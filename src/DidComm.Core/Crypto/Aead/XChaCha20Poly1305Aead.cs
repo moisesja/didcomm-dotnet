@@ -39,8 +39,8 @@ internal sealed class XChaCha20Poly1305Aead : IAead
         // NSec returns [ciphertext || tag]; split into the two pieces the IAead contract expects.
         var ciphertext = new byte[plaintext.Length];
         var tag = new byte[TagSizeBytes];
-        Buffer.BlockCopy(combined, 0, ciphertext, 0, ciphertext.Length);
-        Buffer.BlockCopy(combined, ciphertext.Length, tag, 0, TagSizeBytes);
+        combined.AsSpan(0, ciphertext.Length).CopyTo(ciphertext);
+        combined.AsSpan(ciphertext.Length, TagSizeBytes).CopyTo(tag);
 
         return (ciphertext, tag);
     }
