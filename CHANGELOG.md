@@ -6,6 +6,101 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 1 (Message Model & Consistency)
+
+Closes PRD §12 Phase 1 line items: FR-MSG-01..15, FR-ATT-01..05, FR-CONSIST-01..05
+(FR-CONSIST-06 hook present, resolver wiring stubbed for Phase 3), FR-PROTO-01/02,
+NFR-10.
+
+- **`Messages/`** — plaintext message model:
+  - `Message` — POCO mirroring the §Plaintext Message Structure header set
+    (`id`, `type`, `typ`, `to`, `from`, `thid`, `pthid`, `created_time`,
+    `expires_time`, `body`, `attachments`) plus a `JsonExtensionData`
+    `AdditionalHeaders` bag that survives unpack→repack (FR-MSG-12, FR-MSG-15).
+    `Validate()` enforces the §4 structural rules: REQUIRED `id` of unreserved
+    URI characters (FR-MSG-02), REQUIRED MTURI `type` (FR-MSG-05), no-fragment
+    constraint on `to` / `from` (FR-MSG-07/08), same constraints on
+    `thid`/`pthid` (FR-MSG-11).
+  - `Attachment` + `AttachmentData` — §Attachments shape with FR-ATT-02 (data
+    must carry one of `jws` / `hash` / `links` / `base64` / `json`), FR-ATT-03
+    (`links` requires `hash`), FR-ATT-04 (attachment `id` unreserved-char
+    requirement) all validated in code.
+  - `MessageBuilder` — fluent builder per FR-MSG-13; auto-populates `id` via
+    `IMessageIdGenerator` (default `UuidV4MessageIdGenerator`, FR-MSG-03) and
+    `typ` (`application/didcomm-plain+json`).
+  - `IMessageIdGenerator` carries the FR-MSG-14 uniqueness obligation in its
+    XML docs; custom implementations are responsible for it.
+  - `MediaTypes` — IANA constants for plaintext / signed / encrypted with
+    FR-MSG-06 normalization (`didcomm-plain+json` accepted as equivalent to
+    `application/didcomm-plain+json`).
+- **`Protocols/`** — MTURI parsing:
+  - `MessageTypeUri` — parses
+    `<doc-uri>/<protocol-name>/<major.minor>/<message-type>` into four named
+    components (FR-PROTO-01); `Matches` comparison is case- and
+    punctuation-insensitive on protocol/message and uses
+    `ProtocolVersion.IsCompatibleWith` for the version.
+  - `ProtocolVersion` — `major.minor` value type with
+    `IsCompatibleWith`/`NegotiateWith` implementing FR-PROTO-02 spec semver.
+- **`Consistency/`** — addressing-consistency check functions (PRD §4.3):
+  - `DidSubject.DidSubjectOf(string)` — delegates to net-did's
+    `DidParser.ParseDidUrl` and returns the bare DID subject, the primitive
+    every FR-CONSIST-* rule pivots on.
+  - `AddressingConsistency` — pure static functions for FR-CONSIST-01..05
+    (`CheckAuthcryptFromMatchesSkid`, `CheckRecipientKidInTo`,
+    `CheckSignedFromMatchesSignerKid`, `IsRecipientInTo`,
+    `CheckAuthcryptInnerSignerMatchesSkid`) plus the FR-CONSIST-06
+    `CheckResolverAuthorization` hook (real resolver wiring lands in Phase 3).
+- **`Json/`** — deterministic JSON for NFR-10:
+  - `DeterministicJsonWriter.WriteUtf8(JsonNode?)` walks the tree and emits a
+    UTF-8 byte sequence with object members sorted ASCII-lexicographically at
+    every nesting level and no whitespace. Future signing inputs and `apv`
+    hashing in Phase 2 route through this writer.
+  - `EpochSecondsConverter` enforces integer JSON output for `created_time` /
+    `expires_time` (FR-MSG-09) while tolerating string input on read.
+  - `DidCommJson.Default` `JsonSerializerOptions` instance with
+    `WhenWritingNull` ignore policy so unset optional headers don't appear on
+    the wire.
+- **`Exceptions/`** — typed failure hierarchy scaffolding (FR-API-07):
+  `DidCommException` base + `MalformedMessageException`, `ConsistencyException`,
+  `ProtocolException`. Crypto / resolver / transport exceptions land in their
+  respective phases.
+- **InteropTests fixture payload** — Appendix C.1 "Let's Do Lunch" plaintext
+  saved at `tests/DidComm.InteropTests/fixtures/payloads/c1-lets-do-lunch.json`;
+  the data-driven runner will wire it into `manifest/spec/` when Phase 2 adds
+  the corresponding pack/unpack fixtures.
+
+### Tests — Phase 1
+
+Adds 83 tests to `DidComm.Core.Tests` (86 → 169 total, all green); InteropTests
+remains 2/2.
+
+- `Messages/MessageJsonTests` — Appendix C.1 round-trips structurally; body
+  absent unpacks to `null` body without error (FR-MSG-10); unknown headers
+  survive round-trip (FR-MSG-12, FR-MSG-15); `created_time`/`expires_time`
+  serialize as integers (FR-MSG-09) and tolerate string input; null optional
+  headers omitted from output.
+- `Messages/MessageValidationTests` — FR-MSG-02 / -05 / -07 / -08 / -11
+  rejections each have a dedicated case; minimal valid message passes;
+  media-type normalization accepts both forms (FR-MSG-06).
+- `Messages/MessageBuilderTests` — auto-population of `id`+`typ` (FR-MSG-13),
+  custom `IMessageIdGenerator` honored (FR-MSG-03), `Build()` runs validation.
+- `Messages/IdGeneratorTests` — default generator emits a lowercase RFC 4122
+  UUID v4; **10,000-id no-collision run** satisfies FR-MSG-14.
+- `Messages/AttachmentTests` — FR-ATT-01..05: round-trip, data-required
+  rejection, links-requires-hash rejection, reserved-char-`id` rejection,
+  absent-`id` acceptance, JWS attachment round-trip.
+- `Protocols/MessageTypeUriTests` — captures the four components for every
+  spec example (`forward`, `ping-response`, `empty`, `problem-report`, plus
+  the Appendix C.1 `lets_do_lunch/1.0/proposal`); rejects malformed inputs;
+  punctuation- and case-insensitive `Matches`.
+- `Protocols/ProtocolVersionTests` — FR-PROTO-02 semver compatibility and
+  minor negotiation.
+- `Consistency/AddressingConsistencyTests` — FR-CONSIST-01..05 positive and
+  negative cases including DID URLs with query/path/fragment (per the §4.3
+  normative paragraph); FR-CONSIST-06 short-circuit and reject paths.
+- `Json/DeterministicJsonTests` — member ordering, recursive nested sorting,
+  whitespace insensitivity, primitives/arrays/null pass-through.
+
 ### Added — Phase 0 (Repository & JOSE-Composition Substrate)
 
 Closes PRD §12 Phase 0 line items.
