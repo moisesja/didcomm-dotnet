@@ -1,7 +1,6 @@
 using DidComm.Jose;
 using NetDid.Core;
 using NetDid.Core.Crypto;
-using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
 
 namespace DidComm.Crypto.KeyAgreement;
 
@@ -46,17 +45,7 @@ internal sealed class EphemeralKeyPair
     /// protected header at pack time.
     /// </summary>
     public Jwk ToPublicEpkJwk()
-    {
-        var keyType = KeyTypeMapper.FromCurveForKeyAgreement(Curve);
-        var netDidJwk = NetDidJwkConverter.ToPublicJwk(keyType, PublicKey);
-        return new Jwk
-        {
-            Kty = netDidJwk.Kty,
-            Crv = netDidJwk.Crv,
-            X = netDidJwk.X,
-            Y = netDidJwk.Y,
-        };
-    }
+        => JwkConversion.ToPublicJwk(KeyTypeMapper.FromCurveForKeyAgreement(Curve), PublicKey);
 
     /// <summary>Release private-key material as best as the platform allows.</summary>
     public void Clear() => CryptographicOperations.ZeroMemory(PrivateKey);

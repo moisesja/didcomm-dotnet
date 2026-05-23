@@ -56,18 +56,14 @@ internal static class JweBuilder
 
             return EncryptAndAssemble(
                 plaintextBytes, header, contentEncryption, cryptoProvider,
-                wrapPerRecipient: (recipientPubBytes, _) =>
-                {
-                    var kek = EcdhEsKdf.DeriveKey(
-                        cryptoProvider.NetDidProvider,
-                        KeyTypeMapper.FromCurveForKeyAgreement(curve),
-                        ephemeral.PrivateKey,
-                        recipientPubBytes,
-                        Encoding.ASCII.GetBytes(header.Alg),
-                        apvBytes,
-                        keyDataLen: 32);
-                    return kek;
-                },
+                wrapPerRecipient: (recipientPubBytes, _) => EcdhEsKdf.DeriveKey(
+                    cryptoProvider.NetDidProvider,
+                    KeyTypeMapper.FromCurveForKeyAgreement(curve),
+                    ephemeral.PrivateKey,
+                    recipientPubBytes,
+                    Encoding.ASCII.GetBytes(header.Alg),
+                    apvBytes,
+                    keyDataLen: 32),
                 recipients);
         }
         finally
@@ -138,21 +134,17 @@ internal static class JweBuilder
 
             return EncryptAndAssemble(
                 plaintextBytes, header, contentEncryption, cryptoProvider,
-                wrapPerRecipient: (recipientPubBytes, tag) =>
-                {
-                    var kek = Ecdh1PuKdf.DeriveKey(
-                        cryptoProvider.NetDidProvider,
-                        KeyTypeMapper.FromCurveForKeyAgreement(curve),
-                        senderPrivBytes,
-                        ephemeral.PrivateKey,
-                        recipientPubBytes,
-                        Encoding.ASCII.GetBytes(header.Alg),
-                        apuBytes,
-                        apvBytes,
-                        tag,
-                        keyDataLen: 32);
-                    return kek;
-                },
+                wrapPerRecipient: (recipientPubBytes, tag) => Ecdh1PuKdf.DeriveKey(
+                    cryptoProvider.NetDidProvider,
+                    KeyTypeMapper.FromCurveForKeyAgreement(curve),
+                    senderPrivBytes,
+                    ephemeral.PrivateKey,
+                    recipientPubBytes,
+                    Encoding.ASCII.GetBytes(header.Alg),
+                    apuBytes,
+                    apvBytes,
+                    tag,
+                    keyDataLen: 32),
                 recipients);
         }
         finally

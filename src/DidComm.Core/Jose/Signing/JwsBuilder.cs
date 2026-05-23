@@ -102,7 +102,6 @@ internal static class JwsBuilder
 
     private static string RenderFlattened(string payloadB64u, SignatureEntry entry)
     {
-        // Flattened JSON form: { payload, protected, header, signature }
         return JsonSerializer.Serialize(new
         {
             payload = payloadB64u,
@@ -114,7 +113,6 @@ internal static class JwsBuilder
 
     private static string RenderGeneral(string payloadB64u, IReadOnlyList<SignatureEntry> signatures)
     {
-        // General JSON form: { payload, signatures: [{ protected, header, signature }, …] }
         var entries = signatures.Select(s => new
         {
             @protected = s.ProtectedB64u,

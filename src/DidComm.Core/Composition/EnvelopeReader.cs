@@ -13,9 +13,11 @@ namespace DidComm.Composition;
 
 /// <summary>
 /// High-level unpack orchestrator. Auto-detects the envelope structure (FR-API-03), recursively
-/// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …), runs FR-CONSIST-01..05
-/// checks as each layer reveals enough information, and returns an <see cref="UnpackResult"/>
-/// carrying both the inner plaintext and the FR-API-04 metadata.
+/// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …), runs the addressing-
+/// consistency checks FR-CONSIST-01/02/03/05 as each layer reveals enough information
+/// (FR-CONSIST-04 is an advisory SHOULD and FR-CONSIST-06's resolver-backed authorization is
+/// wired in Phase 3), and returns an <see cref="UnpackResult"/> carrying both the inner plaintext
+/// and the FR-API-04 metadata.
 /// </summary>
 internal static class EnvelopeReader
 {
@@ -61,6 +63,12 @@ internal static class EnvelopeReader
                     if (encrypted && recipientKid is not null)
                         AddressingConsistency.CheckRecipientKidInTo(message.To, recipientKid);
 
+                    // FR-CONSIST-01 — an authcrypt layer (skid present) MUST agree with the
+                    // plaintext 'from' DID subject; otherwise the envelope claims a sender it
+                    // did not cryptographically authenticate.
+                    if (senderKid is not null)
+                        AddressingConsistency.CheckAuthcryptFromMatchesSkid(message.From, senderKid);
+
                     return new UnpackResult(
                         Message: message,
                         Stack: stack,
@@ -100,10 +108,14 @@ internal static class EnvelopeReader
                         throw new ConsistencyException(
                             "Sign-then-encrypt composition: the inner signed JWM MUST carry 'to' (FR-SIG-06).");
 
-                    // FR-CONSIST-03 already enforced inside JwsParser.
+                    // FR-CONSIST-03 (signer kid ↔ from) already enforced inside JwsParser.
+                    // FR-CONSIST-05 — when this signature sits inside an authcrypt layer
+                    // (authcrypt(sign(…))), the inner signer MUST be the same DID subject as the
+                    // outer authcrypt sender (skid).
+                    if (senderKid is not null)
+                        AddressingConsistency.CheckAuthcryptInnerSignerMatchesSkid(jwsResult.SignerKid, senderKid);
 
                     current = Encoding.UTF8.GetString(jwsResult.PayloadBytes);
-                    // Inner JWS payload is the canonical plaintext JWM — return on next loop.
                     break;
                 }
 
@@ -129,6 +141,9 @@ internal static class EnvelopeReader
                     current = Encoding.UTF8.GetString(jweResult.Plaintext);
                     break;
                 }
+
+                default:
+                    throw new MalformedMessageException($"Unrecognized envelope kind '{kind}'.");
             }
         }
 

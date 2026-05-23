@@ -207,4 +207,66 @@ public sealed class EnvelopeReaderTests
 
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-02*");
     }
+
+    [Fact]
+    public void Consistency_check_blocks_authcrypt_skid_not_matching_plaintext_from()
+    {
+        // FR-CONSIST-01: a self-consistent forged envelope — cryptographically valid authcrypt
+        // from Alice, but the inner plaintext claims it came from Carol. The skid authenticates
+        // Alice, so the mismatched 'from' MUST be rejected.
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var msg = new MessageBuilder()
+            .WithType("https://didcomm.org/empty/1.0/empty")
+            .WithFrom("did:example:carol")
+            .WithTo("did:example:bob")
+            .Build();
+
+        var packed = EnvelopeWriter.PackEncrypted(
+            new PackEncryptedParameters(
+                msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
+                SenderPrivateJwk: alice.PrivateJwk,
+                Skid: alice.PublicJwk.Kid),
+            _crypto);
+
+        Action act = () => EnvelopeReader.Unpack(packed,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
+            signerLookup: null,
+            _crypto);
+
+        act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-01*");
+    }
+
+    [Fact]
+    public void Consistency_check_blocks_authcrypt_sign_inner_signer_not_matching_skid()
+    {
+        // FR-CONSIST-05: authcrypt(sign(...)) where the inner signer (Carol) differs from the
+        // authcrypt sender (Alice). The inner signature verifies and its 'from' agrees with the
+        // signer (so FR-CONSIST-03 passes), but the signer/sender disagreement MUST be rejected.
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var carol = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:carol#k");
+        var msg = new MessageBuilder()
+            .WithType("https://didcomm.org/empty/1.0/empty")
+            .WithFrom("did:example:carol")
+            .WithTo("did:example:bob")
+            .Build();
+
+        var packed = EnvelopeWriter.PackEncrypted(
+            new PackEncryptedParameters(
+                msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
+                SenderPrivateJwk: alice.PrivateJwk,
+                Skid: alice.PublicJwk.Kid,
+                SignerPrivateJwks: new[] { carol.PrivateJwk }),
+            _crypto);
+
+        Action act = () => EnvelopeReader.Unpack(packed,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
+            signerLookup: kid => kid == carol.PublicJwk.Kid ? carol.PublicJwk : null,
+            _crypto);
+
+        act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-05*");
+    }
 }

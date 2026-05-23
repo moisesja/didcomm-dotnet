@@ -40,10 +40,13 @@ FR-IX-01 (vendored spec Appendix C fixtures), FR-IX-03 (inbound static gate).
     legal FR-ENV-02 / FR-ENV-04 compositions: anoncrypt, authcrypt, sign-then-encrypt
     (FR-ENV-05 ordering), and anoncrypt-of-authcrypt (`ProtectSender = true`).
   - `EnvelopeReader.Unpack` auto-detects envelope shape (FR-API-03), recursively
-    unwraps up to 4 layers, wires FR-CONSIST-02 / FR-CONSIST-03 enforcement against
-    the inner plaintext, and surfaces FR-API-04 metadata (`encrypted`,
-    `authenticated`, `non_repudiation`, `anonymous_sender`, enc/kw/sig algorithms,
-    signer/sender/recipient kids, envelope stack).
+    unwraps up to 4 layers, enforces the addressing-consistency rules as each layer
+    is revealed — FR-CONSIST-01 (authcrypt `skid` ↔ plaintext `from`), FR-CONSIST-02
+    (recipient kid ↔ `to`), FR-CONSIST-03 (signer kid ↔ `from`), and FR-CONSIST-05
+    (authcrypt(sign) inner signer ↔ outer `skid`) — and surfaces FR-API-04 metadata
+    (`encrypted`, `authenticated`, `non_repudiation`, `anonymous_sender`, enc/kw/sig
+    algorithms, signer/sender/recipient kids, envelope stack). FR-CONSIST-06's
+    resolver-backed authorization is wired in Phase 3.
   - `UnpackResult` carries the metadata shape that the Phase 3 public facade will
     surface unchanged.
 - **Crypto additions** (`Crypto/`):
