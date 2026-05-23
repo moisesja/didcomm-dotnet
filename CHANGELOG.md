@@ -6,6 +6,129 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 2 (Envelopes + Interop Gate)
+
+Closes PRD §12 Phase 2: FR-ENV-01..07, FR-ENC-04, FR-ENC-09..19, FR-SIG-01..06,
+FR-IX-01 (vendored spec Appendix C fixtures), FR-IX-03 (inbound static gate).
+
+- **JWS layer** (`Jose/Signing/`):
+  - `JwsBuilder` emits Flattened JSON Serialization for one signer and General JSON
+    for multiple (FR-SIG-02). Signs the deterministic canonical bytes of the inner
+    plaintext JWM (NFR-10).
+  - `JwsParser` accepts both serializations; verifies the signature; runs FR-CONSIST-03
+    (signer kid ↔ plaintext `from` DID-subject equality); tolerates kid in either the
+    protected or unprotected header per JOSE.
+  - `JwsProtectedHeader` DTO with `JsonExtensionData` for unknown-member preservation
+    (FR-MSG-15 carries through to the protected header too).
+- **JWE layer** (`Jose/Encryption/`):
+  - `JweBuilder` packs General-JSON multi-recipient envelopes. `PackAnoncrypt` uses
+    ECDH-ES+A256KW with any of A256CBC-HS512 / A256GCM / XC20P; `PackAuthcrypt` uses
+    ECDH-1PU+A256KW and **enforces FR-ENC-09**: refuses A256GCM / XC20P for authcrypt.
+    Same-curve invariant enforced inside one envelope (FR-ENC-04 / FR-ENC-11); cross-
+    curve splitting is the Phase 3 facade's job.
+  - `JweParser` decrypts the first recipient whose kid matches a held private key,
+    re-derives `apv` from the parsed recipient kids and **rejects on mismatch
+    (FR-ENC-13)**, re-validates `epk` through `JwkConversion.ExtractPublicKey` (so
+    off-curve EC points throw `CryptoException` per FR-ENC-03 via net-did's
+    `EcPointValidator`).
+  - `ApvComputer` (FR-ENC-13: base64url(SHA-256(sort(kids).join('.')))),
+    `ApuComputer` (FR-ENC-14: base64url(UTF-8(skid))), `JweProtectedHeader` DTO,
+    `RecipientWrap` record.
+- **Composition** (`Composition/`):
+  - `EnvelopeWriter.PackPlaintext` / `PackSigned` / `PackEncrypted` accept explicit
+    key material (no resolver lookups in Phase 2). `PackEncrypted` orchestrates the
+    legal FR-ENV-02 / FR-ENV-04 compositions: anoncrypt, authcrypt, sign-then-encrypt
+    (FR-ENV-05 ordering), and anoncrypt-of-authcrypt (`ProtectSender = true`).
+  - `EnvelopeReader.Unpack` auto-detects envelope shape (FR-API-03), recursively
+    unwraps up to 4 layers, enforces the addressing-consistency rules as each layer
+    is revealed — FR-CONSIST-01 (authcrypt `skid` ↔ plaintext `from`), FR-CONSIST-02
+    (recipient kid ↔ `to`), FR-CONSIST-03 (signer kid ↔ `from`), and FR-CONSIST-05
+    (authcrypt(sign) inner signer ↔ outer `skid`) — and surfaces FR-API-04 metadata
+    (`encrypted`, `authenticated`, `non_repudiation`, `anonymous_sender`, enc/kw/sig
+    algorithms, signer/sender/recipient kids, envelope stack). FR-CONSIST-06's
+    resolver-backed authorization is wired in Phase 3.
+  - `UnpackResult` carries the metadata shape that the Phase 3 public facade will
+    surface unchanged.
+- **Crypto additions** (`Crypto/`):
+  - `Kdf/EcdhEsKdf` — anoncrypt KDF wrapper (`Z = Ze`, tag-free `SuppPubInfo`) plus
+    receive-side variant; mirrors the `Ecdh1PuKdf` pattern.
+  - `KeyAgreement/EphemeralKeyPair.Generate(crv)` — wraps net-did's
+    `DefaultKeyGenerator` to produce one-shot ephemeral keypairs for each pack call;
+    `Clear()` zeroes the private half (NFR-09).
+  - `KeyAgreement/KeyTypeMapper` — single source of truth for JOSE `crv` ↔
+    `KeyType` ↔ JWS `alg` ↔ AEAD key/IV sizes; eliminates ad-hoc dispatch tables
+    scattered across the envelope code.
+- **Secrets** (`Secrets/`):
+  - `IInternalSecretsLookup` and `IInternalSenderKeyLookup` — minimal internal
+    contracts so the envelope layer is testable in isolation. The Phase 3 public
+    `ISecretsResolver` (FR-SEC-01) will adapt.
+- **Exceptions**: `CryptoException` joins the typed hierarchy (FR-API-07). Decrypt /
+  verify / unwrap / off-curve failures throw it instead of raw
+  `CryptographicException`.
+- **Jose plumbing**: `Base64Url` (thin wrapper over `System.Buffers.Text.Base64Url`,
+  used by every JOSE encoder/decoder), `EnvelopeKind` enum, `EnvelopeDetector`
+  (FR-API-03 structural sniff).
+
+### Fixed — Phase 0 carry-over
+
+- **`Crypto/Kdf/Ecdh1PuKdf.cs`**: the `SuppPubInfo` layout was
+  `BE32(keyDataLen*8) ‖ tag`. Per draft-madden-jose-ecdh-1pu-04 §2.3 the tag MUST be
+  prefixed with a 4-octet big-endian length: `BE32(keyDataLen*8) ‖ BE32(tagLen) ‖ tag`.
+  The original Phase 0 wrapper omitted the prefix; self-round-trip tests masked it
+  because both sides used the same (incorrect) layout. Discovered when the SICPA
+  Appendix C.3 authcrypt vectors all failed AES-KW unwrap with "integrity check
+  failed". The matching Phase 0 KAT was updated to the corrected layout.
+- **`Json/DidCommJson.cs` + `Json/DeterministicJsonWriter.cs`**: both serializers now
+  use `JavaScriptEncoder.UnsafeRelaxedJsonEscaping` so the `+` in
+  `application/didcomm-plain+json` is emitted literally rather than as `\u002B`. The
+  spec vectors carry the literal `+`; deterministic JSON bytes that feed JWS signing
+  input and `apv` hashing must match byte-for-byte.
+
+### Tests — Phase 2
+
+Adds **53 new** `DidComm.Core.Tests` cases (245 total) plus **10 new** spec-vector
+runners under `DidComm.InteropTests` (12 total: 1 fact, 11 theory cases).
+
+- `Envelopes/Signing/JwsRoundTripTests` — Sign+verify across EdDSA, ES256, ES256K;
+  payload tampering rejection; unknown-kid rejection; Flattened vs General serialization
+  selection; FR-SIG-06 inner-`to` enforcement; FR-CONSIST-03 wiring.
+- `Envelopes/Encryption/AnoncryptRoundTripTests` — Every supported (curve, enc) cell
+  per PRD §13.5 anoncrypt row; multi-recipient JWE on same curve (FR-ENC-19);
+  cross-curve rejection (FR-ENC-04); apv-tampering detection (FR-ENC-13).
+- `Envelopes/Encryption/AuthcryptRoundTripTests` — All four curves
+  (X25519/P-256/P-384/P-521); FR-ENC-09 A256GCM rejection; cross-curve sender/recipient
+  rejection; missing-sender-lookup rejection; tag-tampering propagates through both
+  KEK derivation (FR-ENC-15) and AEAD verification.
+- `Envelopes/Encryption/ApvComputerTests` + `ApuComputerTests` + `EnvelopeDetectorTests`
+  + `EphemeralKeyPairTests` — per-curve length contracts, freshness, FR-MSG-06
+  prefix-normalization for media types.
+- `Envelopes/Composition/EnvelopeReaderTests` — End-to-end round-trips for plaintext,
+  signed, anoncrypt, authcrypt, anoncrypt(sign), anoncrypt(authcrypt) compositions;
+  FR-CONSIST-02 wiring; metadata shape (FR-API-04).
+- `Crypto/Kdf/EcdhEsKdfTests` — Sender / receiver KDF agreement; apv sensitivity.
+- `Crypto/KeyAgreement/KeyTypeMapperTests` — Routing-table coverage.
+
+### Vendored spec fixtures (FR-IX-01)
+
+DIDComm v2.1 Appendix A/B/C test material harvested from
+`sicpa-dlab/didcomm-python` (the SICPA reference impl; same cryptographic baseline as
+the spec):
+
+- `secrets/alice.json` + `secrets/bob.json` — 6 + 9 JWKs covering Ed25519 / X25519 /
+  P-256 / P-384 / P-521 / secp256k1 (Appendix A).
+- `packed/spec/` — 3 signed (C.2 EdDSA / ES256 / ES256K) and 5 encrypted (C.3
+  anoncrypt-X25519/XC20P×2, anoncrypt-A256CBC-HS512, anoncrypt-A256GCM,
+  authcrypt-X25519, authcrypt-of-signed-P-256, anoncrypt-of-authcrypt-of-signed-P-521)
+  packed envelopes.
+- `manifest/spec/c2-*.json` + `c3-*.json` — 8 fixture manifests, each running through
+  the new `Runner/FixtureDispatcher` and asserting both successful unpack and FR-API-04
+  metadata against the SICPA-published expectations.
+
+`InteropTests/Resolution/SpecActorRegistry` loads the Appendix-A secrets once per test
+host, exposing both `IInternalSecretsLookup` (for recipient private keys) and
+`IInternalSenderKeyLookup` (for authcrypt sender public keys); the resolver-backed
+Phase 3 path will subsume this with `IDidKeyService`.
+
 ### Added — Phase 1 (Message Model & Consistency)
 
 Closes PRD §12 Phase 1 line items: FR-MSG-01..15, FR-ATT-01..05, FR-CONSIST-01..05

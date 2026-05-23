@@ -1,4 +1,5 @@
 using DidComm.Crypto.Aead;
+using DidComm.Crypto.KeyAgreement;
 using DidComm.Crypto.KeyWrap;
 using DidComm.Jose;
 using NetDid.Core;
@@ -47,7 +48,7 @@ internal sealed class DefaultCryptoProvider : ICryptoProvider
 
     public byte[] DeriveSharedSecret(string crv, ReadOnlySpan<byte> privateKey, ReadOnlySpan<byte> publicKey)
     {
-        var keyType = MapCurveForKeyAgreement(crv);
+        var keyType = KeyTypeMapper.FromCurveForKeyAgreement(crv);
         return _netDid.DeriveSharedSecret(keyType, privateKey, publicKey);
     }
 
@@ -104,14 +105,5 @@ internal sealed class DefaultCryptoProvider : ICryptoProvider
         JoseAlgorithms.ES512 => (KeyType.P521, EcdsaSignatureFormat.IeeeP1363),
         JoseAlgorithms.ES256K => (KeyType.Secp256k1, EcdsaSignatureFormat.IeeeP1363), // ignored; net-did secp256k1 already returns R‖S
         _ => throw new NotSupportedException($"Signing algorithm '{joseAlg}' is not supported."),
-    };
-
-    private static KeyType MapCurveForKeyAgreement(string crv) => crv switch
-    {
-        JoseAlgorithms.CrvX25519 => KeyType.X25519,
-        JoseAlgorithms.CrvP256 => KeyType.P256,
-        JoseAlgorithms.CrvP384 => KeyType.P384,
-        JoseAlgorithms.CrvP521 => KeyType.P521,
-        _ => throw new NotSupportedException($"Curve '{crv}' is not supported for ECDH."),
     };
 }

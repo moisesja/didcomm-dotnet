@@ -1,0 +1,26 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-c2-eddsa-signed-alice-key1",
+  "description": "DIDComm v2.1 Appendix C.2: Alice signs with Ed25519 (kid=key-1).",
+  "source": "spec-v2.1",
+  "source_ref": "Appendix C.2 signed example, Ed25519",
+  "direction": "inbound",
+  "operation": "verify",
+  "tags": ["signed", "EdDSA", "Ed25519"],
+  "input": {
+    "packed": "packed/spec/test-signed-didcomm-message-alice-key-1.json"
+  },
+  "expected": {
+    "outcome": "success",
+    "plaintext": "payloads/c1-lets-do-lunch.json",
+    "metadata": {
+      "encrypted": false,
+      "authenticated": true,
+      "non_repudiation": true,
+      "anonymous_sender": false,
+      "sig_alg": "EdDSA",
+      "signer_kid": "did:example:alice#key-1"
+    },
+    "match": "structural"
+  }
+}

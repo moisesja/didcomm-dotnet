@@ -1,3 +1,4 @@
+using DidComm.InteropTests.Runner;
 using FluentAssertions;
 using Xunit;
 
@@ -57,5 +58,9 @@ public sealed class FixtureDiscoveryTests
         manifest.Expected.Outcome.Should().BeOneOf(
             new[] { "success", "error" },
             because: $"fixture 'expected.outcome' must be 'success' or 'error' ({displayPath}).");
+
+        // FR-IX-01: dispatch the manifest's operation. Phase 2 implements unpack/verify;
+        // unknown operations short-circuit per FixtureDispatcher.
+        FixtureDispatcher.Execute(manifest, absolutePath);
     }
 }

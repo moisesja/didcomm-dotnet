@@ -56,11 +56,16 @@ public sealed class Ecdh1PuKdfTests
         Buffer.BlockCopy(ze, 0, z, 0, ze.Length);
         Buffer.BlockCopy(zs, 0, z, ze.Length, zs.Length);
 
-        // SuppPubInfo = BE32(keyDataLen * 8) || aeadTag (1PU binding, draft-madden §2.3).
+        // SuppPubInfo = BE32(keyDataLen * 8) || BE32(aeadTag.Length) || aeadTag
+        // (1PU draft-madden §2.3: "prefixed with a 4-octet big-endian length"). The Phase 0
+        // implementation initially omitted the tag length prefix; that produced
+        // self-consistent round-trips but did not interoperate with askar/SICPA. Fixed in
+        // Phase 2 once Appendix C.3 vectors exposed the divergence.
         const int keyDataLen = 32;
-        var suppPubInfo = new byte[4 + AeadTag.Length];
+        var suppPubInfo = new byte[4 + 4 + AeadTag.Length];
         BinaryPrimitives.WriteUInt32BigEndian(suppPubInfo, keyDataLen * 8U);
-        AeadTag.CopyTo(suppPubInfo.AsSpan(4));
+        BinaryPrimitives.WriteUInt32BigEndian(suppPubInfo.AsSpan(4, 4), (uint)AeadTag.Length);
+        AeadTag.CopyTo(suppPubInfo.AsSpan(8));
 
         var expected = NetDidConcatKdf.DeriveKey(
             sharedSecret: z,

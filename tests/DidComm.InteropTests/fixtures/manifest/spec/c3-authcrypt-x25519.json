@@ -1,0 +1,27 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-c3-auth-x25519",
+  "description": "DIDComm v2.1 Appendix C.3: Authcrypt Alice→Bob over X25519 with A256CBC-HS512.",
+  "source": "spec-v2.1",
+  "source_ref": "Appendix C.3 authcrypt example, X25519",
+  "direction": "inbound",
+  "operation": "unpack",
+  "tags": ["authcrypt", "ECDH-1PU+A256KW", "X25519", "A256CBC-HS512"],
+  "input": {
+    "packed": "packed/spec/test-encrypted-didcomm-message-auth-x25519.json"
+  },
+  "expected": {
+    "outcome": "success",
+    "plaintext": "payloads/c1-lets-do-lunch.json",
+    "metadata": {
+      "encrypted": true,
+      "authenticated": true,
+      "non_repudiation": false,
+      "anonymous_sender": false,
+      "enc": "A256CBC-HS512",
+      "kw": "ECDH-1PU+A256KW",
+      "sender_kid": "did:example:alice#key-x25519-1"
+    },
+    "match": "roundtrip"
+  }
+}

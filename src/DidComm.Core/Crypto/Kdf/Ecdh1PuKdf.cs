@@ -58,11 +58,59 @@ internal static class Ecdh1PuKdf
         ReadOnlySpan<byte> apv,
         ReadOnlySpan<byte> aeadTag,
         int keyDataLen)
+        => DeriveKeyCore(
+            cryptoProvider, curve,
+            firstZPriv: ephemeralPrivateKey, firstZPub: recipientPublicKey,
+            secondZPriv: senderPrivateKey, secondZPub: recipientPublicKey,
+            algorithmId, apu, apv, aeadTag, keyDataLen);
+
+    /// <summary>
+    /// Receive-side variant. DH commutativity gives the recipient the same KEK using their own
+    /// private key against the ephemeral and sender public keys:
+    /// <c>Ze = ECDH(recipient_priv, ephemeral_pub)</c>, <c>Zs = ECDH(recipient_priv, sender_pub)</c>.
+    /// </summary>
+    /// <param name="cryptoProvider">The net-did <see cref="NetDidICryptoProvider"/> supplying raw ECDH.</param>
+    /// <param name="curve">Curve for both ECDH operations.</param>
+    /// <param name="recipientPrivateKey">Recipient's own private key.</param>
+    /// <param name="ephemeralPublicKey">Ephemeral public key from the JWE protected header <c>epk</c>.</param>
+    /// <param name="senderPublicKey">Sender static public key resolved via <c>skid</c>.</param>
+    /// <param name="algorithmId">UTF-8 of the JOSE <c>alg</c> (<c>"ECDH-1PU+A256KW"</c>).</param>
+    /// <param name="apu">PartyUInfo (FR-ENC-14, base64url(skid) bytes).</param>
+    /// <param name="apv">PartyVInfo (FR-ENC-13).</param>
+    /// <param name="aeadTag">AEAD authentication tag from the received envelope.</param>
+    /// <param name="keyDataLen">Wrapping-key length in bytes (32 for A256KW).</param>
+    public static byte[] DeriveKeyForReceiver(
+        NetDidICryptoProvider cryptoProvider,
+        KeyType curve,
+        ReadOnlySpan<byte> recipientPrivateKey,
+        ReadOnlySpan<byte> ephemeralPublicKey,
+        ReadOnlySpan<byte> senderPublicKey,
+        ReadOnlySpan<byte> algorithmId,
+        ReadOnlySpan<byte> apu,
+        ReadOnlySpan<byte> apv,
+        ReadOnlySpan<byte> aeadTag,
+        int keyDataLen)
+        => DeriveKeyCore(
+            cryptoProvider, curve,
+            firstZPriv: recipientPrivateKey, firstZPub: ephemeralPublicKey,
+            secondZPriv: recipientPrivateKey, secondZPub: senderPublicKey,
+            algorithmId, apu, apv, aeadTag, keyDataLen);
+
+    private static byte[] DeriveKeyCore(
+        NetDidICryptoProvider cryptoProvider,
+        KeyType curve,
+        ReadOnlySpan<byte> firstZPriv, ReadOnlySpan<byte> firstZPub,
+        ReadOnlySpan<byte> secondZPriv, ReadOnlySpan<byte> secondZPub,
+        ReadOnlySpan<byte> algorithmId,
+        ReadOnlySpan<byte> apu,
+        ReadOnlySpan<byte> apv,
+        ReadOnlySpan<byte> aeadTag,
+        int keyDataLen)
     {
         ArgumentNullException.ThrowIfNull(cryptoProvider);
 
-        var ze = cryptoProvider.DeriveSharedSecret(curve, ephemeralPrivateKey, recipientPublicKey);
-        var zs = cryptoProvider.DeriveSharedSecret(curve, senderPrivateKey, recipientPublicKey);
+        var ze = cryptoProvider.DeriveSharedSecret(curve, firstZPriv, firstZPub);
+        var zs = cryptoProvider.DeriveSharedSecret(curve, secondZPriv, secondZPub);
 
         var z = new byte[ze.Length + zs.Length];
         ze.AsSpan().CopyTo(z);
@@ -70,9 +118,20 @@ internal static class Ecdh1PuKdf
         CryptographicOperations.ZeroMemory(ze);
         CryptographicOperations.ZeroMemory(zs);
 
-        var suppPubInfo = new byte[4 + aeadTag.Length];
+        // SuppPubInfo layout per draft-madden-jose-ecdh-1pu-04 §2.3 (and the askar reference
+        // impl that produced the SICPA spec vectors):
+        //   BE32(keyDataLen * 8) || [ BE32(cctag.length) || cctag ]   (cctag-block omitted when empty)
+        // The earlier Phase 0 version omitted the tag-length prefix — fine for self-round-trip
+        // but incompatible with every external 1PU implementation.
+        var suppPubInfo = aeadTag.Length == 0
+            ? new byte[4]
+            : new byte[4 + 4 + aeadTag.Length];
         BinaryPrimitives.WriteUInt32BigEndian(suppPubInfo, checked((uint)keyDataLen * 8U));
-        aeadTag.CopyTo(suppPubInfo.AsSpan(4));
+        if (aeadTag.Length > 0)
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(suppPubInfo.AsSpan(4, 4), (uint)aeadTag.Length);
+            aeadTag.CopyTo(suppPubInfo.AsSpan(8));
+        }
 
         try
         {

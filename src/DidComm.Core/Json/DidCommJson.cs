@@ -1,3 +1,4 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -32,6 +33,11 @@ internal static class DidCommJson
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
             WriteIndented = false,
             PropertyNameCaseInsensitive = false,
+            // Use the relaxed JSON encoder so characters like '+' inside DIDComm media types
+            // ("application/didcomm-plain+json") emit as the literal character rather than the
+            // \u002B JavaScript-safe escape. The JOSE / DIDComm spec vectors carry the literal
+            // form; the deterministic-JSON bytes feeding apv / JWS-signing input must match.
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         };
         options.Converters.Add(new EpochSecondsConverter());
         return options;

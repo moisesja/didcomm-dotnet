@@ -1,0 +1,29 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-c3-anon-auth-sign-p521",
+  "description": "DIDComm v2.1 Appendix C.3: Anoncrypt(Authcrypt(Sign(plaintext))) — Alice→Bob over P-521 with outer ECDH-ES+A256KW/XC20P, inner ECDH-1PU+A256KW/A256CBC-HS512, and an innermost Ed25519 signature (FR-ENC-02 optional curve).",
+  "source": "spec-v2.1",
+  "source_ref": "Appendix C.3 protect-sender + sign example, P-521",
+  "direction": "inbound",
+  "operation": "unpack",
+  "tags": ["protect-sender", "authcrypt", "anoncrypt", "sign-then-encrypt", "ECDH-ES+A256KW", "ECDH-1PU+A256KW", "P-521", "XC20P", "A256CBC-HS512", "EdDSA-inner", "optional-curve"],
+  "input": {
+    "packed": "packed/spec/test-encrypted-didcomm-message-auth-p521.json"
+  },
+  "expected": {
+    "outcome": "success",
+    "plaintext": "payloads/c1-lets-do-lunch.json",
+    "metadata": {
+      "encrypted": true,
+      "authenticated": true,
+      "non_repudiation": true,
+      "anonymous_sender": true,
+      "enc": "A256CBC-HS512",
+      "kw": "ECDH-1PU+A256KW",
+      "sender_kid": "did:example:alice#key-p521-1",
+      "sig_alg": "EdDSA",
+      "signer_kid": "did:example:alice#key-1"
+    },
+    "match": "roundtrip"
+  }
+}

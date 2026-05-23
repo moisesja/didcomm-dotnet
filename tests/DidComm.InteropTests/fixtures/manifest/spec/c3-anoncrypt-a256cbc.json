@@ -1,0 +1,26 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-c3-anon-a256cbc",
+  "description": "DIDComm v2.1 Appendix C.3: Anoncrypt to Bob with A256CBC-HS512 content encryption.",
+  "source": "spec-v2.1",
+  "source_ref": "Appendix C.3 anoncrypt example, A256CBC-HS512",
+  "direction": "inbound",
+  "operation": "unpack",
+  "tags": ["anoncrypt", "ECDH-ES+A256KW", "A256CBC-HS512"],
+  "input": {
+    "packed": "packed/spec/test-encrypted-didcomm-message-anon-a256cbc.json"
+  },
+  "expected": {
+    "outcome": "success",
+    "plaintext": "payloads/c1-lets-do-lunch.json",
+    "metadata": {
+      "encrypted": true,
+      "authenticated": false,
+      "non_repudiation": false,
+      "anonymous_sender": true,
+      "enc": "A256CBC-HS512",
+      "kw": "ECDH-ES+A256KW"
+    },
+    "match": "roundtrip"
+  }
+}

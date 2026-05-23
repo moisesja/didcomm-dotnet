@@ -67,3 +67,27 @@ Format per entry:
   `ICryptoProvider`, fully qualify it (e.g.
   `using NetDidICryptoProvider = NetDid.Core.ICryptoProvider;`) at the top
   of the file.
+
+## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
+
+- **Lesson:** A pack→unpack round-trip with my own code only proves the two halves
+  agree. For anything the spec covers — JOSE KDF byte layouts, JSON encoder choices,
+  `apv`/`apu` derivation — write a KAT against a published external value (RFC,
+  spec appendix, or an external reference impl's vector) BEFORE writing the
+  composition test. The composition test should then be a check, not the gate.
+- **Why:** Phase 0 shipped `Ecdh1PuKdf` with a `SuppPubInfo` layout of
+  `BE32(keyDataLen*8) || tag` — the AEAD-tag length prefix from draft-madden-04 §2.3
+  was missing. The Phase 0 differential test was "round-trip vs an independent
+  reference path", but the reference path was hand-written from the same wrong
+  reading. Self-consistent ≠ correct. The Phase 0 KAT shipped green; the SICPA
+  Appendix C.3 vectors failed AES-KW unwrap with "integrity check failed" the
+  moment Phase 2 first ran them. Same lesson applied separately to
+  `JavaScriptEncoder.UnsafeRelaxedJsonEscaping` — default `System.Text.Json` escapes
+  `+` to `\u002B`, which silently diverges from the spec's literal `+` until a
+  byte-level comparison is forced (and self-round-trips can't see it).
+- **How to apply:** For every JOSE primitive (KDF, JSON canonicalization, base64url,
+  apv/apu, sig format), look up at least one PUBLISHED test vector and pin it as a
+  KAT before writing the round-trip. If no spec/RFC vector exists, harvest one from a
+  reference impl (askar-crypto, didcomm-rust, didcomm-python) and tag the fixture's
+  provenance in a code comment. Treat the spec vector as the authority; treat my
+  round-trip as a smoke test.
