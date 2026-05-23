@@ -159,6 +159,26 @@ internal static class JweParser
             IsAuthenticated: !string.IsNullOrEmpty(senderKid));
     }
 
+    /// <summary>
+    /// Read just enough of a packed JWE to surface the recipient kid list and (for authcrypt)
+    /// the <c>skid</c> — no crypto is performed, no exceptions are thrown for invalid bodies
+    /// past the header. Used by the Phase 3 facade to pre-warm DID resolution and secret
+    /// lookups before invoking the full <see cref="Parse"/>.
+    /// </summary>
+    /// <param name="packed">JWE General JSON serialization.</param>
+    /// <returns>The structural metadata; never <c>null</c>. <c>Skid</c> is <c>null</c> for anoncrypt.</returns>
+    /// <exception cref="MalformedMessageException">When the input is not a JWE-shaped JSON object.</exception>
+    public static JwePeekResult PeekRecipients(string packed)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(packed);
+        var jwe = ParseStructure(packed);
+        var header = JweProtectedHeader.Decode(jwe.ProtectedB64u);
+        return new JwePeekResult(
+            Algorithm: header.Alg,
+            Skid: string.IsNullOrEmpty(header.Skid) ? null : header.Skid,
+            RecipientKids: jwe.Recipients.Select(r => r.Kid).ToArray());
+    }
+
     private static byte[] ExtractEphemeralPublicKey(Jwk epk)
     {
         try
@@ -225,3 +245,9 @@ internal sealed record JweParseResult(
     IReadOnlyList<string> AllRecipientKids,
     string SenderKid,
     bool IsAuthenticated);
+
+/// <summary>Structural peek into a JWE — kids only, no decryption.</summary>
+/// <param name="Algorithm">Protected-header <c>alg</c> (e.g. <c>ECDH-1PU+A256KW</c>).</param>
+/// <param name="Skid">Sender key identifier for authcrypt; <c>null</c> for anoncrypt.</param>
+/// <param name="RecipientKids">Recipient kids in declared order.</param>
+internal sealed record JwePeekResult(string Algorithm, string? Skid, IReadOnlyList<string> RecipientKids);

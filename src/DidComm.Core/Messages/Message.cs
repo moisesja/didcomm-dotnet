@@ -23,7 +23,7 @@ namespace DidComm.Messages;
 /// <see cref="Validate"/> and the consistency checks live in <c>DidComm.Consistency</c>.
 /// </para>
 /// </remarks>
-internal sealed class Message
+public sealed class Message
 {
     /// <summary>Message identifier (REQUIRED, FR-MSG-02). Lowercase, unreserved URI characters.</summary>
     [JsonPropertyName("id")]
@@ -44,6 +44,16 @@ internal sealed class Message
     /// <summary>Sender DID / DID-URL (without fragment). OPTIONAL; REQUIRED for authcrypt (FR-MSG-08).</summary>
     [JsonPropertyName("from")]
     public string? From { get; set; }
+
+    /// <summary>
+    /// DID-rotation header (FR-ROT-01): a JWT signed by a key authorized in the <em>prior</em>
+    /// DID's <c>authentication</c> relationship. When present, the inner <see cref="From"/> is
+    /// the new DID and the JWT's <c>iss</c> claim is the prior DID. Per FR-ROT-03, a message
+    /// carrying <c>from_prior</c> MUST be sent encrypted; the facade enforces that at pack
+    /// time. The validated claims are surfaced on the unpack-side metadata.
+    /// </summary>
+    [JsonPropertyName("from_prior")]
+    public string? FromPrior { get; set; }
 
     /// <summary>Thread identifier; same constraints as <see cref="Id"/> (FR-MSG-11).</summary>
     [JsonPropertyName("thid")]

@@ -23,7 +23,7 @@ namespace DidComm.Jose;
 /// <see cref="JwkConversion.ExtractPublicKey(Jwk)"/>.
 /// </para>
 /// </remarks>
-internal sealed class Jwk
+public sealed class Jwk
 {
     /// <summary>Key type. <c>"OKP"</c> for Ed25519/X25519; <c>"EC"</c> for P-256/P-384/P-521/secp256k1.</summary>
     [JsonPropertyName("kty")]

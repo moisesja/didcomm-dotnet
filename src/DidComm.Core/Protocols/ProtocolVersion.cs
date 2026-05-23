@@ -7,7 +7,7 @@ namespace DidComm.Protocols;
 /// </summary>
 /// <param name="Major">Major version number (incompatible changes between majors).</param>
 /// <param name="Minor">Minor version number (older minor is the interop floor; FR-PROTO-02).</param>
-internal readonly record struct ProtocolVersion(int Major, int Minor) : IComparable<ProtocolVersion>
+public readonly record struct ProtocolVersion(int Major, int Minor) : IComparable<ProtocolVersion>
 {
     /// <summary>Render as <c>"major.minor"</c>.</summary>
     public override string ToString() => $"{Major}.{Minor}";

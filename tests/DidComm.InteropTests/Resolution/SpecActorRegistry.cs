@@ -34,6 +34,9 @@ internal sealed class SpecActorRegistry
     public IInternalSenderKeyLookup SenderKeys => new DictionarySenderKeyLookup(_publics);
     public Func<string, Jwk?> SignerKeys => kid => _publics.GetValueOrDefault(kid);
 
+    /// <summary>Exposes the loaded secrets through the Phase 3 public <see cref="ISecretsResolver"/> contract.</summary>
+    public ISecretsResolver AsSecretsResolver() => new DictionarySecretsResolver(_privates);
+
     public Jwk? GetPrivate(string kid) => _privates.GetValueOrDefault(kid);
     public Jwk? GetPublic(string kid) => _publics.GetValueOrDefault(kid);
 
@@ -82,5 +85,18 @@ internal sealed class SpecActorRegistry
         private readonly Dictionary<string, Jwk> _byKid;
         public DictionarySenderKeyLookup(Dictionary<string, Jwk> byKid) => _byKid = byKid;
         public Jwk? TryGet(string skid) => _byKid.GetValueOrDefault(skid);
+    }
+
+    private sealed class DictionarySecretsResolver : ISecretsResolver
+    {
+        private readonly Dictionary<string, Jwk> _byKid;
+        public DictionarySecretsResolver(Dictionary<string, Jwk> byKid) => _byKid = byKid;
+        public Task<Jwk?> FindAsync(string kid, CancellationToken ct = default)
+            => Task.FromResult(_byKid.GetValueOrDefault(kid));
+        public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
+        {
+            IReadOnlyList<string> hits = kids.Where(_byKid.ContainsKey).ToArray();
+            return Task.FromResult(hits);
+        }
     }
 }

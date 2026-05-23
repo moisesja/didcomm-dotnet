@@ -3,7 +3,7 @@ namespace DidComm.Messages;
 /// <summary>
 /// IANA media type constants used by DIDComm v2.1 (FR-MSG-06, FR-ENV-01).
 /// </summary>
-internal static class MediaTypes
+public static class MediaTypes
 {
     /// <summary>Plaintext (unprotected) DIDComm message media type.</summary>
     public const string Plaintext = "application/didcomm-plain+json";

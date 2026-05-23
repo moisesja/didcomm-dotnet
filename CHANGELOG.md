@@ -6,6 +6,154 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 3 (Facade, net-did Integration, Secrets, Rotation)
+
+Closes PRD §12 Phase 3: FR-DID-01..07, FR-SEC-01..05, FR-API-01..08,
+FR-CONSIST-06 (resolver-backed authorization now active), FR-ROT-01..06.
+
+- **Public surface promotions** — every type the facade returns or accepts is now
+  `public sealed`: `Messages/{Message, Attachment, AttachmentData, MessageBuilder,
+  IMessageIdGenerator, UuidV4MessageIdGenerator, MediaTypes}`,
+  `Protocols/{MessageTypeUri, ProtocolVersion}`, `Jose/{Jwk, EnvelopeKind}`. Helper
+  types (`UnreservedUriChars`, `DidSubject`, all `Composition/*`, all
+  `Jose/Signing|Encryption/*`, all `Crypto/*`, the internal lookups) stay internal.
+- **Facade** (`Facade/`):
+  - `DidCommClient` — sealed, thread-safe (NFR-03). Public methods
+    `PackPlaintextAsync`, `PackSignedAsync`, `PackEncryptedAsync`, `UnpackAsync`
+    (FR-API-01..03). Auto-detects envelope shape on unpack, enforces
+    `expires_time` (FR-API-05) and `MaxReceiveBytes` (FR-API-06), rejects
+    `did:web` at every entry point on every DID-bearing field (FR-DID-06).
+  - `PackEncryptedOptions`, `ContentEncryptionAlgorithm`, `DidCommOptions`,
+    public `UnpackResult` (FR-API-04 metadata + `FromPrior` slot).
+  - `MapContentEncryption` enforces FR-ENC-09 (refuses A256GCM / XC20P for
+    authcrypt at pack time).
+- **Resolution** (`Resolution/`):
+  - `IDidKeyService` — public contract: `GetVerificationMethodsAsync`,
+    `IsKeyAuthorizedAsync`, `RejectUnsupportedMethod`. `VerificationRelationship`
+    enum (`KeyAgreement`, `Authentication`).
+  - `NetDidKeyService` — public adapter wrapping `NetDid.Core.IDidResolver`.
+    Method extraction via `NetDid.Core.Parsing.DidParser.ExtractMethod`; rejects
+    `did:web` with `UnsupportedDidMethodException` (DD-08). Dereferences fragment
+    references against the doc's `verificationMethod` array; materialises JWKs
+    from `publicKeyJwk` (off-curve EC points already rejected inside
+    `JwkConversion.ExtractPublicKey` by net-did's `EcPointValidator`); silently
+    skips multibase-only methods and curves outside the `KeyTypeMapper` set so
+    mixed-curve documents still surface usable keys. No internal cache —
+    relies on `CachingDidResolver` from `NetDid.Extensions.DependencyInjection`
+    (FR-DID-04 "no double-caching").
+  - `DidKeyServiceLookups` — internal sync-over-async bridges that satisfy the
+    envelope layer's `IInternalSenderKeyLookup` and signer-`Func<string, Jwk?>`
+    slots by walking back to the public async `IDidKeyService`.
+- **Secrets** (`Secrets/`):
+  - `ISecretsResolver` — public contract: `FindAsync(kid)`,
+    `FindPresentAsync(kids)`. Consumer-supplied; the library ships no production
+    key store per DD-02.
+  - `SyncSecretsAdapter` — internal `IInternalSecretsLookup` wrapper that
+    blocks sync-over-async on the public resolver (safe under .NET 10's
+    no-synchronization-context runtime).
+- **Exceptions** — `UnsupportedDidMethodException(method, did, reason)`,
+  `DidResolutionException(did, reason, inner?)`, `SecretNotFoundException(kid)`
+  (FR-API-07).
+- **FR-CONSIST-06 wiring** — `EnvelopeReader.Unpack` gained a
+  `Func<string,string,string,bool>? resolverCheck` parameter that fires
+  `AddressingConsistency.CheckResolverAuthorization` at three points (sender
+  keyAgreement, recipient keyAgreement, signer authentication) once the inner
+  plaintext reveals `from`. The facade binds the predicate to
+  `IDidKeyService.IsKeyAuthorizedAsync`.
+- **DID rotation** (`Protocols/Rotation/`):
+  - `Message.FromPrior` typed slot + `MessageBuilder.WithFromPrior` (FR-ROT-01).
+  - `FromPriorClaims` record (`Sub`, `Iss`, `Iat`).
+  - `FromPriorBuilder` (internal) — emits a compact JWT
+    `<b64u(header)>.<b64u(claims)>.<b64u(sig)>` signed by a key authorized in
+    the prior DID's `authentication`.
+  - `FromPriorValidator` (internal) — three-part split, signature verification
+    via `IDidKeyService`, `sub == currentSenderDid` enforcement (FR-ROT-02),
+    alg-curve cross-check to defeat downgrade swaps.
+  - `DidCommClient` enforces FR-ROT-03: refuses to emit `from_prior` on a
+    plaintext or signed-only envelope; raises `ConsistencyException` on unpack
+    when a `from_prior`-carrying message arrives unencrypted.
+- **DI extension** (`src/DidComm.Extensions.DependencyInjection/`):
+  - New csproj. `services.AddDidComm(b => …)` registers `DidCommClient` as
+    singleton with `DidCommOptions`, `ISecretsResolver`, and `IDidKeyService`.
+  - `DidCommBuilder` methods: `UseNetDidResolver(...)` (defaults to `did:key` +
+    `did:peer` via net-did's DI builder; extra methods via the inner action),
+    `UseSecretsResolver<T>()` / `UseSecretsResolver(instance)`,
+    `Configure(Action<DidCommOptions>)`.
+  - Build-time FR-SEC-02 fail-fast: throws `InvalidOperationException` with
+    actionable docs-pointer text when `ISecretsResolver` or `IDidKeyService` is
+    unregistered.
+- **NetDid IKeyStore adapter** (`src/DidComm.Adapters.NetDid/`):
+  - New csproj. `NetDidKeyStoreSecretsResolver` bridges
+    `NetDid.Core.IKeyStore` → `ISecretsResolver` (FR-SEC-04, SHOULD). XML doc
+    surfaces the scope limit: `IKeyStore` exposes signing + public-key surfaces
+    only, never raw private bytes, so this adapter is sufficient for resolving
+    *which* kids are held but cannot yield decryption-path private keys until
+    net-did adds an opaque-ECDH provider.
+- **TestSupport** (`tests/DidComm.TestSupport/`):
+  - New library (non-test). `InMemorySecretsResolver` is the dictionary-backed
+    test fake (FR-SEC-05) — deliberately outside `DidComm.Core` so DD-02 stays
+    honest.
+- **`JweParser.PeekRecipients`** — lightweight structural peek (recipient kids
+  + skid, no crypto) for facade pre-warm scenarios. Wired into the design but
+  not yet consumed by the current facade implementation; kept available for
+  future caching/optimization work.
+
+### Vendored spec fixtures (FR-IX-01 extension)
+
+- `tests/DidComm.InteropTests/fixtures/diddocs/spec/{alice,bob}.json` — DIDComm
+  v2.1 Appendix B DID Documents transcribed from didcomm-python's
+  `DID_DOC_*_SPEC_TEST_VECTORS` (Apache-2.0). Provenance + scope note in
+  `fixtures/diddocs/spec/README.md`. Charlie / mediator1 / mediator2 are
+  intentionally deferred to Phase 4 alongside the FR-ROUTE-* work that actually
+  exercises them.
+
+### Tests — Phase 3
+
+Adds **54 new** `DidComm.Core.Tests` cases (299 total) plus **18 new**
+`DidComm.InteropTests` cases (30 total).
+
+- `Exceptions/Phase3ExceptionsTests` — the three new typed exceptions carry the
+  declared properties and inherit `DidCommException`.
+- `Messages/MessageFromPriorTests` — `Message.FromPrior` round-trips, omitted
+  when null, `MessageBuilder.WithFromPrior` populates the slot.
+- `Secrets/{ISecretsResolverContractTests, InMemorySecretsResolverTests,
+  NetDidKeyStoreSecretsResolverTests}` — contract semantics + the two adapters.
+- `Resolution/{IDidKeyServiceContractTests, NetDidKeyServiceTests}` — contract
+  + adapter (did:web rejection, malformed input, missing-doc, embedded JWK,
+  fragment deref, missing reference, unsupported-curve filter,
+  multibase-only-skip, `IsKeyAuthorizedAsync` relationship boundary).
+- `Consistency/ResolverAuthorizationTests` — predicate-fires-correct-triple,
+  null-short-circuit, authorized passes, unauthorized throws.
+- `Facade/{DidCommClientUnitTests, DependencyInjectionTests}` — FR-ROT-03
+  refusal on plaintext / signed; did:web rejection across every entry point and
+  every DID-bearing field; MaxReceiveBytes; fail-fast on missing
+  `ISecretsResolver` / `IDidKeyService`; `Configure(...)` applies; instance
+  registration overload.
+- `Rotation/FromPriorClaimsTests` — record equality + iat inequality.
+- InteropTests:
+  - `Resolution/AppendixBResolutionTests` — Alice authentication (3 keys),
+    Alice keyAgreement (X25519+P256+P521), Bob keyAgreement (9 keys across
+    four curves), Bob no-authentication, `IsKeyAuthorizedAsync` relationship
+    boundary.
+  - `Facade/DidCommClientRoundTripTests` — plaintext, signed, anoncrypt,
+    authcrypt, sign-then-encrypt, anoncrypt(authcrypt), authcrypt FR-ENC-09
+    refusal — every legal FR-ENV-02 composition through the public facade.
+  - `Rotation/FromPriorRotationTests` — builder/validator round-trip, tampered
+    signature rejected, mismatched `sub` rejected (FR-ROT-02), signer-not-in-
+    authentication rejected, malformed JWT rejected, `DidCommClient.UnpackAsync`
+    populates `UnpackResult.FromPrior` end-to-end.
+
+### Changed
+
+- `DidComm.Core.csproj` gained `<InternalsVisibleTo>` entries for the three new
+  sibling assemblies (`DidComm.Extensions.DependencyInjection`,
+  `DidComm.Adapters.NetDid`, `DidComm.TestSupport`).
+- `EnvelopeReader.Unpack` signature gained a trailing optional `resolverCheck`
+  parameter (default `null` preserves the Phase 2 behaviour where the
+  FR-CONSIST-06 hook is a no-op).
+- `SpecActorRegistry.AsSecretsResolver()` — new test helper exposing the
+  Appendix A secrets through the public `ISecretsResolver` shape.
+
 ### Added — Phase 2 (Envelopes + Interop Gate)
 
 Closes PRD §12 Phase 2: FR-ENV-01..07, FR-ENC-04, FR-ENC-09..19, FR-SIG-01..06,

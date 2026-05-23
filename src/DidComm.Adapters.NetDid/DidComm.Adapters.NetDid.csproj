@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Adapters.NetDid</RootNamespace>
+    <AssemblyName>DidComm.Adapters.NetDid</AssemblyName>
+    <PackageId>DidComm.Adapters.NetDid</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>Optional adapter bridging NetDid.Core.IKeyStore to DidComm.ISecretsResolver (FR-SEC-04). See class XML doc for scope: only sign-side keys are surfaceable; encryption-side recipient privates require an extractable-secret store.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
+  </ItemGroup>
+
+</Project>

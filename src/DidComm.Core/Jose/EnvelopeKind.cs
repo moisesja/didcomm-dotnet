@@ -5,7 +5,7 @@ namespace DidComm.Jose;
 /// classifies an incoming packed message into one of these so the unpack pipeline can
 /// dispatch to the right decoder.
 /// </summary>
-internal enum EnvelopeKind
+public enum EnvelopeKind
 {
     /// <summary>An unprotected DIDComm plaintext JWM (<c>application/didcomm-plain+json</c>).</summary>
     Plaintext,

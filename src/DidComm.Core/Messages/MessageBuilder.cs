@@ -14,7 +14,7 @@ namespace DidComm.Messages;
 /// <c>this</c> to allow chaining; <see cref="Build"/> runs <see cref="Message.Validate"/> so a
 /// successful <c>Build()</c> guarantees the returned message satisfies the §4 structural rules.
 /// </remarks>
-internal sealed class MessageBuilder
+public sealed class MessageBuilder
 {
     private readonly Message _message;
     private readonly IMessageIdGenerator _idGenerator;
@@ -67,6 +67,15 @@ internal sealed class MessageBuilder
     public MessageBuilder WithTo(params string[] to)
     {
         _message.To = to is { Length: > 0 } ? to.ToList() : null;
+        return this;
+    }
+
+    /// <summary>Set <see cref="Message.FromPrior"/> for DID rotation (FR-ROT-01).</summary>
+    /// <param name="fromPrior">JWT signed by a key authorized in the prior DID's <c>authentication</c> relationship.</param>
+    public MessageBuilder WithFromPrior(string fromPrior)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(fromPrior);
+        _message.FromPrior = fromPrior;
         return this;
     }
 

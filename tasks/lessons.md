@@ -68,6 +68,40 @@ Format per entry:
   `using NetDidICryptoProvider = NetDid.Core.ICryptoProvider;`) at the top
   of the file.
 
+## L-006 — Promoting `internal` to `public` cascades through the type graph.
+
+- **Lesson:** When a Phase boundary requires exposing a public method whose
+  parameter/return type was previously `internal`, every transitively-referenced
+  type along that signature must also be promoted. `warnaserror` flags this as
+  CS0051 / CS0053 "inconsistent accessibility", and the fix is mechanical but
+  easy to forget when planning.
+- **Why:** Phase 3 added `ISecretsResolver.FindAsync(...) → Jwk?`. The Plan
+  agent enumerated the message-shape types that needed to go public
+  (`Message`, `Attachment`, …) but missed `Jwk` itself — also `EnvelopeKind`
+  (returned in `UnpackResult.Stack`). Each surfaced as a build break that
+  required a second pass.
+- **How to apply:** When promoting a type to public, walk every public
+  member's signature and confirm each referenced type is at least as public.
+  In planning notes, list "transitive public surface" alongside the primary
+  promotion list.
+
+## L-007 — Filter by held-private-key before picking a curve, not after.
+
+- **Lesson:** When the facade picks a sender / signer key for authcrypt or
+  sign-then-encrypt, intersect the DID's public verification methods with the
+  `ISecretsResolver`'s held kids **before** scoring curves, not after. Otherwise
+  the facade picks a curve where a public key exists but the matching private
+  doesn't, then throws `SecretNotFoundException` after committing to an envelope
+  shape.
+- **Why:** Alice's Appendix B keyAgreement list starts with
+  `did:example:alice#key-x25519-not-in-secrets-1` — a key whose private half is
+  deliberately absent from Appendix A. The first authcrypt round-trip failed
+  because the facade picked X25519 (common to alice and bob) and then asked
+  Appendix A for the matching private key, which doesn't exist.
+- **How to apply:** Any time the facade reaches into `ISecretsResolver` for a
+  sender / signer private key, gate the candidate set on
+  `FindPresentAsync(candidateKids)` first; only then run curve-selection logic.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves
