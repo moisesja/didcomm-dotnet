@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm</RootNamespace>
+    <AssemblyName>DidComm.Core</AssemblyName>
+    <PackageId>DidComm.Core</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>DIDComm Messaging v2.1 for .NET — message model, JWE/JWS envelopes, pack/unpack, routing, rotation. Phase 0: crypto substrate.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SSI crypto substrate. NetDid 1.3.0+ ships sign/verify (incl. P1363), raw ECDH for
+         X25519/P-256/P-384/P-521, off-curve point validation at the JWK boundary, and a public
+         Concat KDF. DidComm.Core delegates those primitives and adds the JOSE composition layer
+         on top. The Phase 3 resolver adapter consumes the same package. -->
+    <PackageReference Include="NetDid.Core" />
+
+    <!-- Crypto stack per PRD §3.1. NSec is needed only for XChaCha20-Poly1305 (XC20P); secp256k1
+         comes in transitively through NetDid.Core. -->
+    <PackageReference Include="NSec.Cryptography" />
+
+    <!-- Observability hooks (NFR-04/05/06). -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="OpenTelemetry.Api" />
+
+    <!-- Source Link (NFR-08). -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DidComm.Core.Tests" />
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
+</Project>

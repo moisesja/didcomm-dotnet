@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.InteropTests</RootNamespace>
+    <AssemblyName>DidComm.InteropTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+  </ItemGroup>
+
+  <!--
+    Phase 0: fixtures live inline under ./fixtures so the data-driven runner has
+    something to enumerate (FR-IX-02). Before Phase 2 closes (FR-IX-01 gate),
+    move fixtures into the standalone didcomm-dotnet-fixtures repo and wire it
+    in as a git submodule per PRD §13.3. See ./fixtures/README.md.
+  -->
+  <ItemGroup>
+    <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

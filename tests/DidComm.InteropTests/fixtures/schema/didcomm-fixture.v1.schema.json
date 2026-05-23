@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://didcomm-dotnet.org/schemas/didcomm-fixture.v1.schema.json",
+  "title": "DIDComm interop fixture (v1)",
+  "description": "Canonical manifest format for the didcomm-dotnet interop fixture suite. One manifest per fixture; the InteropTests runner enumerates manifest/**/*.json and emits one xUnit theory case per file. See PRD §13.4.",
+  "type": "object",
+  "required": ["schema", "id", "source", "operation", "direction", "expected"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "didcomm-fixture/v1",
+      "description": "Schema discriminator. Always 'didcomm-fixture/v1' for this version."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable, unique identifier for the fixture. Used to attribute test failures to a specific case."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable summary of what the fixture exercises."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provenance tag identifying where the fixture originated. PRD §13.2 enumerates the canonical values: 'spec-v2.1', 'didcomm-rust', 'didcomm-python', 'didcomm-jvm', 'didcomm-rs', 'credo-ts', 'authored', or 'interop-a-thon-<date>'."
+    },
+    "source_ref": {
+      "type": "string",
+      "description": "Pointer into the source — e.g. 'Appendix C.3 example 1' or a commit-pinned file path."
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["inbound", "outbound", "roundtrip"],
+      "description": "inbound = didcomm-dotnet consumes a foreign-produced artifact; outbound = a foreign impl consumes ours; roundtrip = pack→unpack against ourselves."
+    },
+    "operation": {
+      "type": "string",
+      "enum": ["pack-encrypted", "pack-signed", "pack-plaintext", "unpack", "sign", "verify", "noop"],
+      "description": "The DIDComm operation under test. 'noop' is reserved for runner smoke tests that exist only to prove the runner enumerates the file."
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Free-form tags for filtering (e.g. 'anoncrypt', 'x25519', 'multi-recipient')."
+    },
+    "refs": {
+      "type": "object",
+      "description": "Pointers from the manifest into the sibling fixture data directories.",
+      "additionalProperties": false,
+      "properties": {
+        "secrets":   { "type": "string" },
+        "diddocs":   { "type": "array", "items": { "type": "string" } },
+        "plaintext": { "type": "string" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "description": "Operation inputs. For unpack/verify: 'packed' points at the envelope. For pack-*: carries message, from, to[], sign_from?, enc, protect_sender?, forward?.",
+      "additionalProperties": true
+    },
+    "expected": {
+      "type": "object",
+      "required": ["outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": ["success", "error"]
+        },
+        "error_code": {
+          "type": ["string", "null"],
+          "description": "When outcome=error, the expected error code or exception type."
+        },
+        "plaintext": {
+          "type": "string",
+          "description": "Path to the expected plaintext payload (for unpack)."
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Asserted UnpackResult fields per FR-API-04.",
+          "additionalProperties": true
+        },
+        "match": {
+          "type": "string",
+          "enum": ["exact", "structural", "roundtrip"],
+          "description": "exact = byte-equal output (deterministic algs only); structural = same recipients/headers/alg, ephemerals ignored; roundtrip = pack-then-unpack equals source plaintext."
+        }
+      }
+    }
+  }
+}

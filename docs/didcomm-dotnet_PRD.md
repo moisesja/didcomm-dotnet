@@ -129,7 +129,7 @@ The library is "done" for v1.0 when every `MUST` requirement in this document is
 
 | Package | Responsibility | Key dependencies |
 |---|---|---|
-| `DidComm.Core` | Message model; JWE/JWS envelopes; all crypto; pack/unpack; **resolver adapter over net-did**; secrets interface; routing/forward; rotation; threading; problem reports; OOB encode/decode | **`NetDid`** (DID resolution), `NSec.Cryptography` (libsodium: X25519, Ed25519, XC20P), `System.Security.Cryptography` (P-256/384/521 ECDH+ECDSA, AES-CBC-HMAC, AES-GCM, AES-KW), `Portable.BouncyCastle` (secp256k1 / ES256K only) |
+| `DidComm.Core` | Message model; JWE/JWS envelopes; the JOSE-specific composition layer (A256CBC-HS512 AEAD, A256KW key wrap, ECDH-1PU KDF wrapper, JOSE algorithm dispatch); pack/unpack; **resolver adapter over net-did**; secrets interface; routing/forward; rotation; threading; problem reports; OOB encode/decode | **`NetDid 1.3.0+`** — owns the SSI crypto substrate: DID resolution; sign/verify (EdDSA, ES256/ES384/ES512 with DER or IEEE P1363, ES256K via NBitcoin.Secp256k1); raw ECDH `DeriveSharedSecret` for X25519/P-256/P-384/P-521; off-curve point validation at the JWK boundary (`EcPointValidator`); public `ConcatKdf` (RFC 7518 §4.6 / NIST SP 800-56A §5.8.1). `NSec.Cryptography` — XChaCha20-Poly1305 (XC20P) only; net-did does not ship XC20P. `System.Security.Cryptography` — AES-CBC, AES-GCM, HMAC-SHA512 (the local pieces of the JOSE composition layer). |
 | `DidComm.Transports.Http` | HTTPS send + ASP.NET Core receive endpoint | `DidComm.Core`, `Microsoft.Extensions.Http` |
 | `DidComm.Transports.WebSocket` | WebSocket send/receive, connection lifecycle | `DidComm.Core` |
 | `DidComm.Protocols.TrustPing` | Trust Ping 2.0 | `DidComm.Core` |
@@ -501,18 +501,33 @@ Each phase lists the requirement IDs it closes and **exit criteria** that must a
 
 ---
 
-### Phase 0 — Repository & Crypto Substrate
+### Phase 0 — Repository & JOSE-Composition Substrate
 
-**Closes:** NFR-01, NFR-08 (scaffold), FR-ENC-18 (KDF), parts of FR-ENC-01/05.
-**Build:** solution + `Directory.Build.props` + `.editorconfig`; `DidComm.Core` (referencing `NetDid`) and test project; `ICryptoProvider` with a `DefaultCryptoProvider` covering ECDH (X25519, P-256, P-384, P-521), Ed25519/ES256/ES256K sign+verify, AES-256-CBC-HMAC-SHA512, AES-256-GCM, XC20P, AES-256-KW, and the Concat KDF (ECDH-ES and 1PU forms); base64url-no-pad codec; JWK ↔ key conversions.
-**Vendor:** Wire the `didcomm-dotnet-fixtures` git submodule (§13.3) and seed it with the spec Appendix A secrets, Appendix B DID Docs, and Appendix C vectors as `source: spec-v2.1` manifests (§13.4). Add the `DidComm.InteropTests` data-driven runner skeleton (FR-IX-01/02) so fixtures execute as XUnit theories from Phase 2 onward.
+**Closes:** NFR-01, NFR-08 (scaffold), parts of FR-ENC-05/06/07 (the JOSE-specific AEADs that net-did does not ship), FR-ENC-18 (1PU wrapper around net-did's Concat KDF). FR-ENC-01/02/03 and FR-SIG-01 are **satisfied by `NetDid 1.3.0`** (raw ECDH for all four curves, off-curve point validation, sign/verify with format choice) and are exercised here only as integration smoke tests.
+
+**Build:** solution + `Directory.Build.props` + `.editorconfig`; `DidComm.Core` (referencing `NetDid 1.3.0+`) and test project; a DIDComm-shaped `ICryptoProvider`/`DefaultCryptoProvider` that **delegates** sign/verify and raw ECDH to `NetDid.Core.ICryptoProvider` and **owns** the JOSE composition layer:
+
+- `A256CBC-HS512` AEAD (RFC 7518 §5.2.5 — encrypt-then-MAC composition; not a generic primitive).
+- `A256GCM` AEAD (thin wrapper over `System.Security.Cryptography.AesGcm`).
+- `XC20P` AEAD (thin wrapper over `NSec.Cryptography.AeadAlgorithm.XChaCha20Poly1305`).
+- `A256KW` key wrap (RFC 3394; implemented in DidComm.Core because BCL does not expose AES-KW publicly).
+- `ECDH-1PU` KDF wrapper: composes `Z = Ze ‖ Zs` from two `NetDid.ICryptoProvider.DeriveSharedSecret` calls, threads the AEAD tag into `SuppPubInfo`, and calls `NetDid.Core.Crypto.Kdf.ConcatKdf.DeriveKey`.
+- Base64url-no-pad codec.
+- A DIDComm-shaped JWK overlay (`kid`, JOSE `alg`/`enc` hints) over `NetDid.Core.Jwk.JwkConverter`.
+
+**Vendor:** Stage fixtures under `tests/DidComm.InteropTests/fixtures/` for now (schema + smoke manifest only). Migrate to the standalone `didcomm-dotnet-fixtures` git submodule (PRD §13.3) before Phase 2 closes. Add the `DidComm.InteropTests` data-driven runner skeleton (FR-IX-01/02) so fixtures execute as XUnit theories from Phase 2 onward.
+
 **Exit criteria:**
-- Concat KDF reproduces a known-answer test from RFC 7518 §C.
-- Each primitive has a round-trip test; ES256K path verified (BouncyCastle wired).
-- NIST point-validation rejects an off-curve point (FR-ENC-03).
-- `dotnet build /warnaserror` clean on Linux + Windows CI.
+- `DidComm.Core` builds against `NetDid 1.3.0` with `dotnet build /warnaserror` clean on Linux + Windows CI.
+- A256CBC-HS512 round-trip + RFC 7518 §B.3 known-answer test passes.
+- A256KW round-trip + RFC 3394 §4.1 (256-bit KEK wraps 256-bit data) known-answer test passes.
+- A256GCM and XC20P round-trip + tampering rejection tests pass.
+- ECDH-1PU KDF wrapper reproduces a known-answer derivation (own KAT built from a published 1PU test vector — Appendix C.3 1PU vector lands in Phase 2; Phase 0 uses a synthetic vector with hand-computed expected output).
+- Smoke integration tests confirm net-did delegation works: sign/verify on EdDSA, ES256, ES256K and `DeriveSharedSecret` on X25519/P-256/P-384/P-521 all complete without exception via DidComm.Core's `ICryptoProvider`.
+- A malformed JWK (off-curve EC point) propagates `CryptographicException` through DidComm.Core's pipeline (inherited from net-did's `EcPointValidator`).
+- `DidComm.InteropTests` data-driven runner emits one XUnit theory case per fixture manifest.
 
-> **Kickoff prompt:** "Scaffold the didcomm-dotnet solution per PRD §3 and §11 (NFR-01/08). Then implement `ICryptoProvider`/`DefaultCryptoProvider` satisfying FR-ENC-01,02,05,06,07,08,18 and FR-SIG-01, plus base64url-no-pad and JWK conversions. Use NSec for X25519/Ed25519/XC20P, System.Security.Cryptography for NIST curves + AES, BouncyCastle for secp256k1. Set up the `didcomm-dotnet-fixtures` git submodule and `DidComm.InteropTests` data-driven runner per PRD §13.2–§13.4 (FR-IX-01/02), seeding it with the spec Appendix A/B/C as `source: spec-v2.1` manifests. Provide known-answer tests for the Concat KDF and every primitive. Do not implement envelopes yet."
+> **Kickoff prompt:** "Scaffold the didcomm-dotnet solution per PRD §3 and §11 (NFR-01/08), reference `NetDid 1.3.0+`, and implement the DIDComm JOSE-composition layer per PRD §12 Phase 0: a DIDComm-shaped `ICryptoProvider`/`DefaultCryptoProvider` that delegates sign/verify and raw ECDH to `NetDid.Core.ICryptoProvider`, plus locally-owned A256CBC-HS512 (RFC 7518 §5.2.5), A256GCM, XC20P, A256KW (RFC 3394), an ECDH-1PU KDF wrapper around `NetDid.Core.Crypto.Kdf.ConcatKdf`, a base64url-no-pad codec, and a DIDComm JWK overlay over `NetDid.Core.Jwk.JwkConverter`. Use NSec only for XC20P. Provide round-trip + RFC-7518/RFC-3394 known-answer tests for every JOSE primitive owned here, plus smoke integration tests confirming the net-did delegation path. Stage fixtures inline (`tests/DidComm.InteropTests/fixtures/`) with the v1 schema and one smoke manifest; add the data-driven runner per PRD §13.2–§13.4 (FR-IX-01/02). Do not implement envelopes yet."
 
 ---
 

@@ -3,15 +3,17 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
-    <!-- DID resolution (supporting library) -->
-    <PackageVersion Include="NetDid.Core" Version="1.2.0" />
-    <PackageVersion Include="NetDid.Method.Key" Version="1.2.0" />
-    <PackageVersion Include="NetDid.Method.Peer" Version="1.2.0" />
-    <PackageVersion Include="NetDid.Method.WebVh" Version="1.2.0" />
-    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="1.2.0" />
-    <!-- Cryptography -->
+    <!-- DID resolution + SSI crypto substrate. 1.3.0 ships raw ECDH (X25519/P-256/P-384/P-521),
+         IEEE P1363 ECDSA, off-curve point validation, and a public Concat KDF, so didcomm-dotnet
+         no longer carries its own primitive layer — see PRD §3.1. -->
+    <PackageVersion Include="NetDid.Core" Version="1.3.0" />
+    <PackageVersion Include="NetDid.Method.Key" Version="1.3.0" />
+    <PackageVersion Include="NetDid.Method.Peer" Version="1.3.0" />
+    <PackageVersion Include="NetDid.Method.WebVh" Version="1.3.0" />
+    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="1.3.0" />
+    <!-- Cryptography: NSec is needed only for XChaCha20-Poly1305 (XC20P), which net-did does not
+         ship. secp256k1 comes in transitively through NetDid.Core (no direct ref needed). -->
     <PackageVersion Include="NSec.Cryptography" Version="24.4.0" />
-    <PackageVersion Include="Portable.BouncyCastle" Version="1.9.0" />
     <!-- ASP.NET Core (transports) -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.0-preview.1.25080.5" />
     <!-- Caching -->
@@ -22,8 +24,9 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0-preview.1.25080.5" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0-preview.1.25080.5" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.0-preview.1.25080.5" />
-    <!-- OpenTelemetry (observability — NFR-04) -->
-    <PackageVersion Include="OpenTelemetry.Api" Version="1.10.0" />
+    <!-- OpenTelemetry (observability — NFR-04). 1.10.0 carries GHSA-8785-wc3w-h8q6
+         and GHSA-g94r-2vxg-569j; 1.15.3 is the current patched line. -->
+    <PackageVersion Include="OpenTelemetry.Api" Version="1.15.3" />
     <!-- Source Link -->
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
     <!-- Testing -->

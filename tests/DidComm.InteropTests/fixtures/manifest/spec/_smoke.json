@@ -1,0 +1,16 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-smoke-runner-001",
+  "description": "Phase 0 runner smoke. Proves the data-driven harness enumerates manifest/**/*.json and emits one xUnit theory case per file. No crypto is exercised — operation is 'noop'. Replaced by real spec-v2.1 vectors in Phase 2.",
+  "source": "spec-v2.1",
+  "source_ref": "Phase 0 scaffolding placeholder",
+  "direction": "roundtrip",
+  "operation": "noop",
+  "tags": ["smoke", "phase-0"],
+  "refs": {
+    "plaintext": "payloads/_smoke-plaintext.json"
+  },
+  "expected": {
+    "outcome": "success"
+  }
+}

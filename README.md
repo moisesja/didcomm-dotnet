@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#project-status)
+[![Status](https://img.shields.io/badge/status-phase%200%20complete-yellow.svg)](#project-status)
 [![Spec](https://img.shields.io/badge/spec-DIDComm%20v2.1-informational.svg)](https://identity.foundation/didcomm-messaging/spec/v2.1)
 
 A spec-complete .NET 10 implementation of **DIDComm Messaging v2.1** — the [DIF](https://identity.foundation/) protocol for confidential, integrity-protected, optionally non-repudiable messaging between parties identified by Decentralized Identifiers (DIDs).
@@ -13,9 +13,9 @@ DID resolution is delegated to the sibling library [**NetDid**](https://github.c
 
 ## Project status
 
-**Pre-alpha — implementation has not begun.** This repository currently contains the [Product Requirements Document](didcomm-dotnet_PRD.md) and project scaffolding. The PRD is normative; implementation follows the six-phase plan in §12.
+**Phase 0 complete.** The solution, `DidComm.Core` JOSE-composition crypto substrate (AEAD, AES-KW, 1PU KDF wrapper), and `DidComm.InteropTests` data-driven fixture runner are in place. SSI primitives (sign/verify, raw ECDH, off-curve point validation, Concat KDF) are delegated to [NetDid 1.3.0](https://github.com/moisesja/net-did). See [CHANGELOG.md](CHANGELOG.md) for the per-phase log, the [PRD](docs/didcomm-dotnet_PRD.md) for normative requirements (the six-phase plan is §12), and the [roadmap](#roadmap) below for status at a glance.
 
-No NuGet packages have been published yet. See the [roadmap](#roadmap) below for tracking progress.
+No NuGet packages have been published yet.
 
 ## What "spec-complete" means
 
@@ -98,11 +98,11 @@ public interface ISecretsResolver
 
 ## Roadmap
 
-didcomm-dotnet is delivered in six phases (see [PRD §12](didcomm-dotnet_PRD.md) for the full plan, exit criteria, and per-phase agent kickoff prompts):
+didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PRD.md) for the full plan, exit criteria, and per-phase agent kickoff prompts):
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0** | Repository & crypto substrate (`ICryptoProvider`, KDF, JWK conversions, fixtures harness) | Not started |
+| **0** | Repository & JOSE-composition substrate (`ICryptoProvider`, AEAD, AES-KW, 1PU KDF wrapper, JWK shim, fixtures harness) | ✅ Complete |
 | **1** | Message model, attachments, MTURI parsing, consistency-check functions | Not started |
 | **2** | Envelopes: Signed, Anoncrypt, Authcrypt — Appendix C interop gate | Not started |
 | **3** | Pack/Unpack facade, NetDid integration, secrets, DID rotation | Not started |
@@ -132,11 +132,12 @@ didcomm-dotnet/
 │   └── DidComm.Protocols.*.Tests/
 ├── samples/
 │   └── …                                    # 10 sample apps + 02-Cookbook (PRD §14)
-├── fixtures/                                # git submodule: didcomm-dotnet-fixtures
-├── didcomm-dotnet_PRD.md                    # normative product requirements
+├── fixtures/                                # git submodule: didcomm-dotnet-fixtures (Phase 2)
+├── docs/
+│   └── didcomm-dotnet_PRD.md                # normative product requirements
 ├── Directory.Build.props
 ├── Directory.Packages.props
-└── didcomm-dotnet.sln
+└── DidComm.sln
 ```
 
 ## Contributing

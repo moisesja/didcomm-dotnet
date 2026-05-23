@@ -1,0 +1,5 @@
+{
+  "id": "smoke-001",
+  "type": "https://example.org/protocols/didcomm-dotnet-smoke/1.0/ping",
+  "body": {}
+}
