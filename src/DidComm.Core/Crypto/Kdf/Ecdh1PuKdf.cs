@@ -65,8 +65,8 @@ internal static class Ecdh1PuKdf
         var zs = cryptoProvider.DeriveSharedSecret(curve, senderPrivateKey, recipientPublicKey);
 
         var z = new byte[ze.Length + zs.Length];
-        Buffer.BlockCopy(ze, 0, z, 0, ze.Length);
-        Buffer.BlockCopy(zs, 0, z, ze.Length, zs.Length);
+        ze.AsSpan().CopyTo(z);
+        zs.AsSpan().CopyTo(z.AsSpan(ze.Length));
         CryptographicOperations.ZeroMemory(ze);
         CryptographicOperations.ZeroMemory(zs);
 

@@ -51,7 +51,6 @@ internal static class AesKeyWrap
         Span<byte> block = stackalloc byte[BlockSize * 2];
         Span<byte> encrypted = stackalloc byte[BlockSize * 2];
 
-        // Six wrap rounds.
         for (var j = 0; j < 6; j++)
         {
             for (var i = 0; i < n; i++)
@@ -75,7 +74,7 @@ internal static class AesKeyWrap
 
         var output = new byte[BlockSize + r.Length];
         a.CopyTo(output);
-        Buffer.BlockCopy(r, 0, output, BlockSize, r.Length);
+        r.AsSpan().CopyTo(output.AsSpan(BlockSize));
         return output;
     }
 
@@ -137,7 +136,9 @@ internal static class AesKeyWrap
         var aes = Aes.Create();
         aes.Mode = CipherMode.ECB;
         aes.Padding = PaddingMode.None;
-        aes.Key = kek.ToArray();
+        var kekArray = kek.ToArray();
+        aes.Key = kekArray;
+        CryptographicOperations.ZeroMemory(kekArray);
         return aes;
     }
 

@@ -45,18 +45,19 @@ internal sealed class AesCbcHmacSha512 : IAead
         var macKey = key[..32];
         var encKey = key.Slice(32, 32);
 
-        // Step 2: AES-256-CBC encrypt with PKCS#7 padding.
         byte[] ciphertext;
-        using (var aes = Aes.Create())
+        var encKeyArray = encKey.ToArray();
+        try
         {
-            aes.Mode = CipherMode.CBC;
-            aes.Padding = PaddingMode.PKCS7;
-            aes.Key = encKey.ToArray();
-            aes.IV = iv.ToArray();
+            using var aes = Aes.Create();
+            aes.Key = encKeyArray;
             ciphertext = aes.EncryptCbc(plaintext, iv, PaddingMode.PKCS7);
         }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encKeyArray);
+        }
 
-        // Step 3-4: HMAC-SHA-512 over (AAD ‖ IV ‖ CT ‖ AL), truncate to 32 bytes.
         var tag = ComputeMac(macKey, aad, iv, ciphertext);
 
         return (ciphertext, tag);
@@ -81,13 +82,17 @@ internal sealed class AesCbcHmacSha512 : IAead
         if (!CryptographicOperations.FixedTimeEquals(expectedTag, tag))
             throw new CryptographicException("A256CBC-HS512 authentication tag verification failed.");
 
-        // MAC verified — safe to decrypt.
-        using var aes = Aes.Create();
-        aes.Mode = CipherMode.CBC;
-        aes.Padding = PaddingMode.PKCS7;
-        aes.Key = encKey.ToArray();
-        aes.IV = iv.ToArray();
-        return aes.DecryptCbc(ciphertext, iv, PaddingMode.PKCS7);
+        var encKeyArray = encKey.ToArray();
+        try
+        {
+            using var aes = Aes.Create();
+            aes.Key = encKeyArray;
+            return aes.DecryptCbc(ciphertext, iv, PaddingMode.PKCS7);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encKeyArray);
+        }
     }
 
     /// <summary>
