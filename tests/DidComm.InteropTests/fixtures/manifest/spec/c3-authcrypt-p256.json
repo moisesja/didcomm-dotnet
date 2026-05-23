@@ -1,0 +1,29 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-c3-auth-p256",
+  "description": "DIDComm v2.1 Appendix C.3: Authcrypt(Sign(plaintext)) — Alice→Bob over P-256 with A256CBC-HS512 outer and an inner Ed25519 signature.",
+  "source": "spec-v2.1",
+  "source_ref": "Appendix C.3 authcrypt-of-signed example, P-256 outer, Ed25519 inner",
+  "direction": "inbound",
+  "operation": "unpack",
+  "tags": ["authcrypt", "sign-then-encrypt", "ECDH-1PU+A256KW", "P-256", "A256CBC-HS512", "EdDSA-inner"],
+  "input": {
+    "packed": "packed/spec/test-encrypted-didcomm-message-auth-p256.json"
+  },
+  "expected": {
+    "outcome": "success",
+    "plaintext": "payloads/c1-lets-do-lunch.json",
+    "metadata": {
+      "encrypted": true,
+      "authenticated": true,
+      "non_repudiation": true,
+      "anonymous_sender": false,
+      "enc": "A256CBC-HS512",
+      "kw": "ECDH-1PU+A256KW",
+      "sender_kid": "did:example:alice#key-p256-1",
+      "sig_alg": "EdDSA",
+      "signer_kid": "did:example:alice#key-1"
+    },
+    "match": "roundtrip"
+  }
+}

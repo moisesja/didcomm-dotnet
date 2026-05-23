@@ -1,0 +1,26 @@
+{
+  "schema": "didcomm-fixture/v1",
+  "id": "spec-c2-es256-signed-alice-key2",
+  "description": "DIDComm v2.1 Appendix C.2: Alice signs with ES256 (kid=key-2).",
+  "source": "spec-v2.1",
+  "source_ref": "Appendix C.2 signed example, ES256",
+  "direction": "inbound",
+  "operation": "verify",
+  "tags": ["signed", "ES256", "P-256"],
+  "input": {
+    "packed": "packed/spec/test-signed-didcomm-message-alice-key-2.json"
+  },
+  "expected": {
+    "outcome": "success",
+    "plaintext": "payloads/c1-lets-do-lunch.json",
+    "metadata": {
+      "encrypted": false,
+      "authenticated": true,
+      "non_repudiation": true,
+      "anonymous_sender": false,
+      "sig_alg": "ES256",
+      "signer_kid": "did:example:alice#key-2"
+    },
+    "match": "structural"
+  }
+}

@@ -1,3 +1,4 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -28,7 +29,14 @@ internal static class DeterministicJsonWriter
     public static byte[] WriteUtf8(JsonNode? node)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false, SkipValidation = false }))
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
+        {
+            Indented = false,
+            SkipValidation = false,
+            // Match DidCommJson.Default so the canonical bytes do not double-escape characters
+            // like '+' that the JOSE / DIDComm spec vectors carry literally.
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        }))
         {
             WriteNode(writer, node);
         }

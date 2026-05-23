@@ -1,0 +1,32 @@
+{
+  "protected": "eyJ0eXAiOiJhcHBsaWNhdGlvbi9kaWRjb21tLWVuY3J5cHRlZCtqc29uIiwiYWxnIjoiRUNESC1FUytBMjU2S1ciLCJlbmMiOiJYQzIwUCIsImFwdiI6IlkxWXh3b053WU5HNGRKRlBKanZtLTk0aWJhdXFBOUhyV0tZWmhtY29lU2ciLCJlcGsiOnsiY3J2IjoiWDI1NTE5IiwieCI6ImFNZzU4X1JqT2dGcjhZQWtCdmptOXhKYVZ3bnlXRVRmRFpYaGMyWVctamMiLCJrdHkiOiJPS1AifX0",
+  "recipients": [
+    {
+      "header": {
+        "kid": "did:example:bob#key-x25519-1"
+      },
+      "encrypted_key": "ThzyeMnViwuOEK3LLAhKXyoTUCOcBhaa4FxMvC1F3nLI9oXeKJjtPQ"
+    },
+    {
+      "header": {
+        "kid": "did:example:bob#key-x25519-2"
+      },
+      "encrypted_key": "yglsPC468bnwGL2aPcbGZUdvWFSipmoP9wJoaWqWVc3Ce56jI5v9xQ"
+    },
+    {
+      "header": {
+        "kid": "did:example:bob#key-x25519-3"
+      },
+      "encrypted_key": "SpAP0Gzo2lazwfAPyMhaTd1GlO6aRTmXngDu3j9iFwXetow_FkVxsw"
+    },
+    {
+      "header": {
+        "kid": "did:example:bob#key-x25519-4"
+      },
+      "encrypted_key": "_bWWYGGUZ2ITqcGDdP7C1_LkYb_2qtOaXQ3sWyoK6g161SGxsWEpoQ"
+    }
+  ],
+  "iv": "9AVo9rQR0ZX7QEhguuRWV-JcCbwkaa3x",
+  "ciphertext": "lSto80zaVP0ywIYzF2ecD01SM1xyqqPexRcZ8f-7D1T00AEWdTfJxw3Hp1ktNJFHpj5RHbFomrJy9LXErJWZXQWxmZBhmcIfZwu0b70Nq20m8I4oI-ZN2twVGMApFj-M98aZ11M17SI8jToOPPFJAdfLKBM3Q1nFW4LoqJZQgbRt0T2pHhgeS-xlwzSbC3aNpYPcfm-eceDrZis_GKgvCx5Jqw6BQdSYRxAXIwIM68owSAn9wAPTZlAqgyMXs3aZGvVSGYx6_PnWIqBhubdQ9hod2-XHUzT054MUJPCF16jC1K1qgOYrZguQC6FF0Ly9_Zcr1NQCZSeJLSuSP6BWtDsFaoVC5bLVDAtmqjKgI2uRlo6KaBaXq1f_nzIx_JfBPX8fmSI9k9nfBU0",
+  "tag": "NW406iWJxQucfftvd5Cy9Q"
+}
