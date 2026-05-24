@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\samples\02-Cookbook\02-Cookbook.csproj" />
   </ItemGroup>
 
   <!--

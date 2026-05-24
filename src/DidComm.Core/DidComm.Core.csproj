@@ -30,6 +30,9 @@
   <ItemGroup>
     <InternalsVisibleTo Include="DidComm.Core.Tests" />
     <InternalsVisibleTo Include="DidComm.InteropTests" />
+    <InternalsVisibleTo Include="DidComm.Extensions.DependencyInjection" />
+    <InternalsVisibleTo Include="DidComm.Adapters.NetDid" />
+    <InternalsVisibleTo Include="DidComm.TestSupport" />
   </ItemGroup>
 
 </Project>

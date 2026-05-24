@@ -27,6 +27,11 @@ internal static class EnvelopeReader
     /// <param name="senderLookup">Internal lookup for sender public keys (authcrypt path); MAY be null when no authcrypt is expected.</param>
     /// <param name="signerLookup">Function returning the public JWK of a signer kid (verify path); MAY be null when no signed layers are expected.</param>
     /// <param name="cryptoProvider">DidComm crypto provider.</param>
+    /// <param name="resolverCheck">
+    /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship) =&gt; isAuthorized</c>.
+    /// When non-null, the unpack pipeline asserts the inner plaintext's sender / recipient / signer kids are present
+    /// under the resolved DID Document's matching relationship. Pass <c>null</c> to short-circuit the check (Phase 2 default).
+    /// </param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
     /// <exception cref="CryptoException">When decryption / verification fails.</exception>
     /// <exception cref="ConsistencyException">When an addressing-consistency rule (FR-CONSIST-*) is violated.</exception>
@@ -35,7 +40,8 @@ internal static class EnvelopeReader
         IInternalSecretsLookup secretsLookup,
         IInternalSenderKeyLookup? senderLookup,
         Func<string, Jwk?>? signerLookup,
-        DidCommDefaultCryptoProvider cryptoProvider)
+        DidCommDefaultCryptoProvider cryptoProvider,
+        Func<string, string, string, bool>? resolverCheck = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
         ArgumentNullException.ThrowIfNull(secretsLookup);
@@ -68,6 +74,26 @@ internal static class EnvelopeReader
                     // did not cryptographically authenticate.
                     if (senderKid is not null)
                         AddressingConsistency.CheckAuthcryptFromMatchesSkid(message.From, senderKid);
+
+                    // FR-CONSIST-06 — the kids surfaced by the cryptographic layers must be
+                    // genuinely authorized in their asserted DID Documents. The predicate is
+                    // supplied by the caller (the Phase 3 facade backs it with IDidKeyService);
+                    // when null the check is skipped (Phase 2 default).
+                    if (resolverCheck is not null)
+                    {
+                        if (senderKid is not null && message.From is not null)
+                            AddressingConsistency.CheckResolverAuthorization(message.From, senderKid, "keyAgreement", resolverCheck);
+
+                        if (encrypted && recipientKid is not null)
+                        {
+                            var recipientDid = DidSubject.DidSubjectOf(recipientKid);
+                            if (recipientDid is not null)
+                                AddressingConsistency.CheckResolverAuthorization(recipientDid, recipientKid, "keyAgreement", resolverCheck);
+                        }
+
+                        if (signerKid is not null && message.From is not null)
+                            AddressingConsistency.CheckResolverAuthorization(message.From, signerKid, "authentication", resolverCheck);
+                    }
 
                     return new UnpackResult(
                         Message: message,

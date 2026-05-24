@@ -9,7 +9,7 @@ namespace DidComm.Messages;
 /// a custom generator MUST honor the contract or thread-correlation, deduplication, and
 /// problem-report routing will break for downstream peers.
 /// </summary>
-internal interface IMessageIdGenerator
+public interface IMessageIdGenerator
 {
     /// <summary>Generate a new message identifier. MUST be ≤ 32 bytes of unreserved URI characters per FR-MSG-02 and MUST be unique per FR-MSG-14.</summary>
     string NewId();

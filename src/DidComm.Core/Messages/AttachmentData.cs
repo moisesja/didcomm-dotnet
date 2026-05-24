@@ -12,7 +12,7 @@ namespace DidComm.Messages;
 /// When <see cref="Links"/> is set, <see cref="Hash"/> MUST also be set for integrity
 /// (FR-ATT-03).
 /// </summary>
-internal sealed class AttachmentData
+public sealed class AttachmentData
 {
     /// <summary>Signature over the attachment payload (JWS, detached-content allowed; FR-ATT-05).</summary>
     [JsonPropertyName("jws")]

@@ -19,6 +19,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Adapters.NetDid\DidComm.Adapters.NetDid.csproj" />
+    <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />
   </ItemGroup>
 
 </Project>

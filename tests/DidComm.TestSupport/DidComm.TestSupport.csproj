@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.TestSupport</RootNamespace>
+    <AssemblyName>DidComm.TestSupport</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>Test-only helpers (in-memory ISecretsResolver) for DidComm.Core consumers. Kept out of DidComm.Core per DD-02 / FR-SEC-05.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+  </ItemGroup>
+
+</Project>

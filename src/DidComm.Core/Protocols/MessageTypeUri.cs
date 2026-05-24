@@ -9,7 +9,7 @@ namespace DidComm.Protocols;
 /// Exposes the four named components called for by FR-PROTO-01 and uses the punctuation /
 /// case-insensitive comparison rule from the same FR for <see cref="Matches"/>.
 /// </summary>
-internal sealed partial record class MessageTypeUri(
+public sealed partial record class MessageTypeUri(
     string DocUri,
     string ProtocolName,
     ProtocolVersion Version,

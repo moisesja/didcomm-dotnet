@@ -8,7 +8,7 @@ namespace DidComm.Messages;
 /// for UUIDs since the spec itself recommends UUID v4 for <c>id</c>. The format is
 /// dashes-included, lowercase (FR-MSG-04 requires lowercase emission).
 /// </summary>
-internal sealed class UuidV4MessageIdGenerator : IMessageIdGenerator
+public sealed class UuidV4MessageIdGenerator : IMessageIdGenerator
 {
     /// <summary>Singleton instance; the generator is stateless.</summary>
     public static readonly UuidV4MessageIdGenerator Instance = new();
