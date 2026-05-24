@@ -1,0 +1,8 @@
+{
+    "id": "did:example:123456789abcdefghi#didcomm-1",
+    "type": "DIDCommMessaging",
+    "serviceEndpoint": {
+        "uri": "did:example:somemediator",
+        "routingKeys": ["did:example:anothermediator#somekey"]
+    }
+}

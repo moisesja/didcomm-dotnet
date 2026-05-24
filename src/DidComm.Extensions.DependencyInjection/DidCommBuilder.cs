@@ -38,6 +38,13 @@ public sealed class DidCommBuilder
             configure?.Invoke(b);
         });
         Services.TryAddSingleton<IDidKeyService, NetDidKeyService>();
+        // Phase 4: the same net-did resolver chain also feeds the routing layer
+        // (FR-ROUTE-03/04). NetDidServiceEndpointResolver depends on DidCommOptions for the
+        // DD-10 bare-string tolerance toggle — resolved at construction.
+        Services.TryAddSingleton<IServiceEndpointResolver>(sp => new NetDidServiceEndpointResolver(
+            sp.GetRequiredService<NetDid.Core.IDidResolver>(),
+            sp.GetRequiredService<IDidKeyService>(),
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DidCommOptions>>().Value));
         return this;
     }
 

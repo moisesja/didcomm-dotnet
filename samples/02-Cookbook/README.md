@@ -10,6 +10,7 @@ The cookbook will grow with each phase of the project. The table below names wha
 |---|---|
 | **K** — Unpack and inspect metadata | After unpacking a packed message, what does the library tell you about it? Encrypted? Signed? Who sent it? Which key decrypted? Every field of `UnpackResult` is printed against a maximally-protective envelope so you can see how each flag corresponds to a layer. |
 | **N** — DID rotation via `from_prior` | How Alice changes the DID she identifies as without breaking Bob's trust: she signs a tiny `from_prior` JWT with a key her old DID had advertised, ships it inside her first message under the new DID, and Bob's unpack validates it automatically. Also shows the safety rule — rotation messages cannot be sent in the clear. |
+| **O** — Routing via a mediator | When a recipient publishes a `DIDCommMessaging` service with `routingKeys`, setting `Forward = true` on the pack call makes the library automatically: resolve the route, reverse-order anoncrypt-wrap a `forward` per routing key, and surface the transport URI on `PackEncryptedResult.ServiceEndpoint`. A mediator then unwraps the outer layer via `ForwardProcessor` and emits the onward payload — and Bob unpacks it as if no mediator had been involved. |
 | **AA** — net-did integration + `did:web` rejection | Implicitly, every section is using net-did to resolve DIDs. This section makes that explicit, and shows the deliberate exception: `did:web` is refused at every entry point because its trust model leaves it vulnerable to silent key substitution. Use `did:webvh` if you need a web-resolvable DID. |
 
 Cookbook letters come from the project's PRD §14.2, which is the master list of the API tasks the library must demonstrate. Sections A, B, and D–L map to earlier phases; sections O through BB land with Phase 4–6 (routing, transports, protocols). The PRD/FR cross-references live in each section's XML doc and the project CHANGELOG.
@@ -68,6 +69,20 @@ Identifiers change every run because three fresh `did:peer:2` identities are min
   • Safety demo: a plaintext envelope cannot carry from_prior — the pack call must throw.
     note: PackPlaintextAsync refused: messages carrying 'from_prior' MUST be encrypted (FR-ROT-03). Call PackEncryptedAsync instead.
 
+== Section O — Routing via a mediator (automatic forward wrapping) ==
+  • Minted mediator = did:peer:2.Ez6LS…
+  • Alice packs an authcrypt message for Bob with Forward = true.
+    ServiceEndpoint = https://mediator.example/inbox
+    FallbackServiceEndpoints = 0
+    OutermostEnvelopeBytes = …
+  • Mediator receives, unwraps via ForwardProcessor, and reads body.next.
+    NextHop = did:peer:…   (= Bob)
+    OnwardPayloadBytes = …
+  • Bob unpacks the onward payload as if no mediator had been involved.
+    Authenticated = True
+    From = did:peer:…   (= Alice)
+    ContentMatched = Routed through the mediator.
+
 == Section AA — net-did integration & the did:web refusal ==
   • Implicit integration: every prior section resolved did:peer DIDs through this pipeline.
     Resolver = NetDidKeyService over CompositeDidResolver (did:key + did:peer)
@@ -83,6 +98,7 @@ Identifiers change every run because three fresh `did:peer:2` identities are min
 - [`CookbookContext.cs`](CookbookContext.cs) — one-time bootstrap: DI graph plus the three test identities.
 - [`Sections/Section_K_UnpackMetadata.cs`](Sections/Section_K_UnpackMetadata.cs)
 - [`Sections/Section_N_FromPriorRotation.cs`](Sections/Section_N_FromPriorRotation.cs)
+- [`Sections/Section_O_RoutingViaMediator.cs`](Sections/Section_O_RoutingViaMediator.cs)
 - [`Sections/Section_AA_NetDidAndDidWebRejection.cs`](Sections/Section_AA_NetDidAndDidWebRejection.cs)
 
 Shared helpers (`Narrator`, `PeerIdentityFactory`) live in [`../_shared/`](../_shared/) so future sample apps can reuse them.

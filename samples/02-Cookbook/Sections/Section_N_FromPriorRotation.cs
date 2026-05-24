@@ -65,9 +65,9 @@ public static class Section_N_FromPriorRotation
         // Rotation messages must travel encrypted — the facade rejects plaintext/signed envelopes
         // that carry from_prior. This first pack uses authcrypt from the new identity to Bob.
         ctx.Narrator.Step("Pack the rotation message as an encrypted envelope from alice2 to bob.");
-        var packed = await ctx.Client.PackEncryptedAsync(rotationMessage, new PackEncryptedOptions(
+        var packed = (await ctx.Client.PackEncryptedAsync(rotationMessage, new PackEncryptedOptions(
             Recipients: new[] { ctx.Bob.Did },
-            From: ctx.Alice2.Did));
+            From: ctx.Alice2.Did))).Message;
 
         ctx.Narrator.Step("Bob unpacks. The library verifies the JWT against alice's old DID Document.");
         var result = await ctx.Client.UnpackAsync(packed);

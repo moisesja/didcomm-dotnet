@@ -26,6 +26,15 @@ public sealed class DidCommOptions
     /// </summary>
     public Func<DateTimeOffset>? Clock { get; set; }
 
+    /// <summary>
+    /// Opt-in tolerance (DD-10) for a bare-string <c>serviceEndpoint</c> in a resolved DID
+    /// Document. The DIDComm v2.1 conformance shape is an object (or array of objects) inside
+    /// <c>serviceEndpoint</c>; a bare string is non-canonical. Off by default so callers receive
+    /// stricter parsing automatically. Set to <c>true</c> only when interoperating with peers
+    /// that still emit the legacy shape — and document why in the host application.
+    /// </summary>
+    public bool AllowBareStringServiceEndpoint { get; set; } = false;
+
     /// <summary>Resolved clock helper.</summary>
     internal DateTimeOffset Now() => Clock?.Invoke() ?? DateTimeOffset.UtcNow;
 }

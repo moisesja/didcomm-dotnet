@@ -38,6 +38,14 @@ public sealed class CookbookContext : IAsyncDisposable
     /// <summary>The wired <see cref="DidCommClient"/>.</summary>
     public DidCommClient Client { get; }
 
+    /// <summary>
+    /// The DI container hosting the facade. Exposed so a section that needs additional
+    /// services from the same graph (e.g. section O builds a per-section
+    /// <see cref="DidCommClient"/> with a custom <see cref="DidComm.Resolution.IServiceEndpointResolver"/>)
+    /// doesn't have to bootstrap a parallel container.
+    /// </summary>
+    public IServiceProvider ServiceProvider => _serviceProvider;
+
     private CookbookContext(
         ServiceProvider sp,
         Narrator narrator,

@@ -137,7 +137,7 @@ public sealed class FromPriorRotationTests
         // newAlice. Use anoncrypt to Bob — FR-ROT-03 (must be encrypted) is what we're verifying,
         // not authcrypt itself.
         var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
-        var packed = await client.PackEncryptedAsync(message, new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }));
+        var packed = (await client.PackEncryptedAsync(message, new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }))).Message;
 
         var unpacked = await client.UnpackAsync(packed);
 

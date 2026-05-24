@@ -6,6 +6,117 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 4 (Routing & Mediation)
+
+Closes PRD §12 Phase 4: FR-ROUTE-01..08. Sender-side `forward` wrapping,
+mediator-side processing, and the conformant `serviceEndpoint` object /
+array-of-objects parser with FR-ROUTE-04 mediator-as-DID-endpoint expansion.
+
+- **Forward message** (`Protocols/Routing/`):
+  - `ForwardConstants` — `ProtocolIdentifier`
+    (`https://didcomm.org/routing/2.0`), `ForwardTypeUri`
+    (`…/routing/2.0/forward`), `PayloadMediaType` (alias for
+    `application/didcomm-encrypted+json`).
+  - `ForwardMessage.Create(mediator, next, packedPayloads, idGenerator?, expiresTimeEpochSeconds?)`
+    builds a `Message` with `Type = forward`, `Body.next`, and one
+    `AttachmentData.Json`-bearing attachment per packed payload (FR-ROUTE-01).
+  - `ForwardMessage.TryParse(message, out next, out payloads)` returns `false`
+    for non-forward types, throws `MalformedMessageException` for forwards
+    missing `body.next` or `attachments`.
+- **Service-endpoint resolution** (`Resolution/`):
+  - `DidCommServiceInfo(Uri, RoutingKeys, Accept)` — public record.
+  - `IServiceEndpointResolver` — public contract: `ResolveAsync(did, ct)` →
+    ordered `IReadOnlyList<DidCommServiceInfo>` (FR-ROUTE-03; preference
+    order = FR-ROUTE-08 failover input).
+  - `ServiceEndpointParser` (internal) — projects `NetDid.Core.Model.Service`
+    entries through the v2.1 canonical shapes (single object / array of
+    objects). Bare-string `serviceEndpoint` is gated behind the new
+    `DidCommOptions.AllowBareStringServiceEndpoint` toggle (DD-10) and OFF by
+    default.
+  - `NetDidServiceEndpointResolver` — public default implementation backed by
+    `NetDid.Core.IDidResolver`; rejects `did:web` at the perimeter for symmetry
+    with `NetDidKeyService`.
+  - `ResolvedRoute(TransportUri, RoutingKeyJwks, FallbackUris)` — public
+    record.
+  - `MediatorEndpointExpander` (internal) — implements FR-ROUTE-04. When the
+    primary candidate's `uri` is itself a DID, resolves the mediator's
+    `DIDCommMessaging` service, **prepends** its first `keyAgreement` key
+    to the recipient's `routingKeys`, refuses a second DID-as-uri hop
+    (`ConsistencyException`).
+- **Sender-side forward wrapping** (`Composition/ForwardWrapper.cs`,
+  internal) — loops `JweBuilder.PackAnoncrypt` over the routing-key JWKs in
+  reverse (outermost first), producing one `forward` per layer.
+  Content-encryption is fixed to A256CBC-HS512 per layer.
+- **Facade** (`Facade/`):
+  - `PackEncryptedResult(Message, ServiceEndpoint?, FallbackServiceEndpoints)`
+    — **breaking change**: `DidCommClient.PackEncryptedAsync` now returns
+    `Task<PackEncryptedResult>` instead of `Task<string>`. Consumers of the
+    `.Message` field can append `.Message` to existing call sites.
+  - `PackEncryptedOptions.Forward` — when `true`, the facade resolves the
+    single recipient's `DIDCommMessaging` service, expands a mediator-as-DID
+    endpoint, and wraps forward layers (FR-ROUTE-02). Multi-recipient
+    `Forward = true` throws `InvalidOperationException`.
+  - New `DidCommClient(secrets, keyService, serviceResolver, options)`
+    constructor adds the `IServiceEndpointResolver` slot. The existing
+    3-argument constructor still works (routing unavailable without the
+    resolver).
+  - `DidCommServiceCollectionExtensions.AddDidComm` now passes the optional
+    `IServiceEndpointResolver` into the facade, so hosts that call
+    `UseNetDidResolver()` get routing automatically.
+- **Mediator-side processing** (`Protocols/Routing/`):
+  - `ForwardProcessor` — public; drives the supplied `DidCommClient`'s
+    `UnpackAsync`, validates the unpacked plaintext is a forward, silently
+    drops `please_ack` (FR-ROUTE-07), and emits `ForwardProcessingResult`.
+  - `ForwardProcessingResult(NextHop, OnwardPacked, ExpiresTime?, Delay?)`.
+  - `ForwardProcessorOptions(Mode, ExtraRecipientRoutingKeys?)` +
+    `RewrapMode` enum (`PassThrough`, `ReanoncryptToNext`). Pass-through is
+    the default; rewrap (FR-ROUTE-06) re-anoncrypts the payload to `next` to
+    keep onion size constant. `expires_time` propagates from the inbound
+    forward; `delay_milli` resolves to a `TimeSpan` (negative input →
+    randomised between 0 and |n|).
+
+### Vendored spec fixtures (Phase 4 routing)
+
+- `tests/DidComm.InteropTests/fixtures/spec/{endpoint-example-1,endpoint-example-2}.json`
+  pinned verbatim from the DIDComm v2.1 spec §Service Endpoint /
+  "Using a DID as an endpoint" (Apache-2.0). KAT anchors per L-005.
+- `tests/DidComm.InteropTests/fixtures/diddocs/spec/{bob-with-routing,mediator1,mediator2,charlie}.json`
+  transcribed from didcomm-python's
+  `tests/test_vectors/did_doc/did_doc_{bob,mediator1,mediator2,charlie}.py`
+  into the v2.1 canonical service shape (object form with nested
+  `routingKeys` / `accept`). Provenance + transcription notes in
+  `diddocs/spec/README.md`.
+- `tests/DidComm.InteropTests/fixtures/secrets/{mediator1,mediator2}.json`
+  reuse Bob's matching private bytes — didcomm-python's own fixtures do the
+  same; documented in `fixtures/secrets/README.md`.
+
+### Tests — Phase 4
+
+- 13 forward-message + spec-endpoint tests (Checkpoint A — 11 unit + 2 interop).
+- 16 service-endpoint resolver tests (Checkpoint B — 11 parser unit + 1 DI unit + 4 NetDid adapter interop).
+- 10 mediator-endpoint expander tests (Checkpoint C — internal contract via `InternalsVisibleTo`).
+- 6 sender-side forward wrapping tests (Checkpoint D — 2 facade unit + 4 interop covering single-hop Bob, two-hop Charlie via mediator-as-DID, no-service refusal, Forward=false bypass).
+- 13 ForwardProcessor tests (Checkpoint E — option matrix, non-forward refusal, pass-through, FR-ROUTE-07 please_ack silence, expires_time, delay_milli ±, malformed attachment).
+- 2 Alice → mediator1 → Bob end-to-end round-trip tests (Checkpoint F — happy path + missing-service-block refusal).
+- Cookbook smoke test continues to pass after adding section O.
+- Test totals: **300 → 348 unit (+48)** and **31 → 43 interop (+12)**.
+
+### Changed (Phase 4)
+
+- `DidCommClient.PackEncryptedAsync` return type is now `Task<PackEncryptedResult>`. Existing call sites that fed the result straight to `UnpackAsync` need a `.Message` extraction; six in-repo sites updated (4 round-trip tests, 1 rotation interop test, 2 cookbook sections).
+- `MediatorEndpointExpander` only weaves the mediator's *keyAgreement* (FR-ROUTE-04 implicit-prepend), **not** the mediator's own `routingKeys` — per a re-read of the spec text. The mediator's own routingKeys apply only when the mediator is itself the message recipient.
+
+### Added — Cookbook (PRD §14.2 Phase 4 increment: section O)
+
+- `samples/02-Cookbook/Sections/Section_O_RoutingViaMediator.cs` — narrates
+  `Forward = true` end-to-end against a section-local inline
+  `IServiceEndpointResolver` so the runnable cookbook needs no fixture
+  dependency.
+- `samples/02-Cookbook/CookbookContext.cs` exposes `ServiceProvider` so a
+  section can mint extra identities from the shared net-did graph.
+- `Program.cs` registers Section O in narration order; `README.md` updated
+  with the new section description and expected-output frame.
+
 ### Added — Phase 3 (Facade, net-did Integration, Secrets, Rotation)
 
 Closes PRD §12 Phase 3: FR-DID-01..07, FR-SEC-01..05, FR-API-01..08,

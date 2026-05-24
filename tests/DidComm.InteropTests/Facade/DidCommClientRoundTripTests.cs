@@ -64,9 +64,9 @@ public sealed class DidCommClientRoundTripTests
     public async Task PackEncrypted_Anoncrypt_RoundTrips()
     {
         var client = NewClient();
-        var packed = await client.PackEncryptedAsync(
+        var packed = (await client.PackEncryptedAsync(
             NewProposal(),
-            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }));
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }))).Message;
 
         var result = await client.UnpackAsync(packed);
 
@@ -80,9 +80,9 @@ public sealed class DidCommClientRoundTripTests
     public async Task PackEncrypted_Authcrypt_RoundTrips()
     {
         var client = NewClient();
-        var packed = await client.PackEncryptedAsync(
+        var packed = (await client.PackEncryptedAsync(
             NewProposal(),
-            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"));
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"))).Message;
 
         var result = await client.UnpackAsync(packed);
 
@@ -96,12 +96,12 @@ public sealed class DidCommClientRoundTripTests
     public async Task PackEncrypted_SignThenEncrypt_RoundTrips()
     {
         var client = NewClient();
-        var packed = await client.PackEncryptedAsync(
+        var packed = (await client.PackEncryptedAsync(
             NewProposal(),
             new PackEncryptedOptions(
                 Recipients: new[] { "did:example:bob" },
                 From: "did:example:alice",
-                SignFrom: "did:example:alice"));
+                SignFrom: "did:example:alice"))).Message;
 
         var result = await client.UnpackAsync(packed);
 
@@ -115,12 +115,12 @@ public sealed class DidCommClientRoundTripTests
     public async Task PackEncrypted_AnoncryptOfAuthcrypt_RoundTrips()
     {
         var client = NewClient();
-        var packed = await client.PackEncryptedAsync(
+        var packed = (await client.PackEncryptedAsync(
             NewProposal(),
             new PackEncryptedOptions(
                 Recipients: new[] { "did:example:bob" },
                 From: "did:example:alice",
-                ProtectSender: true));
+                ProtectSender: true))).Message;
 
         var result = await client.UnpackAsync(packed);
 

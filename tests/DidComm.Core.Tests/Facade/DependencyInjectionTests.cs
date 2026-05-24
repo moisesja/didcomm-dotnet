@@ -1,6 +1,7 @@
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Jose;
+using DidComm.Resolution;
 using DidComm.Secrets;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
@@ -63,6 +64,21 @@ public sealed class DependencyInjectionTests
         var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DidCommOptions>>();
 
         options.Value.MaxReceiveBytes.Should().Be(4096);
+    }
+
+    [Fact]
+    public void UseNetDidResolver_AlsoRegistersServiceEndpointResolver_Phase4()
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver<EmptyResolver>();
+        });
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<IServiceEndpointResolver>()
+          .Should().BeOfType<NetDidServiceEndpointResolver>();
     }
 
     [Fact]

@@ -19,20 +19,37 @@ public sealed class DidCommClient
 {
     private readonly ISecretsResolver _secrets;
     private readonly IDidKeyService _keyService;
+    private readonly IServiceEndpointResolver? _serviceResolver;
     private readonly DidCommOptions _options;
     private readonly DefaultCryptoProvider _cryptoProvider;
 
-    /// <summary>Initialize the facade.</summary>
+    /// <summary>Initialize the facade. Routing (FR-ROUTE-*) is unavailable without an <see cref="IServiceEndpointResolver"/>; for that, use the <see cref="DidCommClient(ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions)"/> overload or register the facade through <c>AddDidComm</c>.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
     /// <param name="keyService">DID resolution + verification-method extraction (FR-DID-01..05).</param>
     /// <param name="options">Process-wide options (FR-API-05/06 knobs).</param>
     public DidCommClient(ISecretsResolver secrets, IDidKeyService keyService, DidCommOptions options)
-        : this(secrets, keyService, options, new DefaultCryptoProvider()) { }
+        : this(secrets, keyService, serviceResolver: null, options, new DefaultCryptoProvider()) { }
+
+    /// <summary>Initialize the facade with the Phase 4 routing surface enabled.</summary>
+    /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
+    /// <param name="keyService">DID resolution + verification-method extraction (FR-DID-01..05).</param>
+    /// <param name="serviceResolver">Routing-service resolver (FR-ROUTE-03/04). Required for <c>PackEncryptedAsync(..., Forward: true)</c>.</param>
+    /// <param name="options">Process-wide options.</param>
+    public DidCommClient(
+        ISecretsResolver secrets,
+        IDidKeyService keyService,
+        IServiceEndpointResolver serviceResolver,
+        DidCommOptions options)
+        : this(secrets, keyService, serviceResolver, options, new DefaultCryptoProvider())
+    {
+        ArgumentNullException.ThrowIfNull(serviceResolver);
+    }
 
     /// <summary>Initialize the facade with a custom crypto provider; used by tests.</summary>
     internal DidCommClient(
         ISecretsResolver secrets,
         IDidKeyService keyService,
+        IServiceEndpointResolver? serviceResolver,
         DidCommOptions options,
         DefaultCryptoProvider cryptoProvider)
     {
@@ -42,6 +59,7 @@ public sealed class DidCommClient
         ArgumentNullException.ThrowIfNull(cryptoProvider);
         _secrets = secrets;
         _keyService = keyService;
+        _serviceResolver = serviceResolver;
         _options = options;
         _cryptoProvider = cryptoProvider;
     }
@@ -88,17 +106,36 @@ public sealed class DidCommClient
     /// Pack <paramref name="message"/> as an encrypted DIDComm envelope per
     /// <paramref name="options"/> — anoncrypt when <c>From</c> is null, authcrypt otherwise.
     /// Optional inner JWS via <c>SignFrom</c>; optional outer anoncrypt layer via
-    /// <c>ProtectSender</c>. Enforces FR-ENC-09 (no GCM/XC20P for authcrypt).
+    /// <c>ProtectSender</c>. Enforces FR-ENC-09 (no GCM/XC20P for authcrypt). When
+    /// <see cref="PackEncryptedOptions.Forward"/> is <c>true</c> the result additionally
+    /// applies Routing Protocol 2.0 forward wrapping (FR-ROUTE-02) and surfaces the transport
+    /// URI on <see cref="PackEncryptedResult.ServiceEndpoint"/>.
     /// </summary>
     /// <param name="message">The plaintext message.</param>
-    /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice.</param>
+    /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional forward toggle.</param>
     /// <param name="ct">Cancellation token.</param>
-    public async Task<string> PackEncryptedAsync(Message message, PackEncryptedOptions options, CancellationToken ct = default)
+    public async Task<PackEncryptedResult> PackEncryptedAsync(Message message, PackEncryptedOptions options, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(options);
         if (options.Recipients is null || options.Recipients.Count == 0)
             throw new ArgumentException("At least one recipient DID is required.", nameof(options));
+
+        if (options.Forward)
+        {
+            // FR-ROUTE-02 (Phase 4): forward wrapping shape checks happen up front so the caller
+            // gets a fast, deterministic error before any DID resolution / curve selection runs.
+            if (options.Recipients.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    "Phase 4 supports forward wrapping for single-recipient packs only. Drop Forward = true or call PackEncryptedAsync once per recipient.");
+            }
+            if (_serviceResolver is null)
+            {
+                throw new InvalidOperationException(
+                    "Forward = true requires an IServiceEndpointResolver. Use the (ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions) constructor, or register the facade via AddDidComm + UseNetDidResolver.");
+            }
+        }
 
         foreach (var did in options.Recipients)
             _keyService.RejectUnsupportedMethod(did);
@@ -174,7 +211,26 @@ public sealed class DidCommClient
             SignerPrivateJwks: signerJwks,
             ProtectSender: options.ProtectSender);
 
-        return EnvelopeWriter.PackEncrypted(parameters, _cryptoProvider);
+        var innerPacked = EnvelopeWriter.PackEncrypted(parameters, _cryptoProvider);
+
+        if (!options.Forward)
+            return new PackEncryptedResult(innerPacked, ServiceEndpoint: null, Array.Empty<string>());
+
+        // FR-ROUTE-02 sender path: input-shape checks already validated up front. Resolve the
+        // (single) recipient's DIDCommMessaging service, expand any mediator-as-DID endpoint
+        // (FR-ROUTE-04), then wrap forward layers.
+        var recipientDid = options.Recipients[0];
+        var candidates = await _serviceResolver!.ResolveAsync(recipientDid, ct).ConfigureAwait(false);
+        var route = await MediatorEndpointExpander.ExpandAsync(candidates, _serviceResolver, _keyService, recipientDid, ct).ConfigureAwait(false);
+
+        if (route.RoutingKeyJwks.Count == 0)
+        {
+            // No routing keys → direct delivery; surface the endpoint URI but skip wrapping.
+            return new PackEncryptedResult(innerPacked, route.TransportUri, route.FallbackUris);
+        }
+
+        var wrapped = ForwardWrapper.Wrap(innerPacked, route.RoutingKeyJwks, recipientDid, _cryptoProvider);
+        return new PackEncryptedResult(wrapped, route.TransportUri, route.FallbackUris);
     }
 
     /// <summary>
