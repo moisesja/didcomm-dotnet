@@ -15,16 +15,22 @@ namespace DidComm.Samples.Shared;
 public sealed record PeerIdentity(string Did, IReadOnlyList<Jwk> Privates);
 
 /// <summary>
-/// Mints <c>did:peer:2</c> identities backed by net-did's <see cref="IDidManager"/> and
-/// surfaces the private JWKs so the application can load them into its
-/// <see cref="DidComm.Secrets.ISecretsResolver"/>.
+/// Creates a fresh test identity end-to-end: generates two key pairs (one for encryption,
+/// one for signatures), packages them into a <c>did:peer:2</c> DID via net-did, and hands
+/// back both the DID and the private keys so the calling sample can load them into its
+/// secrets resolver. <c>did:peer:2</c> is a self-resolving DID method — the DID document is
+/// encoded inside the DID string itself, so no network call is needed for resolution. That
+/// makes it the natural choice for samples and tests.
 /// </summary>
 public static class PeerIdentityFactory
 {
-    /// <summary>Mint a fresh <c>did:peer:2</c> with one X25519 keyAgreement key and one Ed25519 authentication key.</summary>
-    /// <param name="manager">net-did DID manager (resolved from the DI container after <c>AddDidComm(b =&gt; b.UseNetDidResolver()...)</c>).</param>
-    /// <param name="keyGenerator">net-did key generator (resolved from the same container).</param>
-    /// <param name="cryptoProvider">net-did crypto provider (resolved from the same container).</param>
+    /// <summary>
+    /// Mint a new identity with two key pairs — an X25519 pair the DID will advertise for
+    /// receiving encrypted messages, and an Ed25519 pair it will advertise for signing.
+    /// </summary>
+    /// <param name="manager">net-did's DID manager. Resolve it from the same DI container <c>AddDidComm(b =&gt; b.UseNetDidResolver())</c> populated.</param>
+    /// <param name="keyGenerator">net-did's key generator. Same DI container.</param>
+    /// <param name="cryptoProvider">net-did's crypto provider. Same DI container.</param>
     public static async Task<PeerIdentity> CreateAsync(
         IDidManager manager,
         IKeyGenerator keyGenerator,

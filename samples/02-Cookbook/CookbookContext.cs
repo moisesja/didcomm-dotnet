@@ -10,11 +10,15 @@ using NetDid.Core.Crypto;
 namespace DidComm.Samples.Cookbook;
 
 /// <summary>
-/// One-time DI + identity bootstrap shared by every cookbook section. Mints three peer
-/// identities (<c>alice</c>, <c>bob</c>, and <c>alice2</c> — the post-rotation identity used
-/// by Section N), seeds an <see cref="InMemorySecretsResolver"/>, and constructs the
-/// <see cref="DidCommClient"/> via <c>AddDidComm(...)</c>.
+/// The setup every cookbook section needs. Builds the DI container, mints three test
+/// identities — <c>alice</c>, <c>bob</c>, and <c>alice2</c> (the identity Alice rotates to
+/// in the rotation example) — loads their private keys into an in-memory secrets resolver,
+/// and resolves the <see cref="DidCommClient"/> sections will use to pack and unpack.
 /// </summary>
+/// <remarks>
+/// In a real application this work happens once at startup. The cookbook does it once per
+/// run because every section uses the same Alice and Bob.
+/// </remarks>
 public sealed class CookbookContext : IAsyncDisposable
 {
     private readonly ServiceProvider _serviceProvider;
@@ -22,13 +26,13 @@ public sealed class CookbookContext : IAsyncDisposable
     /// <summary>The Cookbook narrator (writes section banners + key=value frames).</summary>
     public Narrator Narrator { get; }
 
-    /// <summary>Alice's pre-rotation identity (sender / signer in Sections K and AA).</summary>
+    /// <summary>Alice's original identity — the sender in the metadata and did:web sections.</summary>
     public PeerIdentity Alice { get; }
 
-    /// <summary>Bob's identity (recipient in every section).</summary>
+    /// <summary>Bob's identity — the recipient in every section.</summary>
     public PeerIdentity Bob { get; }
 
-    /// <summary>Alice's post-rotation identity (Section N — <c>from_prior</c>).</summary>
+    /// <summary>The identity Alice rotates to in the rotation section. Holds its own key material.</summary>
     public PeerIdentity Alice2 { get; }
 
     /// <summary>The wired <see cref="DidCommClient"/>.</summary>
