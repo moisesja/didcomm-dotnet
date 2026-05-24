@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Status](https://img.shields.io/badge/status-phase%200%20complete-yellow.svg)](#project-status)
+[![Status](https://img.shields.io/badge/status-phase%203%20complete-orange.svg)](#project-status)
 [![Spec](https://img.shields.io/badge/spec-DIDComm%20v2.1-informational.svg)](https://identity.foundation/didcomm-messaging/spec/v2.1)
 
 A spec-complete .NET 10 implementation of **DIDComm Messaging v2.1** — the [DIF](https://identity.foundation/) protocol for confidential, integrity-protected, optionally non-repudiable messaging between parties identified by Decentralized Identifiers (DIDs).
@@ -13,7 +13,37 @@ DID resolution is delegated to the sibling library [**NetDid**](https://github.c
 
 ## Project status
 
-**Phase 0 complete.** The solution, `DidComm.Core` JOSE-composition crypto substrate (AEAD, AES-KW, 1PU KDF wrapper), and `DidComm.InteropTests` data-driven fixture runner are in place. SSI primitives (sign/verify, raw ECDH, off-curve point validation, Concat KDF) are delegated to [NetDid 1.3.0](https://github.com/moisesja/net-did). See [CHANGELOG.md](CHANGELOG.md) for the per-phase log, the [PRD](docs/didcomm-dotnet_PRD.md) for normative requirements (the six-phase plan is §12), and the [roadmap](#roadmap) below for status at a glance.
+**Phases 0 – 3 complete.** The library has a public Pack/Unpack surface
+(`DidCommClient`), DID resolution via [NetDid 1.3.0](https://github.com/moisesja/net-did),
+a consumer-supplied `ISecretsResolver` contract, the three protective envelope
+shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
+consistency including the FR-CONSIST-06 resolver-backed authorization check,
+and DID rotation via `from_prior`. The DIDComm v2.1 Appendix C inbound interop
+gate passes for every vendored vector.
+
+Shipped highlights:
+
+- **Public facade** — `services.AddDidComm(b => …)` →
+  `Pack{Plaintext,Signed,Encrypted}Async` + `UnpackAsync`. Auto-detects
+  envelope shape on unpack, enforces FR-API-05 (`expires_time`) and FR-API-06
+  (`MaxReceiveBytes`), surfaces FR-API-04 metadata on every unpack.
+- **DID resolution** via the `NetDidKeyService` adapter over net-did
+  (`did:key`, `did:peer`); JWK + Multikey verification methods both supported;
+  `did:web` deliberately refused at every entry point with
+  `UnsupportedDidMethodException` (DD-08).
+- **DID rotation** — `Message.FromPrior` carries a JWT validated against the
+  prior DID's `authentication` relationship; FR-ROT-03 enforced (rotation
+  messages MUST be encrypted).
+- **Cookbook** — runnable, narrated samples for the PRD §14.2 API tasks the
+  shipped surface covers: **K** (unpack metadata), **N** (rotation), **AA**
+  (net-did integration + did:web rejection). Build the project and
+  `dotnet run --project samples/02-Cookbook` to see end-to-end output.
+
+300 unit + 31 interop tests pass under `warnaserror`. See
+[CHANGELOG.md](CHANGELOG.md) for the per-phase log, the
+[PRD](docs/didcomm-dotnet_PRD.md) for normative requirements
+(the six-phase plan is §12), and the [roadmap](#roadmap) below for status at a
+glance.
 
 No NuGet packages have been published yet.
 
@@ -37,53 +67,75 @@ didcomm-dotnet v1.0 will implement, in full, the messaging layer of [DIDComm Mes
 
 The conformance gate is the spec's own Appendix C test vectors plus a live cross-implementation harness round-tripping against the SICPA reference implementations in Python, JVM, and Rust.
 
-## Planned package map
+## Package map
 
-When published, the library will ship as the following NuGet packages:
+### Built today
 
 | Package | Responsibility |
 |---|---|
-| `DidComm.Core` | Message model; JWE/JWS envelopes; all crypto; pack/unpack; resolver adapter over NetDid; secrets interface; routing; rotation; threading; problem reports; OOB |
-| `DidComm.Transports.Http` | HTTPS send + ASP.NET Core receive endpoint |
-| `DidComm.Transports.WebSocket` | WebSocket send/receive, connection lifecycle |
-| `DidComm.Protocols.TrustPing` | Trust Ping 2.0 |
-| `DidComm.Protocols.DiscoverFeatures` | Discover Features 2.0 |
-| `DidComm.Protocols.ReportProblem` | Report Problem 2.0 helpers + problem-code taxonomy |
-| `DidComm.Protocols.OutOfBand` | Out-of-Band 2.0 invitation build/parse, URL/QR encoding |
+| `DidComm.Core` | Message model; JWE/JWS envelopes; pack/unpack facade; `IDidKeyService` + `NetDidKeyService` resolver adapter; `ISecretsResolver` contract; `from_prior` rotation; typed exception hierarchy |
+| `DidComm.Extensions.DependencyInjection` | `IServiceCollection.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver<T>().Configure(...))`; FR-SEC-02 fail-fast on missing registrations |
+| `DidComm.Adapters.NetDid` | Optional bridge from `NetDid.Core.IKeyStore` → `ISecretsResolver` (FR-SEC-04, SHOULD); documented scope (sign-side surface only — see class XML doc) |
+| `DidComm.TestSupport` *(non-shipped helper)* | `InMemorySecretsResolver` for tests and samples — deliberately kept out of `DidComm.Core` per DD-02 |
+
+### Planned (later phases)
+
+| Package | Phase | Responsibility |
+|---|---|---|
+| `DidComm.Transports.Http` | 5 | HTTPS send + ASP.NET Core receive endpoint |
+| `DidComm.Transports.WebSocket` | 5 | WebSocket send/receive, connection lifecycle |
+| `DidComm.Protocols.TrustPing` | 6 | Trust Ping 2.0 |
+| `DidComm.Protocols.DiscoverFeatures` | 6 | Discover Features 2.0 |
+| `DidComm.Protocols.ReportProblem` | 6 | Report Problem 2.0 helpers + problem-code taxonomy |
+| `DidComm.Protocols.OutOfBand` | 6 | Out-of-Band 2.0 invitation build/parse, URL/QR encoding |
 
 ### Naming convention
 
 The repository is `didcomm-dotnet` (kebab-case, matching `net-did` and `zcap-dotnet`). .NET assemblies, NuGet packages, and namespaces use the PascalCase root `DidComm` (e.g. `DidComm.Core`, `DidComm.Transports.Http`). The acronym "DIDComm" from the spec is rendered `DidComm` in code per .NET capitalization guidelines for 3+ letter acronyms (matching `NetDid`). Prose references to the protocol keep the spec spelling "DIDComm".
 
-## Anticipated API shape
+## Public API at a glance
 
-> The signatures below are informative, drawn from PRD §3.3. The final shape will be settled during implementation.
+The signatures below are what ships today in `DidComm.Core` +
+`DidComm.Extensions.DependencyInjection`.
 
 ```csharp
-// The facade
-public sealed class DidComm
+// The facade — DidComm.Facade.DidCommClient
+public sealed class DidCommClient
 {
-    Task<PackEncryptedResult> PackEncryptedAsync(PackEncryptedParams p, CancellationToken ct = default);
-    Task<PackSignedResult>    PackSignedAsync(PackSignedParams p,    CancellationToken ct = default);
-    Task<PackPlaintextResult> PackPlaintextAsync(Message m,          CancellationToken ct = default);
-    Task<UnpackResult>        UnpackAsync(string message, UnpackParams? p = null, CancellationToken ct = default);
+    public Task<string>       PackPlaintextAsync(Message m,                              CancellationToken ct = default);
+    public Task<string>       PackSignedAsync(Message m, string signFrom,                CancellationToken ct = default);
+    public Task<string>       PackEncryptedAsync(Message m, PackEncryptedOptions opts,   CancellationToken ct = default);
+    public Task<UnpackResult> UnpackAsync(string packed,                                 CancellationToken ct = default);
 }
 
-// DID resolution adapter (over NetDid)
+// DID resolution adapter — DidComm.Resolution
 public interface IDidKeyService
 {
-    Task<ResolvedKeys>     GetKeyAgreementKeysAsync(string did, CancellationToken ct = default);
-    Task<ResolvedKeys>     GetAuthenticationKeysAsync(string did, CancellationToken ct = default);
-    Task<DidCommService?>  GetDidCommServiceAsync(string did,   CancellationToken ct = default);
+    Task<IReadOnlyList<Jwk>> GetVerificationMethodsAsync(string did, VerificationRelationship rel, CancellationToken ct = default);
+    Task<bool>               IsKeyAuthorizedAsync(string did, string kid, VerificationRelationship rel, CancellationToken ct = default);
+    void                     RejectUnsupportedMethod(string did);  // throws UnsupportedDidMethodException for did:web
 }
 
-// Consumer-supplied secrets (KMS / HSM / vault)
+// Consumer-supplied secrets (KMS / HSM / Vault) — DidComm.Secrets
 public interface ISecretsResolver
 {
-    Task<Secret?>                    FindSecretAsync(string kid, CancellationToken ct = default);
-    Task<IReadOnlyList<string>>      FindSecretsAsync(IEnumerable<string> kids, CancellationToken ct = default);
+    Task<Jwk?>                  FindAsync(string kid,                       CancellationToken ct = default);
+    Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids,  CancellationToken ct = default);
 }
+
+// DI wiring — DidComm.Extensions.DependencyInjection
+services.AddDidComm(b =>
+{
+    b.UseNetDidResolver();                     // did:key + did:peer via net-did
+    b.UseSecretsResolver<MyVaultResolver>();   // FR-SEC-02 fail-fast if absent
+    b.Configure(o => o.MaxReceiveBytes = 1 * 1024 * 1024);
+});
+var client = sp.GetRequiredService<DidCommClient>();
 ```
+
+The runnable [`samples/02-Cookbook`](samples/02-Cookbook/) project demonstrates
+each shipped API task — the README at that path documents the §14.2 letter
+mapping (currently K / N / AA for the Phase 3 increment).
 
 ## Specifications
 
@@ -103,42 +155,46 @@ didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PR
 | Phase | Scope | Status |
 |---|---|---|
 | **0** | Repository & JOSE-composition substrate (`ICryptoProvider`, AEAD, AES-KW, 1PU KDF wrapper, JWK shim, fixtures harness) | ✅ Complete |
-| **1** | Message model, attachments, MTURI parsing, consistency-check functions | Not started |
-| **2** | Envelopes: Signed, Anoncrypt, Authcrypt — Appendix C interop gate | Not started |
-| **3** | Pack/Unpack facade, NetDid integration, secrets, DID rotation | Not started |
+| **1** | Message model, attachments, MTURI parsing, consistency-check functions | ✅ Complete |
+| **2** | Envelopes: Signed, Anoncrypt, Authcrypt — Appendix C interop gate | ✅ Complete |
+| **3** | Pack/Unpack facade, NetDid integration, secrets, DID rotation (+ Cookbook §14.2 K/N/AA) | ✅ Complete |
 | **4** | Routing & mediation (Forward protocol) | Not started |
 | **5** | Transports (HTTPS, WebSocket) | Not started |
 | **6** | Protocols, OOB, threading, i18n, live interop harness, samples, release | Not started |
 
 The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, cross-implementation interop matrix passes (both inbound static vectors and live round-trip against SICPA Python/JVM/Rust), every public API member demonstrated by a runnable sample, and the README quickstart works unmodified.
 
-## Repository layout (planned)
+## Repository layout
 
 ```
 didcomm-dotnet/
 ├── src/
-│   ├── DidComm.Core/
-│   ├── DidComm.Transports.Http/
-│   ├── DidComm.Transports.WebSocket/
-│   ├── DidComm.Protocols.TrustPing/
-│   ├── DidComm.Protocols.DiscoverFeatures/
-│   ├── DidComm.Protocols.ReportProblem/
-│   └── DidComm.Protocols.OutOfBand/
+│   ├── DidComm.Core/                              # message model, envelopes, facade, resolution, secrets, rotation
+│   ├── DidComm.Extensions.DependencyInjection/    # services.AddDidComm(b => …)
+│   ├── DidComm.Adapters.NetDid/                   # optional NetDid.IKeyStore → ISecretsResolver bridge
+│   ├── DidComm.Transports.Http/                   # (Phase 5)
+│   ├── DidComm.Transports.WebSocket/              # (Phase 5)
+│   └── DidComm.Protocols.*/                       # (Phase 6)
 ├── tests/
-│   ├── DidComm.Core.Tests/
-│   ├── DidComm.InteropTests/                # Appendix C + cross-implementation vectors
-│   ├── DidComm.Transports.Http.Tests/
-│   ├── DidComm.Transports.WebSocket.Tests/
-│   └── DidComm.Protocols.*.Tests/
+│   ├── DidComm.Core.Tests/                        # 300 unit tests
+│   ├── DidComm.InteropTests/                      # 31 cases: Appendix C vectors + Appendix B resolution + facade round-trip + rotation + Cookbook smoke
+│   ├── DidComm.TestSupport/                       # InMemorySecretsResolver helper (non-test library)
+│   └── DidComm.Transports.*.Tests/                # (Phase 5)
 ├── samples/
-│   └── …                                    # 10 sample apps + 02-Cookbook (PRD §14)
-├── fixtures/                                # git submodule: didcomm-dotnet-fixtures (Phase 2)
+│   ├── _shared/                                   # Narrator + PeerIdentityFactory (did:peer:2 via NetDid)
+│   └── 02-Cookbook/                               # PRD §14.2 sections K / N / AA today; grows with each phase
 ├── docs/
-│   └── didcomm-dotnet_PRD.md                # normative product requirements
+│   └── didcomm-dotnet_PRD.md                      # normative product requirements
+├── tasks/                                         # phased todo files + lessons.md
 ├── Directory.Build.props
 ├── Directory.Packages.props
 └── DidComm.sln
 ```
+
+> The Phase 2 fixtures submodule migration (planned at PRD §13.3) is still
+> pending — Appendix A / B / C vectors currently live inline under
+> `tests/DidComm.InteropTests/fixtures/`. They'll move to a dedicated
+> `didcomm-dotnet-fixtures` repo before Phase 6 closes.
 
 ## Contributing
 
