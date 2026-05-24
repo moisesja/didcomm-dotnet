@@ -16,13 +16,19 @@ namespace DidComm.Protocols.Rotation;
 /// the same inputs produce byte-identical output across runs (matches the FR-MSG-09 / NFR-10
 /// deterministic-bytes posture used for JWE signing input).
 /// </remarks>
-internal static class FromPriorBuilder
+public static class FromPriorBuilder
 {
     /// <summary>Build a from_prior JWT from validated claims using the signer's private JWK.</summary>
     /// <param name="claims">Sub / Iss / Iat triple.</param>
     /// <param name="signerPrivateJwk">Private JWK; <c>Kid</c> MUST identify a key authorized under <paramref name="claims"/>.Iss <c>authentication</c>.</param>
+    public static string Build(FromPriorClaims claims, Jwk signerPrivateJwk)
+        => Build(claims, signerPrivateJwk, new DefaultCryptoProvider());
+
+    /// <summary>Test seam: build with an explicit crypto provider.</summary>
+    /// <param name="claims">Sub / Iss / Iat triple.</param>
+    /// <param name="signerPrivateJwk">Private JWK; <c>Kid</c> MUST identify a key authorized under <paramref name="claims"/>.Iss <c>authentication</c>.</param>
     /// <param name="cryptoProvider">Crypto provider for signing.</param>
-    public static string Build(FromPriorClaims claims, Jwk signerPrivateJwk, DefaultCryptoProvider cryptoProvider)
+    internal static string Build(FromPriorClaims claims, Jwk signerPrivateJwk, DefaultCryptoProvider cryptoProvider)
     {
         ArgumentNullException.ThrowIfNull(claims);
         ArgumentNullException.ThrowIfNull(signerPrivateJwk);

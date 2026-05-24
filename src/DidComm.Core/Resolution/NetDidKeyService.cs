@@ -1,9 +1,12 @@
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Exceptions;
 using DidComm.Jose;
+using NetCid;
 using NetDid.Core;
+using NetDid.Core.Crypto;
 using NetDid.Core.Model;
 using NetDid.Core.Parsing;
+using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
 
 namespace DidComm.Resolution;
 
@@ -88,7 +91,14 @@ public sealed class NetDidKeyService : IDidKeyService
             var method = ResolveVerificationMethod(result.DidDocument, entry, did);
             var jwk = TryMaterialise(method, relationship);
             if (jwk is not null)
+            {
+                // Per W3C DID Core a VerificationMethod.id MAY be a relative DID URL like
+                // "#key-1"; net-did's did:peer:2 resolver emits exactly that shape. The
+                // envelope layer keys secrets by absolute DID URL, so normalize here.
+                if (jwk.Kid is { } kid && kid.StartsWith('#'))
+                    jwk.Kid = did + kid;
                 keys.Add(jwk);
+            }
         }
 
         return keys;
@@ -147,13 +157,7 @@ public sealed class NetDidKeyService : IDidKeyService
     /// </summary>
     private static Jwk? TryMaterialise(VerificationMethod method, VerificationRelationship relationship)
     {
-        if (method.PublicKeyJwk is null)
-        {
-            // Multibase-only methods are not consumable by the Phase 3 facade.
-            return null;
-        }
-
-        var crv = method.PublicKeyJwk.Crv;
+        var (kty, crv, x, y, alg, use) = ProjectMethod(method);
         if (string.IsNullOrEmpty(crv))
             return null;
 
@@ -163,14 +167,49 @@ public sealed class NetDidKeyService : IDidKeyService
 
         return new Jwk
         {
-            Kty = method.PublicKeyJwk.Kty ?? string.Empty,
+            Kty = kty,
             Crv = crv,
-            X = method.PublicKeyJwk.X,
-            Y = method.PublicKeyJwk.Y,
+            X = x,
+            Y = y,
             Kid = method.Id,
-            Alg = method.PublicKeyJwk.Alg,
-            Use = method.PublicKeyJwk.Use,
+            Alg = alg,
+            Use = use,
         };
+    }
+
+    /// <summary>
+    /// Project a <see cref="VerificationMethod"/> onto the JOSE shape the JWK record uses,
+    /// supporting both <c>JsonWebKey2020</c> (<see cref="VerificationMethod.PublicKeyJwk"/>)
+    /// and <c>Multikey</c> (<see cref="VerificationMethod.PublicKeyMultibase"/>) — the two
+    /// representations DIDComm-relevant DID methods ship today.
+    /// </summary>
+    private static (string Kty, string? Crv, string? X, string? Y, string? Alg, string? Use) ProjectMethod(VerificationMethod method)
+    {
+        if (method.PublicKeyJwk is not null)
+        {
+            var jwk = method.PublicKeyJwk;
+            return (jwk.Kty ?? string.Empty, jwk.Crv, jwk.X, jwk.Y, jwk.Alg, jwk.Use);
+        }
+
+        if (!string.IsNullOrEmpty(method.PublicKeyMultibase))
+        {
+            try
+            {
+                var decoded = Multibase.Decode(method.PublicKeyMultibase);
+                var (codec, raw) = Multicodec.Decode(decoded);
+                var keyType = KeyTypeExtensions.ToKeyType(codec);
+                var jwk = NetDidJwkConverter.ToPublicJwk(keyType, raw);
+                return (jwk.Kty ?? string.Empty, jwk.Crv, jwk.X, jwk.Y, jwk.Alg, jwk.Use);
+            }
+            catch
+            {
+                // Unknown codec / invalid bytes / off-curve EC point → skip this VM entirely;
+                // mixed-curve docs still surface their usable keys.
+                return (string.Empty, null, null, null, null, null);
+            }
+        }
+
+        return (string.Empty, null, null, null, null, null);
     }
 
     private static bool IsSupported(string crv, VerificationRelationship relationship)

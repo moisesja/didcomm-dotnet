@@ -154,6 +154,66 @@ Adds **54 new** `DidComm.Core.Tests` cases (299 total) plus **18 new**
 - `SpecActorRegistry.AsSecretsResolver()` — new test helper exposing the
   Appendix A secrets through the public `ISecretsResolver` shape.
 
+### Added — Cookbook (PRD §14.2 Phase 3 increment)
+
+Per the PRD §14 note, the Cookbook gains the API tasks each phase ships.
+Phase 3's increment lands here: **K (unpack metadata), N (from_prior rotation),
+AA (net-did + did:web rejection)**.
+
+- **`samples/_shared/`** (`DidComm.Samples.Shared`):
+  - `Narrator` — labeled console output (section banners, key=value frames,
+    notes). Writes through an injectable `TextWriter` so the smoke test
+    captures the transcript without process spawning.
+  - `PeerIdentityFactory.CreateAsync(manager, keyGenerator, cryptoProvider)`
+    mints a `did:peer:2` identity with one X25519 keyAgreement key + one
+    Ed25519 authentication key (via net-did's `KeyPairSigner` +
+    `DidPeerCreateOptions(Numalgo.Two, ...)`); surfaces the matching private
+    JWKs with absolute-DID-URL `Kid` values so they can be loaded into
+    `InMemorySecretsResolver`.
+- **`samples/02-Cookbook/`** (`DidComm.Samples.Cookbook`):
+  - `CookbookContext.BuildAsync()` runs `services.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver(instance))`,
+    mints `alice`, `bob`, and `alice2` peer identities, and resolves the
+    `DidCommClient`. Shared by every section.
+  - `Program.RunAsync(TextWriter? output)` — testable entry point; `Main`
+    wraps it for CLI use.
+  - `Sections/Section_K_UnpackMetadata` — packs authcrypt(sign(plaintext))
+    alice→bob, unpacks as bob, prints every `UnpackResult` field
+    (Encrypted/Authenticated/NonRepudiation/AnonymousSender/ContentEncryption/
+    KeyWrap/SignatureAlgorithm/SignerKid/SenderKid/RecipientKid/
+    AllRecipientKids/Stack/FromPrior + Message.From + Message.Body).
+  - `Sections/Section_N_FromPriorRotation` — builds the `from_prior` JWT via
+    the now-public `FromPriorBuilder.Build(claims, signerPrivateJwk)`, packs
+    as authcrypt(alice2→bob), unpacks as bob, asserts
+    `UnpackResult.FromPrior.Sub == message.From`. Then demonstrates FR-ROT-03
+    by attempting `PackPlaintextAsync` with `FromPrior` set and reporting the
+    `InvalidOperationException` message.
+  - `Sections/Section_AA_NetDidAndDidWebRejection` — every prior section is
+    already going through `NetDidKeyService` over a `CompositeDidResolver`
+    (did:key + did:peer). This section adds the explicit DD-08 / FR-DID-06
+    rejection paths: `PackEncryptedAsync` (recipient, From, SignFrom) and
+    `PackSignedAsync` (signFrom) all throw `UnsupportedDidMethodException`
+    when given `did:web:example.com`.
+  - `README.md` — what each section demonstrates + the expected output shape.
+- **`tests/DidComm.InteropTests/Samples/CookbookSmokeTests`** — FR-DX-02
+  build+run gate: invokes `Program.RunAsync(StringWriter)` and asserts every
+  Phase 3 section banner appears in the transcript, no exceptions, no process
+  spawn.
+
+### Public-surface bumps to unblock the Cookbook
+
+- `Protocols/Rotation/FromPriorBuilder` and `FromPriorValidator` promoted
+  `internal → public` (Section N consumes them directly). Each gains a no-
+  crypto-provider overload as the public entry point; the explicit-provider
+  variant stays `internal` for tests/facade reuse.
+- `NetDidKeyService` now decodes `publicKeyMultibase` (Multikey) verification
+  methods via NetCid's `Multibase` + `Multicodec` + net-did's
+  `KeyTypeExtensions.ToKeyType` — needed because `did:peer:2` resolved DID
+  Documents emit Multikey form (not JsonWebKey2020). It also absolutizes
+  relative VM ids (`#key-1` → `<did>#key-1`) so kids match the envelope
+  layer's expectations. The previous "multibase-only methods are skipped"
+  test became a "Multikey methods decode to JWK" test; a new
+  malformed-multibase test asserts the skip-on-error path.
+
 ### Added — Phase 2 (Envelopes + Interop Gate)
 
 Closes PRD §12 Phase 2: FR-ENV-01..07, FR-ENC-04, FR-ENC-09..19, FR-SIG-01..06,

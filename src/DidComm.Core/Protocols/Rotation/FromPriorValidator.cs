@@ -14,17 +14,29 @@ namespace DidComm.Protocols.Rotation;
 /// (FR-ROT-05) is the application's responsibility — the validator surfaces the iat / iss
 /// pair so a higher layer can compare against its known-active state.
 /// </summary>
-internal static class FromPriorValidator
+public static class FromPriorValidator
 {
     /// <summary>Validate a from_prior JWT against <paramref name="currentSenderDid"/> and return its claims.</summary>
     /// <param name="jwt">Compact-serialized JWT.</param>
     /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity).</param>
     /// <param name="keyService">DID resolver used to authorize the JWT signer key under <c>iss</c>.</param>
-    /// <param name="cryptoProvider">Crypto provider for signature verification.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ProtocolException">When the JWT is malformed.</exception>
     /// <exception cref="ConsistencyException">When the signature is invalid, the kid is not authorized in the iss DID, or sub does not match <paramref name="currentSenderDid"/> (FR-ROT-02).</exception>
-    public static async Task<FromPriorClaims> ValidateAsync(
+    public static Task<FromPriorClaims> ValidateAsync(
+        string jwt,
+        string currentSenderDid,
+        IDidKeyService keyService,
+        CancellationToken ct = default)
+        => ValidateAsync(jwt, currentSenderDid, keyService, new DefaultCryptoProvider(), ct);
+
+    /// <summary>Test seam: validate with an explicit crypto provider.</summary>
+    /// <param name="jwt">Compact-serialized JWT.</param>
+    /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity).</param>
+    /// <param name="keyService">DID resolver used to authorize the JWT signer key under <c>iss</c>.</param>
+    /// <param name="cryptoProvider">Crypto provider for signature verification.</param>
+    /// <param name="ct">Cancellation token.</param>
+    internal static async Task<FromPriorClaims> ValidateAsync(
         string jwt,
         string currentSenderDid,
         IDidKeyService keyService,

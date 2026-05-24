@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Samples.Shared</RootNamespace>
+    <AssemblyName>DidComm.Samples.Shared</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>Reusable helpers for the didcomm-dotnet samples — Narrator console output, PeerIdentityFactory that mints did:peer:2 identities backed by NetDid and surfaces the matching private JWKs. Kept out of DidComm.Core per DD-02 / FR-DX-07.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+    <PackageReference Include="NetDid.Method.Peer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+  </ItemGroup>
+
+</Project>

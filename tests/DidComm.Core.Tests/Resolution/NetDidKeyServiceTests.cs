@@ -170,14 +170,38 @@ public sealed class NetDidKeyServiceTests
     }
 
     [Fact]
-    public async Task GetVerificationMethodsAsync_MultibaseOnlyMethod_SkippedGracefully()
+    public async Task GetVerificationMethodsAsync_MultikeyMethod_DecodedToJwk()
     {
+        // z6LS… is a valid X25519 Multikey (multicodec 0xEC + 32 raw bytes encoded base58btc with "z" prefix).
         var vm = new VerificationMethod
         {
             Id = "did:example:alice#mb",
             Type = "Multikey",
             Controller = new Did("did:example:alice"),
             PublicKeyMultibase = "z6LSp2h4y6EeqhKpLUGeKCaWTcH2PHPWbXo4paERM5QLsstT",
+        };
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver((doc.Id.Value!, doc)));
+
+        var keys = await sut.GetVerificationMethodsAsync("did:example:alice", VerificationRelationship.KeyAgreement);
+
+        keys.Should().ContainSingle().Which.Crv.Should().Be("X25519");
+    }
+
+    [Fact]
+    public async Task GetVerificationMethodsAsync_MalformedMultibase_SkippedGracefully()
+    {
+        var vm = new VerificationMethod
+        {
+            Id = "did:example:alice#bad",
+            Type = "Multikey",
+            Controller = new Did("did:example:alice"),
+            PublicKeyMultibase = "zNotARealMultibaseValue!!",
         };
         var doc = new DidDocument
         {

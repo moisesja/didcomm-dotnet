@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.Cookbook</RootNamespace>
+    <AssemblyName>DidComm.Samples.Cookbook</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet Cookbook — runnable, narrated demonstrations of the §14.2 API tasks (FR-DX-04). Phase 3 increment covers sections K (unpack metadata), N (from_prior rotation), AA (net-did integration + did:web rejection).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>
