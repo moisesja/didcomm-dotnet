@@ -21,8 +21,8 @@ public sealed class CookbookSmokeTests
 
         var transcript = writer.ToString();
         transcript.Should().Contain("Section K — Unpack and inspect metadata");
-        transcript.Should().Contain("Section N — DID rotation");
-        transcript.Should().Contain("Section AA — net-did integration + did:web rejection");
+        transcript.Should().Contain("Section N — DID rotation via from_prior");
+        transcript.Should().Contain("Section AA — net-did integration & the did:web refusal");
         transcript.Should().Contain("FromPrior.Sub");
         transcript.Should().Contain("refused (web)");
     }

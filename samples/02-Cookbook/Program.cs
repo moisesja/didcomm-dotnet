@@ -24,7 +24,11 @@ public static class Program
         }
     }
 
-    /// <summary>Run every cookbook section in §14.2 letter order against the supplied writer.</summary>
+    /// <summary>
+    /// Run every cookbook section in order, writing the narration to <paramref name="output"/>.
+    /// Sections are kept in PRD §14.2 letter order so the CHANGELOG and PRD reading stay
+    /// aligned, but you can run them in any order — each is self-contained.
+    /// </summary>
     /// <param name="output">Destination for narrator output. <c>null</c> uses <see cref="Console.Out"/>.</param>
     public static async Task RunAsync(TextWriter? output = null)
     {
