@@ -10,10 +10,13 @@ namespace DidComm.Secrets;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The facade pre-resolves all secrets it needs before invoking the envelope layer
-/// (see PRD §7 — the JOSE composition layer remains synchronous). Lookups occur at pack time
-/// (to sign / encrypt) and at unpack time (to choose the recipient entry that the local agent
-/// can decrypt).
+/// Lookups occur at pack time (to sign / encrypt) and at unpack time (to choose the recipient
+/// entry that the local agent can decrypt). On the pack path the facade awaits this contract
+/// directly; on the unpack path the JOSE composition layer is synchronous (see PRD §7), so the
+/// facade drives this contract through a sync-over-async bridge. Implementations therefore MUST
+/// use <c>ConfigureAwait(false)</c> on every internal <c>await</c> and avoid
+/// synchronization-context affinity — see <see cref="DidComm.Facade.DidCommClient.UnpackAsync"/>
+/// for the host support boundary.
 /// </para>
 /// <para>
 /// A null return from <see cref="FindAsync"/> on an unpack path is non-fatal — the multi-

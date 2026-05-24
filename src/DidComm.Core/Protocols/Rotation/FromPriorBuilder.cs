@@ -43,9 +43,16 @@ public static class FromPriorBuilder
 
         var alg = KeyTypeMapper.ToJwsAlgorithm(signerPrivateJwk.Crv);
 
-        // Header — key order: alg, kid, typ. RFC 7515 compact JWS signing input is the
-        // ASCII bytes of "<b64u(header)>.<b64u(payload)>".
-        var headerJson = $"{{\"alg\":\"{alg}\",\"kid\":\"{signerPrivateJwk.Kid}\",\"typ\":\"JWT\"}}";
+        // Header — key order: alg, kid, typ (anonymous-object property order is preserved by
+        // the serializer, matching the claims block below). RFC 7515 compact JWS signing input
+        // is the ASCII bytes of "<b64u(header)>.<b64u(payload)>". Serialize rather than
+        // string-interpolate so an unusual 'kid' (quote / control char) is escaped, not injected.
+        var headerJson = JsonSerializer.Serialize(new
+        {
+            alg,
+            kid = signerPrivateJwk.Kid,
+            typ = "JWT",
+        });
         var headerB64u = Base64Url.Encode(Encoding.UTF8.GetBytes(headerJson));
 
         // Claims — key order: iat, iss, sub (lexicographic).

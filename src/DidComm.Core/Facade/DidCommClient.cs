@@ -181,9 +181,18 @@ public sealed class DidCommClient
     /// Unpack <paramref name="packed"/>, auto-detecting the envelope shape (plaintext / signed
     /// / encrypted) and recursively unwrapping nested compositions per FR-API-03. Enforces
     /// FR-API-05 expiry, FR-API-06 size limit, FR-DID-06 did:web rejection, and the
-    /// FR-CONSIST-01..05 addressing-consistency rules. FR-CONSIST-06 wiring lands in
-    /// Checkpoint D of this phase.
+    /// FR-CONSIST-01..06 addressing-consistency rules (FR-CONSIST-06 is resolver-backed).
     /// </summary>
+    /// <remarks>
+    /// <strong>Support boundary:</strong> the unpack pipeline drives the consumer-supplied
+    /// <see cref="ISecretsResolver"/> and <see cref="IDidKeyService"/> through a sync-over-async
+    /// bridge (the JOSE composition layer is synchronous — see PRD §7). This is safe in hosts
+    /// with no <see cref="System.Threading.SynchronizationContext"/> — ASP.NET Core, console,
+    /// generic-host worker services (the supported targets). Calling this under a captured
+    /// synchronization context (legacy WPF/WinForms or a custom context) can deadlock if a
+    /// resolver implementation has an inner <c>await</c> without <c>ConfigureAwait(false)</c>.
+    /// Invoke from such contexts via <c>Task.Run(() =&gt; client.UnpackAsync(...))</c>.
+    /// </remarks>
     /// <param name="packed">The packed DIDComm message.</param>
     /// <param name="ct">Cancellation token.</param>
     public async Task<UnpackResult> UnpackAsync(string packed, CancellationToken ct = default)
@@ -303,17 +312,11 @@ public sealed class DidCommClient
     };
 
     /// <summary>
-    /// Pick the highest-preference curve that every recipient set contains (and, if authcrypt,
-    /// the sender set also contains). Preference order: X25519 → P-256 → P-384 → P-521.
-    /// Returns <c>null</c> when no common curve exists — the facade surfaces that as an
-    /// explicit failure rather than silently splitting envelopes (per-curve splitting lands in
-    /// a later iteration if real fixtures require it).
-    /// </summary>
-    /// <summary>
     /// Build the FR-CONSIST-06 resolver-backed authorization predicate. The closure does a
     /// sync-over-async <see cref="IDidKeyService.IsKeyAuthorizedAsync"/> call — safe under
     /// .NET 10's no-synchronization-context runtime, and warm against the
-    /// <c>CachingDidResolver</c> for resolvers wrapped in net-did's DI builder.
+    /// <c>CachingDidResolver</c> for resolvers wrapped in net-did's DI builder. See the
+    /// <see cref="UnpackAsync"/> support-boundary note for the synchronization-context caveat.
     /// </summary>
     private Func<string, string, string, bool> BuildResolverAuthorizationPredicate()
     {
@@ -328,6 +331,13 @@ public sealed class DidCommClient
         };
     }
 
+    /// <summary>
+    /// Pick the highest-preference curve that every recipient set contains (and, if authcrypt,
+    /// the sender set also contains). Preference order: X25519 → P-256 → P-384 → P-521.
+    /// Returns <c>null</c> when no common curve exists — the facade surfaces that as an
+    /// explicit failure rather than silently splitting envelopes (per-curve splitting lands in
+    /// a later iteration if real fixtures require it).
+    /// </summary>
     private static string? PickCommonCurve(
         IEnumerable<IReadOnlyList<Jwk>> recipientSets,
         IReadOnlyList<Jwk> senderKeys,

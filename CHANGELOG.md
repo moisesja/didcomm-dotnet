@@ -154,6 +154,22 @@ Adds **54 new** `DidComm.Core.Tests` cases (299 total) plus **18 new**
 - `SpecActorRegistry.AsSecretsResolver()` — new test helper exposing the
   Appendix A secrets through the public `ISecretsResolver` shape.
 
+### Fixed (Phase 3 review)
+
+- `FromPriorBuilder` now serializes the JWT protected header via
+  `JsonSerializer` instead of string interpolation, so an unusual signer `kid`
+  (embedded quote / control char) is escaped rather than injected into the
+  header JSON. Output remains byte-identical for well-formed kids (key order
+  `alg, kid, typ` preserved), so round-trip / tamper coverage is unchanged.
+- `DidCommClient.UnpackAsync` documents the sync-over-async **support
+  boundary** (supported on hosts without a captured `SynchronizationContext`;
+  use `Task.Run(...)` from legacy UI contexts), and the `ISecretsResolver` /
+  `IDidKeyService` contracts now require `ConfigureAwait(false)` in
+  implementations. Corrected a stale `ISecretsResolver` remark that claimed the
+  facade pre-resolves all secrets, and removed dead doc references
+  (`UnpackAsync` "Checkpoint D" forward-reference, a misplaced `PickCommonCurve`
+  summary).
+
 ### Added — Cookbook (PRD §14.2 Phase 3 increment)
 
 Per the PRD §14 note, the Cookbook gains the API tasks each phase ships.
