@@ -27,6 +27,11 @@ internal sealed class SpecActorRegistry
         var registry = new SpecActorRegistry();
         registry.LoadFromFile(Path.Combine(fixturesRoot, "secrets", "alice.json"));
         registry.LoadFromFile(Path.Combine(fixturesRoot, "secrets", "bob.json"));
+        // Phase 4 routing additions — mediator1/mediator2 reuse the same X25519 / P-256
+        // private bytes as Bob (the public keys in mediator{1,2}.json match Bob's by design,
+        // so the same `d` values decrypt). See fixtures/secrets/README.md for provenance.
+        registry.LoadFromFile(Path.Combine(fixturesRoot, "secrets", "mediator1.json"));
+        registry.LoadFromFile(Path.Combine(fixturesRoot, "secrets", "mediator2.json"));
         return registry;
     }
 

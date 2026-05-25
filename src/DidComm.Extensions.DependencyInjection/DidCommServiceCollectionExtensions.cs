@@ -36,9 +36,13 @@ public static class DidCommServiceCollectionExtensions
 
         services.AddOptions<DidCommOptions>();
         services.TryAddSingleton<DefaultCryptoProvider>();
-        services.AddSingleton(sp => new DidCommClient(
+        // Phase 4: pass the optional IServiceEndpointResolver so Forward = true works whenever
+        // a host has registered routing. UseNetDidResolver registers one; hosts that bring
+        // their own resolver can register it directly and pick it up here automatically.
+        services.TryAddSingleton(sp => new DidCommClient(
             sp.GetRequiredService<ISecretsResolver>(),
             sp.GetRequiredService<IDidKeyService>(),
+            sp.GetService<IServiceEndpointResolver>(),
             sp.GetRequiredService<IOptions<DidCommOptions>>().Value,
             sp.GetRequiredService<DefaultCryptoProvider>()));
 

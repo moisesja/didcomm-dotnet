@@ -45,10 +45,11 @@ public static class Section_K_UnpackMetadata
         // Build the maximally-protective shape: encrypt to bob with alice as the authenticated
         // sender, AND attach an inner signature so bob has non-repudiable proof Alice wrote this.
         ctx.Narrator.Step("Pack: encrypt for Bob, authenticate Alice as sender, add an inner signature.");
-        var packed = await ctx.Client.PackEncryptedAsync(message, new PackEncryptedOptions(
+        var packResult = await ctx.Client.PackEncryptedAsync(message, new PackEncryptedOptions(
             Recipients: new[] { ctx.Bob.Did },
             From: ctx.Alice.Did,
             SignFrom: ctx.Alice.Did));
+        var packed = packResult.Message;
 
         ctx.Narrator.Step($"Unpack as Bob ({packed.Length} bytes on the wire).");
         var result = await ctx.Client.UnpackAsync(packed);

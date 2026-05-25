@@ -1,0 +1,38 @@
+{
+  "id": "did:example:charlie",
+  "authentication": ["did:example:charlie#key-1"],
+  "keyAgreement": ["did:example:charlie#key-x25519-1"],
+  "verificationMethod": [
+    {
+      "id": "did:example:charlie#key-x25519-1",
+      "type": "JsonWebKey2020",
+      "controller": "did:example:charlie",
+      "publicKeyJwk": {
+        "kty": "OKP",
+        "crv": "X25519",
+        "x": "nTiVFj7DChMsETDdxd5dIzLAJbSQ4j4UG6ZU1ogLNlw"
+      }
+    },
+    {
+      "id": "did:example:charlie#key-1",
+      "type": "JsonWebKey2020",
+      "controller": "did:example:charlie",
+      "publicKeyJwk": {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": "VDXDwuGKVq91zxU6q7__jLDUq8_C5cuxECgd-1feFTE"
+      }
+    }
+  ],
+  "service": [
+    {
+      "id": "did:example:charlie#didcomm-1",
+      "type": "DIDCommMessaging",
+      "serviceEndpoint": {
+        "uri": "did:example:mediator2",
+        "accept": ["didcomm/v2", "didcomm/aip2;env=rfc587"],
+        "routingKeys": ["did:example:mediator1#key-x25519-1"]
+      }
+    }
+  ]
+}

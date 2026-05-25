@@ -40,6 +40,7 @@ public static class Program
 
         await Section_K_UnpackMetadata.RunAsync(ctx);
         await Section_N_FromPriorRotation.RunAsync(ctx);
+        await Section_O_RoutingViaMediator.RunAsync(ctx);
         await Section_AA_NetDidAndDidWebRejection.RunAsync(ctx);
     }
 

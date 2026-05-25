@@ -102,6 +102,46 @@ Format per entry:
   sender / signer private key, gate the candidate set on
   `FindPresentAsync(candidateKids)` first; only then run curve-selection logic.
 
+## L-008 — Move input-shape guards above resolver calls so unit tests can reach them.
+
+- **Lesson:** When the facade gains a new option that has shape-only validity
+  rules (e.g. Phase 4's `Forward = true` requiring single-recipient + a non-null
+  `IServiceEndpointResolver`), put those checks at the top of the public
+  method, BEFORE any DID-resolution or curve-selection step. Otherwise the
+  unit tests that drive the new check via cheap stubs (empty key service, no
+  secrets) hit the resolver path first and throw the wrong exception type.
+- **Why:** Phase 4 Checkpoint D landed `PackEncryptedAsync(Forward: true)`
+  with the Forward-shape checks at the END of the method. The unit test
+  asserting "multi-recipient Forward throws InvalidOperationException" failed
+  with DidResolutionException because the recipient resolution loop ran
+  first against an empty key-service stub. Moving the Forward checks above
+  the recipient resolution made the tests deterministic and the error
+  message reach the user before any I/O.
+- **How to apply:** When adding a public-API option whose validity is purely
+  about argument shape, check it BEFORE doing anything async, anything that
+  hits a resolver, or anything that throws an unrelated exception type. Match
+  the order to what a caller would expect to see when they violate the
+  contract.
+
+## L-009 — Re-read the spec text before adding "obvious" expansions.
+
+- **Lesson:** When a referenced spec says "the mediator's keyAgreement keys
+  are implicitly prepended to routingKeys", don't ALSO append the mediator's
+  own routingKeys to that combined list on the assumption that it's the
+  symmetric thing to do. Implement exactly what the spec text describes.
+- **Why:** Phase 4 Checkpoint C's `MediatorEndpointExpander` added a third
+  category — "Mediator's own routingKeys come after its keyAgreement" — based
+  on extrapolation from Endpoint Example 2's wording. This produced a
+  3-layer onion when only 2 layers were warranted, and surfaced as a test
+  failure in Checkpoint D when the inner-wrap inspection caught the extra
+  hop. The mediator's own routingKeys apply only when the mediator is itself
+  the message recipient; when it merely SERVES as an endpoint, they don't
+  enter the route.
+- **How to apply:** Before adding a "symmetric" extension to a spec
+  algorithm, re-read the exact spec paragraph and ask "did the spec author
+  actually mention this case?". If not, leave it out. If a reference impl
+  diverges, file an issue and pin the spec quote as the source of truth.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves
