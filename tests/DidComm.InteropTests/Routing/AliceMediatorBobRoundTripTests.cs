@@ -60,6 +60,45 @@ public sealed class AliceMediatorBobRoundTripTests
     }
 
     [Fact]
+    public async Task Alice_to_Bob_via_mediator1_rewrap_mode_round_trips_when_recipient_is_forward_aware()
+    {
+        var actors = SpecActorRegistry.LoadDefault();
+        var resolver = LoadRoutingResolver();
+        var keyService = new NetDidKeyService(resolver);
+        var serviceResolver = new NetDidServiceEndpointResolver(resolver, keyService, new DidCommOptions());
+
+        var aliceClient = new DidCommClient(actors.AsSecretsResolver(), keyService, serviceResolver, new DidCommOptions());
+        var originalMessage = NewProposal();
+        var packResult = await aliceClient.PackEncryptedAsync(originalMessage, new PackEncryptedOptions(
+            Recipients: new[] { "did:example:bob" },
+            From: "did:example:alice",
+            Forward: true));
+
+        // mediator1 re-wraps (FR-ROUTE-06 constant-size onion) rather than passing through: it
+        // anoncrypts a fresh, self-addressed forward (to == next == bob) for the next hop.
+        var mediatorClient = new DidCommClient(actors.AsSecretsResolver(), keyService, serviceResolver, new DidCommOptions());
+        var rewrapProcessor = new ForwardProcessor(mediatorClient, keyService,
+            new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext));
+        var processed = await rewrapProcessor.ProcessAsync(packResult.Message);
+
+        processed.NextHop.Should().Be("did:example:bob");
+
+        // Because the onion stayed constant size, Bob receives a forward rather than the bare
+        // message. A forward-aware recipient peels it (next == self) and then unpacks the inner
+        // payload locally — recovering Alice's original authcrypt message.
+        var bobClient = new DidCommClient(actors.AsSecretsResolver(), keyService, serviceResolver, new DidCommOptions());
+        var bobProcessor = new ForwardProcessor(bobClient, keyService, new ForwardProcessorOptions());
+        var peeled = await bobProcessor.ProcessAsync(Encoding.UTF8.GetString(processed.OnwardPacked));
+        peeled.NextHop.Should().Be("did:example:bob");
+
+        var bobUnpack = await bobClient.UnpackAsync(Encoding.UTF8.GetString(peeled.OnwardPacked));
+        bobUnpack.Message.From.Should().Be("did:example:alice");
+        bobUnpack.Message.Type.Should().Be(originalMessage.Type);
+        bobUnpack.Authenticated.Should().BeTrue("Alice's authcrypt survives a rewrapping mediator");
+        bobUnpack.SenderKid.Should().StartWith("did:example:alice#");
+    }
+
+    [Fact]
     public async Task Forward_true_against_a_recipient_with_no_service_block_raises_DidResolutionException()
     {
         var actors = SpecActorRegistry.LoadDefault();

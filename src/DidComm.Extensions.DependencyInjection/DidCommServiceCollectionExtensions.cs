@@ -39,7 +39,7 @@ public static class DidCommServiceCollectionExtensions
         // Phase 4: pass the optional IServiceEndpointResolver so Forward = true works whenever
         // a host has registered routing. UseNetDidResolver registers one; hosts that bring
         // their own resolver can register it directly and pick it up here automatically.
-        services.AddSingleton(sp => new DidCommClient(
+        services.TryAddSingleton(sp => new DidCommClient(
             sp.GetRequiredService<ISecretsResolver>(),
             sp.GetRequiredService<IDidKeyService>(),
             sp.GetService<IServiceEndpointResolver>(),

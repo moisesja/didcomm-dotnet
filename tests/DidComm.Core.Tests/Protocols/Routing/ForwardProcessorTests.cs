@@ -221,6 +221,66 @@ public sealed class ForwardProcessorTests
             .Which.Message.Should().Contain("missing both 'data.json' and 'data.base64'");
     }
 
+    [Fact]
+    public async Task ProcessAsync_decodes_a_base64url_attachment_payload()
+    {
+        // DIDComm attachments encode data.base64 as base64url (unpadded). The value below
+        // base64url-decodes cleanly but is NOT valid standard base64 (unpadded length), so this
+        // exercises the base64url path rather than Convert.FromBase64String.
+        var innerPayload = """{"protected":"abc","ciphertext":"xyz","iv":"","tag":"","recipients":[]}""";
+        var base64url = Base64Url.EncodeUtf8(innerPayload);
+        var forward = new MessageBuilder()
+            .WithType(ForwardConstants.ForwardTypeUri)
+            .WithBody(new JsonObject { ["next"] = "did:example:n" })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = base64url } })
+            .Build();
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(forward);
+
+        var processor = new ForwardProcessor(client, new EmptyKeyService(), new ForwardProcessorOptions());
+        var result = await processor.ProcessAsync(packed);
+
+        Encoding.UTF8.GetString(result.OnwardPacked).Should().Be(innerPayload);
+    }
+
+    [Theory]
+    [InlineData(long.MinValue)]
+    [InlineData(-long.MaxValue)]
+    public async Task ProcessAsync_does_not_crash_on_extreme_negative_delay_milli(long extreme)
+    {
+        var inner = """{"protected":"abc","ciphertext":"x","iv":"","tag":"","recipients":[]}""";
+        var forward = ForwardMessage.Create("did:example:m", "did:example:n", new[] { inner });
+        forward.AdditionalHeaders = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal)
+        {
+            ["delay_milli"] = System.Text.Json.JsonDocument.Parse(extreme.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement.Clone(),
+        };
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(forward);
+
+        var processor = new ForwardProcessor(client, new EmptyKeyService(), new ForwardProcessorOptions());
+        var result = await processor.ProcessAsync(packed);
+
+        result.Delay.Should().NotBeNull();
+        result.Delay!.Value.TotalMilliseconds.Should().BeInRange(0, int.MaxValue);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_throws_when_forward_carries_more_than_one_attachment()
+    {
+        var inner1 = """{"protected":"a","ciphertext":"1","iv":"","tag":"","recipients":[]}""";
+        var inner2 = """{"protected":"b","ciphertext":"2","iv":"","tag":"","recipients":[]}""";
+        var forward = ForwardMessage.Create("did:example:m", "did:example:n", new[] { inner1, inner2 });
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(forward);
+
+        var processor = new ForwardProcessor(client, new EmptyKeyService(), new ForwardProcessorOptions());
+
+        var act = async () => await processor.ProcessAsync(packed);
+
+        (await act.Should().ThrowAsync<ConsistencyException>())
+            .Which.Message.Should().Contain("exactly one packed payload");
+    }
+
     private static DidCommClient NewClient() =>
         new(new EmptySecretsResolver(), new EmptyKeyService(), new DidCommOptions());
 

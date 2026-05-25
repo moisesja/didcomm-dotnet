@@ -110,10 +110,15 @@ public static class ForwardMessage
             return false;
         }
 
-        var nextValue = message.Body?["next"]?.GetValue<string>();
+        // Read `next` defensively: a non-string token (number/object/array) is a protocol
+        // violation, not a CLR error, so surface MalformedMessageException rather than letting
+        // JsonValue.GetValue<string>() throw InvalidOperationException.
+        string? nextValue = message.Body?["next"] is JsonValue nextToken && nextToken.TryGetValue(out string? s)
+            ? s
+            : null;
         if (string.IsNullOrEmpty(nextValue))
             throw new MalformedMessageException(
-                "Forward message body is missing the REQUIRED 'next' field (FR-ROUTE-01).");
+                "Forward message body is missing the REQUIRED 'next' field, or it is not a string (FR-ROUTE-01).");
 
         if (message.Attachments is null || message.Attachments.Count == 0)
             throw new MalformedMessageException(

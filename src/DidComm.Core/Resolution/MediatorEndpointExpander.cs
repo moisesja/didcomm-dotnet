@@ -53,7 +53,11 @@ internal static class MediatorEndpointExpander
             throw new DidResolutionException(recipientDid, "no DIDCommMessaging service entries available");
 
         var primary = candidates[0];
-        var fallbackUris = candidates.Skip(1).Select(c => c.Uri).ToArray();
+        // FR-ROUTE-08 failover candidates must be usable transport URIs. A DID-as-endpoint
+        // fallback would need its own expansion (resolve the mediator, prepend its key); that is
+        // out of scope for a flat failover list, so drop DID-valued fallbacks rather than surface
+        // a DID where a transport URI is expected.
+        var fallbackUris = candidates.Skip(1).Select(c => c.Uri).Where(uri => !LooksLikeDid(uri)).ToArray();
 
         string transportUri;
         var combinedRoutingKeyKids = new List<string>();
@@ -112,8 +116,8 @@ internal static class MediatorEndpointExpander
         foreach (var kid in kids)
         {
             var hashIndex = kid.IndexOf('#');
-            if (hashIndex < 0)
-                throw new DidResolutionException(kid, "routing key reference is not a DID URL with a fragment");
+            if (hashIndex <= 0)
+                throw new DidResolutionException(kid, "routing key reference is not a DID URL with a fragment (relative, fragment-only, or bare-DID references are not supported)");
 
             var subjectDid = kid[..hashIndex];
             var subjectKeys = await keyService.GetVerificationMethodsAsync(subjectDid, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);

@@ -106,6 +106,30 @@ array-of-objects parser with FR-ROUTE-04 mediator-as-DID-endpoint expansion.
 - `DidCommClient.PackEncryptedAsync` return type is now `Task<PackEncryptedResult>`. Existing call sites that fed the result straight to `UnpackAsync` need a `.Message` extraction; six in-repo sites updated (4 round-trip tests, 1 rotation interop test, 2 cookbook sections).
 - `MediatorEndpointExpander` only weaves the mediator's *keyAgreement* (FR-ROUTE-04 implicit-prepend), **not** the mediator's own `routingKeys` — per a re-read of the spec text. The mediator's own routingKeys apply only when the mediator is itself the message recipient.
 
+### Fixed (Phase 4 review)
+
+- `ForwardProcessor.ExtractAttachmentBytes` now decodes `attachment.data.base64` with
+  `Base64Url` (DIDComm attachments are base64url); previously `Convert.FromBase64String` threw
+  `FormatException` on conformant base64url payloads from interop peers.
+- `ForwardProcessor` rewrap mode (`RewrapMode.ReanoncryptToNext`) now strips the DID fragment
+  from `next` before building the self-addressed forward and resolving the next hop's
+  keyAgreement keys, so multi-hop rewrap no longer feeds a fragment'd DID-URL to
+  `GetVerificationMethodsAsync`. Added an Alice→mediator→Bob rewrap round-trip test (the
+  self-addressed `to == next` envelope is peeled by a forward-aware recipient).
+- `ForwardProcessor.ProcessAsync` throws `ConsistencyException` for a forward carrying more than
+  one attachment instead of silently relaying only the first and dropping the rest.
+- `ForwardProcessor.ExtractDelay` no longer crashes on extreme negative `delay_milli`
+  (`long.MinValue` / `-long.MaxValue`); the random hold is computed without overflowing
+  `Math.Abs`/`int` and is capped at `int.MaxValue` ms.
+- `ForwardMessage.TryParse` raises `MalformedMessageException` (not `InvalidOperationException`)
+  when `body.next` is present but not a JSON string.
+- `MediatorEndpointExpander` rejects relative/fragment-only routing-key references with a clear
+  `DidResolutionException` (previously an empty subject DID produced a confusing
+  `ArgumentException`), and drops DID-valued fallback URIs so `FallbackServiceEndpoints` only
+  carries usable transport URIs.
+- `AddDidComm` registers `DidCommClient` via `TryAddSingleton` (parity with its sibling
+  registrations), so a repeated `AddDidComm` no longer double-registers the client.
+
 ### Added — Cookbook (PRD §14.2 Phase 4 increment: section O)
 
 - `samples/02-Cookbook/Sections/Section_O_RoutingViaMediator.cs` — narrates

@@ -96,10 +96,37 @@ public sealed class DependencyInjectionTests
         sp.GetRequiredService<ISecretsResolver>().Should().BeSameAs(instance);
     }
 
+    [Fact]
+    public void AddDidComm_CalledTwice_RegistersSingleDidCommClient()
+    {
+        // Prerequisites registered directly (not via UseNetDidResolver, which is itself not
+        // idempotent at the NetDid layer) so this isolates the DidCommClient registration.
+        var services = new ServiceCollection();
+        services.AddSingleton<ISecretsResolver>(new EmptyResolver());
+        services.AddSingleton<IDidKeyService>(new StubKeyService());
+
+        services.AddDidComm(_ => { });
+        services.AddDidComm(_ => { });
+
+        services.Count(d => d.ServiceType == typeof(DidCommClient)).Should().Be(1);
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<DidCommClient>().Should().NotBeNull();
+    }
+
     private sealed class EmptyResolver : ISecretsResolver
     {
         public Task<Jwk?> FindAsync(string kid, CancellationToken ct = default) => Task.FromResult<Jwk?>(null);
         public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+    }
+
+    private sealed class StubKeyService : IDidKeyService
+    {
+        public Task<IReadOnlyList<Jwk>> GetVerificationMethodsAsync(string did, VerificationRelationship relationship, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<Jwk>>(Array.Empty<Jwk>());
+        public Task<bool> IsKeyAuthorizedAsync(string did, string kid, VerificationRelationship relationship, CancellationToken ct = default)
+            => Task.FromResult(false);
+        public void RejectUnsupportedMethod(string did) { }
     }
 }

@@ -88,6 +88,10 @@ public sealed class ForwardProcessor
         // processor does NOT propagate an ack request onward. This is achieved trivially by
         // never reading `please_ack` here and never adding one to the rewrap envelope.
 
+        if (attachments.Count > 1)
+            throw new ConsistencyException(
+                $"Forward message carries {attachments.Count} attachments; this mediator relays exactly one packed payload per forward (FR-ROUTE-05). Re-send each payload in its own forward.");
+
         var innerPayloadBytes = ExtractAttachmentBytes(attachments[0]);
         var expiresTime = unpack.Message.ExpiresTime;
         var delay = ExtractDelay(unpack.Message);
@@ -113,7 +117,7 @@ public sealed class ForwardProcessor
             return Encoding.UTF8.GetBytes(json.ToJsonString());
 
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
-            return Convert.FromBase64String(attachment.Data.Base64);
+            return Base64Url.Decode(attachment.Data.Base64);
 
         throw new ConsistencyException(
             "Forward attachment is missing both 'data.json' and 'data.base64'. The mediator has nothing to relay.");
@@ -126,28 +130,42 @@ public sealed class ForwardProcessor
         if (element.ValueKind != System.Text.Json.JsonValueKind.Number) return null;
         if (!element.TryGetInt64(out var millis)) return null;
 
-        // Spec: negative value → randomize between 0 and |n|, uniform.
+        // Spec: a negative value is randomized between 0 and |n|, uniform. Guard against
+        // overflow: long.MinValue has no positive magnitude, and |n| can exceed int range — the
+        // hold is capped at int.MaxValue ms (~24.8 days), far longer than any sane relay delay.
         if (millis < 0)
         {
-            var bound = Math.Abs(millis);
-            var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)Math.Min(bound + 1, int.MaxValue));
+            var magnitude = millis == long.MinValue ? long.MaxValue : -millis;
+            var cappedInclusiveMax = Math.Min(magnitude, int.MaxValue - 1);
+            var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)cappedInclusiveMax + 1);
             return TimeSpan.FromMilliseconds(sample);
         }
         return TimeSpan.FromMilliseconds(millis);
     }
 
+    private static string StripFragment(string didUrl)
+    {
+        var hash = didUrl.IndexOf('#');
+        return hash < 0 ? didUrl : didUrl[..hash];
+    }
+
     private async Task<byte[]> RewrapToNextAsync(byte[] innerPacked, string nextHop, CancellationToken ct)
     {
-        // FR-ROUTE-06 rewrap: build a fresh forward addressed to `next`, with the inner
-        // payload as its single attachment, then anoncrypt the forward to `next`'s
-        // keyAgreement key(s).
+        // FR-ROUTE-06 rewrap: build a fresh forward whose attachment is the inbound payload, then
+        // anoncrypt it to the next hop. The fresh forward is self-addressed — to == next == the
+        // next hop — which signals "peel this layer and process the attachment locally": the next
+        // hop unwraps the rewrap and then handles the inner payload exactly as it would have under
+        // pass-through (so the constant-size onion stays deliverable). `next` can arrive as a DID
+        // URL with a fragment (outer onion layers carry the routing-key kid), so strip it to the
+        // bare DID for the message headers and the keyAgreement lookup.
+        var nextDid = StripFragment(nextHop);
         var freshForward = ForwardMessage.Create(
-            mediator: nextHop, next: nextHop,
+            mediator: nextDid, next: nextDid,
             packedPayloads: new[] { Encoding.UTF8.GetString(innerPacked) });
 
-        var nextKeys = await _keyService.GetVerificationMethodsAsync(nextHop, Resolution.VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+        var nextKeys = await _keyService.GetVerificationMethodsAsync(nextDid, Resolution.VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
         if (nextKeys.Count == 0)
-            throw new DidResolutionException(nextHop, "rewrap target has no keyAgreement keys");
+            throw new DidResolutionException(nextDid, "rewrap target has no keyAgreement keys");
 
         var wrapped = Composition.EnvelopeWriter.PackEncrypted(
             new Composition.PackEncryptedParameters(

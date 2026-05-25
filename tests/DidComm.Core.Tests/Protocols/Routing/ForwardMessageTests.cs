@@ -137,4 +137,18 @@ public sealed class ForwardMessageTests
         act.Should().Throw<MalformedMessageException>().WithMessage("*REQUIRED 'attachments'*FR-ROUTE-01*");
     }
 
+    [Fact]
+    public void TryParse_throws_MalformedMessageException_when_next_is_present_but_not_a_string()
+    {
+        // A non-string 'next' is a protocol violation, not a CLR error: it must surface as
+        // MalformedMessageException, never as a raw InvalidOperationException from GetValue<string>().
+        var malformed = new MessageBuilder()
+            .WithType(ForwardConstants.ForwardTypeUri)
+            .WithBody(new JsonObject { ["next"] = 42 })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Json = JsonNode.Parse(SamplePackedJwe) } })
+            .Build();
+
+        Action act = () => ForwardMessage.TryParse(malformed, out _, out _);
+        act.Should().Throw<MalformedMessageException>().WithMessage("*not a string*");
+    }
 }

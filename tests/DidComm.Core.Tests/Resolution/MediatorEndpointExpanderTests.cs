@@ -181,6 +181,38 @@ public sealed class MediatorEndpointExpanderTests
             .Which.Message.Should().Contain("no DIDCommMessaging service");
     }
 
+    [Fact]
+    public async Task Throws_when_routing_key_is_a_relative_fragment_reference()
+    {
+        var svc = new StubServiceResolver();
+        var keys = new StubKeyService();
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(
+            new[] { Info("https://r/", routing: new[] { "#key-1" }) },
+            svc, keys, Recipient);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .Which.Message.Should().Contain("relative");
+    }
+
+    [Fact]
+    public async Task Drops_did_valued_fallback_uris_keeping_only_transport_urls()
+    {
+        var svc = new StubServiceResolver();
+        var keys = new StubKeyService();
+        var candidates = new[]
+        {
+            Info("https://primary/"),
+            Info("did:example:mediator2"), // DID-as-endpoint fallback — not a usable transport URI
+            Info("https://failover/"),
+        };
+
+        var route = await MediatorEndpointExpander.ExpandAsync(candidates, svc, keys, Recipient);
+
+        route.TransportUri.Should().Be("https://primary/");
+        route.FallbackUris.Should().Equal("https://failover/");
+    }
+
     private static DidCommServiceInfo Info(string uri, IReadOnlyList<string>? routing = null) =>
         new(uri, routing ?? Array.Empty<string>(), Array.Empty<string>());
 
