@@ -212,6 +212,23 @@ Format per entry:
   policy library, check that library's documented range and clamp rather than
   trusting the caller.
 
+## L-014 — Namespace import shadows a same-named static class.
+
+- **Lesson:** When a static-constants class has the same name as the namespace
+  it lives in (e.g. `DidComm.Profiles.Profiles`), any consumer that writes
+  `using DidComm.Profiles;` loses the ability to refer to the class as
+  `Profiles` — the namespace import wins and `Profiles.DidCommV2` resolves to
+  `<consumer-namespace>.Profiles.DidCommV2`, which doesn't exist. Fix is a
+  `using ProfilesConst = DidComm.Profiles.Profiles;` alias at the top of the
+  consumer; the namespace-vs-class shadowing is silent until first compile.
+- **Why:** Phase 6.1 added `DidComm.Profiles.Profiles` and the
+  `ProfileNegotiatorTests` + the cookbook `Section_BB_ProfilesAndI18n` both
+  failed `CS0234` on `Profiles.DidCommV2` until aliased.
+- **How to apply:** When naming a static-constants/holder class, prefer
+  pluralizing the namespace (e.g. namespace `DidComm.Profile`, class
+  `DidComm.Profile.Profiles`) OR plan to ship a `using XxxConst = ...;` alias
+  alongside every consumer. The earlier rename is cheap; the alias is forever.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves

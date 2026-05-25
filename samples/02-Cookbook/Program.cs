@@ -39,12 +39,14 @@ public static class Program
         ctx.Narrator.Step($"Minted alice2 (rotation target) = {Truncate(ctx.Alice2.Did)}");
 
         await Section_K_UnpackMetadata.RunAsync(ctx);
+        await Section_M_ThreadingAndAcks.RunAsync(ctx);
         await Section_N_FromPriorRotation.RunAsync(ctx);
         await Section_O_RoutingViaMediator.RunAsync(ctx);
         await Section_P_SendOverTransport.RunAsync(ctx);
         await Section_Q_ReceiveHttp.RunAsync(ctx);
         await Section_R_ReceiveWebSocket.RunAsync(ctx);
         await Section_AA_NetDidAndDidWebRejection.RunAsync(ctx);
+        await Section_BB_ProfilesAndI18n.RunAsync(ctx);
     }
 
     private static string Truncate(string did)

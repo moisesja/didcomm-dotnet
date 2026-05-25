@@ -84,6 +84,37 @@ public sealed class Message
     public IList<Attachment>? Attachments { get; set; }
 
     /// <summary>
+    /// ACK-request header (FR-THR-03): an array of message ids whose receipt the sender wants
+    /// acknowledged. The empty string <c>""</c> is the spec sentinel for "this current message".
+    /// </summary>
+    [JsonPropertyName("please_ack")]
+    public IList<string>? PleaseAck { get; set; }
+
+    /// <summary>
+    /// ACK header (FR-THR-03): an array of message ids being acknowledged, oldest→newest. The
+    /// presence of <c>ack</c> on a message makes it an explicit ACK regardless of <c>type</c>.
+    /// </summary>
+    [JsonPropertyName("ack")]
+    public IList<string>? Ack { get; set; }
+
+    /// <summary>
+    /// Language tag for the protocol-defined human-readable fields in this message (FR-I18N-03).
+    /// IANA language code (e.g. <c>"fr"</c>, <c>"en-GB"</c>). When present, protocol-defined
+    /// human-readable strings MUST be interpreted (and emitted by this library, where available)
+    /// in that language.
+    /// </summary>
+    [JsonPropertyName("lang")]
+    public string? Lang { get; set; }
+
+    /// <summary>
+    /// Ranked IANA language codes the sender prefers for human-readable strings on this thread
+    /// (FR-I18N-01/02). Thread-scoped: a recipient that honors it MUST persist this preference
+    /// against the current <see cref="Thid"/> and MUST NOT leak it into other concurrent threads.
+    /// </summary>
+    [JsonPropertyName("accept-lang")]
+    public IList<string>? AcceptLang { get; set; }
+
+    /// <summary>
     /// Unknown / extension headers preserved verbatim across an unpack→repack round-trip
     /// (FR-MSG-12, FR-MSG-15). Populated by <see cref="System.Text.Json"/> for any JSON
     /// member that does not bind to one of the strongly-typed properties.
@@ -146,6 +177,45 @@ public sealed class Message
         {
             foreach (var attachment in Attachments)
                 attachment.Validate();
+        }
+
+        if (PleaseAck is not null)
+        {
+            foreach (var id in PleaseAck)
+            {
+                if (id is null)
+                    throw new MalformedMessageException("Message 'please_ack' entries must not be null (FR-THR-03).");
+                // "" is the spec-defined sentinel for "this current message" (FR-THR-03); skip the
+                // unreserved-chars check for it. Non-empty entries reference a message id and so
+                // carry the same FR-MSG-02 character constraint.
+                if (id.Length > 0 && !UnreservedUriChars.IsUnreserved(id))
+                    throw new MalformedMessageException(
+                        $"Message 'please_ack' entries must reference a valid message id (unreserved URI characters or empty for current) (FR-THR-03). Got: '{id}'.");
+            }
+        }
+
+        if (Ack is not null)
+        {
+            foreach (var id in Ack)
+            {
+                if (string.IsNullOrEmpty(id))
+                    throw new MalformedMessageException("Message 'ack' entries must not be empty (FR-THR-03).");
+                if (!UnreservedUriChars.IsUnreserved(id))
+                    throw new MalformedMessageException(
+                        $"Message 'ack' entries must reference a valid message id (unreserved URI characters) (FR-THR-03). Got: '{id}'.");
+            }
+        }
+
+        if (Lang is not null && Lang.Length == 0)
+            throw new MalformedMessageException("Message 'lang', when present, must be a non-empty IANA language tag (FR-I18N-03).");
+
+        if (AcceptLang is not null)
+        {
+            foreach (var lang in AcceptLang)
+            {
+                if (string.IsNullOrEmpty(lang))
+                    throw new MalformedMessageException("Message 'accept-lang' entries must be non-empty IANA language tags (FR-I18N-01).");
+            }
         }
     }
 }
