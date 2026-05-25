@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Transports.Http</RootNamespace>
+    <AssemblyName>DidComm.Transports.Http</AssemblyName>
+    <PackageId>DidComm.Transports.Http</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>HTTPS transport binding for didcomm-dotnet (PRD §9.2 / FR-TRN-04..06/08). Sender only; the ASP.NET Core receive endpoint lives in DidComm.AspNetCore.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Polly" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
+</Project>

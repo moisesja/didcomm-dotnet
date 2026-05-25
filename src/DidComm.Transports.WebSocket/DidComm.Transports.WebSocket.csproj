@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Transports.WebSocket</RootNamespace>
+    <AssemblyName>DidComm.Transports.WebSocket</AssemblyName>
+    <PackageId>DidComm.Transports.WebSocket</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>WebSocket transport binding for didcomm-dotnet (PRD §9.3 / FR-TRN-09..11). Sender only; the ASP.NET Core WebSocket receive endpoint lives in DidComm.AspNetCore.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Polly" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
+</Project>

@@ -17,7 +17,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.AspNetCore\DidComm.AspNetCore.csproj" />
     <ProjectReference Include="..\..\samples\02-Cookbook\02-Cookbook.csproj" />
   </ItemGroup>
 

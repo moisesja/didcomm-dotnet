@@ -4,8 +4,10 @@ using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
 using DidComm.Protocols.Rotation;
+using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
+using DidComm.Transports;
 
 namespace DidComm.Facade;
 
@@ -20,6 +22,7 @@ public sealed class DidCommClient
     private readonly ISecretsResolver _secrets;
     private readonly IDidKeyService _keyService;
     private readonly IServiceEndpointResolver? _serviceResolver;
+    private readonly ITransportRouter? _transportRouter;
     private readonly DidCommOptions _options;
     private readonly DefaultCryptoProvider _cryptoProvider;
 
@@ -28,7 +31,7 @@ public sealed class DidCommClient
     /// <param name="keyService">DID resolution + verification-method extraction (FR-DID-01..05).</param>
     /// <param name="options">Process-wide options (FR-API-05/06 knobs).</param>
     public DidCommClient(ISecretsResolver secrets, IDidKeyService keyService, DidCommOptions options)
-        : this(secrets, keyService, serviceResolver: null, options, new DefaultCryptoProvider()) { }
+        : this(secrets, keyService, serviceResolver: null, transportRouter: null, options, new DefaultCryptoProvider()) { }
 
     /// <summary>Initialize the facade with the Phase 4 routing surface enabled.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -40,9 +43,27 @@ public sealed class DidCommClient
         IDidKeyService keyService,
         IServiceEndpointResolver serviceResolver,
         DidCommOptions options)
-        : this(secrets, keyService, serviceResolver, options, new DefaultCryptoProvider())
+        : this(secrets, keyService, serviceResolver, transportRouter: null, options, new DefaultCryptoProvider())
     {
         ArgumentNullException.ThrowIfNull(serviceResolver);
+    }
+
+    /// <summary>Initialize the facade with both routing and a transport router (Phase 5 — enables <see cref="SendAsync"/>).</summary>
+    /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
+    /// <param name="keyService">DID resolution + verification-method extraction (FR-DID-01..05).</param>
+    /// <param name="serviceResolver">Routing-service resolver (FR-ROUTE-03/04).</param>
+    /// <param name="transportRouter">Transport router (FR-TRN-01). Required for <see cref="SendAsync"/>.</param>
+    /// <param name="options">Process-wide options.</param>
+    public DidCommClient(
+        ISecretsResolver secrets,
+        IDidKeyService keyService,
+        IServiceEndpointResolver serviceResolver,
+        ITransportRouter transportRouter,
+        DidCommOptions options)
+        : this(secrets, keyService, serviceResolver, transportRouter, options, new DefaultCryptoProvider())
+    {
+        ArgumentNullException.ThrowIfNull(serviceResolver);
+        ArgumentNullException.ThrowIfNull(transportRouter);
     }
 
     /// <summary>Initialize the facade with a custom crypto provider; used by tests.</summary>
@@ -50,6 +71,7 @@ public sealed class DidCommClient
         ISecretsResolver secrets,
         IDidKeyService keyService,
         IServiceEndpointResolver? serviceResolver,
+        ITransportRouter? transportRouter,
         DidCommOptions options,
         DefaultCryptoProvider cryptoProvider)
     {
@@ -60,6 +82,7 @@ public sealed class DidCommClient
         _secrets = secrets;
         _keyService = keyService;
         _serviceResolver = serviceResolver;
+        _transportRouter = transportRouter;
         _options = options;
         _cryptoProvider = cryptoProvider;
     }
@@ -231,6 +254,65 @@ public sealed class DidCommClient
 
         var wrapped = ForwardWrapper.Wrap(innerPacked, route.RoutingKeyJwks, recipientDid, _cryptoProvider);
         return new PackEncryptedResult(wrapped, route.TransportUri, route.FallbackUris);
+    }
+
+    /// <summary>
+    /// Pack <paramref name="message"/> with <see cref="PackEncryptedOptions.Forward"/> = <c>true</c>
+    /// (unless <paramref name="options"/> overrides the endpoint), then deliver the packed bytes
+    /// via the registered <see cref="ITransportRouter"/> (FR-TRN-01). Requires both a
+    /// <see cref="IServiceEndpointResolver"/> and a <see cref="ITransportRouter"/> to be wired in
+    /// (use <c>AddDidComm(b =&gt; b.UseNetDidResolver().UseHttpTransport()...)</c>).
+    /// </summary>
+    /// <param name="message">The plaintext message.</param>
+    /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional explicit endpoint override.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public async Task<SendResult> SendAsync(Message message, SendOptions options, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.Recipients is null || options.Recipients.Count == 0)
+            throw new ArgumentException("At least one recipient DID is required.", nameof(options));
+        if (_transportRouter is null)
+        {
+            throw new InvalidOperationException(
+                "SendAsync requires an ITransportRouter. Register a transport via builder.UseHttpTransport()/UseWebSocketTransport() or pass one to the (secrets, keyService, serviceResolver, transportRouter, options) constructor (FR-TRN-01).");
+        }
+
+        // When the caller supplies an explicit endpoint, we skip the FR-ROUTE-02 forward
+        // wrapping path: the sender already knows where to send the inner envelope. Useful
+        // for tests, for direct (non-mediated) recipients, and for transports built on top
+        // of a known peer URI. Otherwise we pack with Forward = true so the facade resolves
+        // the recipient's DIDCommMessaging service and surfaces a transport URI.
+        var packOptions = new PackEncryptedOptions(
+            Recipients: options.Recipients,
+            From: options.From,
+            SignFrom: options.SignFrom,
+            Enc: options.Enc,
+            ProtectSender: options.ProtectSender,
+            Forward: options.ServiceEndpointOverride is null);
+
+        var packed = await PackEncryptedAsync(message, packOptions, ct).ConfigureAwait(false);
+
+        var endpointUri = options.ServiceEndpointOverride;
+        if (endpointUri is null)
+        {
+            if (packed.ServiceEndpoint is null)
+            {
+                throw new InvalidOperationException(
+                    $"Recipient '{options.Recipients[0]}' has no resolvable DIDCommMessaging service endpoint and no ServiceEndpointOverride was supplied. Configure a routing service on the recipient's DID document, or pass SendOptions.ServiceEndpointOverride (FR-ROUTE-03).");
+            }
+            if (!Uri.TryCreate(packed.ServiceEndpoint, UriKind.Absolute, out endpointUri))
+            {
+                throw new TransportException(
+                    $"Resolved service endpoint is not an absolute URI: '{packed.ServiceEndpoint}' (FR-ROUTE-03).");
+            }
+        }
+
+        var payload = Encoding.UTF8.GetBytes(packed.Message);
+        var mediaType = ForwardConstants.PayloadMediaType;
+        var request = new TransportRequest(endpointUri, payload, mediaType);
+        var transportResult = await _transportRouter.SendAsync(request, ct).ConfigureAwait(false);
+        return new SendResult(packed, transportResult, endpointUri);
     }
 
     /// <summary>

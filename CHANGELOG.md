@@ -6,6 +6,127 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 5 (Transports)
+
+Closes PRD §12 Phase 5: FR-TRN-01..12 + the FR-API-06 transport (413) path.
+Ships the HTTP and WebSocket transport bindings plus the ASP.NET Core receive
+endpoint, so a packed envelope finally turns into bytes on the wire and the
+matching server side accepts them.
+
+- **Core transport abstractions** (`DidComm.Core/Transports/`):
+  - `IDidCommTransport` — scheme, `CanHandle(Uri)`, `SendAsync(...)` (FR-TRN-01).
+  - `ITransportRouter` + `TransportRouter` (default impl) — dispatches by URI
+    scheme; throws `TransportException` when no transport handles a scheme.
+  - `TransportRequest`, `TransportResult` records (FR-TRN-02/03/05).
+  - `SendOptions` (mirrors `PackEncryptedOptions` + `ServiceEndpointOverride`)
+    and `SendResult` (bundles `PackEncryptedResult` + transport outcome +
+    endpoint used).
+- **Facade** (`DidCommClient`):
+  - `Task<SendResult> SendAsync(Message, SendOptions, CancellationToken)` —
+    packs with `Forward = true` unless `ServiceEndpointOverride` is set, then
+    dispatches via the registered `ITransportRouter`. New 5-arg public ctor
+    accepting `(secrets, keyService, serviceResolver, transportRouter, options)`.
+  - DI registration in `DidCommServiceCollectionExtensions` now passes
+    `ITransportRouter` through to the facade singleton and idempotently registers
+    the default router.
+- **Exception taxonomy** — `DidComm.Exceptions.TransportException` (derived
+  from `DidCommException`) fills the FR-API-07 gap for transport-level
+  failures; carries optional `HttpStatusCode` + `Scheme`.
+- **HTTPS sender** — new project `DidComm.Transports.Http`:
+  - `HttpDidCommTransport` — `IHttpClientFactory`-backed POST; 2xx ⇒ accepted
+    (FR-TRN-05); 307 followed manually with a `MaxRedirectHops` cap
+    (FR-TRN-06); 301/308 + non-2xx surfaced as `TransportException`; rebuilds
+    the request on every Polly retry so `HttpClient` doesn't reject the resend.
+  - `HttpTransportOptions` — `RequestTimeout`, `MaxRetryAttempts`,
+    `RetryBaseDelay`, `CircuitBreakerFailureThreshold`,
+    `CircuitBreakerOpenDuration`, `AllowedSchemes` (default `{"https"}`),
+    `MaxRedirectHops`.
+  - `HttpResiliencePipelineFactory` — Polly v8 pipeline (retry + circuit
+    breaker + per-attempt timeout), driven entirely by the options shape;
+    skips the retry strategy when `MaxRetryAttempts == 0`.
+  - `HttpDidCommBuilderExtensions.UseHttpTransport(...)` — DI extension that
+    registers the transport, the named `"didcomm"` HTTP client, the router,
+    and disables auto-redirect on the handler so the transport can enforce
+    FR-TRN-06.
+- **WebSocket sender** — new project `DidComm.Transports.WebSocket`:
+  - `WebSocketDidCommTransport` — one binary message per packed envelope
+    (FR-TRN-09); end-of-message flag set on the last fragment; per-endpoint
+    connection pool keyed by `Authority + Path`; Polly-driven exponential
+    reconnect (1s / 30s / 0.5-jitter — DD-05 / FR-TRN-11); per-send timeout;
+    dropped socket recycled on `SendFailed`; `IAsyncDisposable` cleans up on
+    container shutdown.
+  - `WebSocketTransportOptions` — connect/send timeouts, max reconnect
+    attempts + base/max delay, allowed schemes (default `{"wss"}`),
+    `WebSocketFactory` + `Connect` seams (used by the InteropTests +
+    cookbook to point at a `Microsoft.AspNetCore.TestHost.TestServer` WS
+    client without opening a real port).
+  - `WebSocketLifecycleEventArgs` + `Lifecycle` event for FR-TRN-11
+    observability (Connected / Disconnected / SendFailed / Reconnected).
+  - `WebSocketDidCommBuilderExtensions.UseWebSocketTransport(...)`.
+- **ASP.NET Core integration** — new project `DidComm.AspNetCore`
+  (`<FrameworkReference Include="Microsoft.AspNetCore.App" />`, zero NuGet
+  weight):
+  - `MapDidCommEndpoint(IEndpointRouteBuilder, string, Func<UnpackResult, CancellationToken, Task>)`
+    — minimal-API `POST` mapping (FR-TRN-07). Validates `Content-Type`
+    against the configured accept list ⇒ 415 on mismatch; streams the body
+    with a hard cap at `DidCommOptions.MaxReceiveBytes` ⇒ 413 (FR-API-06);
+    unpacks via `DidCommClient.UnpackAsync`; dispatches to the inline
+    receiver; returns 202. `MalformedMessageException` / `CryptoException`
+    ⇒ 400; `TransportException` ⇒ 502.
+  - `MapDidCommWebSocket(IEndpointRouteBuilder, string, Func<UnpackResult, CancellationToken, Task>)`
+    — accepts WebSocket; loops `ReceiveAsync` until `EndOfMessage=true`
+    (frame reassembly); honours `MaxReceiveBytes` and closes with 1009
+    "Message Too Big" on overflow; one-way per FR-TRN-10.
+  - `DidCommReceiveOptions` — per-endpoint accept-list (defaults cover the
+    three DIDComm v2.1 media types).
+- **DI plumbing** — `DidCommServiceCollectionExtensions` now auto-registers
+  `TransportRouter` so DI hosts get the FR-TRN-01 dispatch surface for free
+  the moment they call `.UseHttpTransport()` / `.UseWebSocketTransport()`.
+  Hand-constructed clients still receive a clean `InvalidOperationException`
+  on `SendAsync` when no router was supplied.
+
+### Tests — Phase 5
+
+- `DidComm.Core.Tests/Transports/TransportRouterTests` — scheme dispatch,
+  case-insensitive match, no-handler → `TransportException` with the offending
+  scheme, null-arg guards.
+- `DidComm.Core.Tests/Transports/DidCommClientSendAsyncTests` — no-router
+  refusal with an actionable message; empty-recipients refusal.
+- `DidComm.InteropTests/Transports/HttpTransportSendTests` — 2xx accepted
+  (Theory ×3), 307 followed to a final 2xx, 301/308 refused (Theory ×2), 500
+  retried then surfaced as `TransportException`, scheme allow-list refusal,
+  Content-Type propagation, case-insensitive `CanHandle`.
+- `DidComm.InteropTests/Transports/AspNetCoreReceiveRoundTripTests` — full
+  Alice→Bob HTTP round-trip via `TestServer.CreateHandler()`; 415, 413, 400
+  negative cases.
+- `DidComm.InteropTests/Transports/WebSocketTransportRoundTripTests` — full
+  WS round-trip; explicit fragmented-send case (three frames coalesce into
+  one envelope) to nail the FR-TRN-09 reassembly invariant; oversize message
+  triggers a 1009 close per FR-API-06; `CanHandle` honours allow-list.
+
+### Changed
+
+- `Directory.Packages.props` adds `Polly` 8.5.0 (per the user-confirmed Phase 5
+  resilience choice) and bumps `Microsoft.AspNetCore.TestHost` to the version
+  that ships in the local SDK cache. `Microsoft.Extensions.Http` is no longer
+  pinned in `DidComm.InteropTests` (it now arrives via the AspNet shared
+  framework — `NU1510`).
+- `DidComm.sln` — three new project entries (`DidComm.Transports.Http`,
+  `DidComm.Transports.WebSocket`, `DidComm.AspNetCore`).
+
+### Cookbook (samples/02-Cookbook)
+
+- New sections `P` (send over a transport), `Q` (receive over HTTP — incl. the
+  415 / 413 negative branches), `R` (receive / chat over WebSocket — incl.
+  lifecycle-event subscription). All three host an in-process `TestServer` so
+  the cookbook stays offline-safe; `dotnet run --project samples/02-Cookbook`
+  exits 0 with the section banners printed.
+- `samples/02-Cookbook/02-Cookbook.csproj` references the three new transport
+  projects + `Microsoft.AspNetCore.TestHost` and brings in the AspNet shared
+  framework.
+- `samples/02-Cookbook/README.md` — table extended; expected-output sample
+  refreshed with P/Q/R frames; section file list updated.
+
 ### Added — Phase 4 (Routing & Mediation)
 
 Closes PRD §12 Phase 4: FR-ROUTE-01..08. Sender-side `forward` wrapping,

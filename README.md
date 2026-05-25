@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Status](https://img.shields.io/badge/status-phase%203%20complete-orange.svg)](#project-status)
+[![Status](https://img.shields.io/badge/status-phase%205%20complete-orange.svg)](#project-status)
 [![Spec](https://img.shields.io/badge/spec-DIDComm%20v2.1-informational.svg)](https://identity.foundation/didcomm-messaging/spec/v2.1)
 
 A spec-complete .NET 10 implementation of **DIDComm Messaging v2.1** — the [DIF](https://identity.foundation/) protocol for confidential, integrity-protected, optionally non-repudiable messaging between parties identified by Decentralized Identifiers (DIDs).
@@ -13,20 +13,23 @@ DID resolution is delegated to the sibling library [**NetDid**](https://github.c
 
 ## Project status
 
-**Phases 0 – 3 complete.** The library has a public Pack/Unpack surface
-(`DidCommClient`), DID resolution via [NetDid 1.3.0](https://github.com/moisesja/net-did),
+**Phases 0 – 5 complete.** The library has a public Pack / Unpack / Send
+surface (`DidCommClient`), DID resolution via [NetDid 1.3.0](https://github.com/moisesja/net-did),
 a consumer-supplied `ISecretsResolver` contract, the three protective envelope
 shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
 consistency including the FR-CONSIST-06 resolver-backed authorization check,
-and DID rotation via `from_prior`. The DIDComm v2.1 Appendix C inbound interop
+DID rotation via `from_prior`, Routing Protocol 2.0 (sender forward wrapping
++ mediator relay + rewrapping), and the HTTPS / WebSocket transports plus the
+ASP.NET Core receive endpoint. The DIDComm v2.1 Appendix C inbound interop
 gate passes for every vendored vector.
 
 Shipped highlights:
 
 - **Public facade** — `services.AddDidComm(b => …)` →
-  `Pack{Plaintext,Signed,Encrypted}Async` + `UnpackAsync`. Auto-detects
-  envelope shape on unpack, enforces FR-API-05 (`expires_time`) and FR-API-06
-  (`MaxReceiveBytes`), surfaces FR-API-04 metadata on every unpack.
+  `Pack{Plaintext,Signed,Encrypted}Async` + `UnpackAsync` + `SendAsync`.
+  Auto-detects envelope shape on unpack, enforces FR-API-05 (`expires_time`)
+  and FR-API-06 (`MaxReceiveBytes`), surfaces FR-API-04 metadata on every
+  unpack.
 - **DID resolution** via the `NetDidKeyService` adapter over net-did
   (`did:key`, `did:peer`); JWK + Multikey verification methods both supported;
   `did:web` deliberately refused at every entry point with
@@ -34,12 +37,29 @@ Shipped highlights:
 - **DID rotation** — `Message.FromPrior` carries a JWT validated against the
   prior DID's `authentication` relationship; FR-ROT-03 enforced (rotation
   messages MUST be encrypted).
+- **Routing & mediation** — `PackEncryptedAsync(... Forward: true)` resolves
+  the recipient's `DIDCommMessaging` service (object / array-of-objects /
+  opt-in DD-10 bare-string), implicitly prepends mediator `keyAgreement`
+  keys (FR-ROUTE-04), reverse-order anoncrypt-wraps a `forward` per routing
+  key, and surfaces the transport URI on `PackEncryptedResult.ServiceEndpoint`.
+  `ForwardProcessor` handles the mediator side with optional rewrapping
+  (FR-ROUTE-05/06).
+- **Transports** — `DidCommClient.SendAsync(...)` packs and dispatches via an
+  `ITransportRouter`. `DidComm.Transports.Http` ships a Polly-backed HTTPS
+  sender (FR-TRN-04..08); `DidComm.Transports.WebSocket` ships a one-message-
+  per-envelope WS sender with connection pool + exponential reconnect
+  (FR-TRN-09..11). `DidComm.AspNetCore` provides
+  `MapDidCommEndpoint` / `MapDidCommWebSocket` minimal-API extensions —
+  `Content-Type` validation ⇒ 415, `MaxReceiveBytes` ⇒ 413 / 1009
+  (FR-TRN-07 + FR-API-06).
 - **Cookbook** — runnable, narrated samples for the PRD §14.2 API tasks the
-  shipped surface covers: **K** (unpack metadata), **N** (rotation), **AA**
-  (net-did integration + did:web rejection). Build the project and
+  shipped surface covers: **K** (unpack metadata), **N** (rotation), **O**
+  (routing via a mediator), **P** (send over a transport), **Q** (receive
+  over HTTP), **R** (receive over WebSocket), **AA** (net-did integration
+  + did:web rejection). Build the project and
   `dotnet run --project samples/02-Cookbook` to see end-to-end output.
 
-300 unit + 31 interop tests pass under `warnaserror`. See
+364 unit + 63 interop tests pass under `warnaserror`. See
 [CHANGELOG.md](CHANGELOG.md) for the per-phase log, the
 [PRD](docs/didcomm-dotnet_PRD.md) for normative requirements
 (the six-phase plan is §12), and the [roadmap](#roadmap) below for status at a
@@ -73,17 +93,18 @@ The conformance gate is the spec's own Appendix C test vectors plus a live cross
 
 | Package | Responsibility |
 |---|---|
-| `DidComm.Core` | Message model; JWE/JWS envelopes; pack/unpack facade; `IDidKeyService` + `NetDidKeyService` resolver adapter; `ISecretsResolver` contract; `from_prior` rotation; typed exception hierarchy |
-| `DidComm.Extensions.DependencyInjection` | `IServiceCollection.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver<T>().Configure(...))`; FR-SEC-02 fail-fast on missing registrations |
+| `DidComm.Core` | Message model; JWE/JWS envelopes; pack/unpack/send facade; `IDidKeyService` + `NetDidKeyService` resolver adapter; `ISecretsResolver` contract; `from_prior` rotation; Routing Protocol 2.0 (forward wrapping + mediator processing + service-endpoint resolution); transport abstractions (`IDidCommTransport`, `ITransportRouter`); typed exception hierarchy |
+| `DidComm.Extensions.DependencyInjection` | `IServiceCollection.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver<T>().UseHttpTransport().UseWebSocketTransport().Configure(...))`; FR-SEC-02 fail-fast on missing registrations |
 | `DidComm.Adapters.NetDid` | Optional bridge from `NetDid.Core.IKeyStore` → `ISecretsResolver` (FR-SEC-04, SHOULD); documented scope (sign-side surface only — see class XML doc) |
+| `DidComm.Transports.Http` | HTTPS sender (FR-TRN-04..08): `IHttpClientFactory`-backed POST, manual 307 follow + 301/308 refusal, Polly retry / circuit-breaker / timeout |
+| `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events |
+| `DidComm.AspNetCore` | Minimal-API extensions: `MapDidCommEndpoint` (HTTP receive, FR-TRN-07) and `MapDidCommWebSocket` (WS receive with frame reassembly, FR-TRN-09/10); `MaxReceiveBytes` ⇒ 413 / 1009 (FR-API-06) |
 | `DidComm.TestSupport` *(non-shipped helper)* | `InMemorySecretsResolver` for tests and samples — deliberately kept out of `DidComm.Core` per DD-02 |
 
 ### Planned (later phases)
 
 | Package | Phase | Responsibility |
 |---|---|---|
-| `DidComm.Transports.Http` | 5 | HTTPS send + ASP.NET Core receive endpoint |
-| `DidComm.Transports.WebSocket` | 5 | WebSocket send/receive, connection lifecycle |
 | `DidComm.Protocols.TrustPing` | 6 | Trust Ping 2.0 |
 | `DidComm.Protocols.DiscoverFeatures` | 6 | Discover Features 2.0 |
 | `DidComm.Protocols.ReportProblem` | 6 | Report Problem 2.0 helpers + problem-code taxonomy |
@@ -102,10 +123,11 @@ The signatures below are what ships today in `DidComm.Core` +
 // The facade — DidComm.Facade.DidCommClient
 public sealed class DidCommClient
 {
-    public Task<string>       PackPlaintextAsync(Message m,                              CancellationToken ct = default);
-    public Task<string>       PackSignedAsync(Message m, string signFrom,                CancellationToken ct = default);
-    public Task<string>       PackEncryptedAsync(Message m, PackEncryptedOptions opts,   CancellationToken ct = default);
-    public Task<UnpackResult> UnpackAsync(string packed,                                 CancellationToken ct = default);
+    public Task<string>              PackPlaintextAsync(Message m,                              CancellationToken ct = default);
+    public Task<string>              PackSignedAsync(Message m, string signFrom,                CancellationToken ct = default);
+    public Task<PackEncryptedResult> PackEncryptedAsync(Message m, PackEncryptedOptions opts,   CancellationToken ct = default);
+    public Task<SendResult>          SendAsync(Message m, SendOptions opts,                     CancellationToken ct = default);
+    public Task<UnpackResult>        UnpackAsync(string packed,                                 CancellationToken ct = default);
 }
 
 // DID resolution adapter — DidComm.Resolution
@@ -123,19 +145,33 @@ public interface ISecretsResolver
     Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids,  CancellationToken ct = default);
 }
 
+// Transport binding (Phase 5) — DidComm.Transports
+public interface IDidCommTransport
+{
+    string                Scheme { get; }
+    bool                  CanHandle(Uri endpoint);
+    Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct);
+}
+
 // DI wiring — DidComm.Extensions.DependencyInjection
 services.AddDidComm(b =>
 {
     b.UseNetDidResolver();                     // did:key + did:peer via net-did
     b.UseSecretsResolver<MyVaultResolver>();   // FR-SEC-02 fail-fast if absent
+    b.UseHttpTransport();                      // FR-TRN-04..08 (Polly resilience)
+    b.UseWebSocketTransport();                 // FR-TRN-09..11
     b.Configure(o => o.MaxReceiveBytes = 1 * 1024 * 1024);
 });
 var client = sp.GetRequiredService<DidCommClient>();
+
+// Server side — DidComm.AspNetCore
+app.MapDidCommEndpoint("/didcomm",      async (unpacked, ct) => { /* host dispatch */ });
+app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispatch */ });
 ```
 
 The runnable [`samples/02-Cookbook`](samples/02-Cookbook/) project demonstrates
 each shipped API task — the README at that path documents the §14.2 letter
-mapping (currently K / N / AA for the Phase 3 increment).
+mapping (currently K, N, O, P, Q, R, AA through the Phase 5 increment).
 
 ## Specifications
 
@@ -158,8 +194,8 @@ didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PR
 | **1** | Message model, attachments, MTURI parsing, consistency-check functions | ✅ Complete |
 | **2** | Envelopes: Signed, Anoncrypt, Authcrypt — Appendix C interop gate | ✅ Complete |
 | **3** | Pack/Unpack facade, NetDid integration, secrets, DID rotation (+ Cookbook §14.2 K/N/AA) | ✅ Complete |
-| **4** | Routing & mediation (Forward protocol) | Not started |
-| **5** | Transports (HTTPS, WebSocket) | Not started |
+| **4** | Routing & mediation (Forward protocol, mediator-as-DID-endpoint, rewrapping) (+ Cookbook §14.2 O) | ✅ Complete |
+| **5** | Transports (HTTPS + ASP.NET Core receive, WebSocket) (+ Cookbook §14.2 P/Q/R) | ✅ Complete |
 | **6** | Protocols, OOB, threading, i18n, live interop harness, samples, release | Not started |
 
 The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, cross-implementation interop matrix passes (both inbound static vectors and live round-trip against SICPA Python/JVM/Rust), every public API member demonstrated by a runnable sample, and the README quickstart works unmodified.
@@ -169,20 +205,20 @@ The conformance bar is binary: `MUST` requirements implemented, full Appendix C 
 ```
 didcomm-dotnet/
 ├── src/
-│   ├── DidComm.Core/                              # message model, envelopes, facade, resolution, secrets, rotation
+│   ├── DidComm.Core/                              # message model, envelopes, facade, resolution, secrets, rotation, routing, transport abstractions
 │   ├── DidComm.Extensions.DependencyInjection/    # services.AddDidComm(b => …)
 │   ├── DidComm.Adapters.NetDid/                   # optional NetDid.IKeyStore → ISecretsResolver bridge
-│   ├── DidComm.Transports.Http/                   # (Phase 5)
-│   ├── DidComm.Transports.WebSocket/              # (Phase 5)
+│   ├── DidComm.Transports.Http/                   # Polly-backed HTTPS sender (FR-TRN-04..08)
+│   ├── DidComm.Transports.WebSocket/              # WebSocket sender with pool + reconnect (FR-TRN-09..11)
+│   ├── DidComm.AspNetCore/                        # MapDidCommEndpoint / MapDidCommWebSocket (FR-TRN-07/09/10)
 │   └── DidComm.Protocols.*/                       # (Phase 6)
 ├── tests/
-│   ├── DidComm.Core.Tests/                        # 300 unit tests
-│   ├── DidComm.InteropTests/                      # 31 cases: Appendix C vectors + Appendix B resolution + facade round-trip + rotation + Cookbook smoke
-│   ├── DidComm.TestSupport/                       # InMemorySecretsResolver helper (non-test library)
-│   └── DidComm.Transports.*.Tests/                # (Phase 5)
+│   ├── DidComm.Core.Tests/                        # 364 unit tests
+│   ├── DidComm.InteropTests/                      # 63 cases: Appendix C vectors + Appendix B resolution + facade round-trip + rotation + routing + transports + Cookbook smoke
+│   └── DidComm.TestSupport/                       # InMemorySecretsResolver helper (non-test library)
 ├── samples/
 │   ├── _shared/                                   # Narrator + PeerIdentityFactory (did:peer:2 via NetDid)
-│   └── 02-Cookbook/                               # PRD §14.2 sections K / N / AA today; grows with each phase
+│   └── 02-Cookbook/                               # PRD §14.2 sections K, N, O, P, Q, R, AA today; grows with each phase
 ├── docs/
 │   └── didcomm-dotnet_PRD.md                      # normative product requirements
 ├── tasks/                                         # phased todo files + lessons.md
