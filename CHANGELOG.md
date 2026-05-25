@@ -127,6 +127,35 @@ matching server side accepts them.
 - `samples/02-Cookbook/README.md` — table extended; expected-output sample
   refreshed with P/Q/R frames; section file list updated.
 
+### Fixed (Phase 5 review)
+
+- **WebSocket failures now surface as `TransportException` (FR-API-07).**
+  `WebSocketDidCommTransport.SendAsync` wraps an exhausted reconnect budget (and
+  any other transport-library failure) in `TransportException` — carrying the
+  scheme + inner exception via a new ctor overload — instead of leaking the raw
+  `WebSocketException` / `TimeoutException`. Caller-initiated cancellation still
+  propagates as `OperationCanceledException`.
+- **No socket leak on a failed WebSocket connect.** `GetOrConnectAsync` disposes
+  the nascent socket when the connect handshake throws or times out (previously
+  leaked once per failed reconnect attempt).
+- **Malformed `Content-Type` → 415, not 500.** `MapDidCommEndpoint` now treats a
+  `Content-Type` header that the media-type parser rejects as an unsupported
+  type rather than letting a `FormatException` escape as a 500.
+- **WebSocket lifecycle events `Disconnected` / `Reconnected` now fire.**
+  `Disconnected` on a dropped socket and on `DisposeAsync`; `Reconnected` when a
+  send succeeds after a prior failed attempt. Connect failures now also raise
+  `SendFailed`.
+- **Polly circuit-breaker no longer throws when `CircuitBreakerFailureThreshold`
+  is below 2** — clamped up to Polly's `MinimumThroughput` floor.
+- **Per-endpoint WebSocket connect locks** replace the single global semaphore so
+  connecting to one endpoint no longer blocks connects to another.
+- Removed the unused `WebSocketTransportOptions.Clock` knob and a dead
+  `TransportException → 502` branch on the HTTP receive path; the WebSocket
+  oversize close now uses `WebSocketCloseStatus.MessageTooBig` instead of a magic
+  `1009` cast; `DidCommReceiveOptions` reuses the `DidCommMediaTypes` constants.
+- WebSocket round-trip tests and Cookbook section R replaced fixed `Task.Delay`
+  drains with bounded polling to remove timing flakiness.
+
 ### Added — Phase 4 (Routing & Mediation)
 
 Closes PRD §12 Phase 4: FR-ROUTE-01..08. Sender-side `forward` wrapping,

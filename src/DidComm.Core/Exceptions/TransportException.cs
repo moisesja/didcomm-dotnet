@@ -34,4 +34,15 @@ public sealed class TransportException : DidCommException
         HttpStatusCode = httpStatusCode;
         Scheme = scheme;
     }
+
+    /// <summary>Initialize with HTTP-status / scheme context plus the underlying exception (used when wrapping a transport-library failure — e.g. an exhausted WebSocket reconnect budget, FR-TRN-11).</summary>
+    /// <param name="message">Human-readable failure reason.</param>
+    /// <param name="innerException">The underlying exception that triggered the failure.</param>
+    /// <param name="httpStatusCode">HTTP status that triggered the failure, or <c>null</c> for non-HTTP transports.</param>
+    /// <param name="scheme">Scheme of the offending URI (e.g. <c>"https"</c>, <c>"wss"</c>), or <c>null</c> when unknown.</param>
+    public TransportException(string message, Exception innerException, int? httpStatusCode, string? scheme) : base(message, innerException)
+    {
+        HttpStatusCode = httpStatusCode;
+        Scheme = scheme;
+    }
 }

@@ -63,6 +63,25 @@ public sealed class AspNetCoreReceiveRoundTripTests
     }
 
     [Fact]
+    public async Task Returns_415_when_content_type_is_malformed()
+    {
+        var (server, _) = await BuildServerAsync();
+
+        using var client = server.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/didcomm")
+        {
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes("{}")),
+        };
+        // A malformed Content-Type (no "type/subtype") must answer 415, not surface a 500 from
+        // the media-type parser. TryAddWithoutValidation bypasses the client-side header check so
+        // the bad value actually reaches the endpoint.
+        request.Content.Headers.TryAddWithoutValidation("Content-Type", "not-a-valid-type");
+
+        var response = await client.SendAsync(request);
+        response.StatusCode.Should().Be(HttpStatusCode.UnsupportedMediaType);
+    }
+
+    [Fact]
     public async Task Returns_413_when_payload_exceeds_MaxReceiveBytes()
     {
         var (server, _) = await BuildServerAsync(opts => opts.MaxReceiveBytes = 64);

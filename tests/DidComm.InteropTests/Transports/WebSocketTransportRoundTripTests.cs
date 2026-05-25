@@ -35,7 +35,7 @@ public sealed class WebSocketTransportRoundTripTests
     {
         var (server, received) = await BuildServerAsync();
 
-        await SendFromAliceAsync(server, NewProposal());
+        await SendFromAliceAsync(server, NewProposal(), received);
 
         var unpacked = received.Single();
         unpacked.Message.From.Should().Be("did:example:alice");
@@ -81,8 +81,8 @@ public sealed class WebSocketTransportRoundTripTests
         }
         chunks.Should().BeGreaterOrEqualTo(3);
 
-        // Give the server a tick to process the message before closing.
-        await Task.Delay(50);
+        // Wait for the server to reassemble + dispatch before closing, rather than guessing a sleep.
+        await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(5));
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
 
         received.Should().HaveCount(1);
@@ -120,7 +120,7 @@ public sealed class WebSocketTransportRoundTripTests
         transport.CanHandle(new Uri("https://agents.r.us/inbox")).Should().BeFalse();
     }
 
-    private static async Task SendFromAliceAsync(TestServer server, Message message)
+    private static async Task SendFromAliceAsync(TestServer server, Message message, List<UnpackResult> received)
     {
         var actors = SpecActorRegistry.LoadDefault();
         var resolver = LoadResolver();
@@ -146,9 +146,16 @@ public sealed class WebSocketTransportRoundTripTests
             From: "did:example:alice",
             ServiceEndpointOverride: endpoint));
 
-        // Give the server a moment to drain before disposing the transport. The TestServer
-        // ReceiveAsync loop is otherwise raced by the dispose path which closes the socket.
-        await Task.Delay(50);
+        // Wait for the server to drain the message before disposing the transport (dispose closes
+        // the socket and would otherwise race the server's ReceiveAsync loop).
+        await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(5));
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (!condition() && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
     }
 
     private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(Action<DidCommOptions>? configureOptions = null)

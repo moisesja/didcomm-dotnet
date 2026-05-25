@@ -28,7 +28,9 @@ internal static class HttpResiliencePipelineFactory
                 .Handle<TimeoutRejectedException>()
                 .HandleResult(static r => IsTransient(r)),
             FailureRatio = 1.0,
-            MinimumThroughput = options.CircuitBreakerFailureThreshold,
+            // Polly requires MinimumThroughput >= 2; clamp so a small configured threshold can't
+            // throw a ValidationException at pipeline construction.
+            MinimumThroughput = Math.Max(2, options.CircuitBreakerFailureThreshold),
             BreakDuration = options.CircuitBreakerOpenDuration,
             // SamplingDuration must be >= 500 ms (Polly invariant) and is the rolling window
             // the failure ratio + minimum throughput are evaluated over. Use the break duration

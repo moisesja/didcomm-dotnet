@@ -14,8 +14,8 @@ public sealed class DidCommReceiveOptions
     /// </summary>
     public IReadOnlyList<string> AcceptedMediaTypes { get; set; } = new[]
     {
-        "application/didcomm-encrypted+json",
-        "application/didcomm-signed+json",
-        "application/didcomm-plain+json",
+        DidCommMediaTypes.Encrypted,
+        DidCommMediaTypes.Signed,
+        DidCommMediaTypes.Plain,
     };
 }

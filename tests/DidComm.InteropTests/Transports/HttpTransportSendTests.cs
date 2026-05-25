@@ -125,6 +125,18 @@ public sealed class HttpTransportSendTests
     }
 
     [Fact]
+    public void Ctor_does_not_throw_when_circuit_breaker_threshold_below_polly_minimum()
+    {
+        // Polly's MinimumThroughput floor is 2; a configured threshold of 1 must be clamped, not
+        // blow up the pipeline at construction.
+        var act = () => BuildTransport(
+            new StubHandler(_ => Respond(HttpStatusCode.OK)),
+            opts => opts.CircuitBreakerFailureThreshold = 1);
+
+        act.Should().NotThrow();
+    }
+
+    [Fact]
     public async Task SendAsync_sets_content_type_from_request_media_type()
     {
         HttpRequestMessage? captured = null;

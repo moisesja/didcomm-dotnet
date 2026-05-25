@@ -72,8 +72,11 @@ public static class Section_R_ReceiveWebSocket
         ctx.Narrator.Value("Accepted", sendResult.Transport.Accepted);
         ctx.Narrator.Value("TransportEndpoint", sendResult.EndpointUsed);
 
-        // Give the receive loop a tick to drain before reading the captured message.
-        await Task.Delay(50);
+        // Wait for the receive loop to drain before reading the captured message (rather than
+        // guessing a fixed sleep).
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (received.Count == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
         var bobMessage = received.Single();
         ctx.Narrator.Value("ContentReceivedByBob", bobMessage.Message.Body?["content"]?.GetValue<string>());
     }

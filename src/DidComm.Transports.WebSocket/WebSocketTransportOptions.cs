@@ -24,12 +24,6 @@ public sealed class WebSocketTransportOptions
     public IReadOnlyList<string> AllowedSchemes { get; set; } = new[] { "wss" };
 
     /// <summary>
-    /// Optional clock override used by the reconnect backoff for deterministic tests. <c>null</c>
-    /// ⇒ <see cref="DateTimeOffset.UtcNow"/>.
-    /// </summary>
-    public Func<DateTimeOffset>? Clock { get; set; }
-
-    /// <summary>
     /// Factory for the <see cref="System.Net.WebSockets.WebSocket"/> instance used per
     /// connection. Defaults to constructing a new <see cref="System.Net.WebSockets.ClientWebSocket"/>;
     /// tests substitute a TestServer-bound socket via this seam.

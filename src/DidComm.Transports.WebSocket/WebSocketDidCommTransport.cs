@@ -22,7 +22,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly ILogger<WebSocketDidCommTransport> _logger;
     private readonly ResiliencePipeline _reconnectPipeline;
     private readonly ConcurrentDictionary<string, System.Net.WebSockets.WebSocket> _pool = new(StringComparer.Ordinal);
-    private readonly SemaphoreSlim _connectLock = new(1, 1);
+    // One connect gate per pool key so establishing a connection to one endpoint doesn't block
+    // connects to a different endpoint.
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectLocks = new(StringComparer.Ordinal);
 
     /// <summary>Fires when the transport opens, closes, or fails to send (FR-TRN-11).</summary>
     public event EventHandler<WebSocketLifecycleEventArgs>? Lifecycle;
@@ -69,28 +71,68 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
 
         var key = PoolKey(request.Endpoint);
+        var attempt = 0;
 
-        await _reconnectPipeline.ExecuteAsync(async token =>
+        try
         {
-            var socket = await GetOrConnectAsync(key, request.Endpoint, token).ConfigureAwait(false);
-            try
+            await _reconnectPipeline.ExecuteAsync(async token =>
             {
-                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                sendCts.CancelAfter(_options.SendTimeout);
-                // FR-TRN-09: one logical WebSocket message per packed envelope. We always send
-                // the full buffer with EndOfMessage = true; receivers MUST loop until they see
-                // EndOfMessage to handle fragmentation at the wire layer.
-                await socket.SendAsync(request.Payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                // Drop the broken socket so the next attempt opens a fresh connection.
-                _pool.TryRemove(key, out _);
-                socket.Dispose();
-                RaiseLifecycle(WebSocketLifecycleEventKind.SendFailed, request.Endpoint, ex);
-                throw;
-            }
-        }, ct).ConfigureAwait(false);
+                // The reconnect pipeline runs attempts sequentially, so a plain counter is safe.
+                // attempt 0 is the first try; > 0 means this attempt is a recovery after a failure.
+                var isReconnect = attempt++ > 0;
+                System.Net.WebSockets.WebSocket socket;
+                try
+                {
+                    socket = await GetOrConnectAsync(key, request.Endpoint, token).ConfigureAwait(false);
+                    using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    sendCts.CancelAfter(_options.SendTimeout);
+                    // FR-TRN-09: one logical WebSocket message per packed envelope. We always send
+                    // the full buffer with EndOfMessage = true; receivers MUST loop until they see
+                    // EndOfMessage to handle fragmentation at the wire layer.
+                    await socket.SendAsync(request.Payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // Drop the broken socket so the next attempt opens a fresh connection. A socket
+                    // only lands in the pool once it has connected, so a non-null entry here means an
+                    // established connection was lost (Disconnected); a connect failure leaves the
+                    // pool empty and registers as SendFailed only.
+                    _pool.TryRemove(key, out var broken);
+                    if (broken is not null)
+                    {
+                        broken.Dispose();
+                        RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, request.Endpoint, ex);
+                    }
+                    RaiseLifecycle(WebSocketLifecycleEventKind.SendFailed, request.Endpoint, ex);
+                    throw;
+                }
+
+                if (isReconnect)
+                    RaiseLifecycle(WebSocketLifecycleEventKind.Reconnected, request.Endpoint);
+            }, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Caller-initiated cancellation is not a transport failure — let it propagate as-is.
+            throw;
+        }
+        catch (TransportException)
+        {
+            // Already classified (e.g. the scheme refusal above can't reach here, but a future
+            // inner throw might) — don't double-wrap.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // FR-TRN-11 / FR-API-07: surface an exhausted reconnect budget (or any other transport
+            // failure) as TransportException so callers pattern-match the category without depending
+            // on WebSocketException / TimeoutException specifics.
+            throw new TransportException(
+                $"WebSocket send to '{request.Endpoint}' failed after exhausting the reconnect budget ({_options.MaxReconnectAttempts} attempt(s)).",
+                ex,
+                httpStatusCode: null,
+                scheme: request.Endpoint.Scheme);
+        }
 
         return new TransportResult(Accepted: true, HttpStatusCode: null);
     }
@@ -100,7 +142,8 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         if (_pool.TryGetValue(key, out var existing) && existing.State == WebSocketState.Open)
             return existing;
 
-        await _connectLock.WaitAsync(ct).ConfigureAwait(false);
+        var gate = _connectLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             if (_pool.TryGetValue(key, out existing) && existing.State == WebSocketState.Open)
@@ -117,16 +160,26 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             var factory = _options.WebSocketFactory ?? (() => new ClientWebSocket());
             var connect = _options.Connect ?? DefaultConnect;
             var socket = factory();
-            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            connectCts.CancelAfter(_options.ConnectTimeout);
-            await connect(socket, endpoint, connectCts.Token).ConfigureAwait(false);
+            try
+            {
+                using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                connectCts.CancelAfter(_options.ConnectTimeout);
+                await connect(socket, endpoint, connectCts.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The nascent socket never entered the pool; dispose it so a failed (or timed-out)
+                // connect doesn't leak — significant under the reconnect retry loop.
+                socket.Dispose();
+                throw;
+            }
             _pool[key] = socket;
             RaiseLifecycle(WebSocketLifecycleEventKind.Connected, endpoint);
             return socket;
         }
         finally
         {
-            _connectLock.Release();
+            gate.Release();
         }
     }
 
@@ -182,7 +235,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        foreach (var (_, socket) in _pool)
+        foreach (var (key, socket) in _pool)
         {
             try
             {
@@ -196,9 +249,15 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             finally
             {
                 socket.Dispose();
+                // The pool key is a well-formed absolute URI string (see PoolKey); reconstruct it so
+                // observers see which endpoint just disconnected on a clean close.
+                if (Uri.TryCreate(key, UriKind.Absolute, out var endpoint))
+                    RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, endpoint);
             }
         }
         _pool.Clear();
-        _connectLock.Dispose();
+        foreach (var (_, gate) in _connectLocks)
+            gate.Dispose();
+        _connectLocks.Clear();
     }
 }

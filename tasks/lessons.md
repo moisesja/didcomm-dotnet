@@ -191,6 +191,27 @@ Format per entry:
   If a non-shared dep is genuinely needed (e.g. `Microsoft.Extensions.Http.Polly`),
   keep it; otherwise let the framework reference satisfy it.
 
+## L-013 — Wrap transport-library exceptions at the transport boundary, and clamp Polly option floors.
+
+- **Lesson:** A custom `IDidCommTransport` must convert library-specific failures
+  (`WebSocketException`, `TimeoutException`, exhausted Polly budget) into the
+  library's own `TransportException` before they escape — otherwise the FR-API-07
+  promise that callers pattern-match a single category silently breaks for one
+  transport while holding for another. The HTTP transport wrapped; the WebSocket
+  transport didn't, and the gap only showed on the failure path (happy-path tests
+  passed). Caller-initiated cancellation is the one exception to preserve as-is
+  (filter `when (ct.IsCancellationRequested)` and rethrow). Separately, Polly v8's
+  `CircuitBreakerStrategyOptions.MinimumThroughput` is `[Range(2, …)]`: feeding a
+  user-configured threshold straight through throws `ValidationException` at
+  construction when the value is 1 — clamp with `Math.Max(2, …)`.
+- **Why:** PR #7 review found WebSocket send failures leaking raw exceptions and a
+  sub-2 circuit-breaker threshold that would have thrown at startup.
+- **How to apply:** At every transport's public boundary, `try/catch` the library
+  call and rethrow as `TransportException(message, inner, httpStatusCode, scheme)`,
+  preserving cancellation. When forwarding numeric options into a third-party
+  policy library, check that library's documented range and clamp rather than
+  trusting the caller.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves

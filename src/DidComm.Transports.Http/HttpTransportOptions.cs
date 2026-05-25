@@ -16,7 +16,7 @@ public sealed class HttpTransportOptions
     /// <summary>Base delay for exponential backoff between retries. Defaults to 1 s; jittered ±50 % at runtime.</summary>
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(1);
 
-    /// <summary>Number of consecutive failures before the circuit opens. Defaults to 5.</summary>
+    /// <summary>Number of consecutive failures before the circuit opens. Defaults to 5. Values below 2 are clamped up to 2 (Polly's minimum throughput floor).</summary>
     public int CircuitBreakerFailureThreshold { get; set; } = 5;
 
     /// <summary>How long the circuit stays open after tripping. Defaults to 30 s.</summary>

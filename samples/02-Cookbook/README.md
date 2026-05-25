@@ -110,6 +110,7 @@ Identifiers change every run because three fresh `did:peer:2` identities are min
     Accepted = True
     TransportEndpoint = ws://localhost/ws/didcomm
     ContentReceivedByBob = Section R: bytes over WS.
+    note: Lifecycle: Disconnected → ws://localhost/ws/didcomm
 
 == Section AA — net-did integration & the did:web refusal ==
   • Implicit integration: every prior section resolved did:peer DIDs through this pipeline.

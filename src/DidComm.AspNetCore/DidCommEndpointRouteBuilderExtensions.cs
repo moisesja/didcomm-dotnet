@@ -48,7 +48,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             // types we know how to unpack. Mismatched → 415 (the standard HTTP code for an
             // unsupported request body shape).
             var contentType = httpContext.Request.ContentType;
-            if (contentType is null || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
+            if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
             {
                 return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
             }
@@ -84,10 +84,6 @@ public static class DidCommEndpointRouteBuilderExtensions
             catch (CryptoException ex)
             {
                 return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
-            }
-            catch (TransportException ex)
-            {
-                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status502BadGateway);
             }
 
             await onReceive(unpacked, httpContext.RequestAborted).ConfigureAwait(false);
@@ -162,7 +158,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     if (total > maxBytes)
                     {
                         // FR-API-06 + RFC 6455 §7.4.1 close code 1009 "Message Too Big".
-                        await socket.CloseAsync((WebSocketCloseStatus)1009, "payload too large", CancellationToken.None).ConfigureAwait(false);
+                        await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", CancellationToken.None).ConfigureAwait(false);
                         return;
                     }
                     ms.Write(buffer, 0, result.Count);
@@ -196,11 +192,21 @@ public static class DidCommEndpointRouteBuilderExtensions
     private static bool MatchesMediaType(string contentType, IReadOnlyList<string> accepted)
     {
         // ContentType can include parameters (e.g. "; charset=utf-8") — strip and compare the
-        // base media type only.
-        var parsed = new ContentType(contentType);
+        // base media type only. A malformed header throws FormatException; treat that as "no
+        // match" so the endpoint answers 415 rather than letting a 500 escape.
+        string? mediaType;
+        try
+        {
+            mediaType = new ContentType(contentType).MediaType;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
         foreach (var allowed in accepted)
         {
-            if (string.Equals(parsed.MediaType, allowed, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(mediaType, allowed, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
         return false;
