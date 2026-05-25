@@ -142,6 +142,76 @@ Format per entry:
   actually mention this case?". If not, leave it out. If a reference impl
   diverges, file an issue and pin the spec quote as the source of truth.
 
+## L-010 — Polly + HttpClient: build a fresh HttpRequestMessage on every retry attempt.
+
+- **Lesson:** When wrapping `HttpClient.SendAsync` in a Polly retry, the callback
+  MUST construct a new `HttpRequestMessage` on every attempt. `HttpClient` rejects
+  a request instance that has already been sent with `InvalidOperationException`
+  ("request has already been sent"), so the second retry crashes before it even
+  hits the wire. The `HttpContent` itself (e.g. `ByteArrayContent`) is replayable
+  but the message wrapper is one-shot.
+- **Why:** Phase 5 Checkpoint B's `HttpDidCommTransport` originally built one
+  `HttpRequestMessage` per redirect hop and replayed it inside the Polly callback.
+  The 200/202 happy path passed; the 5xx-retry test failed on attempt #2 with the
+  reuse exception. Moving `BuildRequest(...)` INSIDE the Polly callback fixed it.
+- **How to apply:** Any `ResiliencePipeline` (or generic retry wrapper) whose
+  callback hits `HttpClient.SendAsync` must construct the `HttpRequestMessage`
+  inside the callback, not before it.
+
+## L-011 — Polly `RetryStrategyOptions.MaxRetryAttempts` rejects 0; skip the strategy entirely.
+
+- **Lesson:** Polly v8's `RetryStrategyOptions.MaxRetryAttempts` is annotated
+  `[Range(1, int.MaxValue)]`. Setting it to `0` throws `ValidationException`
+  ("The 'RetryStrategyOptions<...>' are invalid"). To express "no retries",
+  the factory must omit `AddRetry(...)` from the pipeline builder altogether
+  rather than passing 0.
+- **Why:** Phase 5 Checkpoint C's TestServer round-trip configured the HTTP
+  transport with `MaxRetryAttempts = 0` to keep the test fast and deterministic;
+  the factory blew up during transport construction with the validation error
+  before any send ever happened.
+- **How to apply:** For any Polly options that expose `MaxRetryAttempts`,
+  `MinimumThroughput`, etc., guard the `AddXxx(...)` call with an `if (count > 0)`
+  rather than passing the zero down — Polly v8's validators are strict.
+
+## L-012 — Phase 5 csproj prune warnings: Microsoft.AspNetCore.App provides Extensions.* packages.
+
+- **Lesson:** When a test or app project declares
+  `<FrameworkReference Include="Microsoft.AspNetCore.App" />` for ASP.NET Core,
+  the shared framework already brings in `Microsoft.Extensions.DependencyInjection`,
+  `Microsoft.Extensions.Http`, `Microsoft.Extensions.Options`, etc. Explicit
+  `<PackageReference>` entries for those become unnecessary, and the .NET 9+ NuGet
+  pruning rules emit `NU1510` ("will not be pruned") — which `TreatWarningsAsErrors`
+  upgrades to a build failure.
+- **Why:** Phase 5 Checkpoint C's InteropTests pulled in
+  `Microsoft.Extensions.DependencyInjection` + `Microsoft.Extensions.Http`
+  explicitly, then added the shared framework reference for TestHost; the build
+  broke on the duplicate.
+- **How to apply:** Any project that adds the AspNetCore shared framework reference
+  must drop redundant `Microsoft.Extensions.*` package references at the same time.
+  If a non-shared dep is genuinely needed (e.g. `Microsoft.Extensions.Http.Polly`),
+  keep it; otherwise let the framework reference satisfy it.
+
+## L-013 — Wrap transport-library exceptions at the transport boundary, and clamp Polly option floors.
+
+- **Lesson:** A custom `IDidCommTransport` must convert library-specific failures
+  (`WebSocketException`, `TimeoutException`, exhausted Polly budget) into the
+  library's own `TransportException` before they escape — otherwise the FR-API-07
+  promise that callers pattern-match a single category silently breaks for one
+  transport while holding for another. The HTTP transport wrapped; the WebSocket
+  transport didn't, and the gap only showed on the failure path (happy-path tests
+  passed). Caller-initiated cancellation is the one exception to preserve as-is
+  (filter `when (ct.IsCancellationRequested)` and rethrow). Separately, Polly v8's
+  `CircuitBreakerStrategyOptions.MinimumThroughput` is `[Range(2, …)]`: feeding a
+  user-configured threshold straight through throws `ValidationException` at
+  construction when the value is 1 — clamp with `Math.Max(2, …)`.
+- **Why:** PR #7 review found WebSocket send failures leaking raw exceptions and a
+  sub-2 circuit-breaker threshold that would have thrown at startup.
+- **How to apply:** At every transport's public boundary, `try/catch` the library
+  call and rethrow as `TransportException(message, inner, httpStatusCode, scheme)`,
+  preserving cancellation. When forwarding numeric options into a third-party
+  policy library, check that library's documented range and clamp rather than
+  trusting the caller.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves

@@ -15,7 +15,7 @@
          ship. secp256k1 comes in transitively through NetDid.Core (no direct ref needed). -->
     <PackageVersion Include="NSec.Cryptography" Version="24.4.0" />
     <!-- ASP.NET Core (transports) -->
-    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.0-preview.1.25080.5" />
+    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.0-preview.1.25120.3" />
     <!-- Caching -->
     <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0-preview.1.25080.5" />
     <!-- Logging -->
@@ -24,6 +24,11 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0-preview.1.25080.5" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0-preview.1.25080.5" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.0-preview.1.25080.5" />
+    <!-- Resilience (retry + timeout + circuit-breaker) for the Phase 5 HTTPS + WebSocket
+         transports. Polly v8 is the .NET-idiomatic policy library and the user-confirmed
+         Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no
+         extra Microsoft.Extensions.Http.Polly / .Resilience wrapper needed. -->
+    <PackageVersion Include="Polly" Version="8.5.0" />
     <!-- OpenTelemetry (observability — NFR-04). 1.10.0 carries GHSA-8785-wc3w-h8q6
          and GHSA-g94r-2vxg-569j; 1.15.3 is the current patched line. -->
     <PackageVersion Include="OpenTelemetry.Api" Version="1.15.3" />

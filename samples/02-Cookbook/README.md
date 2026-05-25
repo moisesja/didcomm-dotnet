@@ -11,6 +11,9 @@ The cookbook will grow with each phase of the project. The table below names wha
 | **K** — Unpack and inspect metadata | After unpacking a packed message, what does the library tell you about it? Encrypted? Signed? Who sent it? Which key decrypted? Every field of `UnpackResult` is printed against a maximally-protective envelope so you can see how each flag corresponds to a layer. |
 | **N** — DID rotation via `from_prior` | How Alice changes the DID she identifies as without breaking Bob's trust: she signs a tiny `from_prior` JWT with a key her old DID had advertised, ships it inside her first message under the new DID, and Bob's unpack validates it automatically. Also shows the safety rule — rotation messages cannot be sent in the clear. |
 | **O** — Routing via a mediator | When a recipient publishes a `DIDCommMessaging` service with `routingKeys`, setting `Forward = true` on the pack call makes the library automatically: resolve the route, reverse-order anoncrypt-wrap a `forward` per routing key, and surface the transport URI on `PackEncryptedResult.ServiceEndpoint`. A mediator then unwraps the outer layer via `ForwardProcessor` and emits the onward payload — and Bob unpacks it as if no mediator had been involved. |
+| **P** — Send over a transport | The pack-then-route work is done; now the bytes go on the wire. `DidCommClient.SendAsync` packs (with `Forward = true` by default), reaches into the registered `ITransportRouter`, picks a transport whose `CanHandle` accepts the endpoint URI's scheme, and POSTs through it. The section uses an in-process `TestServer` as Bob's inbox so the example stays offline. |
+| **Q** — Receive over HTTP | The matching server side. `app.MapDidCommEndpoint("/didcomm", onReceive)` validates `Content-Type`, enforces `MaxReceiveBytes → 413`, unpacks via `DidCommClient.UnpackAsync`, hands the result to the inline `onReceive` delegate, and returns `202 Accepted`. The section also walks the 415 (wrong content type) and 413 (oversize body) negative cases. |
+| **R** — Receive / chat over WebSocket | One packed envelope per WebSocket *message* (FR-TRN-09). The server reassembles fragmented frames before unpacking; the receiver is one-way (the server doesn't send protocol replies on the same socket, FR-TRN-10). The section also subscribes to the transport's `Lifecycle` event so the reader sees `Connected`/`Disconnected` hooks fire. |
 | **AA** — net-did integration + `did:web` rejection | Implicitly, every section is using net-did to resolve DIDs. This section makes that explicit, and shows the deliberate exception: `did:web` is refused at every entry point because its trust model leaves it vulnerable to silent key substitution. Use `did:webvh` if you need a web-resolvable DID. |
 
 Cookbook letters come from the project's PRD §14.2, which is the master list of the API tasks the library must demonstrate. Sections A, B, and D–L map to earlier phases; sections O through BB land with Phase 4–6 (routing, transports, protocols). The PRD/FR cross-references live in each section's XML doc and the project CHANGELOG.
@@ -83,6 +86,32 @@ Identifiers change every run because three fresh `did:peer:2` identities are min
     From = did:peer:…   (= Alice)
     ContentMatched = Routed through the mediator.
 
+== Section P — Send over a transport (HTTP chosen by endpoint scheme) ==
+  • Alice picks SendAsync(...) and overrides the endpoint to point at Bob's in-process inbox.
+    TransportEndpoint = http://localhost/didcomm
+    HttpStatusCode = 202
+    Accepted = True
+    ContentReceivedByBob = Section P: bytes on the wire.
+
+== Section Q — Receive over HTTP (ASP.NET Core MapDidCommEndpoint) ==
+  • Alice POSTs the packed envelope with application/didcomm-encrypted+json.
+    Status = 202
+    From = did:peer:…   (= Alice)
+    Authenticated = True
+    Content = Section Q: receive side spotlight.
+  • Wrong Content-Type → 415 Unsupported Media Type.
+    Status = 415
+  • Body > MaxReceiveBytes → 413 Payload Too Large.
+    Status = 413
+
+== Section R — Receive over WebSocket (MapDidCommWebSocket + binary frames) ==
+  • Alice sends one envelope as a single binary WebSocket message.
+    note: Lifecycle: Connected → ws://localhost/ws/didcomm
+    Accepted = True
+    TransportEndpoint = ws://localhost/ws/didcomm
+    ContentReceivedByBob = Section R: bytes over WS.
+    note: Lifecycle: Disconnected → ws://localhost/ws/didcomm
+
 == Section AA — net-did integration & the did:web refusal ==
   • Implicit integration: every prior section resolved did:peer DIDs through this pipeline.
     Resolver = NetDidKeyService over CompositeDidResolver (did:key + did:peer)
@@ -99,6 +128,9 @@ Identifiers change every run because three fresh `did:peer:2` identities are min
 - [`Sections/Section_K_UnpackMetadata.cs`](Sections/Section_K_UnpackMetadata.cs)
 - [`Sections/Section_N_FromPriorRotation.cs`](Sections/Section_N_FromPriorRotation.cs)
 - [`Sections/Section_O_RoutingViaMediator.cs`](Sections/Section_O_RoutingViaMediator.cs)
+- [`Sections/Section_P_SendOverTransport.cs`](Sections/Section_P_SendOverTransport.cs)
+- [`Sections/Section_Q_ReceiveHttp.cs`](Sections/Section_Q_ReceiveHttp.cs)
+- [`Sections/Section_R_ReceiveWebSocket.cs`](Sections/Section_R_ReceiveWebSocket.cs)
 - [`Sections/Section_AA_NetDidAndDidWebRejection.cs`](Sections/Section_AA_NetDidAndDidWebRejection.cs)
 
 Shared helpers (`Narrator`, `PeerIdentityFactory`) live in [`../_shared/`](../_shared/) so future sample apps can reuse them.
