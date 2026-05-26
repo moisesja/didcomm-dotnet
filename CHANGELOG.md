@@ -6,6 +6,68 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 6.2c (Report Problem 2.0 + Trace 2.0 off-by-default)
+
+Closes PRD §12 Phase 6 partially: **FR-PROTO-07, FR-PROTO-08, FR-PROTO-09,
+FR-PROTO-10, FR-PROTO-11, FR-PROTO-11a**. Last of the three 6.2 sub-PRs —
+**every spec built-in protocol** is now shipped (TrustPing / DiscoverFeatures /
+Empty / ProblemReport / Trace).
+
+- **Report Problem 2.0** (`Protocols/ProblemReport/`):
+  - `ProblemCode` — typed taxonomy parser for `sorter.scope.descriptor[.sub…]`;
+    `IsError` / `IsWarning` / `IsProtocolScoped` / `IsMessageScoped` flags;
+    `StartsWith(prefix)` implements FR-PROTO-08 structural-prefix matching.
+  - `CommentInterpolator` — FR-PROTO-07 `{n}` interpolation, 1-based; missing
+    args render as `?`; unreferenced extras appended in a `[extra: …]` block;
+    `{{` / `}}` escape to literal braces.
+  - `ProblemReport` static API — `Create(...)` / `Escalate(...)` /
+    `ReadCode(...)` / `ReadComment(...)` / `ReadArgs(...)` / `RenderComment(...)`.
+    The single message type (`…/report-problem/2.0/problem-report`) plus the
+    cascade-stop code (`e.p.req.max-errors-exceeded`).
+  - `ProblemReportOptions.CascadeThreshold = 5` (matches `sicpa-dlab/didcomm-python`
+    per locked decision).
+  - `ProblemReportHandler` — increments `ThreadState.ErrorCount` on the
+    **failing thread (pthid)** for inbound errors, emits exactly one
+    `e.p.req.max-errors-exceeded` reply on threshold breach, then silently
+    ignores subsequent reports on the same `pthid` (FR-PROTO-10).
+- **Trace 2.0 — off-by-default** (`Protocols/Trace/`):
+  - `Trace` — protocol/header constants (`trace` header, `report_uri` / `trace_id` members).
+  - `TraceOptions.Validate()` — `Enabled = true` REQUIRES at least one entry in
+    `AllowedReportingUris` per FR-PROTO-11a's "explicitly configured safeguards";
+    throws `InvalidOperationException` at startup otherwise.
+  - `TraceObserver.ShouldReport(...)` — pure decision surface: returns `false`
+    unconditionally when the operator hasn't opted in; otherwise returns the
+    validated absolute report URI (allowlist gate + absolute-URI check).
+    HTTP POSTing is left to a future integration; the off-by-default guarantee
+    is the spec-mandated piece.
+  - `TraceObserver.BuildReportBody(...)` — minimal observed-metadata body for
+    consumers wiring up the POST themselves.
+- **`ProtocolContext.Threads`** — new field exposes `IThreadStateStore` to
+  handlers (so ProblemReport can resolve the failing-thread state by `pthid`,
+  not the report's own thread). Found via an integration test that exposed
+  a real bug in the original design.
+- **DI** (`DidCommBuilder`):
+  - `AddBuiltInProtocols()` now also registers `ProblemReportHandler` + binds
+    `ProblemReportOptions` via the standard Options pattern.
+  - `EnableTracing(Action<TraceOptions>)` — opt-in only; validates immediately
+    and registers `TraceOptions` as a singleton.
+- **Cookbook Section U** (Report Problem) — parses a structured code,
+  interpolates a `{n}` comment, escalates a warning to an error with preserved
+  scope, and trips the cascade guard in 3 packed messages. 14 sections total.
+- **Tests** (+57 unit, +5 interop, total **543 unit + 93 interop**):
+  - 18 `ProblemCode` cases (taxonomy parse, malformed-input rejection,
+    structural-prefix `StartsWith`, sorter/scope flags).
+  - 8 `CommentInterpolator` cases (spec example, missing args → `?`, extras
+    appended, brace escapes, unclosed-brace tolerance, non-positional
+    placeholder passthrough).
+  - 7 `ProblemReport` API tests.
+  - 7 `ProblemReportHandler` cases (incl. cascade trip + exactly-once + silent-after).
+  - 4 `TraceOptions` validation cases.
+  - 7 `TraceObserver` cases (default-off, allowlist match/miss, malformed/missing
+    header, non-absolute URI, body-builder metadata).
+  - 5 DI integration tests (incl. end-to-end cascade-guard trip over real
+    did:peer pack/unpack/dispatch).
+
 ### Added — Phase 6.2b (Discover Features 2.0 + custom-handler cookbook)
 
 Closes PRD §12 Phase 6 partially: **FR-PROTO-05** (Discover Features 2.0 with the

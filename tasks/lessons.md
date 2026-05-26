@@ -229,6 +229,30 @@ Format per entry:
   `DidComm.Profile.Profiles`) OR plan to ship a `using XxxConst = ...;` alias
   alongside every consumer. The earlier rename is cheap; the alias is forever.
 
+## L-018 — Pass the thread-state STORE to handlers, not just the per-message thread.
+
+- **Lesson:** When a protocol handler tracks state on a thread other than the
+  *current* message's thread, exposing only the dispatcher-resolved
+  `context.Thread` is not enough. The handler needs `IThreadStateStore` to
+  look up the right thread by id. Report Problem 2.0 is the canonical case:
+  the report itself is a top-level message (its own `thid` is a fresh UUID),
+  but the FAILING thread it tracks is named by `pthid`. Without store access,
+  the cascade guard's increment lands on the wrong thread state and never
+  trips, even though the per-test unit assertion looks green.
+- **Why:** Phase 6.2c's first integration test for the FR-PROTO-10 cascade
+  guard exposed this: the unit tests passed because they constructed a
+  ThreadState manually and mutated it directly; the integration test packed
+  three real ProblemReports, dispatched them, and the guard never tripped
+  because each report's `context.Thread` was a fresh state keyed off the
+  report's own UUID. Fix was to add `ProtocolContext.Threads` exposing
+  `IThreadStateStore` and have the handler use `context.Threads.GetOrCreate(message.Pthid)`.
+- **How to apply:** Whenever a handler's spec semantics talk about a thread
+  identified by a header OTHER than `thid` (e.g. `pthid` for ProblemReport,
+  OOB-invitation id for stitched response threads), reach for the store
+  directly. Add an integration test that round-trips multiple packed
+  messages — unit tests with hand-constructed state will silently lie about
+  the handler's real behavior.
+
 ## L-017 — DI factories that walk `IEnumerable<T>` can deadlock the graph.
 
 - **Lesson:** When a singleton's DI factory invokes `sp.GetServices<TInterface>()`

@@ -4,6 +4,7 @@ using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Protocols.Empty;
 using DidComm.Protocols.TrustPing;
+using DidComm.Threading;
 using FluentAssertions;
 using Xunit;
 
@@ -21,7 +22,7 @@ public sealed class DiscoverFeaturesHandlerTests
             m, Array.Empty<DidComm.Jose.EnvelopeKind>(),
             false, false, false, false, null, null, null, null, null, null,
             Array.Empty<string>(), null);
-        return new ProtocolContext(unpacked, new DidComm.Threading.ThreadState(m.Thid ?? m.Id), Client: null, options ?? new DidCommOptions());
+        return new ProtocolContext(unpacked, new DidComm.Threading.ThreadState(m.Thid ?? m.Id), new InMemoryThreadStateStore(), Client: null, options ?? new DidCommOptions());
     }
 
     private static (ProtocolHandlerRegistry registry, DiscoverFeaturesHandler handler) BuildHandler(params IFeatureProvider[] providers)

@@ -79,7 +79,7 @@ public sealed class ProtocolDispatcher
         }
 
         var thread = _threads.GetOrCreate(received.Message.Thid ?? received.Message.Id);
-        var context = new ProtocolContext(received, thread, client, options);
+        var context = new ProtocolContext(received, thread, _threads, client, options);
 
         var reply = await handler.HandleAsync(received.Message, context, ct).ConfigureAwait(false);
         if (reply is null)
