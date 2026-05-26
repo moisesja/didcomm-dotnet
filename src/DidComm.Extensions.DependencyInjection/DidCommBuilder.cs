@@ -1,4 +1,7 @@
 using DidComm.Facade;
+using DidComm.Protocols;
+using DidComm.Protocols.Empty;
+using DidComm.Protocols.TrustPing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Threading;
@@ -27,6 +30,51 @@ public sealed class DidCommBuilder
         // singleton seam to write to. Consumers can replace with a distributed store via
         // Services.Replace(...) when they scale horizontally.
         Services.TryAddSingleton<IThreadStateStore, InMemoryThreadStateStore>();
+        // Phase 6.2a: the protocol handler registry + dispatcher are part of every facade
+        // graph (FR-PROTO-03). The registry is built via a DI factory that walks every
+        // registered IProtocolHandler — so AddProtocol<T>() only needs to add the handler to
+        // the IServiceCollection, and first resolution of the singleton picks up everything
+        // registered before that point.
+        Services.TryAddSingleton<ProtocolHandlerRegistry>(sp =>
+        {
+            var registry = new ProtocolHandlerRegistry();
+            foreach (var handler in sp.GetServices<IProtocolHandler>())
+                registry.Register(handler);
+            return registry;
+        });
+        Services.TryAddSingleton<ProtocolDispatcher>();
+    }
+
+    /// <summary>
+    /// Register an <see cref="IProtocolHandler"/> singleton (FR-PROTO-03). Pulled into the
+    /// shared <see cref="ProtocolHandlerRegistry"/> the first time the registry is resolved.
+    /// Idempotent in the DI graph: calling <c>AddProtocol&lt;T&gt;()</c> twice still produces
+    /// exactly one <typeparamref name="T"/> instance and exactly one
+    /// <see cref="IProtocolHandler"/> entry.
+    /// </summary>
+    /// <typeparam name="T">A concrete <see cref="IProtocolHandler"/> with a public ctor resolvable from DI.</typeparam>
+    public DidCommBuilder AddProtocol<T>() where T : class, IProtocolHandler
+    {
+        Services.TryAddSingleton<T>();
+        // TryAddEnumerable de-dupes by ImplementationType; the typed factory below sets
+        // ImplementationType = typeof(T), so repeat AddProtocol<T>() calls are no-ops. The
+        // factory forwards to the singleton T registered above so the IEnumerable entry shares
+        // that single T instance instead of constructing a duplicate.
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IProtocolHandler, T>(sp => sp.GetRequiredService<T>()));
+        return this;
+    }
+
+    /// <summary>
+    /// Register the spec-defined built-in protocol handlers: Trust Ping 2.0 (FR-PROTO-04) and
+    /// Empty 1.0 (FR-PROTO-06). Phase 6.2b will add Discover Features; Phase 6.2c adds
+    /// Report Problem (always-on) and Trace (off by default).
+    /// </summary>
+    public DidCommBuilder AddBuiltInProtocols()
+    {
+        AddProtocol<TrustPingHandler>();
+        AddProtocol<EmptyHandler>();
+        return this;
     }
 
     /// <summary>

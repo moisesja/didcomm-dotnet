@@ -25,6 +25,14 @@ namespace DidComm.Messages;
 /// </remarks>
 public sealed class Message
 {
+    /// <summary>
+    /// Convenience factory that returns a <see cref="MessageBuilder"/> pre-seeded with the
+    /// Empty 1.0 message type (FR-PROTO-06: header-only envelope, typically carrying just an
+    /// <c>ack</c>). Equivalent to <c>new MessageBuilder().WithType("https://didcomm.org/empty/1.0/empty")</c>.
+    /// </summary>
+    public static MessageBuilder Empty()
+        => new MessageBuilder().WithType(Protocols.Empty.EmptyProtocol.MessageType);
+
     /// <summary>Message identifier (REQUIRED, FR-MSG-02). Lowercase, unreserved URI characters.</summary>
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;

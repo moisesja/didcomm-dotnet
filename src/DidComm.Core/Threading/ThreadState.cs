@@ -23,6 +23,14 @@ public sealed class ThreadState
     /// </summary>
     public IReadOnlyList<string>? AcceptLang { get; set; }
 
+    /// <summary>
+    /// Count of problem-reports produced on this thread. Used by the FR-PROTO-10 cascade
+    /// guard (Phase 6.2c) to emit <c>e.p.req.max-errors-exceeded</c> once the per-thread
+    /// threshold trips and then stop responding on the thread. Implementations / tests MAY
+    /// increment this directly.
+    /// </summary>
+    public int ErrorCount { get; set; }
+
     /// <summary>Construct empty state for <paramref name="thid"/>.</summary>
     /// <param name="thid">The thread id. Must be non-empty.</param>
     public ThreadState(string thid)
