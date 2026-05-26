@@ -312,19 +312,28 @@ public static class DidCommEndpointRouteBuilderExtensions
         ILogger? logger,
         CancellationToken ct)
     {
-        var to = inbound.Message.From;
-        var from = inbound.Message.To is { Count: > 0 } ? inbound.Message.To[0] : null;
-        if (string.IsNullOrEmpty(to) || string.IsNullOrEmpty(from))
+        // The handler owns identity selection (from/to); we only enforce what this socket
+        // dictates — see TryRouteSameSocketReply for the rules.
+        if (!TryRouteSameSocketReply(inbound, reply, out var from, out var peerDid, out var reason))
+        {
+            logger?.LogWarning("MapDidCommWebSocket: dropping same-socket reply — {Reason}", reason);
+            return false;
+        }
+
+        // Defense-in-depth advisory: reply.From should normally be one of the identities the
+        // inbound was addressed to. Log if not, but proceed — legitimate multi-DID setups may
+        // legitimately rebind on reply, and authcrypt will still bind the chosen sender key.
+        if (inbound.Message.To is { Count: > 0 } && !inbound.Message.To.Contains(from!, StringComparer.Ordinal))
         {
             logger?.LogWarning(
-                "MapDidCommWebSocket: dispatcher produced a reply for an envelope without round-trippable from/to; dropping.");
-            return false;
+                "MapDidCommWebSocket: handler reply.from '{From}' is not among inbound.to ({InboundTo}); delivering anyway, but this may indicate a misconfigured handler.",
+                from, string.Join(",", inbound.Message.To));
         }
 
         try
         {
             var packed = await client.PackEncryptedAsync(reply, new PackEncryptedOptions(
-                Recipients: new[] { to }, From: from), ct).ConfigureAwait(false);
+                Recipients: new[] { peerDid! }, From: from!), ct).ConfigureAwait(false);
             var bytes = System.Text.Encoding.UTF8.GetBytes(packed.Message);
             await socket.SendAsync(bytes, WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
             return true;
@@ -334,6 +343,54 @@ public static class DidCommEndpointRouteBuilderExtensions
             logger?.LogWarning(ex, "MapDidCommWebSocket: failed to deliver dispatcher reply on same socket.");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Decide whether a handler's reply can be delivered back on the SAME WebSocket as the
+    /// inbound envelope. The handler owns <c>from</c>/<c>to</c> selection — the only thing this
+    /// gate enforces is what the socket dictates: any envelope written here is consumed by the
+    /// inbound peer, so the reply MUST be addressed to that peer (otherwise we'd be writing
+    /// ciphertext the peer cannot decrypt onto its socket). Handlers fanning out to other
+    /// recipients must use <c>ProtocolContext.Client.SendAsync</c> (out-of-band per FR-TRN-10).
+    /// </summary>
+    /// <param name="inbound">The unpack result for the inbound envelope.</param>
+    /// <param name="reply">The handler-produced reply message.</param>
+    /// <param name="from">The sender DID to pack authcrypt as (<c>reply.From</c>) on success.</param>
+    /// <param name="peerDid">The single recipient DID to pack for (the inbound peer) on success.</param>
+    /// <param name="reason">Human-readable failure reason on rejection; <c>null</c> on success.</param>
+    /// <returns><c>true</c> when the reply is safe to deliver on this socket.</returns>
+    internal static bool TryRouteSameSocketReply(
+        UnpackResult inbound,
+        DidComm.Messages.Message reply,
+        out string? from,
+        out string? peerDid,
+        out string? reason)
+    {
+        ArgumentNullException.ThrowIfNull(inbound);
+        ArgumentNullException.ThrowIfNull(reply);
+        from = null;
+        peerDid = null;
+        reason = null;
+
+        if (string.IsNullOrEmpty(reply.From))
+        {
+            reason = "handler reply has no 'from'; cannot pack authcrypt for same-socket delivery.";
+            return false;
+        }
+        if (string.IsNullOrEmpty(inbound.Message.From))
+        {
+            reason = "inbound envelope has no 'from'; same-socket reply has no addressable peer.";
+            return false;
+        }
+        if (reply.To is null || !reply.To.Contains(inbound.Message.From, StringComparer.Ordinal))
+        {
+            reason = $"handler reply.to does not include the inbound peer '{inbound.Message.From}'; use ProtocolContext.Client.SendAsync for out-of-band recipients.";
+            return false;
+        }
+
+        from = reply.From;
+        peerDid = inbound.Message.From;
+        return true;
     }
 
     private static void LogOutcome(ILogger? logger, DispatchOutcome outcome, bool sameSocketDelivered)

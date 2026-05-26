@@ -251,7 +251,7 @@ Format per entry:
   `git show main:path`. To experiment with main's state: `git worktree add` it
   somewhere new, never overlay it on the current branch.
 
-## L-015 — Record-positional parameters use PascalCase, not the lowercase ctor convention.
+## L-017 — Record-positional parameters use PascalCase, not the lowercase ctor convention.
 
 - **Lesson:** When constructing a positional `record` (or `record class`) with named
   arguments, the parameter name in the call site MUST match the property name
