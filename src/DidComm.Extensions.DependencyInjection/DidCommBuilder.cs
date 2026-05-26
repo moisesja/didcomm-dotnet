@@ -1,5 +1,6 @@
 using DidComm.Facade;
 using DidComm.Protocols;
+using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Protocols.Empty;
 using DidComm.Protocols.TrustPing;
 using DidComm.Resolution;
@@ -66,14 +67,38 @@ public sealed class DidCommBuilder
     }
 
     /// <summary>
-    /// Register the spec-defined built-in protocol handlers: Trust Ping 2.0 (FR-PROTO-04) and
-    /// Empty 1.0 (FR-PROTO-06). Phase 6.2b will add Discover Features; Phase 6.2c adds
+    /// Register the spec-defined built-in protocol handlers: Trust Ping 2.0 (FR-PROTO-04),
+    /// Empty 1.0 (FR-PROTO-06), and Discover Features 2.0 (FR-PROTO-05) with its default
+    /// <see cref="IFeatureProvider"/>s for <c>protocol</c> (reflects the registry) and
+    /// <c>constraint</c> (advertises <c>max_receive_bytes</c>). Phase 6.2c will add
     /// Report Problem (always-on) and Trace (off by default).
     /// </summary>
     public DidCommBuilder AddBuiltInProtocols()
     {
         AddProtocol<TrustPingHandler>();
         AddProtocol<EmptyHandler>();
+        AddProtocol<DiscoverFeaturesHandler>();
+        // Default Discover Features providers — consumers add more (goal-codes, headers,
+        // custom constraints) via AddFeatureProvider<T>(). TryAddEnumerable de-dupes by
+        // ImplementationType so re-registration is a no-op.
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IFeatureProvider, ProtocolFeatureProvider>());
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IFeatureProvider, MaxReceiveBytesConstraintProvider>());
+        return this;
+    }
+
+    /// <summary>
+    /// Register an additional <see cref="IFeatureProvider"/> for Discover Features 2.0
+    /// (FR-PROTO-05). Useful for advertising goal-codes, custom headers, or app-specific
+    /// constraints. Idempotent in the DI graph: repeat registration of the same type is a no-op.
+    /// </summary>
+    /// <typeparam name="T">A concrete <see cref="IFeatureProvider"/> resolvable from DI.</typeparam>
+    public DidCommBuilder AddFeatureProvider<T>() where T : class, IFeatureProvider
+    {
+        Services.TryAddSingleton<T>();
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IFeatureProvider, T>(sp => sp.GetRequiredService<T>()));
         return this;
     }
 

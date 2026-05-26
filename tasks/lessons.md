@@ -229,6 +229,33 @@ Format per entry:
   `DidComm.Profile.Profiles`) OR plan to ship a `using XxxConst = ...;` alias
   alongside every consumer. The earlier rename is cheap; the alias is forever.
 
+## L-017 — DI factories that walk `IEnumerable<T>` can deadlock the graph.
+
+- **Lesson:** When a singleton's DI factory invokes `sp.GetServices<TInterface>()`
+  (or `GetService<IEnumerable<TInterface>>()`) and one of those services has a
+  ctor dependency that, transitively, depends on the singleton being built,
+  the .NET DI container will hang (or in some configurations throw a circular-
+  dependency exception). The cycle is invisible at registration time and only
+  surfaces on the first resolution. **Fix:** break the cycle by deferring one
+  side's resolution to call time — either inject `IServiceProvider` and resolve
+  inside the method that needs it, or hand out a `Lazy<T>`/`Func<T>` instead of
+  the resolved instance.
+- **Why:** Phase 6.2b's `ProtocolHandlerRegistry` singleton factory called
+  `sp.GetServices<IProtocolHandler>()`, which forced construction of
+  `DiscoverFeaturesHandler`. That handler depended on `IEnumerable<IFeatureProvider>`,
+  one of which (`ProtocolFeatureProvider`) had been written to take the
+  `ProtocolHandlerRegistry` directly. Result: `dotnet test` hung the testhost
+  for 5+ minutes with no diagnostic. Switching `ProtocolFeatureProvider`'s ctor
+  to take `IServiceProvider` and resolve the registry on demand via
+  `IServiceProvider.GetService(typeof(ProtocolHandlerRegistry))` broke the cycle.
+- **How to apply:** When a service participates in a DI graph that depends on
+  itself transitively — e.g. "a feature catalog that reads the catalog" or
+  "a router that depends on its own routes" — give that service a lazy / SP
+  handle, not the resolved instance. Note: `Microsoft.Extensions.DependencyInjection`
+  is a heavy package for `DidComm.Core`; use the BCL's
+  `IServiceProvider.GetService(Type)` to avoid adding the dep just for the
+  generic `GetRequiredService<T>` extension.
+
 ## L-016 — `git checkout main -- .` overwrites a feature branch's tracked edits silently.
 
 - **Lesson:** Mid-feature-branch, NEVER run `git checkout main -- .` (or its sibling

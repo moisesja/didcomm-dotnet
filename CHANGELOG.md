@@ -6,6 +6,53 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 6.2b (Discover Features 2.0 + custom-handler cookbook)
+
+Closes PRD §12 Phase 6 partially: **FR-PROTO-05** (Discover Features 2.0 with the
+`max_receive_bytes` constraint), and demonstrates **FR-PROTO-03**'s extension
+point with a one-file custom `IProtocolHandler` (`lets_do_lunch`).
+
+- **Discover Features 2.0** (`Protocols/DiscoverFeatures/`):
+  - `DiscoverFeatures` static API — `CreateQuery(from, to, queries…)`,
+    `CreateDisclose(from, to, thid, disclosures…)`, `ReadQueries(msg)`,
+    `ReadDisclosures(msg)`; spec constants for the four `feature-type` values
+    + the `max_receive_bytes` constraint id.
+  - `FeatureQuery` / `FeatureDisclosure` records (spec wire shape:
+    `feature-type` is hyphenated, `value` is omitted when null).
+  - `DiscoverFeaturesHandler` — routes each query to the matching
+    `IFeatureProvider`, concatenates disclosures, emits a single threaded
+    `disclose` reply. Unrecognized `feature-type`s are silently skipped;
+    empty disclosures are meaningful (not "unsupported").
+  - `FeatureMatch` — spec-conformant trailing-`*` prefix matching;
+    bare `*` matches everything; otherwise exact.
+  - `IFeatureProvider` extension point + two built-in providers:
+    `ProtocolFeatureProvider` (reflects the registry) and
+    `MaxReceiveBytesConstraintProvider` (advertises `DidCommOptions.MaxReceiveBytes`).
+- **DI** (`DidCommBuilder`):
+  - `AddBuiltInProtocols()` now also registers `DiscoverFeaturesHandler` + both
+    default `IFeatureProvider`s (via `TryAddEnumerable` so re-registration is a no-op).
+  - New `AddFeatureProvider<T>()` for consumers that want to expose goal-codes,
+    custom headers, or app-specific constraints.
+- **Cookbook**:
+  - **Section T** (Discover Features) — Alice queries `https://didcomm.org/*` +
+    `constraint:max_receive_bytes`; Bob's disclose reply lists all 3 built-in
+    PIURIs + the byte-cap value; narrator confirms `thid` matches.
+  - **Section X** (Custom IProtocolHandler) — a one-file `lets_do_lunch/1.0`
+    protocol shows the FR-PROTO-03 extension point: define a handler, register
+    via `ProtocolHandlerRegistry.Register(...)` (or `b.AddProtocol<T>()`), run
+    through the dispatcher.
+- **Tests** (+27 unit, +3 interop, total **486 unit + 88 interop** green):
+  - 8 `FeatureMatch` cases covering wildcard / prefix / exact / empty.
+  - 7 `DiscoverFeatures` static-API tests (CreateQuery/Disclose round-trip,
+    `feature-type` JSON name, optional `value` omission, malformed-entry tolerance).
+  - 9 `DiscoverFeaturesHandler` cases (wildcard match, prefix filter,
+    `max_receive_bytes` reflection of `DidCommOptions`, case-insensitive
+    `feature-type` matching, unrecognized type silently skipped, disclose-typed
+    inbound is terminal, anonymous query rejected).
+  - 3 DI-graph integration tests (`AddBuiltInProtocols` registers handler +
+    providers; full pack→unpack→dispatch round-trip lists all built-ins +
+    `max_receive_bytes`; `AddFeatureProvider<T>()` appends consumer providers).
+
 ### Added — Phase 6.2a (Protocol handler registry + TrustPing + Empty)
 
 Closes PRD §12 Phase 6 partially: **FR-PROTO-03..04, FR-PROTO-06**, runtime dispatch
