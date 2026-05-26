@@ -46,7 +46,9 @@ public static class Program
         await Section_Q_ReceiveHttp.RunAsync(ctx);
         await Section_R_ReceiveWebSocket.RunAsync(ctx);
         await Section_S_TrustPing.RunAsync(ctx);
+        await Section_T_DiscoverFeatures.RunAsync(ctx);
         await Section_W_EmptyMessage.RunAsync(ctx);
+        await Section_X_CustomHandler.RunAsync(ctx);
         await Section_AA_NetDidAndDidWebRejection.RunAsync(ctx);
         await Section_BB_ProfilesAndI18n.RunAsync(ctx);
     }
