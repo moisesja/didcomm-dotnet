@@ -16,6 +16,10 @@ namespace DidComm.Protocols.DiscoverFeatures;
 ///   <item><description>An empty disclosures array is meaningful and SHOULD be returned when queries
 ///     produced no matches — it asserts "no matches", not "Discover Features unsupported".</description></item>
 ///   <item><description>A <c>disclose</c>-typed inbound (the reply) is the terminal leaf; we never reply.</description></item>
+///   <item><description>For multi-recipient queries (the inbound <c>to</c> array has more than one
+///     entry — uncommon for Discover Features, which is point-to-point in practice), the reply's
+///     <c>from</c> is the first <c>to</c> entry. Single-recipient queries — the typical case —
+///     trivially round-trip.</description></item>
 /// </list>
 /// </para>
 /// </remarks>

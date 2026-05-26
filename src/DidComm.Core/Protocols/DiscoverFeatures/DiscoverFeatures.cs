@@ -118,10 +118,12 @@ public static class DiscoverFeatures
                 var item = node.Deserialize<T>(DidCommJson.Default);
                 if (item is not null) parsed.Add(item);
             }
-            catch (JsonException)
+            catch (Exception ex) when (ex is JsonException or NotSupportedException)
             {
                 // FR-PROTO-05: ignore unrecognized / malformed entries rather than fail the
                 // whole message — the spec wants Discover Features to be permissive.
+                // NotSupportedException covers shapes the serializer can't bind (e.g. a future
+                // feature record with a type the default options don't handle).
             }
         }
         return parsed;

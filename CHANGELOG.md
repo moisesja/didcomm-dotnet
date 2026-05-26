@@ -55,8 +55,6 @@ point with a one-file custom `IProtocolHandler` (`lets_do_lunch`).
 
 ### Added — Phase 6.2a (Protocol handler registry + TrustPing + Empty)
 
-### Added — Phase 6.2a (Protocol handler registry + TrustPing + Empty)
-
 Closes PRD §12 Phase 6 partially: **FR-PROTO-03..04, FR-PROTO-06**, runtime dispatch
 for FR-PROTO-01/02 (parser shipped earlier), and enforces **FR-THR-04 rule 2** at
 the dispatcher boundary plus defensive **rule 3** drop of peer rule-2 violations.
