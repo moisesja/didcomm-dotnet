@@ -306,6 +306,12 @@ public sealed class DidCommClient
                 throw new TransportException(
                     $"Resolved service endpoint is not an absolute URI: '{packed.ServiceEndpoint}' (FR-ROUTE-03).");
             }
+
+            // SSRF defense: this endpoint host came from the recipient's DID document and is
+            // therefore attacker-influenced. Reject private / loopback / metadata destinations
+            // before POSTing the packed envelope. The ServiceEndpointOverride branch above is
+            // caller-supplied and trusted, so it intentionally skips this gate.
+            new OutboundEndpointGuard(_options.OutboundEndpointPolicy).Validate(endpointUri);
         }
 
         var payload = Encoding.UTF8.GetBytes(packed.Message);

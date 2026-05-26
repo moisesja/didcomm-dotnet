@@ -6,6 +6,70 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security
+
+- **SSRF hardening for outbound sends** (`DidComm.Core/Transports/OutboundEndpointGuard.cs`,
+  `DidComm.Core/Transports/OutboundEndpointPolicy.cs`). A recipient's DID-document
+  `serviceEndpoint` host is attacker-influenced, so `DidCommClient.SendAsync` now rejects an
+  endpoint **resolved from a DID** that targets a private, loopback, link-local, unique-local,
+  CGNAT, or cloud-metadata (`169.254.169.254`) address before dispatching the packed envelope.
+  IPv4-mapped IPv6 addresses are unwrapped first so they cannot dodge the IPv4 rules.
+  - The HTTP transport enforces the same policy at TCP connect time via
+    `SocketsHttpHandler.ConnectCallback`, pinning every connection — including each manually
+    followed 307 redirect — to a vetted IP, which also defeats redirect-to-internal and DNS
+    rebinding.
+  - The WebSocket transport vets the host on its default connect path.
+  - Tunable via `DidCommOptions.OutboundEndpointPolicy` and each transport's
+    `OutboundEndpointPolicy` (`BlockPrivateNetworks` defaults to `true`, plus `AllowedHosts` and
+    `ResolveDnsNames`). A caller-supplied `SendOptions.ServiceEndpointOverride` is trusted and
+    intentionally bypasses the gate.
+
+### Added — Phase 6.1 (Threading, ACKs, Profiles, i18n)
+
+Closes PRD §12 Phase 6 partially: FR-THR-01..04 (the message-layer surface),
+FR-PROF-01/02, FR-I18N-01..03. Lays the message-model and DI foundation the
+Phase 6.2 protocol handlers need to honor `please_ack` / `ack` and to localize
+human-readable strings per thread.
+
+- **`Message` plaintext model** (`DidComm.Core/Messages/Message.cs`):
+  - `PleaseAck` (`please_ack`) — array of message ids to be acknowledged;
+    empty string `""` is the spec sentinel for "this current message".
+  - `Ack` (`ack`) — array of acknowledged message ids, oldest→newest.
+  - `Lang` (`lang`) — IANA language tag for the message's protocol-defined
+    human-readable fields (FR-I18N-03).
+  - `AcceptLang` (`accept-lang`) — ranked IANA codes the sender prefers on this
+    thread (FR-I18N-01/02). Spec name is hyphenated, not snake_case.
+  - `Validate()` enforces FR-THR-03 / FR-I18N-01/03 character constraints (with
+    the empty-string sentinel allowed in `please_ack`).
+- **`MessageBuilder`** gained `WithPleaseAck(...)`, `WithAck(...)`,
+  `WithLang(...)`, `WithAcceptLang(...)`.
+- **Threading types** (`DidComm.Core/Threading/`):
+  - `ThreadState` (`Thid`, `AcceptLang`) — per-thread mutable state record.
+  - `IThreadStateStore` + `InMemoryThreadStateStore` — thread-safe
+    `ConcurrentDictionary`-backed store. Registered as a singleton in
+    `DidCommBuilder` so FR-I18N-02 thread-scoped `accept-lang` persists across
+    pack/unpack while concurrent threads stay isolated.
+  - `AckLoopGuard` — pure predicates (`IsPureAck`, `RequestsAck`, `IsSafeToSend`)
+    that future protocol handlers consume to enforce FR-THR-04 (rule 2 today,
+    rules 1/3 wired in Phase 6.2 when handlers dispatch replies).
+- **Profile negotiation** (`DidComm.Core/Profiles/`):
+  - `Profiles` constants (`DidCommV2`, `DidCommAip1`, `DidCommAip2Env10`).
+  - `ProfileNegotiator.Choose(...)` / `IsSupported(...)` — case-insensitive,
+    whitespace-tolerant peer-`accept[]` selection (FR-PROF-01/02).
+- **Cookbook**:
+  - **Section M** (Threading & ACKs) — Alice asks for an ACK with
+    `WithPleaseAck`; Bob replies with a thread-correlated pure ACK; the
+    `IsSafeToSend` loop-trap is demonstrated.
+  - **Section BB** (Profiles & i18n) — `ProfileNegotiator` picks `didcomm/v2`
+    from a peer's `accept[]`; the chess example flows with `lang=fr` +
+    `accept-lang=[fr,en]`; thread-state isolation is asserted in narration.
+- **Tests** (+32, total 396 unit + 69 interop green):
+  - 9 round-trip / validation tests for the four new `Message` fields.
+  - 6 `InMemoryThreadStateStore` tests including the FR-I18N-02 cross-thread
+    isolation assertion.
+  - 8 `AckLoopGuard` tests covering pure-ACK detection and FR-THR-04 rule 2.
+  - 9 `ProfileNegotiator` tests (overlap, case, whitespace, null/empty edge cases).
+
 ### Added — Phase 5 (Transports)
 
 Closes PRD §12 Phase 5: FR-TRN-01..12 + the FR-API-06 transport (413) path.

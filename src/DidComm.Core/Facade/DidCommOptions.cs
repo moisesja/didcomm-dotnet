@@ -1,3 +1,5 @@
+using DidComm.Transports;
+
 namespace DidComm.Facade;
 
 /// <summary>
@@ -34,6 +36,14 @@ public sealed class DidCommOptions
     /// that still emit the legacy shape — and document why in the host application.
     /// </summary>
     public bool AllowBareStringServiceEndpoint { get; set; } = false;
+
+    /// <summary>
+    /// SSRF-defense policy applied by <c>SendAsync</c> to endpoints resolved from a recipient's DID
+    /// document (FR-SEC). Defaults to blocking private / loopback / link-local / metadata
+    /// destinations. A caller-supplied <c>SendOptions.ServiceEndpointOverride</c> is trusted and
+    /// bypasses this policy.
+    /// </summary>
+    public OutboundEndpointPolicy OutboundEndpointPolicy { get; set; } = new();
 
     /// <summary>Resolved clock helper.</summary>
     internal DateTimeOffset Now() => Clock?.Invoke() ?? DateTimeOffset.UtcNow;

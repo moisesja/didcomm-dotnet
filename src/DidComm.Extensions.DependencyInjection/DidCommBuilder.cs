@@ -1,6 +1,7 @@
 using DidComm.Facade;
 using DidComm.Resolution;
 using DidComm.Secrets;
+using DidComm.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NetDid.Extensions.DependencyInjection;
@@ -21,6 +22,11 @@ public sealed class DidCommBuilder
     {
         ArgumentNullException.ThrowIfNull(services);
         Services = services;
+        // Phase 6.1: every facade graph gets a process-local thread-state store by default so
+        // FR-I18N-02 (thread-scoped accept-lang) and FR-PROTO-10 (cascade guard) have a
+        // singleton seam to write to. Consumers can replace with a distributed store via
+        // Services.Replace(...) when they scale horizontally.
+        Services.TryAddSingleton<IThreadStateStore, InMemoryThreadStateStore>();
     }
 
     /// <summary>

@@ -21,6 +21,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly WebSocketTransportOptions _options;
     private readonly ILogger<WebSocketDidCommTransport> _logger;
     private readonly ResiliencePipeline _reconnectPipeline;
+    private readonly OutboundEndpointGuard _guard;
     private readonly ConcurrentDictionary<string, System.Net.WebSockets.WebSocket> _pool = new(StringComparer.Ordinal);
     // One connect gate per pool key so establishing a connection to one endpoint doesn't block
     // connects to a different endpoint.
@@ -40,6 +41,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         _options = options.Value;
         _logger = logger ?? NullLogger<WebSocketDidCommTransport>.Instance;
         _reconnectPipeline = BuildReconnectPipeline(_options);
+        _guard = new OutboundEndpointGuard(_options.OutboundEndpointPolicy);
     }
 
     /// <inheritdoc />
@@ -69,6 +71,12 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 httpStatusCode: null,
                 scheme: request.Endpoint.Scheme);
         }
+
+        // SSRF defense for the default connect path: reject private / loopback / metadata hosts
+        // before opening a socket. A custom Connect delegate (e.g. tests against an in-process
+        // TestServer) owns its own vetting, so the gate is skipped there.
+        if (_options.Connect is null)
+            _guard.Validate(request.Endpoint);
 
         var key = PoolKey(request.Endpoint);
         var attempt = 0;

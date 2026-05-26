@@ -212,6 +212,23 @@ Format per entry:
   policy library, check that library's documented range and clamp rather than
   trusting the caller.
 
+## L-014 — Namespace import shadows a same-named static class.
+
+- **Lesson:** When a static-constants class has the same name as the namespace
+  it lives in (e.g. `DidComm.Profiles.Profiles`), any consumer that writes
+  `using DidComm.Profiles;` loses the ability to refer to the class as
+  `Profiles` — the namespace import wins and `Profiles.DidCommV2` resolves to
+  `<consumer-namespace>.Profiles.DidCommV2`, which doesn't exist. Fix is a
+  `using ProfilesConst = DidComm.Profiles.Profiles;` alias at the top of the
+  consumer; the namespace-vs-class shadowing is silent until first compile.
+- **Why:** Phase 6.1 added `DidComm.Profiles.Profiles` and the
+  `ProfileNegotiatorTests` + the cookbook `Section_BB_ProfilesAndI18n` both
+  failed `CS0234` on `Profiles.DidCommV2` until aliased.
+- **How to apply:** When naming a static-constants/holder class, prefer
+  pluralizing the namespace (e.g. namespace `DidComm.Profile`, class
+  `DidComm.Profile.Profiles`) OR plan to ship a `using XxxConst = ...;` alias
+  alongside every consumer. The earlier rename is cheap; the alias is forever.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves
@@ -235,3 +252,23 @@ Format per entry:
   reference impl (askar-crypto, didcomm-rust, didcomm-python) and tag the fixture's
   provenance in a code comment. Treat the spec vector as the authority; treat my
   round-trip as a smoke test.
+
+## L-015 — Validate DID-derived URLs before egress; the serviceEndpoint host is attacker-controlled.
+
+- **Lesson:** Any URL that originates from a resolved DID document (`serviceEndpoint.uri`,
+  routing endpoints) is untrusted input. Before the library makes an outbound request to it,
+  reject private / loopback / link-local / unique-local / CGNAT / cloud-metadata
+  (`169.254.169.254`) destinations by default. Caller-supplied values
+  (`SendOptions.ServiceEndpointOverride`) are trusted, like a CLI flag, and may bypass the check.
+- **Why:** A full-repo security review found a HIGH-confidence SSRF: `ServiceEndpointParser`
+  accepted any `uri` string with no host/scheme validation, and it flowed through
+  `DidCommClient.SendAsync` straight into an outbound HTTP/WebSocket POST. With self-asserted
+  `did:key`/`did:peer`, an attacker hands the victim a DID whose endpoint is
+  `https://169.254.169.254/...` and the victim's server makes the request. The 307-redirect path
+  only re-checked the scheme, not the host.
+- **How to apply:** Two enforcement points are needed, not one. (1) A pre-send check on the
+  resolved URI catches the obvious case. (2) Connect-time validation that pins the socket to a
+  vetted IP (HTTP `SocketsHttpHandler.ConnectCallback`) is what actually defeats 307-redirect-to-
+  internal and DNS rebinding — a resolve-then-connect check has a TOCTOU gap. Also unwrap
+  IPv4-mapped IPv6 (`::ffff:a.b.c.d`) before classifying, and block if ANY resolved address is
+  private. Put the IP classifier behind an injectable DNS seam so it unit-tests offline.

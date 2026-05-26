@@ -1,3 +1,5 @@
+using DidComm.Transports;
+
 namespace DidComm.Transports.Http;
 
 /// <summary>
@@ -31,4 +33,12 @@ public sealed class HttpTransportOptions
 
     /// <summary>Max number of 307 redirects to follow before throwing. Defaults to 5.</summary>
     public int MaxRedirectHops { get; set; } = 5;
+
+    /// <summary>
+    /// SSRF-defense policy enforced at TCP connect time (via the named client's
+    /// <c>SocketsHttpHandler.ConnectCallback</c>). Because it pins each connection — including every
+    /// followed 307 redirect — to a vetted IP, it also defeats redirect-to-internal and DNS
+    /// rebinding. Defaults to blocking private / loopback / link-local / metadata destinations.
+    /// </summary>
+    public OutboundEndpointPolicy OutboundEndpointPolicy { get; set; } = new();
 }

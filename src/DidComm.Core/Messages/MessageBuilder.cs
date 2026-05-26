@@ -130,6 +130,51 @@ public sealed class MessageBuilder
     }
 
     /// <summary>
+    /// Set <see cref="Message.PleaseAck"/> with one or more message-id references. Use the
+    /// empty string to mean "ack the current message" per the FR-THR-03 sentinel; call with no
+    /// arguments to request an ACK of just this message.
+    /// </summary>
+    /// <param name="messageIds">Message ids to be acknowledged. Empty argument list ≡ <c>[""]</c>.</param>
+    public MessageBuilder WithPleaseAck(params string[] messageIds)
+    {
+        _message.PleaseAck = messageIds is { Length: > 0 } ? messageIds.ToList() : new List<string> { string.Empty };
+        return this;
+    }
+
+    /// <summary>
+    /// Set <see cref="Message.Ack"/> with one or more message-id references (oldest→newest).
+    /// </summary>
+    /// <param name="messageIds">Message ids being acknowledged.</param>
+    public MessageBuilder WithAck(params string[] messageIds)
+    {
+        ArgumentNullException.ThrowIfNull(messageIds);
+        if (messageIds.Length == 0)
+            throw new ArgumentException("At least one message id is required for ack.", nameof(messageIds));
+        _message.Ack = messageIds.ToList();
+        return this;
+    }
+
+    /// <summary>Set <see cref="Message.Lang"/> (FR-I18N-03).</summary>
+    /// <param name="lang">An IANA language tag, e.g. <c>"fr"</c> or <c>"en-GB"</c>.</param>
+    public MessageBuilder WithLang(string lang)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(lang);
+        _message.Lang = lang;
+        return this;
+    }
+
+    /// <summary>Set <see cref="Message.AcceptLang"/> with the ranked language preferences (FR-I18N-01/02).</summary>
+    /// <param name="rankedLangs">Ranked IANA language codes, most-preferred first.</param>
+    public MessageBuilder WithAcceptLang(params string[] rankedLangs)
+    {
+        ArgumentNullException.ThrowIfNull(rankedLangs);
+        if (rankedLangs.Length == 0)
+            throw new ArgumentException("At least one language tag is required.", nameof(rankedLangs));
+        _message.AcceptLang = rankedLangs.ToList();
+        return this;
+    }
+
+    /// <summary>
     /// Finalize the message: populate <c>id</c> via the generator if not explicitly set, then
     /// run <see cref="Message.Validate"/> so the returned instance is guaranteed structurally
     /// valid.

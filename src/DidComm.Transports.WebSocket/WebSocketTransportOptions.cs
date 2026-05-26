@@ -1,3 +1,5 @@
+using DidComm.Transports;
+
 namespace DidComm.Transports.WebSocket;
 
 /// <summary>
@@ -36,4 +38,12 @@ public sealed class WebSocketTransportOptions
     /// tests substitute a TestServer-handshake variant.
     /// </summary>
     public Func<System.Net.WebSockets.WebSocket, Uri, CancellationToken, Task>? Connect { get; set; }
+
+    /// <summary>
+    /// SSRF-defense policy applied before the default connect path opens a socket. Defaults to
+    /// blocking private / loopback / link-local / metadata destinations. Skipped when a custom
+    /// <see cref="Connect"/> delegate is supplied (the host then owns connection vetting — used by
+    /// tests against an in-process TestServer).
+    /// </summary>
+    public OutboundEndpointPolicy OutboundEndpointPolicy { get; set; } = new();
 }
