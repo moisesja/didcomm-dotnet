@@ -18,4 +18,13 @@ public sealed class DidCommReceiveOptions
         DidCommMediaTypes.Signed,
         DidCommMediaTypes.Plain,
     };
+
+    /// <summary>
+    /// When the registry-aware <c>MapDidCommWebSocket</c> overload's dispatcher produces a
+    /// reply (e.g. a Trust Ping response), should it be sent back over the SAME WebSocket the
+    /// inbound message arrived on? Defaults to <c>false</c>: DIDComm is one-way per FR-TRN-10
+    /// and replies travel out of band by default. Operators that want the in-band convenience
+    /// (e.g. chat samples) set this to <c>true</c> per endpoint.
+    /// </summary>
+    public bool AllowSameSocketReplies { get; set; }
 }

@@ -6,6 +6,44 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 6.2a (Protocol handler registry + TrustPing + Empty)
+
+Closes PRD §12 Phase 6 partially: **FR-PROTO-03..04, FR-PROTO-06**, runtime dispatch
+for FR-PROTO-01/02 (parser shipped earlier), and enforces **FR-THR-04 rule 2** at
+the dispatcher boundary plus defensive **rule 3** drop of peer rule-2 violations.
+
+- **`IProtocolHandler` + dispatch framework** (`DidComm.Core/Protocols/`):
+  - `IProtocolHandler` — `ProtocolUri` + `HandleAsync(Message, ProtocolContext, ct)` returning an optional reply.
+  - `ProtocolIdentifier` — PIURI parser (`<doc-uri>/<protocol-name>/<major.minor>`) mirroring `MessageTypeUri`.
+  - `ProtocolHandlerRegistry` — case- and punctuation-insensitive PIURI lookup (FR-PROTO-01) with the older-minor-wins interop floor (FR-PROTO-02). Thread-safe; intended as a singleton.
+  - `ProtocolContext` — wraps `UnpackResult`, `ThreadState`, optional `DidCommClient`, and `DidCommOptions`.
+  - `ProtocolDispatcher` — orchestrates resolution → pre-filter (FR-THR-04 rule 3) → handler invocation → reply safety check (`AckLoopGuard.IsSafeToSend`, FR-THR-04 rule 2) → `DispatchOutcome` (NoHandler / NoReply / ReplyProduced / DroppedAsAckLoop).
+- **Trust Ping 2.0** (`Protocols/TrustPing/`):
+  - `TrustPing.CreatePing(from, to, responseRequested=true)`, `TrustPing.CreateResponse(ping)`, `TrustPing.IsResponseRequested(ping)` (default `true` when the body member is missing or non-boolean — matches `sicpa-dlab/didcomm-python`).
+  - `TrustPingHandler` auto-replies `ping-response` with `thid = ping.id`; suppresses reply when `response_requested = false`; never replies to a `ping-response` (terminal leaf).
+- **Empty 1.0** (`Protocols/Empty/`):
+  - `EmptyProtocol` constants + `EmptyHandler` (returns `null` reply — Empty is header-only).
+  - `Message.Empty()` static factory: pre-seeded `MessageBuilder` for the Empty 1.0 type.
+- **`ThreadState.ErrorCount`** added for the FR-PROTO-10 cascade guard (Phase 6.2c wires it).
+- **DI** (`DidCommBuilder`):
+  - `AddProtocol<T>()` registers an `IProtocolHandler` singleton.
+  - `AddBuiltInProtocols()` registers TrustPing + Empty.
+  - Registry built via a DI factory that walks every `IProtocolHandler` so order of `AddProtocol` calls doesn't matter.
+- **ASP.NET Core endpoint overloads** (`DidCommEndpointRouteBuilderExtensions`):
+  - `MapDidCommEndpoint(pattern)` — parameterless overload that dispatches each inbound through the registry; HTTP replies are LOGGED, not returned (FR-TRN-10 one-way).
+  - `MapDidCommWebSocket(pattern)` — same, with optional same-socket reply when `DidCommReceiveOptions.AllowSameSocketReplies = true` (default `false` per FR-TRN-10).
+- **Cookbook**:
+  - **Section S** (Trust Ping liveness) — Alice pings Bob; the dispatcher resolves `TrustPingHandler` and produces a reply with `thid = ping.id`; the response round-trips back.
+  - **Section W** (Empty 1.0 ACK) — Bob ACKs a prior message with `Message.Empty().WithAck(...)`; narration shows `AckLoopGuard.IsPureAck = true` and `IsSafeToSend = true`.
+- **Tests** (+26 unit, +2 interop, total **461 unit + 77 interop** green):
+  - 10 `ProtocolHandlerRegistry` tests (exact match, case/punctuation, older-minor-wins, malformed input, re-registration).
+  - 9 `ProtocolDispatcher` tests (no-handler, null/non-null reply, FR-THR-04 rules 2 + 3, thread-state passthrough, full TrustPing + Empty round-trips).
+  - 6 `TrustPing` static-API tests (`response_requested` parsing, response construction, validation).
+  - 4 `TrustPingHandler` tests (auto-reply, suppression, terminal-leaf, PIURI).
+  - 3 `EmptyHandler` tests (null reply, `Message.Empty()` factory, PIURI).
+  - 1 `ThreadState.ErrorCount` per-thread isolation test.
+  - 2 DI-graph integration tests (`AddBuiltInProtocols` populates the registry; end-to-end pack→unpack→dispatch round-trip for Trust Ping over real `did:peer` identities).
+
 ### Security
 
 - **SSRF hardening for outbound sends** (`DidComm.Core/Transports/OutboundEndpointGuard.cs`,

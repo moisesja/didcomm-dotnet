@@ -229,6 +229,44 @@ Format per entry:
   `DidComm.Profile.Profiles`) OR plan to ship a `using XxxConst = ...;` alias
   alongside every consumer. The earlier rename is cheap; the alias is forever.
 
+## L-016 — `git checkout main -- .` overwrites a feature branch's tracked edits silently.
+
+- **Lesson:** Mid-feature-branch, NEVER run `git checkout main -- .` (or its sibling
+  `git restore --source=main -- .`) to "see what main looks like" — the path-spec
+  form REPLACES the working-tree copy of every tracked file with main's version
+  WITHOUT touching untracked files and WITHOUT producing a "your changes will be
+  lost" warning. The only safe ways to compare against main mid-branch are
+  `git diff main`, `git show main:path/to/file`, or `git worktree add` of main into
+  a separate path.
+- **Why:** Phase 6.2a almost shipped without `Message.Empty()`, `ThreadState.ErrorCount`,
+  the DI registry factory, `AllowSameSocketReplies`, or any of the registry-aware
+  endpoint overloads — a single accidental `git checkout main -- .` invocation,
+  intended as an investigation step into a baseline test count, wiped out ~280 lines
+  of edited code across seven tracked files in one keystroke. The untracked new
+  source/test files survived (so the disaster was partially recoverable), and the
+  system-reminder tool surface flagged the silent file modifications fast enough
+  to re-apply the edits in ~5 minutes — but it could just as easily have shipped.
+- **How to apply:** Treat `git checkout <ref> -- <path>` as a DESTRUCTIVE operation,
+  exactly like `git reset --hard`. To diff against main: `git diff main -- path` or
+  `git show main:path`. To experiment with main's state: `git worktree add` it
+  somewhere new, never overlay it on the current branch.
+
+## L-015 — Record-positional parameters use PascalCase, not the lowercase ctor convention.
+
+- **Lesson:** When constructing a positional `record` (or `record class`) with named
+  arguments, the parameter name in the call site MUST match the property name
+  emitted by the record — which is the CAPITALIZED form even though the record's
+  declaration uses `lowercase` (the compiler synthesizes Pascal-cased properties
+  and the ctor parameter inherits the *property* name, not the declaration's
+  source spelling). Writing `new ProtocolContext(received, thread, client: x, options)`
+  fails CS1739 because the synthesized ctor parameter is `Client`, not `client`.
+- **Why:** Phase 6.2a's first dispatcher test pass tripped CS1739 on every record
+  construction site that used the lowercase form ergonomic of regular ctors. The
+  fix is mechanical (PascalCase the named arg) but easy to miss when the rest of
+  the codebase uses lowercase ctor params elsewhere.
+- **How to apply:** When building a positional record with named arguments, type
+  the property name (PascalCase), not the lowercase ctor-parameter spelling.
+
 ## L-005 — Self-round-trip tests do NOT prove spec interop for KDFs and serializers.
 
 - **Lesson:** A pack→unpack round-trip with my own code only proves the two halves

@@ -3,6 +3,7 @@ using System.Net.Mime;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
 using DidComm.Facade;
+using DidComm.Protocols;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -92,6 +93,71 @@ public static class DidCommEndpointRouteBuilderExtensions
     }
 
     /// <summary>
+    /// Registry-aware HTTP receive endpoint (FR-PROTO-03). Same shape as the
+    /// <c>onReceive</c>-callback overload (validates content-type → 415, caps body → 413,
+    /// returns 202 on success) but resolves the inbound message to a registered
+    /// <see cref="IProtocolHandler"/> via <see cref="ProtocolDispatcher"/>. Any reply the
+    /// handler produces is LOGGED (HTTP receive is one-way per FR-TRN-10) — operators that
+    /// want to deliver the reply schedule an outbound send out of band, typically using
+    /// <see cref="DidCommClient.SendAsync"/> from inside the handler itself.
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
+    public static IEndpointConventionBuilder MapDidCommEndpoint(
+        this IEndpointRouteBuilder endpoints,
+        string pattern)
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+        ArgumentException.ThrowIfNullOrEmpty(pattern);
+
+        return endpoints.MapPost(pattern, async (HttpContext httpContext) =>
+        {
+            var sp = httpContext.RequestServices;
+            var client = sp.GetRequiredService<DidCommClient>();
+            var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
+            var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
+            var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
+            var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Dispatch");
+
+            var contentType = httpContext.Request.ContentType;
+            if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
+                return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+
+            var maxBytes = coreOptions.MaxReceiveBytes;
+            if (httpContext.Request.ContentLength is long declared && declared > maxBytes)
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+
+            string body;
+            try
+            {
+                body = await ReadCappedAsync(httpContext.Request.Body, maxBytes, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (PayloadTooLargeException)
+            {
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+            }
+
+            UnpackResult unpacked;
+            try
+            {
+                unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (MalformedMessageException ex)
+            {
+                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+            catch (CryptoException ex)
+            {
+                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+            LogOutcome(logger, outcome, sameSocketDelivered: false);
+            return Results.StatusCode(StatusCodes.Status202Accepted);
+        });
+    }
+
+    /// <summary>
     /// Map a WebSocket endpoint that accepts DIDComm envelopes per FR-TRN-09 (one logical
     /// WebSocket message per packed envelope; multi-frame messages are reassembled before
     /// processing) and dispatches each to <paramref name="onReceive"/>. One-way per FR-TRN-10:
@@ -126,6 +192,170 @@ public static class DidCommEndpointRouteBuilderExtensions
 
             await ReceiveLoopAsync(socket, client, coreOptions, onReceive, logger, httpContext.RequestAborted).ConfigureAwait(false);
         });
+    }
+
+    /// <summary>
+    /// Registry-aware WebSocket overload (FR-PROTO-03). Same wire behavior as the inline-
+    /// callback overload (FR-TRN-09/10/API-06 enforced); each reassembled envelope is unpacked
+    /// and dispatched through <see cref="ProtocolDispatcher"/>. When the inbound endpoint's
+    /// <see cref="DidCommReceiveOptions.AllowSameSocketReplies"/> is <c>true</c>, any handler
+    /// reply is packed (authcrypt back to the original sender) and written on the same socket
+    /// as a single binary message — the chat-style convenience. Defaults to <c>false</c> per
+    /// FR-TRN-10's one-way reading.
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
+    public static IEndpointConventionBuilder MapDidCommWebSocket(
+        this IEndpointRouteBuilder endpoints,
+        string pattern)
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+        ArgumentException.ThrowIfNullOrEmpty(pattern);
+
+        return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
+        {
+            if (!httpContext.WebSockets.IsWebSocketRequest)
+            {
+                httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            var sp = httpContext.RequestServices;
+            var client = sp.GetRequiredService<DidCommClient>();
+            var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
+            var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
+            var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
+            var loggerFactory = sp.GetService<ILoggerFactory>();
+            var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
+
+            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, logger, httpContext.RequestAborted)
+                .ConfigureAwait(false);
+        });
+    }
+
+    private static async Task ReceiveLoopWithDispatchAsync(
+        System.Net.WebSockets.WebSocket socket,
+        DidCommClient client,
+        DidCommOptions coreOptions,
+        DidCommReceiveOptions receiveOptions,
+        ProtocolDispatcher dispatcher,
+        ILogger? logger,
+        CancellationToken ct)
+    {
+        var maxBytes = coreOptions.MaxReceiveBytes;
+        var buffer = ArrayPool<byte>.Shared.Rent(8192);
+        try
+        {
+            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
+            {
+                using var ms = new MemoryStream();
+                long total = 0;
+                WebSocketReceiveResult result;
+
+                do
+                {
+                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "client closed", CancellationToken.None).ConfigureAwait(false);
+                        return;
+                    }
+                    total += result.Count;
+                    if (total > maxBytes)
+                    {
+                        await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", CancellationToken.None).ConfigureAwait(false);
+                        return;
+                    }
+                    ms.Write(buffer, 0, result.Count);
+                }
+                while (!result.EndOfMessage);
+
+                var packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+
+                UnpackResult unpacked;
+                try
+                {
+                    unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
+                }
+                catch (MalformedMessageException ex)
+                {
+                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding malformed envelope");
+                    continue;
+                }
+                catch (CryptoException ex)
+                {
+                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding undecryptable envelope");
+                    continue;
+                }
+
+                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, ct).ConfigureAwait(false);
+                var delivered = false;
+                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: not null } && receiveOptions.AllowSameSocketReplies)
+                {
+                    delivered = await TrySendReplyOnSocketAsync(socket, client, unpacked, outcome.Reply, logger, ct).ConfigureAwait(false);
+                }
+                LogOutcome(logger, outcome, sameSocketDelivered: delivered);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static async Task<bool> TrySendReplyOnSocketAsync(
+        System.Net.WebSockets.WebSocket socket,
+        DidCommClient client,
+        UnpackResult inbound,
+        DidComm.Messages.Message reply,
+        ILogger? logger,
+        CancellationToken ct)
+    {
+        var to = inbound.Message.From;
+        var from = inbound.Message.To is { Count: > 0 } ? inbound.Message.To[0] : null;
+        if (string.IsNullOrEmpty(to) || string.IsNullOrEmpty(from))
+        {
+            logger?.LogWarning(
+                "MapDidCommWebSocket: dispatcher produced a reply for an envelope without round-trippable from/to; dropping.");
+            return false;
+        }
+
+        try
+        {
+            var packed = await client.PackEncryptedAsync(reply, new PackEncryptedOptions(
+                Recipients: new[] { to }, From: from), ct).ConfigureAwait(false);
+            var bytes = System.Text.Encoding.UTF8.GetBytes(packed.Message);
+            await socket.SendAsync(bytes, WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "MapDidCommWebSocket: failed to deliver dispatcher reply on same socket.");
+            return false;
+        }
+    }
+
+    private static void LogOutcome(ILogger? logger, DispatchOutcome outcome, bool sameSocketDelivered)
+    {
+        if (logger is null) return;
+        switch (outcome.Result)
+        {
+            case DispatchResult.ReplyProduced:
+                logger.LogInformation(
+                    "Protocol dispatch produced a reply (handler={Handler}, delivered-on-same-socket={Delivered}).",
+                    outcome.Handler?.ProtocolUri, sameSocketDelivered);
+                break;
+            case DispatchResult.NoReply:
+                logger.LogDebug("Protocol dispatch ran handler '{Handler}' which produced no reply.", outcome.Handler?.ProtocolUri);
+                break;
+            case DispatchResult.NoHandler:
+                logger.LogDebug("Protocol dispatch found no handler for inbound message.");
+                break;
+            case DispatchResult.DroppedAsAckLoop:
+                logger.LogWarning("Protocol dispatch dropped inbound pure-ACK that also requested an ACK (FR-THR-04 rule 3).");
+                break;
+        }
     }
 
     private static async Task ReceiveLoopAsync(

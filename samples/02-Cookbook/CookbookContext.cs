@@ -74,6 +74,10 @@ public sealed class CookbookContext : IAsyncDisposable
         {
             b.UseNetDidResolver();
             b.UseSecretsResolver(secrets);
+            // Phase 6.2a: register the spec built-in protocol handlers (Trust Ping + Empty
+            // today; Discover Features in 6.2b; Report Problem / Trace in 6.2c). Sections S/W
+            // rely on these being present.
+            b.AddBuiltInProtocols();
         });
 
         var sp = services.BuildServiceProvider();
