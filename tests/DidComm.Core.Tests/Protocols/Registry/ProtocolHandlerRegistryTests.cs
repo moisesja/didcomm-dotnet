@@ -107,6 +107,16 @@ public sealed class ProtocolHandlerRegistryTests
     }
 
     [Fact]
+    public void Register_rejects_PIURI_with_trailing_slash_doc_uri()
+    {
+        // Tightened FR-PROTO-01 parser: a docUri ending in '/' cannot smuggle an empty path
+        // segment ("https://didcomm.org//empty/1.0") past the regex.
+        var reg = new ProtocolHandlerRegistry();
+        Action act = () => reg.Register(new StaticHandler("https://didcomm.org//empty/1.0"));
+        act.Should().Throw<ArgumentException>().WithMessage("*FR-PROTO-01*");
+    }
+
+    [Fact]
     public void All_returns_every_registered_handler()
     {
         var reg = new ProtocolHandlerRegistry();

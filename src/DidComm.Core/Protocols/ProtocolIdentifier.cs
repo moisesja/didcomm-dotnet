@@ -17,7 +17,10 @@ public sealed partial record class ProtocolIdentifier(
     string ProtocolName,
     ProtocolVersion Version)
 {
-    [GeneratedRegex(@"^(?<docUri>.+?)/(?<protocol>[^/]+)/(?<version>\d+\.\d+)$", RegexOptions.Compiled)]
+    // Last char of docUri must NOT be '/': prevents accepting a malformed double-slash PIURI
+    // such as "https://didcomm.org//empty/1.0" (which a non-greedy `.+?` would otherwise allow
+    // with docUri = "https://didcomm.org/", silently smuggling an empty path segment).
+    [GeneratedRegex(@"^(?<docUri>.+?[^/])/(?<protocol>[^/]+)/(?<version>\d+\.\d+)$", RegexOptions.Compiled)]
     private static partial Regex PiuriRegex();
 
     /// <summary>Render as <c>doc-uri/protocol/major.minor</c>.</summary>

@@ -52,7 +52,7 @@ public sealed class ProtocolDispatcherTests
     public async Task No_handler_returns_NoHandler_outcome()
     {
         var dispatcher = new ProtocolDispatcher(new ProtocolHandlerRegistry(), new InMemoryThreadStateStore());
-        var result = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/x/1.0/msg")), client: null!, new DidCommOptions());
+        var result = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/x/1.0/msg")), client: null, new DidCommOptions());
         result.Result.Should().Be(DispatchResult.NoHandler);
         result.Reply.Should().BeNull();
         result.Handler.Should().BeNull();
@@ -66,7 +66,7 @@ public sealed class ProtocolDispatcherTests
         reg.Register(handler);
         var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
 
-        var result = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null!, new DidCommOptions());
+        var result = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null, new DidCommOptions());
         result.Result.Should().Be(DispatchResult.NoReply);
         handler.CallCount.Should().Be(1);
     }
@@ -80,7 +80,7 @@ public sealed class ProtocolDispatcherTests
         reg.Register(handler);
         var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
 
-        var result = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null!, new DidCommOptions());
+        var result = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null, new DidCommOptions());
         result.Result.Should().Be(DispatchResult.ReplyProduced);
         result.Reply.Should().BeSameAs(reply);
         result.Handler.Should().BeSameAs(handler);
@@ -98,7 +98,7 @@ public sealed class ProtocolDispatcherTests
         var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
 
         Func<Task> act = async () => await dispatcher.DispatchAsync(
-            Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null!, new DidCommOptions());
+            Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null, new DidCommOptions());
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*FR-THR-04*");
     }
 
@@ -114,7 +114,7 @@ public sealed class ProtocolDispatcherTests
         var loopTrap = Message.Empty().WithFrom("did:peer:alice").WithTo("did:peer:bob")
             .WithAck("prev-id").WithPleaseAck().Build();
 
-        var result = await dispatcher.DispatchAsync(Unpack(loopTrap), client: null!, new DidCommOptions());
+        var result = await dispatcher.DispatchAsync(Unpack(loopTrap), client: null, new DidCommOptions());
         result.Result.Should().Be(DispatchResult.DroppedAsAckLoop);
         handler.CallCount.Should().Be(0);
     }
@@ -130,7 +130,7 @@ public sealed class ProtocolDispatcherTests
 
         var msg = Msg("https://didcomm.org/test/1.0/m", id: "id-x");
         msg.Thid = "thread-7";
-        await dispatcher.DispatchAsync(Unpack(msg), client: null!, new DidCommOptions());
+        await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions());
 
         observed.Should().NotBeNull();
         observed!.Thid.Should().Be("thread-7");
@@ -145,7 +145,7 @@ public sealed class ProtocolDispatcherTests
         var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
 
         var ping = TrustPingApi.CreatePing(from: "did:peer:alice", to: "did:peer:bob");
-        var outcome = await dispatcher.DispatchAsync(Unpack(ping), client: null!, new DidCommOptions());
+        var outcome = await dispatcher.DispatchAsync(Unpack(ping), client: null, new DidCommOptions());
 
         outcome.Result.Should().Be(DispatchResult.ReplyProduced);
         outcome.Reply!.Type.Should().Be(TrustPingApi.ResponseType);
@@ -162,7 +162,7 @@ public sealed class ProtocolDispatcherTests
         var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
 
         var empty = Message.Empty().WithFrom("did:peer:alice").WithTo("did:peer:bob").WithAck("prev").Build();
-        var outcome = await dispatcher.DispatchAsync(Unpack(empty), client: null!, new DidCommOptions());
+        var outcome = await dispatcher.DispatchAsync(Unpack(empty), client: null, new DidCommOptions());
         outcome.Result.Should().Be(DispatchResult.NoReply);
         outcome.Handler.Should().BeOfType<EmptyHandler>();
     }

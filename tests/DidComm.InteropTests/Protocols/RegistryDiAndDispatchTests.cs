@@ -40,6 +40,26 @@ public sealed class RegistryDiAndDispatchTests
     }
 
     [Fact]
+    public void AddProtocol_called_twice_for_same_type_registers_a_single_shared_instance()
+    {
+        // AddProtocol<T> is idempotent in the DI graph: a repeated registration is a no-op,
+        // and the typed singleton + the IEnumerable<IProtocolHandler> entry share one instance.
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.AddProtocol<TrustPingHandler>();
+            b.AddProtocol<TrustPingHandler>(); // intentional double-register
+        });
+        using var sp = services.BuildServiceProvider();
+
+        var allTrustPing = sp.GetServices<IProtocolHandler>().OfType<TrustPingHandler>().ToList();
+        allTrustPing.Should().HaveCount(1);
+        sp.GetRequiredService<TrustPingHandler>().Should().BeSameAs(allTrustPing[0]);
+    }
+
+    [Fact]
     public async Task End_to_end_pack_unpack_dispatch_replies_to_trust_ping()
     {
         var services = new ServiceCollection();

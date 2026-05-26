@@ -19,6 +19,19 @@ namespace DidComm.Protocols;
 /// DI graph), so they MUST be thread-safe: avoid mutable fields, push per-thread state to the
 /// <see cref="ProtocolContext.Thread"/> store.
 /// </para>
+/// <para>
+/// <strong>Trust model.</strong> Handlers are on the trust path. The dispatcher invokes
+/// <see cref="HandleAsync"/> only after the envelope's cryptographic guarantees are verified
+/// (authcrypt sender identity, signature, FR-CONSIST-* addressing checks), so a handler can
+/// rely on <see cref="ProtocolContext.Received"/> for authenticated metadata. The dispatcher
+/// does NOT, however, second-guess the <c>from</c>/<c>to</c> a handler picks for its reply —
+/// handlers own outgoing identity selection. Be deliberate: whatever DID a handler puts in
+/// <c>reply.From</c> becomes the message's authenticated sender as far as the receiver is
+/// concerned. The same-socket WebSocket reply path adds a separate transport gate (the reply
+/// MUST be addressed to the inbound peer — see
+/// <c>DidCommEndpointRouteBuilderExtensions.MapDidCommWebSocket</c>), but that is a delivery
+/// constraint, not an identity-binding policy.
+/// </para>
 /// </remarks>
 public interface IProtocolHandler
 {

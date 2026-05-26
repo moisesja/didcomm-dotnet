@@ -48,12 +48,20 @@ public sealed class DidCommBuilder
     /// <summary>
     /// Register an <see cref="IProtocolHandler"/> singleton (FR-PROTO-03). Pulled into the
     /// shared <see cref="ProtocolHandlerRegistry"/> the first time the registry is resolved.
+    /// Idempotent in the DI graph: calling <c>AddProtocol&lt;T&gt;()</c> twice still produces
+    /// exactly one <typeparamref name="T"/> instance and exactly one
+    /// <see cref="IProtocolHandler"/> entry.
     /// </summary>
     /// <typeparam name="T">A concrete <see cref="IProtocolHandler"/> with a public ctor resolvable from DI.</typeparam>
     public DidCommBuilder AddProtocol<T>() where T : class, IProtocolHandler
     {
-        Services.AddSingleton<T>();
-        Services.AddSingleton<IProtocolHandler>(sp => sp.GetRequiredService<T>());
+        Services.TryAddSingleton<T>();
+        // TryAddEnumerable de-dupes by ImplementationType; the typed factory below sets
+        // ImplementationType = typeof(T), so repeat AddProtocol<T>() calls are no-ops. The
+        // factory forwards to the singleton T registered above so the IEnumerable entry shares
+        // that single T instance instead of constructing a duplicate.
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IProtocolHandler, T>(sp => sp.GetRequiredService<T>()));
         return this;
     }
 

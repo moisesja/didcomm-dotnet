@@ -151,7 +151,26 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
             }
 
-            var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+            DispatchOutcome outcome;
+            try
+            {
+                outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // FR-THR-04 rule 2 violation by a handler (a bug): surface as 500 with a clear
+                // detail rather than letting it bubble out as an opaque unhandled exception.
+                logger?.LogWarning(ex, "MapDidCommEndpoint: handler bug (FR-THR-04 rule 2); responding 500.");
+                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Handlers are application code; an unexpected throw is a server error, not a
+                // protocol error. Map to 500 so the inbound peer learns we couldn't process it
+                // without leaking the inner exception type.
+                logger?.LogError(ex, "MapDidCommEndpoint: handler threw an unhandled exception; responding 500.");
+                return Results.Problem(detail: "Handler failed; see server logs.", statusCode: StatusCodes.Status500InternalServerError);
+            }
             LogOutcome(logger, outcome, sameSocketDelivered: false);
             return Results.StatusCode(StatusCodes.Status202Accepted);
         });
@@ -289,7 +308,27 @@ public static class DidCommEndpointRouteBuilderExtensions
                     continue;
                 }
 
-                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, ct).ConfigureAwait(false);
+                DispatchOutcome outcome;
+                try
+                {
+                    outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, ct).ConfigureAwait(false);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // FR-THR-04 rule 2 violation in a handler (a bug). Don't tear down the
+                    // socket — log and keep serving the connection so a buggy protocol doesn't
+                    // poison every other protocol sharing the connection.
+                    logger?.LogWarning(ex, "MapDidCommWebSocket: handler bug (FR-THR-04 rule 2); dropping inbound and continuing.");
+                    continue;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Same posture as above for any other handler-thrown exception: log + keep
+                    // the connection alive. Cancellation propagates so the loop can exit cleanly.
+                    logger?.LogError(ex, "MapDidCommWebSocket: handler threw an unhandled exception; dropping inbound and continuing.");
+                    continue;
+                }
+
                 var delivered = false;
                 if (outcome is { Result: DispatchResult.ReplyProduced, Reply: not null } && receiveOptions.AllowSameSocketReplies)
                 {
