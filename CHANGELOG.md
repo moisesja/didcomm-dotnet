@@ -6,6 +6,24 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security
+
+- **SSRF hardening for outbound sends** (`DidComm.Core/Transports/OutboundEndpointGuard.cs`,
+  `DidComm.Core/Transports/OutboundEndpointPolicy.cs`). A recipient's DID-document
+  `serviceEndpoint` host is attacker-influenced, so `DidCommClient.SendAsync` now rejects an
+  endpoint **resolved from a DID** that targets a private, loopback, link-local, unique-local,
+  CGNAT, or cloud-metadata (`169.254.169.254`) address before dispatching the packed envelope.
+  IPv4-mapped IPv6 addresses are unwrapped first so they cannot dodge the IPv4 rules.
+  - The HTTP transport enforces the same policy at TCP connect time via
+    `SocketsHttpHandler.ConnectCallback`, pinning every connection — including each manually
+    followed 307 redirect — to a vetted IP, which also defeats redirect-to-internal and DNS
+    rebinding.
+  - The WebSocket transport vets the host on its default connect path.
+  - Tunable via `DidCommOptions.OutboundEndpointPolicy` and each transport's
+    `OutboundEndpointPolicy` (`BlockPrivateNetworks` defaults to `true`, plus `AllowedHosts` and
+    `ResolveDnsNames`). A caller-supplied `SendOptions.ServiceEndpointOverride` is trusted and
+    intentionally bypasses the gate.
+
 ### Added — Phase 6.1 (Threading, ACKs, Profiles, i18n)
 
 Closes PRD §12 Phase 6 partially: FR-THR-01..04 (the message-layer surface),

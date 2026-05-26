@@ -252,3 +252,23 @@ Format per entry:
   reference impl (askar-crypto, didcomm-rust, didcomm-python) and tag the fixture's
   provenance in a code comment. Treat the spec vector as the authority; treat my
   round-trip as a smoke test.
+
+## L-015 — Validate DID-derived URLs before egress; the serviceEndpoint host is attacker-controlled.
+
+- **Lesson:** Any URL that originates from a resolved DID document (`serviceEndpoint.uri`,
+  routing endpoints) is untrusted input. Before the library makes an outbound request to it,
+  reject private / loopback / link-local / unique-local / CGNAT / cloud-metadata
+  (`169.254.169.254`) destinations by default. Caller-supplied values
+  (`SendOptions.ServiceEndpointOverride`) are trusted, like a CLI flag, and may bypass the check.
+- **Why:** A full-repo security review found a HIGH-confidence SSRF: `ServiceEndpointParser`
+  accepted any `uri` string with no host/scheme validation, and it flowed through
+  `DidCommClient.SendAsync` straight into an outbound HTTP/WebSocket POST. With self-asserted
+  `did:key`/`did:peer`, an attacker hands the victim a DID whose endpoint is
+  `https://169.254.169.254/...` and the victim's server makes the request. The 307-redirect path
+  only re-checked the scheme, not the host.
+- **How to apply:** Two enforcement points are needed, not one. (1) A pre-send check on the
+  resolved URI catches the obvious case. (2) Connect-time validation that pins the socket to a
+  vetted IP (HTTP `SocketsHttpHandler.ConnectCallback`) is what actually defeats 307-redirect-to-
+  internal and DNS rebinding — a resolve-then-connect check has a TOCTOU gap. Also unwrap
+  IPv4-mapped IPv6 (`::ffff:a.b.c.d`) before classifying, and block if ANY resolved address is
+  private. Put the IP classifier behind an injectable DNS seam so it unit-tests offline.
