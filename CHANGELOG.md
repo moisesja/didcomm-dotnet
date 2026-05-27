@@ -6,6 +6,128 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 6.2c (Report Problem 2.0 + Trace 2.0 off-by-default)
+
+Closes PRD §12 Phase 6 partially: **FR-PROTO-07, FR-PROTO-08, FR-PROTO-09,
+FR-PROTO-10, FR-PROTO-11, FR-PROTO-11a**. Last of the three 6.2 sub-PRs —
+**every spec built-in protocol** is now shipped (TrustPing / DiscoverFeatures /
+Empty / ProblemReport / Trace).
+
+- **Report Problem 2.0** (`Protocols/ProblemReport/`):
+  - `ProblemCode` — typed taxonomy parser for `sorter.scope.descriptor[.sub…]`;
+    `IsError` / `IsWarning` / `IsProtocolScoped` / `IsMessageScoped` flags;
+    `StartsWith(prefix)` implements FR-PROTO-08 structural-prefix matching.
+  - `CommentInterpolator` — FR-PROTO-07 `{n}` interpolation, 1-based; missing
+    args render as `?`; unreferenced extras appended in a `[extra: …]` block;
+    `{{` / `}}` escape to literal braces.
+  - `ProblemReport` static API — `Create(...)` / `Escalate(...)` /
+    `ReadCode(...)` / `ReadComment(...)` / `ReadArgs(...)` / `RenderComment(...)`.
+    The single message type (`…/report-problem/2.0/problem-report`) plus the
+    cascade-stop code (`e.p.req.max-errors-exceeded`).
+  - `ProblemReportOptions.CascadeThreshold = 5` (matches `sicpa-dlab/didcomm-python`
+    per locked decision).
+  - `ProblemReportHandler` — increments `ThreadState.ErrorCount` on the
+    **failing thread (pthid)** for inbound errors, emits exactly one
+    `e.p.req.max-errors-exceeded` reply on threshold breach, then silently
+    ignores subsequent reports on the same `pthid` (FR-PROTO-10).
+- **Trace 2.0 — off-by-default** (`Protocols/Trace/`):
+  - `Trace` — protocol/header constants (`trace` header, `report_uri` / `trace_id` members).
+  - `TraceOptions.Validate()` — `Enabled = true` REQUIRES at least one entry in
+    `AllowedReportingUris` per FR-PROTO-11a's "explicitly configured safeguards";
+    throws `InvalidOperationException` at startup otherwise.
+  - `TraceObserver.ShouldReport(...)` — pure decision surface: returns `false`
+    unconditionally when the operator hasn't opted in; otherwise returns the
+    validated absolute report URI (allowlist gate + absolute-URI check).
+    HTTP POSTing is left to a future integration; the off-by-default guarantee
+    is the spec-mandated piece.
+  - `TraceObserver.BuildReportBody(...)` — minimal observed-metadata body for
+    consumers wiring up the POST themselves.
+- **`ProtocolContext.Threads`** — new field exposes `IThreadStateStore` to
+  handlers (so ProblemReport can resolve the failing-thread state by `pthid`,
+  not the report's own thread). Found via an integration test that exposed
+  a real bug in the original design.
+- **DI** (`DidCommBuilder`):
+  - `AddBuiltInProtocols()` now also registers `ProblemReportHandler` + binds
+    `ProblemReportOptions` via the standard Options pattern.
+  - `EnableTracing(Action<TraceOptions>)` — opt-in only; validates immediately
+    and registers `TraceOptions` as a singleton.
+- **Cookbook Section U** (Report Problem) — parses a structured code,
+  interpolates a `{n}` comment, escalates a warning to an error with preserved
+  scope, and trips the cascade guard in 3 packed messages. 14 sections total.
+- **Tests** (+57 unit, +5 interop, total **543 unit + 93 interop**):
+  - 18 `ProblemCode` cases (taxonomy parse, malformed-input rejection,
+    structural-prefix `StartsWith`, sorter/scope flags).
+  - 8 `CommentInterpolator` cases (spec example, missing args → `?`, extras
+    appended, brace escapes, unclosed-brace tolerance, non-positional
+    placeholder passthrough).
+  - 7 `ProblemReport` API tests.
+  - 7 `ProblemReportHandler` cases (incl. cascade trip + exactly-once + silent-after).
+  - 4 `TraceOptions` validation cases.
+  - 7 `TraceObserver` cases (default-off, allowlist match/miss, malformed/missing
+    header, non-absolute URI, body-builder metadata).
+  - 5 DI integration tests (incl. end-to-end cascade-guard trip over real
+    did:peer pack/unpack/dispatch).
+
+### Fixed (Phase 6.2c review)
+
+Addresses 15 review findings on the Phase 6.2c surface (see PR #11 inline comments).
+
+- **`ProblemReportHandler.HandleAsync` rewritten for FR-PROTO-10 correctness.**
+  - Atomic increment + threshold check + trip decision under a per-`ThreadState` lock — concurrent
+    inbound error reports on the same `pthid` (singleton handler fed by parallel transports) now
+    yield exactly one cascade-stop instead of racing on `ErrorCount++`.
+  - The cascade-trip is deferred when the threshold-tripping report is unrepliable
+    (anoncrypt — no `from`/`to`); without the deferral, the counter landed past the threshold and
+    the silent-ignore branch swallowed every subsequent report, so the cascade-stop was never
+    emitted (FR-PROTO-10 silently broken).
+  - Past-trip reports are now truly silent: short-circuit happens BEFORE the increment + Information
+    log, eliminating the unbounded counter growth and per-message log-flood that "silently
+    ignores" used to allow.
+  - Threshold semantics simplified from `> CascadeThreshold + 1` / `== CascadeThreshold + 1` to a
+    single `> CascadeThreshold` decision driven by `ThreadState.MaxErrorsNoticeSent` (new flag).
+- **`ProblemReportOptions.Validate()`** — added; the handler ctor calls it so misconfigured
+  thresholds (negative, `int.MaxValue`) fail loudly at DI resolution rather than silently
+  disabling the cascade guard.
+- **`ProblemReport.ReadCode` / `ReadComment` / `ReadArgs`** — pattern-match `JsonValue` instead of
+  unconditionally calling `JsonNode.AsValue()`. A malformed peer sending
+  `{"code": {"x": 1}}` (etc.) no longer crashes the handler with
+  `InvalidOperationException`. `ReadArgs` additionally preserves null/non-string entries as empty
+  strings so 1-based positional indexes stay aligned with the on-wire array.
+- **`CommentInterpolator.Interpolate`** —
+  - Brace-collapse (`{{` → `{`, `}}` → `}`) now runs uniformly, even when `args` is null/empty:
+    identical templates render identically regardless of args presence.
+  - `{0}` (or any non-positive numeric placeholder) renders as `?` per the 1-based spec, instead
+    of leaking the placeholder text + dumping the unused arg into `[extra: …]`.
+- **`TraceObserver.ShouldReport`** — three correctness/security fixes:
+  - **Scheme guard**: reject any URI whose scheme is not `http`/`https` (previously `file://`,
+    `javascript:`, `gopher:`, `data:`, `ftp:` all admitted if allowlisted).
+  - **SSRF defense-in-depth**: reject IP-literal hosts that classify as loopback / private /
+    link-local / metadata via `OutboundEndpointGuard.IsPrivateOrReserved` — wires up the
+    defense-in-depth the docstring already promised.
+  - **Allowlist normalisation**: compare both sides via `Uri.AbsoluteUri`. Trailing-slash,
+    default-port, percent-encoding, and host-case differences no longer silently drop legitimate
+    matches.
+- **`ProtocolDispatcher`** — accepts an optional `TraceOptions` (DI-injected when
+  `EnableTracing` was called) and invokes `TraceObserver.ShouldReport` on every inbound message.
+  An authorised trace intent is logged at `Information`; HTTP POST integration remains deferred,
+  but the decision logic is no longer dead in production.
+- **`DidCommBuilder.EnableTracing`** uses `TryAddSingleton` so repeated calls are idempotent
+  (first-call-wins) instead of silently shadowing prior `TraceOptions`.
+- **`ProtocolHandlerRegistry` factory** in `DidCommBuilder` now logs a warning when two
+  `IProtocolHandler` registrations target the same PIURI (most commonly: `AddBuiltInProtocols()`
+  silently overriding a host's custom handler registered earlier). Last-write-wins semantics are
+  preserved — but the override is now observable.
+
+### Breaking (Phase 6.2c review)
+
+- **`ProtocolContext` positional ctor signature.** `Threads` was previously inserted at index 2
+  (between `Thread` and `Client`); it is now appended at the end of the positional list so
+  callers using the prior positional shape `new ProtocolContext(received, thread, client,
+  options)` keep compiling. Downstream consumers that built `ProtocolContext` positionally
+  against the dd204b0 commit of this PR will need to swap to the new order:
+  `new ProtocolContext(received, thread, client, options, threads)`. Callers using named
+  parameters are unaffected.
+
 ### Added — Phase 6.2b (Discover Features 2.0 + custom-handler cookbook)
 
 Closes PRD §12 Phase 6 partially: **FR-PROTO-05** (Discover Features 2.0 with the

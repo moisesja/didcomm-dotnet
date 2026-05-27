@@ -2,12 +2,15 @@ using DidComm.Facade;
 using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Protocols.Empty;
+using DidComm.Protocols.ProblemReport;
+using DidComm.Protocols.Trace;
 using DidComm.Protocols.TrustPing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using NetDid.Extensions.DependencyInjection;
 
 namespace DidComm.Extensions.DependencyInjection;
@@ -39,8 +42,23 @@ public sealed class DidCommBuilder
         Services.TryAddSingleton<ProtocolHandlerRegistry>(sp =>
         {
             var registry = new ProtocolHandlerRegistry();
+            var logger = sp.GetService<ILogger<ProtocolHandlerRegistry>>();
+            // Detect duplicate-PIURI registrations and surface them as warnings: the registry
+            // is last-write-wins by design (re-registration is idempotent for DI re-application),
+            // but silently overriding a host's custom handler with a built-in is a documented
+            // foot-gun (AddBuiltInProtocols after a custom AddProtocol). Logging here makes the
+            // override observable without changing the documented semantics.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var handler in sp.GetServices<IProtocolHandler>())
+            {
+                if (!seen.Add(handler.ProtocolUri))
+                {
+                    logger?.LogWarning(
+                        "Multiple IProtocolHandler registrations for PIURI '{Piuri}'. Last registration wins ({HandlerType}). If you registered a custom handler before calling AddBuiltInProtocols(), reorder so the custom registration comes after.",
+                        handler.ProtocolUri, handler.GetType().FullName);
+                }
                 registry.Register(handler);
+            }
             return registry;
         });
         Services.TryAddSingleton<ProtocolDispatcher>();
@@ -68,16 +86,20 @@ public sealed class DidCommBuilder
 
     /// <summary>
     /// Register the spec-defined built-in protocol handlers: Trust Ping 2.0 (FR-PROTO-04),
-    /// Empty 1.0 (FR-PROTO-06), and Discover Features 2.0 (FR-PROTO-05) with its default
-    /// <see cref="IFeatureProvider"/>s for <c>protocol</c> (reflects the registry) and
-    /// <c>constraint</c> (advertises <c>max_receive_bytes</c>). Phase 6.2c will add
-    /// Report Problem (always-on) and Trace (off by default).
+    /// Empty 1.0 (FR-PROTO-06), Discover Features 2.0 (FR-PROTO-05) with its default
+    /// <see cref="IFeatureProvider"/>s, and Report Problem 2.0 (FR-PROTO-07/08/10). Trace 2.0
+    /// is NOT registered here — it is off by default per FR-PROTO-11a; opt in via
+    /// <see cref="EnableTracing"/>.
     /// </summary>
     public DidCommBuilder AddBuiltInProtocols()
     {
         AddProtocol<TrustPingHandler>();
         AddProtocol<EmptyHandler>();
         AddProtocol<DiscoverFeaturesHandler>();
+        AddProtocol<ProblemReportHandler>();
+        // ProblemReportOptions is bound via the standard Options pattern; default ctor's
+        // CascadeThreshold = 5 is the SICPA-python-matching default per locked decision.
+        Services.AddOptions<ProblemReportOptions>();
         // Default Discover Features providers — consumers add more (goal-codes, headers,
         // custom constraints) via AddFeatureProvider<T>(). TryAddEnumerable de-dupes by
         // ImplementationType so re-registration is a no-op.
@@ -85,6 +107,29 @@ public sealed class DidCommBuilder
             ServiceDescriptor.Singleton<IFeatureProvider, ProtocolFeatureProvider>());
         Services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IFeatureProvider, MaxReceiveBytesConstraintProvider>());
+        return this;
+    }
+
+    /// <summary>
+    /// Opt in to Trace 2.0 (FR-PROTO-11). <strong>Off by default</strong> per FR-PROTO-11a;
+    /// calling this method registers <see cref="TraceOptions"/>, validates the configured
+    /// allowlist immediately (a non-empty <c>AllowedReportingUris</c> is REQUIRED when
+    /// <c>Enabled = true</c>), and makes the options available for resolution.
+    /// </summary>
+    /// <remarks>
+    /// Idempotent: first call wins. Subsequent calls on the same <see cref="IServiceCollection"/>
+    /// keep the original <see cref="TraceOptions"/> instance — use <c>Services.Replace(...)</c>
+    /// if you need to reconfigure.
+    /// </remarks>
+    /// <param name="configure">Configuration callback. Set <c>Enabled = true</c> and add entries to <c>AllowedReportingUris</c>.</param>
+    /// <exception cref="InvalidOperationException">When the configured options fail <see cref="TraceOptions.Validate"/>.</exception>
+    public DidCommBuilder EnableTracing(Action<TraceOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        var options = new TraceOptions();
+        configure(options);
+        options.Validate();
+        Services.TryAddSingleton(options);
         return this;
     }
 

@@ -16,7 +16,7 @@ public sealed class EmptyHandlerTests
             m, Array.Empty<DidComm.Jose.EnvelopeKind>(),
             false, false, false, false, null, null, null, null, null, null,
             Array.Empty<string>(), null);
-        return new ProtocolContext(unpacked, new DidComm.Threading.ThreadState(m.Thid ?? m.Id), Client: null, new DidCommOptions());
+        return new ProtocolContext(unpacked, new DidComm.Threading.ThreadState(m.Thid ?? m.Id), Client: null, new DidCommOptions(), new InMemoryThreadStateStore());
     }
 
     [Fact]
