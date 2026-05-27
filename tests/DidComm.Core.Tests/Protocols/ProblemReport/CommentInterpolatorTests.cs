@@ -52,10 +52,21 @@ public sealed class CommentInterpolatorTests
     }
 
     [Fact]
-    public void Doubled_brace_escape_without_args_yields_literal_braces()
+    public void Doubled_brace_escape_collapses_even_when_args_are_empty()
     {
-        InvokeInterpolate("{{ok}}", null).Should().Be("{{ok}}"); // null args = verbatim
-        InvokeInterpolate("{{ok}}", Array.Empty<string>()).Should().Be("{{ok}}");
+        // Brace-collapse is uniform regardless of whether args were supplied — `{{` → `{`
+        // and `}}` → `}` always (matches String.Format semantics).
+        InvokeInterpolate("{{ok}}", null).Should().Be("{ok}");
+        InvokeInterpolate("{{ok}}", Array.Empty<string>()).Should().Be("{ok}");
+    }
+
+    [Fact]
+    public void Zero_or_negative_placeholder_renders_as_question_mark()
+    {
+        // `{0}` is not a valid 1-based positional reference; treat as missing-arg per FR-PROTO-07
+        // so a 0-based-mindset caller doesn't leak the placeholder text into the rendered output.
+        InvokeInterpolate("{0}", new[] { "X" }).Should().Be("? [extra: X]");
+        InvokeInterpolate("{0}", Array.Empty<string>()).Should().Be("?");
     }
 
     [Fact]

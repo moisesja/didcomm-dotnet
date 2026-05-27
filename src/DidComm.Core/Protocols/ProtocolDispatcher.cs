@@ -1,5 +1,6 @@
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.Protocols.Trace;
 using DidComm.Threading;
 using Microsoft.Extensions.Logging;
 
@@ -24,21 +25,25 @@ public sealed class ProtocolDispatcher
     private readonly ProtocolHandlerRegistry _registry;
     private readonly IThreadStateStore _threads;
     private readonly ILogger<ProtocolDispatcher>? _logger;
+    private readonly TraceOptions? _traceOptions;
 
     /// <summary>Construct a dispatcher bound to a registry and thread-state store.</summary>
     /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
     /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
     /// <param name="logger">Optional structured logger; warnings are emitted for FR-THR-04 rule 3 drops.</param>
+    /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11). Registered via <c>DidCommBuilder.EnableTracing(...)</c>; when supplied, every inbound message is checked against <see cref="TraceObserver.ShouldReport"/> and an authorised trace-report intent is logged at <c>Information</c>. HTTP POST integration is deferred.</param>
     public ProtocolDispatcher(
         ProtocolHandlerRegistry registry,
         IThreadStateStore threads,
-        ILogger<ProtocolDispatcher>? logger = null)
+        ILogger<ProtocolDispatcher>? logger = null,
+        TraceOptions? traceOptions = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(threads);
         _registry = registry;
         _threads = threads;
         _logger = logger;
+        _traceOptions = traceOptions;
     }
 
     /// <summary>
@@ -58,6 +63,16 @@ public sealed class ProtocolDispatcher
     {
         ArgumentNullException.ThrowIfNull(received);
         ArgumentNullException.ThrowIfNull(options);
+
+        // FR-PROTO-11: when Trace 2.0 is opted in via EnableTracing, exercise the decision logic
+        // on every inbound. Today the observable side effect is a structured Information log
+        // line — HTTP POST integration is deferred to the runtime hook in a later phase.
+        if (_traceOptions is not null && TraceObserver.ShouldReport(received.Message, _traceOptions, out var traceUri))
+        {
+            _logger?.LogInformation(
+                "Trace 2.0: inbound message {MessageId} authorizes trace-report to {TraceUri}; POST integration deferred (FR-PROTO-11).",
+                received.Message.Id, traceUri);
+        }
 
         // FR-THR-04 rule 3 (defensive enforcement of a peer's rule-2 violation):
         // if the inbound is a pure ACK that ALSO requests an ACK, dropping it here prevents
@@ -79,7 +94,7 @@ public sealed class ProtocolDispatcher
         }
 
         var thread = _threads.GetOrCreate(received.Message.Thid ?? received.Message.Id);
-        var context = new ProtocolContext(received, thread, _threads, client, options);
+        var context = new ProtocolContext(received, thread, client, options, _threads);
 
         var reply = await handler.HandleAsync(received.Message, context, ct).ConfigureAwait(false);
         if (reply is null)

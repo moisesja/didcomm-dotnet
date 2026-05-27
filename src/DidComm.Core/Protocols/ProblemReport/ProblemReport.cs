@@ -123,14 +123,17 @@ public static class ProblemReport
         return Create(from, to, newCode, pthid, comment, args);
     }
 
-    /// <summary>Read <c>body.code</c>; returns <c>null</c> when the message has no body or no code field.</summary>
+    /// <summary>Read <c>body.code</c>; returns <c>null</c> when the message has no body or no code field, or when the value is not a JSON string.</summary>
     /// <param name="message">A message of type <see cref="MessageType"/>.</param>
     public static string? ReadCode(Message message)
     {
         ArgumentNullException.ThrowIfNull(message);
         if (message.Body is null) return null;
         if (!message.Body.TryGetPropertyValue(CodeField, out var node) || node is null) return null;
-        return node.AsValue().TryGetValue<string>(out var s) ? s : null;
+        // Pattern-match instead of an unconditional AsValue() cast: AsValue() throws
+        // InvalidOperationException when the node is a JsonObject/JsonArray. A malformed
+        // `body.code = { ... }` must surface as "absent or malformed", not a crash.
+        return node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
     }
 
     /// <summary>Read <c>body.comment</c> raw (no interpolation).</summary>
@@ -140,10 +143,10 @@ public static class ProblemReport
         ArgumentNullException.ThrowIfNull(message);
         if (message.Body is null) return null;
         if (!message.Body.TryGetPropertyValue(CommentField, out var node) || node is null) return null;
-        return node.AsValue().TryGetValue<string>(out var s) ? s : null;
+        return node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
     }
 
-    /// <summary>Read <c>body.args</c>.</summary>
+    /// <summary>Read <c>body.args</c>. Null / non-string entries are preserved as empty strings so the 1-based positional indexes used by <see cref="CommentInterpolator"/> stay aligned with the on-wire array.</summary>
     /// <param name="message">A message of type <see cref="MessageType"/>.</param>
     public static IReadOnlyList<string> ReadArgs(Message message)
     {
@@ -152,7 +155,7 @@ public static class ProblemReport
         if (!message.Body.TryGetPropertyValue(ArgsField, out var node) || node is not JsonArray arr) return Array.Empty<string>();
         var list = new List<string>(arr.Count);
         foreach (var n in arr)
-            if (n is not null && n.AsValue().TryGetValue<string>(out var s)) list.Add(s);
+            list.Add(n is JsonValue v && v.TryGetValue<string>(out var s) ? s : string.Empty);
         return list;
     }
 

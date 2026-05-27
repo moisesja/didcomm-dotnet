@@ -85,6 +85,55 @@ public sealed class TraceObserverTests
         TraceObserver.ShouldReport(msg, options, out _).Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData("https://trace.example.com", "https://trace.example.com/")]      // operator omits trailing slash; inbound has it
+    [InlineData("https://trace.example.com/", "https://trace.example.com")]      // and vice versa
+    [InlineData("https://trace.example.com:443/r", "https://trace.example.com/r")] // default port stripping
+    [InlineData("HTTPS://Trace.Example.Com/r", "https://trace.example.com/r")]   // case differences in scheme/host
+    public void Allowlist_match_is_normalised_via_AbsoluteUri(string allowlistEntry, string inboundReportUri)
+    {
+        // Bug fix: the previous Uri.ToString()-vs-raw-string comparison silently dropped legitimate
+        // matches due to Uri normalisation (trailing slash, default-port stripping, case folding).
+        // After the fix, both sides are compared via Uri.AbsoluteUri so these variants match.
+        var msg = WithTraceHeader(inboundReportUri);
+        var options = new TraceOptions { Enabled = true };
+        options.AllowedReportingUris.Add(allowlistEntry);
+        TraceObserver.ShouldReport(msg, options, out var uri).Should().BeTrue(
+            $"'{allowlistEntry}' and '{inboundReportUri}' canonicalise to the same AbsoluteUri");
+        uri.Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData("file:///etc/passwd")]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("ftp://files.example.com/x")]
+    public void Non_http_schemes_are_rejected_even_when_on_the_allowlist(string rawUri)
+    {
+        // Defense-in-depth: a typo'd or attacker-injected non-HTTP URI on the allowlist must not
+        // unlock ShouldReport — FR-PROTO-11 trace-reports are HTTP/HTTPS only.
+        var msg = WithTraceHeader(rawUri);
+        var options = new TraceOptions { Enabled = true };
+        options.AllowedReportingUris.Add(rawUri);
+        TraceObserver.ShouldReport(msg, options, out var uri).Should().BeFalse();
+        uri.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1/x")]
+    [InlineData("http://10.0.0.1/x")]
+    [InlineData("http://192.168.0.1/x")]
+    [InlineData("http://169.254.169.254/x")] // AWS / GCP metadata
+    [InlineData("http://[::1]/x")]
+    public void Loopback_or_private_ip_literal_is_rejected_even_when_on_the_allowlist(string rawUri)
+    {
+        // FR-PROTO-11a defense-in-depth: an operator typo (or compromise) that allowlists an
+        // internal-IP literal must not turn the tracer into an SSRF amplifier.
+        var msg = WithTraceHeader(rawUri);
+        var options = new TraceOptions { Enabled = true };
+        options.AllowedReportingUris.Add(rawUri);
+        TraceObserver.ShouldReport(msg, options, out _).Should().BeFalse();
+    }
+
     [Fact]
     public void BuildReportBody_includes_observed_metadata_and_trace_id()
     {

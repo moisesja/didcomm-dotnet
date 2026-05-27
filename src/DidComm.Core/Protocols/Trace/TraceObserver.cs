@@ -1,6 +1,9 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Messages;
+using DidComm.Transports;
 
 namespace DidComm.Protocols.Trace;
 
@@ -26,10 +29,12 @@ public static class TraceObserver
     /// (a) <see cref="TraceOptions.Enabled"/> is <c>false</c>;
     /// (b) the message has no <c>trace</c> header;
     /// (c) the header is malformed or missing <c>report_uri</c>;
-    /// (d) the <c>report_uri</c> is not on <see cref="TraceOptions.AllowedReportingUris"/>;
-    /// (e) the <c>report_uri</c> targets a loopback / private IP (defense-in-depth; this
-    /// duplicates the SSRF guard at a different layer for the rare case where the operator's
-    /// allowlist contains a typo'd hostname).
+    /// (d) the <c>report_uri</c> uses a scheme other than <c>http</c>/<c>https</c>;
+    /// (e) the <c>report_uri</c> targets a loopback / private IP literal (defense-in-depth
+    /// against typo'd allowlist entries — reuses <see cref="OutboundEndpointGuard.IsPrivateOrReserved"/>);
+    /// (f) the <c>report_uri</c> is not on <see cref="TraceOptions.AllowedReportingUris"/> (comparison
+    /// is done on the canonical <see cref="Uri.AbsoluteUri"/> form on both sides so trailing-slash,
+    /// default-port, and percent-encoding normalisations don't drop legitimate matches).
     /// </summary>
     /// <param name="inbound">The message to consider. May be any type — Trace observes ALL messages.</param>
     /// <param name="options">The active TraceOptions.</param>
@@ -54,13 +59,42 @@ public static class TraceObserver
 
         if (!Uri.TryCreate(rawUri, UriKind.Absolute, out var parsed)) return false;
 
-        // Allowlist gate — exact-match. The set is OrdinalIgnoreCase to forgive case differences
-        // in the scheme/host (per RFC 3986 those are case-insensitive); paths stay case-sensitive
-        // by virtue of the URI string equality.
-        if (!options.AllowedReportingUris.Contains(parsed.ToString())) return false;
+        // Scheme guard — `file://`, `javascript:`, `data:`, `gopher:` etc. all parse as absolute
+        // but only http/https are valid trace-report transports per FR-PROTO-11.
+        if (parsed.Scheme is not ("http" or "https")) return false;
+
+        // SSRF defense-in-depth: reject IP-literal hosts that classify as loopback / private /
+        // link-local / metadata. DNS hostnames are deferred to the transport-level guard at
+        // connect-time (OutboundEndpointGuard.ConnectAsync) — checking them here would require
+        // synchronous DNS resolution per inbound message.
+        if ((parsed.HostNameType == UriHostNameType.IPv4 || parsed.HostNameType == UriHostNameType.IPv6)
+            && IPAddress.TryParse(parsed.Host, out var hostIp)
+            && OutboundEndpointGuard.IsPrivateOrReserved(hostIp))
+        {
+            return false;
+        }
+
+        // Allowlist gate — normalise both sides via Uri.AbsoluteUri so trailing slashes,
+        // default-port stripping (`:443`), percent-encoding, and host-case normalisation don't
+        // silently drop a legitimate operator-configured match.
+        if (!IsAllowlisted(options, parsed)) return false;
 
         reportUri = parsed;
         return true;
+    }
+
+    private static bool IsAllowlisted(TraceOptions options, Uri parsed)
+    {
+        var target = parsed.AbsoluteUri;
+        foreach (var allowed in options.AllowedReportingUris)
+        {
+            if (Uri.TryCreate(allowed, UriKind.Absolute, out var allowedUri)
+                && string.Equals(target, allowedUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static string? TryReadStringMember(System.Text.Json.JsonElement element, string memberName)

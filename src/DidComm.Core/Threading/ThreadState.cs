@@ -27,9 +27,16 @@ public sealed class ThreadState
     /// Count of problem-reports produced on this thread. Used by the FR-PROTO-10 cascade
     /// guard (Phase 6.2c) to emit <c>e.p.req.max-errors-exceeded</c> once the per-thread
     /// threshold trips and then stop responding on the thread. Implementations / tests MAY
-    /// increment this directly.
+    /// increment this directly; concurrent callers MUST hold the per-instance lock
+    /// (<see cref="ThreadState"/> exposes itself as the lock seam — see remarks).
     /// </summary>
     public int ErrorCount { get; set; }
+
+    /// <summary>
+    /// Set to <c>true</c> the moment the FR-PROTO-10 cascade-stop notice has been emitted on
+    /// this thread, so the handler can short-circuit subsequent reports without further work.
+    /// </summary>
+    public bool MaxErrorsNoticeSent { get; set; }
 
     /// <summary>Construct empty state for <paramref name="thid"/>.</summary>
     /// <param name="thid">The thread id. Must be non-empty.</param>

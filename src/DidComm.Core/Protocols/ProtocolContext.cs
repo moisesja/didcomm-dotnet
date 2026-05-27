@@ -13,12 +13,12 @@ namespace DidComm.Protocols;
 /// </summary>
 /// <param name="Received">The full unpack outcome for the inbound message.</param>
 /// <param name="Thread">The mutable state for the current thread (resolved from <c>thid</c> or <c>id</c>). For protocols whose semantically-meaningful thread is a different message's thread — most notably ProblemReport, whose <c>pthid</c> names the failing thread — use <see cref="Threads"/> to look up the right one.</param>
-/// <param name="Threads">The thread-state store, so handlers can resolve thread state by an arbitrary id (e.g. ProblemReport's <c>pthid</c>, the OOB invitation id when stitching parallel response threads).</param>
 /// <param name="Client">The DIDComm facade — handlers can invoke <see cref="DidCommClient.SendAsync"/> for out-of-band sends. Nullable so dispatcher unit tests can run without spinning up the full client graph; production code always wires it in via DI.</param>
 /// <param name="Options">The active <see cref="DidCommOptions"/>.</param>
+/// <param name="Threads">The thread-state store, so handlers can resolve thread state by an arbitrary id (e.g. ProblemReport's <c>pthid</c>, the OOB invitation id when stitching parallel response threads). Appended at the end of the positional parameter list so existing positional callers (<c>received, thread, client, options</c>) are not broken.</param>
 public sealed record ProtocolContext(
     UnpackResult Received,
     ThreadState Thread,
-    IThreadStateStore Threads,
     DidCommClient? Client,
-    DidCommOptions Options);
+    DidCommOptions Options,
+    IThreadStateStore Threads);

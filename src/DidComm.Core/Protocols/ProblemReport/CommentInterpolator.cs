@@ -24,7 +24,9 @@ internal static class CommentInterpolator
     public static string Interpolate(string? comment, IReadOnlyList<string>? args)
     {
         if (string.IsNullOrEmpty(comment)) return string.Empty;
-        if (args is null || args.Count == 0) return comment;
+        // Treat null as empty so the brace-collapse pass runs uniformly: `{{ok}}` must render as
+        // `{ok}` whether or not args were supplied (matches String.Format-style escape semantics).
+        args ??= Array.Empty<string>();
 
         var used = new bool[args.Count];
         var sb = new StringBuilder(comment.Length + 16);
@@ -64,10 +66,19 @@ internal static class CommentInterpolator
             }
 
             var token = comment.AsSpan(i + 1, close - i - 1);
-            if (!int.TryParse(token, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n) || n < 1)
+            if (!int.TryParse(token, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n))
             {
-                // Not a positional placeholder — emit verbatim.
+                // Non-numeric token (e.g. `{foo}`) — not a positional placeholder; emit verbatim.
                 sb.Append(comment, i, close - i + 1);
+                i = close + 1;
+                continue;
+            }
+            if (n < 1)
+            {
+                // Non-positive integer (`{0}`, `{-3}` rejected earlier by NumberStyles.None) — the
+                // 1-based positional grammar has no n &lt; 1. Treat as missing-arg per FR-PROTO-07
+                // so `{0}` from a 0-based-mindset caller doesn't leak the placeholder text.
+                sb.Append('?');
                 i = close + 1;
                 continue;
             }

@@ -10,6 +10,7 @@ using DidComm.Secrets;
 using DidComm.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using NetDid.Extensions.DependencyInjection;
 
 namespace DidComm.Extensions.DependencyInjection;
@@ -41,8 +42,23 @@ public sealed class DidCommBuilder
         Services.TryAddSingleton<ProtocolHandlerRegistry>(sp =>
         {
             var registry = new ProtocolHandlerRegistry();
+            var logger = sp.GetService<ILogger<ProtocolHandlerRegistry>>();
+            // Detect duplicate-PIURI registrations and surface them as warnings: the registry
+            // is last-write-wins by design (re-registration is idempotent for DI re-application),
+            // but silently overriding a host's custom handler with a built-in is a documented
+            // foot-gun (AddBuiltInProtocols after a custom AddProtocol). Logging here makes the
+            // override observable without changing the documented semantics.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var handler in sp.GetServices<IProtocolHandler>())
+            {
+                if (!seen.Add(handler.ProtocolUri))
+                {
+                    logger?.LogWarning(
+                        "Multiple IProtocolHandler registrations for PIURI '{Piuri}'. Last registration wins ({HandlerType}). If you registered a custom handler before calling AddBuiltInProtocols(), reorder so the custom registration comes after.",
+                        handler.ProtocolUri, handler.GetType().FullName);
+                }
                 registry.Register(handler);
+            }
             return registry;
         });
         Services.TryAddSingleton<ProtocolDispatcher>();
@@ -100,6 +116,11 @@ public sealed class DidCommBuilder
     /// allowlist immediately (a non-empty <c>AllowedReportingUris</c> is REQUIRED when
     /// <c>Enabled = true</c>), and makes the options available for resolution.
     /// </summary>
+    /// <remarks>
+    /// Idempotent: first call wins. Subsequent calls on the same <see cref="IServiceCollection"/>
+    /// keep the original <see cref="TraceOptions"/> instance — use <c>Services.Replace(...)</c>
+    /// if you need to reconfigure.
+    /// </remarks>
     /// <param name="configure">Configuration callback. Set <c>Enabled = true</c> and add entries to <c>AllowedReportingUris</c>.</param>
     /// <exception cref="InvalidOperationException">When the configured options fail <see cref="TraceOptions.Validate"/>.</exception>
     public DidCommBuilder EnableTracing(Action<TraceOptions> configure)
@@ -108,7 +129,7 @@ public sealed class DidCommBuilder
         var options = new TraceOptions();
         configure(options);
         options.Validate();
-        Services.AddSingleton(options);
+        Services.TryAddSingleton(options);
         return this;
     }
 
