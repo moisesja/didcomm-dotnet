@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using DidComm.Composition;
 using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Messages;
@@ -21,11 +20,13 @@ namespace DidComm.Protocols.OutOfBand;
 /// </para>
 /// <para>
 /// FR-OOB-02 encodes the whitespace-free plaintext JWM as base64url in the <c>_oob</c> query
-/// parameter. JSON object key order is not canonical in the spec, so this library does not
-/// reproduce the spec's illustrative base64url string byte-for-byte on <em>encode</em> (our
-/// serializer emits members in declaration order and includes the <c>typ</c> media type);
-/// interop holds because decoding is order-independent — <see cref="FromUrl"/> round-trips both
-/// our own output and the spec example.
+/// parameter. <see cref="ToUrl"/> emits a canonical, reproducible payload — object keys sorted
+/// ASCII-lexicographically at every level (via the deterministic JSON writer) and the <c>typ</c>
+/// media type dropped (the URL form is a bare plaintext JWM) — so the same invitation always
+/// yields the same URL. That key order still isn't the one the spec's illustrative example uses,
+/// so this is not a byte-for-byte reproduction of that example; interop holds regardless because
+/// decoding is order-independent — <see cref="FromUrl"/> round-trips both our own output and the
+/// spec example.
 /// </para>
 /// <para>Maps to PRD §14.2 task <strong>V</strong>.</para>
 /// </remarks>
@@ -107,9 +108,15 @@ public static class OutOfBand
         ArgumentNullException.ThrowIfNull(invitation);
         ArgumentException.ThrowIfNullOrEmpty(baseUrl);
 
-        // PackPlaintext emits compact JSON (no whitespace) per FR-OOB-02's "eliminate whitespace".
-        var json = EnvelopeWriter.PackPlaintext(invitation.Message);
-        var encoded = Base64Url.EncodeUtf8(json);
+        invitation.Message.Validate();
+        // Serialize to a node so we can drop 'typ' (the OOB URL form is a bare plaintext JWM, and
+        // the spec example carries no typ) and emit canonical, reproducible bytes:
+        // DeterministicJsonWriter sorts keys at every level and strips whitespace (FR-OOB-02's
+        // "eliminate whitespace"), so the same invitation always encodes to the same URL.
+        var node = JsonSerializer.SerializeToNode(invitation.Message, DidCommJson.Default)?.AsObject()
+                   ?? throw new InvalidOperationException("Invitation did not serialize to a JSON object.");
+        node.Remove("typ");
+        var encoded = Base64Url.Encode(DeterministicJsonWriter.WriteUtf8(node));
         return $"{baseUrl}{Separator(baseUrl)}{OobParameter}={encoded}";
     }
 

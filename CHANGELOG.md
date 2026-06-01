@@ -23,9 +23,11 @@ Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-
   - `WebRedirect` record; `IOobInvitationStore` + `InMemoryOobInvitationStore` for the short-form.
   - **No dispatcher handler** — an invitation arrives out of band (URL/QR) and bootstraps a
     follow-up protocol, so there is nothing to route through `ProtocolDispatcher`.
-  - **Byte-for-byte note (FR-OOB-02):** JSON object key order is not canonical in the spec, so
-    `ToUrl` does not reproduce the spec's illustrative base64url string verbatim on encode;
-    interop is proven by decoding the spec's own example fixture + round-trip equality.
+  - **Encoding (FR-OOB-02):** `ToUrl` emits a canonical, reproducible payload — keys sorted at
+    every level (the deterministic JSON writer) and the `typ` header dropped — so the same
+    invitation always yields the same URL. That key order still differs from the spec's
+    illustrative example, so it is not a byte-for-byte reproduction of that example; interop is
+    proven instead by decoding the spec's own example fixture + round-trip equality.
 - **ASP.NET Core**: `MapDidCommOobEndpoint(pattern, store)` — HTTP GET serving the short-form
   invitation by `_oobid` (200 `application/didcomm-plain+json` / 404 / 400) (FR-OOB-04).
 - **Cookbook Section V** (`Section_V_OutOfBandInvitation`) — build → URL → decode round trip,

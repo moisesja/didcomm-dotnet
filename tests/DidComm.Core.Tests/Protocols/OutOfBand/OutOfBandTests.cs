@@ -84,6 +84,25 @@ public sealed class OutOfBandTests
     }
 
     [Fact]
+    public void ToUrl_emits_a_canonical_payload_without_typ()
+    {
+        var invitation = OutOfBandApi.CreateInvitation(
+            from: "did:example:alice", goal: "g", goalCode: "c", accept: new[] { "didcomm/v2" }, id: "abc");
+        var url = OutOfBandApi.ToUrl(invitation, "https://x/y");
+
+        // Deterministic: the same invitation always encodes to the same URL.
+        OutOfBandApi.ToUrl(invitation, "https://x/y").Should().Be(url);
+
+        var encoded = url["https://x/y?_oob=".Length..];
+        var json = DidComm.Jose.Base64Url.DecodeUtf8(encoded);
+
+        // No 'typ', and keys sorted ASCII-lexicographically at every level (no whitespace).
+        json.Should().NotContain("\"typ\"");
+        json.Should().Be(
+            """{"body":{"accept":["didcomm/v2"],"goal":"g","goal_code":"c"},"from":"did:example:alice","id":"abc","type":"https://didcomm.org/out-of-band/2.0/invitation"}""");
+    }
+
+    [Fact]
     public void FromUrl_decodes_the_spec_example_fixture()
     {
         var decoded = OutOfBandApi.FromUrl($"https://example.com/path?_oob={SpecExampleOob}");
