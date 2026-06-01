@@ -43,7 +43,7 @@ internal static class JwsParser
         ArgumentNullException.ThrowIfNull(resolveSignerPublicJwk);
         ArgumentNullException.ThrowIfNull(cryptoProvider);
 
-        using var doc = JsonDocument.Parse(packed);
+        using var doc = JsonDocument.Parse(packed, DidCommJson.StrictDocument);
         var root = doc.RootElement;
 
         if (!root.TryGetProperty("payload", out var payloadElement) || payloadElement.ValueKind != JsonValueKind.String)

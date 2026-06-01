@@ -3,6 +3,7 @@ using DidComm.Crypto;
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Exceptions;
 using DidComm.Jose;
+using DidComm.Json;
 using DidComm.Resolution;
 using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
 
@@ -59,7 +60,7 @@ public static class FromPriorValidator
         string? alg, kid;
         try
         {
-            using var headerDoc = JsonDocument.Parse(headerJson);
+            using var headerDoc = JsonDocument.Parse(headerJson, DidCommJson.StrictDocument);
             alg = headerDoc.RootElement.GetProperty("alg").GetString();
             kid = headerDoc.RootElement.GetProperty("kid").GetString();
         }
@@ -73,7 +74,7 @@ public static class FromPriorValidator
         FromPriorClaims claims;
         try
         {
-            using var claimsDoc = JsonDocument.Parse(claimsJson);
+            using var claimsDoc = JsonDocument.Parse(claimsJson, DidCommJson.StrictDocument);
             var iss = claimsDoc.RootElement.GetProperty("iss").GetString()
                 ?? throw new ProtocolException("from_prior JWT 'iss' is missing or null.");
             var sub = claimsDoc.RootElement.GetProperty("sub").GetString()

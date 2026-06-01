@@ -1,3 +1,4 @@
+using DidComm.Exceptions;
 using Microsoft.IdentityModel.Tokens;
 using NetDid.Core.Crypto;
 using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
@@ -17,6 +18,14 @@ internal static class JwkConversion
     public static JsonWebKey ToNetDidJwk(Jwk source)
     {
         ArgumentNullException.ThrowIfNull(source);
+
+        // Defense-in-depth for OKP (Ed25519 / X25519): the EC path validates the point is on-curve,
+        // but OKP keys import raw bytes straight into the primitive. Reject any 'x' that does not
+        // decode to exactly 32 bytes (RFC 8037 §2) before it reaches NSec, so a truncated, oversized,
+        // or otherwise malformed attacker-supplied OKP key can't hit the crypto layer. This is the
+        // single chokepoint every public-key import (JWE epk/sender, JWS signer) flows through.
+        if (string.Equals(source.Kty, "OKP", StringComparison.Ordinal) && !IsValid32ByteKey(source.X))
+            throw new MalformedMessageException("OKP JWK 'x' must decode to exactly 32 bytes (Ed25519/X25519).");
 
         return new JsonWebKey
         {
@@ -40,6 +49,20 @@ internal static class JwkConversion
     /// <exception cref="ArgumentException">When the JWK <c>kty</c>/<c>crv</c> combination is unsupported.</exception>
     public static (KeyType KeyType, byte[] PublicKey) ExtractPublicKey(Jwk jwk)
         => NetDidJwkConverter.ExtractPublicKey(ToNetDidJwk(jwk));
+
+    private static bool IsValid32ByteKey(string? x)
+    {
+        if (string.IsNullOrEmpty(x))
+            return false;
+        try
+        {
+            return Base64Url.Decode(x).Length == 32;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>Build a public-only DIDComm JWK from a raw public key and key type.</summary>
     public static Jwk ToPublicJwk(KeyType keyType, byte[] publicKey, string? kid = null)

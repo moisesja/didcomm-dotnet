@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DidComm.Exceptions;
+using DidComm.Json;
 
 namespace DidComm.Jose;
 
@@ -34,7 +35,7 @@ internal static class EnvelopeDetector
         JsonDocument document;
         try
         {
-            document = JsonDocument.Parse(packedJson);
+            document = JsonDocument.Parse(packedJson, DidCommJson.StrictDocument);
         }
         catch (JsonException ex)
         {

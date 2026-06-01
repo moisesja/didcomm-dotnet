@@ -4,6 +4,7 @@ using DidComm.Crypto;
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Crypto.Kdf;
 using DidComm.Exceptions;
+using DidComm.Json;
 using DidComm.Secrets;
 using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
 using DidCommDefaultCryptoProvider = DidComm.Crypto.DefaultCryptoProvider;
@@ -37,6 +38,18 @@ internal static class JweParser
 
         var jwe = ParseStructure(packed);
         var header = JweProtectedHeader.Decode(jwe.ProtectedB64u);
+
+        // FR-ENC-09 / content-encryption allow-list. Reject any 'enc' outside the supported set
+        // before deriving a key, and pin authcrypt (ECDH-1PU) to A256CBC-HS512 — the only AEAD the
+        // spec authorizes for authenticated encryption. Mirrors the send-side restriction; stops an
+        // attacker steering the receiver into an unintended AEAD and avoids an uncaught
+        // NotSupportedException surfacing from GetAead later.
+        if (!JoseAlgorithms.IsSupportedContentEncryption(header.Enc))
+            throw new CryptoException($"Unsupported JWE 'enc' '{header.Enc}'.");
+        if (string.Equals(header.Alg, JoseAlgorithms.Ecdh1PuA256Kw, StringComparison.Ordinal) &&
+            !string.Equals(header.Enc, JoseAlgorithms.A256CbcHs512, StringComparison.Ordinal))
+            throw new CryptoException(
+                $"Authcrypt (ECDH-1PU) requires enc=A256CBC-HS512 (FR-ENC-09); got '{header.Enc}'.");
 
         var apvRecomputed = ApvComputer.Compute(jwe.Recipients.Select(r => r.Kid));
         if (!string.Equals(apvRecomputed, header.Apv, StringComparison.Ordinal))
@@ -199,7 +212,7 @@ internal static class JweParser
 
     private static ParsedJwe ParseStructure(string packed)
     {
-        using var doc = JsonDocument.Parse(packed);
+        using var doc = JsonDocument.Parse(packed, DidCommJson.StrictDocument);
         var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object)
             throw new MalformedMessageException("JWE root is not a JSON object.");

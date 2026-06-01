@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Jose.Encryption;
@@ -117,5 +119,60 @@ public sealed class AuthcryptRoundTripTests
 
         Action act = () => JweParser.Parse(tampered, secrets, senderLookup, _crypto);
         act.Should().Throw<CryptoException>();
+    }
+
+    [Fact]
+    public void Unpack_rejects_authcrypt_whose_enc_is_not_cbc_hmac_per_fr_enc_09()
+    {
+        // FR-ENC-09 on receive: the send side forbids non-CBC-HMAC enc for authcrypt; the parser must
+        // mirror it. A malicious sender that hand-crafts an ECDH-1PU envelope with enc=A256GCM (a
+        // supported AEAD, but not for authenticated encryption) must be rejected before any KDF.
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#enc");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#enc");
+        var packed = JweBuilder.PackAuthcrypt(
+            Encoding.UTF8.GetBytes("{}"),
+            new[] { bob.PublicJwk },
+            alice.PrivateJwk, alice.PublicJwk.Kid!,
+            "A256CBC-HS512", _crypto);
+        var tampered = RewriteProtectedEnc(packed, "A256GCM");
+
+        var secrets = new DictionarySecretsLookup(new[] { bob.PrivateJwk });
+        var senderLookup = new DictionarySenderKeyLookup(new[] { alice.PublicJwk });
+
+        Action act = () => JweParser.Parse(tampered, secrets, senderLookup, _crypto);
+        act.Should().Throw<CryptoException>().WithMessage("*A256CBC-HS512*");
+    }
+
+    [Fact]
+    public void Unpack_rejects_unsupported_content_encryption()
+    {
+        // An 'enc' outside the DIDComm-permitted set must be rejected cleanly (CryptoException), not
+        // surface later as an uncaught NotSupportedException from the AEAD dispatch.
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#enc");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#enc");
+        var packed = JweBuilder.PackAuthcrypt(
+            Encoding.UTF8.GetBytes("{}"),
+            new[] { bob.PublicJwk },
+            alice.PrivateJwk, alice.PublicJwk.Kid!,
+            "A256CBC-HS512", _crypto);
+        var tampered = RewriteProtectedEnc(packed, "A128GCM");
+
+        var secrets = new DictionarySecretsLookup(new[] { bob.PrivateJwk });
+        var senderLookup = new DictionarySenderKeyLookup(new[] { alice.PublicJwk });
+
+        Action act = () => JweParser.Parse(tampered, secrets, senderLookup, _crypto);
+        act.Should().Throw<CryptoException>().WithMessage("*Unsupported JWE 'enc'*");
+    }
+
+    // Rewrite the protected-header 'enc' and re-encode. The parser's enc allow-list runs before any
+    // AEAD/AAD work, so the (now-broken) AAD never matters for these negative tests.
+    private static string RewriteProtectedEnc(string packed, string newEnc)
+    {
+        using var doc = JsonDocument.Parse(packed);
+        var protectedB64u = doc.RootElement.GetProperty("protected").GetString()!;
+        var header = JsonNode.Parse(Encoding.UTF8.GetString(Base64Url.Decode(protectedB64u)))!.AsObject();
+        header["enc"] = newEnc;
+        var rewritten = Base64Url.Encode(Encoding.UTF8.GetBytes(header.ToJsonString()));
+        return packed.Replace("\"" + protectedB64u + "\"", "\"" + rewritten + "\"", StringComparison.Ordinal);
     }
 }
