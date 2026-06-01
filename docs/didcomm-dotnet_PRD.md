@@ -315,9 +315,9 @@ public sealed class DidComm {
 |---|---|---|---|
 | FR-ROT-01 | MUST | Support the `from_prior` header: a JWT with `sub`=new DID, `iss`=prior DID, `iat`=rotation time, signed by a key authorized in the prior DID. Header `kid` identifies that key. | A rotation JWT round-trips and validates. |
 | FR-ROT-02 | MUST | On receiving a message from an unknown DID, check for `from_prior`; validate JWT signature against the prior DID's authorized key (`kid`); extract `iss`; bind context to the known sender; use the new DID/DID-Doc thereafter. | Validation fails on bad signature or unauthorized kid. |
-| FR-ROT-03 | MUST | The rotation message MUST be encrypted and MUST use the new DID. | Plaintext-only rotation rejected. |
+| FR-ROT-03 | MUST | The rotation message MUST be encrypted, MUST use the new DID, and MUST authenticate the sender (authcrypt `skid` or an inner signature) — on a plain anoncrypt envelope `from` is attacker-settable, so a rotation assertion there is not bound to a held key. | Plaintext-only and anoncrypt (unauthenticated-sender) rotation rejected; authcrypted/signed rotation validates. |
 | FR-ROT-04 | MUST | Include `from_prior` on each message until a message arrives addressed to the new DID; thereafter it MAY be ignored. | Surfaced in `UnpackResult` metadata. |
-| FR-ROT-05 | MUST | Messages sent before a rotation but received after it MUST be ignored (compromise-mitigation). | Out-of-order pre-rotation message is dropped. |
+| FR-ROT-05 | MUST | Messages sent before a rotation but received after it MUST be ignored (compromise-mitigation). | Library enforces `exp`/`nbf` freshness (with clock skew) and sender-authentication on the rotation JWT; full monotonic out-of-order detection needs per-relationship state and is delegated to the application, which receives `iss`/`iat`/`exp` in `UnpackResult.FromPrior`. |
 | FR-ROT-06 | MAY | Support relationship termination: omit `sub` in `from_prior` and send without `from`. | Termination form parses. |
 
 ---

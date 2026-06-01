@@ -10,7 +10,17 @@ namespace DidComm.Facade;
 /// <see cref="FromPrior"/> rotation claims so the consumer can pattern-match on every
 /// envelope property the library knows about.
 /// </summary>
-/// <param name="Message">The fully-unwrapped inner plaintext message.</param>
+/// <remarks>
+/// <para>
+/// <strong>Trust boundary:</strong> <see cref="Message"/>'s <c>from</c> is only cryptographically
+/// proven when <see cref="Authenticated"/> (authcrypt sender) or <see cref="NonRepudiation"/>
+/// (a verified signature) is <c>true</c>. On a plaintext or anoncrypt envelope
+/// (<see cref="AnonymousSender"/>) the <c>from</c> field is attacker-settable and MUST NOT be
+/// trusted for authorization, attribution, or reply routing. Check the authentication flags before
+/// acting on the sender identity.
+/// </para>
+/// </remarks>
+/// <param name="Message">The fully-unwrapped inner plaintext message. NOTE: <c>Message.From</c> is trustworthy only when <see cref="Authenticated"/> or <see cref="NonRepudiation"/> is <c>true</c> (see remarks).</param>
 /// <param name="Stack">The envelope kinds encountered, outermost first.</param>
 /// <param name="Encrypted">True when the outermost layer was a JWE.</param>
 /// <param name="Authenticated">True when an authcrypt layer was present (sender authenticated via 1PU).</param>

@@ -80,7 +80,11 @@ public static class FromPriorValidator
             var sub = claimsDoc.RootElement.GetProperty("sub").GetString()
                 ?? throw new ProtocolException("from_prior JWT 'sub' is missing or null.");
             var iat = claimsDoc.RootElement.GetProperty("iat").GetInt64();
-            claims = new FromPriorClaims(Sub: sub, Iss: iss, Iat: iat);
+            long? exp = claimsDoc.RootElement.TryGetProperty("exp", out var expEl) && expEl.ValueKind == JsonValueKind.Number
+                ? expEl.GetInt64() : null;
+            long? nbf = claimsDoc.RootElement.TryGetProperty("nbf", out var nbfEl) && nbfEl.ValueKind == JsonValueKind.Number
+                ? nbfEl.GetInt64() : null;
+            claims = new FromPriorClaims(Sub: sub, Iss: iss, Iat: iat, Exp: exp, Nbf: nbf);
         }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException)
         {
