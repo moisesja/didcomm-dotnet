@@ -12,10 +12,55 @@ namespace DidComm.InteropTests.Transports;
 /// Phase 5 review remediation — unit-level coverage for <see cref="WebSocketDidCommTransport"/>'s
 /// failure handling that doesn't need a live TestServer: exhausted-budget failures are wrapped in
 /// <see cref="TransportException"/> (FR-API-07), a failed connect disposes its nascent socket
-/// (no leak), and the lifecycle event surface raises Reconnected / Disconnected.
+/// (no leak), the lifecycle event surface raises Reconnected / Disconnected, and the default
+/// connect path pins the TCP connection to a guard-vetted IP (SSRF defense).
 /// </summary>
 public sealed class WebSocketTransportBehaviorTests
 {
+    [Fact]
+    public async Task SendAsync_rejects_private_ip_literal_endpoint_on_default_path()
+    {
+        // Default connect path (no custom Connect/factory): the SSRF guard must refuse a private host.
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws", "wss" },
+            MaxReconnectAttempts = 0,
+        });
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        var request = new TransportRequest(
+            new Uri("ws://127.0.0.1:9/socket"), new byte[] { 1 }, "application/didcomm-encrypted+json");
+
+        var ex = (await ((Func<Task>)(() => transport.SendAsync(request, default)))
+            .Should().ThrowAsync<TransportException>()).Which;
+        FlattenMessages(ex).Should().Contain("private or reserved");
+    }
+
+    [Fact]
+    public async Task SendAsync_pins_connection_so_a_name_resolving_to_loopback_is_blocked_even_with_dns_check_disabled()
+    {
+        // ResolveDnsNames = false makes the pre-send Validate() a no-op for DNS names, so reaching the
+        // refusal here proves it is the connect-time IP pinning (OutboundEndpointGuard.ConnectAsync,
+        // which always resolves) — not the pre-check — that blocks a name resolving to a private IP.
+        // This is the DNS-rebinding / ResolveDnsNames=false gap the fix closes for the WS transport.
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws", "wss" },
+            MaxReconnectAttempts = 0,
+        });
+        options.Value.OutboundEndpointPolicy.ResolveDnsNames = false;
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        // 'localhost' is a DNS name (not an IP literal) that resolves only to loopback. Port 9 is
+        // never actually dialed: the guard filters every resolved address before connecting.
+        var request = new TransportRequest(
+            new Uri("ws://localhost:9/socket"), new byte[] { 1 }, "application/didcomm-encrypted+json");
+
+        var ex = (await ((Func<Task>)(() => transport.SendAsync(request, default)))
+            .Should().ThrowAsync<TransportException>()).Which;
+        FlattenMessages(ex).Should().Contain("private or reserved");
+    }
+
     [Fact]
     public async Task SendAsync_wraps_connect_failure_in_TransportException()
     {
@@ -113,6 +158,17 @@ public sealed class WebSocketTransportBehaviorTests
 
     private static TransportRequest NewRequest() =>
         new(new Uri("ws://agents.r.us/socket"), new byte[] { 1, 2, 3 }, "application/didcomm-encrypted+json");
+
+    // Walk the InnerException chain into one string: the guard's SSRF TransportException can be
+    // wrapped by ClientWebSocket (WebSocketException) and then by the transport's budget-exhausted
+    // TransportException, so assert against the whole chain rather than a single layer's message.
+    private static string FlattenMessages(Exception ex)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            sb.Append(e.Message).Append(" | ");
+        return sb.ToString();
+    }
 
     /// <summary>A minimal in-memory <see cref="WebSocket"/> that records disposal and accepts sends.</summary>
     private sealed class TrackingWebSocket : System.Net.WebSockets.WebSocket

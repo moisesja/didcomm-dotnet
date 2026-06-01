@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net.Http;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
 using DidComm.Transports;
@@ -22,6 +24,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly ILogger<WebSocketDidCommTransport> _logger;
     private readonly ResiliencePipeline _reconnectPipeline;
     private readonly OutboundEndpointGuard _guard;
+    // Non-null on the default connect path: pins every ClientWebSocket connection to a guard-vetted
+    // IP via SocketsHttpHandler.ConnectCallback (see constructor). Null when a custom Connect
+    // delegate owns its own vetting.
+    private readonly HttpMessageInvoker? _pinnedInvoker;
     private readonly ConcurrentDictionary<string, System.Net.WebSockets.WebSocket> _pool = new(StringComparer.Ordinal);
     // One connect gate per pool key so establishing a connection to one endpoint doesn't block
     // connects to a different endpoint.
@@ -42,6 +48,24 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         _logger = logger ?? NullLogger<WebSocketDidCommTransport>.Instance;
         _reconnectPipeline = BuildReconnectPipeline(_options);
         _guard = new OutboundEndpointGuard(_options.OutboundEndpointPolicy);
+        // SSRF defense for the default ClientWebSocket path: pin every connection — the initial
+        // handshake and each reconnect — to a guard-vetted IP via a SocketsHttpHandler.ConnectCallback,
+        // exactly as the HTTP transport does. OutboundEndpointGuard.ConnectAsync resolves at connect
+        // time regardless of OutboundEndpointPolicy.ResolveDnsNames, so this also defeats a DNS rebind
+        // between the pre-send Validate() and the handshake. TLS still uses the original host for SNI
+        // and certificate validation; only the TCP target IP is constrained. A custom Connect delegate
+        // owns its own vetting, so the invoker is built only for the default path.
+        _pinnedInvoker = _options.Connect is null
+            ? new HttpMessageInvoker(new SocketsHttpHandler
+            {
+                ConnectCallback = async (context, ct) =>
+                {
+                    var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                    Stream stream = new NetworkStream(socket, ownsSocket: true);
+                    return stream;
+                },
+            })
+            : null;
     }
 
     /// <inheritdoc />
@@ -72,9 +96,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 scheme: request.Endpoint.Scheme);
         }
 
-        // SSRF defense for the default connect path: reject private / loopback / metadata hosts
-        // before opening a socket. A custom Connect delegate (e.g. tests against an in-process
-        // TestServer) owns its own vetting, so the gate is skipped there.
+        // SSRF defense, layer 1: reject obvious private / loopback / metadata hosts up front with a
+        // clear error. The authoritative defense is the connect-time IP pinning in _pinnedInvoker
+        // (see constructor), which additionally covers DNS rebinding and ResolveDnsNames = false. A
+        // custom Connect delegate (e.g. tests against an in-process TestServer) owns its own vetting,
+        // so both layers are skipped there.
         if (_options.Connect is null)
             _guard.Validate(request.Endpoint);
 
@@ -191,10 +217,17 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
     }
 
-    private static Task DefaultConnect(System.Net.WebSockets.WebSocket socket, Uri endpoint, CancellationToken ct)
+    private Task DefaultConnect(System.Net.WebSockets.WebSocket socket, Uri endpoint, CancellationToken ct)
     {
         if (socket is ClientWebSocket cws)
-            return cws.ConnectAsync(endpoint, ct);
+        {
+            // Drive the handshake through the SSRF-pinning invoker so the underlying TCP connection
+            // can only reach a guard-vetted IP. _pinnedInvoker is non-null whenever this default path
+            // is in use (no custom Connect delegate overriding it).
+            return _pinnedInvoker is not null
+                ? cws.ConnectAsync(endpoint, _pinnedInvoker, ct)
+                : cws.ConnectAsync(endpoint, ct);
+        }
         throw new InvalidOperationException(
             "Default Connect supports ClientWebSocket only. Provide WebSocketTransportOptions.Connect for custom socket types (used by tests against TestServer).");
     }
@@ -267,5 +300,6 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         foreach (var (_, gate) in _connectLocks)
             gate.Dispose();
         _connectLocks.Clear();
+        _pinnedInvoker?.Dispose();
     }
 }
