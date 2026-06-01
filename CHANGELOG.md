@@ -1153,4 +1153,4 @@ Closes PRD §12 Phase 0 line items.
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/HEAD...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/commits/main
