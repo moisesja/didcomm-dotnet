@@ -9,7 +9,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 ### Added — Phase 6.3 (Out-of-Band 2.0 + NuGet release pipeline)
 
 Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-08**
-(release pipeline). Suite: **575 unit + 96 interop** under `warnaserror` (was 559 + 93).
+(release pipeline). Suite: **578 unit + 96 interop** under `warnaserror` (was 559 + 93).
 
 - **Out-of-Band 2.0** (`Protocols/OutOfBand/`):
   - `OutOfBand` static API — `CreateInvitation(from, goal?, goalCode?, accept?, attachments?, id?)`
@@ -37,6 +37,9 @@ Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-
   the tag; `Directory.Build.targets` packs the repo `README.md` into each package (fixes NU5039);
   README gains an Install section. *(Publishing requires a `NUGET_API_KEY` repo secret + a pushed
   tag — neither is done here.)*
+- **Review hardening**: OOB URL parsing tolerates a trailing `#fragment` (decodes instead of
+  failing base64url); the release job is gated behind a `nuget-release` GitHub Environment — add
+  required reviewers to enforce manual approval before the irreversible publish.
 
 ### Fixed — PR #11 review casualties (carried over from the abandoned local fix branch)
 

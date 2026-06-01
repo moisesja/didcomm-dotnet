@@ -206,4 +206,34 @@ public sealed class OutOfBandTests
         };
         OutOfBandApi.ReadWebRedirect(message).Should().BeNull();
     }
+
+    [Fact]
+    public void FromUrl_ignores_a_trailing_url_fragment()
+    {
+        var invitation = OutOfBandApi.CreateInvitation(from: "did:example:alice", goal: "Connect");
+        var url = OutOfBandApi.ToUrl(invitation, "https://example.com/path");
+
+        // A '#fragment' is not part of the query — decoding must skip it, not fold it into _oob.
+        var decoded = OutOfBandApi.FromUrl(url + "#section");
+
+        decoded.Id.Should().Be(invitation.Id);
+        decoded.Goal.Should().Be("Connect");
+    }
+
+    [Fact]
+    public void AddWebRedirect_survives_a_plaintext_serialize_round_trip()
+    {
+        var message = Message.Empty().WithFrom("did:example:verifier").WithTo("did:example:prover").Build();
+        OutOfBandApi.AddWebRedirect(message, new WebRedirect("OK", "https://example.com/done"));
+
+        // web_redirect rides in [JsonExtensionData]; pack to plaintext and reparse to lock in the
+        // on-wire {"status","redirectUrl"} shape (FR-OOB-05) against future serializer changes.
+        var json = DidComm.Composition.EnvelopeWriter.PackPlaintext(message);
+        var reparsed = System.Text.Json.JsonSerializer.Deserialize<Message>(json, DidComm.Json.DidCommJson.Default)!;
+
+        var read = OutOfBandApi.ReadWebRedirect(reparsed);
+        read.Should().NotBeNull();
+        read!.Status.Should().Be("OK");
+        read.RedirectUrl.Should().Be("https://example.com/done");
+    }
 }

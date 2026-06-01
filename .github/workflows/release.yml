@@ -18,6 +18,10 @@ jobs:
   pack-and-publish:
     name: pack + publish to NuGet
     runs-on: ubuntu-latest
+    # Gate the irreversible publish: add "Required reviewers" to the `nuget-release` environment
+    # (repo Settings > Environments) so each tag push waits for approval before this job runs.
+    # Until those rules exist this is a no-op. Scope the NUGET_API_KEY secret to this environment.
+    environment: nuget-release
     steps:
       - name: Checkout
         uses: actions/checkout@v4

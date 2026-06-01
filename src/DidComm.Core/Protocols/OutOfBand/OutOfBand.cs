@@ -28,6 +28,11 @@ namespace DidComm.Protocols.OutOfBand;
 /// decoding is order-independent — <see cref="FromUrl"/> round-trips both our own output and the
 /// spec example.
 /// </para>
+/// <para>
+/// The short-form (<c>_oobid</c>) GET serves the full plaintext invitation unchanged — including
+/// the <c>typ</c> header that <see cref="ToUrl"/> drops from the inline form — so the two URL
+/// forms are not byte-identical, but both decode to the same invitation.
+/// </para>
 /// <para>Maps to PRD §14.2 task <strong>V</strong>.</para>
 /// </remarks>
 public static class OutOfBand
@@ -249,6 +254,11 @@ public static class OutOfBand
             return false;
 
         var query = url[(queryStart + 1)..];
+        // A fragment (#...) is not part of the query; drop it so an _oob/_oobid value followed by
+        // a fragment still decodes instead of failing base64url on the trailing "#frag".
+        var hash = query.IndexOf('#');
+        if (hash >= 0)
+            query = query[..hash];
         foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
             var eq = pair.IndexOf('=');
