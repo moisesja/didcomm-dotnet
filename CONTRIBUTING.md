@@ -115,6 +115,14 @@ Order operations encrypt-then-derive-KEK so the JWE tag participates
 in the KDF input, matching the Appendix C.3 authcrypt vectors.
 ```
 
+## Releasing
+
+Releases are tag-driven: pushing a `vMAJOR.MINOR.PATCH` tag packs and publishes the
+`DidComm.*` packages to NuGet.org. Maintainers cutting a release should follow the
+runbook in [RELEASING.md](RELEASING.md) — it covers the one-time `NUGET_API_KEY` secret
+and reviewer-gated `nuget-release` environment, the versioning policy, the CHANGELOG
+step, and post-release verification.
+
 ## Reporting issues
 
 When filing a bug, please include:

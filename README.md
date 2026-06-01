@@ -1,8 +1,9 @@
 # didcomm-dotnet
 
+[![NuGet](https://img.shields.io/nuget/vpre/DidComm.Core.svg)](https://www.nuget.org/packages/DidComm.Core)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Status](https://img.shields.io/badge/status-phase%205%20complete-orange.svg)](#project-status)
+[![Status](https://img.shields.io/badge/status-phase%206%20complete-orange.svg)](#project-status)
 [![Spec](https://img.shields.io/badge/spec-DIDComm%20v2.1-informational.svg)](https://identity.foundation/didcomm-messaging/spec/v2.1)
 
 A spec-complete .NET 10 implementation of **DIDComm Messaging v2.1** — the [DIF](https://identity.foundation/) protocol for confidential, integrity-protected, optionally non-repudiable messaging between parties identified by Decentralized Identifiers (DIDs).
@@ -13,15 +14,17 @@ DID resolution is delegated to the sibling library [**NetDid**](https://github.c
 
 ## Project status
 
-**Phases 0 – 5 complete.** The library has a public Pack / Unpack / Send
+**Phases 0 – 6 complete.** The library has a public Pack / Unpack / Send
 surface (`DidCommClient`), DID resolution via [NetDid 1.3.0](https://github.com/moisesja/net-did),
 a consumer-supplied `ISecretsResolver` contract, the three protective envelope
 shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
 consistency including the FR-CONSIST-06 resolver-backed authorization check,
 DID rotation via `from_prior`, Routing Protocol 2.0 (sender forward wrapping
 + mediator relay + rewrapping), and the HTTPS / WebSocket transports plus the
-ASP.NET Core receive endpoint. The DIDComm v2.1 Appendix C inbound interop
-gate passes for every vendored vector.
+ASP.NET Core receive endpoint. Phase 6 adds threading / ACKs / i18n / profiles
+and **all the spec's built-in protocols** — Trust Ping, Discover Features, Empty,
+Report Problem, Trace (off by default), and Out-of-Band 2.0. The DIDComm v2.1
+Appendix C inbound interop gate passes for every vendored vector.
 
 Shipped highlights:
 
@@ -52,14 +55,21 @@ Shipped highlights:
   `MapDidCommEndpoint` / `MapDidCommWebSocket` minimal-API extensions —
   `Content-Type` validation ⇒ 415, `MaxReceiveBytes` ⇒ 413 / 1009
   (FR-TRN-07 + FR-API-06).
-- **Cookbook** — runnable, narrated samples for the PRD §14.2 API tasks the
-  shipped surface covers: **K** (unpack metadata), **N** (rotation), **O**
-  (routing via a mediator), **P** (send over a transport), **Q** (receive
-  over HTTP), **R** (receive over WebSocket), **AA** (net-did integration
-  + did:web rejection). Build the project and
-  `dotnet run --project samples/02-Cookbook` to see end-to-end output.
+- **Built-in protocols** — every protocol the spec defines directly:
+  Trust Ping 2.0, Discover Features 2.0, Empty 1.0, Report Problem 2.0
+  (taxonomy + interpolation + escalation + cascade guard), Trace 2.0
+  (off by default), and Out-of-Band 2.0 (`OutOfBand.CreateInvitation` /
+  `ToUrl` / `FromUrl`, short-form `?_oobid=` retrieval, `web_redirect`).
+- **Cookbook** — runnable, narrated samples for the PRD §14.2 API tasks:
+  **K** (unpack metadata), **M** (threading & ACKs), **N** (rotation),
+  **O** (routing via a mediator), **P** (send over a transport), **Q**
+  (receive over HTTP), **R** (receive over WebSocket), **S** (Trust Ping),
+  **T** (Discover Features), **U** (Report Problem), **V** (Out-of-Band
+  invitation), **W** (Empty message), **X** (custom handler), **AA**
+  (net-did + did:web rejection), **BB** (profiles & i18n). Build the project
+  and `dotnet run --project samples/02-Cookbook` to see end-to-end output.
 
-364 unit + 63 interop tests pass under `warnaserror`. See
+576 unit + 96 interop tests pass under `warnaserror`. See
 [CHANGELOG.md](CHANGELOG.md) for the per-phase log, the
 [PRD](docs/didcomm-dotnet_PRD.md) for normative requirements
 (the six-phase plan is §12), and the [roadmap](#roadmap) below for status at a
@@ -79,14 +89,15 @@ package per transport and integration:
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
 
 ```bash
-dotnet add package DidComm.Core
-dotnet add package DidComm.Extensions.DependencyInjection
+# The first release is a prerelease (0.1.0-preview.1), so pass --prerelease until a stable tag:
+dotnet add package DidComm.Core --prerelease
+dotnet add package DidComm.Extensions.DependencyInjection --prerelease
 ```
 
 > The release pipeline ([`.github/workflows/release.yml`](.github/workflows/release.yml)) packs
-> all packages (with symbols + SourceLink) and pushes them to NuGet.org on a
-> `vMAJOR.MINOR.PATCH` tag. The first version (`0.1.0`) has not been tagged/published yet — until
-> then, build from source.
+> all packages (with symbols + SourceLink) and pushes them to NuGet.org on a `vMAJOR.MINOR.PATCH`
+> tag. The first version (`0.1.0-preview.1`) has not been tagged/published yet — until then, build
+> from source. Maintainers: see [RELEASING.md](RELEASING.md) for the publish runbook.
 
 ## What "spec-complete" means
 
@@ -192,7 +203,7 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 
 The runnable [`samples/02-Cookbook`](samples/02-Cookbook/) project demonstrates
 each shipped API task — the README at that path documents the §14.2 letter
-mapping (currently K, N, O, P, Q, R, AA through the Phase 5 increment).
+mapping (K, M, N, O, P, Q, R, S, T, U, V, W, X, AA, BB through the Phase 6 increment).
 
 ## Specifications
 
@@ -234,7 +245,7 @@ didcomm-dotnet/
 │   ├── DidComm.AspNetCore/                        # MapDidCommEndpoint / MapDidCommWebSocket (FR-TRN-07/09/10)
 │   └── DidComm.Protocols.*/                       # (Phase 6)
 ├── tests/
-│   ├── DidComm.Core.Tests/                        # 364 unit tests
+│   ├── DidComm.Core.Tests/                        # 576 unit tests
 │   ├── DidComm.InteropTests/                      # 63 cases: Appendix C vectors + Appendix B resolution + facade round-trip + rotation + routing + transports + Cookbook smoke
 │   └── DidComm.TestSupport/                       # InMemorySecretsResolver helper (non-test library)
 ├── samples/

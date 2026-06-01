@@ -4,7 +4,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0-preview.1]
 
 ### Added — Phase 6.3 (Out-of-Band 2.0 + NuGet release pipeline)
 
@@ -12,22 +12,22 @@ Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-
 (release pipeline). Suite: **578 unit + 96 interop** under `warnaserror` (was 559 + 93).
 
 - **Out-of-Band 2.0** (`Protocols/OutOfBand/`):
-  - `OutOfBand` static API — `CreateInvitation(from, goal?, goalCode?, accept?, attachments?, id?)`
-    (goal_code / goal / accept written into `body`, FR-OOB-01); `ToUrl(invitation, baseUrl)` /
-    `FromUrl(url)` for the `?_oob=<base64url(plaintext-jwm)>` form (FR-OOB-02), reusing the
-    existing compact plaintext serializer + `Base64Url`; `FromPlaintext(json)`; short-form
-    `ToShortUrl(baseUrl, oobId)` / `TryGetShortFormId(...)` (FR-OOB-04); `AddWebRedirect(...)` /
-    `ReadWebRedirect(...)` for the `web_redirect` block (FR-OOB-05).
-  - `OutOfBandInvitation` — read-only projection (`Id`, `From`, `Goal`, `GoalCode`, `Accept`,
-    `Attachments`); the invitation `id` is the recipient's response `pthid` (FR-OOB-03).
-  - `WebRedirect` record; `IOobInvitationStore` + `InMemoryOobInvitationStore` for the short-form.
-  - **No dispatcher handler** — an invitation arrives out of band (URL/QR) and bootstraps a
-    follow-up protocol, so there is nothing to route through `ProtocolDispatcher`.
-  - **Encoding (FR-OOB-02):** `ToUrl` emits a canonical, reproducible payload — keys sorted at
-    every level (the deterministic JSON writer) and the `typ` header dropped — so the same
-    invitation always yields the same URL. That key order still differs from the spec's
-    illustrative example, so it is not a byte-for-byte reproduction of that example; interop is
-    proven instead by decoding the spec's own example fixture + round-trip equality.
+    - `OutOfBand` static API — `CreateInvitation(from, goal?, goalCode?, accept?, attachments?, id?)`
+      (goal_code / goal / accept written into `body`, FR-OOB-01); `ToUrl(invitation, baseUrl)` /
+      `FromUrl(url)` for the `?_oob=<base64url(plaintext-jwm)>` form (FR-OOB-02), reusing the
+      existing compact plaintext serializer + `Base64Url`; `FromPlaintext(json)`; short-form
+      `ToShortUrl(baseUrl, oobId)` / `TryGetShortFormId(...)` (FR-OOB-04); `AddWebRedirect(...)` /
+      `ReadWebRedirect(...)` for the `web_redirect` block (FR-OOB-05).
+    - `OutOfBandInvitation` — read-only projection (`Id`, `From`, `Goal`, `GoalCode`, `Accept`,
+      `Attachments`); the invitation `id` is the recipient's response `pthid` (FR-OOB-03).
+    - `WebRedirect` record; `IOobInvitationStore` + `InMemoryOobInvitationStore` for the short-form.
+    - **No dispatcher handler** — an invitation arrives out of band (URL/QR) and bootstraps a
+      follow-up protocol, so there is nothing to route through `ProtocolDispatcher`.
+    - **Encoding (FR-OOB-02):** `ToUrl` emits a canonical, reproducible payload — keys sorted at
+      every level (the deterministic JSON writer) and the `typ` header dropped — so the same
+      invitation always yields the same URL. That key order still differs from the spec's
+      illustrative example, so it is not a byte-for-byte reproduction of that example; interop is
+      proven instead by decoding the spec's own example fixture + round-trip equality.
 - **ASP.NET Core**: `MapDidCommOobEndpoint(pattern, store)` — HTTP GET serving the short-form
   invitation by `_oobid` (200 `application/didcomm-plain+json` / 404 / 400) (FR-OOB-04).
 - **Cookbook Section V** (`Section_V_OutOfBandInvitation`) — build → URL → decode round trip,
@@ -35,8 +35,8 @@ Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-
 - **NuGet release pipeline (NFR-08)**: `.github/workflows/release.yml` packs + pushes all six
   packages (with symbols + SourceLink) to NuGet.org on a `v*` tag, with the version derived from
   the tag; `Directory.Build.targets` packs the repo `README.md` into each package (fixes NU5039);
-  README gains an Install section. *(Publishing requires a `NUGET_API_KEY` repo secret + a pushed
-  tag — neither is done here.)*
+  README gains an Install section. _(Publishing requires a `NUGET_API_KEY` repo secret + a pushed
+  tag — neither is done here.)_
 - **Review hardening**: OOB URL parsing tolerates a trailing `#fragment` (decodes instead of
   failing base64url); the release job is gated behind a `nuget-release` GitHub Environment — add
   required reviewers to enforce manual approval before the irreversible publish.
@@ -61,77 +61,77 @@ FR-PROTO-10, FR-PROTO-11, FR-PROTO-11a**. Last of the three 6.2 sub-PRs —
 Empty / ProblemReport / Trace).
 
 - **Report Problem 2.0** (`Protocols/ProblemReport/`):
-  - `ProblemCode` — typed taxonomy parser for `sorter.scope.descriptor[.sub…]`;
-    `IsError` / `IsWarning` / `IsProtocolScoped` / `IsMessageScoped` flags;
-    `StartsWith(prefix)` implements FR-PROTO-08 structural-prefix matching.
-  - `CommentInterpolator` — FR-PROTO-07 `{n}` interpolation, 1-based; missing
-    args render as `?`; unreferenced extras appended in a `[extra: …]` block;
-    `{{` / `}}` escape to literal braces.
-  - `ProblemReport` static API — `Create(...)` / `Escalate(...)` /
-    `ReadCode(...)` / `ReadComment(...)` / `ReadArgs(...)` / `RenderComment(...)`.
-    The single message type (`…/report-problem/2.0/problem-report`) plus the
-    cascade-stop code (`e.p.req.max-errors-exceeded`).
-  - `ProblemReportOptions.CascadeThreshold = 5` (matches `sicpa-dlab/didcomm-python`
-    per locked decision).
-  - `ProblemReportHandler` — increments `ThreadState.ErrorCount` on the
-    **failing thread (pthid)** for inbound errors, emits exactly one
-    `e.p.req.max-errors-exceeded` reply on threshold breach, then silently
-    ignores subsequent reports on the same `pthid` (FR-PROTO-10).
+    - `ProblemCode` — typed taxonomy parser for `sorter.scope.descriptor[.sub…]`;
+      `IsError` / `IsWarning` / `IsProtocolScoped` / `IsMessageScoped` flags;
+      `StartsWith(prefix)` implements FR-PROTO-08 structural-prefix matching.
+    - `CommentInterpolator` — FR-PROTO-07 `{n}` interpolation, 1-based; missing
+      args render as `?`; unreferenced extras appended in a `[extra: …]` block;
+      `{{` / `}}` escape to literal braces.
+    - `ProblemReport` static API — `Create(...)` / `Escalate(...)` /
+      `ReadCode(...)` / `ReadComment(...)` / `ReadArgs(...)` / `RenderComment(...)`.
+      The single message type (`…/report-problem/2.0/problem-report`) plus the
+      cascade-stop code (`e.p.req.max-errors-exceeded`).
+    - `ProblemReportOptions.CascadeThreshold = 5` (matches `sicpa-dlab/didcomm-python`
+      per locked decision).
+    - `ProblemReportHandler` — increments `ThreadState.ErrorCount` on the
+      **failing thread (pthid)** for inbound errors, emits exactly one
+      `e.p.req.max-errors-exceeded` reply on threshold breach, then silently
+      ignores subsequent reports on the same `pthid` (FR-PROTO-10).
 - **Trace 2.0 — off-by-default** (`Protocols/Trace/`):
-  - `Trace` — protocol/header constants (`trace` header, `report_uri` / `trace_id` members).
-  - `TraceOptions.Validate()` — `Enabled = true` REQUIRES at least one entry in
-    `AllowedReportingUris` per FR-PROTO-11a's "explicitly configured safeguards";
-    throws `InvalidOperationException` at startup otherwise.
-  - `TraceObserver.ShouldReport(...)` — pure decision surface: returns `false`
-    unconditionally when the operator hasn't opted in; otherwise returns the
-    validated absolute report URI (allowlist gate + absolute-URI check).
-    HTTP POSTing is left to a future integration; the off-by-default guarantee
-    is the spec-mandated piece.
-  - `TraceObserver.BuildReportBody(...)` — minimal observed-metadata body for
-    consumers wiring up the POST themselves.
+    - `Trace` — protocol/header constants (`trace` header, `report_uri` / `trace_id` members).
+    - `TraceOptions.Validate()` — `Enabled = true` REQUIRES at least one entry in
+      `AllowedReportingUris` per FR-PROTO-11a's "explicitly configured safeguards";
+      throws `InvalidOperationException` at startup otherwise.
+    - `TraceObserver.ShouldReport(...)` — pure decision surface: returns `false`
+      unconditionally when the operator hasn't opted in; otherwise returns the
+      validated absolute report URI (allowlist gate + absolute-URI check).
+      HTTP POSTing is left to a future integration; the off-by-default guarantee
+      is the spec-mandated piece.
+    - `TraceObserver.BuildReportBody(...)` — minimal observed-metadata body for
+      consumers wiring up the POST themselves.
 - **`ProtocolContext.Threads`** — new field exposes `IThreadStateStore` to
   handlers (so ProblemReport can resolve the failing-thread state by `pthid`,
   not the report's own thread). Found via an integration test that exposed
   a real bug in the original design.
 - **DI** (`DidCommBuilder`):
-  - `AddBuiltInProtocols()` now also registers `ProblemReportHandler` + binds
-    `ProblemReportOptions` via the standard Options pattern.
-  - `EnableTracing(Action<TraceOptions>)` — opt-in only; validates immediately
-    and registers `TraceOptions` as a singleton.
+    - `AddBuiltInProtocols()` now also registers `ProblemReportHandler` + binds
+      `ProblemReportOptions` via the standard Options pattern.
+    - `EnableTracing(Action<TraceOptions>)` — opt-in only; validates immediately
+      and registers `TraceOptions` as a singleton.
 - **Cookbook Section U** (Report Problem) — parses a structured code,
   interpolates a `{n}` comment, escalates a warning to an error with preserved
   scope, and trips the cascade guard in 3 packed messages. 14 sections total.
 - **Tests** (+57 unit, +5 interop, total **543 unit + 93 interop**):
-  - 18 `ProblemCode` cases (taxonomy parse, malformed-input rejection,
-    structural-prefix `StartsWith`, sorter/scope flags).
-  - 8 `CommentInterpolator` cases (spec example, missing args → `?`, extras
-    appended, brace escapes, unclosed-brace tolerance, non-positional
-    placeholder passthrough).
-  - 7 `ProblemReport` API tests.
-  - 7 `ProblemReportHandler` cases (incl. cascade trip + exactly-once + silent-after).
-  - 4 `TraceOptions` validation cases.
-  - 7 `TraceObserver` cases (default-off, allowlist match/miss, malformed/missing
-    header, non-absolute URI, body-builder metadata).
-  - 5 DI integration tests (incl. end-to-end cascade-guard trip over real
-    did:peer pack/unpack/dispatch).
+    - 18 `ProblemCode` cases (taxonomy parse, malformed-input rejection,
+      structural-prefix `StartsWith`, sorter/scope flags).
+    - 8 `CommentInterpolator` cases (spec example, missing args → `?`, extras
+      appended, brace escapes, unclosed-brace tolerance, non-positional
+      placeholder passthrough).
+    - 7 `ProblemReport` API tests.
+    - 7 `ProblemReportHandler` cases (incl. cascade trip + exactly-once + silent-after).
+    - 4 `TraceOptions` validation cases.
+    - 7 `TraceObserver` cases (default-off, allowlist match/miss, malformed/missing
+      header, non-absolute URI, body-builder metadata).
+    - 5 DI integration tests (incl. end-to-end cascade-guard trip over real
+      did:peer pack/unpack/dispatch).
 
 ### Fixed (Phase 6.2c review)
 
 Addresses 15 review findings on the Phase 6.2c surface (see PR #11 inline comments).
 
 - **`ProblemReportHandler.HandleAsync` rewritten for FR-PROTO-10 correctness.**
-  - Atomic increment + threshold check + trip decision under a per-`ThreadState` lock — concurrent
-    inbound error reports on the same `pthid` (singleton handler fed by parallel transports) now
-    yield exactly one cascade-stop instead of racing on `ErrorCount++`.
-  - The cascade-trip is deferred when the threshold-tripping report is unrepliable
-    (anoncrypt — no `from`/`to`); without the deferral, the counter landed past the threshold and
-    the silent-ignore branch swallowed every subsequent report, so the cascade-stop was never
-    emitted (FR-PROTO-10 silently broken).
-  - Past-trip reports are now truly silent: short-circuit happens BEFORE the increment + Information
-    log, eliminating the unbounded counter growth and per-message log-flood that "silently
-    ignores" used to allow.
-  - Threshold semantics simplified from `> CascadeThreshold + 1` / `== CascadeThreshold + 1` to a
-    single `> CascadeThreshold` decision driven by `ThreadState.MaxErrorsNoticeSent` (new flag).
+    - Atomic increment + threshold check + trip decision under a per-`ThreadState` lock — concurrent
+      inbound error reports on the same `pthid` (singleton handler fed by parallel transports) now
+      yield exactly one cascade-stop instead of racing on `ErrorCount++`.
+    - The cascade-trip is deferred when the threshold-tripping report is unrepliable
+      (anoncrypt — no `from`/`to`); without the deferral, the counter landed past the threshold and
+      the silent-ignore branch swallowed every subsequent report, so the cascade-stop was never
+      emitted (FR-PROTO-10 silently broken).
+    - Past-trip reports are now truly silent: short-circuit happens BEFORE the increment + Information
+      log, eliminating the unbounded counter growth and per-message log-flood that "silently
+      ignores" used to allow.
+    - Threshold semantics simplified from `> CascadeThreshold + 1` / `== CascadeThreshold + 1` to a
+      single `> CascadeThreshold` decision driven by `ThreadState.MaxErrorsNoticeSent` (new flag).
 - **`ProblemReportOptions.Validate()`** — added; the handler ctor calls it so misconfigured
   thresholds (negative, `int.MaxValue`) fail loudly at DI resolution rather than silently
   disabling the cascade guard.
@@ -141,19 +141,19 @@ Addresses 15 review findings on the Phase 6.2c surface (see PR #11 inline commen
   `InvalidOperationException`. `ReadArgs` additionally preserves null/non-string entries as empty
   strings so 1-based positional indexes stay aligned with the on-wire array.
 - **`CommentInterpolator.Interpolate`** —
-  - Brace-collapse (`{{` → `{`, `}}` → `}`) now runs uniformly, even when `args` is null/empty:
-    identical templates render identically regardless of args presence.
-  - `{0}` (or any non-positive numeric placeholder) renders as `?` per the 1-based spec, instead
-    of leaking the placeholder text + dumping the unused arg into `[extra: …]`.
+    - Brace-collapse (`{{` → `{`, `}}` → `}`) now runs uniformly, even when `args` is null/empty:
+      identical templates render identically regardless of args presence.
+    - `{0}` (or any non-positive numeric placeholder) renders as `?` per the 1-based spec, instead
+      of leaking the placeholder text + dumping the unused arg into `[extra: …]`.
 - **`TraceObserver.ShouldReport`** — three correctness/security fixes:
-  - **Scheme guard**: reject any URI whose scheme is not `http`/`https` (previously `file://`,
-    `javascript:`, `gopher:`, `data:`, `ftp:` all admitted if allowlisted).
-  - **SSRF defense-in-depth**: reject IP-literal hosts that classify as loopback / private /
-    link-local / metadata via `OutboundEndpointGuard.IsPrivateOrReserved` — wires up the
-    defense-in-depth the docstring already promised.
-  - **Allowlist normalisation**: compare both sides via `Uri.AbsoluteUri`. Trailing-slash,
-    default-port, percent-encoding, and host-case differences no longer silently drop legitimate
-    matches.
+    - **Scheme guard**: reject any URI whose scheme is not `http`/`https` (previously `file://`,
+      `javascript:`, `gopher:`, `data:`, `ftp:` all admitted if allowlisted).
+    - **SSRF defense-in-depth**: reject IP-literal hosts that classify as loopback / private /
+      link-local / metadata via `OutboundEndpointGuard.IsPrivateOrReserved` — wires up the
+      defense-in-depth the docstring already promised.
+    - **Allowlist normalisation**: compare both sides via `Uri.AbsoluteUri`. Trailing-slash,
+      default-port, percent-encoding, and host-case differences no longer silently drop legitimate
+      matches.
 - **`ProtocolDispatcher`** — accepts an optional `TraceOptions` (DI-injected when
   `EnableTracing` was called) and invokes `TraceObserver.ShouldReport` on every inbound message.
   An authorised trace intent is logged at `Information`; HTTP POST integration remains deferred,
@@ -170,7 +170,7 @@ Addresses 15 review findings on the Phase 6.2c surface (see PR #11 inline commen
 - **`ProtocolContext` positional ctor signature.** `Threads` was previously inserted at index 2
   (between `Thread` and `Client`); it is now appended at the end of the positional list so
   callers using the prior positional shape `new ProtocolContext(received, thread, client,
-  options)` keep compiling. Downstream consumers that built `ProtocolContext` positionally
+options)` keep compiling. Downstream consumers that built `ProtocolContext` positionally
   against the dd204b0 commit of this PR will need to swap to the new order:
   `new ProtocolContext(received, thread, client, options, threads)`. Callers using named
   parameters are unaffected.
@@ -182,45 +182,45 @@ Closes PRD §12 Phase 6 partially: **FR-PROTO-05** (Discover Features 2.0 with t
 point with a one-file custom `IProtocolHandler` (`lets_do_lunch`).
 
 - **Discover Features 2.0** (`Protocols/DiscoverFeatures/`):
-  - `DiscoverFeatures` static API — `CreateQuery(from, to, queries…)`,
-    `CreateDisclose(from, to, thid, disclosures…)`, `ReadQueries(msg)`,
-    `ReadDisclosures(msg)`; spec constants for the four `feature-type` values
-    + the `max_receive_bytes` constraint id.
-  - `FeatureQuery` / `FeatureDisclosure` records (spec wire shape:
-    `feature-type` is hyphenated, `value` is omitted when null).
-  - `DiscoverFeaturesHandler` — routes each query to the matching
-    `IFeatureProvider`, concatenates disclosures, emits a single threaded
-    `disclose` reply. Unrecognized `feature-type`s are silently skipped;
-    empty disclosures are meaningful (not "unsupported").
-  - `FeatureMatch` — spec-conformant trailing-`*` prefix matching;
-    bare `*` matches everything; otherwise exact.
-  - `IFeatureProvider` extension point + two built-in providers:
-    `ProtocolFeatureProvider` (reflects the registry) and
-    `MaxReceiveBytesConstraintProvider` (advertises `DidCommOptions.MaxReceiveBytes`).
+    - `DiscoverFeatures` static API — `CreateQuery(from, to, queries…)`,
+      `CreateDisclose(from, to, thid, disclosures…)`, `ReadQueries(msg)`,
+      `ReadDisclosures(msg)`; spec constants for the four `feature-type` values
+        - the `max_receive_bytes` constraint id.
+    - `FeatureQuery` / `FeatureDisclosure` records (spec wire shape:
+      `feature-type` is hyphenated, `value` is omitted when null).
+    - `DiscoverFeaturesHandler` — routes each query to the matching
+      `IFeatureProvider`, concatenates disclosures, emits a single threaded
+      `disclose` reply. Unrecognized `feature-type`s are silently skipped;
+      empty disclosures are meaningful (not "unsupported").
+    - `FeatureMatch` — spec-conformant trailing-`*` prefix matching;
+      bare `*` matches everything; otherwise exact.
+    - `IFeatureProvider` extension point + two built-in providers:
+      `ProtocolFeatureProvider` (reflects the registry) and
+      `MaxReceiveBytesConstraintProvider` (advertises `DidCommOptions.MaxReceiveBytes`).
 - **DI** (`DidCommBuilder`):
-  - `AddBuiltInProtocols()` now also registers `DiscoverFeaturesHandler` + both
-    default `IFeatureProvider`s (via `TryAddEnumerable` so re-registration is a no-op).
-  - New `AddFeatureProvider<T>()` for consumers that want to expose goal-codes,
-    custom headers, or app-specific constraints.
+    - `AddBuiltInProtocols()` now also registers `DiscoverFeaturesHandler` + both
+      default `IFeatureProvider`s (via `TryAddEnumerable` so re-registration is a no-op).
+    - New `AddFeatureProvider<T>()` for consumers that want to expose goal-codes,
+      custom headers, or app-specific constraints.
 - **Cookbook**:
-  - **Section T** (Discover Features) — Alice queries `https://didcomm.org/*` +
-    `constraint:max_receive_bytes`; Bob's disclose reply lists all 3 built-in
-    PIURIs + the byte-cap value; narrator confirms `thid` matches.
-  - **Section X** (Custom IProtocolHandler) — a one-file `lets_do_lunch/1.0`
-    protocol shows the FR-PROTO-03 extension point: define a handler, register
-    via `ProtocolHandlerRegistry.Register(...)` (or `b.AddProtocol<T>()`), run
-    through the dispatcher.
+    - **Section T** (Discover Features) — Alice queries `https://didcomm.org/*` +
+      `constraint:max_receive_bytes`; Bob's disclose reply lists all 3 built-in
+      PIURIs + the byte-cap value; narrator confirms `thid` matches.
+    - **Section X** (Custom IProtocolHandler) — a one-file `lets_do_lunch/1.0`
+      protocol shows the FR-PROTO-03 extension point: define a handler, register
+      via `ProtocolHandlerRegistry.Register(...)` (or `b.AddProtocol<T>()`), run
+      through the dispatcher.
 - **Tests** (+27 unit, +3 interop, total **486 unit + 88 interop** green):
-  - 8 `FeatureMatch` cases covering wildcard / prefix / exact / empty.
-  - 7 `DiscoverFeatures` static-API tests (CreateQuery/Disclose round-trip,
-    `feature-type` JSON name, optional `value` omission, malformed-entry tolerance).
-  - 9 `DiscoverFeaturesHandler` cases (wildcard match, prefix filter,
-    `max_receive_bytes` reflection of `DidCommOptions`, case-insensitive
-    `feature-type` matching, unrecognized type silently skipped, disclose-typed
-    inbound is terminal, anonymous query rejected).
-  - 3 DI-graph integration tests (`AddBuiltInProtocols` registers handler +
-    providers; full pack→unpack→dispatch round-trip lists all built-ins +
-    `max_receive_bytes`; `AddFeatureProvider<T>()` appends consumer providers).
+    - 8 `FeatureMatch` cases covering wildcard / prefix / exact / empty.
+    - 7 `DiscoverFeatures` static-API tests (CreateQuery/Disclose round-trip,
+      `feature-type` JSON name, optional `value` omission, malformed-entry tolerance).
+    - 9 `DiscoverFeaturesHandler` cases (wildcard match, prefix filter,
+      `max_receive_bytes` reflection of `DidCommOptions`, case-insensitive
+      `feature-type` matching, unrecognized type silently skipped, disclose-typed
+      inbound is terminal, anonymous query rejected).
+    - 3 DI-graph integration tests (`AddBuiltInProtocols` registers handler +
+      providers; full pack→unpack→dispatch round-trip lists all built-ins +
+      `max_receive_bytes`; `AddFeatureProvider<T>()` appends consumer providers).
 
 ### Added — Phase 6.2a (Protocol handler registry + TrustPing + Empty)
 
@@ -229,36 +229,36 @@ for FR-PROTO-01/02 (parser shipped earlier), and enforces **FR-THR-04 rule 2** a
 the dispatcher boundary plus defensive **rule 3** drop of peer rule-2 violations.
 
 - **`IProtocolHandler` + dispatch framework** (`DidComm.Core/Protocols/`):
-  - `IProtocolHandler` — `ProtocolUri` + `HandleAsync(Message, ProtocolContext, ct)` returning an optional reply.
-  - `ProtocolIdentifier` — PIURI parser (`<doc-uri>/<protocol-name>/<major.minor>`) mirroring `MessageTypeUri`.
-  - `ProtocolHandlerRegistry` — case- and punctuation-insensitive PIURI lookup (FR-PROTO-01) with the older-minor-wins interop floor (FR-PROTO-02). Thread-safe; intended as a singleton.
-  - `ProtocolContext` — wraps `UnpackResult`, `ThreadState`, optional `DidCommClient`, and `DidCommOptions`.
-  - `ProtocolDispatcher` — orchestrates resolution → pre-filter (FR-THR-04 rule 3) → handler invocation → reply safety check (`AckLoopGuard.IsSafeToSend`, FR-THR-04 rule 2) → `DispatchOutcome` (NoHandler / NoReply / ReplyProduced / DroppedAsAckLoop).
+    - `IProtocolHandler` — `ProtocolUri` + `HandleAsync(Message, ProtocolContext, ct)` returning an optional reply.
+    - `ProtocolIdentifier` — PIURI parser (`<doc-uri>/<protocol-name>/<major.minor>`) mirroring `MessageTypeUri`.
+    - `ProtocolHandlerRegistry` — case- and punctuation-insensitive PIURI lookup (FR-PROTO-01) with the older-minor-wins interop floor (FR-PROTO-02). Thread-safe; intended as a singleton.
+    - `ProtocolContext` — wraps `UnpackResult`, `ThreadState`, optional `DidCommClient`, and `DidCommOptions`.
+    - `ProtocolDispatcher` — orchestrates resolution → pre-filter (FR-THR-04 rule 3) → handler invocation → reply safety check (`AckLoopGuard.IsSafeToSend`, FR-THR-04 rule 2) → `DispatchOutcome` (NoHandler / NoReply / ReplyProduced / DroppedAsAckLoop).
 - **Trust Ping 2.0** (`Protocols/TrustPing/`):
-  - `TrustPing.CreatePing(from, to, responseRequested=true)`, `TrustPing.CreateResponse(ping)`, `TrustPing.IsResponseRequested(ping)` (default `true` when the body member is missing or non-boolean — matches `sicpa-dlab/didcomm-python`).
-  - `TrustPingHandler` auto-replies `ping-response` with `thid = ping.id`; suppresses reply when `response_requested = false`; never replies to a `ping-response` (terminal leaf).
+    - `TrustPing.CreatePing(from, to, responseRequested=true)`, `TrustPing.CreateResponse(ping)`, `TrustPing.IsResponseRequested(ping)` (default `true` when the body member is missing or non-boolean — matches `sicpa-dlab/didcomm-python`).
+    - `TrustPingHandler` auto-replies `ping-response` with `thid = ping.id`; suppresses reply when `response_requested = false`; never replies to a `ping-response` (terminal leaf).
 - **Empty 1.0** (`Protocols/Empty/`):
-  - `EmptyProtocol` constants + `EmptyHandler` (returns `null` reply — Empty is header-only).
-  - `Message.Empty()` static factory: pre-seeded `MessageBuilder` for the Empty 1.0 type.
+    - `EmptyProtocol` constants + `EmptyHandler` (returns `null` reply — Empty is header-only).
+    - `Message.Empty()` static factory: pre-seeded `MessageBuilder` for the Empty 1.0 type.
 - **`ThreadState.ErrorCount`** added for the FR-PROTO-10 cascade guard (Phase 6.2c wires it).
 - **DI** (`DidCommBuilder`):
-  - `AddProtocol<T>()` registers an `IProtocolHandler` singleton.
-  - `AddBuiltInProtocols()` registers TrustPing + Empty.
-  - Registry built via a DI factory that walks every `IProtocolHandler` so order of `AddProtocol` calls doesn't matter.
+    - `AddProtocol<T>()` registers an `IProtocolHandler` singleton.
+    - `AddBuiltInProtocols()` registers TrustPing + Empty.
+    - Registry built via a DI factory that walks every `IProtocolHandler` so order of `AddProtocol` calls doesn't matter.
 - **ASP.NET Core endpoint overloads** (`DidCommEndpointRouteBuilderExtensions`):
-  - `MapDidCommEndpoint(pattern)` — parameterless overload that dispatches each inbound through the registry; HTTP replies are LOGGED, not returned (FR-TRN-10 one-way).
-  - `MapDidCommWebSocket(pattern)` — same, with optional same-socket reply when `DidCommReceiveOptions.AllowSameSocketReplies = true` (default `false` per FR-TRN-10).
+    - `MapDidCommEndpoint(pattern)` — parameterless overload that dispatches each inbound through the registry; HTTP replies are LOGGED, not returned (FR-TRN-10 one-way).
+    - `MapDidCommWebSocket(pattern)` — same, with optional same-socket reply when `DidCommReceiveOptions.AllowSameSocketReplies = true` (default `false` per FR-TRN-10).
 - **Cookbook**:
-  - **Section S** (Trust Ping liveness) — Alice pings Bob; the dispatcher resolves `TrustPingHandler` and produces a reply with `thid = ping.id`; the response round-trips back.
-  - **Section W** (Empty 1.0 ACK) — Bob ACKs a prior message with `Message.Empty().WithAck(...)`; narration shows `AckLoopGuard.IsPureAck = true` and `IsSafeToSend = true`.
+    - **Section S** (Trust Ping liveness) — Alice pings Bob; the dispatcher resolves `TrustPingHandler` and produces a reply with `thid = ping.id`; the response round-trips back.
+    - **Section W** (Empty 1.0 ACK) — Bob ACKs a prior message with `Message.Empty().WithAck(...)`; narration shows `AckLoopGuard.IsPureAck = true` and `IsSafeToSend = true`.
 - **Tests** (+26 unit, +2 interop, total **461 unit + 77 interop** green):
-  - 10 `ProtocolHandlerRegistry` tests (exact match, case/punctuation, older-minor-wins, malformed input, re-registration).
-  - 9 `ProtocolDispatcher` tests (no-handler, null/non-null reply, FR-THR-04 rules 2 + 3, thread-state passthrough, full TrustPing + Empty round-trips).
-  - 6 `TrustPing` static-API tests (`response_requested` parsing, response construction, validation).
-  - 4 `TrustPingHandler` tests (auto-reply, suppression, terminal-leaf, PIURI).
-  - 3 `EmptyHandler` tests (null reply, `Message.Empty()` factory, PIURI).
-  - 1 `ThreadState.ErrorCount` per-thread isolation test.
-  - 2 DI-graph integration tests (`AddBuiltInProtocols` populates the registry; end-to-end pack→unpack→dispatch round-trip for Trust Ping over real `did:peer` identities).
+    - 10 `ProtocolHandlerRegistry` tests (exact match, case/punctuation, older-minor-wins, malformed input, re-registration).
+    - 9 `ProtocolDispatcher` tests (no-handler, null/non-null reply, FR-THR-04 rules 2 + 3, thread-state passthrough, full TrustPing + Empty round-trips).
+    - 6 `TrustPing` static-API tests (`response_requested` parsing, response construction, validation).
+    - 4 `TrustPingHandler` tests (auto-reply, suppression, terminal-leaf, PIURI).
+    - 3 `EmptyHandler` tests (null reply, `Message.Empty()` factory, PIURI).
+    - 1 `ThreadState.ErrorCount` per-thread isolation test.
+    - 2 DI-graph integration tests (`AddBuiltInProtocols` populates the registry; end-to-end pack→unpack→dispatch round-trip for Trust Ping over real `did:peer` identities).
 
 ### Security
 
@@ -268,15 +268,15 @@ the dispatcher boundary plus defensive **rule 3** drop of peer rule-2 violations
   endpoint **resolved from a DID** that targets a private, loopback, link-local, unique-local,
   CGNAT, or cloud-metadata (`169.254.169.254`) address before dispatching the packed envelope.
   IPv4-mapped IPv6 addresses are unwrapped first so they cannot dodge the IPv4 rules.
-  - The HTTP transport enforces the same policy at TCP connect time via
-    `SocketsHttpHandler.ConnectCallback`, pinning every connection — including each manually
-    followed 307 redirect — to a vetted IP, which also defeats redirect-to-internal and DNS
-    rebinding.
-  - The WebSocket transport vets the host on its default connect path.
-  - Tunable via `DidCommOptions.OutboundEndpointPolicy` and each transport's
-    `OutboundEndpointPolicy` (`BlockPrivateNetworks` defaults to `true`, plus `AllowedHosts` and
-    `ResolveDnsNames`). A caller-supplied `SendOptions.ServiceEndpointOverride` is trusted and
-    intentionally bypasses the gate.
+    - The HTTP transport enforces the same policy at TCP connect time via
+      `SocketsHttpHandler.ConnectCallback`, pinning every connection — including each manually
+      followed 307 redirect — to a vetted IP, which also defeats redirect-to-internal and DNS
+      rebinding.
+    - The WebSocket transport vets the host on its default connect path.
+    - Tunable via `DidCommOptions.OutboundEndpointPolicy` and each transport's
+      `OutboundEndpointPolicy` (`BlockPrivateNetworks` defaults to `true`, plus `AllowedHosts` and
+      `ResolveDnsNames`). A caller-supplied `SendOptions.ServiceEndpointOverride` is trusted and
+      intentionally bypasses the gate.
 
 ### Added — Phase 6.1 (Threading, ACKs, Profiles, i18n)
 
@@ -286,43 +286,43 @@ Phase 6.2 protocol handlers need to honor `please_ack` / `ack` and to localize
 human-readable strings per thread.
 
 - **`Message` plaintext model** (`DidComm.Core/Messages/Message.cs`):
-  - `PleaseAck` (`please_ack`) — array of message ids to be acknowledged;
-    empty string `""` is the spec sentinel for "this current message".
-  - `Ack` (`ack`) — array of acknowledged message ids, oldest→newest.
-  - `Lang` (`lang`) — IANA language tag for the message's protocol-defined
-    human-readable fields (FR-I18N-03).
-  - `AcceptLang` (`accept-lang`) — ranked IANA codes the sender prefers on this
-    thread (FR-I18N-01/02). Spec name is hyphenated, not snake_case.
-  - `Validate()` enforces FR-THR-03 / FR-I18N-01/03 character constraints (with
-    the empty-string sentinel allowed in `please_ack`).
+    - `PleaseAck` (`please_ack`) — array of message ids to be acknowledged;
+      empty string `""` is the spec sentinel for "this current message".
+    - `Ack` (`ack`) — array of acknowledged message ids, oldest→newest.
+    - `Lang` (`lang`) — IANA language tag for the message's protocol-defined
+      human-readable fields (FR-I18N-03).
+    - `AcceptLang` (`accept-lang`) — ranked IANA codes the sender prefers on this
+      thread (FR-I18N-01/02). Spec name is hyphenated, not snake_case.
+    - `Validate()` enforces FR-THR-03 / FR-I18N-01/03 character constraints (with
+      the empty-string sentinel allowed in `please_ack`).
 - **`MessageBuilder`** gained `WithPleaseAck(...)`, `WithAck(...)`,
   `WithLang(...)`, `WithAcceptLang(...)`.
 - **Threading types** (`DidComm.Core/Threading/`):
-  - `ThreadState` (`Thid`, `AcceptLang`) — per-thread mutable state record.
-  - `IThreadStateStore` + `InMemoryThreadStateStore` — thread-safe
-    `ConcurrentDictionary`-backed store. Registered as a singleton in
-    `DidCommBuilder` so FR-I18N-02 thread-scoped `accept-lang` persists across
-    pack/unpack while concurrent threads stay isolated.
-  - `AckLoopGuard` — pure predicates (`IsPureAck`, `RequestsAck`, `IsSafeToSend`)
-    that future protocol handlers consume to enforce FR-THR-04 (rule 2 today,
-    rules 1/3 wired in Phase 6.2 when handlers dispatch replies).
+    - `ThreadState` (`Thid`, `AcceptLang`) — per-thread mutable state record.
+    - `IThreadStateStore` + `InMemoryThreadStateStore` — thread-safe
+      `ConcurrentDictionary`-backed store. Registered as a singleton in
+      `DidCommBuilder` so FR-I18N-02 thread-scoped `accept-lang` persists across
+      pack/unpack while concurrent threads stay isolated.
+    - `AckLoopGuard` — pure predicates (`IsPureAck`, `RequestsAck`, `IsSafeToSend`)
+      that future protocol handlers consume to enforce FR-THR-04 (rule 2 today,
+      rules 1/3 wired in Phase 6.2 when handlers dispatch replies).
 - **Profile negotiation** (`DidComm.Core/Profiles/`):
-  - `Profiles` constants (`DidCommV2`, `DidCommAip1`, `DidCommAip2Env10`).
-  - `ProfileNegotiator.Choose(...)` / `IsSupported(...)` — case-insensitive,
-    whitespace-tolerant peer-`accept[]` selection (FR-PROF-01/02).
+    - `Profiles` constants (`DidCommV2`, `DidCommAip1`, `DidCommAip2Env10`).
+    - `ProfileNegotiator.Choose(...)` / `IsSupported(...)` — case-insensitive,
+      whitespace-tolerant peer-`accept[]` selection (FR-PROF-01/02).
 - **Cookbook**:
-  - **Section M** (Threading & ACKs) — Alice asks for an ACK with
-    `WithPleaseAck`; Bob replies with a thread-correlated pure ACK; the
-    `IsSafeToSend` loop-trap is demonstrated.
-  - **Section BB** (Profiles & i18n) — `ProfileNegotiator` picks `didcomm/v2`
-    from a peer's `accept[]`; the chess example flows with `lang=fr` +
-    `accept-lang=[fr,en]`; thread-state isolation is asserted in narration.
+    - **Section M** (Threading & ACKs) — Alice asks for an ACK with
+      `WithPleaseAck`; Bob replies with a thread-correlated pure ACK; the
+      `IsSafeToSend` loop-trap is demonstrated.
+    - **Section BB** (Profiles & i18n) — `ProfileNegotiator` picks `didcomm/v2`
+      from a peer's `accept[]`; the chess example flows with `lang=fr` +
+      `accept-lang=[fr,en]`; thread-state isolation is asserted in narration.
 - **Tests** (+32, total 396 unit + 69 interop green):
-  - 9 round-trip / validation tests for the four new `Message` fields.
-  - 6 `InMemoryThreadStateStore` tests including the FR-I18N-02 cross-thread
-    isolation assertion.
-  - 8 `AckLoopGuard` tests covering pure-ACK detection and FR-THR-04 rule 2.
-  - 9 `ProfileNegotiator` tests (overlap, case, whitespace, null/empty edge cases).
+    - 9 round-trip / validation tests for the four new `Message` fields.
+    - 6 `InMemoryThreadStateStore` tests including the FR-I18N-02 cross-thread
+      isolation assertion.
+    - 8 `AckLoopGuard` tests covering pure-ACK detection and FR-THR-04 rule 2.
+    - 9 `ProfileNegotiator` tests (overlap, case, whitespace, null/empty edge cases).
 
 ### Added — Phase 5 (Transports)
 
@@ -332,71 +332,71 @@ endpoint, so a packed envelope finally turns into bytes on the wire and the
 matching server side accepts them.
 
 - **Core transport abstractions** (`DidComm.Core/Transports/`):
-  - `IDidCommTransport` — scheme, `CanHandle(Uri)`, `SendAsync(...)` (FR-TRN-01).
-  - `ITransportRouter` + `TransportRouter` (default impl) — dispatches by URI
-    scheme; throws `TransportException` when no transport handles a scheme.
-  - `TransportRequest`, `TransportResult` records (FR-TRN-02/03/05).
-  - `SendOptions` (mirrors `PackEncryptedOptions` + `ServiceEndpointOverride`)
-    and `SendResult` (bundles `PackEncryptedResult` + transport outcome +
-    endpoint used).
+    - `IDidCommTransport` — scheme, `CanHandle(Uri)`, `SendAsync(...)` (FR-TRN-01).
+    - `ITransportRouter` + `TransportRouter` (default impl) — dispatches by URI
+      scheme; throws `TransportException` when no transport handles a scheme.
+    - `TransportRequest`, `TransportResult` records (FR-TRN-02/03/05).
+    - `SendOptions` (mirrors `PackEncryptedOptions` + `ServiceEndpointOverride`)
+      and `SendResult` (bundles `PackEncryptedResult` + transport outcome +
+      endpoint used).
 - **Facade** (`DidCommClient`):
-  - `Task<SendResult> SendAsync(Message, SendOptions, CancellationToken)` —
-    packs with `Forward = true` unless `ServiceEndpointOverride` is set, then
-    dispatches via the registered `ITransportRouter`. New 5-arg public ctor
-    accepting `(secrets, keyService, serviceResolver, transportRouter, options)`.
-  - DI registration in `DidCommServiceCollectionExtensions` now passes
-    `ITransportRouter` through to the facade singleton and idempotently registers
-    the default router.
+    - `Task<SendResult> SendAsync(Message, SendOptions, CancellationToken)` —
+      packs with `Forward = true` unless `ServiceEndpointOverride` is set, then
+      dispatches via the registered `ITransportRouter`. New 5-arg public ctor
+      accepting `(secrets, keyService, serviceResolver, transportRouter, options)`.
+    - DI registration in `DidCommServiceCollectionExtensions` now passes
+      `ITransportRouter` through to the facade singleton and idempotently registers
+      the default router.
 - **Exception taxonomy** — `DidComm.Exceptions.TransportException` (derived
   from `DidCommException`) fills the FR-API-07 gap for transport-level
   failures; carries optional `HttpStatusCode` + `Scheme`.
 - **HTTPS sender** — new project `DidComm.Transports.Http`:
-  - `HttpDidCommTransport` — `IHttpClientFactory`-backed POST; 2xx ⇒ accepted
-    (FR-TRN-05); 307 followed manually with a `MaxRedirectHops` cap
-    (FR-TRN-06); 301/308 + non-2xx surfaced as `TransportException`; rebuilds
-    the request on every Polly retry so `HttpClient` doesn't reject the resend.
-  - `HttpTransportOptions` — `RequestTimeout`, `MaxRetryAttempts`,
-    `RetryBaseDelay`, `CircuitBreakerFailureThreshold`,
-    `CircuitBreakerOpenDuration`, `AllowedSchemes` (default `{"https"}`),
-    `MaxRedirectHops`.
-  - `HttpResiliencePipelineFactory` — Polly v8 pipeline (retry + circuit
-    breaker + per-attempt timeout), driven entirely by the options shape;
-    skips the retry strategy when `MaxRetryAttempts == 0`.
-  - `HttpDidCommBuilderExtensions.UseHttpTransport(...)` — DI extension that
-    registers the transport, the named `"didcomm"` HTTP client, the router,
-    and disables auto-redirect on the handler so the transport can enforce
-    FR-TRN-06.
+    - `HttpDidCommTransport` — `IHttpClientFactory`-backed POST; 2xx ⇒ accepted
+      (FR-TRN-05); 307 followed manually with a `MaxRedirectHops` cap
+      (FR-TRN-06); 301/308 + non-2xx surfaced as `TransportException`; rebuilds
+      the request on every Polly retry so `HttpClient` doesn't reject the resend.
+    - `HttpTransportOptions` — `RequestTimeout`, `MaxRetryAttempts`,
+      `RetryBaseDelay`, `CircuitBreakerFailureThreshold`,
+      `CircuitBreakerOpenDuration`, `AllowedSchemes` (default `{"https"}`),
+      `MaxRedirectHops`.
+    - `HttpResiliencePipelineFactory` — Polly v8 pipeline (retry + circuit
+      breaker + per-attempt timeout), driven entirely by the options shape;
+      skips the retry strategy when `MaxRetryAttempts == 0`.
+    - `HttpDidCommBuilderExtensions.UseHttpTransport(...)` — DI extension that
+      registers the transport, the named `"didcomm"` HTTP client, the router,
+      and disables auto-redirect on the handler so the transport can enforce
+      FR-TRN-06.
 - **WebSocket sender** — new project `DidComm.Transports.WebSocket`:
-  - `WebSocketDidCommTransport` — one binary message per packed envelope
-    (FR-TRN-09); end-of-message flag set on the last fragment; per-endpoint
-    connection pool keyed by `Authority + Path`; Polly-driven exponential
-    reconnect (1s / 30s / 0.5-jitter — DD-05 / FR-TRN-11); per-send timeout;
-    dropped socket recycled on `SendFailed`; `IAsyncDisposable` cleans up on
-    container shutdown.
-  - `WebSocketTransportOptions` — connect/send timeouts, max reconnect
-    attempts + base/max delay, allowed schemes (default `{"wss"}`),
-    `WebSocketFactory` + `Connect` seams (used by the InteropTests +
-    cookbook to point at a `Microsoft.AspNetCore.TestHost.TestServer` WS
-    client without opening a real port).
-  - `WebSocketLifecycleEventArgs` + `Lifecycle` event for FR-TRN-11
-    observability (Connected / Disconnected / SendFailed / Reconnected).
-  - `WebSocketDidCommBuilderExtensions.UseWebSocketTransport(...)`.
+    - `WebSocketDidCommTransport` — one binary message per packed envelope
+      (FR-TRN-09); end-of-message flag set on the last fragment; per-endpoint
+      connection pool keyed by `Authority + Path`; Polly-driven exponential
+      reconnect (1s / 30s / 0.5-jitter — DD-05 / FR-TRN-11); per-send timeout;
+      dropped socket recycled on `SendFailed`; `IAsyncDisposable` cleans up on
+      container shutdown.
+    - `WebSocketTransportOptions` — connect/send timeouts, max reconnect
+      attempts + base/max delay, allowed schemes (default `{"wss"}`),
+      `WebSocketFactory` + `Connect` seams (used by the InteropTests +
+      cookbook to point at a `Microsoft.AspNetCore.TestHost.TestServer` WS
+      client without opening a real port).
+    - `WebSocketLifecycleEventArgs` + `Lifecycle` event for FR-TRN-11
+      observability (Connected / Disconnected / SendFailed / Reconnected).
+    - `WebSocketDidCommBuilderExtensions.UseWebSocketTransport(...)`.
 - **ASP.NET Core integration** — new project `DidComm.AspNetCore`
   (`<FrameworkReference Include="Microsoft.AspNetCore.App" />`, zero NuGet
   weight):
-  - `MapDidCommEndpoint(IEndpointRouteBuilder, string, Func<UnpackResult, CancellationToken, Task>)`
-    — minimal-API `POST` mapping (FR-TRN-07). Validates `Content-Type`
-    against the configured accept list ⇒ 415 on mismatch; streams the body
-    with a hard cap at `DidCommOptions.MaxReceiveBytes` ⇒ 413 (FR-API-06);
-    unpacks via `DidCommClient.UnpackAsync`; dispatches to the inline
-    receiver; returns 202. `MalformedMessageException` / `CryptoException`
-    ⇒ 400; `TransportException` ⇒ 502.
-  - `MapDidCommWebSocket(IEndpointRouteBuilder, string, Func<UnpackResult, CancellationToken, Task>)`
-    — accepts WebSocket; loops `ReceiveAsync` until `EndOfMessage=true`
-    (frame reassembly); honours `MaxReceiveBytes` and closes with 1009
-    "Message Too Big" on overflow; one-way per FR-TRN-10.
-  - `DidCommReceiveOptions` — per-endpoint accept-list (defaults cover the
-    three DIDComm v2.1 media types).
+    - `MapDidCommEndpoint(IEndpointRouteBuilder, string, Func<UnpackResult, CancellationToken, Task>)`
+      — minimal-API `POST` mapping (FR-TRN-07). Validates `Content-Type`
+      against the configured accept list ⇒ 415 on mismatch; streams the body
+      with a hard cap at `DidCommOptions.MaxReceiveBytes` ⇒ 413 (FR-API-06);
+      unpacks via `DidCommClient.UnpackAsync`; dispatches to the inline
+      receiver; returns 202. `MalformedMessageException` / `CryptoException`
+      ⇒ 400; `TransportException` ⇒ 502.
+    - `MapDidCommWebSocket(IEndpointRouteBuilder, string, Func<UnpackResult, CancellationToken, Task>)`
+      — accepts WebSocket; loops `ReceiveAsync` until `EndOfMessage=true`
+      (frame reassembly); honours `MaxReceiveBytes` and closes with 1009
+      "Message Too Big" on overflow; one-way per FR-TRN-10.
+    - `DidCommReceiveOptions` — per-endpoint accept-list (defaults cover the
+      three DIDComm v2.1 media types).
 - **DI plumbing** — `DidCommServiceCollectionExtensions` now auto-registers
   `TransportRouter` so DI hosts get the FR-TRN-01 dispatch surface for free
   the moment they call `.UseHttpTransport()` / `.UseWebSocketTransport()`.
@@ -481,67 +481,67 @@ mediator-side processing, and the conformant `serviceEndpoint` object /
 array-of-objects parser with FR-ROUTE-04 mediator-as-DID-endpoint expansion.
 
 - **Forward message** (`Protocols/Routing/`):
-  - `ForwardConstants` — `ProtocolIdentifier`
-    (`https://didcomm.org/routing/2.0`), `ForwardTypeUri`
-    (`…/routing/2.0/forward`), `PayloadMediaType` (alias for
-    `application/didcomm-encrypted+json`).
-  - `ForwardMessage.Create(mediator, next, packedPayloads, idGenerator?, expiresTimeEpochSeconds?)`
-    builds a `Message` with `Type = forward`, `Body.next`, and one
-    `AttachmentData.Json`-bearing attachment per packed payload (FR-ROUTE-01).
-  - `ForwardMessage.TryParse(message, out next, out payloads)` returns `false`
-    for non-forward types, throws `MalformedMessageException` for forwards
-    missing `body.next` or `attachments`.
+    - `ForwardConstants` — `ProtocolIdentifier`
+      (`https://didcomm.org/routing/2.0`), `ForwardTypeUri`
+      (`…/routing/2.0/forward`), `PayloadMediaType` (alias for
+      `application/didcomm-encrypted+json`).
+    - `ForwardMessage.Create(mediator, next, packedPayloads, idGenerator?, expiresTimeEpochSeconds?)`
+      builds a `Message` with `Type = forward`, `Body.next`, and one
+      `AttachmentData.Json`-bearing attachment per packed payload (FR-ROUTE-01).
+    - `ForwardMessage.TryParse(message, out next, out payloads)` returns `false`
+      for non-forward types, throws `MalformedMessageException` for forwards
+      missing `body.next` or `attachments`.
 - **Service-endpoint resolution** (`Resolution/`):
-  - `DidCommServiceInfo(Uri, RoutingKeys, Accept)` — public record.
-  - `IServiceEndpointResolver` — public contract: `ResolveAsync(did, ct)` →
-    ordered `IReadOnlyList<DidCommServiceInfo>` (FR-ROUTE-03; preference
-    order = FR-ROUTE-08 failover input).
-  - `ServiceEndpointParser` (internal) — projects `NetDid.Core.Model.Service`
-    entries through the v2.1 canonical shapes (single object / array of
-    objects). Bare-string `serviceEndpoint` is gated behind the new
-    `DidCommOptions.AllowBareStringServiceEndpoint` toggle (DD-10) and OFF by
-    default.
-  - `NetDidServiceEndpointResolver` — public default implementation backed by
-    `NetDid.Core.IDidResolver`; rejects `did:web` at the perimeter for symmetry
-    with `NetDidKeyService`.
-  - `ResolvedRoute(TransportUri, RoutingKeyJwks, FallbackUris)` — public
-    record.
-  - `MediatorEndpointExpander` (internal) — implements FR-ROUTE-04. When the
-    primary candidate's `uri` is itself a DID, resolves the mediator's
-    `DIDCommMessaging` service, **prepends** its first `keyAgreement` key
-    to the recipient's `routingKeys`, refuses a second DID-as-uri hop
-    (`ConsistencyException`).
+    - `DidCommServiceInfo(Uri, RoutingKeys, Accept)` — public record.
+    - `IServiceEndpointResolver` — public contract: `ResolveAsync(did, ct)` →
+      ordered `IReadOnlyList<DidCommServiceInfo>` (FR-ROUTE-03; preference
+      order = FR-ROUTE-08 failover input).
+    - `ServiceEndpointParser` (internal) — projects `NetDid.Core.Model.Service`
+      entries through the v2.1 canonical shapes (single object / array of
+      objects). Bare-string `serviceEndpoint` is gated behind the new
+      `DidCommOptions.AllowBareStringServiceEndpoint` toggle (DD-10) and OFF by
+      default.
+    - `NetDidServiceEndpointResolver` — public default implementation backed by
+      `NetDid.Core.IDidResolver`; rejects `did:web` at the perimeter for symmetry
+      with `NetDidKeyService`.
+    - `ResolvedRoute(TransportUri, RoutingKeyJwks, FallbackUris)` — public
+      record.
+    - `MediatorEndpointExpander` (internal) — implements FR-ROUTE-04. When the
+      primary candidate's `uri` is itself a DID, resolves the mediator's
+      `DIDCommMessaging` service, **prepends** its first `keyAgreement` key
+      to the recipient's `routingKeys`, refuses a second DID-as-uri hop
+      (`ConsistencyException`).
 - **Sender-side forward wrapping** (`Composition/ForwardWrapper.cs`,
   internal) — loops `JweBuilder.PackAnoncrypt` over the routing-key JWKs in
   reverse (outermost first), producing one `forward` per layer.
   Content-encryption is fixed to A256CBC-HS512 per layer.
 - **Facade** (`Facade/`):
-  - `PackEncryptedResult(Message, ServiceEndpoint?, FallbackServiceEndpoints)`
-    — **breaking change**: `DidCommClient.PackEncryptedAsync` now returns
-    `Task<PackEncryptedResult>` instead of `Task<string>`. Consumers of the
-    `.Message` field can append `.Message` to existing call sites.
-  - `PackEncryptedOptions.Forward` — when `true`, the facade resolves the
-    single recipient's `DIDCommMessaging` service, expands a mediator-as-DID
-    endpoint, and wraps forward layers (FR-ROUTE-02). Multi-recipient
-    `Forward = true` throws `InvalidOperationException`.
-  - New `DidCommClient(secrets, keyService, serviceResolver, options)`
-    constructor adds the `IServiceEndpointResolver` slot. The existing
-    3-argument constructor still works (routing unavailable without the
-    resolver).
-  - `DidCommServiceCollectionExtensions.AddDidComm` now passes the optional
-    `IServiceEndpointResolver` into the facade, so hosts that call
-    `UseNetDidResolver()` get routing automatically.
+    - `PackEncryptedResult(Message, ServiceEndpoint?, FallbackServiceEndpoints)`
+      — **breaking change**: `DidCommClient.PackEncryptedAsync` now returns
+      `Task<PackEncryptedResult>` instead of `Task<string>`. Consumers of the
+      `.Message` field can append `.Message` to existing call sites.
+    - `PackEncryptedOptions.Forward` — when `true`, the facade resolves the
+      single recipient's `DIDCommMessaging` service, expands a mediator-as-DID
+      endpoint, and wraps forward layers (FR-ROUTE-02). Multi-recipient
+      `Forward = true` throws `InvalidOperationException`.
+    - New `DidCommClient(secrets, keyService, serviceResolver, options)`
+      constructor adds the `IServiceEndpointResolver` slot. The existing
+      3-argument constructor still works (routing unavailable without the
+      resolver).
+    - `DidCommServiceCollectionExtensions.AddDidComm` now passes the optional
+      `IServiceEndpointResolver` into the facade, so hosts that call
+      `UseNetDidResolver()` get routing automatically.
 - **Mediator-side processing** (`Protocols/Routing/`):
-  - `ForwardProcessor` — public; drives the supplied `DidCommClient`'s
-    `UnpackAsync`, validates the unpacked plaintext is a forward, silently
-    drops `please_ack` (FR-ROUTE-07), and emits `ForwardProcessingResult`.
-  - `ForwardProcessingResult(NextHop, OnwardPacked, ExpiresTime?, Delay?)`.
-  - `ForwardProcessorOptions(Mode, ExtraRecipientRoutingKeys?)` +
-    `RewrapMode` enum (`PassThrough`, `ReanoncryptToNext`). Pass-through is
-    the default; rewrap (FR-ROUTE-06) re-anoncrypts the payload to `next` to
-    keep onion size constant. `expires_time` propagates from the inbound
-    forward; `delay_milli` resolves to a `TimeSpan` (negative input →
-    randomised between 0 and |n|).
+    - `ForwardProcessor` — public; drives the supplied `DidCommClient`'s
+      `UnpackAsync`, validates the unpacked plaintext is a forward, silently
+      drops `please_ack` (FR-ROUTE-07), and emits `ForwardProcessingResult`.
+    - `ForwardProcessingResult(NextHop, OnwardPacked, ExpiresTime?, Delay?)`.
+    - `ForwardProcessorOptions(Mode, ExtraRecipientRoutingKeys?)` +
+      `RewrapMode` enum (`PassThrough`, `ReanoncryptToNext`). Pass-through is
+      the default; rewrap (FR-ROUTE-06) re-anoncrypts the payload to `next` to
+      keep onion size constant. `expires_time` propagates from the inbound
+      forward; `delay_milli` resolves to a `TimeSpan` (negative input →
+      randomised between 0 and |n|).
 
 ### Vendored spec fixtures (Phase 4 routing)
 
@@ -572,7 +572,7 @@ array-of-objects parser with FR-ROUTE-04 mediator-as-DID-endpoint expansion.
 ### Changed (Phase 4)
 
 - `DidCommClient.PackEncryptedAsync` return type is now `Task<PackEncryptedResult>`. Existing call sites that fed the result straight to `UnpackAsync` need a `.Message` extraction; six in-repo sites updated (4 round-trip tests, 1 rotation interop test, 2 cookbook sections).
-- `MediatorEndpointExpander` only weaves the mediator's *keyAgreement* (FR-ROUTE-04 implicit-prepend), **not** the mediator's own `routingKeys` — per a re-read of the spec text. The mediator's own routingKeys apply only when the mediator is itself the message recipient.
+- `MediatorEndpointExpander` only weaves the mediator's _keyAgreement_ (FR-ROUTE-04 implicit-prepend), **not** the mediator's own `routingKeys` — per a re-read of the spec text. The mediator's own routingKeys apply only when the mediator is itself the message recipient.
 
 ### Fixed (Phase 4 review)
 
@@ -616,44 +616,44 @@ FR-CONSIST-06 (resolver-backed authorization now active), FR-ROT-01..06.
 
 - **Public surface promotions** — every type the facade returns or accepts is now
   `public sealed`: `Messages/{Message, Attachment, AttachmentData, MessageBuilder,
-  IMessageIdGenerator, UuidV4MessageIdGenerator, MediaTypes}`,
+IMessageIdGenerator, UuidV4MessageIdGenerator, MediaTypes}`,
   `Protocols/{MessageTypeUri, ProtocolVersion}`, `Jose/{Jwk, EnvelopeKind}`. Helper
   types (`UnreservedUriChars`, `DidSubject`, all `Composition/*`, all
   `Jose/Signing|Encryption/*`, all `Crypto/*`, the internal lookups) stay internal.
 - **Facade** (`Facade/`):
-  - `DidCommClient` — sealed, thread-safe (NFR-03). Public methods
-    `PackPlaintextAsync`, `PackSignedAsync`, `PackEncryptedAsync`, `UnpackAsync`
-    (FR-API-01..03). Auto-detects envelope shape on unpack, enforces
-    `expires_time` (FR-API-05) and `MaxReceiveBytes` (FR-API-06), rejects
-    `did:web` at every entry point on every DID-bearing field (FR-DID-06).
-  - `PackEncryptedOptions`, `ContentEncryptionAlgorithm`, `DidCommOptions`,
-    public `UnpackResult` (FR-API-04 metadata + `FromPrior` slot).
-  - `MapContentEncryption` enforces FR-ENC-09 (refuses A256GCM / XC20P for
-    authcrypt at pack time).
+    - `DidCommClient` — sealed, thread-safe (NFR-03). Public methods
+      `PackPlaintextAsync`, `PackSignedAsync`, `PackEncryptedAsync`, `UnpackAsync`
+      (FR-API-01..03). Auto-detects envelope shape on unpack, enforces
+      `expires_time` (FR-API-05) and `MaxReceiveBytes` (FR-API-06), rejects
+      `did:web` at every entry point on every DID-bearing field (FR-DID-06).
+    - `PackEncryptedOptions`, `ContentEncryptionAlgorithm`, `DidCommOptions`,
+      public `UnpackResult` (FR-API-04 metadata + `FromPrior` slot).
+    - `MapContentEncryption` enforces FR-ENC-09 (refuses A256GCM / XC20P for
+      authcrypt at pack time).
 - **Resolution** (`Resolution/`):
-  - `IDidKeyService` — public contract: `GetVerificationMethodsAsync`,
-    `IsKeyAuthorizedAsync`, `RejectUnsupportedMethod`. `VerificationRelationship`
-    enum (`KeyAgreement`, `Authentication`).
-  - `NetDidKeyService` — public adapter wrapping `NetDid.Core.IDidResolver`.
-    Method extraction via `NetDid.Core.Parsing.DidParser.ExtractMethod`; rejects
-    `did:web` with `UnsupportedDidMethodException` (DD-08). Dereferences fragment
-    references against the doc's `verificationMethod` array; materialises JWKs
-    from `publicKeyJwk` (off-curve EC points already rejected inside
-    `JwkConversion.ExtractPublicKey` by net-did's `EcPointValidator`); silently
-    skips multibase-only methods and curves outside the `KeyTypeMapper` set so
-    mixed-curve documents still surface usable keys. No internal cache —
-    relies on `CachingDidResolver` from `NetDid.Extensions.DependencyInjection`
-    (FR-DID-04 "no double-caching").
-  - `DidKeyServiceLookups` — internal sync-over-async bridges that satisfy the
-    envelope layer's `IInternalSenderKeyLookup` and signer-`Func<string, Jwk?>`
-    slots by walking back to the public async `IDidKeyService`.
+    - `IDidKeyService` — public contract: `GetVerificationMethodsAsync`,
+      `IsKeyAuthorizedAsync`, `RejectUnsupportedMethod`. `VerificationRelationship`
+      enum (`KeyAgreement`, `Authentication`).
+    - `NetDidKeyService` — public adapter wrapping `NetDid.Core.IDidResolver`.
+      Method extraction via `NetDid.Core.Parsing.DidParser.ExtractMethod`; rejects
+      `did:web` with `UnsupportedDidMethodException` (DD-08). Dereferences fragment
+      references against the doc's `verificationMethod` array; materialises JWKs
+      from `publicKeyJwk` (off-curve EC points already rejected inside
+      `JwkConversion.ExtractPublicKey` by net-did's `EcPointValidator`); silently
+      skips multibase-only methods and curves outside the `KeyTypeMapper` set so
+      mixed-curve documents still surface usable keys. No internal cache —
+      relies on `CachingDidResolver` from `NetDid.Extensions.DependencyInjection`
+      (FR-DID-04 "no double-caching").
+    - `DidKeyServiceLookups` — internal sync-over-async bridges that satisfy the
+      envelope layer's `IInternalSenderKeyLookup` and signer-`Func<string, Jwk?>`
+      slots by walking back to the public async `IDidKeyService`.
 - **Secrets** (`Secrets/`):
-  - `ISecretsResolver` — public contract: `FindAsync(kid)`,
-    `FindPresentAsync(kids)`. Consumer-supplied; the library ships no production
-    key store per DD-02.
-  - `SyncSecretsAdapter` — internal `IInternalSecretsLookup` wrapper that
-    blocks sync-over-async on the public resolver (safe under .NET 10's
-    no-synchronization-context runtime).
+    - `ISecretsResolver` — public contract: `FindAsync(kid)`,
+      `FindPresentAsync(kids)`. Consumer-supplied; the library ships no production
+      key store per DD-02.
+    - `SyncSecretsAdapter` — internal `IInternalSecretsLookup` wrapper that
+      blocks sync-over-async on the public resolver (safe under .NET 10's
+      no-synchronization-context runtime).
 - **Exceptions** — `UnsupportedDidMethodException(method, did, reason)`,
   `DidResolutionException(did, reason, inner?)`, `SecretNotFoundException(kid)`
   (FR-API-07).
@@ -664,42 +664,42 @@ FR-CONSIST-06 (resolver-backed authorization now active), FR-ROT-01..06.
   plaintext reveals `from`. The facade binds the predicate to
   `IDidKeyService.IsKeyAuthorizedAsync`.
 - **DID rotation** (`Protocols/Rotation/`):
-  - `Message.FromPrior` typed slot + `MessageBuilder.WithFromPrior` (FR-ROT-01).
-  - `FromPriorClaims` record (`Sub`, `Iss`, `Iat`).
-  - `FromPriorBuilder` (internal) — emits a compact JWT
-    `<b64u(header)>.<b64u(claims)>.<b64u(sig)>` signed by a key authorized in
-    the prior DID's `authentication`.
-  - `FromPriorValidator` (internal) — three-part split, signature verification
-    via `IDidKeyService`, `sub == currentSenderDid` enforcement (FR-ROT-02),
-    alg-curve cross-check to defeat downgrade swaps.
-  - `DidCommClient` enforces FR-ROT-03: refuses to emit `from_prior` on a
-    plaintext or signed-only envelope; raises `ConsistencyException` on unpack
-    when a `from_prior`-carrying message arrives unencrypted.
+    - `Message.FromPrior` typed slot + `MessageBuilder.WithFromPrior` (FR-ROT-01).
+    - `FromPriorClaims` record (`Sub`, `Iss`, `Iat`).
+    - `FromPriorBuilder` (internal) — emits a compact JWT
+      `<b64u(header)>.<b64u(claims)>.<b64u(sig)>` signed by a key authorized in
+      the prior DID's `authentication`.
+    - `FromPriorValidator` (internal) — three-part split, signature verification
+      via `IDidKeyService`, `sub == currentSenderDid` enforcement (FR-ROT-02),
+      alg-curve cross-check to defeat downgrade swaps.
+    - `DidCommClient` enforces FR-ROT-03: refuses to emit `from_prior` on a
+      plaintext or signed-only envelope; raises `ConsistencyException` on unpack
+      when a `from_prior`-carrying message arrives unencrypted.
 - **DI extension** (`src/DidComm.Extensions.DependencyInjection/`):
-  - New csproj. `services.AddDidComm(b => …)` registers `DidCommClient` as
-    singleton with `DidCommOptions`, `ISecretsResolver`, and `IDidKeyService`.
-  - `DidCommBuilder` methods: `UseNetDidResolver(...)` (defaults to `did:key` +
-    `did:peer` via net-did's DI builder; extra methods via the inner action),
-    `UseSecretsResolver<T>()` / `UseSecretsResolver(instance)`,
-    `Configure(Action<DidCommOptions>)`.
-  - Build-time FR-SEC-02 fail-fast: throws `InvalidOperationException` with
-    actionable docs-pointer text when `ISecretsResolver` or `IDidKeyService` is
-    unregistered.
+    - New csproj. `services.AddDidComm(b => …)` registers `DidCommClient` as
+      singleton with `DidCommOptions`, `ISecretsResolver`, and `IDidKeyService`.
+    - `DidCommBuilder` methods: `UseNetDidResolver(...)` (defaults to `did:key` +
+      `did:peer` via net-did's DI builder; extra methods via the inner action),
+      `UseSecretsResolver<T>()` / `UseSecretsResolver(instance)`,
+      `Configure(Action<DidCommOptions>)`.
+    - Build-time FR-SEC-02 fail-fast: throws `InvalidOperationException` with
+      actionable docs-pointer text when `ISecretsResolver` or `IDidKeyService` is
+      unregistered.
 - **NetDid IKeyStore adapter** (`src/DidComm.Adapters.NetDid/`):
-  - New csproj. `NetDidKeyStoreSecretsResolver` bridges
-    `NetDid.Core.IKeyStore` → `ISecretsResolver` (FR-SEC-04, SHOULD). XML doc
-    surfaces the scope limit: `IKeyStore` exposes signing + public-key surfaces
-    only, never raw private bytes, so this adapter is sufficient for resolving
-    *which* kids are held but cannot yield decryption-path private keys until
-    net-did adds an opaque-ECDH provider.
+    - New csproj. `NetDidKeyStoreSecretsResolver` bridges
+      `NetDid.Core.IKeyStore` → `ISecretsResolver` (FR-SEC-04, SHOULD). XML doc
+      surfaces the scope limit: `IKeyStore` exposes signing + public-key surfaces
+      only, never raw private bytes, so this adapter is sufficient for resolving
+      _which_ kids are held but cannot yield decryption-path private keys until
+      net-did adds an opaque-ECDH provider.
 - **TestSupport** (`tests/DidComm.TestSupport/`):
-  - New library (non-test). `InMemorySecretsResolver` is the dictionary-backed
-    test fake (FR-SEC-05) — deliberately outside `DidComm.Core` so DD-02 stays
-    honest.
+    - New library (non-test). `InMemorySecretsResolver` is the dictionary-backed
+      test fake (FR-SEC-05) — deliberately outside `DidComm.Core` so DD-02 stays
+      honest.
 - **`JweParser.PeekRecipients`** — lightweight structural peek (recipient kids
-  + skid, no crypto) for facade pre-warm scenarios. Wired into the design but
-  not yet consumed by the current facade implementation; kept available for
-  future caching/optimization work.
+    - skid, no crypto) for facade pre-warm scenarios. Wired into the design but
+      not yet consumed by the current facade implementation; kept available for
+      future caching/optimization work.
 
 ### Vendored spec fixtures (FR-IX-01 extension)
 
@@ -707,7 +707,7 @@ FR-CONSIST-06 (resolver-backed authorization now active), FR-ROT-01..06.
   v2.1 Appendix B DID Documents transcribed from didcomm-python's
   `DID_DOC_*_SPEC_TEST_VECTORS` (Apache-2.0). Provenance + scope note in
   `fixtures/diddocs/spec/README.md`. Charlie / mediator1 / mediator2 are
-  intentionally deferred to Phase 4 alongside the FR-ROUTE-* work that actually
+  intentionally deferred to Phase 4 alongside the FR-ROUTE-\* work that actually
   exercises them.
 
 ### Tests — Phase 3
@@ -720,11 +720,11 @@ Adds **54 new** `DidComm.Core.Tests` cases (299 total) plus **18 new**
 - `Messages/MessageFromPriorTests` — `Message.FromPrior` round-trips, omitted
   when null, `MessageBuilder.WithFromPrior` populates the slot.
 - `Secrets/{ISecretsResolverContractTests, InMemorySecretsResolverTests,
-  NetDidKeyStoreSecretsResolverTests}` — contract semantics + the two adapters.
+NetDidKeyStoreSecretsResolverTests}` — contract semantics + the two adapters.
 - `Resolution/{IDidKeyServiceContractTests, NetDidKeyServiceTests}` — contract
-  + adapter (did:web rejection, malformed input, missing-doc, embedded JWK,
-  fragment deref, missing reference, unsupported-curve filter,
-  multibase-only-skip, `IsKeyAuthorizedAsync` relationship boundary).
+    - adapter (did:web rejection, malformed input, missing-doc, embedded JWK,
+      fragment deref, missing reference, unsupported-curve filter,
+      multibase-only-skip, `IsKeyAuthorizedAsync` relationship boundary).
 - `Consistency/ResolverAuthorizationTests` — predicate-fires-correct-triple,
   null-short-circuit, authorized passes, unauthorized throws.
 - `Facade/{DidCommClientUnitTests, DependencyInjectionTests}` — FR-ROT-03
@@ -734,17 +734,17 @@ Adds **54 new** `DidComm.Core.Tests` cases (299 total) plus **18 new**
   registration overload.
 - `Rotation/FromPriorClaimsTests` — record equality + iat inequality.
 - InteropTests:
-  - `Resolution/AppendixBResolutionTests` — Alice authentication (3 keys),
-    Alice keyAgreement (X25519+P256+P521), Bob keyAgreement (9 keys across
-    four curves), Bob no-authentication, `IsKeyAuthorizedAsync` relationship
-    boundary.
-  - `Facade/DidCommClientRoundTripTests` — plaintext, signed, anoncrypt,
-    authcrypt, sign-then-encrypt, anoncrypt(authcrypt), authcrypt FR-ENC-09
-    refusal — every legal FR-ENV-02 composition through the public facade.
-  - `Rotation/FromPriorRotationTests` — builder/validator round-trip, tampered
-    signature rejected, mismatched `sub` rejected (FR-ROT-02), signer-not-in-
-    authentication rejected, malformed JWT rejected, `DidCommClient.UnpackAsync`
-    populates `UnpackResult.FromPrior` end-to-end.
+    - `Resolution/AppendixBResolutionTests` — Alice authentication (3 keys),
+      Alice keyAgreement (X25519+P256+P521), Bob keyAgreement (9 keys across
+      four curves), Bob no-authentication, `IsKeyAuthorizedAsync` relationship
+      boundary.
+    - `Facade/DidCommClientRoundTripTests` — plaintext, signed, anoncrypt,
+      authcrypt, sign-then-encrypt, anoncrypt(authcrypt), authcrypt FR-ENC-09
+      refusal — every legal FR-ENV-02 composition through the public facade.
+    - `Rotation/FromPriorRotationTests` — builder/validator round-trip, tampered
+      signature rejected, mismatched `sub` rejected (FR-ROT-02), signer-not-in-
+      authentication rejected, malformed JWT rejected, `DidCommClient.UnpackAsync`
+      populates `UnpackResult.FromPrior` end-to-end.
 
 ### Changed
 
@@ -780,39 +780,39 @@ Phase 3's increment lands here: **K (unpack metadata), N (from_prior rotation),
 AA (net-did + did:web rejection)**.
 
 - **`samples/_shared/`** (`DidComm.Samples.Shared`):
-  - `Narrator` — labeled console output (section banners, key=value frames,
-    notes). Writes through an injectable `TextWriter` so the smoke test
-    captures the transcript without process spawning.
-  - `PeerIdentityFactory.CreateAsync(manager, keyGenerator, cryptoProvider)`
-    mints a `did:peer:2` identity with one X25519 keyAgreement key + one
-    Ed25519 authentication key (via net-did's `KeyPairSigner` +
-    `DidPeerCreateOptions(Numalgo.Two, ...)`); surfaces the matching private
-    JWKs with absolute-DID-URL `Kid` values so they can be loaded into
-    `InMemorySecretsResolver`.
+    - `Narrator` — labeled console output (section banners, key=value frames,
+      notes). Writes through an injectable `TextWriter` so the smoke test
+      captures the transcript without process spawning.
+    - `PeerIdentityFactory.CreateAsync(manager, keyGenerator, cryptoProvider)`
+      mints a `did:peer:2` identity with one X25519 keyAgreement key + one
+      Ed25519 authentication key (via net-did's `KeyPairSigner` +
+      `DidPeerCreateOptions(Numalgo.Two, ...)`); surfaces the matching private
+      JWKs with absolute-DID-URL `Kid` values so they can be loaded into
+      `InMemorySecretsResolver`.
 - **`samples/02-Cookbook/`** (`DidComm.Samples.Cookbook`):
-  - `CookbookContext.BuildAsync()` runs `services.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver(instance))`,
-    mints `alice`, `bob`, and `alice2` peer identities, and resolves the
-    `DidCommClient`. Shared by every section.
-  - `Program.RunAsync(TextWriter? output)` — testable entry point; `Main`
-    wraps it for CLI use.
-  - `Sections/Section_K_UnpackMetadata` — packs authcrypt(sign(plaintext))
-    alice→bob, unpacks as bob, prints every `UnpackResult` field
-    (Encrypted/Authenticated/NonRepudiation/AnonymousSender/ContentEncryption/
-    KeyWrap/SignatureAlgorithm/SignerKid/SenderKid/RecipientKid/
-    AllRecipientKids/Stack/FromPrior + Message.From + Message.Body).
-  - `Sections/Section_N_FromPriorRotation` — builds the `from_prior` JWT via
-    the now-public `FromPriorBuilder.Build(claims, signerPrivateJwk)`, packs
-    as authcrypt(alice2→bob), unpacks as bob, asserts
-    `UnpackResult.FromPrior.Sub == message.From`. Then demonstrates FR-ROT-03
-    by attempting `PackPlaintextAsync` with `FromPrior` set and reporting the
-    `InvalidOperationException` message.
-  - `Sections/Section_AA_NetDidAndDidWebRejection` — every prior section is
-    already going through `NetDidKeyService` over a `CompositeDidResolver`
-    (did:key + did:peer). This section adds the explicit DD-08 / FR-DID-06
-    rejection paths: `PackEncryptedAsync` (recipient, From, SignFrom) and
-    `PackSignedAsync` (signFrom) all throw `UnsupportedDidMethodException`
-    when given `did:web:example.com`.
-  - `README.md` — what each section demonstrates + the expected output shape.
+    - `CookbookContext.BuildAsync()` runs `services.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver(instance))`,
+      mints `alice`, `bob`, and `alice2` peer identities, and resolves the
+      `DidCommClient`. Shared by every section.
+    - `Program.RunAsync(TextWriter? output)` — testable entry point; `Main`
+      wraps it for CLI use.
+    - `Sections/Section_K_UnpackMetadata` — packs authcrypt(sign(plaintext))
+      alice→bob, unpacks as bob, prints every `UnpackResult` field
+      (Encrypted/Authenticated/NonRepudiation/AnonymousSender/ContentEncryption/
+      KeyWrap/SignatureAlgorithm/SignerKid/SenderKid/RecipientKid/
+      AllRecipientKids/Stack/FromPrior + Message.From + Message.Body).
+    - `Sections/Section_N_FromPriorRotation` — builds the `from_prior` JWT via
+      the now-public `FromPriorBuilder.Build(claims, signerPrivateJwk)`, packs
+      as authcrypt(alice2→bob), unpacks as bob, asserts
+      `UnpackResult.FromPrior.Sub == message.From`. Then demonstrates FR-ROT-03
+      by attempting `PackPlaintextAsync` with `FromPrior` set and reporting the
+      `InvalidOperationException` message.
+    - `Sections/Section_AA_NetDidAndDidWebRejection` — every prior section is
+      already going through `NetDidKeyService` over a `CompositeDidResolver`
+      (did:key + did:peer). This section adds the explicit DD-08 / FR-DID-06
+      rejection paths: `PackEncryptedAsync` (recipient, From, SignFrom) and
+      `PackSignedAsync` (signFrom) all throw `UnsupportedDidMethodException`
+      when given `did:web:example.com`.
+    - `README.md` — what each section demonstrates + the expected output shape.
 - **`tests/DidComm.InteropTests/Samples/CookbookSmokeTests`** — FR-DX-02
   build+run gate: invokes `Program.RunAsync(StringWriter)` and asserts every
   Phase 3 section banner appears in the transcript, no exceptions, no process
@@ -839,56 +839,56 @@ Closes PRD §12 Phase 2: FR-ENV-01..07, FR-ENC-04, FR-ENC-09..19, FR-SIG-01..06,
 FR-IX-01 (vendored spec Appendix C fixtures), FR-IX-03 (inbound static gate).
 
 - **JWS layer** (`Jose/Signing/`):
-  - `JwsBuilder` emits Flattened JSON Serialization for one signer and General JSON
-    for multiple (FR-SIG-02). Signs the deterministic canonical bytes of the inner
-    plaintext JWM (NFR-10).
-  - `JwsParser` accepts both serializations; verifies the signature; runs FR-CONSIST-03
-    (signer kid ↔ plaintext `from` DID-subject equality); tolerates kid in either the
-    protected or unprotected header per JOSE.
-  - `JwsProtectedHeader` DTO with `JsonExtensionData` for unknown-member preservation
-    (FR-MSG-15 carries through to the protected header too).
+    - `JwsBuilder` emits Flattened JSON Serialization for one signer and General JSON
+      for multiple (FR-SIG-02). Signs the deterministic canonical bytes of the inner
+      plaintext JWM (NFR-10).
+    - `JwsParser` accepts both serializations; verifies the signature; runs FR-CONSIST-03
+      (signer kid ↔ plaintext `from` DID-subject equality); tolerates kid in either the
+      protected or unprotected header per JOSE.
+    - `JwsProtectedHeader` DTO with `JsonExtensionData` for unknown-member preservation
+      (FR-MSG-15 carries through to the protected header too).
 - **JWE layer** (`Jose/Encryption/`):
-  - `JweBuilder` packs General-JSON multi-recipient envelopes. `PackAnoncrypt` uses
-    ECDH-ES+A256KW with any of A256CBC-HS512 / A256GCM / XC20P; `PackAuthcrypt` uses
-    ECDH-1PU+A256KW and **enforces FR-ENC-09**: refuses A256GCM / XC20P for authcrypt.
-    Same-curve invariant enforced inside one envelope (FR-ENC-04 / FR-ENC-11); cross-
-    curve splitting is the Phase 3 facade's job.
-  - `JweParser` decrypts the first recipient whose kid matches a held private key,
-    re-derives `apv` from the parsed recipient kids and **rejects on mismatch
-    (FR-ENC-13)**, re-validates `epk` through `JwkConversion.ExtractPublicKey` (so
-    off-curve EC points throw `CryptoException` per FR-ENC-03 via net-did's
-    `EcPointValidator`).
-  - `ApvComputer` (FR-ENC-13: base64url(SHA-256(sort(kids).join('.')))),
-    `ApuComputer` (FR-ENC-14: base64url(UTF-8(skid))), `JweProtectedHeader` DTO,
-    `RecipientWrap` record.
+    - `JweBuilder` packs General-JSON multi-recipient envelopes. `PackAnoncrypt` uses
+      ECDH-ES+A256KW with any of A256CBC-HS512 / A256GCM / XC20P; `PackAuthcrypt` uses
+      ECDH-1PU+A256KW and **enforces FR-ENC-09**: refuses A256GCM / XC20P for authcrypt.
+      Same-curve invariant enforced inside one envelope (FR-ENC-04 / FR-ENC-11); cross-
+      curve splitting is the Phase 3 facade's job.
+    - `JweParser` decrypts the first recipient whose kid matches a held private key,
+      re-derives `apv` from the parsed recipient kids and **rejects on mismatch
+      (FR-ENC-13)**, re-validates `epk` through `JwkConversion.ExtractPublicKey` (so
+      off-curve EC points throw `CryptoException` per FR-ENC-03 via net-did's
+      `EcPointValidator`).
+    - `ApvComputer` (FR-ENC-13: base64url(SHA-256(sort(kids).join('.')))),
+      `ApuComputer` (FR-ENC-14: base64url(UTF-8(skid))), `JweProtectedHeader` DTO,
+      `RecipientWrap` record.
 - **Composition** (`Composition/`):
-  - `EnvelopeWriter.PackPlaintext` / `PackSigned` / `PackEncrypted` accept explicit
-    key material (no resolver lookups in Phase 2). `PackEncrypted` orchestrates the
-    legal FR-ENV-02 / FR-ENV-04 compositions: anoncrypt, authcrypt, sign-then-encrypt
-    (FR-ENV-05 ordering), and anoncrypt-of-authcrypt (`ProtectSender = true`).
-  - `EnvelopeReader.Unpack` auto-detects envelope shape (FR-API-03), recursively
-    unwraps up to 4 layers, enforces the addressing-consistency rules as each layer
-    is revealed — FR-CONSIST-01 (authcrypt `skid` ↔ plaintext `from`), FR-CONSIST-02
-    (recipient kid ↔ `to`), FR-CONSIST-03 (signer kid ↔ `from`), and FR-CONSIST-05
-    (authcrypt(sign) inner signer ↔ outer `skid`) — and surfaces FR-API-04 metadata
-    (`encrypted`, `authenticated`, `non_repudiation`, `anonymous_sender`, enc/kw/sig
-    algorithms, signer/sender/recipient kids, envelope stack). FR-CONSIST-06's
-    resolver-backed authorization is wired in Phase 3.
-  - `UnpackResult` carries the metadata shape that the Phase 3 public facade will
-    surface unchanged.
+    - `EnvelopeWriter.PackPlaintext` / `PackSigned` / `PackEncrypted` accept explicit
+      key material (no resolver lookups in Phase 2). `PackEncrypted` orchestrates the
+      legal FR-ENV-02 / FR-ENV-04 compositions: anoncrypt, authcrypt, sign-then-encrypt
+      (FR-ENV-05 ordering), and anoncrypt-of-authcrypt (`ProtectSender = true`).
+    - `EnvelopeReader.Unpack` auto-detects envelope shape (FR-API-03), recursively
+      unwraps up to 4 layers, enforces the addressing-consistency rules as each layer
+      is revealed — FR-CONSIST-01 (authcrypt `skid` ↔ plaintext `from`), FR-CONSIST-02
+      (recipient kid ↔ `to`), FR-CONSIST-03 (signer kid ↔ `from`), and FR-CONSIST-05
+      (authcrypt(sign) inner signer ↔ outer `skid`) — and surfaces FR-API-04 metadata
+      (`encrypted`, `authenticated`, `non_repudiation`, `anonymous_sender`, enc/kw/sig
+      algorithms, signer/sender/recipient kids, envelope stack). FR-CONSIST-06's
+      resolver-backed authorization is wired in Phase 3.
+    - `UnpackResult` carries the metadata shape that the Phase 3 public facade will
+      surface unchanged.
 - **Crypto additions** (`Crypto/`):
-  - `Kdf/EcdhEsKdf` — anoncrypt KDF wrapper (`Z = Ze`, tag-free `SuppPubInfo`) plus
-    receive-side variant; mirrors the `Ecdh1PuKdf` pattern.
-  - `KeyAgreement/EphemeralKeyPair.Generate(crv)` — wraps net-did's
-    `DefaultKeyGenerator` to produce one-shot ephemeral keypairs for each pack call;
-    `Clear()` zeroes the private half (NFR-09).
-  - `KeyAgreement/KeyTypeMapper` — single source of truth for JOSE `crv` ↔
-    `KeyType` ↔ JWS `alg` ↔ AEAD key/IV sizes; eliminates ad-hoc dispatch tables
-    scattered across the envelope code.
+    - `Kdf/EcdhEsKdf` — anoncrypt KDF wrapper (`Z = Ze`, tag-free `SuppPubInfo`) plus
+      receive-side variant; mirrors the `Ecdh1PuKdf` pattern.
+    - `KeyAgreement/EphemeralKeyPair.Generate(crv)` — wraps net-did's
+      `DefaultKeyGenerator` to produce one-shot ephemeral keypairs for each pack call;
+      `Clear()` zeroes the private half (NFR-09).
+    - `KeyAgreement/KeyTypeMapper` — single source of truth for JOSE `crv` ↔
+      `KeyType` ↔ JWS `alg` ↔ AEAD key/IV sizes; eliminates ad-hoc dispatch tables
+      scattered across the envelope code.
 - **Secrets** (`Secrets/`):
-  - `IInternalSecretsLookup` and `IInternalSenderKeyLookup` — minimal internal
-    contracts so the envelope layer is testable in isolation. The Phase 3 public
-    `ISecretsResolver` (FR-SEC-01) will adapt.
+    - `IInternalSecretsLookup` and `IInternalSenderKeyLookup` — minimal internal
+      contracts so the envelope layer is testable in isolation. The Phase 3 public
+      `ISecretsResolver` (FR-SEC-01) will adapt.
 - **Exceptions**: `CryptoException` joins the typed hierarchy (FR-API-07). Decrypt /
   verify / unwrap / off-curve failures throw it instead of raw
   `CryptographicException`.
@@ -927,8 +927,8 @@ runners under `DidComm.InteropTests` (12 total: 1 fact, 11 theory cases).
   rejection; missing-sender-lookup rejection; tag-tampering propagates through both
   KEK derivation (FR-ENC-15) and AEAD verification.
 - `Envelopes/Encryption/ApvComputerTests` + `ApuComputerTests` + `EnvelopeDetectorTests`
-  + `EphemeralKeyPairTests` — per-curve length contracts, freshness, FR-MSG-06
-  prefix-normalization for media types.
+    - `EphemeralKeyPairTests` — per-curve length contracts, freshness, FR-MSG-06
+      prefix-normalization for media types.
 - `Envelopes/Composition/EnvelopeReaderTests` — End-to-end round-trips for plaintext,
   signed, anoncrypt, authcrypt, anoncrypt(sign), anoncrypt(authcrypt) compositions;
   FR-CONSIST-02 wiring; metadata shape (FR-API-04).
@@ -963,53 +963,53 @@ Closes PRD §12 Phase 1 line items: FR-MSG-01..15, FR-ATT-01..05, FR-CONSIST-01.
 NFR-10.
 
 - **`Messages/`** — plaintext message model:
-  - `Message` — POCO mirroring the §Plaintext Message Structure header set
-    (`id`, `type`, `typ`, `to`, `from`, `thid`, `pthid`, `created_time`,
-    `expires_time`, `body`, `attachments`) plus a `JsonExtensionData`
-    `AdditionalHeaders` bag that survives unpack→repack (FR-MSG-12, FR-MSG-15).
-    `Validate()` enforces the §4 structural rules: REQUIRED `id` of unreserved
-    URI characters (FR-MSG-02), REQUIRED MTURI `type` (FR-MSG-05), no-fragment
-    constraint on `to` / `from` (FR-MSG-07/08), same constraints on
-    `thid`/`pthid` (FR-MSG-11).
-  - `Attachment` + `AttachmentData` — §Attachments shape with FR-ATT-02 (data
-    must carry one of `jws` / `hash` / `links` / `base64` / `json`), FR-ATT-03
-    (`links` requires `hash`), FR-ATT-04 (attachment `id` unreserved-char
-    requirement) all validated in code.
-  - `MessageBuilder` — fluent builder per FR-MSG-13; auto-populates `id` via
-    `IMessageIdGenerator` (default `UuidV4MessageIdGenerator`, FR-MSG-03) and
-    `typ` (`application/didcomm-plain+json`).
-  - `IMessageIdGenerator` carries the FR-MSG-14 uniqueness obligation in its
-    XML docs; custom implementations are responsible for it.
-  - `MediaTypes` — IANA constants for plaintext / signed / encrypted with
-    FR-MSG-06 normalization (`didcomm-plain+json` accepted as equivalent to
-    `application/didcomm-plain+json`).
+    - `Message` — POCO mirroring the §Plaintext Message Structure header set
+      (`id`, `type`, `typ`, `to`, `from`, `thid`, `pthid`, `created_time`,
+      `expires_time`, `body`, `attachments`) plus a `JsonExtensionData`
+      `AdditionalHeaders` bag that survives unpack→repack (FR-MSG-12, FR-MSG-15).
+      `Validate()` enforces the §4 structural rules: REQUIRED `id` of unreserved
+      URI characters (FR-MSG-02), REQUIRED MTURI `type` (FR-MSG-05), no-fragment
+      constraint on `to` / `from` (FR-MSG-07/08), same constraints on
+      `thid`/`pthid` (FR-MSG-11).
+    - `Attachment` + `AttachmentData` — §Attachments shape with FR-ATT-02 (data
+      must carry one of `jws` / `hash` / `links` / `base64` / `json`), FR-ATT-03
+      (`links` requires `hash`), FR-ATT-04 (attachment `id` unreserved-char
+      requirement) all validated in code.
+    - `MessageBuilder` — fluent builder per FR-MSG-13; auto-populates `id` via
+      `IMessageIdGenerator` (default `UuidV4MessageIdGenerator`, FR-MSG-03) and
+      `typ` (`application/didcomm-plain+json`).
+    - `IMessageIdGenerator` carries the FR-MSG-14 uniqueness obligation in its
+      XML docs; custom implementations are responsible for it.
+    - `MediaTypes` — IANA constants for plaintext / signed / encrypted with
+      FR-MSG-06 normalization (`didcomm-plain+json` accepted as equivalent to
+      `application/didcomm-plain+json`).
 - **`Protocols/`** — MTURI parsing:
-  - `MessageTypeUri` — parses
-    `<doc-uri>/<protocol-name>/<major.minor>/<message-type>` into four named
-    components (FR-PROTO-01); `Matches` comparison is case- and
-    punctuation-insensitive on protocol/message and uses
-    `ProtocolVersion.IsCompatibleWith` for the version.
-  - `ProtocolVersion` — `major.minor` value type with
-    `IsCompatibleWith`/`NegotiateWith` implementing FR-PROTO-02 spec semver.
+    - `MessageTypeUri` — parses
+      `<doc-uri>/<protocol-name>/<major.minor>/<message-type>` into four named
+      components (FR-PROTO-01); `Matches` comparison is case- and
+      punctuation-insensitive on protocol/message and uses
+      `ProtocolVersion.IsCompatibleWith` for the version.
+    - `ProtocolVersion` — `major.minor` value type with
+      `IsCompatibleWith`/`NegotiateWith` implementing FR-PROTO-02 spec semver.
 - **`Consistency/`** — addressing-consistency check functions (PRD §4.3):
-  - `DidSubject.DidSubjectOf(string)` — delegates to net-did's
-    `DidParser.ParseDidUrl` and returns the bare DID subject, the primitive
-    every FR-CONSIST-* rule pivots on.
-  - `AddressingConsistency` — pure static functions for FR-CONSIST-01..05
-    (`CheckAuthcryptFromMatchesSkid`, `CheckRecipientKidInTo`,
-    `CheckSignedFromMatchesSignerKid`, `IsRecipientInTo`,
-    `CheckAuthcryptInnerSignerMatchesSkid`) plus the FR-CONSIST-06
-    `CheckResolverAuthorization` hook (real resolver wiring lands in Phase 3).
+    - `DidSubject.DidSubjectOf(string)` — delegates to net-did's
+      `DidParser.ParseDidUrl` and returns the bare DID subject, the primitive
+      every FR-CONSIST-\* rule pivots on.
+    - `AddressingConsistency` — pure static functions for FR-CONSIST-01..05
+      (`CheckAuthcryptFromMatchesSkid`, `CheckRecipientKidInTo`,
+      `CheckSignedFromMatchesSignerKid`, `IsRecipientInTo`,
+      `CheckAuthcryptInnerSignerMatchesSkid`) plus the FR-CONSIST-06
+      `CheckResolverAuthorization` hook (real resolver wiring lands in Phase 3).
 - **`Json/`** — deterministic JSON for NFR-10:
-  - `DeterministicJsonWriter.WriteUtf8(JsonNode?)` walks the tree and emits a
-    UTF-8 byte sequence with object members sorted ASCII-lexicographically at
-    every nesting level and no whitespace. Future signing inputs and `apv`
-    hashing in Phase 2 route through this writer.
-  - `EpochSecondsConverter` enforces integer JSON output for `created_time` /
-    `expires_time` (FR-MSG-09) while tolerating string input on read.
-  - `DidCommJson.Default` `JsonSerializerOptions` instance with
-    `WhenWritingNull` ignore policy so unset optional headers don't appear on
-    the wire.
+    - `DeterministicJsonWriter.WriteUtf8(JsonNode?)` walks the tree and emits a
+      UTF-8 byte sequence with object members sorted ASCII-lexicographically at
+      every nesting level and no whitespace. Future signing inputs and `apv`
+      hashing in Phase 2 route through this writer.
+    - `EpochSecondsConverter` enforces integer JSON output for `created_time` /
+      `expires_time` (FR-MSG-09) while tolerating string input on read.
+    - `DidCommJson.Default` `JsonSerializerOptions` instance with
+      `WhenWritingNull` ignore policy so unset optional headers don't appear on
+      the wire.
 - **`Exceptions/`** — typed failure hierarchy scaffolding (FR-API-07):
   `DidCommException` base + `MalformedMessageException`, `ConsistencyException`,
   `ProtocolException`. Crypto / resolver / transport exceptions land in their
@@ -1092,7 +1092,7 @@ Closes PRD §12 Phase 0 line items.
   submodule is a `git rm -r` + `git submodule add` (no data restructuring).
 - **CI workflow** — `.github/workflows/ci.yml` on `ubuntu-latest` +
   `windows-latest`, `dotnet build /warnaserror` + `dotnet test --configuration
-  Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
+Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
 
 ### Changed
 
@@ -1153,4 +1153,4 @@ Closes PRD §12 Phase 0 line items.
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/HEAD...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/commits/main
