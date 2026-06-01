@@ -62,7 +62,19 @@ internal static class EnvelopeReader
             {
                 case EnvelopeKind.Plaintext:
                 {
-                    var message = JsonSerializer.Deserialize<Message>(current, DidCommJson.Default)
+                    Message? deserialized;
+                    try
+                    {
+                        deserialized = JsonSerializer.Deserialize<Message>(current, DidCommJson.Default);
+                    }
+                    catch (JsonException ex)
+                    {
+                        // Covers malformed members and converter rejections (e.g. an out-of-range
+                        // epoch-seconds value) so they surface as the standard malformed-message error
+                        // rather than an undocumented JsonException at the public unpack boundary.
+                        throw new MalformedMessageException("Plaintext payload is not a valid DIDComm message.", ex);
+                    }
+                    var message = deserialized
                         ?? throw new MalformedMessageException("Plaintext payload deserialized to null.");
                     message.Validate();
 

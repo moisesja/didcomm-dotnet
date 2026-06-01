@@ -164,15 +164,73 @@ public sealed class AuthcryptRoundTripTests
         act.Should().Throw<CryptoException>().WithMessage("*Unsupported JWE 'enc'*");
     }
 
+    [Fact]
+    public void Unpack_rejects_authcrypt_with_apu_not_matching_skid()
+    {
+        // FR-ENC-14: apu MUST equal base64url(utf8(skid)). A self-consistent envelope that names a
+        // different sender in apu than in skid must be rejected (the two indicators must agree). The
+        // binding check runs before the AEAD, so the broken AAD never masks it.
+        var (packed, secrets, senderLookup) = BuildAuthcrypt();
+        var tampered = MutateProtectedHeader(packed, h => h["apu"] = Base64Url.EncodeUtf8("did:example:evil#enc"));
+
+        Action act = () => JweParser.Parse(tampered, secrets, senderLookup, _crypto);
+        act.Should().Throw<CryptoException>().WithMessage("*apu*does not match*");
+    }
+
+    [Fact]
+    public void Unpack_rejects_jwe_with_critical_extension()
+    {
+        // RFC 7516 §4.1.13: a 'crit' header naming an extension we don't understand must be rejected.
+        var (packed, secrets, senderLookup) = BuildAuthcrypt();
+        var tampered = MutateProtectedHeader(packed, h => h["crit"] = new JsonArray("did:example:unknown-ext"));
+
+        Action act = () => JweParser.Parse(tampered, secrets, senderLookup, _crypto);
+        act.Should().Throw<MalformedMessageException>().WithMessage("*crit*");
+    }
+
+    [Fact]
+    public void Unpack_rejects_jwe_missing_required_member()
+    {
+        // A missing required member (here 'iv') must surface as MalformedMessageException, not a raw
+        // KeyNotFoundException at the parse boundary.
+        var (packed, secrets, senderLookup) = BuildAuthcrypt();
+        var broken = RemoveRootMember(packed, "iv");
+
+        Action act = () => JweParser.Parse(broken, secrets, senderLookup, _crypto);
+        act.Should().Throw<MalformedMessageException>().WithMessage("*iv*");
+    }
+
+    private static (string packed, DictionarySecretsLookup secrets, DictionarySenderKeyLookup senderLookup) BuildAuthcrypt()
+    {
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#enc");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#enc");
+        var packed = JweBuilder.PackAuthcrypt(
+            Encoding.UTF8.GetBytes("{}"),
+            new[] { bob.PublicJwk },
+            alice.PrivateJwk, alice.PublicJwk.Kid!,
+            "A256CBC-HS512", _crypto);
+        return (packed, new DictionarySecretsLookup(new[] { bob.PrivateJwk }), new DictionarySenderKeyLookup(new[] { alice.PublicJwk }));
+    }
+
     // Rewrite the protected-header 'enc' and re-encode. The parser's enc allow-list runs before any
     // AEAD/AAD work, so the (now-broken) AAD never matters for these negative tests.
-    private static string RewriteProtectedEnc(string packed, string newEnc)
+    private static string RewriteProtectedEnc(string packed, string newEnc) =>
+        MutateProtectedHeader(packed, h => h["enc"] = newEnc);
+
+    private static string MutateProtectedHeader(string packed, Action<JsonObject> mutate)
     {
         using var doc = JsonDocument.Parse(packed);
         var protectedB64u = doc.RootElement.GetProperty("protected").GetString()!;
         var header = JsonNode.Parse(Encoding.UTF8.GetString(Base64Url.Decode(protectedB64u)))!.AsObject();
-        header["enc"] = newEnc;
+        mutate(header);
         var rewritten = Base64Url.Encode(Encoding.UTF8.GetBytes(header.ToJsonString()));
         return packed.Replace("\"" + protectedB64u + "\"", "\"" + rewritten + "\"", StringComparison.Ordinal);
+    }
+
+    private static string RemoveRootMember(string packed, string name)
+    {
+        var root = JsonNode.Parse(packed)!.AsObject();
+        root.Remove(name);
+        return root.ToJsonString();
     }
 }

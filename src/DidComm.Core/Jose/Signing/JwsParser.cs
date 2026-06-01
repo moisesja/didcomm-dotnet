@@ -69,6 +69,24 @@ internal static class JwsParser
             try
             {
                 var header = JwsProtectedHeader.Decode(sig.ProtectedB64u);
+
+                // RFC 7515 §4.1.11: reject a 'crit' header that names extensions we don't understand —
+                // we understand none. RFC 7797: reject b64=false (unencoded payload); this parser always
+                // base64url-decodes the payload. Both land in the extension-data bag.
+                if (header.AdditionalMembers is not null)
+                {
+                    if (header.AdditionalMembers.ContainsKey("crit"))
+                    {
+                        lastFailure = new MalformedMessageException("JWS protected header marks an unsupported extension critical ('crit').");
+                        continue;
+                    }
+                    if (header.AdditionalMembers.TryGetValue("b64", out var b64) && b64.ValueKind == JsonValueKind.False)
+                    {
+                        lastFailure = new MalformedMessageException("JWS with b64=false (unencoded payload, RFC 7797) is not supported.");
+                        continue;
+                    }
+                }
+
                 if (!string.Equals(header.Alg, KeyTypeMapper.ToJwsAlgorithm(publicJwk.Crv!), StringComparison.Ordinal))
                 {
                     lastFailure = new CryptoException(
@@ -116,9 +134,11 @@ internal static class JwsParser
 
     private static IEnumerable<RawSignature> ExtractSignatures(JsonElement root)
     {
-        // Flattened: payload + protected + (optional header) + signature at the top level.
-        if (root.TryGetProperty("signature", out var sigEl)
-            && root.TryGetProperty("protected", out var protEl))
+        // Flattened: payload + protected + (optional header) + signature at the top level. Both
+        // 'signature' and 'protected' must be strings; otherwise this is not a flattened JWS and we
+        // fall through (an empty result then surfaces as a clean "no signatures" malformed error).
+        if (root.TryGetProperty("signature", out var sigEl) && sigEl.ValueKind == JsonValueKind.String
+            && root.TryGetProperty("protected", out var protEl) && protEl.ValueKind == JsonValueKind.String)
         {
             var kid = root.TryGetProperty("header", out var hdr) && hdr.ValueKind == JsonValueKind.Object
                 ? hdr.TryGetProperty("kid", out var kEl) ? kEl.GetString() ?? string.Empty : string.Empty
@@ -131,7 +151,7 @@ internal static class JwsParser
                 kid = JwsProtectedHeader.Decode(protB64u).Kid;
             }
 
-            yield return new RawSignature(protB64u, kid, Base64Url.Decode(sigEl.GetString()!));
+            yield return new RawSignature(protB64u, kid, DecodeSignature(sigEl.GetString()!));
             yield break;
         }
 
@@ -140,15 +160,31 @@ internal static class JwsParser
         {
             foreach (var entry in arr.EnumerateArray())
             {
-                var protB64u = entry.GetProperty("protected").GetString()!;
+                if (entry.ValueKind != JsonValueKind.Object
+                    || !entry.TryGetProperty("protected", out var protElement) || protElement.ValueKind != JsonValueKind.String
+                    || !entry.TryGetProperty("signature", out var sigElement) || sigElement.ValueKind != JsonValueKind.String)
+                    throw new MalformedMessageException("JWS signature entry is missing a string 'protected' or 'signature'.");
+
+                var protB64u = protElement.GetString()!;
                 var kid = entry.TryGetProperty("header", out var hdr2) && hdr2.ValueKind == JsonValueKind.Object
                     ? hdr2.TryGetProperty("kid", out var kEl) ? kEl.GetString() ?? string.Empty : string.Empty
                     : string.Empty;
                 if (string.IsNullOrEmpty(kid))
                     kid = JwsProtectedHeader.Decode(protB64u).Kid;
-                var sig = Base64Url.Decode(entry.GetProperty("signature").GetString()!);
-                yield return new RawSignature(protB64u, kid, sig);
+                yield return new RawSignature(protB64u, kid, DecodeSignature(sigElement.GetString()!));
             }
+        }
+    }
+
+    private static byte[] DecodeSignature(string b64u)
+    {
+        try
+        {
+            return Base64Url.Decode(b64u);
+        }
+        catch (FormatException ex)
+        {
+            throw new MalformedMessageException("JWS 'signature' is not valid base64url.", ex);
         }
     }
 

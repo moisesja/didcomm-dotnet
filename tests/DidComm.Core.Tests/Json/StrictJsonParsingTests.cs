@@ -35,4 +35,18 @@ public sealed class StrictJsonParsingTests
 
         act.Should().Throw<MalformedMessageException>();
     }
+
+    [Fact]
+    public void Epoch_field_out_of_int64_range_is_a_clean_json_error()
+    {
+        // An out-of-range epoch-seconds value must surface as JsonException (mapped to
+        // MalformedMessageException upstream), not a raw OverflowException from the converter.
+        const string json = """
+            {"id":"m1","type":"https://didcomm.org/x/1.0/y","expires_time":"99999999999999999999999"}
+            """;
+
+        Action act = () => JsonSerializer.Deserialize<Message>(json, DidCommJson.Default);
+
+        act.Should().Throw<JsonException>();
+    }
 }

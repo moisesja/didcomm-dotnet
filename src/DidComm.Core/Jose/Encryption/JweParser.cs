@@ -39,6 +39,11 @@ internal static class JweParser
         var jwe = ParseStructure(packed);
         var header = JweProtectedHeader.Decode(jwe.ProtectedB64u);
 
+        // RFC 7516 §4.1.13: a 'crit' header naming extensions the recipient doesn't understand MUST be
+        // rejected. This implementation understands no JWE crit extensions, so any 'crit' is fatal.
+        if (header.AdditionalMembers is not null && header.AdditionalMembers.ContainsKey("crit"))
+            throw new MalformedMessageException("JWE protected header marks an unsupported extension critical ('crit').");
+
         // FR-ENC-09 / content-encryption allow-list. Reject any 'enc' outside the supported set
         // before deriving a key, and pin authcrypt (ECDH-1PU) to A256CBC-HS512 — the only AEAD the
         // spec authorizes for authenticated encryption. Mirrors the send-side restriction; stops an
@@ -94,22 +99,44 @@ internal static class JweParser
                 }
                 case JoseAlgorithms.Ecdh1PuA256Kw:
                 {
-                    if (string.IsNullOrEmpty(header.Skid))
-                        throw new CryptoException("Authcrypt JWE is missing 'skid' in the protected header.");
                     if (senderLookup is null)
                         throw new CryptoException("Authcrypt unpack requires a sender-key lookup; none was supplied.");
-                    var senderPublicJwk = senderLookup.TryGet(header.Skid)
-                        ?? throw new CryptoException($"Could not resolve sender public key for skid '{header.Skid}'.");
+
+                    // FR-ENC-14/17: resolve the sender key id from 'skid' when present, else from 'apu'
+                    // (= base64url(utf8(skid)); the 1PU draft does not mandate 'skid'). When BOTH are
+                    // present they MUST agree, so a peer cannot present one sender identity in 'skid' and
+                    // a different one in 'apu'.
+                    string skid;
+                    if (!string.IsNullOrEmpty(header.Skid))
+                    {
+                        skid = header.Skid;
+                        if (!string.IsNullOrEmpty(header.Apu) &&
+                            !string.Equals(header.Apu, ApuComputer.Compute(skid), StringComparison.Ordinal))
+                            throw new CryptoException("Authcrypt 'apu' does not match base64url(skid) (FR-ENC-14).");
+                    }
+                    else if (!string.IsNullOrEmpty(header.Apu))
+                    {
+                        skid = Encoding.UTF8.GetString(Base64Url.Decode(header.Apu));
+                    }
+                    else
+                    {
+                        throw new CryptoException("Authcrypt JWE is missing both 'skid' and 'apu' in the protected header (FR-ENC-17).");
+                    }
+
+                    var senderPublicJwk = senderLookup.TryGet(skid)
+                        ?? throw new CryptoException($"Could not resolve sender public key for skid '{skid}'.");
                     if (!string.Equals(senderPublicJwk.Crv, privateJwk.Crv, StringComparison.Ordinal))
                         throw new CryptoException(
                             $"Authcrypt sender key curve ({senderPublicJwk.Crv}) does not match recipient curve ({privateJwk.Crv}).");
 
-                    senderKid = header.Skid;
+                    senderKid = skid;
                     var (_, senderPubBytes) = NetDidJwkConverter.ExtractPublicKey(Jose.JwkConversion.ToNetDidJwk(senderPublicJwk));
                     var apvBytes = Base64Url.Decode(header.Apv);
-                    // 1PU draft-04 §2.3: PartyUInfo is the base64url-DECODED apu (the original
-                    // UTF-8 bytes of the sender skid), not the b64u string itself.
-                    var apuBytes = string.IsNullOrEmpty(header.Apu) ? Array.Empty<byte>() : Base64Url.Decode(header.Apu);
+                    // 1PU draft-04 §2.3: PartyUInfo is the UTF-8 bytes of the sender skid (the decoded
+                    // 'apu'); fall back to utf8(skid) when the peer omitted 'apu'.
+                    var apuBytes = string.IsNullOrEmpty(header.Apu)
+                        ? Encoding.UTF8.GetBytes(skid)
+                        : Base64Url.Decode(header.Apu);
                     kek = Ecdh1PuKdf.DeriveKeyForReceiver(
                         cryptoProvider.NetDidProvider,
                         KeyTypeMapper.FromCurveForKeyAgreement(privateJwk.Crv!),
@@ -212,30 +239,68 @@ internal static class JweParser
 
     private static ParsedJwe ParseStructure(string packed)
     {
-        using var doc = JsonDocument.Parse(packed, DidCommJson.StrictDocument);
-        var root = doc.RootElement;
-        if (root.ValueKind != JsonValueKind.Object)
-            throw new MalformedMessageException("JWE root is not a JSON object.");
-
-        var protectedB64u = root.GetProperty("protected").GetString()
-            ?? throw new MalformedMessageException("JWE is missing 'protected'.");
-        var iv = Base64Url.Decode(root.GetProperty("iv").GetString()!);
-        var ciphertext = Base64Url.Decode(root.GetProperty("ciphertext").GetString()!);
-        var tag = Base64Url.Decode(root.GetProperty("tag").GetString()!);
-
-        var recipients = new List<ParsedRecipient>();
-        foreach (var rec in root.GetProperty("recipients").EnumerateArray())
+        JsonDocument doc;
+        try
         {
-            var kid = rec.GetProperty("header").GetProperty("kid").GetString()
-                ?? throw new MalformedMessageException("JWE recipient is missing 'header.kid'.");
-            var encryptedKey = Base64Url.Decode(rec.GetProperty("encrypted_key").GetString()!);
-            recipients.Add(new ParsedRecipient(kid, encryptedKey));
+            doc = JsonDocument.Parse(packed, DidCommJson.StrictDocument);
+        }
+        catch (JsonException ex)
+        {
+            throw new MalformedMessageException("JWE is not valid JSON.", ex);
         }
 
-        if (recipients.Count == 0)
-            throw new MalformedMessageException("JWE has zero recipients.");
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new MalformedMessageException("JWE root is not a JSON object.");
 
-        return new ParsedJwe(protectedB64u, recipients, iv, ciphertext, tag);
+            // Every required member is read with an explicit type check so a missing or mistyped
+            // member (e.g. a numeric 'iv') yields a MalformedMessageException — the parser's documented
+            // failure — rather than a raw KeyNotFoundException / ArgumentNullException at the boundary.
+            var protectedB64u = RequireString(root, "protected");
+            var iv = DecodeB64u(RequireString(root, "iv"), "iv");
+            var ciphertext = DecodeB64u(RequireString(root, "ciphertext"), "ciphertext");
+            var tag = DecodeB64u(RequireString(root, "tag"), "tag");
+
+            if (!root.TryGetProperty("recipients", out var recipientsEl) || recipientsEl.ValueKind != JsonValueKind.Array)
+                throw new MalformedMessageException("JWE is missing the 'recipients' array.");
+
+            var recipients = new List<ParsedRecipient>();
+            foreach (var rec in recipientsEl.EnumerateArray())
+            {
+                if (rec.ValueKind != JsonValueKind.Object ||
+                    !rec.TryGetProperty("header", out var hdr) || hdr.ValueKind != JsonValueKind.Object)
+                    throw new MalformedMessageException("JWE recipient is missing its 'header' object.");
+                var kid = RequireString(hdr, "kid");
+                var encryptedKey = DecodeB64u(RequireString(rec, "encrypted_key"), "encrypted_key");
+                recipients.Add(new ParsedRecipient(kid, encryptedKey));
+            }
+
+            if (recipients.Count == 0)
+                throw new MalformedMessageException("JWE has zero recipients.");
+
+            return new ParsedJwe(protectedB64u, recipients, iv, ciphertext, tag);
+        }
+    }
+
+    private static string RequireString(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out var el) || el.ValueKind != JsonValueKind.String)
+            throw new MalformedMessageException($"JWE is missing required string member '{name}'.");
+        return el.GetString()!;
+    }
+
+    private static byte[] DecodeB64u(string value, string name)
+    {
+        try
+        {
+            return Base64Url.Decode(value);
+        }
+        catch (FormatException ex)
+        {
+            throw new MalformedMessageException($"JWE member '{name}' is not valid base64url.", ex);
+        }
     }
 
     private sealed record ParsedRecipient(string Kid, byte[] EncryptedKey);

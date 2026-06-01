@@ -18,12 +18,19 @@ internal sealed class EpochSecondsConverter : JsonConverter<long?>
             case JsonTokenType.Null:
                 return null;
             case JsonTokenType.Number:
-                return reader.GetInt64();
+                // Out-of-Int64-range numbers throw FormatException from GetInt64, which System.Text.Json
+                // does NOT wrap — surface a JsonException so the malformed value maps to the library's
+                // standard MalformedMessageException instead of an unexpected exception type.
+                if (!reader.TryGetInt64(out var number))
+                    throw new JsonException("Epoch-seconds field is outside the Int64 range.");
+                return number;
             case JsonTokenType.String:
                 {
                     var s = reader.GetString();
                     if (string.IsNullOrEmpty(s)) return null;
-                    return long.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+                    if (!long.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+                        throw new JsonException("Epoch-seconds string is not a valid Int64.");
+                    return parsed;
                 }
             default:
                 throw new JsonException("Expected integer or string for epoch-seconds field.");
