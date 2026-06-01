@@ -3,13 +3,18 @@ using System.Net.Mime;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
 using DidComm.Facade;
+using DidComm.Messages;
 using DidComm.Protocols;
+using DidComm.Protocols.OutOfBand;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+
+// L-014: alias the static OutOfBand API class so the same-named namespace doesn't shadow it.
+using OutOfBandApi = DidComm.Protocols.OutOfBand.OutOfBand;
 
 namespace DidComm.AspNetCore;
 
@@ -173,6 +178,41 @@ public static class DidCommEndpointRouteBuilderExtensions
             }
             LogOutcome(logger, outcome, sameSocketDelivered: false);
             return Results.StatusCode(StatusCodes.Status202Accepted);
+        });
+    }
+
+    /// <summary>
+    /// Map an HTTP GET endpoint that serves the short-form of an out-of-band invitation
+    /// (FR-OOB-04). A recipient dereferences a <c>?_oobid=&lt;id&gt;</c> URL; this endpoint reads
+    /// the id, looks it up in <paramref name="store"/>, and returns the full plaintext invitation
+    /// (<c>200</c>, <c>application/didcomm-plain+json</c>). Returns <c>400</c> when the
+    /// <c>_oobid</c> query value is absent and <c>404</c> when the id is unknown. The sender hosts
+    /// this itself rather than using a public URL shortener, which the spec forbids for privacy.
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern (e.g. <c>"/oob"</c>) — must match the path used in <c>OutOfBand.ToShortUrl</c>.</param>
+    /// <param name="store">The invitation store the sender populated when it minted the short URL.</param>
+    public static IEndpointConventionBuilder MapDidCommOobEndpoint(
+        this IEndpointRouteBuilder endpoints,
+        string pattern,
+        IOobInvitationStore store)
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+        ArgumentException.ThrowIfNullOrEmpty(pattern);
+        ArgumentNullException.ThrowIfNull(store);
+
+        return endpoints.MapGet(pattern, (HttpContext httpContext) =>
+        {
+            // The short URL carries the id in the _oobid query parameter (OutOfBand.OobIdParameter).
+            var oobId = httpContext.Request.Query[OutOfBandApi.OobIdParameter].ToString();
+            if (string.IsNullOrEmpty(oobId))
+                return Results.StatusCode(StatusCodes.Status400BadRequest);
+
+            var invitation = store.Retrieve(oobId);
+            if (invitation is null)
+                return Results.StatusCode(StatusCodes.Status404NotFound);
+
+            return Results.Text(invitation, MediaTypes.Plaintext);
         });
     }
 

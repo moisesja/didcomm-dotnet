@@ -48,6 +48,7 @@ public static class Program
         await Section_S_TrustPing.RunAsync(ctx);
         await Section_T_DiscoverFeatures.RunAsync(ctx);
         await Section_U_ProblemReport.RunAsync(ctx);
+        await Section_V_OutOfBandInvitation.RunAsync(ctx);
         await Section_W_EmptyMessage.RunAsync(ctx);
         await Section_X_CustomHandler.RunAsync(ctx);
         await Section_AA_NetDidAndDidWebRejection.RunAsync(ctx);

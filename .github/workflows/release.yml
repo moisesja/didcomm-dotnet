@@ -1,0 +1,60 @@
+name: Release
+
+# NFR-08: on a version tag, build + test + pack all publishable packages and push them to
+# NuGet.org. Tag the release as `vMAJOR.MINOR.PATCH` (e.g. v0.1.0); the package version is
+# derived from the tag, overriding the dev-default DidCommVersion in Directory.Build.props.
+#
+# Prerequisite: add a repository secret named NUGET_API_KEY (a nuget.org API key scoped to push
+# the DidComm.* package ids). Without it the push step fails — build/test/pack still validate.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  pack-and-publish:
+    name: pack + publish to NuGet
+    runs-on: ubuntu-latest
+    # Gate the irreversible publish: add "Required reviewers" to the `nuget-release` environment
+    # (repo Settings > Environments) so each tag push waits for approval before this job runs.
+    # Until those rules exist this is a no-op. Scope the NUGET_API_KEY secret to this environment.
+    environment: nuget-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Derive version from tag
+        id: version
+        # Strip the leading 'v': refs/tags/v0.1.0 -> GITHUB_REF_NAME=v0.1.0 -> 0.1.0.
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore
+        run: dotnet restore DidComm.sln
+
+      - name: Build (warnings as errors — NFR-01)
+        run: dotnet build DidComm.sln --configuration Release --no-restore /warnaserror -p:DidCommVersion=${{ steps.version.outputs.version }}
+
+      - name: Test
+        run: dotnet test DidComm.sln --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack DidComm.sln --configuration Release --no-build -p:DidCommVersion=${{ steps.version.outputs.version }} --output artifacts
+
+      - name: Upload packages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: artifacts/*.*nupkg
+          if-no-files-found: error
+
+      - name: Push to NuGet.org
+        # Pushes the .nupkg files; the matching .snupkg symbol packages ride along automatically.
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

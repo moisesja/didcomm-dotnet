@@ -1,0 +1,14 @@
+<Project>
+  <!--
+    Pack the repository README into every publishable package so the PackageReadmeFile set in
+    Directory.Build.props resolves; without a packed README, `dotnet pack` fails with NU5039.
+
+    This lives in Directory.Build.targets (imported AFTER each project body) rather than
+    Directory.Build.props so $(IsPackable) is already resolved: test and sample projects set
+    IsPackable=false and are skipped, while the six src libraries (IsPackable unset → true)
+    include the root README. $(MSBuildThisFileDirectory) is the repo root, where README.md lives.
+  -->
+  <ItemGroup Condition="'$(IsPackable)' != 'false' AND Exists('$(MSBuildThisFileDirectory)README.md')">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+</Project>

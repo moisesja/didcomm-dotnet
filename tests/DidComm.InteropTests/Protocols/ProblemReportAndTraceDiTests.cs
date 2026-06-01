@@ -84,6 +84,11 @@ public sealed class ProblemReportAndTraceDiTests
         var options = sp.GetRequiredService<TraceOptions>();
         options.Enabled.Should().BeTrue();
         options.AllowedReportingUris.Should().Contain("https://trace.example.com/report");
+
+        // Symmetric with ProblemReportOptions: IOptions<TraceOptions> resolves to the same
+        // instance for consumers that prefer the Options pattern.
+        var wrapped = sp.GetRequiredService<IOptions<TraceOptions>>();
+        wrapped.Value.Should().BeSameAs(options);
     }
 
     [Fact]

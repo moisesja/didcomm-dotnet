@@ -1,4 +1,6 @@
+using System.Text.Json.Nodes;
 using DidComm.Exceptions;
+using DidComm.Messages;
 using DidComm.Protocols.ProblemReport;
 using FluentAssertions;
 using Xunit;
@@ -98,5 +100,32 @@ public sealed class ProblemReportTests
                 escalatedDescriptor: "xfer.failed",
                 pthid: "pthid")))
             .Should().Throw<ArgumentException>().WithMessage("*FR-PROTO-09*");
+    }
+
+    [Fact]
+    public void Read_helpers_return_null_or_empty_on_non_string_body_fields()
+    {
+        // A malformed peer could send body.code / body.comment as nested objects, or body.args
+        // entries as objects. None of those should throw — JsonNode.AsValue() would, the
+        // JsonValue pattern-match the readers use shouldn't.
+        var body = new JsonObject
+        {
+            ["code"] = new JsonObject { ["nested"] = "thing" },
+            ["comment"] = new JsonArray { "not", "a", "string" },
+            ["args"] = new JsonArray { "valid", new JsonObject { ["x"] = 1 }, "also-valid" },
+        };
+        var msg = new MessageBuilder()
+            .WithType(ProblemReportApi.MessageType)
+            .WithPthid("pthid")
+            .WithBody(body)
+            .Build();
+
+        ProblemReportApi.ReadCode(msg).Should().BeNull();
+        ProblemReportApi.ReadComment(msg).Should().BeNull();
+        // ReadArgs keeps positional alignment: the non-string entry becomes "" rather than being
+        // dropped, so 1-based {n} interpolation indexes still line up with the on-wire array.
+        ProblemReportApi.ReadArgs(msg).Should().Equal("valid", string.Empty, "also-valid");
+        // RenderComment composes code + comment — should not throw either.
+        ProblemReportApi.RenderComment(msg).Should().Be(string.Empty);
     }
 }

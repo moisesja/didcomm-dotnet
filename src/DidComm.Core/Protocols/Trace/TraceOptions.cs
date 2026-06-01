@@ -27,6 +27,15 @@ public sealed class TraceOptions
     /// inbound <c>trace</c> header whose <c>report_uri</c> is not on this list is silently
     /// dropped, even when <see cref="Enabled"/> is <c>true</c>.
     /// </summary>
+    /// <remarks>
+    /// Entries are matched against the parsed URI's <see cref="Uri.AbsoluteUri"/> — the
+    /// canonical percent-encoded form. Put canonical URIs in the allowlist (e.g.
+    /// <c>https://trace.example.com/report</c>, not <c>https://trace.example.com/report/</c>
+    /// unless the responder really expects the trailing slash); a peer-supplied
+    /// <c>report_uri</c> that decodes to the same canonical form matches regardless of how
+    /// the peer encoded it on the wire. Comparison is OrdinalIgnoreCase, so scheme/host
+    /// case differences are forgiven; paths remain case-sensitive.
+    /// </remarks>
     public HashSet<string> AllowedReportingUris { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>

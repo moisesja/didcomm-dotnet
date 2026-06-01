@@ -65,7 +65,28 @@ Shipped highlights:
 (the six-phase plan is §12), and the [roadmap](#roadmap) below for status at a
 glance.
 
-No NuGet packages have been published yet.
+## Install
+
+didcomm-dotnet ships as focused NuGet packages (hybrid packaging, DD-03) — the core plus one
+package per transport and integration:
+
+| Package | What it gives you |
+|---|---|
+| `DidComm.Core` | Message model, JWE/JWS envelopes, pack/unpack, routing, rotation, threading, and the built-in protocols (Trust Ping, Discover Features, Empty, Report Problem, Trace, Out-of-Band) |
+| `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` wiring with net-did resolution |
+| `DidComm.AspNetCore` | `MapDidCommEndpoint` / `MapDidCommWebSocket` / `MapDidCommOobEndpoint` receive endpoints |
+| `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | Sender-side transport bindings |
+| `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
+
+```bash
+dotnet add package DidComm.Core
+dotnet add package DidComm.Extensions.DependencyInjection
+```
+
+> The release pipeline ([`.github/workflows/release.yml`](.github/workflows/release.yml)) packs
+> all packages (with symbols + SourceLink) and pushes them to NuGet.org on a
+> `vMAJOR.MINOR.PATCH` tag. The first version (`0.1.0`) has not been tagged/published yet — until
+> then, build from source.
 
 ## What "spec-complete" means
 

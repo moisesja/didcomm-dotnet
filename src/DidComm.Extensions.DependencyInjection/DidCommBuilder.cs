@@ -130,6 +130,13 @@ public sealed class DidCommBuilder
         configure(options);
         options.Validate();
         Services.TryAddSingleton(options);
+        // Also expose the validated instance as IOptions<TraceOptions> for consumers that prefer
+        // the Options pattern (ProblemReportOptions offers the same via AddOptions<T>()). Options.Create
+        // wraps the SAME instance registered above, so both resolve to identical values; the container
+        // prefers this closed IOptions<TraceOptions> over the open-generic IOptions<> fallback, so it
+        // is order-independent. TryAdd keeps the "first call wins" idempotency this method documents.
+        Services.TryAddSingleton<Microsoft.Extensions.Options.IOptions<TraceOptions>>(
+            Microsoft.Extensions.Options.Options.Create(options));
         return this;
     }
 

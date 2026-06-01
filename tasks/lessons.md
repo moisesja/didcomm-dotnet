@@ -361,3 +361,22 @@ Format per entry:
   internal and DNS rebinding — a resolve-then-connect check has a TOCTOU gap. Also unwrap
   IPv4-mapped IPv6 (`::ffff:a.b.c.d`) before classifying, and block if ANY resolved address is
   private. Put the IP classifier behind an injectable DNS seam so it unit-tests offline.
+
+---
+
+## L-019 — Re-verify the checked-out branch after any interruption, and immediately before every commit.
+
+- **Lesson:** `git branch --show-current` must be confirmed (a) right after creating the
+  feature branch, (b) again after any pause/interruption or long gap, and (c) as the line
+  immediately preceding any `git add`/`git commit`. Never assume HEAD is still where you left it.
+- **Why:** During Phase 6.3 the feature branch `feat/phase-6-3-oob-nuget` was created and
+  confirmed checked out, but several edits later HEAD was found back on `main` (an external
+  checkout — IDE, user, or a parallel session — moved it). The user caught it: "you're working
+  in the main branch which is a no-no." Nothing was committed, so the fix was a clean
+  `git checkout feat/...` that carried the uncommitted changes over (both branches were at the
+  same commit). Had a commit run on `main` first, it would have violated the never-commit-to-main
+  rule and needed a reset.
+- **How to apply:** Working-tree edits are branch-agnostic until committed, so a drift is
+  recoverable only if caught before `git commit`. Print `git branch --show-current` as the first
+  token of any commit command (e.g. `b=$(git branch --show-current); [ "$b" != main ] && git commit …`)
+  and re-check after every interruption. Relates to [[feedback_branching]].

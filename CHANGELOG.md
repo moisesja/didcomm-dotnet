@@ -6,6 +6,53 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Phase 6.3 (Out-of-Band 2.0 + NuGet release pipeline)
+
+Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-08**
+(release pipeline). Suite: **578 unit + 96 interop** under `warnaserror` (was 559 + 93).
+
+- **Out-of-Band 2.0** (`Protocols/OutOfBand/`):
+  - `OutOfBand` static API — `CreateInvitation(from, goal?, goalCode?, accept?, attachments?, id?)`
+    (goal_code / goal / accept written into `body`, FR-OOB-01); `ToUrl(invitation, baseUrl)` /
+    `FromUrl(url)` for the `?_oob=<base64url(plaintext-jwm)>` form (FR-OOB-02), reusing the
+    existing compact plaintext serializer + `Base64Url`; `FromPlaintext(json)`; short-form
+    `ToShortUrl(baseUrl, oobId)` / `TryGetShortFormId(...)` (FR-OOB-04); `AddWebRedirect(...)` /
+    `ReadWebRedirect(...)` for the `web_redirect` block (FR-OOB-05).
+  - `OutOfBandInvitation` — read-only projection (`Id`, `From`, `Goal`, `GoalCode`, `Accept`,
+    `Attachments`); the invitation `id` is the recipient's response `pthid` (FR-OOB-03).
+  - `WebRedirect` record; `IOobInvitationStore` + `InMemoryOobInvitationStore` for the short-form.
+  - **No dispatcher handler** — an invitation arrives out of band (URL/QR) and bootstraps a
+    follow-up protocol, so there is nothing to route through `ProtocolDispatcher`.
+  - **Encoding (FR-OOB-02):** `ToUrl` emits a canonical, reproducible payload — keys sorted at
+    every level (the deterministic JSON writer) and the `typ` header dropped — so the same
+    invitation always yields the same URL. That key order still differs from the spec's
+    illustrative example, so it is not a byte-for-byte reproduction of that example; interop is
+    proven instead by decoding the spec's own example fixture + round-trip equality.
+- **ASP.NET Core**: `MapDidCommOobEndpoint(pattern, store)` — HTTP GET serving the short-form
+  invitation by `_oobid` (200 `application/didcomm-plain+json` / 404 / 400) (FR-OOB-04).
+- **Cookbook Section V** (`Section_V_OutOfBandInvitation`) — build → URL → decode round trip,
+  short-form retrieval, and `pthid` correlation.
+- **NuGet release pipeline (NFR-08)**: `.github/workflows/release.yml` packs + pushes all six
+  packages (with symbols + SourceLink) to NuGet.org on a `v*` tag, with the version derived from
+  the tag; `Directory.Build.targets` packs the repo `README.md` into each package (fixes NU5039);
+  README gains an Install section. *(Publishing requires a `NUGET_API_KEY` repo secret + a pushed
+  tag — neither is done here.)*
+- **Review hardening**: OOB URL parsing tolerates a trailing `#fragment` (decodes instead of
+  failing base64url); the release job is gated behind a `nuget-release` GitHub Environment — add
+  required reviewers to enforce manual approval before the irreversible publish.
+
+### Fixed — PR #11 review casualties (carried over from the abandoned local fix branch)
+
+The independent `113608d` that landed on `main` dropped three deliverables the abandoned local
+PR #11 branch carried; restored here (behavior was already correct on `main`):
+
+- `DidCommBuilder.EnableTracing` now registers `IOptions<TraceOptions>` (via `TryAddSingleton`)
+  symmetrically with `ProblemReportOptions`, so consumers using the Options pattern can resolve it.
+- Restored the `Read_helpers_return_null_or_empty_on_non_string_body_fields` regression test
+  (adapted to main's index-preserving `ReadArgs` — non-string entries become `""`).
+- Restored the `<remarks>` XML doc on `TraceOptions.AllowedReportingUris` documenting canonical
+  `AbsoluteUri` allowlist matching.
+
 ### Added — Phase 6.2c (Report Problem 2.0 + Trace 2.0 off-by-default)
 
 Closes PRD §12 Phase 6 partially: **FR-PROTO-07, FR-PROTO-08, FR-PROTO-09,
