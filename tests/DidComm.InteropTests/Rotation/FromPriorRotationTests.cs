@@ -119,31 +119,63 @@ public sealed class FromPriorRotationTests
     }
 
     [Fact]
-    public async Task DidCommClient_PopulatesFromPriorOnUnpack()
+    public async Task DidCommClient_PopulatesFromPriorOnAuthcryptedUnpack()
     {
-        // 1. Alice rotates to newAlice. The rotation message is encrypted (FR-ROT-03), uses the
-        //    new DID as `from`, and carries the prior-signed JWT in `from_prior`.
-        var jwt = FromPriorBuilder.Build(SampleClaims(), SignerPrivateJwk(), new DefaultCryptoProvider());
+        // from_prior must ride on a sender-authenticated envelope (FR-ROT-03 hardening), so the
+        // rotation message is authcrypted as the new sender. alice is the only fixture DID that holds
+        // BOTH an authentication signing key (to sign the JWT as the prior DID) AND keyAgreement keys
+        // (to authcrypt), so it stands in for both ends here — this test exercises the authenticated-
+        // unpack + validation path, not a realistic two-party rotation. The authcrypt direction
+        // (alice -> bob) is the round-trip-proven one (see DidCommClientRoundTripTests).
+        var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: 1700000000);
+        var jwt = FromPriorBuilder.Build(claims, SignerPrivateJwk(), new DefaultCryptoProvider());
 
         var message = new MessageBuilder()
             .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
-            .WithFrom(NewSenderDid)
+            .WithFrom("did:example:alice")
             .WithTo("did:example:bob")
             .WithFromPrior(jwt)
             .WithBody(JsonNode.Parse("""{"messagespecificattribute":"and its value"}""")!.AsObject())
             .Build();
 
-        // The new DID has no DID Document in the fixture set, so the client can't authcrypt as
-        // newAlice. Use anoncrypt to Bob — FR-ROT-03 (must be encrypted) is what we're verifying,
-        // not authcrypt itself.
         var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
-        var packed = (await client.PackEncryptedAsync(message, new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }))).Message;
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"))).Message;
 
         var unpacked = await client.UnpackAsync(packed);
 
+        unpacked.Authenticated.Should().BeTrue();
         unpacked.FromPrior.Should().NotBeNull();
-        unpacked.FromPrior!.Sub.Should().Be(NewSenderDid);
+        unpacked.FromPrior!.Sub.Should().Be("did:example:alice");
         unpacked.FromPrior.Iss.Should().Be(PriorDid);
         unpacked.Message.FromPrior.Should().Be(jwt);
+    }
+
+    [Fact]
+    public async Task DidCommClient_RejectsFromPriorOnAnoncrypt()
+    {
+        // Anoncrypt does not authenticate the sender, so `from` (= sub) is attacker-settable. A
+        // rotation assertion on such an envelope must be rejected (FR-ROT-03 hardening) — otherwise a
+        // captured rotation JWT could be replayed under a spoofed sender.
+        var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: 1700000000);
+        var jwt = FromPriorBuilder.Build(claims, SignerPrivateJwk(), new DefaultCryptoProvider());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
+        // No From → anoncrypt → not sender-authenticated.
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }))).Message;
+
+        var act = async () => await client.UnpackAsync(packed);
+
+        await act.Should().ThrowAsync<ConsistencyException>()
+            .Where(e => e.Message.Contains("not authenticated"));
     }
 }

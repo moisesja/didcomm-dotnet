@@ -26,6 +26,14 @@ internal static class DidCommJson
     /// <summary>Default options for serializing/deserializing a DIDComm <c>Message</c> / <c>Attachment</c>.</summary>
     public static readonly JsonSerializerOptions Default = CreateDefault();
 
+    /// <summary>
+    /// Parse options that reject duplicate member names, for the raw <see cref="JsonDocument"/> /
+    /// <see cref="System.Text.Json.Nodes.JsonNode"/> parses (JWE/JWS structure, the <c>from_prior</c>
+    /// JWT, forward payloads) that don't flow through <see cref="Default"/>. Mirrors
+    /// <c>AllowDuplicateProperties = false</c> on <see cref="Default"/>.
+    /// </summary>
+    public static readonly JsonDocumentOptions StrictDocument = new() { AllowDuplicateProperties = false };
+
     private static JsonSerializerOptions CreateDefault()
     {
         var options = new JsonSerializerOptions
@@ -33,6 +41,11 @@ internal static class DidCommJson
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
             WriteIndented = false,
             PropertyNameCaseInsensitive = false,
+            // Reject duplicate JSON member names rather than silently taking the last (the .NET 10
+            // default is to allow them). DIDComm headers are a fixed namespace; a repeated `from` /
+            // `to` / `type` is a parser-differential smuggling vector (the library would act on one
+            // value while a strict/first-wins peer or audit log sees another), so fail closed.
+            AllowDuplicateProperties = false,
             // Use the relaxed JSON encoder so characters like '+' inside DIDComm media types
             // ("application/didcomm-plain+json") emit as the literal character rather than the
             // \u002B JavaScript-safe escape. The JOSE / DIDComm spec vectors carry the literal

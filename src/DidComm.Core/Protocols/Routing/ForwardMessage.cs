@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Exceptions;
+using DidComm.Json;
 using DidComm.Messages;
 
 namespace DidComm.Protocols.Routing;
@@ -133,7 +134,7 @@ public static class ForwardMessage
     {
         try
         {
-            return JsonNode.Parse(packed)
+            return JsonNode.Parse(packed, documentOptions: DidCommJson.StrictDocument)
                 ?? throw new ArgumentException("Forward payload parsed to a null JSON node.", nameof(packed));
         }
         catch (JsonException ex)

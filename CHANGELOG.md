@@ -6,6 +6,34 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [0.1.0-preview.1]
 
+### Security — full-codebase audit remediation (`feat/security-hardening`)
+
+A defensive security + correctness review of the whole library, fixed in priority order. Suite:
+**606 unit + 99 interop** under `warnaserror` (was 578 + 96). No public API removed; several
+receive-side paths now reject inputs they previously tolerated (all spec-conformant tightenings).
+
+- **WebSocket SSRF (HIGH):** the WS transport now pins each connection to a guard-vetted IP via a
+  `SocketsHttpHandler.ConnectCallback` (mirroring the HTTP transport), closing a DNS-rebinding TOCTOU
+  and the `ResolveDnsNames=false` bypass. TLS still validates against the original host.
+- **SSRF classifier:** `OutboundEndpointGuard` now blocks IPv4 embedded in IPv6 alternate forms
+  (IPv4-compatible `::/96`, 6to4 `2002::/16`, NAT64 `64:ff9b::/96`) and Teredo `2001::/32`, and
+  normalizes trailing-dot hosts.
+- **JWE receive validation:** reject any `enc` outside `{A256CBC-HS512, A256GCM, XC20P}` and pin
+  authcrypt (ECDH-1PU) to `A256CBC-HS512` (FR-ENC-09); enforce `crit` (RFC 7516) and bind `apu` to
+  `skid` with the FR-ENC-17 `apu` fallback (FR-ENC-14); require well-typed members so malformed JWEs
+  yield `MalformedMessageException`.
+- **JSON:** reject duplicate member names (`AllowDuplicateProperties = false`) across the message
+  model and every raw JWE/JWS/`from_prior`/forward parse — closes a parser-differential vector.
+- **Keys:** reject OKP (Ed25519/X25519) JWKs whose `x` is not exactly 32 bytes before import.
+- **DID rotation:** `from_prior` is accepted only on a sender-authenticated envelope (authcrypt or
+  signed), not plain anoncrypt, and is checked for `exp`/`nbf` freshness (FR-ROT-03/05 reconciled in
+  the PRD). `UnpackResult` documents that `Message.From` is trustworthy only when authenticated.
+- **JWS:** enforce `crit`/`b64` (RFC 7515/7797); normalize malformed-input errors.
+- **Correctness/defense-in-depth:** control-char + length validation on `from`/`to`; forward
+  `body.next` is a bare DID; `SyncSecretsAdapter` avoids a sync-over-async deadlock; canonical
+  protocol-version parsing; UTF-8 `apv` hashing; lowercase UUID ids; Discover Features disclosure
+  de-duplication; ephemeral-key zeroization on early-throw.
+
 ### Added — Phase 6.3 (Out-of-Band 2.0 + NuGet release pipeline)
 
 Closes PRD §10.3 **FR-OOB-01..05** (the last spec built-in protocol) and **NFR-08**

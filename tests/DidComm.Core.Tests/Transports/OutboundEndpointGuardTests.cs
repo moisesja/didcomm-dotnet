@@ -31,6 +31,13 @@ public sealed class OutboundEndpointGuardTests
     [InlineData("fd12:3456:789a::1")]   // IPv6 unique-local
     [InlineData("::ffff:169.254.169.254")] // IPv4-mapped metadata must not dodge the IPv4 rules
     [InlineData("::ffff:10.0.0.1")]     // IPv4-mapped RFC 1918
+    [InlineData("::a9fe:a9fe")]         // IPv4-compatible ::/96 wrapping 169.254.169.254 (metadata)
+    [InlineData("::7f00:1")]            // IPv4-compatible ::/96 wrapping 127.0.0.1 (loopback)
+    [InlineData("2002:7f00:0001::")]    // 6to4 wrapping 127.0.0.1
+    [InlineData("2002:a9fe:a9fe::")]    // 6to4 wrapping 169.254.169.254 (metadata)
+    [InlineData("64:ff9b::a9fe:a9fe")]  // NAT64 of 169.254.169.254
+    [InlineData("64:ff9b::0a00:0001")]  // NAT64 of 10.0.0.1 (RFC 1918)
+    [InlineData("2001:0:0:0:0:0:0:1")]  // Teredo 2001::/32
     public void IsPrivateOrReserved_blocks_non_public(string ip)
     {
         OutboundEndpointGuard.IsPrivateOrReserved(IPAddress.Parse(ip)).Should().BeTrue();
@@ -42,9 +49,22 @@ public sealed class OutboundEndpointGuardTests
     [InlineData("9.9.9.9")]
     [InlineData("93.184.216.34")]            // example.com
     [InlineData("2606:4700:4700::1111")]     // public IPv6 (Cloudflare)
+    [InlineData("2002:0808:0808::")]         // 6to4 wrapping public 8.8.8.8 — legitimately routable
     public void IsPrivateOrReserved_allows_public(string ip)
     {
         OutboundEndpointGuard.IsPrivateOrReserved(IPAddress.Parse(ip)).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_normalizes_trailing_dot_literal_and_blocks_it_even_without_dns_resolution()
+    {
+        // With ResolveDnsNames = false, a non-normalized "127.0.0.1." would be treated as a DNS name
+        // and skipped. Normalizing the trailing dot makes it an IP literal again, so it is blocked.
+        var guard = new OutboundEndpointGuard(new OutboundEndpointPolicy { ResolveDnsNames = false });
+
+        guard.Invoking(g => g.Validate(new Uri("https://127.0.0.1./inbox")))
+            .Should().Throw<TransportException>()
+            .WithMessage("*private or reserved*");
     }
 
     [Fact]

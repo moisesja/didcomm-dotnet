@@ -49,6 +49,13 @@ internal static class JoseAlgorithms
     /// <summary>XChaCha20-Poly1305 (libsodium / draft-irtf-cfrg-xchacha-03). 24-byte IV, 16-byte tag.</summary>
     public const string XC20P = "XC20P";
 
+    /// <summary>
+    /// True when <paramref name="enc"/> is one of the three content-encryption algorithms DIDComm
+    /// v2.1 permits. Receivers MUST reject anything else before deriving a key (FR-ENC-09).
+    /// </summary>
+    public static bool IsSupportedContentEncryption(string? enc) =>
+        enc is A256CbcHs512 or A256Gcm or XC20P;
+
     // --- Curve names (JWK \"crv\" values per RFC 7518 §6 and RFC 8037 §2) ---
 
     /// <summary>Curve25519 used for X25519 key agreement (RFC 8037 §2).</summary>

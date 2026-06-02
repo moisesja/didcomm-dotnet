@@ -44,6 +44,28 @@ public sealed class MessageValidationTests
         act.Should().Throw<MalformedMessageException>().WithMessage("*FR-MSG-05*");
     }
 
+    [Theory]
+    [InlineData("did:example:al\nice")]      // newline — would otherwise enable log injection
+    public void From_with_control_char_throws(string from)
+    {
+        var msg = new Message { Id = "msg-1", Type = "https://didcomm.org/empty/1.0/empty", From = from };
+        Action act = msg.Validate;
+        act.Should().Throw<MalformedMessageException>().WithMessage("*control*");
+    }
+
+    [Fact]
+    public void Overlong_to_entry_throws()
+    {
+        var msg = new Message
+        {
+            Id = "msg-1",
+            Type = "https://didcomm.org/empty/1.0/empty",
+            To = new[] { "did:example:" + new string('a', 3000) },
+        };
+        Action act = msg.Validate;
+        act.Should().Throw<MalformedMessageException>().WithMessage("*maximum length*");
+    }
+
     [Fact]
     public void Invalid_mturi_in_type_throws()
     {

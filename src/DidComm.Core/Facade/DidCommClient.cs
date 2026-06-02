@@ -386,8 +386,21 @@ public sealed class DidCommClient
                 throw new ConsistencyException(
                     "Message carries 'from_prior' but was not encrypted (FR-ROT-03). Drop.");
             }
-            fromPrior = await FromPriorValidator.ValidateAsync(
+            // FR-ROT-03 hardening: the rotation binds to the post-rotation sender via sub == from, but
+            // 'from' is only cryptographically authenticated when the envelope authenticates the sender
+            // (authcrypt skid or an inner signature). On a plain anoncrypt envelope 'from' is attacker-
+            // settable, so a captured rotation JWT could be replayed under a spoofed sender. Require the
+            // carrying envelope to actually authenticate the sender.
+            if (!internalResult.Authenticated)
+            {
+                throw new ConsistencyException(
+                    "Message carries 'from_prior' but the sender is not authenticated (anoncrypt). A rotation " +
+                    "assertion MUST ride on an authcrypt or signed envelope (FR-ROT-03). Drop.");
+            }
+            var validated = await FromPriorValidator.ValidateAsync(
                 message.FromPrior, message.From, _keyService, _cryptoProvider, ct).ConfigureAwait(false);
+            ValidateFromPriorFreshness(validated);
+            fromPrior = validated;
         }
 
         return new UnpackResult(
@@ -440,6 +453,25 @@ public sealed class DidCommClient
         {
             throw new InvalidOperationException(
                 $"{method} refused: messages carrying 'from_prior' MUST be encrypted (FR-ROT-03). Call PackEncryptedAsync instead.");
+        }
+    }
+
+    // FR-ROT-05 freshness: when the rotation JWT carries exp / nbf, reject an expired or not-yet-valid
+    // assertion (with the configured clock skew). Full out-of-order pre-rotation detection still needs
+    // per-relationship state and is the application's responsibility — it has iss/iat/exp to compare.
+    private void ValidateFromPriorFreshness(FromPriorClaims claims)
+    {
+        var nowSeconds = _options.Now().ToUnixTimeSeconds();
+        var skewSeconds = (long)Math.Floor(_options.ExpiresClockSkew.TotalSeconds);
+        if (claims.Exp is long exp && nowSeconds - skewSeconds > exp)
+        {
+            throw new ConsistencyException(
+                $"from_prior JWT expired at {exp} (epoch seconds); current clock {nowSeconds} exceeds it with skew={skewSeconds}s (FR-ROT-05).");
+        }
+        if (claims.Nbf is long nbf && nowSeconds + skewSeconds < nbf)
+        {
+            throw new ConsistencyException(
+                $"from_prior JWT is not yet valid (nbf={nbf} epoch seconds); current clock {nowSeconds} with skew={skewSeconds}s.");
         }
     }
 

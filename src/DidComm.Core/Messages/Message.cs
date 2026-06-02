@@ -174,12 +174,25 @@ public sealed class Message
                 if (to.IndexOf('#') >= 0)
                     throw new MalformedMessageException(
                         $"Message 'to' entries MUST NOT contain a fragment (FR-MSG-07). Got: '{to}'.");
+                if (to.Length > MaxIdentifierLength)
+                    throw new MalformedMessageException(
+                        $"Message 'to' entry exceeds the maximum length of {MaxIdentifierLength} characters (FR-MSG-07).");
+                if (ContainsControlChar(to))
+                    throw new MalformedMessageException("Message 'to' entries MUST NOT contain control characters (FR-MSG-07).");
             }
         }
 
-        if (From is not null && From.IndexOf('#') >= 0)
-            throw new MalformedMessageException(
-                $"Message 'from' MUST NOT contain a fragment (FR-MSG-08). Got: '{From}'.");
+        if (From is not null)
+        {
+            if (From.IndexOf('#') >= 0)
+                throw new MalformedMessageException(
+                    $"Message 'from' MUST NOT contain a fragment (FR-MSG-08). Got: '{From}'.");
+            if (From.Length > MaxIdentifierLength)
+                throw new MalformedMessageException(
+                    $"Message 'from' exceeds the maximum length of {MaxIdentifierLength} characters (FR-MSG-08).");
+            if (ContainsControlChar(From))
+                throw new MalformedMessageException("Message 'from' MUST NOT contain control characters (FR-MSG-08).");
+        }
 
         if (Attachments is not null)
         {
@@ -225,5 +238,19 @@ public sealed class Message
                     throw new MalformedMessageException("Message 'accept-lang' entries must be non-empty IANA language tags (FR-I18N-01).");
             }
         }
+    }
+
+    // A generous upper bound on identity-header length. DIDs / DID-URLs are far shorter in practice,
+    // so this only rejects pathological multi-kilobyte values smuggled into from/to.
+    private const int MaxIdentifierLength = 2048;
+
+    private static bool ContainsControlChar(string value)
+    {
+        foreach (var c in value)
+        {
+            if (char.IsControl(c))
+                return true;
+        }
+        return false;
     }
 }

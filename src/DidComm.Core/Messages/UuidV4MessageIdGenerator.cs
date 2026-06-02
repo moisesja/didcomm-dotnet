@@ -1,12 +1,11 @@
 namespace DidComm.Messages;
 
 /// <summary>
-/// Default <see cref="IMessageIdGenerator"/>: emits a lowercase RFC 4122 UUID v4 per
-/// FR-MSG-03. UUID v4 is 36 unreserved URI characters (32 hex digits + 4 hyphens) and
-/// well within the FR-MSG-02 budget of ≤ 32 bytes — wait, it is **36 characters**, but
-/// the spec's "≤ 32 bytes" rule is read as a recommendation rather than a hard ceiling
-/// for UUIDs since the spec itself recommends UUID v4 for <c>id</c>. The format is
-/// dashes-included, lowercase (FR-MSG-04 requires lowercase emission).
+/// Default <see cref="IMessageIdGenerator"/>: emits an RFC 4122 UUID v4 per FR-MSG-03, rendered
+/// dashes-included and lowercase (FR-MSG-04 requires lowercase emission). A UUID v4 is 36
+/// characters of unreserved URI grammar (32 hex digits + 4 hyphens); the spec recommends UUID v4
+/// for <c>id</c>, so its 36-character length is treated as conformant rather than bounded by the
+/// FR-MSG-02 ≤ 32-byte recommendation.
 /// </summary>
 public sealed class UuidV4MessageIdGenerator : IMessageIdGenerator
 {
@@ -14,6 +13,7 @@ public sealed class UuidV4MessageIdGenerator : IMessageIdGenerator
     public static readonly UuidV4MessageIdGenerator Instance = new();
 
     /// <inheritdoc />
-    public string NewId() => Guid.NewGuid().ToString("D");
-    // Guid.ToString("D") is already lowercase per .NET's documented behavior; no extra .ToLowerInvariant needed.
+    // Guid.ToString("D") is lowercase in practice, but FR-MSG-04 mandates lowercase, so normalize
+    // explicitly rather than depend on undocumented formatting behavior.
+    public string NewId() => Guid.NewGuid().ToString("D").ToLowerInvariant();
 }

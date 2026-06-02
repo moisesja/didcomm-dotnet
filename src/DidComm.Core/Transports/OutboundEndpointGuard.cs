@@ -46,7 +46,7 @@ public sealed class OutboundEndpointGuard
         if (!_policy.BlockPrivateNetworks)
             return;
 
-        var host = endpoint.DnsSafeHost;
+        var host = NormalizeHost(endpoint.DnsSafeHost);
         if (string.IsNullOrEmpty(host) || _policy.AllowedHosts.Contains(host))
             return;
 
@@ -94,7 +94,7 @@ public sealed class OutboundEndpointGuard
     public async ValueTask<Socket> ConnectAsync(DnsEndPoint endpoint, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
-        var host = endpoint.Host;
+        var host = NormalizeHost(endpoint.Host);
 
         IPAddress[] candidates = IPAddress.TryParse(host, out var literal)
             ? new[] { literal }
@@ -168,11 +168,54 @@ public sealed class OutboundEndpointGuard
                 return true;
             if (address.Equals(IPAddress.IPv6Any))              // unspecified ::
                 return true;
+            var v6 = address.GetAddressBytes();
             // fc00::/7 unique-local addresses.
-            return (address.GetAddressBytes()[0] & 0xFE) == 0xFC;
+            if ((v6[0] & 0xFE) == 0xFC)
+                return true;
+            // Teredo 2001:0000::/32 tunnels to an arbitrary IPv4 endpoint — treat as reserved.
+            if (v6[0] == 0x20 && v6[1] == 0x01 && v6[2] == 0x00 && v6[3] == 0x00)
+                return true;
+            // The IsIPv4MappedToIPv6 unwrap at the top only catches ::ffff:0:0/96. Other IPv6 forms
+            // also embed an IPv4 target: IPv4-compatible ::/96 (e.g. ::a9fe:a9fe), 6to4 2002::/16, and
+            // NAT64 64:ff9b::/96. Re-run the IPv4 classification on the embedded address so a loopback
+            // / metadata / RFC 1918 v4 can't hide inside an IPv6 literal.
+            if (TryExtractEmbeddedIPv4(v6, out var embedded) && IsPrivateOrReserved(embedded))
+                return true;
+            return false;
         }
 
         return false;
+    }
+
+    // Strip a single trailing dot (the DNS root label). "127.0.0.1." would otherwise fail the
+    // IP-literal check and be treated as a DNS name, and "example.com." would not match an
+    // "example.com" allowlist entry — both let a target dodge classification.
+    private static string NormalizeHost(string host) =>
+        host.Length > 1 && host[^1] == '.' ? host[..^1] : host;
+
+    private static bool TryExtractEmbeddedIPv4(byte[] v6, out IPAddress embedded)
+    {
+        embedded = IPAddress.None;
+        // 6to4 2002::/16 — the embedded IPv4 is bytes 2..5.
+        if (v6[0] == 0x20 && v6[1] == 0x02)
+        {
+            embedded = new IPAddress(new[] { v6[2], v6[3], v6[4], v6[5] });
+            return true;
+        }
+        // NAT64 well-known prefix 64:ff9b::/96 — embedded IPv4 is the low 32 bits.
+        if (v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xFF && v6[3] == 0x9B &&
+            v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
+            v6[8] == 0 && v6[9] == 0 && v6[10] == 0 && v6[11] == 0)
+        {
+            embedded = new IPAddress(new[] { v6[12], v6[13], v6[14], v6[15] });
+            return true;
+        }
+        // IPv4-compatible ::/96 (deprecated): 0:0:0:0:0:0:a.b.c.d — the top 96 bits are zero.
+        for (var i = 0; i < 12; i++)
+            if (v6[i] != 0)
+                return false;
+        embedded = new IPAddress(new[] { v6[12], v6[13], v6[14], v6[15] });
+        return true;
     }
 
     private static TransportException Blocked(Uri endpoint, string host, IPAddress address, string scheme) =>

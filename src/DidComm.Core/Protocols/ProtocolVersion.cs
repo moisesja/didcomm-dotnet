@@ -22,13 +22,22 @@ public readonly record struct ProtocolVersion(int Major, int Minor) : IComparabl
         var dot = value.IndexOf('.');
         if (dot <= 0 || dot == value.Length - 1) return false;
         if (value.IndexOf('.', dot + 1) >= 0) return false;
-        if (!int.TryParse(value.AsSpan(0, dot), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var major))
+        var majorSpan = value.AsSpan(0, dot);
+        var minorSpan = value.AsSpan(dot + 1);
+        // Reject non-canonical leading zeros ("02.0", "2.00") so a version string has exactly one
+        // spelling — NumberStyles.None still parses leading zeros, which would let the registry treat
+        // "02.0" as compatible while an exact-type re-check rejects it (a confusing no-reply mismatch).
+        if (!IsCanonicalComponent(majorSpan) || !IsCanonicalComponent(minorSpan)) return false;
+        if (!int.TryParse(majorSpan, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var major))
             return false;
-        if (!int.TryParse(value.AsSpan(dot + 1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minor))
+        if (!int.TryParse(minorSpan, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minor))
             return false;
         version = new ProtocolVersion(major, minor);
         return true;
     }
+
+    // A canonical numeric component is a single digit, or a multi-digit run not starting with '0'.
+    private static bool IsCanonicalComponent(ReadOnlySpan<char> s) => s.Length == 1 || s[0] != '0';
 
     /// <summary>
     /// Spec-semver compatibility check (FR-PROTO-02): two versions are compatible when their

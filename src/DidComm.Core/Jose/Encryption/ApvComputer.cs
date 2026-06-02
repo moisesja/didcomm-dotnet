@@ -22,6 +22,10 @@ internal static class ApvComputer
         if (sorted.Length == 0)
             throw new ArgumentException("apv requires at least one recipient kid.", nameof(recipientKids));
         var joined = string.Join('.', sorted);
-        return SHA256.HashData(Encoding.ASCII.GetBytes(joined));
+        // UTF-8 (not ASCII): recipient kids are DID URLs whose grammar is ASCII, but Encoding.ASCII
+        // silently maps any non-ASCII byte to '?', which would alias two distinct kid lists onto the
+        // same apv commitment. UTF-8 preserves every byte; identical for the ASCII case, so the
+        // send/receive re-derivation still matches.
+        return SHA256.HashData(Encoding.UTF8.GetBytes(joined));
     }
 }
