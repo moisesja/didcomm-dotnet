@@ -380,3 +380,30 @@ Format per entry:
   recoverable only if caught before `git commit`. Print `git branch --show-current` as the first
   token of any commit command (e.g. `b=$(git branch --show-current); [ "$b" != main ] && git commit …`)
   and re-check after every interruption. Relates to [[feedback_branching]].
+
+---
+
+## L-020 — A test that fails after a security fix may be *encoding the bug* — verify against the spec before "fixing" the test.
+
+- **Lesson:** When a behavioral hardening change breaks an existing test, do NOT reflexively rewrite
+  the test to match the new output. First decide whether the test was asserting correct contract or
+  was pinning the pre-existing bug. Only update it once the new behavior is confirmed against the
+  spec/PRD.
+- **Why:** In the security-hardening pass, fixing forward `body.next` to emit a bare DID (it had been
+  emitting a fragment-bearing kid) broke `SenderForwardWrappingTests` — which asserted the *buggy*
+  fragment form. The right move was to confirm the routing spec wants a DID, then update the
+  assertion. Had the change instead been wrong, blindly editing the test would have hidden a real
+  regression.
+- **How to apply:** For each test broken by a behavioral change, write one sentence: "this asserts
+  <contract> because <spec ref>" or "this pinned the old behavior." Update only the latter. Relates
+  to the project rule: prove correctness before marking done.
+
+## L-021 — Put a new receive-side validation check *before* the AAD/crypto step so negative tests can tamper a real envelope.
+
+- **Lesson:** When adding a reject-rule to an envelope parser (enc allow-list, `crit`, `apu`↔`skid`),
+  place it before the AEAD/AAD derivation. Then a negative test can build a valid envelope, mutate
+  the protected header, and deterministically hit the new check — the (now-broken) AAD never masks it.
+- **Why:** The `enc`/`crit`/`apu` checks were positioned right after header decode, so
+  `MutateProtectedHeader(...)` tamper tests trigger them cleanly instead of failing later at the tag.
+- **How to apply:** Order parser checks: structural → header allow-lists/bindings → key resolution →
+  AEAD. Add tamper-a-built-envelope tests for each reject-rule.
