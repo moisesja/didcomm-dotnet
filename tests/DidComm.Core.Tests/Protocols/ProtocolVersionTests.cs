@@ -24,6 +24,9 @@ public sealed class ProtocolVersionTests
     [InlineData("2.1.0")]
     [InlineData("a.b")]
     [InlineData("2.1-rc1")]
+    [InlineData("02.0")]   // leading zero is non-canonical
+    [InlineData("2.00")]
+    [InlineData("007.1")]
     public void TryParse_rejects_malformed(string input)
     {
         ProtocolVersion.TryParse(input, out _).Should().BeFalse();

@@ -75,9 +75,9 @@ internal static class ForwardWrapper
                     ContentEncryption: JoseAlgorithms.A256CbcHs512),
                 cryptoProvider);
 
-            // Next outer wrap's body.next is the kid we just encrypted for.
-            nextHopDid = routingKey.Kid
-                ?? throw new InvalidOperationException("Routing-key JWK is missing 'kid'; cannot derive body.next for the next forward layer.");
+            // Next outer wrap's body.next is the BARE DID of the routing key we just encrypted for —
+            // body.next is a DID, not a key id, so strip the #fragment (mirrors the `mediator` field).
+            nextHopDid = ExtractDidFromKid(routingKey.Kid);
         }
 
         return current;

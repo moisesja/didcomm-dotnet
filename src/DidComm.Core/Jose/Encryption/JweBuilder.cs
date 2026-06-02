@@ -110,8 +110,11 @@ internal static class JweBuilder
                 $"Authcrypt requires the sender key and all recipients on the same curve. Sender='{senderPrivateJwk.Crv}', recipients='{curve}'.",
                 nameof(senderPrivateJwk));
 
-        var ephemeral = EphemeralKeyPair.Generate(curve);
+        // Decode the sender's static private key BEFORE generating the ephemeral key, so a malformed
+        // 'd' throws with no freshly-generated ephemeral secret left un-zeroed (the finally below only
+        // runs once the try is entered).
         var senderPrivBytes = Base64Url.Decode(senderPrivateJwk.D!);
+        var ephemeral = EphemeralKeyPair.Generate(curve);
         try
         {
             var apvBytes = ApvComputer.ComputeBytes(recipients.Select(r => r.Kid ?? throw new MalformedMessageException("Recipient JWK is missing 'kid'.")));

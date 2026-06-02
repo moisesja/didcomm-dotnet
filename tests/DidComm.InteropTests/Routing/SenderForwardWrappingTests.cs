@@ -58,9 +58,10 @@ public sealed class SenderForwardWrappingTests
         // Outer wrap: mediator2's prepended keyAgreement (FR-ROUTE-04 prepend).
         var outer = UnwrapForwardMessage(result.Message, recipientKid: "did:example:mediator2#key-x25519-1");
         outer.Type.Should().Be(ForwardConstants.ForwardTypeUri);
-        // body.next on the outer wrap is the kid one hop inward — i.e. the next routing key,
-        // which is charlie's routingKeys entry: did:example:mediator1#key-x25519-1.
-        outer.Body!["next"]!.GetValue<string>().Should().Be("did:example:mediator1#key-x25519-1");
+        // body.next on the outer wrap is the BARE DID one hop inward (the next routing key's DID,
+        // not its kid — body.next is a DID; the #fragment is stripped, mirroring the `to`/mediator
+        // field). The inner blob is already anoncrypted to mediator1's specific key.
+        outer.Body!["next"]!.GetValue<string>().Should().Be("did:example:mediator1");
 
         // Inner wrap: charlie's routingKeys entry (mediator1).
         var innerPacked = outer.Attachments![0].Data.Json!.ToJsonString();
