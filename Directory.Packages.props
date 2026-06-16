@@ -3,27 +3,34 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
-    <!-- DID resolution + SSI crypto substrate. 1.3.0 ships raw ECDH (X25519/P-256/P-384/P-521),
-         IEEE P1363 ECDSA, off-curve point validation, and a public Concat KDF, so didcomm-dotnet
-         no longer carries its own primitive layer — see PRD §3.1. -->
-    <PackageVersion Include="NetDid.Core" Version="1.3.0" />
-    <PackageVersion Include="NetDid.Method.Key" Version="1.3.0" />
-    <PackageVersion Include="NetDid.Method.Peer" Version="1.3.0" />
-    <PackageVersion Include="NetDid.Method.WebVh" Version="1.3.0" />
-    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="1.3.0" />
-    <!-- Cryptography: NSec is needed only for XChaCha20-Poly1305 (XC20P), which net-did does not
-         ship. secp256k1 comes in transitively through NetDid.Core (no direct ref needed). -->
-    <PackageVersion Include="NSec.Cryptography" Version="24.4.0" />
+    <!-- DID resolution only. 2.0.0 relocated all crypto primitives to NetCrypto; didcomm-dotnet
+         consumes NetDid solely for resolution (IDidResolver, DID Document model) — see PRD §3.1.
+         The JOSE composition + crypto substrate now come from DataProofsDotnet.Jose (which itself
+         builds on NetCrypto 1.1.0), referenced as a project below. -->
+    <PackageVersion Include="NetDid.Core" Version="2.0.1" />
+    <PackageVersion Include="NetDid.Method.Key" Version="2.0.1" />
+    <PackageVersion Include="NetDid.Method.Peer" Version="2.0.1" />
+    <PackageVersion Include="NetDid.Method.WebVh" Version="2.0.1" />
+    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="2.0.1" />
+    <!-- NetCrypto: the crypto substrate (arrives transitively via DataProofsDotnet.Jose). DidComm
+         references it directly in exactly one place — JwsSignerFactory adapts a private signer JWK
+         into a NetCrypto ISigner, because DataProofs' JWS layer signs through ISigner, not raw key
+         bytes. Everything else (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK) is DataProofs. -->
+    <PackageVersion Include="NetCrypto" Version="1.1.0" />
+    <!-- JOSE composition + crypto substrate (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK).
+         Brings NetCrypto transitively; didcomm carries no envelope crypto of its own. 1.0.1
+         surfaces the verified JWS signer kid from the unprotected header (dataproofs-dotnet#10). -->
+    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.0.1" />
     <!-- ASP.NET Core (transports) -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.0-preview.1.25120.3" />
     <!-- Caching -->
-    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0-preview.1.25080.5" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.8" />
     <!-- Logging -->
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0-preview.1.25080.5" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
     <!-- Dependency Injection -->
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0-preview.1.25080.5" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0-preview.1.25080.5" />
-    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.0-preview.1.25080.5" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.8" />
     <!-- Resilience (retry + timeout + circuit-breaker) for the Phase 5 HTTPS + WebSocket
          transports. Polly v8 is the .NET-idiomatic policy library and the user-confirmed
          Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no

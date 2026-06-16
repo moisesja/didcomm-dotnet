@@ -5,6 +5,9 @@ using Microsoft.IdentityModel.Tokens;
 using NetDid.Core;
 using NetDid.Core.Model;
 using Xunit;
+// NetDid 2.0 introduced its own Model.VerificationRelationship; the DIDComm key-service API speaks
+// the DidComm.Resolution enum, so bind the unqualified name to that one.
+using VerificationRelationship = DidComm.Resolution.VerificationRelationship;
 
 namespace DidComm.Tests.Resolution;
 

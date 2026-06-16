@@ -2,23 +2,31 @@ using System.Text.Json;
 using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Jose;
-using DidComm.Jose.Encryption;
-using DidComm.Jose.Signing;
 using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Secrets;
-using DidCommDefaultCryptoProvider = DidComm.Crypto.DefaultCryptoProvider;
+using DpEnc = DataProofsDotnet.Jose.Encryption;
+using DpSig = DataProofsDotnet.Jose.Signing;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Composition;
 
 /// <summary>
 /// High-level unpack orchestrator. Auto-detects the envelope structure (FR-API-03), recursively
-/// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …), runs the addressing-
-/// consistency checks FR-CONSIST-01/02/03/05 as each layer reveals enough information
-/// (FR-CONSIST-04 is an advisory SHOULD and FR-CONSIST-06's resolver-backed authorization is
-/// wired in Phase 3), and returns an <see cref="UnpackResult"/> carrying both the inner plaintext
-/// and the FR-API-04 metadata.
+/// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …) by delegating each JWE/
+/// JWS layer to DataProofsDotnet.Jose, runs the addressing-consistency checks FR-CONSIST-01/02/03/05
+/// as each layer reveals enough information (FR-CONSIST-04 is an advisory SHOULD;
+/// FR-CONSIST-06's resolver-backed authorization is supplied by the facade), and returns an
+/// <see cref="UnpackResult"/> carrying both the inner plaintext and the FR-API-04 metadata.
 /// </summary>
+/// <remarks>
+/// The JOSE layer (DataProofsDotnet.Jose) verifies signatures and decrypts but knows nothing of the
+/// DIDComm plaintext <c>from</c>/<c>to</c> headers, so it returns the signer/sender/recipient kids
+/// (and the verified payload bytes) and this reader binds them to the message-layer addressing
+/// rules. In particular FR-CONSIST-03 (signed <c>from</c> ↔ signer kid) and FR-SIG-06 (an inner
+/// signed JWM under encryption MUST carry <c>to</c>) are enforced here, against the deserialized
+/// inner message, since the JWS parser returns raw payload bytes rather than a DIDComm message.
+/// </remarks>
 internal static class EnvelopeReader
 {
     /// <summary>Unpack <paramref name="packed"/> into its inner plaintext + metadata.</summary>
@@ -26,11 +34,11 @@ internal static class EnvelopeReader
     /// <param name="secretsLookup">Internal lookup for recipient private keys (decrypt path).</param>
     /// <param name="senderLookup">Internal lookup for sender public keys (authcrypt path); MAY be null when no authcrypt is expected.</param>
     /// <param name="signerLookup">Function returning the public JWK of a signer kid (verify path); MAY be null when no signed layers are expected.</param>
-    /// <param name="cryptoProvider">DidComm crypto provider.</param>
+    /// <param name="cryptoProvider">JOSE crypto provider (NetCrypto-backed).</param>
     /// <param name="resolverCheck">
     /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship) =&gt; isAuthorized</c>.
     /// When non-null, the unpack pipeline asserts the inner plaintext's sender / recipient / signer kids are present
-    /// under the resolved DID Document's matching relationship. Pass <c>null</c> to short-circuit the check (Phase 2 default).
+    /// under the resolved DID Document's matching relationship. Pass <c>null</c> to short-circuit the check.
     /// </param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
     /// <exception cref="CryptoException">When decryption / verification fails.</exception>
@@ -40,7 +48,7 @@ internal static class EnvelopeReader
         IInternalSecretsLookup secretsLookup,
         IInternalSenderKeyLookup? senderLookup,
         Func<string, Jwk?>? signerLookup,
-        DidCommDefaultCryptoProvider cryptoProvider,
+        JoseCryptoProvider cryptoProvider,
         Func<string, string, string, bool>? resolverCheck = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
@@ -87,10 +95,23 @@ internal static class EnvelopeReader
                     if (senderKid is not null)
                         AddressingConsistency.CheckAuthcryptFromMatchesSkid(message.From, senderKid);
 
+                    // FR-CONSIST-03 — a signed layer's signer kid MUST agree with the plaintext
+                    // 'from' DID subject. The JOSE layer verified the signature and surfaced the
+                    // signer kid; the from↔signer binding is a message-layer rule enforced here
+                    // (DataProofsDotnet.Jose's JwsParser returns bytes, not a DIDComm message).
+                    if (signerKid is not null)
+                        AddressingConsistency.CheckSignedFromMatchesSignerKid(message.From, signerKid);
+
+                    // FR-SIG-06 — a signed JWM nested inside an encrypt layer MUST carry 'to' (the
+                    // anti-surreptitious-forwarding rule). Previously enforced inside the JWS parser
+                    // against the deserialized payload; re-homed here for the same reason.
+                    if (encrypted && nonRepudiation && (message.To is null || message.To.Count == 0))
+                        throw new ConsistencyException(
+                            "Sign-then-encrypt composition: the inner signed JWM MUST carry 'to' (FR-SIG-06).");
+
                     // FR-CONSIST-06 — the kids surfaced by the cryptographic layers must be
                     // genuinely authorized in their asserted DID Documents. The predicate is
-                    // supplied by the caller (the Phase 3 facade backs it with IDidKeyService);
-                    // when null the check is skipped (Phase 2 default).
+                    // supplied by the facade (backed by IDidKeyService); when null the check is skipped.
                     if (resolverCheck is not null)
                     {
                         if (senderKid is not null && message.From is not null)
@@ -133,7 +154,20 @@ internal static class EnvelopeReader
                     if (signerLookup is null)
                         throw new CryptoException("Signed envelope encountered but no signer-key lookup was supplied.");
 
-                    var jwsResult = JwsParser.Parse(current, signerLookup, cryptoProvider);
+                    DpSig.JwsParseResult jwsResult;
+                    try
+                    {
+                        jwsResult = DpSig.JwsParser.Parse(current, signerLookup, cryptoProvider);
+                    }
+                    catch (DataProofsDotnet.Jose.MalformedJoseException ex)
+                    {
+                        throw new MalformedMessageException(ex.Message, ex);
+                    }
+                    catch (DataProofsDotnet.Jose.JoseCryptoException ex)
+                    {
+                        throw new CryptoException(ex.Message, ex);
+                    }
+
                     nonRepudiation = true;
                     // A verified JWS authenticates the signer (the FR-API-04 metadata semantics
                     // treat 'authenticated' as "sender identity cryptographically confirmed").
@@ -142,14 +176,10 @@ internal static class EnvelopeReader
                     sigAlg = jwsResult.SignatureAlgorithm;
                     signerKid = jwsResult.SignerKid;
 
-                    if (encrypted && jwsResult.Message.To is null)
-                        throw new ConsistencyException(
-                            "Sign-then-encrypt composition: the inner signed JWM MUST carry 'to' (FR-SIG-06).");
-
-                    // FR-CONSIST-03 (signer kid ↔ from) already enforced inside JwsParser.
                     // FR-CONSIST-05 — when this signature sits inside an authcrypt layer
                     // (authcrypt(sign(…))), the inner signer MUST be the same DID subject as the
-                    // outer authcrypt sender (skid).
+                    // outer authcrypt sender (skid). FR-CONSIST-03 and FR-SIG-06 are deferred to
+                    // the Plaintext branch, which has the deserialized inner message.
                     if (senderKid is not null)
                         AddressingConsistency.CheckAuthcryptInnerSignerMatchesSkid(jwsResult.SignerKid, senderKid);
 
@@ -159,7 +189,20 @@ internal static class EnvelopeReader
 
                 case EnvelopeKind.Encrypted:
                 {
-                    var jweResult = JweParser.Parse(current, secretsLookup, senderLookup, cryptoProvider);
+                    DpEnc.JweParseResult jweResult;
+                    try
+                    {
+                        jweResult = DpEnc.JweParser.Parse(current, secretsLookup, senderLookup, cryptoProvider);
+                    }
+                    catch (DataProofsDotnet.Jose.MalformedJoseException ex)
+                    {
+                        throw new MalformedMessageException(ex.Message, ex);
+                    }
+                    catch (DataProofsDotnet.Jose.JoseCryptoException ex)
+                    {
+                        throw new CryptoException(ex.Message, ex);
+                    }
+
                     encrypted = true;
                     contentEnc = jweResult.ContentEncryption;
                     keyWrap = jweResult.Algorithm;

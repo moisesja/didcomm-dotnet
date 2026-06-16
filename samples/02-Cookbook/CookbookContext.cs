@@ -4,8 +4,8 @@ using DidComm.Facade;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
 using Microsoft.Extensions.DependencyInjection;
+using NetCrypto;
 using NetDid.Core;
-using NetDid.Core.Crypto;
 
 namespace DidComm.Samples.Cookbook;
 

@@ -1,8 +1,6 @@
 using DidComm.Adapters.NetDid;
 using FluentAssertions;
-using NetDid.Core;
-using NetDid.Core.Crypto;
-using NetDid.Core.KeyStore;
+using NetCrypto;
 using Xunit;
 
 namespace DidComm.Tests.Secrets;

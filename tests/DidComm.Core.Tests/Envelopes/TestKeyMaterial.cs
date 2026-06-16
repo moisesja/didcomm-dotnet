@@ -1,15 +1,13 @@
-using DidComm.Jose;
 using DidComm.Secrets;
-using NetDid.Core;
-using NetDid.Core.Crypto;
-using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
+using NetCrypto;
+using JwkConversion = DataProofsDotnet.Jose.JwkConversion;
 
 namespace DidComm.Tests.Envelopes;
 
 /// <summary>
 /// Round-trip test material: generates fresh keypairs per curve and packs them into the
-/// DIDComm <see cref="Jwk"/> shape the envelope layer expects. Also implements the two
-/// internal lookup contracts so tests can drive <c>JweParser</c> / <c>EnvelopeReader</c>
+/// <see cref="Jwk"/> shape (DataProofsDotnet.Jose) the envelope layer expects. Also implements the
+/// two internal lookup contracts so tests can drive the JOSE parsers / <c>EnvelopeReader</c>
 /// without standing up the Phase 3 resolver.
 /// </summary>
 internal sealed class TestKeyMaterial
@@ -28,25 +26,8 @@ internal sealed class TestKeyMaterial
     public static TestKeyMaterial Generate(KeyType keyType, string kid)
     {
         var pair = _generator.Generate(keyType);
-        var privateNetDid = NetDidJwkConverter.ToPrivateJwk(pair);
-        var publicNetDid = NetDidJwkConverter.ToPublicJwk(pair);
-        var priv = new Jwk
-        {
-            Kty = privateNetDid.Kty,
-            Crv = privateNetDid.Crv,
-            X = privateNetDid.X,
-            Y = privateNetDid.Y,
-            D = privateNetDid.D,
-            Kid = kid,
-        };
-        var pub = new Jwk
-        {
-            Kty = publicNetDid.Kty,
-            Crv = publicNetDid.Crv,
-            X = publicNetDid.X,
-            Y = publicNetDid.Y,
-            Kid = kid,
-        };
+        var priv = JwkConversion.ToPrivateJwk(pair, kid);
+        var pub = JwkConversion.ToPublicJwk(pair.KeyType, pair.PublicKey, kid);
         return new TestKeyMaterial(priv, pub);
     }
 }

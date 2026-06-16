@@ -1,5 +1,3 @@
-using DidComm.Jose;
-
 namespace DidComm.Secrets;
 
 /// <summary>

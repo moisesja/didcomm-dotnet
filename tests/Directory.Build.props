@@ -1,0 +1,9 @@
+<Project>
+  <Import Project="../Directory.Build.props" />
+  <!-- The envelope crypto/JOSE now lives in DataProofsDotnet.Jose; its Jwk is the JWK type the
+       DidComm public surface (ISecretsResolver, IDidKeyService, pack/unpack) speaks. Alias it so
+       test code referencing `Jwk` binds to the same type DidComm.Core does. -->
+  <ItemGroup>
+    <Using Include="DataProofsDotnet.Jose.Jwk" Alias="Jwk" />
+  </ItemGroup>
+</Project>

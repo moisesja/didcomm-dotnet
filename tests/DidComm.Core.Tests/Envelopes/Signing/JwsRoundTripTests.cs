@@ -1,23 +1,38 @@
+using DidComm.Composition;
 using DidComm.Exceptions;
 using DidComm.Jose;
-using DidComm.Jose.Signing;
 using DidComm.Messages;
 using FluentAssertions;
-using NetDid.Core.Crypto;
+using NetCrypto;
 using Xunit;
-using DidCommDefaultCryptoProvider = DidComm.Crypto.DefaultCryptoProvider;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Tests.Envelopes.Signing;
 
+/// <summary>
+/// Envelope-level signed round trips. The JWS build/parse primitives now live in
+/// DataProofsDotnet.Jose; these tests exercise the DIDComm signed envelope through
+/// <see cref="EnvelopeWriter.PackSignedAsync"/> + <see cref="EnvelopeReader.Unpack"/> so the
+/// from↔signer binding (FR-CONSIST-03), FR-SIG-06 inner-'to', and the flattened/general JWS shapes
+/// are covered at the composition seam.
+/// </summary>
 public sealed class JwsRoundTripTests
 {
-    private static readonly DidCommDefaultCryptoProvider _crypto = new();
+    private static readonly JoseCryptoProvider _crypto = new();
+
+    private static UnpackResult Unpack(string packed, Func<string, Jwk?> signerLookup) =>
+        EnvelopeReader.Unpack(
+            packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: signerLookup,
+            _crypto);
 
     [Theory]
     [InlineData(KeyType.Ed25519, "EdDSA")]
     [InlineData(KeyType.P256, "ES256")]
     [InlineData(KeyType.Secp256k1, "ES256K")]
-    public void Sign_then_verify_round_trips_for_each_alg(KeyType keyType, string expectedAlg)
+    public async Task Sign_then_verify_round_trips_for_each_alg(KeyType keyType, string expectedAlg)
     {
         var signer = TestKeyMaterial.Generate(keyType, "did:example:alice#key-1");
         var msg = new MessageBuilder()
@@ -26,11 +41,10 @@ public sealed class JwsRoundTripTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
 
-        var result = JwsParser.Parse(packed,
-            kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
-            _crypto);
+        var result = Unpack(packed, kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null);
 
         result.SignatureAlgorithm.Should().Be(expectedAlg);
         result.SignerKid.Should().Be("did:example:alice#key-1");
@@ -39,7 +53,7 @@ public sealed class JwsRoundTripTests
     }
 
     [Fact]
-    public void Tampered_payload_fails_verification()
+    public async Task Tampered_payload_fails_verification()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var msg = new MessageBuilder()
@@ -47,20 +61,19 @@ public sealed class JwsRoundTripTests
             .WithFrom("did:example:alice")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
 
         // Flip a byte in the base64url payload to invalidate the signature.
         var tampered = packed.Replace("\"payload\":\"e", "\"payload\":\"f", StringComparison.Ordinal);
 
-        Action act = () => JwsParser.Parse(tampered,
-            _ => signer.PublicJwk,
-            _crypto);
+        Action act = () => Unpack(tampered, _ => signer.PublicJwk);
 
         act.Should().Throw<CryptoException>();
     }
 
     [Fact]
-    public void Verifier_with_no_matching_kid_throws_crypto()
+    public async Task Verifier_with_no_matching_kid_throws_crypto()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var msg = new MessageBuilder()
@@ -68,14 +81,15 @@ public sealed class JwsRoundTripTests
             .WithFrom("did:example:alice")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
 
-        Action act = () => JwsParser.Parse(packed, _ => null, _crypto);
+        Action act = () => Unpack(packed, _ => null);
         act.Should().Throw<CryptoException>();
     }
 
     [Fact]
-    public void Single_signer_emits_flattened_form()
+    public async Task Single_signer_emits_flattened_form()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var msg = new MessageBuilder()
@@ -83,7 +97,8 @@ public sealed class JwsRoundTripTests
             .WithFrom("did:example:alice")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
 
         // Flattened JSON: top-level "signature" + "protected", no "signatures" array.
         packed.Should().Contain("\"signature\":");
@@ -91,7 +106,7 @@ public sealed class JwsRoundTripTests
     }
 
     [Fact]
-    public void Multiple_signers_emit_general_form_and_either_verifies()
+    public async Task Multiple_signers_emit_general_form_and_either_verifies()
     {
         var signerA = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#ed");
         var signerB = TestKeyMaterial.Generate(KeyType.P256, "did:example:alice#p256");
@@ -100,7 +115,8 @@ public sealed class JwsRoundTripTests
             .WithFrom("did:example:alice")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signerA.PrivateJwk, signerB.PrivateJwk }, _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signerA.PrivateJwk, signerB.PrivateJwk }));
 
         packed.Should().Contain("\"signatures\":");
 
@@ -109,50 +125,54 @@ public sealed class JwsRoundTripTests
         using var doc = System.Text.Json.JsonDocument.Parse(packed);
         doc.RootElement.TryGetProperty("signature", out _).Should().BeFalse("general form has no top-level 'signature'");
 
-        var byKid = new Dictionary<string, Jwk>
-        {
-            [signerA.PublicJwk.Kid!] = signerA.PublicJwk,
-            [signerB.PublicJwk.Kid!] = signerB.PublicJwk,
-        };
-
-        var resolveA = (string kid) => kid == signerA.PublicJwk.Kid ? signerA.PublicJwk : null;
-        var resultA = JwsParser.Parse(packed, resolveA, _crypto);
+        var resultA = Unpack(packed, kid => kid == signerA.PublicJwk.Kid ? signerA.PublicJwk : null);
         resultA.SignerKid.Should().Be(signerA.PublicJwk.Kid);
 
-        var resolveB = (string kid) => kid == signerB.PublicJwk.Kid ? signerB.PublicJwk : null;
-        var resultB = JwsParser.Parse(packed, resolveB, _crypto);
+        var resultB = Unpack(packed, kid => kid == signerB.PublicJwk.Kid ? signerB.PublicJwk : null);
         resultB.SignerKid.Should().Be(signerB.PublicJwk.Kid);
     }
 
     [Fact]
-    public void Sign_then_encrypt_inner_to_required_throws_when_missing()
+    public async Task Sign_then_encrypt_inner_to_required_throws_when_missing()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
         var msg = new MessageBuilder()
             .WithType("https://didcomm.org/empty/1.0/empty")
             .WithFrom("did:example:alice")
             .Build(); // no 'to'
 
-        Action act = () => JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto, requireInnerToHeader: true);
-        act.Should().Throw<MalformedMessageException>().WithMessage("*FR-SIG-06*");
+        // FR-SIG-06 is enforced when a signed JWM is nested inside an encrypt layer.
+        Func<Task> act = () => EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(
+                msg, new[] { bob.PublicJwk }, "A256GCM",
+                SignerPrivateJwks: new[] { signer.PrivateJwk }),
+            _crypto);
+
+        await act.Should().ThrowAsync<MalformedMessageException>().WithMessage("*FR-SIG-06*");
     }
 
     [Fact]
-    public void Sign_then_encrypt_inner_to_passes_when_present()
+    public async Task Sign_then_encrypt_inner_to_passes_when_present()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
         var msg = new MessageBuilder()
             .WithType("https://didcomm.org/empty/1.0/empty")
             .WithFrom("did:example:alice")
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto, requireInnerToHeader: true);
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(
+                msg, new[] { bob.PublicJwk }, "A256GCM",
+                SignerPrivateJwks: new[] { signer.PrivateJwk }),
+            _crypto);
         packed.Should().NotBeNullOrEmpty();
     }
 
     [Fact]
-    public void Consistency_check_blocks_mismatched_signer_kid()
+    public async Task Consistency_check_blocks_mismatched_signer_kid()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:mallory#k");
         var msg = new MessageBuilder()
@@ -160,9 +180,10 @@ public sealed class JwsRoundTripTests
             .WithFrom("did:example:alice")
             .Build();
 
-        var packed = JwsBuilder.Build(msg, new[] { signer.PrivateJwk }, _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
 
-        Action act = () => JwsParser.Parse(packed, _ => signer.PublicJwk, _crypto);
+        Action act = () => Unpack(packed, _ => signer.PublicJwk);
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-03*");
     }
 }

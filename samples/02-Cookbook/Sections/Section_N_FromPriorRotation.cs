@@ -51,7 +51,7 @@ public static class Section_N_FromPriorRotation
             Iat: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
         ctx.Narrator.Step("Build the from_prior JWT — Alice signs it with her OLD authentication key.");
-        var jwt = FromPriorBuilder.Build(claims, alicePriorAuthKey);
+        var jwt = await FromPriorBuilder.BuildAsync(claims, alicePriorAuthKey);
         ctx.Narrator.Value("jwt.length", jwt.Length);
         ctx.Narrator.Value("jwt.head", jwt[..Math.Min(60, jwt.Length)] + "…");
 

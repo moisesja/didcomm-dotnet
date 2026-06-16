@@ -407,3 +407,43 @@ Format per entry:
   `MutateProtectedHeader(...)` tamper tests trigger them cleanly instead of failing later at the tag.
 - **How to apply:** Order parser checks: structural → header allow-lists/bindings → key resolution →
   AEAD. Add tamper-a-built-envelope tests for each reject-rule.
+
+---
+
+## L-022 — DataProofs JwsParser sources signer kid ONLY from the protected header; DIDComm spec puts it in the unprotected per-signature header
+
+- **Context:** After delegating JOSE to `DataProofsDotnet.Jose` (1.0.0), 5 InteropTests cross-impl
+  fixtures fail: `c2-{eddsa,es256,es256k}-signed` and `c3-authcrypt-{p256,p521}`.
+- **Symptom:** `EnvelopeReader.Unpack` throws `ArgumentException: signerKid cannot be empty` from
+  `AddressingConsistency.CheckSignedFromMatchesSignerKid` / `CheckAuthcryptInnerSignerMatchesSkid`.
+- **Root cause:** The DIDComm v2.1 spec examples (Appendix C.2/C.3) carry the JWS `kid` in the
+  per-signature **unprotected** `header` (`protected` holds only `typ`+`alg`). DataProofs'
+  `JwsParser` deliberately returns `SignerKid` ONLY from the integrity-protected header (documented:
+  an unprotected-header kid is "an unauthenticated routing hint" and is never surfaced), so it
+  returns `""`, which the src consistency guards then reject.
+- **Scope:** This is a behavioral incompatibility between the DIDComm wire format and the upstream
+  `DataProofsDotnet.Jose` security posture. The fix belongs in `src/` (EnvelopeReader/Addressing) or
+  upstream DataProofs — NOT in tests. Do NOT weaken/delete these fixtures; they are the
+  byte-equivalence gate doing its job.
+- **How to apply:** When a parser swap changes where authenticated identity is read from, expect the
+  spec-vector interop gate to flag it. Triage by decoding the fixture's protected vs unprotected
+  headers before touching any test.
+- **Resolution (DONE):** Verified the kid IS used to resolve the verifying key and the signature
+  DOES verify — so the kid that produced a successful verification is authentic and safe to surface.
+  Filed as **dataproofs-dotnet#10**; fixed upstream in **DataProofsDotnet.Jose 1.0.1** (`JwsParser`
+  returns `header.Kid ?? sig.Kid` after verification). didcomm kept its checks intact and never
+  weakened the fixtures — all 5 went green on the dependency bump (99/99 interop).
+
+---
+
+## L-023 — A deliberate local `ProjectReference` is a hard constraint; don't let a delegated subagent convert it to a `PackageReference`.
+
+- **Lesson:** The user explicitly chose a local `ProjectReference` to `DataProofsDotnet.Jose` (NuGet
+  prefix reservation pending). A test-fixing subagent, hitting a CPM/NU1008 snag, "helpfully"
+  converted it to a `PackageReference` + central `PackageVersion 1.0.0` — silently violating the
+  instruction. Caught on review and restored.
+- **Why:** Reference *kind* (project vs package) is a user-level decision with release implications,
+  not an incidental build detail a subagent should change to make a build pass.
+- **How to apply:** When delegating, name the hard constraints explicitly ("the dataproofs ref MUST
+  stay a local ProjectReference") and re-diff csproj/props after a subagent runs. Treat any
+  reference-kind change as needing review, not auto-accept.

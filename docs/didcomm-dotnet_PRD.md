@@ -129,7 +129,7 @@ The library is "done" for v1.0 when every `MUST` requirement in this document is
 
 | Package | Responsibility | Key dependencies |
 |---|---|---|
-| `DidComm.Core` | Message model; JWE/JWS envelopes; the JOSE-specific composition layer (A256CBC-HS512 AEAD, A256KW key wrap, ECDH-1PU KDF wrapper, JOSE algorithm dispatch); pack/unpack; **resolver adapter over net-did**; secrets interface; routing/forward; rotation; threading; problem reports; OOB encode/decode | **`NetDid 1.3.0+`** — owns the SSI crypto substrate: DID resolution; sign/verify (EdDSA, ES256/ES384/ES512 with DER or IEEE P1363, ES256K via NBitcoin.Secp256k1); raw ECDH `DeriveSharedSecret` for X25519/P-256/P-384/P-521; off-curve point validation at the JWK boundary (`EcPointValidator`); public `ConcatKdf` (RFC 7518 §4.6 / NIST SP 800-56A §5.8.1). `NSec.Cryptography` — XChaCha20-Poly1305 (XC20P) only; net-did does not ship XC20P. `System.Security.Cryptography` — AES-CBC, AES-GCM, HMAC-SHA512 (the local pieces of the JOSE composition layer). |
+| `DidComm.Core` | Message model; the DIDComm **envelope-composition** layer (legal compositions FR-ENV-02, media-type pinning, addressing-consistency FR-CONSIST-01..06, recipient defaulting, curve negotiation); pack/unpack; **resolver adapter over net-did**; secrets interface; routing/forward; rotation; threading; problem reports; OOB encode/decode. DidComm carries **no crypto or JWE/JWS assembly of its own** — those are delegated. | **`DataProofsDotnet.Jose 1.0.1`** — owns the JOSE envelope layer: multi-recipient JWE General-JSON (`ECDH-ES+A256KW` / `ECDH-1PU+A256KW`; `A256CBC-HS512` / `A256GCM` / `XC20P`), JWS (Flattened/General, compact), `JwkConversion`, base64url — all on `NetCrypto`. **`NetCrypto 1.1.0`** — the crypto substrate (sign/verify with IEEE P1363, raw ECDH, AEAD, A256KW, Concat KDF, on-curve validation in `JwkConverter.ExtractPublicKey`, `Base64Url`); reached directly only by `JwsSignerFactory` (adapts a private signer JWK into a NetCrypto `ISigner`), otherwise transitively via DataProofs. **`NetDid.Core 2.0.x`** — **DID resolution only** (`IDidResolver`, DID Document model); all crypto moved out of net-did in 2.0.0. No `NSec` / `System.Security.Cryptography` envelope crypto in DidComm. |
 | `DidComm.Transports.Http` | HTTPS send + ASP.NET Core receive endpoint | `DidComm.Core`, `Microsoft.Extensions.Http` |
 | `DidComm.Transports.WebSocket` | WebSocket send/receive, connection lifecycle | `DidComm.Core` |
 | `DidComm.Protocols.TrustPing` | Trust Ping 2.0 | `DidComm.Core` |
@@ -151,21 +151,26 @@ The library is "done" for v1.0 when every `MUST` requirement in this document is
         ├──────────────┬───────────────┬──────────────┤
         │  Routing      │  Rotation     │  Threading    │
         ├──────────────┴───────────────┴──────────────┤
-        │  Envelopes:  JWE (anon/auth)  +  JWS          │
-        ├─────────────────────────────────────────────┤
-        │  Crypto provider (curves, AEAD, KW, KDF)      │
+        │  Envelope COMPOSITION (DidComm-specific):     │
+        │  legal compositions · media types ·           │
+        │  FR-CONSIST addressing checks · recipient      │
+        │  defaulting · curve negotiation                │
         ├───────────────────────┬─────────────────────┤
         │  Resolver adapter      │ ISecretsResolver     │
         │  (over NetDid)         │ (consumer-supplied)  │
-        └───────────┬────────────┴─────────────────────┘
-                    │
-        ┌───────────▼─────────────────────────────────┐
-        │  net-did (NetDid):  key · peer · webvh ·      │
-        │  dht · ethr   (→ depends on net-cid)          │
-        └─────────────────────────────────────────────┘
+        └───────┬───────────────┴──────────┬───────────┘
+                │                           │
+   ┌────────────▼────────────┐  ┌───────────▼──────────────────────┐
+   │ net-did (NetDid 2.0.x): │  │ DataProofsDotnet.Jose:            │
+   │ resolution only —       │  │ JWE (anon/auth) + JWS build/parse │
+   │ key · peer · webvh ·    │  │            │                      │
+   │ ethr (→ net-cid)        │  │            ▼                      │
+   └─────────────────────────┘  │ NetCrypto: curves · AEAD · KW ·   │
+                                 │ KDF · sign/verify · JWK · b64url  │
+                                 └───────────────────────────────────┘
 ```
 
-net-did owns DID method logic and W3C-conformant resolution; didcomm-dotnet owns everything message-and-envelope. The only coupling is the resolver adapter (§6.1) and an optional `IKeyStore`→`ISecretsResolver` bridge (DD-09).
+net-did owns DID method logic and W3C-conformant resolution; **DataProofsDotnet.Jose (on NetCrypto) owns the JOSE envelope build/parse and all crypto**; didcomm-dotnet owns the DIDComm message-and-envelope **composition** layer above them — which envelopes may legally nest, the media-type and addressing-consistency rules (FR-ENV / FR-CONSIST), recipient defaulting, and curve negotiation. The couplings are the resolver adapter (§6.1), the DataProofs JWE/JWS surface (its key-resolver hooks are satisfied directly by DidComm's internal secret/sender lookups), and an optional `IKeyStore`→`ISecretsResolver` bridge (DD-09).
 
 ### 3.3 Core abstractions (informative signatures; final shape is the agent's, constrained by the FRs)
 

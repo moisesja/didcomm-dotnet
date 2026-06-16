@@ -4,7 +4,7 @@ using DidComm.Messages;
 namespace DidComm.Composition;
 
 /// <summary>
-/// Parameters for <see cref="EnvelopeWriter.PackSigned"/>. Phase 2 keeps this internal; the
+/// Parameters for <see cref="EnvelopeWriter.PackSignedAsync"/>. Phase 2 keeps this internal; the
 /// Phase 3 public facade will wrap it with resolver-driven key fetching.
 /// </summary>
 /// <param name="Message">Plaintext message to sign.</param>
@@ -15,7 +15,7 @@ internal sealed record PackSignedParameters(
     IReadOnlyList<Jwk> SignerPrivateJwks,
     bool RequireInnerToHeader = false);
 
-/// <summary>Parameters for <see cref="EnvelopeWriter.PackEncrypted"/>.</summary>
+/// <summary>Parameters for <see cref="EnvelopeWriter.PackEncryptedAsync"/>.</summary>
 /// <param name="Message">Plaintext message to encrypt.</param>
 /// <param name="Recipients">Recipient public JWKs, all sharing the same curve (FR-ENC-04, FR-ENC-11).</param>
 /// <param name="ContentEncryption">JOSE <c>enc</c> algorithm.</param>

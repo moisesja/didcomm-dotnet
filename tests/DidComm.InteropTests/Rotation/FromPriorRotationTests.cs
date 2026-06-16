@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json.Nodes;
-using DidComm.Crypto;
 using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.InteropTests.Resolution;
@@ -42,10 +41,10 @@ public sealed class FromPriorRotationTests
     [Fact]
     public async Task BuilderValidator_RoundTrip_ReturnsClaims()
     {
-        var jwt = FromPriorBuilder.Build(SampleClaims(), SignerPrivateJwk(), new DefaultCryptoProvider());
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
 
         var validated = await FromPriorValidator.ValidateAsync(
-            jwt, NewSenderDid, NewKeyService(), new DefaultCryptoProvider());
+            jwt, NewSenderDid, NewKeyService());
 
         validated.Sub.Should().Be(NewSenderDid);
         validated.Iss.Should().Be(PriorDid);
@@ -55,7 +54,7 @@ public sealed class FromPriorRotationTests
     [Fact]
     public async Task Validator_RejectsTamperedSignature()
     {
-        var jwt = FromPriorBuilder.Build(SampleClaims(), SignerPrivateJwk(), new DefaultCryptoProvider());
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
         var parts = jwt.Split('.');
         // Flip the last byte of the signature.
         var sig = Base64Url.Decode(parts[2]);
@@ -63,7 +62,7 @@ public sealed class FromPriorRotationTests
         var tampered = $"{parts[0]}.{parts[1]}.{Base64Url.Encode(sig)}";
 
         var act = async () => await FromPriorValidator.ValidateAsync(
-            tampered, NewSenderDid, NewKeyService(), new DefaultCryptoProvider());
+            tampered, NewSenderDid, NewKeyService());
 
         await act.Should().ThrowAsync<ConsistencyException>()
             .Where(e => e.Message.Contains("FR-ROT-01"));
@@ -72,10 +71,10 @@ public sealed class FromPriorRotationTests
     [Fact]
     public async Task Validator_RejectsMismatchedSub_FrRot02()
     {
-        var jwt = FromPriorBuilder.Build(SampleClaims(), SignerPrivateJwk(), new DefaultCryptoProvider());
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
 
         var act = async () => await FromPriorValidator.ValidateAsync(
-            jwt, currentSenderDid: "did:example:somebody-else", NewKeyService(), new DefaultCryptoProvider());
+            jwt, currentSenderDid: "did:example:somebody-else", NewKeyService());
 
         await act.Should().ThrowAsync<ConsistencyException>()
             .Where(e => e.Message.Contains("FR-ROT-02"));
@@ -91,7 +90,7 @@ public sealed class FromPriorRotationTests
 
         // Building with this would fail because X25519 has no signing alg. So instead, build with
         // alice#key-1 (valid) but then surgically swap the header kid to a key not authorized for auth.
-        var jwt = FromPriorBuilder.Build(SampleClaims(), SignerPrivateJwk(), new DefaultCryptoProvider());
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
         var parts = jwt.Split('.');
         var origHeaderJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[0]));
         var rewrittenHeaderJson = origHeaderJson.Replace(PriorSignerKid, keyAgreementKid, StringComparison.Ordinal);
@@ -99,7 +98,7 @@ public sealed class FromPriorRotationTests
         var rewrittenJwt = $"{rewrittenHeaderB64u}.{parts[1]}.{parts[2]}";
 
         var act = async () => await FromPriorValidator.ValidateAsync(
-            rewrittenJwt, NewSenderDid, NewKeyService(), new DefaultCryptoProvider());
+            rewrittenJwt, NewSenderDid, NewKeyService());
 
         // X25519 is in keyAgreement, not authentication → authorization check fails first.
         await act.Should().ThrowAsync<ConsistencyException>()
@@ -113,7 +112,7 @@ public sealed class FromPriorRotationTests
     public async Task Validator_RejectsMalformedJwt()
     {
         var act = async () => await FromPriorValidator.ValidateAsync(
-            "not.a.jwt.extra-segment", NewSenderDid, NewKeyService(), new DefaultCryptoProvider());
+            "not.a.jwt.extra-segment", NewSenderDid, NewKeyService());
 
         await act.Should().ThrowAsync<ProtocolException>();
     }
@@ -128,7 +127,7 @@ public sealed class FromPriorRotationTests
         // unpack + validation path, not a realistic two-party rotation. The authcrypt direction
         // (alice -> bob) is the round-trip-proven one (see DidCommClientRoundTripTests).
         var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: 1700000000);
-        var jwt = FromPriorBuilder.Build(claims, SignerPrivateJwk(), new DefaultCryptoProvider());
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk());
 
         var message = new MessageBuilder()
             .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
@@ -158,7 +157,7 @@ public sealed class FromPriorRotationTests
         // rotation assertion on such an envelope must be rejected (FR-ROT-03 hardening) — otherwise a
         // captured rotation JWT could be replayed under a spoofed sender.
         var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: 1700000000);
-        var jwt = FromPriorBuilder.Build(claims, SignerPrivateJwk(), new DefaultCryptoProvider());
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk());
 
         var message = new MessageBuilder()
             .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
