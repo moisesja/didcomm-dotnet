@@ -9,15 +9,19 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- SSI crypto substrate. NetDid 1.3.0+ ships sign/verify (incl. P1363), raw ECDH for
-         X25519/P-256/P-384/P-521, off-curve point validation at the JWK boundary, and a public
-         Concat KDF. DidComm.Core delegates those primitives and adds the JOSE composition layer
-         on top. The Phase 3 resolver adapter consumes the same package. -->
+    <!-- DID resolution only (NetDid 2.0.0). Consumed by the Phase 3 resolver adapter
+         (NetDidKeyService) for IDidResolver + the DID Document model. All crypto primitives moved
+         to NetCrypto in 2.0.0; didcomm no longer reaches NetDid for crypto. -->
     <PackageReference Include="NetDid.Core" />
 
-    <!-- Crypto stack per PRD §3.1. NSec is needed only for XChaCha20-Poly1305 (XC20P); secp256k1
-         comes in transitively through NetDid.Core. -->
-    <PackageReference Include="NSec.Cryptography" />
+    <!-- JOSE composition + crypto substrate. DataProofsDotnet.Jose owns the JWE/JWS envelope
+         build/parse (multi-recipient ECDH-ES / ECDH-1PU, A256CBC-HS512/A256GCM/XC20P) and brings
+         NetCrypto transitively, so didcomm carries no crypto of its own. -->
+    <PackageReference Include="DataProofsDotnet.Jose" />
+
+    <!-- Direct NetCrypto reference for JwsSignerFactory only (adapt a private signer JWK into a
+         NetCrypto ISigner — DataProofs' JWS layer signs through ISigner, not raw key bytes). -->
+    <PackageReference Include="NetCrypto" />
 
     <!-- Observability hooks (NFR-04/05/06). -->
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />

@@ -1,12 +1,9 @@
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Exceptions;
-using DidComm.Jose;
-using NetCid;
 using NetDid.Core;
-using NetDid.Core.Crypto;
 using NetDid.Core.Model;
 using NetDid.Core.Parsing;
-using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
+using DpJwkConversion = DataProofsDotnet.Jose.JwkConversion;
 
 namespace DidComm.Resolution;
 
@@ -25,10 +22,10 @@ namespace DidComm.Resolution;
 /// <para>
 /// <c>did:web</c> is rejected up front per FR-DID-06 / DD-08 with
 /// <see cref="UnsupportedDidMethodException"/>; failures during net-did resolution surface as
-/// <see cref="DidResolutionException"/>; off-curve EC points encountered while materialising
-/// JWKs throw <see cref="System.Security.Cryptography.CryptographicException"/> through
-/// <see cref="JwkConversion.ExtractPublicKey(Jwk)"/> (FR-ENC-03, inherited from net-did's
-/// <c>EcPointValidator</c>).
+/// <see cref="DidResolutionException"/>. Multikey verification methods are materialised via
+/// <c>DataProofsDotnet.Jose.JwkConversion.FromMultikey</c>; the invalid-curve / off-curve defense
+/// (FR-ENC-03) is applied by NetCrypto when the received ephemeral key is later imported during
+/// decrypt (NetCrypto 1.1.0 guarantees the on-curve check in <c>JwkConverter.ExtractPublicKey</c>).
 /// </para>
 /// </remarks>
 public sealed class NetDidKeyService : IDidKeyService
@@ -195,11 +192,10 @@ public sealed class NetDidKeyService : IDidKeyService
         {
             try
             {
-                var decoded = Multibase.Decode(method.PublicKeyMultibase);
-                var (codec, raw) = Multicodec.Decode(decoded);
-                var keyType = KeyTypeExtensions.ToKeyType(codec);
-                var jwk = NetDidJwkConverter.ToPublicJwk(keyType, raw);
-                return (jwk.Kty ?? string.Empty, jwk.Crv, jwk.X, jwk.Y, jwk.Alg, jwk.Use);
+                // FromMultikey decodes the multibase + multicodec prefix and produces the public JWK
+                // (replacing the old NetCid Multibase/Multicodec + NetDid JwkConverter chain).
+                var jwk = DpJwkConversion.FromMultikey(method.PublicKeyMultibase, method.Id);
+                return (jwk.Kty, jwk.Crv, jwk.X, jwk.Y, jwk.Alg, jwk.Use);
             }
             catch
             {
@@ -213,17 +209,7 @@ public sealed class NetDidKeyService : IDidKeyService
     }
 
     private static bool IsSupported(string crv, VerificationRelationship relationship)
-    {
-        try
-        {
-            _ = relationship == VerificationRelationship.KeyAgreement
-                ? KeyTypeMapper.FromCurveForKeyAgreement(crv)
-                : KeyTypeMapper.FromCurveForSigning(crv);
-            return true;
-        }
-        catch (NotSupportedException)
-        {
-            return false;
-        }
-    }
+        => relationship == VerificationRelationship.KeyAgreement
+            ? KeyTypeMapper.IsKeyAgreementCurve(crv)
+            : KeyTypeMapper.IsSigningCurve(crv);
 }

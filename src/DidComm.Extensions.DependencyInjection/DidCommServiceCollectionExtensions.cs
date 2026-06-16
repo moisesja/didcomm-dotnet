@@ -1,4 +1,3 @@
-using DidComm.Crypto;
 using DidComm.Facade;
 using DidComm.Resolution;
 using DidComm.Secrets;
@@ -6,6 +5,7 @@ using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Extensions.DependencyInjection;
 
@@ -36,7 +36,7 @@ public static class DidCommServiceCollectionExtensions
         configure(builder);
 
         services.AddOptions<DidCommOptions>();
-        services.TryAddSingleton<DefaultCryptoProvider>();
+        services.TryAddSingleton<JoseCryptoProvider>();
         // Phase 5: a TransportRouter wraps whatever IDidCommTransport implementations the
         // consumer has registered. We register it unconditionally so SendAsync's null check
         // surfaces a clean InvalidOperationException naming the offending scheme rather than
@@ -52,7 +52,7 @@ public static class DidCommServiceCollectionExtensions
             sp.GetService<IServiceEndpointResolver>(),
             sp.GetService<ITransportRouter>(),
             sp.GetRequiredService<IOptions<DidCommOptions>>().Value,
-            sp.GetRequiredService<DefaultCryptoProvider>()));
+            sp.GetRequiredService<JoseCryptoProvider>()));
 
         if (!IsRegistered<ISecretsResolver>(services))
         {

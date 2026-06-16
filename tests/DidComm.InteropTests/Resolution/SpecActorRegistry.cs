@@ -1,8 +1,6 @@
 using System.Text.Json;
 using DidComm.Jose;
 using DidComm.Secrets;
-using NetDid.Core.Crypto;
-using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
 
 namespace DidComm.InteropTests.Resolution;
 

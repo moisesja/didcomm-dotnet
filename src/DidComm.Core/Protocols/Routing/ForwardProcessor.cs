@@ -1,10 +1,9 @@
 using System.Text;
 using System.Text.Json.Nodes;
-using DidComm.Crypto;
 using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Jose;
-using DidComm.Jose.Encryption;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Protocols.Routing;
 
@@ -34,7 +33,7 @@ public sealed class ForwardProcessor
 {
     private readonly DidCommClient _client;
     private readonly IDidKeyServiceForFacadeOnlyAlias _keyService; // alias so the public ctor reads cleanly.
-    private readonly DefaultCryptoProvider _cryptoProvider;
+    private readonly JoseCryptoProvider _cryptoProvider;
     private readonly ForwardProcessorOptions _options;
 
     /// <summary>Initialise the processor.</summary>
@@ -45,14 +44,14 @@ public sealed class ForwardProcessor
         DidCommClient client,
         Resolution.IDidKeyService keyService,
         ForwardProcessorOptions options)
-        : this(client, keyService, options, new DefaultCryptoProvider()) { }
+        : this(client, keyService, options, new JoseCryptoProvider()) { }
 
     /// <summary>Test-only constructor that accepts a shared crypto provider.</summary>
     internal ForwardProcessor(
         DidCommClient client,
         Resolution.IDidKeyService keyService,
         ForwardProcessorOptions options,
-        DefaultCryptoProvider cryptoProvider)
+        JoseCryptoProvider cryptoProvider)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(keyService);
@@ -167,12 +166,13 @@ public sealed class ForwardProcessor
         if (nextKeys.Count == 0)
             throw new DidResolutionException(nextDid, "rewrap target has no keyAgreement keys");
 
-        var wrapped = Composition.EnvelopeWriter.PackEncrypted(
+        var wrapped = await Composition.EnvelopeWriter.PackEncryptedAsync(
             new Composition.PackEncryptedParameters(
                 Message: freshForward,
                 Recipients: PickSameCurveKeys(nextKeys),
                 ContentEncryption: JoseAlgorithms.A256CbcHs512),
-            _cryptoProvider);
+            _cryptoProvider,
+            ct).ConfigureAwait(false);
         return Encoding.UTF8.GetBytes(wrapped);
     }
 
@@ -187,13 +187,12 @@ public sealed class ForwardProcessor
         // wrapping logic as the sender (ForwardWrapper) by composing one forward per key in
         // reverse order. The mediator does NOT prepend any of its own keys here — it only
         // adds the recipient's pre-configured extras.
-        await Task.CompletedTask.ConfigureAwait(false); // ConfigureAwait pattern; method is async for ct alignment with siblings.
-        ct.ThrowIfCancellationRequested();
-        var wrapped = Composition.ForwardWrapper.Wrap(
+        var wrapped = await Composition.ForwardWrapper.WrapAsync(
             innerPackedPayload: Encoding.UTF8.GetString(innerPacked),
             routingKeyJwksOuterToInner: extraRoutingKeys,
             finalRecipientDid: nextHop,
-            cryptoProvider: _cryptoProvider);
+            cryptoProvider: _cryptoProvider,
+            ct: ct).ConfigureAwait(false);
         return Encoding.UTF8.GetBytes(wrapped);
     }
 

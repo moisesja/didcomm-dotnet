@@ -1,5 +1,4 @@
 using DidComm.Composition;
-using DidComm.Crypto;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
@@ -8,6 +7,7 @@ using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Facade;
 
@@ -24,14 +24,14 @@ public sealed class DidCommClient
     private readonly IServiceEndpointResolver? _serviceResolver;
     private readonly ITransportRouter? _transportRouter;
     private readonly DidCommOptions _options;
-    private readonly DefaultCryptoProvider _cryptoProvider;
+    private readonly JoseCryptoProvider _cryptoProvider;
 
     /// <summary>Initialize the facade. Routing (FR-ROUTE-*) is unavailable without an <see cref="IServiceEndpointResolver"/>; for that, use the <see cref="DidCommClient(ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions)"/> overload or register the facade through <c>AddDidComm</c>.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
     /// <param name="keyService">DID resolution + verification-method extraction (FR-DID-01..05).</param>
     /// <param name="options">Process-wide options (FR-API-05/06 knobs).</param>
     public DidCommClient(ISecretsResolver secrets, IDidKeyService keyService, DidCommOptions options)
-        : this(secrets, keyService, serviceResolver: null, transportRouter: null, options, new DefaultCryptoProvider()) { }
+        : this(secrets, keyService, serviceResolver: null, transportRouter: null, options, new JoseCryptoProvider()) { }
 
     /// <summary>Initialize the facade with the Phase 4 routing surface enabled.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -43,7 +43,7 @@ public sealed class DidCommClient
         IDidKeyService keyService,
         IServiceEndpointResolver serviceResolver,
         DidCommOptions options)
-        : this(secrets, keyService, serviceResolver, transportRouter: null, options, new DefaultCryptoProvider())
+        : this(secrets, keyService, serviceResolver, transportRouter: null, options, new JoseCryptoProvider())
     {
         ArgumentNullException.ThrowIfNull(serviceResolver);
     }
@@ -60,7 +60,7 @@ public sealed class DidCommClient
         IServiceEndpointResolver serviceResolver,
         ITransportRouter transportRouter,
         DidCommOptions options)
-        : this(secrets, keyService, serviceResolver, transportRouter, options, new DefaultCryptoProvider())
+        : this(secrets, keyService, serviceResolver, transportRouter, options, new JoseCryptoProvider())
     {
         ArgumentNullException.ThrowIfNull(serviceResolver);
         ArgumentNullException.ThrowIfNull(transportRouter);
@@ -73,7 +73,7 @@ public sealed class DidCommClient
         IServiceEndpointResolver? serviceResolver,
         ITransportRouter? transportRouter,
         DidCommOptions options,
-        DefaultCryptoProvider cryptoProvider)
+        JoseCryptoProvider cryptoProvider)
     {
         ArgumentNullException.ThrowIfNull(secrets);
         ArgumentNullException.ThrowIfNull(keyService);
@@ -122,7 +122,7 @@ public sealed class DidCommClient
 
         var signerPriv = await PickSignerPrivateKeyAsync(signFrom, ct).ConfigureAwait(false);
         var parameters = new PackSignedParameters(message, new[] { signerPriv });
-        return EnvelopeWriter.PackSigned(parameters, _cryptoProvider);
+        return await EnvelopeWriter.PackSignedAsync(parameters, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -234,7 +234,7 @@ public sealed class DidCommClient
             SignerPrivateJwks: signerJwks,
             ProtectSender: options.ProtectSender);
 
-        var innerPacked = EnvelopeWriter.PackEncrypted(parameters, _cryptoProvider);
+        var innerPacked = await EnvelopeWriter.PackEncryptedAsync(parameters, _cryptoProvider, ct).ConfigureAwait(false);
 
         if (!options.Forward)
             return new PackEncryptedResult(innerPacked, ServiceEndpoint: null, Array.Empty<string>());
@@ -252,7 +252,7 @@ public sealed class DidCommClient
             return new PackEncryptedResult(innerPacked, route.TransportUri, route.FallbackUris);
         }
 
-        var wrapped = ForwardWrapper.Wrap(innerPacked, route.RoutingKeyJwks, recipientDid, _cryptoProvider);
+        var wrapped = await ForwardWrapper.WrapAsync(innerPacked, route.RoutingKeyJwks, recipientDid, _cryptoProvider, ct).ConfigureAwait(false);
         return new PackEncryptedResult(wrapped, route.TransportUri, route.FallbackUris);
     }
 

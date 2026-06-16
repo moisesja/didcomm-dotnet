@@ -4,6 +4,74 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — delegate the envelope layer to DataProofsDotnet.Jose (`feat/delegate-jose-dataproofs`)
+
+didcomm-dotnet no longer carries its own cryptography or JWE/JWS assembly. The entire `Crypto/`
+folder and almost all of `Jose/` were deleted; envelope build/parse is delegated to
+**`DataProofsDotnet.Jose` (1.0.1)** which runs on **`NetCrypto` (1.1.0)**. This realizes the
+foundation-stack split (architectural-path §5.6) and removes ~435+ lines of hand-rolled,
+security-sensitive crypto from this repo. Suite: **475 unit + 99 interop** green under `warnaserror`;
+all DIDComm v2.1 Appendix C byte-equivalence vectors (anoncrypt/authcrypt/signed, every curve) pass.
+
+- **Crypto substrate → NetCrypto.** AES-256-CBC-HMAC-SHA512 / A256GCM / XC20P, RFC 3394 A256KW, the
+  ECDH-ES & ECDH-1PU (`Ze‖Zs`) Concat-KDF, raw ECDH, sign/verify, JWK conversion, base64url, and the
+  RFC 7518 §6.2.2 on-curve `epk` validation are all NetCrypto's now (byte-identical to the deleted
+  in-repo versions, proven by the interop vectors).
+- **JOSE composition → DataProofsDotnet.Jose.** Multi-recipient `JweBuilder`/`JweParser`
+  (ECDH-ES+A256KW anoncrypt, ECDH-1PU+A256KW authcrypt, single shared `epk`, apu/apv binding,
+  single-curve enforcement, authcrypt-pins-A256CBC) and `JwsBuilder`/`JwsParser` (Flattened/General,
+  compact) are delegated. DidComm's internal secret/sender lookups now directly satisfy DataProofs'
+  `IJweRecipientKeyResolver`/`IJweSenderKeyResolver` (no adapter), and its `Jwk` is the shared
+  `DataProofsDotnet.Jose.Jwk`.
+- **`NetDid.Core` → 2.0.x, resolution-only.** All crypto primitives moved out of net-did in 2.0.0;
+  the `NetDidKeyService` adapter now materializes Multikey verification methods via
+  `JwkConversion.FromMultikey`, and the optional `IKeyStore`→`ISecretsResolver` bridge re-targets
+  `NetCrypto.IKeyStore`. The direct `NSec.Cryptography` dependency is dropped.
+- **DIDComm-specific rules stay in didcomm.** Legal compositions + media-type pinning (FR-ENV),
+  recipient defaulting (FR-ENC-19), curve negotiation (FR-ENC-04), and the addressing-consistency
+  checks (FR-CONSIST-01..06) remain in `EnvelopeWriter`/`EnvelopeReader`/`DidCommClient`. Because the
+  delegated JWS parser returns verified-payload bytes (not a DIDComm message), FR-CONSIST-03
+  (signed `from` ↔ signer kid) and FR-SIG-06 (inner signed JWM must carry `to`) are now enforced in
+  `EnvelopeReader` against the deserialized inner message.
+- **Pack APIs are now async** end-to-end (`EnvelopeWriter.PackSignedAsync`/`PackEncryptedAsync`,
+  `ForwardWrapper.WrapAsync`, `FromPriorBuilder.BuildAsync`) since DataProofs signs through an async
+  `ISigner`. `from_prior` is built via DataProofs' compact JWS.
+- **Upstream fixes landed** from this integration: NetCrypto 1.1.0 (on-curve guarantee in
+  `ExtractPublicKey`, `IKeyStore.DeriveSharedSecretAsync`, `Base64Url`, AEAD size constants —
+  crypto-dotnet #10/#11/#12); DataProofsDotnet.Jose 1.0.1 (surface the verified JWS signer kid from
+  the unprotected header for DIDComm v2.1 conformance — dataproofs-dotnet #10).
+- **Receive-side defense-in-depth:** a verified JWS that surfaces **no** signer kid is now rejected
+  (`CryptoException`) rather than reported authenticated — the `from`↔signer binding (FR-CONSIST-03)
+  never silently no-ops, independent of the delegated parser's behavior.
+
+### Breaking
+
+- `FromPriorBuilder.Build(FromPriorClaims, Jwk)` → **`BuildAsync(FromPriorClaims, Jwk, CancellationToken)`**
+  (method name **and** return type change). DataProofs signs through an async `ISigner`, so direct
+  callers must `await` the new method. The primary `DidCommClient` pack/unpack facade is unchanged
+  (it was already async); `ForwardWrapper.WrapAsync` is `internal`.
+- **ES512 / P-521 *signing* dropped.** The old `KeyTypeMapper` mapped `P-521 → ES512` for JWS; the
+  delegated signer scopes JWS to EdDSA / ES256 / ES384 / ES256K, so a P-521 signer JWK now raises
+  `NotSupportedException`. **Not a DIDComm v2.1 regression** — signed messages require only
+  EdDSA / ES256 / ES256K (none were tested with P-521), and P-521 *key agreement*
+  (anoncrypt/authcrypt) is unaffected and still tested.
+
+### Notes
+
+- The deleted in-repo crypto unit tests (AEAD tag, off-curve `epk`, key-wrap, malformed JWK
+  negatives) are carried by the upstream suites — NetCrypto (`EcPointValidatorTests`, the
+  AES-GCM / AES-CBC-HMAC / XChaCha20-Poly1305 / AES-KW cipher tests, `JwkConverterTests`,
+  input-validation fuzz) and DataProofsDotnet.Jose (`Parity/*`, `Conformance/NegativePathTests`,
+  `Hardening/*`). This repo's 99 interop **vectors** backstop byte-equivalence; the primitive
+  negatives live where the primitives now live.
+- **Follow-up (not in this PR):** enabling a package lockfile (`packages.lock.json`,
+  `RestorePackagesWithLockFile`) to pin the resolved transitive graph is worthwhile now that the
+  security-critical core lives in transitive packages, but it currently conflicts with this repo's
+  `Directory.Build.props`-level `TargetFramework` (NuGet's lock-file restore evaluates an empty TF →
+  NETSDK1013). It needs `TargetFramework` moved into each csproj first; tracked separately.
+
 ## [0.1.0-preview.1]
 
 ### Security — full-codebase audit remediation (`feat/security-hardening`)

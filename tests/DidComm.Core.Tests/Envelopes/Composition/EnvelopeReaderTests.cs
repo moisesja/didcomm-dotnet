@@ -1,18 +1,17 @@
-using System.Text.Json.Nodes;
 using DidComm.Composition;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
 using FluentAssertions;
-using NetDid.Core.Crypto;
+using NetCrypto;
 using Xunit;
-using DidCommDefaultCryptoProvider = DidComm.Crypto.DefaultCryptoProvider;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Tests.Envelopes.Composition;
 
 public sealed class EnvelopeReaderTests
 {
-    private static readonly DidCommDefaultCryptoProvider _crypto = new();
+    private static readonly JoseCryptoProvider _crypto = new();
 
     [Fact]
     public void Plaintext_round_trips_through_writer_and_reader()
@@ -38,7 +37,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Signed_round_trips_with_metadata()
+    public async Task Signed_round_trips_with_metadata()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var msg = new MessageBuilder()
@@ -47,9 +46,8 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackSigned(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }),
-            _crypto);
+        var packed = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
 
         var unpacked = EnvelopeReader.Unpack(packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
@@ -64,7 +62,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Anoncrypt_round_trips_with_metadata()
+    public async Task Anoncrypt_round_trips_with_metadata()
     {
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
         var msg = new MessageBuilder()
@@ -72,7 +70,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(msg, new[] { bob.PublicJwk }, "A256GCM"),
             _crypto);
 
@@ -93,7 +91,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Authcrypt_round_trips_with_metadata()
+    public async Task Authcrypt_round_trips_with_metadata()
     {
         var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
@@ -103,7 +101,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
                 SenderPrivateJwk: alice.PrivateJwk,
@@ -126,7 +124,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Anoncrypt_then_sign_unwraps_to_inner_plaintext()
+    public async Task Anoncrypt_then_sign_unwraps_to_inner_plaintext()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
@@ -136,7 +134,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256GCM",
                 SignerPrivateJwks: new[] { signer.PrivateJwk }),
@@ -157,7 +155,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Anoncrypt_authcrypt_protect_sender_unwraps_recursively()
+    public async Task Anoncrypt_authcrypt_protect_sender_unwraps_recursively()
     {
         var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
@@ -167,7 +165,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
                 SenderPrivateJwk: alice.PrivateJwk,
@@ -187,7 +185,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Consistency_check_blocks_recipient_kid_not_in_to_header()
+    public async Task Consistency_check_blocks_recipient_kid_not_in_to_header()
     {
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
         var msg = new MessageBuilder()
@@ -195,7 +193,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:carol") // Bob isn't in the 'to' list
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(msg, new[] { bob.PublicJwk }, "A256GCM"),
             _crypto);
 
@@ -209,7 +207,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Consistency_check_blocks_authcrypt_skid_not_matching_plaintext_from()
+    public async Task Consistency_check_blocks_authcrypt_skid_not_matching_plaintext_from()
     {
         // FR-CONSIST-01: a self-consistent forged envelope — cryptographically valid authcrypt
         // from Alice, but the inner plaintext claims it came from Carol. The skid authenticates
@@ -222,7 +220,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
                 SenderPrivateJwk: alice.PrivateJwk,
@@ -239,7 +237,7 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public void Consistency_check_blocks_authcrypt_sign_inner_signer_not_matching_skid()
+    public async Task Consistency_check_blocks_authcrypt_sign_inner_signer_not_matching_skid()
     {
         // FR-CONSIST-05: authcrypt(sign(...)) where the inner signer (Carol) differs from the
         // authcrypt sender (Alice). The inner signature verifies and its 'from' agrees with the
@@ -253,7 +251,7 @@ public sealed class EnvelopeReaderTests
             .WithTo("did:example:bob")
             .Build();
 
-        var packed = EnvelopeWriter.PackEncrypted(
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
                 SenderPrivateJwk: alice.PrivateJwk,

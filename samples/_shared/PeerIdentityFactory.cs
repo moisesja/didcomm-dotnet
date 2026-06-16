@@ -1,9 +1,9 @@
 using DidComm.Jose;
+using NetCrypto;
 using NetDid.Core;
-using NetDid.Core.Crypto;
 using NetDid.Core.Model;
 using NetDid.Method.Peer;
-using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
+using JwkConversion = DataProofsDotnet.Jose.JwkConversion;
 
 namespace DidComm.Samples.Shared;
 
@@ -29,8 +29,8 @@ public static class PeerIdentityFactory
     /// receiving encrypted messages, and an Ed25519 pair it will advertise for signing.
     /// </summary>
     /// <param name="manager">net-did's DID manager. Resolve it from the same DI container <c>AddDidComm(b =&gt; b.UseNetDidResolver())</c> populated.</param>
-    /// <param name="keyGenerator">net-did's key generator. Same DI container.</param>
-    /// <param name="cryptoProvider">net-did's crypto provider. Same DI container.</param>
+    /// <param name="keyGenerator">A key generator (NetCrypto). Same DI container.</param>
+    /// <param name="cryptoProvider">A crypto provider (NetCrypto). Same DI container.</param>
     public static async Task<PeerIdentity> CreateAsync(
         IDidManager manager,
         IKeyGenerator keyGenerator,
@@ -80,15 +80,7 @@ public static class PeerIdentityFactory
         // numalgo 2 emits relative ids like "#key-1"; the envelope layer keys by absolute DID URL.
         var kid = match.Id.StartsWith('#') ? did + match.Id : match.Id;
 
-        var jwk = NetDidJwkConverter.ToPrivateJwk(keyPair);
-        return new Jwk
-        {
-            Kty = jwk.Kty ?? string.Empty,
-            Crv = jwk.Crv,
-            X = jwk.X,
-            Y = jwk.Y,
-            D = jwk.D,
-            Kid = kid,
-        };
+        // ToPrivateJwk stamps the kid directly into the returned JWK.
+        return JwkConversion.ToPrivateJwk(keyPair, kid);
     }
 }

@@ -1,8 +1,7 @@
 using DidComm.Jose;
-using DidComm.Jose.Encryption;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
-using DidCommDefaultCryptoProvider = DidComm.Crypto.DefaultCryptoProvider;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Composition;
 
@@ -36,13 +35,15 @@ internal static class ForwardWrapper
     /// <param name="innerPackedPayload">The packed (encrypted) payload for the final recipient — wrapped unchanged inside the innermost forward.</param>
     /// <param name="routingKeyJwksOuterToInner">Routing-key JWKs in OUTER-to-INNER order (the list from <c>ResolvedRoute</c>). The loop runs in reverse so the outermost wrap addresses index 0.</param>
     /// <param name="finalRecipientDid">The DID of the FINAL recipient; used as <c>body.next</c> on the innermost forward.</param>
-    /// <param name="cryptoProvider">Default crypto provider.</param>
+    /// <param name="cryptoProvider">JOSE crypto provider (NetCrypto-backed).</param>
+    /// <param name="ct">Cancellation token.</param>
     /// <returns>The fully-wrapped outermost JWE JSON ready to hand to a transport.</returns>
-    public static string Wrap(
+    public static async Task<string> WrapAsync(
         string innerPackedPayload,
         IReadOnlyList<Jwk> routingKeyJwksOuterToInner,
         string finalRecipientDid,
-        DidCommDefaultCryptoProvider cryptoProvider)
+        JoseCryptoProvider cryptoProvider,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(innerPackedPayload);
         ArgumentNullException.ThrowIfNull(routingKeyJwksOuterToInner);
@@ -68,12 +69,13 @@ internal static class ForwardWrapper
                 next: nextHopDid,
                 packedPayloads: new[] { current });
 
-            current = Composition.EnvelopeWriter.PackEncrypted(
+            current = await EnvelopeWriter.PackEncryptedAsync(
                 new PackEncryptedParameters(
                     Message: forwardMessage,
                     Recipients: new[] { routingKey },
                     ContentEncryption: JoseAlgorithms.A256CbcHs512),
-                cryptoProvider);
+                cryptoProvider,
+                ct).ConfigureAwait(false);
 
             // Next outer wrap's body.next is the BARE DID of the routing key we just encrypted for —
             // body.next is a DID, not a key id, so strip the #fragment (mirrors the `mediator` field).

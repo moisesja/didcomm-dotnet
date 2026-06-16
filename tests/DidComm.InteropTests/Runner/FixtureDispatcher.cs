@@ -4,7 +4,7 @@ using DidComm.InteropTests.Resolution;
 using DidComm.Jose;
 using DidComm.Messages;
 using FluentAssertions;
-using DidCommDefaultCryptoProvider = DidComm.Crypto.DefaultCryptoProvider;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.InteropTests.Runner;
 
@@ -15,7 +15,7 @@ namespace DidComm.InteropTests.Runner;
 /// </summary>
 internal static class FixtureDispatcher
 {
-    private static readonly DidCommDefaultCryptoProvider _crypto = new();
+    private static readonly JoseCryptoProvider _crypto = new();
     private static readonly Lazy<SpecActorRegistry> _registry = new(SpecActorRegistry.LoadDefault);
 
     public static void Execute(FixtureManifest manifest, string manifestPath)

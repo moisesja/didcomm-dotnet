@@ -7,8 +7,8 @@ using DidComm.TestSupport;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using NetCrypto;
 using NetDid.Core;
-using NetDid.Core.Crypto;
 using Xunit;
 
 // L-014.

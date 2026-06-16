@@ -1,20 +1,14 @@
-using DidComm.Jose;
+using DataProofsDotnet.Jose.Encryption;
 
 namespace DidComm.Secrets;
 
 /// <summary>
 /// Minimal internal contract that the envelope layer uses to fetch the *public* key of a
-/// remote sender — needed for authcrypt unpack (Zs = ECDH(local_priv, sender_pub)). Phase 3
-/// merges this into the resolver-backed <c>IDidKeyService</c> documented in FR-DID-02..05;
-/// Phase 2 keeps it minimal and test-substitutable.
+/// remote sender — needed for authcrypt unpack (Zs = ECDH(local_priv, sender_pub)). Identical in
+/// shape to DataProofsDotnet.Jose's <see cref="IJweSenderKeyResolver"/> (<c>TryGet</c>), which it
+/// extends so an <see cref="IInternalSenderKeyLookup"/> can be passed straight to
+/// <c>DataProofsDotnet.Jose.Encryption.JweParser.Parse</c> with no adapter.
 /// </summary>
-internal interface IInternalSenderKeyLookup
+internal interface IInternalSenderKeyLookup : IJweSenderKeyResolver
 {
-    /// <summary>
-    /// Look up the public JWK for the authcrypt sender identified by <paramref name="skid"/>.
-    /// Returns <c>null</c> when the kid is unknown; the unpack pipeline turns null into a
-    /// <c>CryptoException</c> stating the sender key could not be resolved.
-    /// </summary>
-    /// <param name="skid">Sender key identifier (DID URL with fragment) as carried in the protected header.</param>
-    Jwk? TryGet(string skid);
 }

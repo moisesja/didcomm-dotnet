@@ -1,11 +1,11 @@
 using System.Text.Json;
-using DidComm.Crypto;
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Resolution;
-using NetDidJwkConverter = NetDid.Core.Jwk.JwkConverter;
+using DpJwkConversion = DataProofsDotnet.Jose.JwkConversion;
+using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Protocols.Rotation;
 
@@ -29,7 +29,7 @@ public static class FromPriorValidator
         string currentSenderDid,
         IDidKeyService keyService,
         CancellationToken ct = default)
-        => ValidateAsync(jwt, currentSenderDid, keyService, new DefaultCryptoProvider(), ct);
+        => ValidateAsync(jwt, currentSenderDid, keyService, new JoseCryptoProvider(), ct);
 
     /// <summary>Test seam: validate with an explicit crypto provider.</summary>
     /// <param name="jwt">Compact-serialized JWT.</param>
@@ -41,7 +41,7 @@ public static class FromPriorValidator
         string jwt,
         string currentSenderDid,
         IDidKeyService keyService,
-        DefaultCryptoProvider cryptoProvider,
+        JoseCryptoProvider cryptoProvider,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(jwt);
@@ -112,7 +112,7 @@ public static class FromPriorValidator
         var signerJwk = signerPubs.FirstOrDefault(k => string.Equals(k.Kid, kid, StringComparison.Ordinal))
             ?? throw new ConsistencyException($"from_prior signer kid '{kid}' not present in resolved keys (FR-ROT-01).");
 
-        var (_, publicBytes) = NetDidJwkConverter.ExtractPublicKey(JwkConversion.ToNetDidJwk(signerJwk));
+        var (_, publicBytes) = DpJwkConversion.ExtractPublicKey(signerJwk);
         var signingInput = Encoding.ASCII.GetBytes($"{parts[0]}.{parts[1]}");
 
         // Cross-check: the header alg MUST match the JWK's curve. Prevents a downgrade where
