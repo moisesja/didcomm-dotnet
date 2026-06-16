@@ -1,3 +1,4 @@
+using DidComm.Consistency;
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Exceptions;
 using NetDid.Core;
@@ -108,14 +109,66 @@ public sealed class NetDidKeyService : IDidKeyService
         VerificationRelationship relationship,
         CancellationToken ct = default)
     {
+        ArgumentException.ThrowIfNullOrEmpty(did);
         ArgumentException.ThrowIfNullOrEmpty(kid);
-        var keys = await GetVerificationMethodsAsync(did, relationship, ct).ConfigureAwait(false);
-        foreach (var key in keys)
+        RejectUnsupportedMethod(did);
+
+        // FR-CONSIST-06 / DD-01 require more than string-matching the kid into the relationship:
+        // the verification method must be genuinely *controlled by* the asserted DID. So we walk the
+        // raw resolved verification methods (not the curve-projected JWKs, which drop `controller`)
+        // and authorize the matching kid only when its id-subject AND its controller are the asserted
+        // DID — rejecting a key that sits under the relationship but is controlled by a different DID,
+        // or an embedded VM whose id belongs to another DID. (Issue #18.)
+        var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
+        if (result.DidDocument is null)
         {
-            if (string.Equals(key.Kid, kid, StringComparison.Ordinal))
-                return true;
+            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
+            throw new DidResolutionException(did, error);
         }
+
+        var entries = relationship switch
+        {
+            VerificationRelationship.KeyAgreement => result.DidDocument.KeyAgreement,
+            VerificationRelationship.Authentication => result.DidDocument.Authentication,
+            _ => throw new ArgumentOutOfRangeException(nameof(relationship), relationship, "Unknown VerificationRelationship."),
+        };
+        if (entries is null || entries.Count == 0)
+            return false;
+
+        foreach (var entry in entries)
+        {
+            var method = ResolveVerificationMethod(result.DidDocument, entry, did);
+
+            // VerificationMethod.id MAY be a relative DID URL ("#key-1"); normalize to absolute so it
+            // matches the absolute kid the envelope layer uses and so DidSubjectOf can extract a DID.
+            var methodId = method.Id is { } id && id.StartsWith('#') ? did + id : method.Id;
+            if (!string.Equals(methodId, kid, StringComparison.Ordinal))
+                continue;
+
+            // Found the kid under the right relationship; authorize only if it is controlled by `did`
+            // and is usable for the relationship's curve (preserving the prior curve-support filter).
+            return IsControlledBy(did, methodId, method)
+                && TryMaterialise(method, relationship) is not null;
+        }
+
         return false;
+    }
+
+    /// <summary>
+    /// FR-CONSIST-06 controller rule: a verification method is authorized for <paramref name="did"/>
+    /// only when its (absolute) id resolves to the asserted DID subject AND its <c>controller</c>
+    /// (when present) is the asserted DID. An absent controller falls back to the id-subject rule.
+    /// </summary>
+    private static bool IsControlledBy(string did, string absoluteMethodId, VerificationMethod method)
+    {
+        if (!string.Equals(DidSubject.DidSubjectOf(absoluteMethodId), did, StringComparison.Ordinal))
+            return false; // cross-DID verification-method id
+
+        var controller = method.Controller.Value;
+        if (string.IsNullOrEmpty(controller))
+            return true; // controller omitted — the id-subject rule above already bound it to `did`
+
+        return string.Equals(DidSubject.DidSubjectOf(controller), did, StringComparison.Ordinal);
     }
 
     /// <summary>

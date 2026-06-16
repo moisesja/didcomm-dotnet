@@ -62,4 +62,77 @@ public sealed class InMemoryThreadStateStoreTests
         ((Action)(() => store.Get(string.Empty))).Should().Throw<ArgumentException>();
         ((Action)(() => store.Remove(string.Empty))).Should().Throw<ArgumentException>();
     }
+
+    [Fact]
+    public void Store_is_bounded_under_a_flood_of_fresh_thids()
+    {
+        // Issue #21: a peer flooding fresh, unauthenticated thids must not grow the store without
+        // limit. With a small cap, inserting far more distinct ids keeps the count at/under the cap.
+        var store = new InMemoryThreadStateStore(maxEntries: 100);
+        for (var i = 0; i < 1_000; i++)
+        {
+            store.GetOrCreate($"thid-{i}");
+        }
+
+        store.Count.Should().BeLessThanOrEqualTo(100);
+    }
+
+    [Fact]
+    public void Oldest_untouched_threads_are_evicted_newest_retained()
+    {
+        var store = new InMemoryThreadStateStore(maxEntries: 100);
+        for (var i = 0; i < 1_000; i++)
+        {
+            store.GetOrCreate($"thid-{i}");
+        }
+
+        // The most recently created id survives; an early one has aged out.
+        store.Get("thid-999").Should().NotBeNull();
+        store.Get("thid-0").Should().BeNull();
+    }
+
+    [Fact]
+    public void A_live_thread_within_the_cap_survives_a_flood_with_state_intact()
+    {
+        // A legitimate multi-message thread is touched on every access, so approximate-LRU never
+        // evicts it even while an attacker floods junk ids around it.
+        var store = new InMemoryThreadStateStore(maxEntries: 100);
+        var live = store.GetOrCreate("live");
+        live.AcceptLang = new[] { "fr" };
+
+        for (var i = 0; i < 1_000; i++)
+        {
+            store.GetOrCreate($"junk-{i}");
+            store.GetOrCreate("live"); // keep the live thread warm, as real traffic would
+        }
+
+        var stillLive = store.Get("live");
+        stillLive.Should().NotBeNull();
+        stillLive!.AcceptLang.Should().Equal("fr");
+    }
+
+    [Fact]
+    public void Non_positive_capacity_throws()
+    {
+        ((Action)(() => _ = new InMemoryThreadStateStore(0))).Should().Throw<ArgumentOutOfRangeException>();
+        ((Action)(() => _ = new InMemoryThreadStateStore(-5))).Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task Concurrent_flood_stays_bounded_and_does_not_throw()
+    {
+        // NFR-03: shared store under concurrent access. Eviction races must not throw and the
+        // final count must respect the cap.
+        var store = new InMemoryThreadStateStore(maxEntries: 200);
+        var tasks = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+        {
+            for (var i = 0; i < 1_000; i++)
+            {
+                store.GetOrCreate($"w{worker}-thid-{i}");
+            }
+        }));
+
+        await Task.WhenAll(tasks);
+        store.Count.Should().BeLessThanOrEqualTo(200);
+    }
 }

@@ -56,6 +56,11 @@ internal static class EnvelopeReader
         ArgumentNullException.ThrowIfNull(cryptoProvider);
 
         var stack = new List<EnvelopeKind>();
+        // Per-layer composition trace (outer→inner) carrying the authenticated/anonymous distinction
+        // the EnvelopeKind stack can't (anoncrypt and authcrypt are both EnvelopeKind.Encrypted). Used
+        // by AssertLegalComposition to reject illegal layer orderings — e.g. the illegal
+        // anoncrypt(anoncrypt) vs the legal anoncrypt(authcrypt) (FR-ENV-02/04, issue #17).
+        var shape = new List<LayerShape>();
         bool authenticated = false, nonRepudiation = false, anonymous = false, encrypted = false;
         string? contentEnc = null, keyWrap = null, sigAlg = null, signerKid = null, senderKid = null, recipientKid = null;
         IReadOnlyList<string> allRecipientKids = Array.Empty<string>();
@@ -70,6 +75,13 @@ internal static class EnvelopeReader
             {
                 case EnvelopeKind.Plaintext:
                 {
+                    // Reject illegal envelope compositions before any content/consistency work: the legal
+                    // receive grammar is anoncrypt? authcrypt? sign? plaintext (DIDComm v2.1 Appendix C).
+                    // The auth/anon flag on each encrypt layer is what separates the legal anoncrypt(authcrypt)
+                    // from the illegal anoncrypt(anoncrypt). (Issue #17.)
+                    shape.Add(LayerShape.Plaintext);
+                    AssertLegalComposition(shape);
+
                     Message? deserialized;
                     try
                     {
@@ -151,6 +163,7 @@ internal static class EnvelopeReader
 
                 case EnvelopeKind.Signed:
                 {
+                    shape.Add(LayerShape.Sign);
                     if (signerLookup is null)
                         throw new CryptoException("Signed envelope encountered but no signer-key lookup was supplied.");
 
@@ -222,10 +235,12 @@ internal static class EnvelopeReader
                     {
                         authenticated = true;
                         senderKid = jweResult.SenderKid;
+                        shape.Add(LayerShape.AuthEncrypt);
                     }
                     else
                     {
                         anonymous = true;
+                        shape.Add(LayerShape.AnonEncrypt);
                     }
 
                     current = Encoding.UTF8.GetString(jweResult.Plaintext);
@@ -238,5 +253,41 @@ internal static class EnvelopeReader
         }
 
         throw new MalformedMessageException("Envelope nesting exceeded the legal depth of 4.");
+    }
+
+    /// <summary>A single envelope layer, outer→inner, with the auth/anon distinction the composition gate needs.</summary>
+    private enum LayerShape
+    {
+        Sign,
+        AnonEncrypt,
+        AuthEncrypt,
+        Plaintext,
+    }
+
+    /// <summary>
+    /// Assert the unwrapped layer sequence (outer→inner) is a legal DIDComm v2.1 composition. The
+    /// receive grammar is <c>anoncrypt? authcrypt? sign? plaintext</c>: at most one anoncrypt
+    /// (outermost), then at most one authcrypt, then at most one signature (innermost), then the
+    /// plaintext. This admits every shape in spec Appendix C — including the FR-ENV-02 emit set, the
+    /// receive-only <c>authcrypt(sign)</c> (FR-ENV-03), and the protect-sender-plus-sign
+    /// <c>anoncrypt(authcrypt(sign))</c> (Appendix C.3) — and rejects sign-outside-encrypt
+    /// (FR-ENV-05 ordering), authcrypt-outside-anoncrypt, double anoncrypt/authcrypt, and more than
+    /// one signature. (Issue #17.)
+    /// </summary>
+    private static void AssertLegalComposition(IReadOnlyList<LayerShape> shape)
+    {
+        var i = 0;
+        if (i < shape.Count && shape[i] == LayerShape.AnonEncrypt) i++; // at most one anoncrypt, outermost
+        if (i < shape.Count && shape[i] == LayerShape.AuthEncrypt) i++; // then at most one authcrypt
+        if (i < shape.Count && shape[i] == LayerShape.Sign) i++;        // then at most one signature, innermost
+
+        // Whatever remains must be exactly the terminal plaintext; anything else is an illegal nesting.
+        var legal = i == shape.Count - 1 && shape[i] == LayerShape.Plaintext;
+        if (!legal)
+        {
+            throw new MalformedMessageException(
+                $"Illegal DIDComm envelope composition [{string.Join(", ", shape)}]; the legal receive grammar " +
+                "is anoncrypt? authcrypt? sign? plaintext (DIDComm v2.1, Appendix C).");
+        }
     }
 }

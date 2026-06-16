@@ -6,6 +6,43 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security — Medium-severity audit remediation (`feat/security-medium-cluster`)
+
+Remediates the five Medium-severity findings from the multi-agent security & compliance audit
+(GitHub issues #17–#21), plus two lower-severity defects on the same code path (#28, #33). Each fix
+ships with negative and regression tests; the full suite (598 tests) is green.
+
+- **Illegal envelope compositions rejected (#17, FR-ENV-04a).** `EnvelopeReader.Unpack` now tracks
+  each unwrapped layer with its authenticated/anonymous flag and enforces the legal DIDComm v2.1
+  receive grammar `anoncrypt? authcrypt? sign? plaintext` before any content/consistency processing.
+  Illegal nestings — sign-outside-encrypt (FR-ENV-05), `anoncrypt(anoncrypt)`, `authcrypt(authcrypt)`,
+  `authcrypt(anoncrypt)`, double-sign — are rejected with `MalformedMessageException`. The grammar
+  admits every spec Appendix C unpack vector, including `authcrypt(sign)` (FR-ENV-03) and
+  `anoncrypt(authcrypt(sign))` (Appendix C.3). The auth/anon flag is what distinguishes the legal
+  `anoncrypt(authcrypt)` from the illegal `anoncrypt(anoncrypt)` (indistinguishable at envelope-kind
+  level). PRD gains **FR-ENV-04a** documenting the receive-acceptance set.
+- **Controller-aware resolver authorization (#18, FR-CONSIST-06 / DD-01).** `NetDidKeyService`
+  `IsKeyAuthorizedAsync` now walks the raw resolved verification methods (not the curve-projected
+  JWKs, which dropped `controller`) and authorizes a `kid` only when its id-subject **and** its
+  `controller` resolve to the asserted DID — rejecting a key listed under the DID's relationship but
+  controlled by a different DID, and cross-DID embedded ids. did:key / did:peer keep authorizing
+  (controller == subject by construction).
+- **`from_prior` JWT parse errors normalized (#19).** `FromPriorValidator` wraps base64url decode and
+  all JSON reads in one boundary that surfaces malformed input (`FormatException`,
+  `InvalidOperationException`, `ArgumentException` on an empty segment, `JsonException`,
+  `KeyNotFoundException`) as the typed `ProtocolException` with a generic message — closing an
+  unhandled-exception path out of `UnpackAsync` and removing the header-vs-claims info leak.
+- **Receive endpoint no longer an oracle (#20, #28, #33).** Both ASP.NET Core HTTP receive overloads
+  collapse every input- or handler-triggered failure to a single opaque `400` with an empty body,
+  logging the reason server-side only. This closes the verbatim-`CryptoException` decryption /
+  recipient-`kid` enumeration oracle (#20), the `Consistency`/`Resolution`/`UnsupportedDidMethod`
+  exceptions that previously escaped to `500` + dev stack-trace (#28), and the echoed handler-bug
+  detail (#33). The 202 success, 415, and 413 paths are unchanged; cancellation still propagates.
+- **Thread-state store bounded (#21).** `InMemoryThreadStateStore` is now capped
+  (`DefaultMaxEntries = 10_000`, overridable via ctor) with approximate-LRU eviction, converting an
+  unbounded-growth memory-exhaustion DoS (attacker-chosen, unauthenticated `thid`/`pthid`) into a
+  few-MB bound. Secure-by-default — no DI wiring change.
+
 ### Changed — delegate the envelope layer to DataProofsDotnet.Jose (`feat/delegate-jose-dataproofs`)
 
 didcomm-dotnet no longer carries its own cryptography or JWE/JWS assembly. The entire `Crypto/`

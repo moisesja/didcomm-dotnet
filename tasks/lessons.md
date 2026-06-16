@@ -447,3 +447,19 @@ Format per entry:
 - **How to apply:** When delegating, name the hard constraints explicitly ("the dataproofs ref MUST
   stay a local ProjectReference") and re-diff csproj/props after a subagent runs. Treat any
   reference-kind change as needing review, not auto-accept.
+
+## L-024 — A receive-side validation gate must match the spec's *receive-acceptance* set (Appendix C vectors), not the PRD's *emit* set.
+
+- **Lesson:** When building an inbound validation gate (e.g. legal envelope compositions), enumerate
+  the accepted set from the spec's interop test vectors, not from the PRD's "what we emit" rules. The
+  receive set is a superset of the emit set.
+- **Why:** Issue #17's first cut enforced the FR-ENV-02 *emit* compositions (6) plus the FR-ENV-03
+  receive-only `authcrypt(sign)` (7 total) and rejected everything else. That broke the real spec
+  fixture `c3-authcrypt-p521` — DIDComm v2.1 Appendix C.3 `anoncrypt(authcrypt(sign))`, an inbound
+  vector with `outcome: success`. FR-ENV-04 ("never emit `anoncrypt(authcrypt(sign))`") is an *emit*
+  MUST-NOT, not a receive prohibition; the PRD was simply silent on the full receive set. Fixed to the
+  grammar `anoncrypt? authcrypt? sign? plaintext` (8 shapes) and added PRD **FR-ENV-04a**. Relates to
+  L-005 (self-round-trip ≠ interop) and L-020 (verify against spec before trusting a test outcome).
+- **How to apply:** For any inbound gate, list the spec/Appendix vectors it must accept and run the
+  interop fixtures *before* declaring the allow-set complete. If the PRD only describes emit behavior,
+  the receive-acceptance set is incomplete — fill it in (and update the PRD).
