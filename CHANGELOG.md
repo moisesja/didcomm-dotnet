@@ -42,6 +42,35 @@ all DIDComm v2.1 Appendix C byte-equivalence vectors (anoncrypt/authcrypt/signed
   `ExtractPublicKey`, `IKeyStore.DeriveSharedSecretAsync`, `Base64Url`, AEAD size constants —
   crypto-dotnet #10/#11/#12); DataProofsDotnet.Jose 1.0.1 (surface the verified JWS signer kid from
   the unprotected header for DIDComm v2.1 conformance — dataproofs-dotnet #10).
+- **Receive-side defense-in-depth:** a verified JWS that surfaces **no** signer kid is now rejected
+  (`CryptoException`) rather than reported authenticated — the `from`↔signer binding (FR-CONSIST-03)
+  never silently no-ops, independent of the delegated parser's behavior.
+
+### Breaking
+
+- `FromPriorBuilder.Build(FromPriorClaims, Jwk)` → **`BuildAsync(FromPriorClaims, Jwk, CancellationToken)`**
+  (method name **and** return type change). DataProofs signs through an async `ISigner`, so direct
+  callers must `await` the new method. The primary `DidCommClient` pack/unpack facade is unchanged
+  (it was already async); `ForwardWrapper.WrapAsync` is `internal`.
+- **ES512 / P-521 *signing* dropped.** The old `KeyTypeMapper` mapped `P-521 → ES512` for JWS; the
+  delegated signer scopes JWS to EdDSA / ES256 / ES384 / ES256K, so a P-521 signer JWK now raises
+  `NotSupportedException`. **Not a DIDComm v2.1 regression** — signed messages require only
+  EdDSA / ES256 / ES256K (none were tested with P-521), and P-521 *key agreement*
+  (anoncrypt/authcrypt) is unaffected and still tested.
+
+### Notes
+
+- The deleted in-repo crypto unit tests (AEAD tag, off-curve `epk`, key-wrap, malformed JWK
+  negatives) are carried by the upstream suites — NetCrypto (`EcPointValidatorTests`, the
+  AES-GCM / AES-CBC-HMAC / XChaCha20-Poly1305 / AES-KW cipher tests, `JwkConverterTests`,
+  input-validation fuzz) and DataProofsDotnet.Jose (`Parity/*`, `Conformance/NegativePathTests`,
+  `Hardening/*`). This repo's 99 interop **vectors** backstop byte-equivalence; the primitive
+  negatives live where the primitives now live.
+- **Follow-up (not in this PR):** enabling a package lockfile (`packages.lock.json`,
+  `RestorePackagesWithLockFile`) to pin the resolved transitive graph is worthwhile now that the
+  security-critical core lives in transitive packages, but it currently conflicts with this repo's
+  `Directory.Build.props`-level `TargetFramework` (NuGet's lock-file restore evaluates an empty TF →
+  NETSDK1013). It needs `TargetFramework` moved into each csproj first; tracked separately.
 
 ## [0.1.0-preview.1]
 

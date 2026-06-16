@@ -168,6 +168,15 @@ internal static class EnvelopeReader
                         throw new CryptoException(ex.Message, ex);
                     }
 
+                    // Fail closed: a verified JWS MUST surface a signer kid. Otherwise FR-CONSIST-03
+                    // (signed 'from' ↔ signer) and FR-CONSIST-05 (inner signer ↔ skid) would silently
+                    // no-op below while the message is still reported authenticated — letting 'from'
+                    // assert an identity the signature never bound. Assert it here so the identity
+                    // binding never depends on the delegated parser always populating the kid.
+                    if (string.IsNullOrEmpty(jwsResult.SignerKid))
+                        throw new CryptoException(
+                            "Verified JWS did not surface a signer kid; cannot bind the message 'from' to the signer (FR-CONSIST-03).");
+
                     nonRepudiation = true;
                     // A verified JWS authenticates the signer (the FR-API-04 metadata semantics
                     // treat 'authenticated' as "sender identity cryptographically confirmed").

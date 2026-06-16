@@ -186,4 +186,32 @@ public sealed class JwsRoundTripTests
         Action act = () => Unpack(packed, _ => signer.PublicJwk);
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-03*");
     }
+
+    [Fact]
+    public async Task Verified_jws_without_a_signer_kid_fails_closed()
+    {
+        // A JWS that VERIFIES but carries no kid (neither protected nor unprotected header) would
+        // leave FR-CONSIST-03 with nothing to bind 'from' against. EnvelopeReader must reject it
+        // rather than report the message authenticated with an unbound signer.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var kidless = await BuildKidlessSignedJws(signer);
+
+        // The lookup returns the correct key for any kid (here the empty string), so the signature
+        // verifies — the only thing missing is the surfaced kid.
+        Action act = () => Unpack(kidless, _ => signer.PublicJwk);
+
+        act.Should().Throw<CryptoException>().WithMessage("*signer kid*");
+    }
+
+    /// <summary>Build a flattened JWS whose signer has no <c>kid</c> in either header (verifies, but
+    /// surfaces no signer identity) — exercising the EnvelopeReader fail-closed guard.</summary>
+    private static async Task<string> BuildKidlessSignedJws(TestKeyMaterial signer)
+    {
+        var priv = DataProofsDotnet.Jose.Base64Url.Decode(signer.PrivateJwk.D!);
+        var keyPair = new DefaultKeyGenerator().FromPrivateKey(KeyType.Ed25519, priv);
+        var jwsSigner = new DataProofsDotnet.Jose.Signing.JwsSigner(
+            new KeyPairSigner(keyPair, new DefaultCryptoProvider()), kid: null);
+        return await DataProofsDotnet.Jose.Signing.JwsBuilder.BuildJsonAsync(
+            System.Text.Encoding.UTF8.GetBytes("{}"), new[] { jwsSigner }, MediaTypes.Signed);
+    }
 }
