@@ -44,6 +44,13 @@ public sealed class ThreadState
     /// cleared when the answering pure-ACK arrives. Tracks only dispatcher-emitted ACK requests; requests
     /// sent via the facade directly are the application's responsibility (#31).
     /// </summary>
+    /// <remarks>
+    /// Best-effort, not a state machine: if the expected pure-ACK never arrives, the flag stays
+    /// <c>true</c> until this entry is evicted from the bounded thread store (#21). While set, a later
+    /// <i>unsolicited</i> pure-ACK on the same thread is dropped as a loop (a benign over-drop — pure
+    /// ACKs are inert and carry no work). This is acceptable because rule-3 is only defense-in-depth:
+    /// rule-2 (a pure-ACK must not itself request an ACK) is the actual loop barrier.
+    /// </remarks>
     public bool AckRequested { get; set; }
 
     /// <summary>

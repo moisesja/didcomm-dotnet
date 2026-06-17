@@ -10,7 +10,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 Resolves four scattered Low/Info findings (GitHub issues #27, #30, #31, #34); #32 closed as
 spec-compliant (no change — see below). Each fix passed a PoC-backed adversarial red-team pass that
-caught two real residuals (folded in). Full suite (648 tests) green.
+caught two real residuals (folded in). Full suite (650 tests) green.
 
 - **`web_redirect.redirectUrl` validated (#30).** `OutOfBand.ReadWebRedirect` previously returned the
   peer-supplied URL verbatim; it now returns `null` unless the value is an absolute `http`/`https` URL
@@ -39,6 +39,26 @@ caught two real residuals (folded in). Full suite (648 tests) green.
   delegated to `DataProofsDotnet.Jose` (which does not surface `typ`); RFC 7515 §4.1.9 makes `typ`
   advisory, FR-SIG-04 has no MUST to validate it on receive, and envelope kind is determined
   structurally (no confusion risk). Closed with rationale.
+
+Review remediation (PR #41 review):
+
+- **#27 — HTTP inherit path now covered by tests.** Added `HttpTransportPolicyInheritanceTests`, the
+  symmetric coverage to the existing WebSocket inherit test: it exercises the real
+  `SocketsHttpHandler.ConnectCallback` (a positive test proving the permissive core policy is inherited
+  when the transport policy is unset, plus a complement proving the default blocking policy governs when
+  no policy is configured anywhere — so the positive test cannot pass vacuously).
+- **#30 — open-redirect contract documented on the public API.** `OutOfBand.ReadWebRedirect` now carries
+  a `<remarks>` warning (surfaced in IntelliSense) that a non-null result is a *candidate* navigation
+  target, not a vetted one, and the consumer MUST confirm it before navigating.
+- **#31 — `AckRequested` limitation documented.** `ThreadState.AckRequested` now documents that, if the
+  answering pure-ACK never arrives, the flag persists until the entry is evicted from the bounded store
+  (#21), during which a later *unsolicited* pure-ACK on the same thread is dropped (a benign over-drop —
+  pure ACKs are inert; rule-2 remains the actual loop barrier).
+- **`IsSafeRedirectUrl` numeric-IP handling clarified.** Added a comment pinning that `System.Uri`
+  canonicalizes numeric-encoded IPv4 literals (decimal/hex/octal/short) to dotted form with
+  `HostNameType == IPv4` *before* the guard runs, so the private/reserved check catches them (verified
+  empirically) — and noting the guard would need its own normalization if a future parser stopped
+  canonicalizing.
 
 ### Security — problem-report cascade-guard redesign (`feat/security-cascade-guard`)
 

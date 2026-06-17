@@ -239,6 +239,15 @@ public static class OutOfBand
     /// Read a <c>web_redirect</c> block from <paramref name="message"/> (FR-OOB-05). Returns
     /// <c>null</c> when absent or malformed (missing <c>status</c> / <c>redirectUrl</c>).
     /// </summary>
+    /// <remarks>
+    /// <b>Open-redirect warning.</b> The returned <see cref="WebRedirect.RedirectUrl"/> is
+    /// attacker-controlled (the block rides in a peer-supplied message). This method only filters out
+    /// non-navigable shapes — non-<c>http(s)</c> schemes, relative URLs, <c>user@host</c> userinfo, and
+    /// private/reserved IP-literal hosts — and returns the canonicalized URL. It deliberately does
+    /// <i>not</i> apply a destination allowlist, so a well-formed redirect to an arbitrary public host
+    /// still passes. A non-<c>null</c> result is therefore a <i>candidate</i> navigation target, not a
+    /// vetted one: the consumer MUST confirm it (e.g. user prompt / allowlist) before navigating (#30).
+    /// </remarks>
     /// <param name="message">The message to inspect.</param>
     public static WebRedirect? ReadWebRedirect(Message message)
     {
@@ -282,6 +291,12 @@ public static class OutOfBand
         // benign host but navigates to `evil`, so reject it outright.
         if (!string.IsNullOrEmpty(parsed.UserInfo))
             return false;
+        // We test parsed.Host, NOT the raw url string. System.Uri canonicalizes numeric-encoded IPv4
+        // literals before we see them — decimal (http://2130706433), hex (0x7f000001), octal (017700000001),
+        // and short (127.1) forms all normalize to dotted "127.0.0.1" with HostNameType == IPv4 — so
+        // IPAddress.TryParse(parsed.Host) parses them and IsPrivateOrReserved catches the obfuscated
+        // loopback/private hosts a raw-string check would miss. (If a future parser swap stopped
+        // canonicalizing, this guard would need its own numeric-form normalization.)
         if ((parsed.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
             && IPAddress.TryParse(parsed.Host, out var ip)
             && OutboundEndpointGuard.IsPrivateOrReserved(ip))
