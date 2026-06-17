@@ -463,3 +463,22 @@ Format per entry:
 - **How to apply:** For any inbound gate, list the spec/Appendix vectors it must accept and run the
   interop fixtures *before* declaring the allow-set complete. If the PRD only describes emit behavior,
   the receive-acceptance set is incomplete — fill it in (and update the PRD).
+
+## L-025 — Closing a body/status oracle leaves a timing oracle; and amortized-eviction analysis is single-threaded.
+
+- **Lesson:** Two red-team findings on my own #20/#21 fixes. (a) Normalizing error *responses* (uniform
+  400, empty body) closes the content/status oracle but NOT the timing oracle — a held-vs-unheld
+  recipient kid still separates by ~180 µs because the decrypt path fast-fails before ECDH. (b) An
+  eviction whose cost is "amortized O(log n) per insert" is only amortized *single-threaded*; with N
+  concurrent inserters over the cap, each independently runs the full O(n log n) snapshot-sort →
+  up-to-Nx CPU stampede. Fixed with a single-flight `Interlocked.CompareExchange` gate.
+- **Why:** Adversarial agents tasked with *breaking* the just-written fix (per the repo's "use
+  adversarial agents to attempt to exploit the code" rule) found both empirically — a body/status test
+  (`Should().BeEmpty()`) passes while the timing channel is wide open, and a serial eviction-cost
+  argument hides a concurrency stampede.
+- **How to apply:** (1) When closing an oracle, enumerate ALL observables — body, status, headers,
+  **timing**, and connection behavior — not just the obvious one; if you can't make it constant-time
+  cheaply, file it and say so rather than claiming "no longer an oracle." (2) Any "amortized" cost
+  argument for shared mutable state must be re-derived under concurrency; guard expensive
+  rebuild/evict passes with single-flight. (3) Always run a break-it adversarial pass on a security
+  fix before declaring done — the fix that closes the headline issue often leaves a residual.

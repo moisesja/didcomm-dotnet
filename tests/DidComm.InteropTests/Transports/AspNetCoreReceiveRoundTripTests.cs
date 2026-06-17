@@ -195,7 +195,24 @@ public sealed class AspNetCoreReceiveRoundTripTests
         return (response.StatusCode, await response.Content.ReadAsStringAsync());
     }
 
-    private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(Action<DidCommOptions>? configureOptions = null)
+    [Fact]
+    public async Task Throwing_onReceive_callback_still_returns_202_not_a_500_oracle()
+    {
+        // Issue #20 red-team: a consumer callback that throws after a successful unpack must NOT escape
+        // as a 500 — otherwise an attacker could probe "did this envelope decrypt for us?" by inducing
+        // the throw, re-exposing the unpack-success oracle. The receive is one-way: log + ack 202.
+        var (server, _) = await BuildServerAsync(
+            onReceive: (_, _) => throw new InvalidOperationException("downstream handler blew up"));
+
+        var valid = await PackAnoncryptForBobAsync();
+        var result = await PostEnvelopeAsync(server, valid);
+
+        result.Status.Should().Be(HttpStatusCode.Accepted); // 202, not 500
+    }
+
+    private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(
+        Action<DidCommOptions>? configureOptions = null,
+        Func<UnpackResult, CancellationToken, Task>? onReceive = null)
     {
         var received = new List<UnpackResult>();
         var actors = SpecActorRegistry.LoadDefault();
@@ -223,11 +240,11 @@ public sealed class AspNetCoreReceiveRoundTripTests
 
         var app = builder.Build();
         app.UseRouting();
-        app.MapDidCommEndpoint("/didcomm", async (result, ct) =>
+        app.MapDidCommEndpoint("/didcomm", onReceive ?? (async (result, ct) =>
         {
             received.Add(result);
             await Task.CompletedTask;
-        });
+        }));
 
         await app.StartAsync();
         return (app.GetTestServer(), received);

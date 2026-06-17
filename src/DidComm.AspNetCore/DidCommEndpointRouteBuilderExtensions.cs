@@ -81,6 +81,8 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             }
 
+            var logger = httpContext.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
+
             UnpackResult unpacked;
             try
             {
@@ -94,11 +96,28 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 // Every unpack failure (crypto / malformed / consistency / resolution / did:web /
                 // missing-secret) collapses to one opaque 400 so the peer can't distinguish them.
-                var logger = httpContext.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
                 return NormalizedReceiveRejection(logger, ex);
             }
 
-            await onReceive(unpacked, httpContext.RequestAborted).ConfigureAwait(false);
+            // The message was received and unpacked; HTTP receive is one-way / fire-and-forget
+            // (FR-TRN-10). A fault in the consumer callback is the receiver's own concern — log it but
+            // still answer 202, so a throwing callback can't turn a successfully-unpacked message into a
+            // distinguishable 500. Otherwise an attacker could probe "did this envelope decrypt for us?"
+            // by inducing a callback throw — re-exposing the unpack-success oracle the uniform-400
+            // rejection closes (#20 red-team).
+            try
+            {
+                await onReceive(unpacked, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "DidComm receive: onReceive callback threw after a successful unpack; acknowledging anyway (one-way receive).");
+            }
+
             return Results.StatusCode(StatusCodes.Status202Accepted);
         });
     }

@@ -28,7 +28,9 @@ public sealed class InMemoryThreadStateStore : IThreadStateStore
     private readonly ConcurrentDictionary<string, ThreadState> _states = new(StringComparer.Ordinal);
     private readonly int _maxEntries;
     private readonly int _lowWaterMark;
-    private long _tick; // Interlocked monotonic clock for approximate-LRU stamping.
+    private long _tick;     // Interlocked monotonic clock for approximate-LRU stamping.
+    private int _evicting;  // single-flight guard: 1 while an eviction pass is running, else 0.
+    private long _evictionPasses; // diagnostics: number of EvictDownToLowWater passes that ran.
 
     /// <summary>Create a store bounded at <see cref="DefaultMaxEntries"/>.</summary>
     public InMemoryThreadStateStore() : this(DefaultMaxEntries)
@@ -57,6 +59,9 @@ public sealed class InMemoryThreadStateStore : IThreadStateStore
     /// <summary>Number of currently-retained thread states. Exposed for tests.</summary>
     internal int Count => _states.Count;
 
+    /// <summary>Number of eviction passes run so far. Exposed for tests (the single-flight guard).</summary>
+    internal long EvictionPasses => Interlocked.Read(ref _evictionPasses);
+
     /// <inheritdoc />
     public ThreadState GetOrCreate(string thid)
     {
@@ -66,9 +71,23 @@ public sealed class InMemoryThreadStateStore : IThreadStateStore
             static (id, self) => new ThreadState(id) { LastTouchedTick = Interlocked.Increment(ref self._tick) },
             this);
         state.LastTouchedTick = Interlocked.Increment(ref _tick); // touch on access (approximate-LRU)
-        if (_states.Count > _maxEntries)
+
+        // Single-flight eviction: only ONE thread sorts+trims at a time; concurrent inserters that
+        // also see the store over capacity skip the pass instead of each running their own
+        // O(n log n) snapshot-sort. Without this guard, N concurrent inserts over the cap trigger up
+        // to N redundant full sorts per burst — a CPU-amplification DoS (issue #21 red-team). The
+        // store may transiently exceed the cap by the number of in-flight inserts during a pass; the
+        // next insert after the flag clears trims it back.
+        if (_states.Count > _maxEntries && Interlocked.CompareExchange(ref _evicting, 1, 0) == 0)
         {
-            EvictDownToLowWater();
+            try
+            {
+                EvictDownToLowWater();
+            }
+            finally
+            {
+                Volatile.Write(ref _evicting, 0);
+            }
         }
 
         return state;
@@ -102,6 +121,7 @@ public sealed class InMemoryThreadStateStore : IThreadStateStore
     /// </summary>
     private void EvictDownToLowWater()
     {
+        Interlocked.Increment(ref _evictionPasses);
         var snapshot = _states.ToArray();
         Array.Sort(snapshot, static (a, b) => a.Value.LastTouchedTick.CompareTo(b.Value.LastTouchedTick));
         var target = snapshot.Length - _lowWaterMark;

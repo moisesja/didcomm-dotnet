@@ -135,4 +135,29 @@ public sealed class InMemoryThreadStateStoreTests
         await Task.WhenAll(tasks);
         store.Count.Should().BeLessThanOrEqualTo(200);
     }
+
+    [Fact]
+    public async Task Concurrent_flood_does_not_trigger_an_eviction_storm()
+    {
+        // Issue #21 red-team: without single-flight eviction, N concurrent inserters over the cap each
+        // run their own O(n log n) snapshot-sort, so eviction passes scale with concurrency (a CPU DoS).
+        // With the guard, passes track the insert count (~one per cap/10 inserts), not the thread count.
+        const int cap = 500;
+        const int perWorker = 50_000;
+        const int workers = 8;
+        var store = new InMemoryThreadStateStore(maxEntries: cap);
+
+        var tasks = Enumerable.Range(0, workers).Select(w => Task.Run(() =>
+        {
+            for (var i = 0; i < perWorker; i++)
+                store.GetOrCreate($"w{w}-{i}");
+        }));
+        await Task.WhenAll(tasks);
+
+        // Serial expectation ≈ totalInserts / (cap - lowWater) = 400_000 / 50 ≈ 8_000 passes. A storm
+        // would multiply that by up to `workers`. Assert we stay within a small multiple of serial.
+        const long serialExpectation = (long)workers * perWorker / (cap / 10);
+        store.EvictionPasses.Should().BeLessThan(serialExpectation * 3);
+        store.Count.Should().BeLessThanOrEqualTo(cap);
+    }
 }
