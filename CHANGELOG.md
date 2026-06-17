@@ -6,6 +6,33 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security — problem-report cascade-guard redesign (`feat/security-cascade-guard`)
+
+Resolves two FR-PROTO-10 cascade-guard findings (GitHub issues #29, #36), addressed together since both
+stem from the per-`pthid` error budget living on the dispatcher's general thread store. Passed a
+PoC-backed adversarial red-team pass that caught — and drove the fix for — a concurrency bug in the
+first cut. Full suite (630 tests) green.
+
+- **Cascade budget moved to a dedicated, bounded store (#36).** The FR-PROTO-10 budget now lives in a
+  new `CascadeBudgetStore`, separate from the dispatcher's general thread store (which is flooded with
+  one entry per inbound `thid`). Previously a flood of cheap fresh `thid`s could evict — and reset to
+  zero — a victim `pthid`'s error budget, defeating the cascade-stop. The dedicated store **owns its
+  concurrency**: the increment + threshold check + trip decision is atomic under a single `pthid`-keyed
+  lock (the earlier "lock on the per-thread state object" seam broke under LRU eviction and could
+  double-emit the cascade-stop — fixed). Its LRU **prefers evicting not-yet-tripped entries**, so a
+  tripped thread's silenced decision survives a fresh-`pthid` flood without exempting entries from
+  eviction (still bounded). Registered as its own DI singleton so the budget persists regardless of the
+  handler's lifetime. Residual: a determined attacker can still pressure the bound with distinct-`pthid`
+  *error reports* (far costlier than the original cheap-`thid` reset); a distributed/persistent budget
+  is the path to a hard guarantee for horizontally-scaled hosts.
+- **Unrepliable-stream counter/log flood capped (#29).** A sustained stream of unrepliable
+  (anoncrypt/from-less) over-threshold reports previously incremented the counter and emitted an Info
+  log line forever (the trip permanently deferred). The handler now clamps the count at `threshold + 1`
+  and stops per-message logging after the breach, while preserving the deferral so a later repliable
+  report still fires the cascade-stop.
+- `ThreadState.ErrorCount`/`MaxErrorsNoticeSent` are retained as general-purpose per-thread fields but
+  are no longer used by the built-in cascade guard (which uses `CascadeBudgetStore`).
+
 ### Fixed — rotation JWT compliance
 
 Resolves two Low-severity audit findings on the `from_prior` rotation path (GitHub issues #25, #26).

@@ -84,7 +84,9 @@ public static class Section_U_ProblemReport
 
         ctx.Narrator.Value("Cascade-stop code", ProblemReportApi.ReadCode(trip!.Reply!));
         ctx.Narrator.Value("Cascade-stop pthid", trip.Reply!.Pthid);
-        ctx.Narrator.Value("Failing-thread errorCount", localStore.GetOrCreate(failingThread).ErrorCount);
+        // The breach count rides on the cascade-stop notice itself (the count is communicated to the
+        // peer, not read from internal state — the FR-PROTO-10 budget lives in a dedicated store, #36).
+        ctx.Narrator.Value("Cascade-stop comment", ProblemReportApi.RenderComment(trip.Reply!));
         ctx.Narrator.Note("Beyond the trip the handler returns null for further reports on the same pthid (FR-PROTO-10).");
     }
 }

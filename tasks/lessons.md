@@ -513,3 +513,22 @@ Format per entry:
 - **How to apply:** Before tightening a shared codec/parser, enumerate each call site and check the
   *spec's* strictness requirement for THAT field. Apply strictness only where mandated; give permissive
   fields a clearly-named relaxed path. Verify the spec, don't assume one rule fits all call sites.
+
+## L-028 — Never use a value from an evictable/bounded store as a lock seam; the store must own its concurrency.
+
+- **Lesson:** The cascade guard locked on the per-pthid `ThreadState` instance returned by a bounded
+  LRU store ("same pthid → same instance → natural lock seam"). That invariant is FALSE for an
+  evicting store: if the entry is evicted between `GetOrCreate` and `lock`, a concurrent caller mints a
+  fresh instance, the two callers lock DIFFERENT objects, mutual exclusion is lost, and the "emit
+  exactly once" guard double-emits. The mandatory adversarial pass (AGENTS.md §2) proved it
+  deterministically at small caps.
+- **Why:** Eviction can replace the object you locked on with a new one for the same logical key, so an
+  object borrowed from the store is not a stable monitor. Atomicity must be owned by the store, keyed
+  by the stable string key, not delegated to the caller via a returned (evictable) object.
+- **How to apply:** When a bounded/evicting store backs a guard that needs atomic read-modify-write,
+  put the whole decision INSIDE the store under a stable lock (single lock, or stripe by the string
+  key), with eviction performed inside that same lock — and return a value/decision, not a mutable
+  shared object for the caller to lock. Also: a bounded store can reset any entry on eviction, so make
+  "decision already made" (e.g. tripped/silenced) survive eviction (prefer-evict-untripped or a sticky
+  marker), and decouple the store's DI lifetime from a handler's (register it as its own singleton) so
+  a non-singleton handler can't silently get a fresh store per request.
