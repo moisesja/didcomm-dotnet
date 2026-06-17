@@ -6,6 +6,42 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security — HTTP receive timing side-channel (`feat/security-receive-timing-floor`)
+
+Closes GitHub issue **#35** (High) — the timing residual the #20 red-team explicitly filed (see
+`tasks/lessons.md` L-025). The #20 fix made every HTTP receive failure return a uniform bodyless
+`400`, closing the response-content/status oracle, but response **time** still partitioned those 400s:
+an envelope addressed to a recipient key the agent holds runs the full ECDH/AEAD path (~360 µs) while
+one addressed to a key it does not hold fast-fails before any crypto (~180 µs), so a single timed
+request enumerated which recipient keys the agent holds (FR-API-07). A PoC-backed adversarial pass
+caught — and the fix folds in — two further residuals.
+
+- **Constant-time rejection floor.** New `DidCommReceiveOptions.ReceiveRejectionFloor` (default
+  **5 ms**, set `TimeSpan.Zero` to disable). The HTTP receive handler times the unpack window and,
+  before returning the uniform `400`, pads with a non-cancelable timer-backed delay up to the floor, so
+  the rejection time is independent of how far envelope processing got. The fast-fail "unheld kid" path
+  and the full-crypto "held kid + AEAD fail" path now both finish under the floor and pad to the same
+  duration. **Behavior change:** rejected requests now take ≥ the floor; legitimate received messages
+  answer `202` and are never padded (the hot path is untouched), and `415`/`413` pre-decrypt rejections
+  are unchanged. The cost is paid only on rejected — typically hostile or malformed — traffic.
+- **Red-team Finding 1 (folded in): floor measured after the body read.** The pad clock starts *after*
+  `ReadCappedAsync`, not at handler entry — otherwise a peer could pad the envelope toward
+  `MaxReceiveBytes` so the (kid-independent) body read alone exhausts the floor, collapse the pad to
+  zero, and re-expose the gap. Covered by `Large_body_rejection_is_still_padded_to_the_floor`.
+- **Red-team Finding 2 (documented residual, not closed by a fixed floor).** The held-only path that
+  decrypts and then does **network** DID resolution (authcrypt sender / FR-CONSIST-06 / `from_prior`)
+  can run longer than the floor — e.g. an attacker authcrypts to a guessed kid signed by an
+  attacker-controlled, deliberately-slow `did:webvh` sender, making a held response visibly exceed the
+  floor while an unheld one stays at it. That residual is network-bound and unbounded, so a fixed floor
+  cannot close it without an absurd value; the API docs direct operators to authentication / a
+  rate-limiter in front of the receive endpoint (the deployment tradeoff #35 calls out).
+- **WebSocket receive is document-only.** The WS loops log-and-discard with nothing written back, so
+  there is no per-message response to time; the floor is intentionally not applied there (noted in code).
+- **Root cause tracked upstream.** The local-crypto gap originates in `JweParser.Parse` /
+  `FindPresent` (DataProofsDotnet.Jose), which fast-fails before ECDH when no recipient kid is held.
+  The floor is a compensating edge control; the durable constant-time-recipient-selection fix is filed
+  upstream (`moisesja/dataproofs-dotnet#12`) and tracked here in #42.
+
 ### Security — protocol & transport hardening (`feat/security-protocol-hardening`)
 
 Resolves four scattered Low/Info findings (GitHub issues #27, #30, #31, #34); #32 closed as

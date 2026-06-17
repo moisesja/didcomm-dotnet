@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -125,6 +126,8 @@ public sealed class AspNetCoreReceiveRoundTripTests
         // (ConsistencyException) MUST all yield the SAME response — same 400 status, same empty body.
         // Previously crypto failures leaked the failing recipient kid / layer, and a ConsistencyException
         // escaped to a 500 (+ dev stack trace), so a peer could distinguish the failure class.
+        // (#35 closes the residual TIMING channel these same classes left open — covered by the
+        // floor tests below; this test asserts the status/body parity only.)
         var (server, _) = await BuildServerAsync();
 
         var malformed = "not even json";
@@ -143,6 +146,104 @@ public sealed class AspNetCoreReceiveRoundTripTests
             r.Status.Should().Be(HttpStatusCode.BadRequest);
             r.Body.Should().BeEmpty(); // no kid / layer / DID / stack-trace text distinguishes the classes
         });
+    }
+
+    // === #35: constant-time rejection floor =================================================
+    // The pad helper is exercised directly (no HTTP, no flaky upper bounds) and through the live
+    // endpoint. Every assertion against a rejection is a LOWER bound on elapsed time: a slow CI can
+    // only make elapsed larger, never smaller, so these do not flake. The one upper-bound assertion
+    // (the success path) is given a multi-second floor it must NOT pay, so its margin is enormous.
+
+    [Fact]
+    public async Task DelayToRejectionFloor_waits_out_the_remaining_floor()
+    {
+        var start = Stopwatch.GetTimestamp();
+        var floor = TimeSpan.FromMilliseconds(200);
+
+        await DidCommEndpointRouteBuilderExtensions.DelayToRejectionFloorAsync(start, floor);
+
+        var elapsed = Stopwatch.GetElapsedTime(start);
+        // Lower bound only (180 ms < 200 ms floor, slack for timer granularity). Task.Delay never
+        // fires early, so a held-kid path that finished in microseconds is still lifted to the floor.
+        elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(180));
+    }
+
+    [Fact]
+    public async Task DelayToRejectionFloor_is_a_noop_when_floor_is_zero()
+    {
+        var start = Stopwatch.GetTimestamp();
+
+        await DidCommEndpointRouteBuilderExtensions.DelayToRejectionFloorAsync(start, TimeSpan.Zero);
+
+        // Disabled floor: returns essentially immediately (no wait). Generous ceiling — this only
+        // guards against an accidental unconditional delay, not a precise timing.
+        Stopwatch.GetElapsedTime(start).Should().BeLessThan(TimeSpan.FromMilliseconds(100));
+    }
+
+    [Fact]
+    public async Task DelayToRejectionFloor_is_a_noop_when_work_already_exceeded_the_floor()
+    {
+        var start = Stopwatch.GetTimestamp();
+
+        // A floor already elapsed by the time we call (1 tick = 100 ns) → no further delay. Models the
+        // held + DID-resolution path that legitimately ran longer than the floor.
+        await DidCommEndpointRouteBuilderExtensions.DelayToRejectionFloorAsync(start, TimeSpan.FromTicks(1));
+
+        Stopwatch.GetElapsedTime(start).Should().BeLessThan(TimeSpan.FromMilliseconds(100));
+    }
+
+    [Fact]
+    public async Task Rejection_response_is_padded_to_the_floor()
+    {
+        // With a 200 ms floor, the malformed-envelope rejection (which fast-fails in microseconds)
+        // must still take ≥ ~floor before answering 400 — the timing channel is closed end-to-end.
+        var (server, _) = await BuildServerAsync(rejectionFloor: TimeSpan.FromMilliseconds(200));
+
+        var sw = Stopwatch.StartNew();
+        var result = await PostEnvelopeAsync(server, "not even json");
+        sw.Stop();
+
+        result.Status.Should().Be(HttpStatusCode.BadRequest);
+        result.Body.Should().BeEmpty();
+        sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(180));
+    }
+
+    [Fact]
+    public async Task Large_body_rejection_is_still_padded_to_the_floor()
+    {
+        // PR #43 red-team (Finding 1): the floor must be measured AFTER the body read, not from
+        // handler entry. Otherwise a peer pads the envelope out toward MaxReceiveBytes so the read
+        // time alone exhausts the floor, the pad collapses to zero, and the held-vs-unheld crypto gap
+        // is re-exposed. A large malformed body must therefore STILL be padded to the floor.
+        var (server, _) = await BuildServerAsync(
+            configureOptions: o => o.MaxReceiveBytes = 1 * 1024 * 1024,
+            rejectionFloor: TimeSpan.FromMilliseconds(200));
+
+        var largeMalformed = new string('x', 256 * 1024); // 256 KiB, well under the 1 MiB cap; not valid JSON
+        var sw = Stopwatch.StartNew();
+        var result = await PostEnvelopeAsync(server, largeMalformed);
+        sw.Stop();
+
+        result.Status.Should().Be(HttpStatusCode.BadRequest);
+        result.Body.Should().BeEmpty();
+        sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(180));
+    }
+
+    [Fact]
+    public async Task Successful_receive_is_not_padded_by_the_floor()
+    {
+        // Pin a deliberately huge floor (2 s) that ONLY the rejection path would pay. A successfully
+        // unpacked envelope answers 202 and must return far faster — proving the floor never touches
+        // the hot success path (which would otherwise be a throughput regression).
+        var (server, _) = await BuildServerAsync(rejectionFloor: TimeSpan.FromSeconds(2));
+
+        var valid = await PackAnoncryptForBobAsync();
+        var sw = Stopwatch.StartNew();
+        var result = await PostEnvelopeAsync(server, valid);
+        sw.Stop();
+
+        result.Status.Should().Be(HttpStatusCode.Accepted); // 202, decrypted for Bob
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1)); // nowhere near the 2 s rejection floor
     }
 
     private static DidCommClient NewPackerClient()
@@ -245,7 +346,8 @@ public sealed class AspNetCoreReceiveRoundTripTests
     private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(
         Action<DidCommOptions>? configureOptions = null,
         Func<UnpackResult, CancellationToken, Task>? onReceive = null,
-        IDidResolver? resolverOverride = null)
+        IDidResolver? resolverOverride = null,
+        TimeSpan? rejectionFloor = null)
     {
         var received = new List<UnpackResult>();
         var actors = SpecActorRegistry.LoadDefault();
@@ -270,6 +372,10 @@ public sealed class AspNetCoreReceiveRoundTripTests
             o.MaxReceiveBytes = 64 * 1024;
             configureOptions?.Invoke(o);
         });
+        // #35: let a test pin the constant-time rejection floor. When unset, the endpoint falls back
+        // to the DidCommReceiveOptions default (5 ms), exercising the production posture.
+        if (rejectionFloor is { } floor)
+            builder.Services.Configure<DidCommReceiveOptions>(o => o.ReceiveRejectionFloor = floor);
 
         var app = builder.Build();
         app.UseRouting();
