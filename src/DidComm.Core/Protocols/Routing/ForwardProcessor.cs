@@ -116,7 +116,22 @@ public sealed class ForwardProcessor
             return Encoding.UTF8.GetBytes(json.ToJsonString());
 
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
-            return Base64Url.Decode(attachment.Data.Base64);
+        {
+            try
+            {
+                // Relaxed decode: attachment data.base64 has no spec no-pad requirement (FR-ATT-02,
+                // cf. Aries RFC 0017), and a mediator only relays the bytes for the recipient to
+                // re-parse strictly — so tolerate '=' padding rather than refuse a peer's forward.
+                // Genuinely-invalid base64 still maps to the documented malformed-input type (a raw
+                // FormatException must not escape ProcessAsync). (#24 + PR #38 review.)
+                return Base64Url.DecodeRelaxed(attachment.Data.Base64);
+            }
+            catch (FormatException ex)
+            {
+                throw new MalformedMessageException(
+                    "Forward attachment 'data.base64' is not valid base64url.", ex);
+            }
+        }
 
         throw new ConsistencyException(
             "Forward attachment is missing both 'data.json' and 'data.base64'. The mediator has nothing to relay.");

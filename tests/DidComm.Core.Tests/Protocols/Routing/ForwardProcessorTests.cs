@@ -243,6 +243,54 @@ public sealed class ForwardProcessorTests
         Encoding.UTF8.GetString(result.OnwardPacked).Should().Be(innerPayload);
     }
 
+    [Fact]
+    public async Task ProcessAsync_maps_malformed_base64_attachment_to_MalformedMessageException()
+    {
+        // Issue #24 (red-team): a forward attachment whose data.base64 is genuinely invalid base64url
+        // ('@' is non-alphabet; '+'/'/' are standard-base64, not base64url) must surface as
+        // MalformedMessageException, not a raw FormatException escaping the mediator's ProcessAsync.
+        var forward = new MessageBuilder()
+            .WithType(ForwardConstants.ForwardTypeUri)
+            .WithBody(new JsonObject { ["next"] = "did:example:n" })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = "@@@@" } }) // not base64url at all
+            .Build();
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(forward);
+
+        var processor = new ForwardProcessor(client, new EmptyKeyService(), new ForwardProcessorOptions());
+
+        var act = async () => await processor.ProcessAsync(packed);
+
+        (await act.Should().ThrowAsync<MalformedMessageException>())
+            .Which.Message.Should().Contain("not valid base64url");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_relays_a_padded_base64_attachment_FR_ATT_02()
+    {
+        // PR #38 review: attachment data.base64 has no spec no-pad requirement (FR-ATT-02, cf. Aries
+        // RFC 0017), and the mediator only relays the bytes for the recipient to re-parse — so a peer's
+        // '=' padded forward attachment must still be relayed, not refused. (Only the strict JOSE/JWT/
+        // OOB paths reject padding.)
+        var innerPayload = "forward-me!"; // 11 bytes → base64 carries a trailing '=' pad
+        var bytes = Encoding.UTF8.GetBytes(innerPayload);
+        var paddedBase64Url = Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_'); // padded base64url
+        paddedBase64Url.Should().EndWith("="); // sanity: this value really is padded
+
+        var forward = new MessageBuilder()
+            .WithType(ForwardConstants.ForwardTypeUri)
+            .WithBody(new JsonObject { ["next"] = "did:example:n" })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = paddedBase64Url } })
+            .Build();
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(forward);
+
+        var processor = new ForwardProcessor(client, new EmptyKeyService(), new ForwardProcessorOptions());
+        var result = await processor.ProcessAsync(packed);
+
+        Encoding.UTF8.GetString(result.OnwardPacked).Should().Be(innerPayload);
+    }
+
     [Theory]
     [InlineData(long.MinValue)]
     [InlineData(-long.MaxValue)]
