@@ -34,7 +34,7 @@ caught — and the fix folds in — two further residuals.
   attacker-controlled, deliberately-slow `did:webvh` sender, making a held response visibly exceed the
   floor while an unheld one stays at it. That residual is network-bound and unbounded, so a fixed floor
   cannot close it without an absurd value; the API docs direct operators to authentication / a
-  rate-limiter in front of the receive endpoint (the deployment tradeoff #35 calls out).
+  rate-limiter in front of the receive endpoint (the deployment tradeoff #35 calls out). Tracked as #44.
 - **WebSocket receive is document-only.** The WS loops log-and-discard with nothing written back, so
   there is no per-message response to time; the floor is intentionally not applied there (noted in code).
 - **Root cause tracked upstream.** The local-crypto gap originates in `JweParser.Parse` /

@@ -48,7 +48,10 @@ public sealed class DidCommReceiveOptions
     ///
     /// Keep this small (single-digit milliseconds): 5 ms already dominates the local-crypto spread
     /// with margin, and the wait is backed by a timer (it holds no thread). Defaults to 5 ms; set
-    /// <see cref="TimeSpan.Zero"/> to disable the floor entirely.
+    /// <see cref="TimeSpan.Zero"/> to disable the floor entirely. On Windows, <see cref="Task.Delay(TimeSpan)"/>
+    /// rounds up to the system timer resolution (~15 ms by default), so values below that are silently
+    /// floored to it — this does not weaken the security property (15 ms still dominates the µs-scale
+    /// crypto gap) but means rejected requests cost ~15 ms there rather than the configured 5 ms.
     ///
     /// <para><b>What this does and does not close.</b> The floor closes the cheap, universal probe —
     /// an unauthenticated peer sending garbage ciphertext to guessed recipient kids and timing the
@@ -56,7 +59,8 @@ public sealed class DidCommReceiveOptions
     /// where a decryptable envelope triggers network DID resolution that runs longer than the floor
     /// (an attacker-controlled slow sender DID makes the held response visibly exceed the floor while
     /// an unheld one stays at it). That residual is network-bound and unbounded; close it with
-    /// authentication / a rate-limiter in front of the endpoint, not by inflating this value.</para>
+    /// authentication / a rate-limiter in front of the endpoint, not by inflating this value — see the
+    /// tracking issue #44.</para>
     /// </summary>
     public TimeSpan ReceiveRejectionFloor { get; set; } = TimeSpan.FromMilliseconds(5);
 }

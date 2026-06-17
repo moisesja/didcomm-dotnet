@@ -578,8 +578,8 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// deliberately-slow did:webvh sender) sees "response ≫ floor" for a held kid versus "response ≈
     /// floor" for an unheld one. That residual is unbounded (network latency), so a fixed floor cannot
     /// close it without an absurd value; mitigate it with auth / a rate-limiter in front of the receive
-    /// endpoint (the deployment tradeoff the #35 issue calls out). The durable fix for the local-crypto
-    /// gap is constant-time recipient-kid selection in the JWE parser, tracked upstream.
+    /// endpoint (the deployment tradeoff the #35 issue calls out, tracked in #44). The durable fix for
+    /// the local-crypto gap is constant-time recipient-kid selection in the JWE parser, tracked upstream.
     /// </para>
     /// </summary>
     internal static async Task DelayToRejectionFloorAsync(long startTimestamp, TimeSpan floor)
