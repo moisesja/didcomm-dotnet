@@ -342,6 +342,35 @@ public sealed class FromPriorRotationTests
     }
 
     [Fact]
+    public async Task DidCommClient_RejectsNotYetValidFromPrior_FrRot05()
+    {
+        // Issue #25 end-to-end, symmetric to the expired-Exp case: a from_prior whose nbf is in the
+        // future must be rejected on unpack (FR-ROT-05). The clock is pinned to iat so nbf = iat + 1 day
+        // is deterministically not-yet-valid (well past any skew) regardless of wall-clock time.
+        const long iat = 1700000000;
+        var pinnedNow = DateTimeOffset.FromUnixTimeSeconds(iat);
+        var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: iat, Nbf: iat + 86400);
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+
+        var options = new DidCommOptions { Clock = () => pinnedNow };
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), options);
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"))).Message;
+
+        var act = async () => await client.UnpackAsync(packed);
+
+        await act.Should().ThrowAsync<ConsistencyException>().Where(e => e.Message.Contains("not yet valid"));
+    }
+
+    [Fact]
     public async Task Validator_RejectsCritHeader_FrRot26()
     {
         // Issue #26: a from_prior whose protected header marks an extension critical must be rejected
