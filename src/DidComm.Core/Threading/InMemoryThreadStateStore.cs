@@ -13,8 +13,10 @@ namespace DidComm.Threading;
 /// attacker-controlled and <i>not</i> cryptographically authenticated. An unbounded dictionary
 /// would let a peer flood fresh ids and grow the store until the process OOMs. To prevent that,
 /// retained entries are capped at <see cref="DefaultMaxEntries"/> (overridable via the ctor) and
-/// the oldest-touched entries are evicted (approximate-LRU) once the cap is reached. A thread
-/// that keeps receiving messages is touched on every access and so is never evicted while active.
+/// the oldest-touched entries are evicted (approximate-LRU) once the cap is reached. A thread is
+/// touched on every access, so one that is actively receiving is not evicted; note this holds only
+/// within the eviction window — a thread left idle while a peer floods more than (cap − low-water)
+/// fresh ids can still age out (the approximate-LRU tradeoff).
 /// </remarks>
 public sealed class InMemoryThreadStateStore : IThreadStateStore
 {

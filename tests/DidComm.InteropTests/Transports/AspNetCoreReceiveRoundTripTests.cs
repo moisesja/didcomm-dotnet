@@ -17,6 +17,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using NetDid.Core;
+using NetDid.Core.Model;
 using Xunit;
 
 namespace DidComm.InteropTests.Transports;
@@ -210,13 +212,44 @@ public sealed class AspNetCoreReceiveRoundTripTests
         result.Status.Should().Be(HttpStatusCode.Accepted); // 202, not 500
     }
 
+    [Fact]
+    public async Task Downstream_resolution_timeout_returns_400_not_a_500_oracle()
+    {
+        // PR #37 review: a downstream DID-resolution timeout surfaces as TaskCanceledException :
+        // OperationCanceledException with the request token NOT cancelled. It must collapse to the
+        // uniform 400, not be mistaken for a client abort and rethrown as a distinguishable 500 — which
+        // would re-open the 400-vs-500 oracle via an attacker-controlled did:webvh host that hangs until
+        // the resolver's HttpClient.Timeout fires.
+        var (server, _) = await BuildServerAsync(resolverOverride: new TimeoutResolver());
+        var valid = await PackAnoncryptForBobAsync(); // decrypts (Bob's secret), then resolution throws
+
+        var result = await PostEnvelopeAsync(server, valid);
+
+        result.Status.Should().Be(HttpStatusCode.BadRequest); // 400, not 500; RequestAborted is not cancelled
+        result.Body.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Simulates a downstream resolver whose HttpClient.Timeout fires: throws
+    /// <see cref="TaskCanceledException"/> (a <see cref="OperationCanceledException"/>) with the
+    /// caller's token NOT cancelled — exactly what net-did's webvh client surfaces on a hung host.
+    /// </summary>
+    private sealed class TimeoutResolver : IDidResolver
+    {
+        public bool CanResolve(string did) => true;
+
+        public Task<DidResolutionResult> ResolveAsync(string did, DidResolutionOptions? options = null, CancellationToken ct = default)
+            => throw new TaskCanceledException("simulated downstream HttpClient.Timeout (caller token not cancelled)");
+    }
+
     private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(
         Action<DidCommOptions>? configureOptions = null,
-        Func<UnpackResult, CancellationToken, Task>? onReceive = null)
+        Func<UnpackResult, CancellationToken, Task>? onReceive = null,
+        IDidResolver? resolverOverride = null)
     {
         var received = new List<UnpackResult>();
         var actors = SpecActorRegistry.LoadDefault();
-        var resolver = LoadResolver();
+        IDidResolver resolver = resolverOverride ?? LoadResolver();
         var keyService = new NetDidKeyService(resolver);
         var serviceResolver = new NetDidServiceEndpointResolver(resolver, keyService, new DidCommOptions());
 

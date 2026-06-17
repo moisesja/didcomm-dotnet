@@ -88,14 +88,17 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
-                throw; // client aborted — let cancellation propagate, do not mask as a rejection
+                throw; // genuine client abort — propagate, do not mask as a rejection
             }
             catch (Exception ex)
             {
-                // Every unpack failure (crypto / malformed / consistency / resolution / did:web /
-                // missing-secret) collapses to one opaque 400 so the peer can't distinguish them.
+                // Every unpack failure collapses to one opaque 400 so the peer can't distinguish them:
+                // crypto / malformed / consistency / resolution / did:web / missing-secret, AND a
+                // downstream DID-resolution timeout (TaskCanceledException : OperationCanceledException
+                // with the request token NOT cancelled, e.g. an attacker-controlled did:webvh host that
+                // hangs). Only a real client abort is rethrown above, so there is no 400-vs-500 oracle.
                 return NormalizedReceiveRejection(logger, ex);
             }
 
@@ -109,9 +112,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 await onReceive(unpacked, httpContext.RequestAborted).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
-                throw;
+                throw; // genuine client abort
             }
             catch (Exception ex)
             {
@@ -167,9 +170,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             }
 
-            // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException)
-            // and an unpack rejection (crypto/malformed/consistency/resolution) all return the same 400
-            // with no body, so the status code itself is not an oracle (no 400-vs-500 partition).
+            // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException),
+            // an unpack rejection (crypto/malformed/consistency/resolution), and a downstream
+            // DID-resolution timeout (TaskCanceledException with the request token NOT cancelled) all
+            // return the same 400 with no body, so the status code itself is not an oracle (no
+            // 400-vs-500 partition). Only a genuine client abort is rethrown.
             try
             {
                 var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
@@ -177,9 +182,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                 LogOutcome(logger, outcome, sameSocketDelivered: false);
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
-                throw; // client aborted — let cancellation propagate
+                throw; // genuine client abort — propagate
             }
             catch (Exception ex)
             {

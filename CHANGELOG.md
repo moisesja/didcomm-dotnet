@@ -44,7 +44,12 @@ follow-ups). The full suite (600 tests) is green.
   that throws after a successful unpack returns 202 (logged) instead of escaping as a distinguishable
   `500` — removing an unpack-success oracle the uniform-400 path would otherwise leave. (A residual
   *timing* side-channel in the underlying decrypt path — held-vs-unheld recipient kid — is **not**
-  closed by this change and is tracked as a follow-up.)
+  closed by this change and is tracked as a follow-up.) A downstream DID-resolution timeout
+  (`TaskCanceledException` with the request token not cancelled — e.g. a hung `did:webvh` host) also
+  collapses to the uniform 400 rather than escaping as a `500`; only a genuine client abort propagates.
+  **Operator note:** a receiver-side handler bug (FR-THR-04 `InvalidOperationException`) now returns
+  `400` instead of `500` for response uniformity — it is logged at `Error` level, so alert on the
+  `DidComm.AspNetCore` error log rather than on a 5xx rate for handler faults.
 - **Thread-state store bounded (#21).** `InMemoryThreadStateStore` is now capped
   (`DefaultMaxEntries = 10_000`, overridable via ctor) with approximate-LRU eviction, converting an
   unbounded-growth memory-exhaustion DoS (attacker-chosen, unauthenticated `thid`/`pthid`) into a
