@@ -54,6 +54,22 @@ internal static class Base64Url
     private static bool IsBase64UrlChar(char c)
         => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
 
+    /// <summary>
+    /// Decode <paramref name="value"/> tolerating <c>'='</c> padding and ASCII whitespace (the BCL
+    /// codec's lenient behavior). Use ONLY for transport/attachment payloads where padding is
+    /// historically permitted and not spec-forbidden — DIDComm attachment <c>data.base64</c>
+    /// (FR-ATT-02; cf. Aries RFC 0017), which the mediator merely relays for the recipient to
+    /// re-parse. JOSE fields (JWS/JWE segments, JWK material), <c>from_prior</c> JWTs, and OOB URLs
+    /// have an explicit no-pad requirement and MUST use the strict <see cref="Decode"/>.
+    /// </summary>
+    /// <param name="value">Base64url string, possibly padded.</param>
+    /// <exception cref="FormatException">When the input is not valid base64url even allowing padding/whitespace.</exception>
+    public static byte[] DecodeRelaxed(string value)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(value);
+        return SystemBase64Url.DecodeFromChars(value.AsSpan());
+    }
+
     /// <summary>Decode a base64url string and return the bytes interpreted as a UTF-8 string.</summary>
     /// <param name="value">Base64url string.</param>
     public static string DecodeUtf8(string value) => Encoding.UTF8.GetString(Decode(value));

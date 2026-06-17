@@ -498,3 +498,18 @@ Format per entry:
   map where missing, with a regression test per reachable site. Treat the issue's stated premise as a
   hypothesis to verify, not a fact. (This is exactly what the mandatory adversarial pass, AGENTS.md
   §2, is for — run it on every security fix and fix what it finds.)
+
+## L-027 — Scope encoding strictness to where the spec actually mandates it; a global tightening can refuse spec-valid peer data.
+
+- **Lesson:** Making `Base64Url.Decode` strict (no-pad) globally also tightened the mediator's
+  forward-attachment relay. The reviewer flagged that attachment `data.base64` (FR-ATT-02; Aries RFC
+  0017) has NO no-pad requirement — only JOSE/JWT segments and OOB URLs do (FR-ENC-13/14, FR-SIG-04,
+  FR-OOB-02 "whitespace-stripped"). A global strict decode would refuse a peer's padded forward, an
+  interop regression with ~zero security upside (the mediator just relays bytes the recipient re-parses
+  strictly). Fix: keep `Decode` strict for the JOSE/JWT/OOB paths, add `DecodeRelaxed` for the
+  attachment relay.
+- **Why:** "Strict is safer" is true for fields the spec pins (signed bytes, key material) but wrong
+  where the spec is permissive and the data is pass-through — there it just breaks interop.
+- **How to apply:** Before tightening a shared codec/parser, enumerate each call site and check the
+  *spec's* strictness requirement for THAT field. Apply strictness only where mandated; give permissive
+  fields a clearly-named relaxed path. Verify the spec, don't assume one rule fits all call sites.

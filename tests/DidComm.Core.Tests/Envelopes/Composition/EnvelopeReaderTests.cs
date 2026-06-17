@@ -448,11 +448,32 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
+    public async Task ArgumentException_from_the_delegated_parse_maps_to_MalformedMessageException()
+    {
+        // Issue #22 boundary guard — directly exercised. The wrong-length-iv path is wrapped upstream,
+        // so this drives the new catch via a signer lookup that throws ArgumentException (the lookup is
+        // invoked inside the delegated parse). Contract: ANY ArgumentException from the delegated parse
+        // becomes MalformedMessageException, never escapes raw; InnerException is preserved for diagnosis.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk }));
+
+        Action act = () => EnvelopeReader.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: _ => throw new ArgumentException("boom from a buggy lookup"),
+            _crypto);
+
+        act.Should().Throw<MalformedMessageException>().WithInnerException<ArgumentException>();
+    }
+
+    [Fact]
     public async Task AnonymousSender_reflects_the_outermost_encrypt_layer_not_accumulation()
     {
-        // Issue #23: for anoncrypt(authcrypt(...)) the OUTERMOST encrypt layer is anoncrypt, so
-        // AnonymousSender must be true even though the inner authcrypt layer binds and authenticates
-        // the sender. The flag is derived from the outermost layer, not OR-accumulated across layers.
+        // Issue #23 — characterization / defense-in-depth (NOT a regression guard: the #17 gate already
+        // rejects the only shapes where the old OR-accumulation would have differed, so this passes on
+        // main too). It pins the documented contract: for anoncrypt(authcrypt(...)) the OUTERMOST encrypt
+        // layer is anoncrypt, so AnonymousSender is true even though the inner authcrypt authenticates
+        // the sender — the flag now reads from the outermost layer rather than OR-accumulating.
         var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
 

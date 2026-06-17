@@ -182,10 +182,11 @@ internal static class EnvelopeReader
                     }
                     catch (ArgumentException ex)
                     {
-                        // Defensive boundary guard (#22, FR-API-07): map any ArgumentException the
-                        // delegated JWS parser might surface for a non-canonical field length to the
-                        // documented unpack contract, so a raw ArgumentException never escapes UnpackAsync.
-                        throw new MalformedMessageException("Malformed JWS field length.", ex);
+                        // Defensive boundary guard (#22, FR-API-07): map any ArgumentException surfacing
+                        // from the delegated JWS parse (a non-canonical field length, or a throwing
+                        // consumer signer lookup) to the documented unpack contract, so a raw
+                        // ArgumentException never escapes UnpackAsync. InnerException is preserved.
+                        throw new MalformedMessageException("Malformed JWS.", ex);
                     }
 
                     // Fail closed: a verified JWS MUST surface a signer kid. Otherwise FR-CONSIST-03
@@ -237,9 +238,10 @@ internal static class EnvelopeReader
                         // parser currently wraps the AEAD's wrong-length-iv/tag ArgumentException as
                         // MalformedJoseException (caught above), but EnvelopeReader's contract promises
                         // only MalformedMessageException/CryptoException — so map ANY ArgumentException
-                        // from the delegate to the contract type rather than let a raw one escape
-                        // UnpackAsync. Generic message; no attacker-influenced detail.
-                        throw new MalformedMessageException("Malformed JWE field length (iv/tag).", ex);
+                        // surfacing from the delegated parse to the contract type rather than let a raw
+                        // one escape UnpackAsync. Neutral message (the cause may be a field length or a
+                        // throwing consumer lookup); the original is preserved as InnerException.
+                        throw new MalformedMessageException("Malformed JWE.", ex);
                     }
 
                     // The loop unwraps outermost→inner, so the first encrypt layer is the outermost one.

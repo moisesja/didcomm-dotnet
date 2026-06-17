@@ -119,13 +119,15 @@ public sealed class ForwardProcessor
         {
             try
             {
-                return Base64Url.Decode(attachment.Data.Base64);
+                // Relaxed decode: attachment data.base64 has no spec no-pad requirement (FR-ATT-02,
+                // cf. Aries RFC 0017), and a mediator only relays the bytes for the recipient to
+                // re-parse strictly — so tolerate '=' padding rather than refuse a peer's forward.
+                // Genuinely-invalid base64 still maps to the documented malformed-input type (a raw
+                // FormatException must not escape ProcessAsync). (#24 + PR #38 review.)
+                return Base64Url.DecodeRelaxed(attachment.Data.Base64);
             }
             catch (FormatException ex)
             {
-                // The attachment payload is attacker-controlled; a non-strict-base64url value must
-                // surface as the documented malformed-input type, not a raw FormatException out of the
-                // mediator's ProcessAsync (#24 — strict Base64Url.Decode widened the rejected set).
                 throw new MalformedMessageException(
                     "Forward attachment 'data.base64' is not valid base64url.", ex);
             }
