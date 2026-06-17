@@ -876,12 +876,22 @@ bool acked = received.Message.Acks.Contains(sentId);
 
 **N. DID rotation (from_prior — FR-ROT-*)**
 ```csharp
-var rotated = Message.Builder(type).From("did:peer:alice2").To("did:peer:bob")
-    .WithDidRotation(newDid: "did:peer:alice2", oldDid: "did:peer:alice",
-                     oldKid: "did:peer:alice#key-1")   // signed via ISecretsResolver
+// Mint the rotation JWT, signed by a key authorized under the PRIOR DID's `authentication`
+// relationship (fetch oldSignerPrivateJwk from your ISecretsResolver). Pass a short lifetime so the
+// token is freshness-bounded and cannot be replayed past the window (FR-ROT-05).
+var fromPrior = await FromPriorBuilder.BuildAsync(
+    new FromPriorClaims(Sub: "did:peer:alice2", Iss: "did:peer:alice",
+                        Iat: DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+    oldSignerPrivateJwk, lifetime: TimeSpan.FromMinutes(5));
+
+var rotated = new MessageBuilder().WithType(type)
+    .WithFrom("did:peer:alice2").WithTo("did:peer:bob")
+    .WithFromPrior(fromPrior)                       // ride the JWT on a sender-authenticated envelope (FR-ROT-01/03)
     .Build();
-// On unpack: res.Metadata.FromPrior is populated and validated.
+// On unpack: unpacked.FromPrior is populated and validated (FR-ROT-01..05).
 ```
+> `MessageBuilder.WithDidRotation(...)` is a possible future DX convenience; today the rotation JWT is
+> minted explicitly via `FromPriorBuilder.BuildAsync` and attached with `WithFromPrior`.
 
 **O. Routing via a mediator (automatic from the recipient's routingKeys — FR-ROUTE-*)**
 ```csharp
@@ -1018,7 +1028,7 @@ This matrix is the traceability artifact behind FR-DX-01/09. Each public API gro
 | Params/results | `PackEncryptedParams`, `PackSignedParams`, `UnpackParams`, `*Result`, `UnpackMetadata`, `SendOptions` | 02, 03 |
 | Message model | `Message`, `Message.Builder`, `Attachment` (+factories), `ContentEncryptionAlgorithm` | 02, 03 |
 | Threading/ACKs | `WithThid/WithPthid/WithPleaseAck/WithAck`, `Message.Empty` | 03, 07 |
-| Rotation | `WithDidRotation`, `UnpackMetadata.FromPrior` | 03 |
+| Rotation | `FromPriorBuilder.BuildAsync`, `MessageBuilder.WithFromPrior`, `UnpackResult.FromPrior` | 03 |
 | DI | `AddDidComm`, `DidCommBuilder.UseNetDidResolver/UseSecretsResolver/UseTransport/AddProtocol/Configure` | 02, 08 |
 | Resolution | `IDidKeyService`, `NetDidKeyService`, `UseNetDidResolver`, `UnsupportedDidMethodException` | 09 |
 | Secrets | `ISecretsResolver`, `Secret`, `NetDidKeyStoreSecretsResolver` | 08 |

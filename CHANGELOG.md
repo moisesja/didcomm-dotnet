@@ -6,6 +6,27 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — rotation JWT compliance (`feat/security-rotation-compliance`)
+
+Resolves two Low-severity audit findings on the `from_prior` rotation path (GitHub issues #25, #26).
+Both passed a PoC-backed adversarial red-team pass; full suite (625 tests) green.
+
+- **`FromPriorBuilder` now emits `exp`/`nbf` (#25, FR-ROT-05).** The builder previously serialized only
+  `{ iat, iss, sub }`, silently discarding any `FromPriorClaims.Exp`/`Nbf` — so every self-issued
+  rotation JWT was non-expiring and the validator-side freshness control (already enforced by
+  `DidCommClient.ValidateFromPriorFreshness`) could never fire on tokens this library minted. Claims are
+  now built via an insertion-ordered `JsonObject` (`exp, iat, iss, nbf, sub`), emitting `exp`/`nbf` only
+  when set (the no-expiry payload is byte-identical to before). A new
+  `BuildAsync(claims, signerJwk, TimeSpan lifetime)` overload sets `exp = iat + lifetime` (rejecting a
+  sub-second lifetime, which would floor to an already-expired token) so issuing a freshness-bounded
+  rotation JWT is one call. The PRD's rotation cookbook/API-matrix is realigned to the actual API
+  (`FromPriorBuilder.BuildAsync` + `MessageBuilder.WithFromPrior`); the previously-documented
+  `WithDidRotation` helper was never built and is noted as possible future DX.
+- **`from_prior` validator rejects a `crit` protected header (#26, RFC 7515 §4.1.11).** The validator
+  hand-parses the JWS header and previously read only `alg`/`kid`, silently ignoring `crit` — unlike
+  `JwsParser`/`JweParser`, which fail closed. It now rejects any `crit` member with `ProtocolException`,
+  before signature verification, bringing the rotation path to parity.
+
 ### Fixed — receive-path correctness (`feat/security-receive-correctness`)
 
 Resolves three Low-severity audit findings on the unpack/JOSE receive surface (GitHub issues
