@@ -11,8 +11,8 @@ namespace DidComm.Protocols.ProblemReport;
 /// <para>
 /// Problem-reports are informational by design — they tell the peer something went wrong on
 /// a thread, but they do not themselves require an application-level reply. So this handler's
-/// "happy path" is to read the code, increment <see cref="DidComm.Threading.ThreadState.ErrorCount"/>
-/// for error-sorter codes, and return <c>null</c>.
+/// "happy path" is to read the code, record it against the failing thread's FR-PROTO-10 budget in
+/// the dedicated <see cref="CascadeBudgetStore"/> (#36) for error-sorter codes, and return <c>null</c>.
 /// </para>
 /// <para>
 /// The one exception is the FR-PROTO-10 cascade guard: once a thread accumulates more than
@@ -25,16 +25,27 @@ namespace DidComm.Protocols.ProblemReport;
 public sealed class ProblemReportHandler : IProtocolHandler
 {
     private readonly ProblemReportOptions _options;
+    private readonly CascadeBudgetStore _cascadeBudget;
     private readonly ILogger<ProblemReportHandler>? _logger;
 
-    /// <summary>Construct the handler with explicit options + optional logger.</summary>
+    /// <summary>Construct the handler with explicit options, an optional dedicated cascade-budget store, and an optional logger.</summary>
     /// <param name="options">Handler options (cascade threshold, etc.). Validated eagerly at ctor so a misconfig surfaces at DI resolution rather than as silently-degraded cascade-guard behaviour.</param>
+    /// <param name="cascadeBudget">
+    /// The dedicated FR-PROTO-10 cascade-budget store (#36), kept separate from the dispatcher's general
+    /// thread store. Defaults to a fresh process-local instance; the DI setup registers one as a
+    /// singleton so the budget's lifetime is decoupled from the handler's (a handler accidentally
+    /// registered non-singleton would otherwise lose its budget per request).
+    /// </param>
     /// <param name="logger">Optional structured logger.</param>
-    public ProblemReportHandler(IOptions<ProblemReportOptions> options, ILogger<ProblemReportHandler>? logger = null)
+    public ProblemReportHandler(
+        IOptions<ProblemReportOptions> options,
+        CascadeBudgetStore? cascadeBudget = null,
+        ILogger<ProblemReportHandler>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _options = options.Value;
         _options.Validate();
+        _cascadeBudget = cascadeBudget ?? new CascadeBudgetStore();
         _logger = logger;
     }
 
@@ -70,46 +81,26 @@ public sealed class ProblemReportHandler : IProtocolHandler
         if (string.IsNullOrEmpty(message.Pthid))
             return Task.FromResult<Message?>(null);
 
-        var failingThread = context.Threads.GetOrCreate(message.Pthid);
+        // FR-PROTO-10 cascade guard. The whole increment + threshold check + trip decision is done
+        // ATOMICALLY inside the dedicated, bounded cascade-budget store (#36) — separate from the
+        // dispatcher's general thread store (which a cheap-thid flood evicts) and self-synchronizing on
+        // a stable pthid-keyed lock (so concurrent reports on the same pthid can't double-emit, even
+        // under the store's LRU eviction). A report is repliable iff it has a usable reply target.
+        bool repliable = !string.IsNullOrEmpty(message.From)
+            && message.To is { Count: > 0 } && !string.IsNullOrEmpty(message.To[0]);
+        var step = _cascadeBudget.RecordErrorReport(message.Pthid, _options.CascadeThreshold, repliable);
 
-        // FR-PROTO-10 cascade guard. The increment + threshold check + trip-emission decision
-        // must be atomic per-thread, otherwise concurrent inbound reports on the same pthid
-        // race on `ErrorCount` and either double-emit the cascade-stop or skip the trip entirely.
-        // Lock on the ThreadState instance — it is shared between callers of the same pthid via
-        // IThreadStateStore.GetOrCreate, so it is the natural lock seam.
-        bool shouldEmit = false;
-        int errorCountSnapshot = 0;
-        lock (failingThread)
+        if (step.Log)
         {
-            // Truly silent after the trip has fired: no increment, no log, no work. (Previously
-            // every post-trip report still mutated state and emitted an Information log line,
-            // turning "silently ignored" into a DoS-shaped log-flood + unbounded counter growth.)
-            if (failingThread.MaxErrorsNoticeSent)
-                return Task.FromResult<Message?>(null);
-
-            failingThread.ErrorCount++;
-            errorCountSnapshot = failingThread.ErrorCount;
             _logger?.LogInformation(
                 "Inbound problem-report on thread {Pthid}: code={Code}, errorCount={Count}/{Threshold}",
-                message.Pthid, code.Value, errorCountSnapshot, _options.CascadeThreshold);
-
-            if (errorCountSnapshot > _options.CascadeThreshold)
-            {
-                // We need a repliable target to emit the cascade-stop. If this report is anoncrypt
-                // (no `from`) or addressless, DEFER the trip — leave MaxErrorsNoticeSent=false so
-                // the next repliable report on the same pthid can fire the trip. Without this
-                // deferral, an unrepliable report sets the counter past the threshold; the next
-                // report falls into the silent-ignore branch above and the cascade-stop is never
-                // emitted (FR-PROTO-10 silently broken).
-                if (string.IsNullOrEmpty(message.From) || message.To is not { Count: > 0 } || string.IsNullOrEmpty(message.To[0]))
-                    return Task.FromResult<Message?>(null);
-
-                failingThread.MaxErrorsNoticeSent = true;
-                shouldEmit = true;
-            }
+                message.Pthid, code.Value, step.Count, _options.CascadeThreshold);
         }
 
-        if (!shouldEmit) return Task.FromResult<Message?>(null);
+        if (!step.Emit)
+            return Task.FromResult<Message?>(null);
+
+        var errorCountSnapshot = step.Count;
 
         // Build + log the cascade-stop OUTSIDE the per-thread lock — MessageBuilder allocations
         // and logging shouldn't contend on the lock.

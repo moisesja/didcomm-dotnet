@@ -97,6 +97,9 @@ public sealed class DidCommBuilder
         AddProtocol<EmptyHandler>();
         AddProtocol<DiscoverFeaturesHandler>();
         AddProtocol<ProblemReportHandler>();
+        // The FR-PROTO-10 cascade budget (#36) lives in a dedicated store registered as its OWN
+        // singleton, so the budget persists even if the handler is (mis)registered non-singleton.
+        Services.TryAddSingleton<CascadeBudgetStore>();
         // ProblemReportOptions is bound via the standard Options pattern; default ctor's
         // CascadeThreshold = 5 is the SICPA-python-matching default per locked decision.
         Services.AddOptions<ProblemReportOptions>();

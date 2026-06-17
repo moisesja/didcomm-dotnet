@@ -24,17 +24,16 @@ public sealed class ThreadState
     public IReadOnlyList<string>? AcceptLang { get; set; }
 
     /// <summary>
-    /// Count of problem-reports produced on this thread. Used by the FR-PROTO-10 cascade
-    /// guard (Phase 6.2c) to emit <c>e.p.req.max-errors-exceeded</c> once the per-thread
-    /// threshold trips and then stop responding on the thread. Implementations / tests MAY
-    /// increment this directly; concurrent callers MUST hold the per-instance lock
-    /// (<see cref="ThreadState"/> exposes itself as the lock seam — see remarks).
+    /// General-purpose mutable per-thread error counter for consumer use. <b>Note:</b> the built-in
+    /// FR-PROTO-10 cascade guard no longer uses this field — it keeps its budget in a dedicated,
+    /// separate store (<c>CascadeBudgetStore</c>) so a flood of cheap thids in the general store can't
+    /// evict and reset it (#36). Retained for consumers who track their own per-thread counts.
     /// </summary>
     public int ErrorCount { get; set; }
 
     /// <summary>
-    /// Set to <c>true</c> the moment the FR-PROTO-10 cascade-stop notice has been emitted on
-    /// this thread, so the handler can short-circuit subsequent reports without further work.
+    /// General-purpose per-thread flag for consumer use. <b>Note:</b> as with <see cref="ErrorCount"/>,
+    /// the built-in cascade guard no longer reads or writes this — see <c>CascadeBudgetStore</c> (#36).
     /// </summary>
     public bool MaxErrorsNoticeSent { get; set; }
 
