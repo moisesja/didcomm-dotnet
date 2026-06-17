@@ -10,11 +10,16 @@ namespace DidComm.Threading;
 /// <remarks>
 /// The three rules from §ACKs (DIDComm v2.1):
 /// <list type="number">
-///   <item><description><see cref="IsSafeToSend"/>: never send a pure ACK that also requests an ACK (rule 2).</description></item>
-///   <item><description>Protocols MUST honor at most one ACK request per incoming message (rule 1) — enforced
-///     in the dispatcher by replying exactly once.</description></item>
-///   <item><description>Protocols MUST drop a pure ACK that arrives in response to one's own ACK request (rule 3) —
-///     enforced in the dispatcher using <see cref="IsPureAck"/> + thread bookkeeping.</description></item>
+///   <item><description>Protocols MUST honor at most one ACK request per incoming message (rule 1) — the
+///     dispatcher replies exactly once per inbound.</description></item>
+///   <item><description><see cref="IsSafeToSend"/>: never send a pure ACK that also requests an ACK
+///     (rule 2). The dispatcher additionally drops an <em>inbound</em> pure ACK that also requests an
+///     ACK (a peer's rule-2 violation that would otherwise loop).</description></item>
+///   <item><description>Protocols MUST drop a pure ACK that arrives in response to one's own ACK request
+///     (rule 3) — the dispatcher records on the thread (<c>ThreadState.AckRequested</c>) each ACK request
+///     it emits and, via <see cref="IsPureAck"/>, consumes the answering pure ACK instead of dispatching
+///     it. This covers ACK requests the dispatcher emits; ACK requests a host sends via the facade
+///     directly are the application's responsibility to reconcile.</description></item>
 /// </list>
 /// </remarks>
 public static class AckLoopGuard

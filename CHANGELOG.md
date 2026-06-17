@@ -6,6 +6,40 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security — protocol & transport hardening (`feat/security-protocol-hardening`)
+
+Resolves four scattered Low/Info findings (GitHub issues #27, #30, #31, #34); #32 closed as
+spec-compliant (no change — see below). Each fix passed a PoC-backed adversarial red-team pass that
+caught two real residuals (folded in). Full suite (648 tests) green.
+
+- **`web_redirect.redirectUrl` validated (#30).** `OutOfBand.ReadWebRedirect` previously returned the
+  peer-supplied URL verbatim; it now returns `null` unless the value is an absolute `http`/`https` URL
+  with no userinfo and a non-private host, and returns the canonical (normalized) form. Closes a
+  `javascript:`/`data:`/`file:` and `user@host`-phishing passthrough on the documented "may navigate to"
+  target. (A public-host open redirect remains by design — there is intentionally no allowlist here, so
+  consumers MUST still confirm before navigating.)
+- **OOB invitation `from` enforced (#34).** `OutOfBand.FromPlaintext` (the single inbound choke point)
+  now rejects an invitation with an absent **or whitespace-only** `from` (`FormatException`, FR-OOB-01),
+  matching the build side (which likewise tightened to `ThrowIfNullOrWhiteSpace`).
+- **FR-THR-04 rule 3 implemented (#31).** The dispatcher now records each ACK request it emits
+  (`ThreadState.AckRequested`) and consumes the answering pure-ACK instead of re-dispatching it, rather
+  than only doing a rule-2-shaped check. `AckLoopGuard`'s remarks are corrected to describe exactly what
+  is enforced (ACK requests sent via the facade directly remain the application's responsibility).
+- **Single source of truth for the outbound SSRF policy (#27).** `HttpTransportOptions` /
+  `WebSocketTransportOptions` `OutboundEndpointPolicy` are now nullable (`null` = inherit
+  `DidCommOptions.OutboundEndpointPolicy`), so configuring the policy in one place governs the facade
+  pre-send check and both transports' connect-time pin alike. The default stays strict
+  (`BlockPrivateNetworks = true`). **Behavior change:** because the transports now inherit the core
+  policy, setting `DidCommOptions.OutboundEndpointPolicy.BlockPrivateNetworks = false` (or another
+  permissive core setting) now relaxes the transport connect-time guard as well — previously each
+  transport kept an independent strict default. This is the intended single-source consistency; set an
+  explicit per-transport policy only to diverge deliberately (note: the facade pre-send always uses the
+  core policy).
+- **#32 (JWS `typ` not validated on verify) — no change, spec-compliant.** The cited local parser was
+  delegated to `DataProofsDotnet.Jose` (which does not surface `typ`); RFC 7515 §4.1.9 makes `typ`
+  advisory, FR-SIG-04 has no MUST to validate it on receive, and envelope kind is determined
+  structurally (no confusion risk). Closed with rationale.
+
 ### Security — problem-report cascade-guard redesign (`feat/security-cascade-guard`)
 
 Resolves two FR-PROTO-10 cascade-guard findings (GitHub issues #29, #36), addressed together since both

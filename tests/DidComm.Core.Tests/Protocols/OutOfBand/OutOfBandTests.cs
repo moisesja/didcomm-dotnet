@@ -207,6 +207,65 @@ public sealed class OutOfBandTests
         OutOfBandApi.ReadWebRedirect(message).Should().BeNull();
     }
 
+    [Theory]
+    [InlineData("javascript:alert(1)")]                       // script URI
+    [InlineData("data:text/html,<script>1</script>")]         // data URI
+    [InlineData("file:///etc/passwd")]                        // file URI
+    [InlineData("/relative/only")]                            // not absolute
+    [InlineData("http://127.0.0.1/admin")]                    // private IPv4 literal
+    [InlineData("http://2130706433/admin")]                   // decimal-encoded 127.0.0.1
+    [InlineData("https://[::1]/admin")]                       // loopback IPv6 literal
+    [InlineData("https://[::ffff:127.0.0.1]/admin")]          // IPv4-mapped loopback
+    [InlineData("https://good.example@evil.example/login")]   // userinfo phishing-display (#30 red-team)
+    public void ReadWebRedirect_rejects_unsafe_redirect_url(string hostile)
+    {
+        // #30: the peer-supplied redirectUrl is documented as a "may navigate to" target. Anything that
+        // is not an absolute http/https URL to a non-private host must parse to null, never reaching the
+        // consumer as trusted-looking navigation data.
+        var message = Message.Empty().WithFrom("did:example:a").WithTo("did:example:b").Build();
+        message.AdditionalHeaders = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["web_redirect"] = System.Text.Json.JsonSerializer.SerializeToElement(new { status = "OK", redirectUrl = hostile }),
+        };
+        OutOfBandApi.ReadWebRedirect(message).Should().BeNull();
+    }
+
+    [Fact]
+    public void ReadWebRedirect_allows_an_absolute_https_url()
+    {
+        var message = Message.Empty().WithFrom("did:example:a").WithTo("did:example:b").Build();
+        message.AdditionalHeaders = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["web_redirect"] = System.Text.Json.JsonSerializer.SerializeToElement(new { status = "OK", redirectUrl = "https://verifier.example/done" }),
+        };
+        OutOfBandApi.ReadWebRedirect(message)!.RedirectUrl.Should().Be("https://verifier.example/done");
+    }
+
+    [Fact]
+    public void ReadWebRedirect_returns_the_canonical_url_stripping_leading_control_chars()
+    {
+        // #30 red-team: a leading control char is tolerated by Uri parsing; the returned value must be
+        // the canonical (stripped) URL, not the raw string, so a downstream sink can't mishandle it.
+        var message = Message.Empty().WithFrom("did:example:a").WithTo("did:example:b").Build();
+        message.AdditionalHeaders = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["web_redirect"] = System.Text.Json.JsonSerializer.SerializeToElement(new { status = "OK", redirectUrl = "\thttps://verifier.example/done" }),
+        };
+        OutOfBandApi.ReadWebRedirect(message)!.RedirectUrl.Should().Be("https://verifier.example/done");
+    }
+
+    [Theory]
+    [InlineData("""{"type":"https://didcomm.org/out-of-band/2.0/invitation","id":"abc"}""")]            // from absent
+    [InlineData("""{"type":"https://didcomm.org/out-of-band/2.0/invitation","id":"abc","from":""}""")]   // from empty
+    [InlineData("""{"type":"https://didcomm.org/out-of-band/2.0/invitation","id":"abc","from":" "}""")]  // whitespace-only (#34 red-team)
+    public void FromPlaintext_rejects_invitation_missing_required_from_FrOob01(string fromless)
+    {
+        // #34: FR-OOB-01 marks `from` REQUIRED. A from-less / whitespace-only-from invitation must be
+        // rejected on parse — the build side enforces it, so the parse side must too.
+        Action act = () => OutOfBandApi.FromPlaintext(fromless);
+        act.Should().Throw<FormatException>().WithMessage("*FR-OOB-01*");
+    }
+
     [Fact]
     public void FromUrl_ignores_a_trailing_url_fragment()
     {

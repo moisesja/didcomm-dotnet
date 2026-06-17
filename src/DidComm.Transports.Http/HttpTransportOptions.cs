@@ -37,8 +37,14 @@ public sealed class HttpTransportOptions
     /// <summary>
     /// SSRF-defense policy enforced at TCP connect time (via the named client's
     /// <c>SocketsHttpHandler.ConnectCallback</c>). Because it pins each connection — including every
-    /// followed 307 redirect — to a vetted IP, it also defeats redirect-to-internal and DNS
-    /// rebinding. Defaults to blocking private / loopback / link-local / metadata destinations.
+    /// followed 307 redirect — to a vetted IP, it also defeats redirect-to-internal and DNS rebinding.
     /// </summary>
-    public OutboundEndpointPolicy OutboundEndpointPolicy { get; set; } = new();
+    /// <remarks>
+    /// <c>null</c> (the default) means <b>inherit</b> the single source of truth,
+    /// <c>DidCommOptions.OutboundEndpointPolicy</c> (which itself defaults to blocking private /
+    /// loopback / link-local / metadata destinations), so configuring the policy in one place applies
+    /// to the pre-send check and the transport connect-time pin alike (#27). Set a non-null value only
+    /// to give this transport a policy distinct from the core one.
+    /// </remarks>
+    public OutboundEndpointPolicy? OutboundEndpointPolicy { get; set; }
 }

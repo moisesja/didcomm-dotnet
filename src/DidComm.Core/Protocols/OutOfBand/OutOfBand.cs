@@ -1,8 +1,10 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Messages;
+using DidComm.Transports;
 
 namespace DidComm.Protocols.OutOfBand;
 
@@ -73,7 +75,7 @@ public static class OutOfBand
         IEnumerable<Attachment>? attachments = null,
         string? id = null)
     {
-        ArgumentException.ThrowIfNullOrEmpty(from);
+        ArgumentException.ThrowIfNullOrWhiteSpace(from); // FR-OOB-01: reject empty AND whitespace-only (#34)
 
         var builder = new MessageBuilder().WithType(InvitationType).WithFrom(from);
         if (!string.IsNullOrEmpty(id))
@@ -171,6 +173,15 @@ public static class OutOfBand
         // Surface structural problems (missing id, bad chars, malformed attachments) as the
         // library's standard malformed-message error.
         message.Validate();
+
+        // FR-OOB-01: `from` is REQUIRED on an invitation. Message.Validate() only rejects control chars
+        // in `from` when present, so enforce presence here at the single inbound choke point. Reject
+        // whitespace-only `from` too (a space / NBSP is not a resolvable DID) — IsNullOrEmpty would let
+        // it through (#34, red-team). Mirrors the build-side ThrowIfNullOrWhiteSpace in CreateInvitation.
+        if (string.IsNullOrWhiteSpace(message.From))
+            throw new FormatException(
+                "Out-of-band invitation is missing the REQUIRED 'from' header (FR-OOB-01).");
+
         return new OutOfBandInvitation(message);
     }
 
@@ -241,7 +252,45 @@ public static class OutOfBand
         var redirectUrl = element.TryGetProperty("redirectUrl", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
         if (string.IsNullOrEmpty(status) || string.IsNullOrEmpty(redirectUrl))
             return null;
-        return new WebRedirect(status, redirectUrl);
+
+        // The redirectUrl is attacker-controlled (web_redirect rides in a peer-supplied message) and is
+        // documented as a "may navigate to" target. Reject anything that isn't an absolute http/https
+        // URL to a non-private host — a hostile `javascript:`/`data:`/`file:` value, a relative URL, or
+        // a `user@host` phishing-display form must never reach the consumer as a navigation target (#30).
+        // (Like the TraceObserver scheme guard, but WITHOUT an allowlist: a public http(s) host is still
+        // permitted, so the consumer MUST confirm before navigating.)
+        if (!IsSafeRedirectUrl(redirectUrl, out var canonical))
+            return null;
+
+        return new WebRedirect(status, canonical);
+    }
+
+    /// <summary>
+    /// True when <paramref name="url"/> is an absolute <c>http</c>/<c>https</c> URL with no userinfo and
+    /// whose host, if an IP literal, is not private/reserved — the only shape safe to surface as a
+    /// navigation target (#30). On success <paramref name="canonical"/> is the normalized URL (leading
+    /// control chars stripped). DNS hostnames are not resolved here (the consumer's / connect-time concern).
+    /// </summary>
+    private static bool IsSafeRedirectUrl(string url, out string canonical)
+    {
+        canonical = url;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+            return false;
+        if (parsed.Scheme is not ("http" or "https"))
+            return false;
+        // A legitimate redirect target never carries userinfo; `https://good.example@evil/` displays the
+        // benign host but navigates to `evil`, so reject it outright.
+        if (!string.IsNullOrEmpty(parsed.UserInfo))
+            return false;
+        if ((parsed.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
+            && IPAddress.TryParse(parsed.Host, out var ip)
+            && OutboundEndpointGuard.IsPrivateOrReserved(ip))
+        {
+            return false;
+        }
+
+        canonical = parsed.AbsoluteUri;
+        return true;
     }
 
     private static char Separator(string baseUrl) => baseUrl.Contains('?') ? '&' : '?';

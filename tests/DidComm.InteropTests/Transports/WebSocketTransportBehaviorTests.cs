@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using DidComm.Exceptions;
+using DidComm.Facade;
 using DidComm.Transports;
 using DidComm.Transports.WebSocket;
 using FluentAssertions;
@@ -47,8 +48,9 @@ public sealed class WebSocketTransportBehaviorTests
         {
             AllowedSchemes = new[] { "ws", "wss" },
             MaxReconnectAttempts = 0,
+            // Explicit transport policy (#27 made the policy nullable = inherit-core-by-default).
+            OutboundEndpointPolicy = new OutboundEndpointPolicy { ResolveDnsNames = false },
         });
-        options.Value.OutboundEndpointPolicy.ResolveDnsNames = false;
         await using var transport = new WebSocketDidCommTransport(options);
 
         // 'localhost' is a DNS name (not an IP literal) that resolves only to loopback. Port 9 is
@@ -154,6 +156,34 @@ public sealed class WebSocketTransportBehaviorTests
         await transport.DisposeAsync();
 
         kinds.Should().Contain(WebSocketLifecycleEventKind.Disconnected);
+    }
+
+    [Fact]
+    public async Task SendAsync_inherits_core_OutboundEndpointPolicy_when_transport_policy_unset()
+    {
+        // #27: the WS transport's OutboundEndpointPolicy is null by default = inherit the single source
+        // of truth (DidCommOptions). A core policy that does NOT block private networks must be honored —
+        // localhost then passes the SSRF guard and the connect fails for a DIFFERENT reason. With the
+        // default (blocking) policy, localhost would be rejected as "private or reserved".
+        var wsOptions = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws", "wss" },
+            MaxReconnectAttempts = 0,
+            // OutboundEndpointPolicy left null → inherit the core policy below.
+        });
+        var core = Options.Create(new DidCommOptions
+        {
+            OutboundEndpointPolicy = new OutboundEndpointPolicy { BlockPrivateNetworks = false },
+        });
+        await using var transport = new WebSocketDidCommTransport(wsOptions, logger: null, coreOptions: core);
+
+        var request = new TransportRequest(
+            new Uri("ws://localhost:9/socket"), new byte[] { 1 }, "application/didcomm-encrypted+json");
+
+        var ex = (await ((Func<Task>)(() => transport.SendAsync(request, default)))
+            .Should().ThrowAsync<TransportException>()).Which;
+        FlattenMessages(ex).Should().NotContain("private or reserved",
+            "the permissive core policy was inherited, so localhost is not SSRF-blocked");
     }
 
     private static TransportRequest NewRequest() =>

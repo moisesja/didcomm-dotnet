@@ -74,13 +74,30 @@ public sealed class ProtocolDispatcher
                 received.Message.Id, traceUri);
         }
 
-        // FR-THR-04 rule 3 (defensive enforcement of a peer's rule-2 violation):
-        // if the inbound is a pure ACK that ALSO requests an ACK, dropping it here prevents
-        // an infinite ACK loop. We never invoke the handler — log and move on.
+        // FR-THR-04 rule 3: a pure ACK that answers an ACK THIS agent requested on the thread must be
+        // consumed, not dispatched — honoring it (e.g. a handler replying) is what closes an ACK loop.
+        // Only ACK requests the dispatcher itself emitted are tracked (see the reply path below); a
+        // request sent via the facade directly is the application's responsibility. Fetch the thread
+        // only for a pure ACK so unrelated traffic doesn't allocate state here.
+        if (AckLoopGuard.IsPureAck(received.Message))
+        {
+            var ackThread = _threads.GetOrCreate(received.Message.Thid ?? received.Message.Id);
+            if (ackThread.AckRequested)
+            {
+                ackThread.AckRequested = false;
+                _logger?.LogInformation(
+                    "Consumed inbound pure-ACK answering our ACK request (FR-THR-04 rule 3); not dispatched. Message id: {MessageId}",
+                    received.Message.Id);
+                return new DispatchOutcome(DispatchResult.DroppedAsAckLoop, Reply: null, Handler: null);
+            }
+        }
+
+        // FR-THR-04 rule 2 (defensive enforcement of a peer's violation): an inbound pure ACK that ALSO
+        // requests an ACK would loop both peers forever. Drop it without invoking a handler.
         if (AckLoopGuard.IsPureAck(received.Message) && AckLoopGuard.RequestsAck(received.Message))
         {
             _logger?.LogWarning(
-                "Dropped inbound pure-ACK that also requests an ACK (FR-THR-04 rule 3). Message id: {MessageId}",
+                "Dropped inbound pure-ACK that also requests an ACK (peer's FR-THR-04 rule 2 violation). Message id: {MessageId}",
                 received.Message.Id);
             return new DispatchOutcome(DispatchResult.DroppedAsAckLoop, Reply: null, Handler: null);
         }
@@ -108,6 +125,11 @@ public sealed class ProtocolDispatcher
             throw new InvalidOperationException(
                 $"Protocol handler '{handler.ProtocolUri}' returned a reply that violates FR-THR-04 rule 2 (a pure ACK MUST NOT also request an ACK). Reply id: '{reply.Id}'.");
         }
+
+        // FR-THR-04 rule-3 bookkeeping: if this reply requests an ACK, remember it on the thread so the
+        // answering pure-ACK is consumed (above) rather than re-dispatched into a loop.
+        if (AckLoopGuard.RequestsAck(reply))
+            thread.AckRequested = true;
 
         return new DispatchOutcome(DispatchResult.ReplyProduced, reply, handler);
     }
