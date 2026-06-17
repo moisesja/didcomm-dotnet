@@ -548,3 +548,30 @@ Format per entry:
   validated URL you surface to a consumer, return the canonical `AbsoluteUri` and reject userinfo. When a
   comment claims a fix "mirrors" an existing guard, verify parity — the OOB redirect guard is the scheme
   half of TraceObserver's, NOT its allowlist; say so rather than overclaim.
+
+## L-030 — A constant-time floor must cover ONLY the secret-dependent window, and a fixed floor cannot mask an unbounded tail.
+
+- **Lesson:** Closing the #25/L-025 timing residual (#35) with a response-time floor took two red-team
+  iterations to get right. (a) **Floor the right window.** The first cut captured the start timestamp at
+  HTTP handler entry — *before* the up-to-`MaxReceiveBytes` (1 MiB) body read. Body-read time is
+  attacker-controlled and kid-independent, but it was charged against the floor, so a peer padding the
+  envelope toward the size cap made the read alone exhaust the floor (`remaining ≤ 0`), the pad collapsed
+  to zero, and the held-vs-unheld crypto gap was re-exposed. Fix: start the clock *after* the body read,
+  budgeting only the unpack window where the secret-dependent timing actually lives. (b) **A fixed floor
+  only masks paths that finish UNDER it.** The held-only decrypt-then-network-DID-resolution path
+  (authcrypt sender / FR-CONSIST-06 / `from_prior`) can run *longer* than any sane floor — an
+  attacker-controlled slow `did:webvh` sender turns the floor into a clean threshold: "response ≫ floor ⇒
+  held". My first draft comment rationalized this away as "unreachable for an unheld kid, so masked" —
+  which is exactly backwards: unreachable-for-the-other-class IS the discriminator. Honest disposition:
+  document it as an unbounded residual and point operators at auth / a rate-limiter (the deployment
+  tradeoff the issue itself named), don't claim closure.
+- **Why:** A timing defense is only as good as (1) the window it measures — anything constant-time-padded
+  must exclude attacker-controlled, secret-independent preamble, or the attacker inflates the preamble to
+  evict the pad; and (2) the assumption that the padded work finishes under the floor — a network/IO tail
+  on the secret-holding branch breaks that and a fixed floor can't fix unbounded latency.
+- **How to apply:** When you add a constant-time floor: measure from immediately before the
+  secret-dependent work, not from request entry; add a regression test with a *large* input on the padded
+  path (not just a tiny one) to prove the preamble can't evict the floor; and when a branch has an
+  unbounded (network) tail reachable only when the secret is present, say plainly that the floor does not
+  close it and name the compensating control — never argue "the other class can't reach it" as if that
+  hid the signal. Always re-run the break-it adversarial pass on the *revised* fix, not just the first.

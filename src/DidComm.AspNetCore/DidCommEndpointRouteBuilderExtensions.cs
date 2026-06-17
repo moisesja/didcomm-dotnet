@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Net.Mime;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
@@ -83,6 +84,13 @@ public static class DidCommEndpointRouteBuilderExtensions
 
             var logger = httpContext.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
 
+            // #35: start the constant-time clock HERE — after the body has been read — so the floor
+            // budgets only the unpack window where the recipient-kid-dependent timing lives. The body
+            // read is kid-independent (the peer chose its size), so charging it against the floor would
+            // let a peer pad the request out to MaxReceiveBytes, exhaust the floor before any crypto,
+            // and re-expose the held-vs-unheld gap (PR #43 red-team).
+            var startTimestamp = Stopwatch.GetTimestamp();
+
             UnpackResult unpacked;
             try
             {
@@ -99,7 +107,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // downstream DID-resolution timeout (TaskCanceledException : OperationCanceledException
                 // with the request token NOT cancelled, e.g. an attacker-controlled did:webvh host that
                 // hangs). Only a real client abort is rethrown above, so there is no 400-vs-500 oracle.
-                return NormalizedReceiveRejection(logger, ex);
+                return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
             }
 
             // The message was received and unpacked; HTTP receive is one-way / fire-and-forget
@@ -170,6 +178,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             }
 
+            // #35: start the constant-time clock after the (kid-independent) body read, covering only
+            // the unpack+dispatch window where the recipient-kid-dependent timing lives — see the
+            // matching note in the callback overload above.
+            var startTimestamp = Stopwatch.GetTimestamp();
+
             // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException),
             // an unpack rejection (crypto/malformed/consistency/resolution), and a downstream
             // DID-resolution timeout (TaskCanceledException with the request token NOT cancelled) all
@@ -188,7 +201,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             }
             catch (Exception ex)
             {
-                return NormalizedReceiveRejection(logger, ex);
+                return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
             }
         });
     }
@@ -344,6 +357,11 @@ public static class DidCommEndpointRouteBuilderExtensions
 
                 var packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
 
+                // #35: the recipient-kid timing side-channel that the HTTP receive path pads against
+                // (see DelayToRejectionFloorAsync) does NOT apply here — a failed unpack is logged and
+                // discarded with NOTHING written back on the socket, so there is no per-message response
+                // for a peer to time. We deliberately do not pad the discard: it would add latency to the
+                // whole multiplexed message stream on the connection for a far weaker, noisier signal.
                 UnpackResult unpacked;
                 try
                 {
@@ -512,8 +530,18 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// status code or response text as a decryption / recipient-kid / DID-resolution oracle (issues
     /// #20/#28/#33). The detailed reason is logged server-side only. The WebSocket paths already take
     /// this posture (log-and-discard, echo nothing); this brings the HTTP paths to parity.
+    /// <para>
+    /// #35: the uniform body/status alone is not enough — the response <em>time</em> still partitioned
+    /// the failures (a held recipient kid runs the full ECDH/AEAD path; an unheld one fast-fails before
+    /// any crypto), so a single timed request enumerated which keys the agent holds. Before returning
+    /// the 400 we therefore pad the response out to <paramref name="rejectionFloor"/> measured from
+    /// <paramref name="startTimestamp"/> (captured after the body read, so the floor budgets only the
+    /// unpack window), making the rejection time independent of the crypto work done. See
+    /// <see cref="DelayToRejectionFloorAsync"/>.
+    /// </para>
     /// </summary>
-    private static IResult NormalizedReceiveRejection(ILogger? logger, Exception ex)
+    private static async Task<IResult> NormalizedReceiveRejectionAsync(
+        ILogger? logger, Exception ex, long startTimestamp, TimeSpan rejectionFloor)
     {
         if (ex is DidCommException)
         {
@@ -527,7 +555,41 @@ public static class DidCommEndpointRouteBuilderExtensions
             logger?.LogError(ex, "DidComm receive: inbound processing failed ({Reason}).", ex.GetType().Name);
         }
 
+        await DelayToRejectionFloorAsync(startTimestamp, rejectionFloor).ConfigureAwait(false);
         return Results.StatusCode(StatusCodes.Status400BadRequest);
+    }
+
+    /// <summary>
+    /// #35: wait until at least <paramref name="floor"/> has elapsed since <paramref name="startTimestamp"/>
+    /// (captured after the body read, so the floor budgets only the unpack window) before the caller
+    /// returns its rejection. This pins the cheap, universal enumeration probe — garbage ciphertext to a
+    /// guessed kid — to a constant time: the fast-fail "unheld kid" path and the full-crypto "held kid +
+    /// AEAD fail" path both finish well under the floor and so are padded to the same duration.
+    /// <para>
+    /// The wait is deliberately <b>not</b> cancelable: a cancelable delay would let a peer abort the
+    /// connection early to skip the pad and re-expose the timing gap. <see cref="Task.Delay(TimeSpan)"/>
+    /// is timer-backed and holds no thread, so padding a soon-to-be-rejected request is cheap.
+    /// </para>
+    /// <para>
+    /// LIMITATION (documented, not fixed by a fixed floor): a fixed floor only masks failures that
+    /// finish <em>under</em> it. The held-only path that decrypts and then does network DID resolution
+    /// (authcrypt sender / FR-CONSIST-06 / from_prior) can run <em>longer</em> than the floor — and an
+    /// attacker who can drive that (e.g. authcrypt to a guessed kid signed by an attacker-controlled,
+    /// deliberately-slow did:webvh sender) sees "response ≫ floor" for a held kid versus "response ≈
+    /// floor" for an unheld one. That residual is unbounded (network latency), so a fixed floor cannot
+    /// close it without an absurd value; mitigate it with auth / a rate-limiter in front of the receive
+    /// endpoint (the deployment tradeoff the #35 issue calls out, tracked in #44). The durable fix for
+    /// the local-crypto gap is constant-time recipient-kid selection in the JWE parser, tracked upstream.
+    /// </para>
+    /// </summary>
+    internal static async Task DelayToRejectionFloorAsync(long startTimestamp, TimeSpan floor)
+    {
+        if (floor <= TimeSpan.Zero)
+            return;
+
+        var remaining = floor - Stopwatch.GetElapsedTime(startTimestamp);
+        if (remaining > TimeSpan.Zero)
+            await Task.Delay(remaining).ConfigureAwait(false);
     }
 
     private static async Task ReceiveLoopAsync(
@@ -570,6 +632,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // FR-TRN-09: the reassembled bytes are exactly one packed envelope.
                 var packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
 
+                // #35: no constant-time pad here (unlike the HTTP 400 path) — a failed unpack is logged
+                // and discarded with nothing written back, so there is no per-message response a peer can
+                // time to enumerate held recipient kids.
                 try
                 {
                     var unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
