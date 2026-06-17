@@ -17,6 +17,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using NetDid.Core;
+using NetDid.Core.Model;
 using Xunit;
 
 namespace DidComm.InteropTests.Transports;
@@ -111,13 +113,143 @@ public sealed class AspNetCoreReceiveRoundTripTests
 
         var response = await client.SendAsync(request);
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        // Issue #20: the body carries no detail (no Problem JSON) that could form an oracle.
+        (await response.Content.ReadAsStringAsync()).Should().BeEmpty();
     }
 
-    private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(Action<DidCommOptions>? configureOptions = null)
+    [Fact]
+    public async Task Receive_rejections_are_indistinguishable_so_there_is_no_oracle()
+    {
+        // Issues #20/#28: a malformed envelope (MalformedMessageException), an undecryptable one
+        // (CryptoException), and a self-consistent forgery that fails an addressing rule
+        // (ConsistencyException) MUST all yield the SAME response — same 400 status, same empty body.
+        // Previously crypto failures leaked the failing recipient kid / layer, and a ConsistencyException
+        // escaped to a 500 (+ dev stack trace), so a peer could distinguish the failure class.
+        var (server, _) = await BuildServerAsync();
+
+        var malformed = "not even json";
+        var undecryptable = CorruptField(await PackAnoncryptForBobAsync(), "ciphertext");
+        var forged = await PackMismatchedFromAuthcryptAsync();
+
+        var results = new[]
+        {
+            await PostEnvelopeAsync(server, malformed),
+            await PostEnvelopeAsync(server, undecryptable),
+            await PostEnvelopeAsync(server, forged),
+        };
+
+        results.Should().AllSatisfy(r =>
+        {
+            r.Status.Should().Be(HttpStatusCode.BadRequest);
+            r.Body.Should().BeEmpty(); // no kid / layer / DID / stack-trace text distinguishes the classes
+        });
+    }
+
+    private static DidCommClient NewPackerClient()
+    {
+        var actors = SpecActorRegistry.LoadDefault();
+        var resolver = LoadResolver();
+        var keyService = new NetDidKeyService(resolver);
+        var serviceResolver = new NetDidServiceEndpointResolver(resolver, keyService, new DidCommOptions());
+        return new DidCommClient(actors.AsSecretsResolver(), keyService, serviceResolver, new DidCommOptions());
+    }
+
+    private static async Task<string> PackAnoncryptForBobAsync()
+    {
+        var packed = await NewPackerClient().PackEncryptedAsync(
+            NewProposal(), new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }));
+        return packed.Message;
+    }
+
+    private static async Task<string> PackMismatchedFromAuthcryptAsync()
+    {
+        // authcrypt skid = alice, but the inner plaintext claims from = carol → FR-CONSIST-01 fails
+        // on unpack (a self-consistent forgery the server can fully decrypt before rejecting).
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithFrom("did:example:carol")
+            .WithTo("did:example:bob")
+            .WithBody(System.Text.Json.Nodes.JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+        var packed = await NewPackerClient().PackEncryptedAsync(
+            message, new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"));
+        return packed.Message;
+    }
+
+    private static string CorruptField(string jweJson, string field)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(jweJson)!.AsObject();
+        var original = node[field]!.GetValue<string>();
+        var flipped = original[..^1] + (original[^1] == 'A' ? 'B' : 'A'); // still valid base64url; AEAD tag fails
+        node[field] = flipped;
+        return node.ToJsonString();
+    }
+
+    private static async Task<(HttpStatusCode Status, string Body)> PostEnvelopeAsync(TestServer server, string body)
+    {
+        using var client = server.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/didcomm")
+        {
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes(body)),
+        };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/didcomm-encrypted+json");
+        using var response = await client.SendAsync(request);
+        return (response.StatusCode, await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Throwing_onReceive_callback_still_returns_202_not_a_500_oracle()
+    {
+        // Issue #20 red-team: a consumer callback that throws after a successful unpack must NOT escape
+        // as a 500 — otherwise an attacker could probe "did this envelope decrypt for us?" by inducing
+        // the throw, re-exposing the unpack-success oracle. The receive is one-way: log + ack 202.
+        var (server, _) = await BuildServerAsync(
+            onReceive: (_, _) => throw new InvalidOperationException("downstream handler blew up"));
+
+        var valid = await PackAnoncryptForBobAsync();
+        var result = await PostEnvelopeAsync(server, valid);
+
+        result.Status.Should().Be(HttpStatusCode.Accepted); // 202, not 500
+    }
+
+    [Fact]
+    public async Task Downstream_resolution_timeout_returns_400_not_a_500_oracle()
+    {
+        // PR #37 review: a downstream DID-resolution timeout surfaces as TaskCanceledException :
+        // OperationCanceledException with the request token NOT cancelled. It must collapse to the
+        // uniform 400, not be mistaken for a client abort and rethrown as a distinguishable 500 — which
+        // would re-open the 400-vs-500 oracle via an attacker-controlled did:webvh host that hangs until
+        // the resolver's HttpClient.Timeout fires.
+        var (server, _) = await BuildServerAsync(resolverOverride: new TimeoutResolver());
+        var valid = await PackAnoncryptForBobAsync(); // decrypts (Bob's secret), then resolution throws
+
+        var result = await PostEnvelopeAsync(server, valid);
+
+        result.Status.Should().Be(HttpStatusCode.BadRequest); // 400, not 500; RequestAborted is not cancelled
+        result.Body.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Simulates a downstream resolver whose HttpClient.Timeout fires: throws
+    /// <see cref="TaskCanceledException"/> (a <see cref="OperationCanceledException"/>) with the
+    /// caller's token NOT cancelled — exactly what net-did's webvh client surfaces on a hung host.
+    /// </summary>
+    private sealed class TimeoutResolver : IDidResolver
+    {
+        public bool CanResolve(string did) => true;
+
+        public Task<DidResolutionResult> ResolveAsync(string did, DidResolutionOptions? options = null, CancellationToken ct = default)
+            => throw new TaskCanceledException("simulated downstream HttpClient.Timeout (caller token not cancelled)");
+    }
+
+    private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(
+        Action<DidCommOptions>? configureOptions = null,
+        Func<UnpackResult, CancellationToken, Task>? onReceive = null,
+        IDidResolver? resolverOverride = null)
     {
         var received = new List<UnpackResult>();
         var actors = SpecActorRegistry.LoadDefault();
-        var resolver = LoadResolver();
+        IDidResolver resolver = resolverOverride ?? LoadResolver();
         var keyService = new NetDidKeyService(resolver);
         var serviceResolver = new NetDidServiceEndpointResolver(resolver, keyService, new DidCommOptions());
 
@@ -141,11 +273,11 @@ public sealed class AspNetCoreReceiveRoundTripTests
 
         var app = builder.Build();
         app.UseRouting();
-        app.MapDidCommEndpoint("/didcomm", async (result, ct) =>
+        app.MapDidCommEndpoint("/didcomm", onReceive ?? (async (result, ct) =>
         {
             received.Add(result);
             await Task.CompletedTask;
-        });
+        }));
 
         await app.StartAsync();
         return (app.GetTestServer(), received);

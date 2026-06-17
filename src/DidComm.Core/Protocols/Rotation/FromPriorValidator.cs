@@ -53,27 +53,27 @@ public static class FromPriorValidator
         if (parts.Length != 3)
             throw new ProtocolException("from_prior JWT must have three dot-separated segments (compact JWS).");
 
-        var headerJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[0]));
-        var claimsJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[1]));
-        var signature = Base64Url.Decode(parts[2]);
-
+        byte[] signature;
         string? alg, kid;
-        try
-        {
-            using var headerDoc = JsonDocument.Parse(headerJson, DidCommJson.StrictDocument);
-            alg = headerDoc.RootElement.GetProperty("alg").GetString();
-            kid = headerDoc.RootElement.GetProperty("kid").GetString();
-        }
-        catch (Exception ex) when (ex is JsonException or KeyNotFoundException)
-        {
-            throw new ProtocolException("from_prior JWT header is malformed.", ex);
-        }
-        if (string.IsNullOrEmpty(alg) || string.IsNullOrEmpty(kid))
-            throw new ProtocolException("from_prior JWT header is missing 'alg' or 'kid'.");
-
         FromPriorClaims claims;
         try
         {
+            // Everything in this block is a pure function of the attacker-controlled JWT string:
+            // base64url-decode (FormatException on bad chars, ArgumentException on an empty segment),
+            // JSON parse (JsonException), member access (KeyNotFoundException), and typed reads
+            // (InvalidOperationException on a wrong JSON value kind, FormatException on an out-of-range
+            // number). All of these mean "the JWT is malformed" and MUST surface as the typed
+            // ProtocolException rather than escaping UnpackAsync as a raw runtime exception (issue #19,
+            // FR-API-07). The resolver/crypto calls below stay OUTSIDE this block so a genuine
+            // ConsistencyException/CryptoException is never masked.
+            var headerJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[0]));
+            var claimsJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[1]));
+            signature = Base64Url.Decode(parts[2]);
+
+            using var headerDoc = JsonDocument.Parse(headerJson, DidCommJson.StrictDocument);
+            alg = headerDoc.RootElement.GetProperty("alg").GetString();
+            kid = headerDoc.RootElement.GetProperty("kid").GetString();
+
             using var claimsDoc = JsonDocument.Parse(claimsJson, DidCommJson.StrictDocument);
             var iss = claimsDoc.RootElement.GetProperty("iss").GetString()
                 ?? throw new ProtocolException("from_prior JWT 'iss' is missing or null.");
@@ -86,10 +86,15 @@ public static class FromPriorValidator
                 ? nbfEl.GetInt64() : null;
             claims = new FromPriorClaims(Sub: sub, Iss: iss, Iat: iat, Exp: exp, Nbf: nbf);
         }
-        catch (Exception ex) when (ex is JsonException or KeyNotFoundException)
+        catch (Exception ex)
+            when (ex is JsonException or KeyNotFoundException or FormatException or InvalidOperationException or ArgumentException)
         {
-            throw new ProtocolException("from_prior JWT claims are malformed.", ex);
+            // Generic message: do not echo the offending alg/kid/segment (no parse-failure oracle).
+            throw new ProtocolException("from_prior JWT is malformed.", ex);
         }
+
+        if (string.IsNullOrEmpty(alg) || string.IsNullOrEmpty(kid))
+            throw new ProtocolException("from_prior JWT header is missing 'alg' or 'kid'.");
 
         // FR-ROT-02 — sub MUST equal the message 'from' DID.
         if (!string.Equals(claims.Sub, currentSenderDid, StringComparison.Ordinal))

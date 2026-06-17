@@ -245,6 +245,104 @@ public sealed class NetDidKeyServiceTests
             .Should().BeFalse();
     }
 
+    private const string X25519Point = "avH0O2Y4tqLAq8y9zpianr8ajii5m4F_mICrzNlatXs";
+
+    [Fact]
+    public async Task IsKeyAuthorizedAsync_FalseWhenControllerIsADifferentDid()
+    {
+        // Issue #18 / FR-CONSIST-06 negative test: the key sits under alice's keyAgreement and its id
+        // subject is alice, but it is CONTROLLED by eve. A key controlled by a different DID MUST be
+        // rejected even though DidSubjectOf(kid) == alice.
+        var vm = new VerificationMethod
+        {
+            Id = "did:example:alice#k",
+            Type = "JsonWebKey2020",
+            Controller = new Did("did:example:eve"),
+            PublicKeyJwk = new JsonWebKey { Kty = "OKP", Crv = "X25519", X = X25519Point },
+        };
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver((doc.Id.Value!, doc)));
+
+        (await sut.IsKeyAuthorizedAsync("did:example:alice", "did:example:alice#k", VerificationRelationship.KeyAgreement))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task IsKeyAuthorizedAsync_FalseForCrossDidEmbeddedId()
+    {
+        // Issue #18: an embedded VM whose id belongs to a different DID must not be authorized for the
+        // queried DID, even if it is listed under the queried DID's relationship.
+        var vm = new VerificationMethod
+        {
+            Id = "did:example:eve#k",
+            Type = "JsonWebKey2020",
+            Controller = new Did("did:example:eve"),
+            PublicKeyJwk = new JsonWebKey { Kty = "OKP", Crv = "X25519", X = X25519Point },
+        };
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver((doc.Id.Value!, doc)));
+
+        (await sut.IsKeyAuthorizedAsync("did:example:alice", "did:example:eve#k", VerificationRelationship.KeyAgreement))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task IsKeyAuthorizedAsync_TrueForRelativeIdWithSelfController()
+    {
+        // Regression guard: a did:peer:2-style relative VM id ("#key-1") controlled by the same DID
+        // must still authorize. Proves the id is normalized to absolute before both the kid compare
+        // and the controller/subject check (the highest-risk spot for the #18 change).
+        var vm = new VerificationMethod
+        {
+            Id = "#key-1",
+            Type = "JsonWebKey2020",
+            Controller = new Did("did:example:alice"),
+            PublicKeyJwk = new JsonWebKey { Kty = "OKP", Crv = "X25519", X = X25519Point },
+        };
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver((doc.Id.Value!, doc)));
+
+        (await sut.IsKeyAuthorizedAsync("did:example:alice", "did:example:alice#key-1", VerificationRelationship.KeyAgreement))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task IsKeyAuthorizedAsync_TrueWhenControllerOmittedAndIdSubjectMatches()
+    {
+        // Absent controller falls back to the id-subject rule, which already binds the key to alice.
+        var vm = new VerificationMethod
+        {
+            Id = "did:example:alice#k",
+            Type = "JsonWebKey2020",
+            PublicKeyJwk = new JsonWebKey { Kty = "OKP", Crv = "X25519", X = X25519Point },
+        };
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver((doc.Id.Value!, doc)));
+
+        (await sut.IsKeyAuthorizedAsync("did:example:alice", "did:example:alice#k", VerificationRelationship.KeyAgreement))
+            .Should().BeTrue();
+    }
+
     /// <summary>Hand-rolled resolver that returns pre-canned documents and counts invocations.</summary>
     private sealed class StubResolver : IDidResolver
     {

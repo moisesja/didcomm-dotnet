@@ -38,6 +38,13 @@ public sealed class ThreadState
     /// </summary>
     public bool MaxErrorsNoticeSent { get; set; }
 
+    /// <summary>
+    /// Monotonic last-touched stamp used by <see cref="InMemoryThreadStateStore"/>'s
+    /// approximate-LRU eviction to bound the store under a flood of fresh, unauthenticated
+    /// thids (issue #21). Not part of the public thread-state contract; other stores ignore it.
+    /// </summary>
+    internal long LastTouchedTick;
+
     /// <summary>Construct empty state for <paramref name="thid"/>.</summary>
     /// <param name="thid">The thread id. Must be non-empty.</param>
     public ThreadState(string thid)

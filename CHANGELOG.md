@@ -6,6 +6,58 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Security — Medium-severity audit remediation (`feat/security-medium-cluster`)
+
+Remediates the five Medium-severity findings from the multi-agent security & compliance audit
+(GitHub issues #17–#21), plus two lower-severity defects on the same code path (#28, #33). Each fix
+ships with negative and regression tests, and each was then put through an adversarial red-team pass
+which surfaced two further hardening items (folded in below) and two deeper residuals (filed as
+follow-ups). The full suite (600 tests) is green.
+
+- **Illegal envelope compositions rejected (#17, FR-ENV-04a).** `EnvelopeReader.Unpack` now tracks
+  each unwrapped layer with its authenticated/anonymous flag and enforces the legal DIDComm v2.1
+  receive grammar `anoncrypt? authcrypt? sign? plaintext` before any content/consistency processing.
+  Illegal nestings — sign-outside-encrypt (FR-ENV-05), `anoncrypt(anoncrypt)`, `authcrypt(authcrypt)`,
+  `authcrypt(anoncrypt)`, double-sign — are rejected with `MalformedMessageException`. The grammar
+  admits every spec Appendix C unpack vector, including `authcrypt(sign)` (FR-ENV-03) and
+  `anoncrypt(authcrypt(sign))` (Appendix C.3). The auth/anon flag is what distinguishes the legal
+  `anoncrypt(authcrypt)` from the illegal `anoncrypt(anoncrypt)` (indistinguishable at envelope-kind
+  level). PRD gains **FR-ENV-04a** documenting the receive-acceptance set.
+- **Controller-aware resolver authorization (#18, FR-CONSIST-06 / DD-01).** `NetDidKeyService`
+  `IsKeyAuthorizedAsync` now walks the raw resolved verification methods (not the curve-projected
+  JWKs, which dropped `controller`) and authorizes a `kid` only when its id-subject **and** its
+  `controller` resolve to the asserted DID — rejecting a key listed under the DID's relationship but
+  controlled by a different DID, and cross-DID embedded ids. did:key / did:peer keep authorizing
+  (controller == subject by construction).
+- **`from_prior` JWT parse errors normalized (#19).** `FromPriorValidator` wraps base64url decode and
+  all JSON reads in one boundary that surfaces malformed input (`FormatException`,
+  `InvalidOperationException`, `ArgumentException` on an empty segment, `JsonException`,
+  `KeyNotFoundException`) as the typed `ProtocolException` with a generic message — closing an
+  unhandled-exception path out of `UnpackAsync` and removing the header-vs-claims info leak.
+- **Receive endpoint response oracle closed (#20, #28, #33).** Both ASP.NET Core HTTP receive overloads
+  collapse every input- or handler-triggered failure to a single opaque `400` with an empty body,
+  logging the reason server-side only. This closes the verbatim-`CryptoException` decryption /
+  recipient-`kid` enumeration oracle (#20), the `Consistency`/`Resolution`/`UnsupportedDidMethod`
+  exceptions that previously escaped to `500` + dev stack-trace (#28), and the echoed handler-bug
+  detail (#33). The 202 success, 415, and 413 paths are unchanged; cancellation still propagates.
+  Red-team hardening: the inline-callback overload now also wraps `onReceive` so a consumer callback
+  that throws after a successful unpack returns 202 (logged) instead of escaping as a distinguishable
+  `500` — removing an unpack-success oracle the uniform-400 path would otherwise leave. (A residual
+  *timing* side-channel in the underlying decrypt path — held-vs-unheld recipient kid — is **not**
+  closed by this change and is tracked as a follow-up.) A downstream DID-resolution timeout
+  (`TaskCanceledException` with the request token not cancelled — e.g. a hung `did:webvh` host) also
+  collapses to the uniform 400 rather than escaping as a `500`; only a genuine client abort propagates.
+  **Operator note:** a receiver-side handler bug (FR-THR-04 `InvalidOperationException`) now returns
+  `400` instead of `500` for response uniformity — it is logged at `Error` level, so alert on the
+  `DidComm.AspNetCore` error log rather than on a 5xx rate for handler faults.
+- **Thread-state store bounded (#21).** `InMemoryThreadStateStore` is now capped
+  (`DefaultMaxEntries = 10_000`, overridable via ctor) with approximate-LRU eviction, converting an
+  unbounded-growth memory-exhaustion DoS (attacker-chosen, unauthenticated `thid`/`pthid`) into a
+  few-MB bound. Secure-by-default — no DI wiring change. Red-team hardening: eviction is **single-flight**
+  (an `Interlocked` guard) so N concurrent inserters over the cap can't each run a full O(n log n)
+  snapshot-sort — closing a CPU-amplification DoS. (A residual cascade-guard-reset-via-eviction vector,
+  costing the attacker ~`cap` messages per suppressed report, is tracked as a follow-up alongside #29.)
+
 ### Changed — delegate the envelope layer to DataProofsDotnet.Jose (`feat/delegate-jose-dataproofs`)
 
 didcomm-dotnet no longer carries its own cryptography or JWE/JWS assembly. The entire `Crypto/`

@@ -27,9 +27,12 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <summary>
     /// Map an HTTP POST endpoint that accepts DIDComm envelopes, unpacks them via
     /// <see cref="DidCommClient.UnpackAsync"/>, and dispatches to <paramref name="onReceive"/>
-    /// (FR-TRN-07). Returns <c>202 Accepted</c> on success. Returns <c>415</c> for an unknown
-    /// content type, <c>413</c> when the body exceeds <see cref="DidCommOptions.MaxReceiveBytes"/>
-    /// (FR-API-06), <c>400</c> for malformed envelopes, and <c>500</c> for unexpected errors.
+    /// (FR-TRN-07). Returns <c>202 Accepted</c> on success, <c>415</c> for an unknown content type,
+    /// and <c>413</c> when the body exceeds <see cref="DidCommOptions.MaxReceiveBytes"/> (FR-API-06).
+    /// ANY envelope/processing failure — crypto, malformed structure, consistency, or DID resolution —
+    /// returns a uniform <c>400 Bad Request</c> with an empty body and the reason logged server-side
+    /// only, so the response cannot be used as a decryption / recipient-kid / resolution oracle
+    /// (FR-API-07, issues #20/#28/#33).
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
@@ -78,21 +81,46 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             }
 
+            var logger = httpContext.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
+
             UnpackResult unpacked;
             try
             {
                 unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
             }
-            catch (MalformedMessageException ex)
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
-                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
+                throw; // genuine client abort — propagate, do not mask as a rejection
             }
-            catch (CryptoException ex)
+            catch (Exception ex)
             {
-                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
+                // Every unpack failure collapses to one opaque 400 so the peer can't distinguish them:
+                // crypto / malformed / consistency / resolution / did:web / missing-secret, AND a
+                // downstream DID-resolution timeout (TaskCanceledException : OperationCanceledException
+                // with the request token NOT cancelled, e.g. an attacker-controlled did:webvh host that
+                // hangs). Only a real client abort is rethrown above, so there is no 400-vs-500 oracle.
+                return NormalizedReceiveRejection(logger, ex);
             }
 
-            await onReceive(unpacked, httpContext.RequestAborted).ConfigureAwait(false);
+            // The message was received and unpacked; HTTP receive is one-way / fire-and-forget
+            // (FR-TRN-10). A fault in the consumer callback is the receiver's own concern — log it but
+            // still answer 202, so a throwing callback can't turn a successfully-unpacked message into a
+            // distinguishable 500. Otherwise an attacker could probe "did this envelope decrypt for us?"
+            // by inducing a callback throw — re-exposing the unpack-success oracle the uniform-400
+            // rejection closes (#20 red-team).
+            try
+            {
+                await onReceive(unpacked, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
+            {
+                throw; // genuine client abort
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "DidComm receive: onReceive callback threw after a successful unpack; acknowledging anyway (one-way receive).");
+            }
+
             return Results.StatusCode(StatusCodes.Status202Accepted);
         });
     }
@@ -142,42 +170,26 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             }
 
-            UnpackResult unpacked;
+            // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException),
+            // an unpack rejection (crypto/malformed/consistency/resolution), and a downstream
+            // DID-resolution timeout (TaskCanceledException with the request token NOT cancelled) all
+            // return the same 400 with no body, so the status code itself is not an oracle (no
+            // 400-vs-500 partition). Only a genuine client abort is rethrown.
             try
             {
-                unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+                var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+                LogOutcome(logger, outcome, sameSocketDelivered: false);
+                return Results.StatusCode(StatusCodes.Status202Accepted);
             }
-            catch (MalformedMessageException ex)
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
-                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
+                throw; // genuine client abort — propagate
             }
-            catch (CryptoException ex)
+            catch (Exception ex)
             {
-                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest);
+                return NormalizedReceiveRejection(logger, ex);
             }
-
-            DispatchOutcome outcome;
-            try
-            {
-                outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
-            }
-            catch (InvalidOperationException ex)
-            {
-                // FR-THR-04 rule 2 violation by a handler (a bug): surface as 500 with a clear
-                // detail rather than letting it bubble out as an opaque unhandled exception.
-                logger?.LogWarning(ex, "MapDidCommEndpoint: handler bug (FR-THR-04 rule 2); responding 500.");
-                return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status500InternalServerError);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // Handlers are application code; an unexpected throw is a server error, not a
-                // protocol error. Map to 500 so the inbound peer learns we couldn't process it
-                // without leaking the inner exception type.
-                logger?.LogError(ex, "MapDidCommEndpoint: handler threw an unhandled exception; responding 500.");
-                return Results.Problem(detail: "Handler failed; see server logs.", statusCode: StatusCodes.Status500InternalServerError);
-            }
-            LogOutcome(logger, outcome, sameSocketDelivered: false);
-            return Results.StatusCode(StatusCodes.Status202Accepted);
         });
     }
 
@@ -492,6 +504,30 @@ public static class DidCommEndpointRouteBuilderExtensions
                 logger.LogWarning("Protocol dispatch dropped inbound pure-ACK that also requested an ACK (FR-THR-04 rule 3).");
                 break;
         }
+    }
+
+    /// <summary>
+    /// FR-API-07 / FR-TRN-10: collapse every input- or handler-triggered failure on the HTTP receive
+    /// path to one opaque rejection — a bare <c>400</c> with no body — so a remote peer cannot use the
+    /// status code or response text as a decryption / recipient-kid / DID-resolution oracle (issues
+    /// #20/#28/#33). The detailed reason is logged server-side only. The WebSocket paths already take
+    /// this posture (log-and-discard, echo nothing); this brings the HTTP paths to parity.
+    /// </summary>
+    private static IResult NormalizedReceiveRejection(ILogger? logger, Exception ex)
+    {
+        if (ex is DidCommException)
+        {
+            // Expected, peer-triggered category (malformed / crypto / consistency / resolution /
+            // unsupported-method / secret-missing) — it's the peer's envelope, not our bug.
+            logger?.LogWarning(ex, "DidComm receive: rejecting inbound envelope ({Reason}).", ex.GetType().Name);
+        }
+        else
+        {
+            // A handler bug (FR-THR-04 InvalidOperationException) or any other unexpected throw.
+            logger?.LogError(ex, "DidComm receive: inbound processing failed ({Reason}).", ex.GetType().Name);
+        }
+
+        return Results.StatusCode(StatusCodes.Status400BadRequest);
     }
 
     private static async Task ReceiveLoopAsync(

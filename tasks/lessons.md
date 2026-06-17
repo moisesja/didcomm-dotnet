@@ -447,3 +447,38 @@ Format per entry:
 - **How to apply:** When delegating, name the hard constraints explicitly ("the dataproofs ref MUST
   stay a local ProjectReference") and re-diff csproj/props after a subagent runs. Treat any
   reference-kind change as needing review, not auto-accept.
+
+## L-024 — A receive-side validation gate must match the spec's *receive-acceptance* set (Appendix C vectors), not the PRD's *emit* set.
+
+- **Lesson:** When building an inbound validation gate (e.g. legal envelope compositions), enumerate
+  the accepted set from the spec's interop test vectors, not from the PRD's "what we emit" rules. The
+  receive set is a superset of the emit set.
+- **Why:** Issue #17's first cut enforced the FR-ENV-02 *emit* compositions (6) plus the FR-ENV-03
+  receive-only `authcrypt(sign)` (7 total) and rejected everything else. That broke the real spec
+  fixture `c3-authcrypt-p521` — DIDComm v2.1 Appendix C.3 `anoncrypt(authcrypt(sign))`, an inbound
+  vector with `outcome: success`. FR-ENV-04 ("never emit `anoncrypt(authcrypt(sign))`") is an *emit*
+  MUST-NOT, not a receive prohibition; the PRD was simply silent on the full receive set. Fixed to the
+  grammar `anoncrypt? authcrypt? sign? plaintext` (8 shapes) and added PRD **FR-ENV-04a**. Relates to
+  L-005 (self-round-trip ≠ interop) and L-020 (verify against spec before trusting a test outcome).
+- **How to apply:** For any inbound gate, list the spec/Appendix vectors it must accept and run the
+  interop fixtures *before* declaring the allow-set complete. If the PRD only describes emit behavior,
+  the receive-acceptance set is incomplete — fill it in (and update the PRD).
+
+## L-025 — Closing a body/status oracle leaves a timing oracle; and amortized-eviction analysis is single-threaded.
+
+- **Lesson:** Two red-team findings on my own #20/#21 fixes. (a) Normalizing error *responses* (uniform
+  400, empty body) closes the content/status oracle but NOT the timing oracle — a held-vs-unheld
+  recipient kid still separates by ~180 µs because the decrypt path fast-fails before ECDH. (b) An
+  eviction whose cost is "amortized O(log n) per insert" is only amortized *single-threaded*; with N
+  concurrent inserters over the cap, each independently runs the full O(n log n) snapshot-sort →
+  up-to-Nx CPU stampede. Fixed with a single-flight `Interlocked.CompareExchange` gate.
+- **Why:** Adversarial agents tasked with *breaking* the just-written fix (per the repo's "use
+  adversarial agents to attempt to exploit the code" rule) found both empirically — a body/status test
+  (`Should().BeEmpty()`) passes while the timing channel is wide open, and a serial eviction-cost
+  argument hides a concurrency stampede.
+- **How to apply:** (1) When closing an oracle, enumerate ALL observables — body, status, headers,
+  **timing**, and connection behavior — not just the obvious one; if you can't make it constant-time
+  cheaply, file it and say so rather than claiming "no longer an oracle." (2) Any "amortized" cost
+  argument for shared mutable state must be re-derived under concurrency; guard expensive
+  rebuild/evict passes with single-flight. (3) Always run a break-it adversarial pass on a security
+  fix before declaring done — the fix that closes the headline issue often leaves a residual.

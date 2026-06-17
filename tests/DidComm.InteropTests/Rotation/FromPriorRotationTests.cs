@@ -117,6 +117,99 @@ public sealed class FromPriorRotationTests
         await act.Should().ThrowAsync<ProtocolException>();
     }
 
+    // Issue #19: malformed from_prior JWT bytes (bad base64url, empty segment, or a claim/header of
+    // the wrong JSON value-kind) must surface as the typed ProtocolException, NOT escape UnpackAsync
+    // as a raw FormatException / InvalidOperationException / ArgumentException. Each case corrupts a
+    // segment of an otherwise-valid JWT and fails at the parse stage, before signature verification.
+
+    [Theory]
+    [InlineData("!!!not-base64url!!!", 0)] // header segment is not base64url -> FormatException
+    [InlineData("@@@", 2)]                 // signature segment is not base64url -> FormatException
+    public async Task Validator_RejectsNonBase64UrlSegment_AsProtocolException(string garbage, int segmentIndex)
+    {
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var parts = jwt.Split('.');
+        parts[segmentIndex] = garbage;
+        var malformed = string.Join('.', parts);
+
+        var act = async () => await FromPriorValidator.ValidateAsync(malformed, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>();
+    }
+
+    [Fact]
+    public async Task Validator_RejectsEmptySegment_AsProtocolException()
+    {
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var parts = jwt.Split('.');
+        var malformed = $"{parts[0]}..{parts[2]}"; // empty claims segment -> ArgumentException in Base64Url.Decode
+
+        var act = async () => await FromPriorValidator.ValidateAsync(malformed, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>();
+    }
+
+    [Fact]
+    public async Task Validator_RejectsWrongKindAlgHeader_AsProtocolException()
+    {
+        // "alg" is a number instead of a string -> GetString() throws InvalidOperationException.
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var malformed = MutateHeader(jwt, h => h["alg"] = 123);
+
+        var act = async () => await FromPriorValidator.ValidateAsync(malformed, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>();
+    }
+
+    [Fact]
+    public async Task Validator_RejectsWrongKindSubClaim_AsProtocolException()
+    {
+        // "sub" is an object instead of a string -> GetString() throws InvalidOperationException.
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var malformed = MutateClaims(jwt, c => c["sub"] = new JsonObject());
+
+        var act = async () => await FromPriorValidator.ValidateAsync(malformed, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>();
+    }
+
+    [Fact]
+    public async Task Validator_RejectsWrongKindIatClaim_AsProtocolException()
+    {
+        // "iat" is a string instead of a number -> GetInt64() throws InvalidOperationException.
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var malformed = MutateClaims(jwt, c => c["iat"] = "not-a-number");
+
+        var act = async () => await FromPriorValidator.ValidateAsync(malformed, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>();
+    }
+
+    [Fact]
+    public async Task Validator_RejectsOutOfRangeIatClaim_AsProtocolException()
+    {
+        // "iat" is a JSON number outside Int64 range -> GetInt64() throws FormatException.
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var malformed = MutateClaims(jwt, c => c["iat"] = JsonNode.Parse("99999999999999999999999"));
+
+        var act = async () => await FromPriorValidator.ValidateAsync(malformed, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>();
+    }
+
+    private static string MutateHeader(string jwt, Action<JsonObject> mutate) => MutateSegment(jwt, 0, mutate);
+
+    private static string MutateClaims(string jwt, Action<JsonObject> mutate) => MutateSegment(jwt, 1, mutate);
+
+    private static string MutateSegment(string jwt, int segmentIndex, Action<JsonObject> mutate)
+    {
+        var parts = jwt.Split('.');
+        var obj = JsonNode.Parse(Encoding.UTF8.GetString(Base64Url.Decode(parts[segmentIndex])))!.AsObject();
+        mutate(obj);
+        parts[segmentIndex] = Base64Url.Encode(Encoding.UTF8.GetBytes(obj.ToJsonString()));
+        return string.Join('.', parts);
+    }
+
     [Fact]
     public async Task DidCommClient_PopulatesFromPriorOnAuthcryptedUnpack()
     {

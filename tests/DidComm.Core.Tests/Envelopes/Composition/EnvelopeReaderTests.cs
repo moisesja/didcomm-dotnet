@@ -1,10 +1,14 @@
+using System.Text;
 using DidComm.Composition;
 using DidComm.Exceptions;
 using DidComm.Jose;
+using DidComm.Jose.Signing;
 using DidComm.Messages;
 using FluentAssertions;
 using NetCrypto;
 using Xunit;
+using DpEnc = DataProofsDotnet.Jose.Encryption;
+using DpSig = DataProofsDotnet.Jose.Signing;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Tests.Envelopes.Composition;
@@ -266,5 +270,158 @@ public sealed class EnvelopeReaderTests
             _crypto);
 
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-05*");
+    }
+
+    // ---- Issue #17: only the legal FR-ENV-02 compositions (+ authcrypt(sign) on receive, FR-ENV-03)
+    //      may unpack. Illegal layer orderings, built by hand-wrapping a packed envelope, MUST be
+    //      rejected as malformed structure BEFORE any consistency/content processing. ----
+
+    private static string AnoncryptWrap(string inner, Jwk recipientPublicJwk) =>
+        DpEnc.JweBuilder.BuildEcdhEsA256Kw(
+            Encoding.UTF8.GetBytes(inner), new[] { recipientPublicJwk }, "A256GCM", _crypto, MediaTypes.Encrypted);
+
+    private static string AuthcryptWrap(string inner, Jwk recipientPublicJwk, Jwk senderPrivateJwk, string skid) =>
+        DpEnc.JweBuilder.BuildEcdh1PuA256Kw(
+            Encoding.UTF8.GetBytes(inner), new[] { recipientPublicJwk }, senderPrivateJwk, skid, "A256CBC-HS512", _crypto, MediaTypes.Encrypted);
+
+    private static Task<string> SignWrapAsync(string inner, Jwk signerPrivateJwk)
+    {
+        var signers = new List<DpSig.JwsSigner> { JwsSignerFactory.FromPrivateJwk(signerPrivateJwk) };
+        return DpSig.JwsBuilder.BuildJsonAsync(Encoding.UTF8.GetBytes(inner), signers, MediaTypes.Signed, detachedPayload: false);
+    }
+
+    private static Message EmptyMessage() => new MessageBuilder()
+        .WithType("https://didcomm.org/empty/1.0/empty")
+        .WithFrom("did:example:alice")
+        .WithTo("did:example:bob")
+        .Build();
+
+    [Fact]
+    public async Task Anoncrypt_of_anoncrypt_is_rejected_as_illegal_composition()
+    {
+        // [AnonEncrypt, AnonEncrypt, Plaintext] — only anoncrypt(authcrypt) is legal; the inner
+        // encrypt MUST be authenticated. This is the case the EnvelopeKind stack alone can't tell
+        // apart from the legal anoncrypt(authcrypt) — the auth flag is what distinguishes them.
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var inner = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
+        var outer = AnoncryptWrap(inner, bob.PublicJwk);
+
+        Action act = () => EnvelopeReader.Unpack(outer,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }), senderLookup: null, signerLookup: null, _crypto);
+
+        act.Should().Throw<MalformedMessageException>().WithMessage("*Illegal*composition*");
+    }
+
+    [Fact]
+    public async Task Authcrypt_of_authcrypt_is_rejected_as_illegal_composition()
+    {
+        // [AuthEncrypt, AuthEncrypt, Plaintext] — double authcrypt is not a legal shape.
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var inner = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
+                SenderPrivateJwk: alice.PrivateJwk, Skid: alice.PublicJwk.Kid), _crypto);
+        var outer = AuthcryptWrap(inner, bob.PublicJwk, alice.PrivateJwk, alice.PublicJwk.Kid!);
+
+        Action act = () => EnvelopeReader.Unpack(outer,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
+            signerLookup: null, _crypto);
+
+        act.Should().Throw<MalformedMessageException>().WithMessage("*Illegal*composition*");
+    }
+
+    [Fact]
+    public async Task Sign_outside_encrypt_is_rejected_as_illegal_composition()
+    {
+        // [Sign, AnonEncrypt, Plaintext] — DIDComm signs INSIDE encrypt (FR-ENV-05). A JWS wrapping a
+        // JWE signs opaque ciphertext, defeating FR-SIG-06's anti-surreptitious-forwarding intent.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var inner = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
+        var outer = await SignWrapAsync(inner, signer.PrivateJwk);
+
+        Action act = () => EnvelopeReader.Unpack(outer,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: null,
+            signerLookup: _ => signer.PublicJwk, _crypto);
+
+        act.Should().Throw<MalformedMessageException>().WithMessage("*Illegal*composition*");
+    }
+
+    [Fact]
+    public async Task Signed_of_signed_is_rejected_as_illegal_composition()
+    {
+        // [Sign, Sign, Plaintext] — double signature is not a legal shape.
+        var s1 = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k1");
+        var s2 = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k2");
+        var inner = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { s1.PrivateJwk }));
+        var outer = await SignWrapAsync(inner, s2.PrivateJwk);
+
+        Action act = () => EnvelopeReader.Unpack(outer,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: kid => kid == s1.PublicJwk.Kid ? s1.PublicJwk : kid == s2.PublicJwk.Kid ? s2.PublicJwk : null,
+            _crypto);
+
+        act.Should().Throw<MalformedMessageException>().WithMessage("*Illegal*composition*");
+    }
+
+    [Fact]
+    public async Task Authcrypt_of_sign_is_accepted_on_receive_FrEnv03()
+    {
+        // [AuthEncrypt, Sign, Plaintext] — we never EMIT authcrypt(sign), but the spec lets us ACCEPT
+        // it on receive (FR-ENV-03). With the signer and skid both under did:example:alice, the
+        // consistency checks pass and the message unpacks; the gate must NOT reject the shape.
+        var aliceKa = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
+        var aliceSign = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
+                SenderPrivateJwk: aliceKa.PrivateJwk,
+                Skid: aliceKa.PublicJwk.Kid,
+                SignerPrivateJwks: new[] { aliceSign.PrivateJwk }), _crypto);
+
+        var unpacked = EnvelopeReader.Unpack(packed,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: new DictionarySenderKeyLookup(new[] { aliceKa.PublicJwk }),
+            signerLookup: kid => kid == aliceSign.PublicJwk.Kid ? aliceSign.PublicJwk : null,
+            _crypto);
+
+        unpacked.Stack.Should().Equal(EnvelopeKind.Encrypted, EnvelopeKind.Signed, EnvelopeKind.Plaintext);
+        unpacked.Authenticated.Should().BeTrue();
+        unpacked.NonRepudiation.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Anoncrypt_authcrypt_sign_is_accepted_on_receive()
+    {
+        // [AnonEncrypt, AuthEncrypt, Sign, Plaintext] — protect-sender + sign. The library emits this
+        // via ProtectSender + signers, and the spec's Appendix C.3 vector requires accepting it. The
+        // legal receive grammar (anoncrypt? authcrypt? sign? plaintext) admits it.
+        var aliceKa = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
+        var aliceSign = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
+                SenderPrivateJwk: aliceKa.PrivateJwk,
+                Skid: aliceKa.PublicJwk.Kid,
+                SignerPrivateJwks: new[] { aliceSign.PrivateJwk },
+                ProtectSender: true), _crypto);
+
+        var unpacked = EnvelopeReader.Unpack(packed,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: new DictionarySenderKeyLookup(new[] { aliceKa.PublicJwk }),
+            signerLookup: kid => kid == aliceSign.PublicJwk.Kid ? aliceSign.PublicJwk : null,
+            _crypto);
+
+        unpacked.Stack.Should().Equal(EnvelopeKind.Encrypted, EnvelopeKind.Encrypted, EnvelopeKind.Signed, EnvelopeKind.Plaintext);
+        unpacked.Authenticated.Should().BeTrue();
+        unpacked.AnonymousSender.Should().BeTrue();
+        unpacked.NonRepudiation.Should().BeTrue();
     }
 }
