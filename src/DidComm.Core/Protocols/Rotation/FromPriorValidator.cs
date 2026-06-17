@@ -74,6 +74,13 @@ public static class FromPriorValidator
             alg = headerDoc.RootElement.GetProperty("alg").GetString();
             kid = headerDoc.RootElement.GetProperty("kid").GetString();
 
+            // RFC 7515 §4.1.11: fail closed on a 'crit' header — the library understands no from_prior
+            // crit extensions, so any are by definition unsupported. Mirrors JwsParser/JweParser crit
+            // rejection (#26). 'crit' is covered by the signature but was previously read and ignored.
+            // The check runs before signature verification, so a crit envelope is rejected as malformed.
+            if (headerDoc.RootElement.TryGetProperty("crit", out _))
+                throw new ProtocolException("from_prior JWT marks an unsupported extension critical ('crit').");
+
             using var claimsDoc = JsonDocument.Parse(claimsJson, DidCommJson.StrictDocument);
             var iss = claimsDoc.RootElement.GetProperty("iss").GetString()
                 ?? throw new ProtocolException("from_prior JWT 'iss' is missing or null.");

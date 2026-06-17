@@ -271,4 +271,116 @@ public sealed class FromPriorRotationTests
         await act.Should().ThrowAsync<ConsistencyException>()
             .Where(e => e.Message.Contains("not authenticated"));
     }
+
+    // ---- Issue #25: the builder must emit exp/nbf so the FR-ROT-05 freshness control is reachable on
+    //      the issuing side; the no-expiry payload stays byte-identical. ----
+
+    [Fact]
+    public async Task Builder_emits_exp_and_nbf_in_lexicographic_order()
+    {
+        var claims = new FromPriorClaims(Sub: NewSenderDid, Iss: PriorDid, Iat: 1700000000, Exp: 1700003600, Nbf: 1699999900);
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk());
+
+        var payload = Encoding.UTF8.GetString(Base64Url.Decode(jwt.Split('.')[1]));
+        payload.Should().Be(
+            """{"exp":1700003600,"iat":1700000000,"iss":"did:example:alice","nbf":1699999900,"sub":"did:example:newAlice"}""");
+    }
+
+    [Fact]
+    public async Task Builder_without_exp_nbf_emits_only_iat_iss_sub_unchanged()
+    {
+        // Regression: the no-expiry path is byte-identical to the prior {iat,iss,sub} payload.
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+
+        var payload = Encoding.UTF8.GetString(Base64Url.Decode(jwt.Split('.')[1]));
+        payload.Should().Be("""{"iat":1700000000,"iss":"did:example:alice","sub":"did:example:newAlice"}""");
+    }
+
+    [Fact]
+    public async Task Builder_lifetime_overload_sets_exp_from_iat_plus_lifetime()
+    {
+        var claims = new FromPriorClaims(Sub: NewSenderDid, Iss: PriorDid, Iat: 1700000000);
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk(), lifetime: TimeSpan.FromMinutes(5));
+
+        var payload = JsonNode.Parse(Encoding.UTF8.GetString(Base64Url.Decode(jwt.Split('.')[1])))!.AsObject();
+        ((long)payload["exp"]!).Should().Be(1700000000 + 300);
+    }
+
+    [Theory]
+    [InlineData(0)]    // zero
+    [InlineData(-5)]   // negative
+    [InlineData(0.5)]  // sub-second: floors to exp == iat (already-expired) → rejected (red-team)
+    public async Task Builder_lifetime_overload_rejects_lifetime_below_one_second(double seconds)
+    {
+        var act = async () => await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk(), TimeSpan.FromSeconds(seconds));
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task DidCommClient_RejectsExpiredFromPrior_FrRot05()
+    {
+        // Issue #25 end-to-end: a self-issued from_prior with exp in the past is now actually rejected
+        // on unpack (FR-ROT-05) — previously unreachable because the builder never emitted exp.
+        var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: 1700000000, Exp: 1700000100); // 2023, long past
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"))).Message;
+
+        var act = async () => await client.UnpackAsync(packed);
+
+        await act.Should().ThrowAsync<ConsistencyException>().Where(e => e.Message.Contains("FR-ROT-05"));
+    }
+
+    [Fact]
+    public async Task DidCommClient_RejectsNotYetValidFromPrior_FrRot05()
+    {
+        // Issue #25 end-to-end, symmetric to the expired-Exp case: a from_prior whose nbf is in the
+        // future must be rejected on unpack (FR-ROT-05). The clock is pinned to iat so nbf = iat + 1 day
+        // is deterministically not-yet-valid (well past any skew) regardless of wall-clock time.
+        const long iat = 1700000000;
+        var pinnedNow = DateTimeOffset.FromUnixTimeSeconds(iat);
+        var claims = new FromPriorClaims(Sub: "did:example:alice", Iss: PriorDid, Iat: iat, Nbf: iat + 86400);
+        var jwt = await FromPriorBuilder.BuildAsync(claims, SignerPrivateJwk());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+
+        var options = new DidCommOptions { Clock = () => pinnedNow };
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), options);
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"))).Message;
+
+        var act = async () => await client.UnpackAsync(packed);
+
+        await act.Should().ThrowAsync<ConsistencyException>().Where(e => e.Message.Contains("not yet valid"));
+    }
+
+    [Fact]
+    public async Task Validator_RejectsCritHeader_FrRot26()
+    {
+        // Issue #26: a from_prior whose protected header marks an extension critical must be rejected
+        // (RFC 7515 §4.1.11), mirroring JwsParser/JweParser. The check precedes signature verification,
+        // so splicing 'crit' (without re-signing) still triggers it.
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+        var withCrit = MutateHeader(jwt, h => h["crit"] = new JsonArray("urn:example:unsupported"));
+
+        var act = async () => await FromPriorValidator.ValidateAsync(withCrit, NewSenderDid, NewKeyService());
+
+        await act.Should().ThrowAsync<ProtocolException>().Where(e => e.Message.Contains("crit"));
+    }
 }

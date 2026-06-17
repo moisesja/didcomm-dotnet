@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /tmp/akwprobe_dir)",
+      "Bash(cp /tmp/akwprobe.cs /tmp/akwprobe_dir/Program.cs)",
+      "Bash(awk '/private static byte\\\\[\\\\] DeriveKeyCore/,/^    }$/' /Users/moises/Projects/didcomm-dotnet/src/DidComm.Core/Crypto/Kdf/Ecdh1PuKdf.cs)",
+      "Bash(awk '/RenderJwe|recipients = recipientArr|@protected|encrypted_key|header = new/' /Users/moises/Projects/didcomm-dotnet/src/DidComm.Core/Jose/Encryption/JweBuilder.cs)",
+      "Bash(awk '/private static string RenderJwe/,/^    }$/' /Users/moises/Projects/didcomm-dotnet/src/DidComm.Core/Jose/Encryption/JweBuilder.cs)",
+      "Bash(find / -name \"ConcatKdf.cs\" -path \"*NetDid*\")",
+      "Bash(find / -name \"ConcatKdf.cs\" -path \"*net-did*\")",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; cat \"{}\"')",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}')",
+      "Bash(echo \"\\(exit: $?\\)\")",
+      "Bash(xargs -I{} echo \".claude entries staged: {}\")",
+      "Bash(xargs -I{} echo \"{} packages.lock.json files\")",
+      "Bash(xargs -I{} echo \"{} lock files \\(want 0\\)\")",
+      "Bash(echo \"---exit:$?---\")",
+      "Bash(awk 'NR>=342 && NR<=421' /Users/moises/Projects/didcomm-dotnet/src/DidComm.Core/Facade/DidCommClient.cs)",
+      "Bash(/bin/ls -la /Users/moises/Projects/didcomm-dotnet/src/DidComm.Core/Jose/Encryption/)",
+      "Bash(/bin/ls -la /Users/moises/Projects/didcomm-dotnet/)",
+      "Bash(/bin/ls -la /Users/moises/Projects/didcomm-dotnet/src/)",
+      "Bash(xargs -I{} basename {})",
+      "Bash(/bin/ls -la /Users/moises/Projects/didcomm-dotnet/src/DidComm.Core/Composition/)",
+      "Bash(echo \"=== exit: $? \\(1 = no matches\\) ===\")",
+      "Bash(sed -n '1,40p' src/DidComm.Core/Threading/InMemoryThreadStateStore.cs)",
+      "Bash(sed -n '88,100p' src/DidComm.Core/Protocols/ProtocolDispatcher.cs)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(awk '/FR-ENV-02/{p=1} p{print} /FR-ENV-05/{c++; if\\(c>=1 && /Acceptance|acceptance/\\) }' docs/didcomm-dotnet_PRD.md)",
+      "Bash(xargs sed -n '1,60p')",
+      "Bash(grep -rn \"AllowSynchronousIO\\\\|PreserveExecutionContext\\\\|ThrowOnUnhandled\\\\|TestServerOptions\" /usr/local/share/dotnet 2>/dev/null | head; echo \"=== check TestServer option name via reflection doc ===\"; grep -rn \"UseTestServer\\\\|TestServer\" tests/DidComm.InteropTests --include=\"*.cs\" | head)",
+      "Read(//usr/local/share/dotnet/**)",
+      "Bash(xargs sed -n '1,12p')",
+      "Bash(cd /Users/moises/Projects/didcomm-dotnet *)",
+      "Bash(ln -sfn /Users/moises/Projects/didcomm-dotnet/tests/DidComm.InteropTests/bin/Debug/net10.0/fixtures /tmp/rotpoc2/bin/Debug/net10.0/fixtures)"
+    ],
+    "additionalDirectories": [
+      "/Users/moises/Projects/dataproofs-dotnet/src/DataProofsDotnet.Jose/Encryption"
+    ]
+  }
+}
