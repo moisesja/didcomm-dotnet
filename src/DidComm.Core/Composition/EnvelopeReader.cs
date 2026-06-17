@@ -147,10 +147,10 @@ internal static class EnvelopeReader
                         Authenticated: authenticated,
                         NonRepudiation: nonRepudiation,
                         // The two flags are independent (matches SICPA reference impl):
-                        // anonymous reflects whether the *outermost* encrypt layer was
-                        // anoncrypt (true) or authcrypt (false); authenticated reflects
-                        // whether any layer (signed or authcrypt) bound a sender identity.
-                        // anon-encrypt + inner-sign sets both flags.
+                        // anonymous is derived strictly from the *outermost* encrypt layer's alg —
+                        // anoncrypt (true) or authcrypt (false), set once when that layer is unwrapped
+                        // (#23) — while authenticated reflects whether any layer (signed or authcrypt)
+                        // bound a sender identity. anoncrypt-encrypt + inner-sign sets both flags.
                         AnonymousSender: anonymous,
                         ContentEncryption: contentEnc,
                         KeyWrap: keyWrap,
@@ -179,6 +179,13 @@ internal static class EnvelopeReader
                     catch (DataProofsDotnet.Jose.JoseCryptoException ex)
                     {
                         throw new CryptoException(ex.Message, ex);
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        // Defensive boundary guard (#22, FR-API-07): map any ArgumentException the
+                        // delegated JWS parser might surface for a non-canonical field length to the
+                        // documented unpack contract, so a raw ArgumentException never escapes UnpackAsync.
+                        throw new MalformedMessageException("Malformed JWS field length.", ex);
                     }
 
                     // Fail closed: a verified JWS MUST surface a signer kid. Otherwise FR-CONSIST-03
@@ -224,12 +231,32 @@ internal static class EnvelopeReader
                     {
                         throw new CryptoException(ex.Message, ex);
                     }
+                    catch (ArgumentException ex)
+                    {
+                        // Defensive boundary guard (#22, FR-API-07). The delegated DataProofsDotnet.Jose
+                        // parser currently wraps the AEAD's wrong-length-iv/tag ArgumentException as
+                        // MalformedJoseException (caught above), but EnvelopeReader's contract promises
+                        // only MalformedMessageException/CryptoException — so map ANY ArgumentException
+                        // from the delegate to the contract type rather than let a raw one escape
+                        // UnpackAsync. Generic message; no attacker-influenced detail.
+                        throw new MalformedMessageException("Malformed JWE field length (iv/tag).", ex);
+                    }
 
+                    // The loop unwraps outermost→inner, so the first encrypt layer is the outermost one.
+                    // AnonymousSender is documented as "the outermost encrypt layer was anoncrypt", so
+                    // derive it from THIS layer's alg only when it's the outermost encrypt — not by
+                    // OR-accumulating across layers (#23). For legal shapes the #17 gate already
+                    // guarantees anoncrypt-if-present is outermost; deriving here keeps the flag correct
+                    // by construction regardless.
+                    var isOutermostEncryptLayer = !encrypted;
                     encrypted = true;
                     contentEnc = jweResult.ContentEncryption;
                     keyWrap = jweResult.Algorithm;
                     recipientKid = jweResult.RecipientKid;
                     allRecipientKids = jweResult.AllRecipientKids;
+
+                    if (isOutermostEncryptLayer)
+                        anonymous = !jweResult.IsAuthenticated;
 
                     if (jweResult.IsAuthenticated)
                     {
@@ -239,7 +266,6 @@ internal static class EnvelopeReader
                     }
                     else
                     {
-                        anonymous = true;
                         shape.Add(LayerShape.AnonEncrypt);
                     }
 

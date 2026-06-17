@@ -116,7 +116,20 @@ public sealed class ForwardProcessor
             return Encoding.UTF8.GetBytes(json.ToJsonString());
 
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
-            return Base64Url.Decode(attachment.Data.Base64);
+        {
+            try
+            {
+                return Base64Url.Decode(attachment.Data.Base64);
+            }
+            catch (FormatException ex)
+            {
+                // The attachment payload is attacker-controlled; a non-strict-base64url value must
+                // surface as the documented malformed-input type, not a raw FormatException out of the
+                // mediator's ProcessAsync (#24 — strict Base64Url.Decode widened the rejected set).
+                throw new MalformedMessageException(
+                    "Forward attachment 'data.base64' is not valid base64url.", ex);
+            }
+        }
 
         throw new ConsistencyException(
             "Forward attachment is missing both 'data.json' and 'data.base64'. The mediator has nothing to relay.");

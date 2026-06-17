@@ -243,6 +243,28 @@ public sealed class ForwardProcessorTests
         Encoding.UTF8.GetString(result.OnwardPacked).Should().Be(innerPayload);
     }
 
+    [Fact]
+    public async Task ProcessAsync_maps_malformed_base64_attachment_to_MalformedMessageException()
+    {
+        // Issue #24 (red-team): a forward attachment whose data.base64 is not strict base64url (e.g.
+        // '=' padding) must surface as MalformedMessageException, not a raw FormatException escaping
+        // the mediator's ProcessAsync.
+        var forward = new MessageBuilder()
+            .WithType(ForwardConstants.ForwardTypeUri)
+            .WithBody(new JsonObject { ["next"] = "did:example:n" })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = "SGVsbG8=" } }) // padded → rejected
+            .Build();
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(forward);
+
+        var processor = new ForwardProcessor(client, new EmptyKeyService(), new ForwardProcessorOptions());
+
+        var act = async () => await processor.ProcessAsync(packed);
+
+        (await act.Should().ThrowAsync<MalformedMessageException>())
+            .Which.Message.Should().Contain("not valid base64url");
+    }
+
     [Theory]
     [InlineData(long.MinValue)]
     [InlineData(-long.MaxValue)]

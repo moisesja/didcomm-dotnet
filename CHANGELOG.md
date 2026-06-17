@@ -6,6 +6,29 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — receive-path correctness (`feat/security-receive-correctness`)
+
+Resolves three Low-severity audit findings on the unpack/JOSE receive surface (GitHub issues
+#22, #23, #24). Each ships with tests and an adversarial red-team pass; full suite (615 tests) green.
+
+- **Unpack honors its exception contract for non-canonical field lengths (#22).** `EnvelopeReader`
+  gains a defensive `ArgumentException → MalformedMessageException` boundary catch at both the JWS and
+  JWE delegation points. Note: the originally-reported escape is **already resolved upstream** — the
+  delegated `DataProofsDotnet.Jose` parser now wraps the AEAD's wrong-length-iv/tag `ArgumentException`
+  (and base64 `FormatException`) as `MalformedJoseException` — so this is a boundary guard plus a
+  regression test asserting wrong-length-iv → `MalformedMessageException`.
+- **Strict JOSE base64url decoding (#24).** `Base64Url.Decode` now rejects `=` padding, embedded ASCII
+  whitespace, and standard-base64 `+`/`/` (anything outside `[A-Za-z0-9-_]`) with `FormatException`,
+  per RFC 7515 §2 / RFC 4648 §3.2-3.3, closing a parser-differential / non-canonical-encoding gap on
+  the from_prior, forward-attachment, and OOB receive paths. Red-team follow-up: `ForwardProcessor`
+  now maps that `FormatException` to `MalformedMessageException` so a malformed forward attachment no
+  longer escapes the mediator as a raw exception.
+- **`UnpackResult.AnonymousSender` derived from the outermost encrypt layer (#23).** The flag is now
+  computed from the outermost encrypt layer's alg (matching its documented semantics) instead of
+  OR-accumulating across layers. The contradiction the finding described (`authcrypt(anoncrypt)` →
+  both flags true) was already unreachable after the #17 composition gate; this makes the code match
+  its contract by construction.
+
 ### Security — Medium-severity audit remediation (`feat/security-medium-cluster`)
 
 Remediates the five Medium-severity findings from the multi-agent security & compliance audit

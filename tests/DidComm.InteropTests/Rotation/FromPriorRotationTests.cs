@@ -125,6 +125,7 @@ public sealed class FromPriorRotationTests
     [Theory]
     [InlineData("!!!not-base64url!!!", 0)] // header segment is not base64url -> FormatException
     [InlineData("@@@", 2)]                 // signature segment is not base64url -> FormatException
+    [InlineData("SGVsbG8=", 1)]            // #24: '=' padded segment -> strict base64url FormatException
     public async Task Validator_RejectsNonBase64UrlSegment_AsProtocolException(string garbage, int segmentIndex)
     {
         var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());

@@ -424,4 +424,49 @@ public sealed class EnvelopeReaderTests
         unpacked.AnonymousSender.Should().BeTrue();
         unpacked.NonRepudiation.Should().BeTrue();
     }
+
+    [Fact]
+    public async Task Wrong_length_iv_throws_MalformedMessageException_honoring_the_unpack_contract()
+    {
+        // Issue #22: a non-canonical iv length must surface as MalformedMessageException, never as a raw
+        // ArgumentException out of unpack. (A256GCM requires a 12-byte iv; splice a 5-byte one.) Note:
+        // the delegated DataProofsDotnet.Jose parser already wraps the AEAD's ArgumentException as
+        // MalformedJoseException, so this is a regression guard on the unpack contract; EnvelopeReader
+        // also carries a defensive ArgumentException boundary catch for any path the delegate doesn't wrap.
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
+
+        var jwe = System.Text.Json.Nodes.JsonNode.Parse(packed)!.AsObject();
+        jwe["iv"] = DidComm.Jose.Base64Url.Encode(new byte[5]); // valid base64url, wrong length
+        var tampered = jwe.ToJsonString();
+
+        Action act = () => EnvelopeReader.Unpack(tampered,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }), senderLookup: null, signerLookup: null, _crypto);
+
+        act.Should().Throw<MalformedMessageException>();
+    }
+
+    [Fact]
+    public async Task AnonymousSender_reflects_the_outermost_encrypt_layer_not_accumulation()
+    {
+        // Issue #23: for anoncrypt(authcrypt(...)) the OUTERMOST encrypt layer is anoncrypt, so
+        // AnonymousSender must be true even though the inner authcrypt layer binds and authenticates
+        // the sender. The flag is derived from the outermost layer, not OR-accumulated across layers.
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, "did:example:alice#x");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
+                SenderPrivateJwk: alice.PrivateJwk, Skid: alice.PublicJwk.Kid, ProtectSender: true), _crypto);
+
+        var unpacked = EnvelopeReader.Unpack(packed,
+            new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
+            senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
+            signerLookup: null, _crypto);
+
+        unpacked.AnonymousSender.Should().BeTrue();             // outermost layer is anoncrypt
+        unpacked.Authenticated.Should().BeTrue();               // inner authcrypt bound the sender
+        unpacked.SenderKid.Should().Be(alice.PublicJwk.Kid);
+    }
 }

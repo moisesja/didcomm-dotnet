@@ -482,3 +482,19 @@ Format per entry:
   argument for shared mutable state must be re-derived under concurrency; guard expensive
   rebuild/evict passes with single-flight. (3) Always run a break-it adversarial pass on a security
   fix before declaring done — the fix that closes the headline issue often leaves a residual.
+
+## L-026 — When you make a shared primitive throw a new/wider exception, audit EVERY call site's exception contract — don't trust the issue's "call sites already handle it" premise.
+
+- **Lesson:** Making `Base64Url.Decode` strict (#24) widened when it throws `FormatException`. The issue
+  body asserted the call sites "map it to MalformedMessageException" — but the adversarial pass found
+  `ForwardProcessor.ExtractAttachmentBytes` had NO try/catch, so a malformed forward attachment threw a
+  raw `FormatException` out of the mediator's `ProcessAsync`. The from_prior site mapped it (#19); the
+  forward site did not.
+- **Why:** A primitive's exception is part of its contract; changing/widening it ripples to every
+  caller. The audit-era issue text described call-site behavior that was only partially true, and the
+  pre-existing raw-`FormatException` escape was simply made more reachable.
+- **How to apply:** Before changing what a shared decoder/parser throws, `grep` every call site and
+  verify each maps the (new or widened) exception to the module's documented contract type — add the
+  map where missing, with a regression test per reachable site. Treat the issue's stated premise as a
+  hypothesis to verify, not a fact. (This is exactly what the mandatory adversarial pass, AGENTS.md
+  §2, is for — run it on every security fix and fix what it finds.)
