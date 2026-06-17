@@ -31,15 +31,18 @@ public sealed class ProblemReportHandlerTests
     [Fact]
     public async Task Warning_report_does_not_increment_error_count()
     {
-        var handler = BuildHandler();
+        var budget = new CascadeBudgetStore();
+        var handler = BuildHandler(budget: budget);
         var warning = ProblemReportApi.Create(
             from: "did:peer:alice", to: "did:peer:bob",
             code: "w.m.req.expired", pthid: "thread-1");
         var store = new InMemoryThreadStateStore();
         var reply = await handler.HandleAsync(warning, Ctx(warning, store), CancellationToken.None);
         reply.Should().BeNull();
-        // No state was created for "thread-1" since warnings don't trigger error accounting.
-        store.Get("thread-1").Should().BeNull();
+        // A warning code must not create or advance the FR-PROTO-10 budget entry (PR #40 review: assert
+        // against the budget store, since the handler no longer writes the general store for any code).
+        budget.Peek("thread-1").ErrorCount.Should().Be(0);
+        budget.Count.Should().Be(0, "warnings create no budget entry at all");
     }
 
     [Fact]
@@ -327,5 +330,24 @@ public sealed class ProblemReportHandlerTests
         budget.Peek("victim").NoticeSent.Should().BeTrue("the tripped decision survives the fresh-pthid flood");
         (await handler.HandleAsync(victim, Ctx(victim, store), CancellationToken.None))
             .Should().BeNull("a tripped thread stays silent — no re-emit after the flood");
+    }
+
+    [Fact]
+    public async Task Budget_store_stays_bounded_even_at_a_cap_of_one()
+    {
+        // PR #40 review: maxEntries=1 must actually bound the store. A naive low-water (== cap for
+        // maxEntries=1) made Evict() a no-op, so the store grew by one per distinct pthid without limit.
+        var budget = new CascadeBudgetStore(maxEntries: 1);
+        var handler = BuildHandler(budget: budget);
+        var store = new InMemoryThreadStateStore();
+
+        for (var i = 0; i < 200; i++)
+        {
+            var r = ProblemReportApi.Create(
+                from: "did:peer:a", to: "did:peer:b", code: "e.p.xfer.cant-use-endpoint", pthid: $"p-{i}");
+            await handler.HandleAsync(r, Ctx(r, store), CancellationToken.None);
+        }
+
+        budget.Count.Should().BeLessThanOrEqualTo(1, "the cap must hold even at maxEntries=1");
     }
 }

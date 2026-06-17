@@ -19,7 +19,10 @@ namespace DidComm.Protocols.ProblemReport;
 /// increment + threshold check + trip decision atomically under a single lock keyed by the pthid
 /// string. (An earlier design locked on the per-pthid state object borrowed from an LRU store; under
 /// eviction two concurrent callers could lock <em>different</em> instances for the same pthid and
-/// double-emit the cascade-stop — the lock seam must not be an evictable value.)
+/// double-emit the cascade-stop — the lock seam must not be an evictable value.) The single lock
+/// serializes all callers; that is a deliberate trade-off — problem reports are rare events, so a
+/// global lock is simpler and safe. A high-throughput in-process host would stripe locks by pthid; a
+/// multi-host deployment supplies a distributed budget (same frontier as the eviction residual below).
 /// </para>
 /// <para>
 /// Bounded at <see cref="DefaultMaxEntries"/> with approximate-LRU eviction that <em>prefers</em>
@@ -61,7 +64,11 @@ public sealed class CascadeBudgetStore
         }
 
         _maxEntries = maxEntries;
-        _lowWaterMark = Math.Max(1, maxEntries - Math.Max(1, maxEntries / 10));
+        // Trim toward ~90%, but ALWAYS strictly below the cap so Evict() actually frees a slot. A naive
+        // Math.Max(1, …) leaves lowWater == cap for maxEntries == 1 (1/10 == 0): Evict() removes
+        // Count − lowWater == 0 entries, the new entry is added anyway, and the store grows past its cap
+        // without bound. Clamp to maxEntries − 1 (PR #40 review).
+        _lowWaterMark = Math.Min(maxEntries - 1, Math.Max(1, maxEntries - Math.Max(1, maxEntries / 10)));
     }
 
     /// <summary>

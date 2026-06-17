@@ -11,7 +11,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 Resolves two FR-PROTO-10 cascade-guard findings (GitHub issues #29, #36), addressed together since both
 stem from the per-`pthid` error budget living on the dispatcher's general thread store. Passed a
 PoC-backed adversarial red-team pass that caught — and drove the fix for — a concurrency bug in the
-first cut. Full suite (630 tests) green.
+first cut. Full suite (631 tests) green.
 
 - **Cascade budget moved to a dedicated, bounded store (#36).** The FR-PROTO-10 budget now lives in a
   new `CascadeBudgetStore`, separate from the dispatcher's general thread store (which is flooded with
