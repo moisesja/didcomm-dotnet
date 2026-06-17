@@ -6,7 +6,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
-### Fixed — rotation JWT compliance (`feat/security-rotation-compliance`)
+### Fixed — rotation JWT compliance
 
 Resolves two Low-severity audit findings on the `from_prior` rotation path (GitHub issues #25, #26).
 Both passed a PoC-backed adversarial red-team pass; full suite (625 tests) green.
@@ -27,7 +27,7 @@ Both passed a PoC-backed adversarial red-team pass; full suite (625 tests) green
   `JwsParser`/`JweParser`, which fail closed. It now rejects any `crit` member with `ProtocolException`,
   before signature verification, bringing the rotation path to parity.
 
-### Fixed — receive-path correctness (`feat/security-receive-correctness`)
+### Fixed — receive-path correctness
 
 Resolves three Low-severity audit findings on the unpack/JOSE receive surface (GitHub issues
 #22, #23, #24). Each ships with tests and an adversarial red-team pass; full suite (615 tests) green.
@@ -54,7 +54,7 @@ Resolves three Low-severity audit findings on the unpack/JOSE receive surface (G
   both flags true) was already unreachable after the #17 composition gate; this makes the code match
   its contract by construction.
 
-### Security — Medium-severity audit remediation (`feat/security-medium-cluster`)
+### Security — Medium-severity audit remediation
 
 Remediates the five Medium-severity findings from the multi-agent security & compliance audit
 (GitHub issues #17–#21), plus two lower-severity defects on the same code path (#28, #33). Each fix
@@ -91,7 +91,7 @@ follow-ups). The full suite (600 tests) is green.
   Red-team hardening: the inline-callback overload now also wraps `onReceive` so a consumer callback
   that throws after a successful unpack returns 202 (logged) instead of escaping as a distinguishable
   `500` — removing an unpack-success oracle the uniform-400 path would otherwise leave. (A residual
-  *timing* side-channel in the underlying decrypt path — held-vs-unheld recipient kid — is **not**
+  _timing_ side-channel in the underlying decrypt path — held-vs-unheld recipient kid — is **not**
   closed by this change and is tracked as a follow-up.) A downstream DID-resolution timeout
   (`TaskCanceledException` with the request token not cancelled — e.g. a hung `did:webvh` host) also
   collapses to the uniform 400 rather than escaping as a `500`; only a genuine client abort propagates.
@@ -106,7 +106,7 @@ follow-ups). The full suite (600 tests) is green.
   snapshot-sort — closing a CPU-amplification DoS. (A residual cascade-guard-reset-via-eviction vector,
   costing the attacker ~`cap` messages per suppressed report, is tracked as a follow-up alongside #29.)
 
-### Changed — delegate the envelope layer to DataProofsDotnet.Jose (`feat/delegate-jose-dataproofs`)
+### Changed — delegate the envelope layer to DataProofsDotnet.Jose
 
 didcomm-dotnet no longer carries its own cryptography or JWE/JWS assembly. The entire `Crypto/`
 folder and almost all of `Jose/` were deleted; envelope build/parse is delegated to
@@ -152,10 +152,10 @@ all DIDComm v2.1 Appendix C byte-equivalence vectors (anoncrypt/authcrypt/signed
   (method name **and** return type change). DataProofs signs through an async `ISigner`, so direct
   callers must `await` the new method. The primary `DidCommClient` pack/unpack facade is unchanged
   (it was already async); `ForwardWrapper.WrapAsync` is `internal`.
-- **ES512 / P-521 *signing* dropped.** The old `KeyTypeMapper` mapped `P-521 → ES512` for JWS; the
+- **ES512 / P-521 _signing_ dropped.** The old `KeyTypeMapper` mapped `P-521 → ES512` for JWS; the
   delegated signer scopes JWS to EdDSA / ES256 / ES384 / ES256K, so a P-521 signer JWK now raises
   `NotSupportedException`. **Not a DIDComm v2.1 regression** — signed messages require only
-  EdDSA / ES256 / ES256K (none were tested with P-521), and P-521 *key agreement*
+  EdDSA / ES256 / ES256K (none were tested with P-521), and P-521 _key agreement_
   (anoncrypt/authcrypt) is unaffected and still tested.
 
 ### Notes
