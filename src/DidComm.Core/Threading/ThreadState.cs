@@ -38,6 +38,22 @@ public sealed class ThreadState
     public bool MaxErrorsNoticeSent { get; set; }
 
     /// <summary>
+    /// FR-THR-04 rule-3 bookkeeping: <c>true</c> once the dispatcher has emitted a reply that requests
+    /// an ACK on this thread, so a subsequent pure-ACK answering it is consumed (not re-dispatched) to
+    /// break an ACK loop. Set by <c>ProtocolDispatcher</c> when it produces an ACK-requesting reply and
+    /// cleared when the answering pure-ACK arrives. Tracks only dispatcher-emitted ACK requests; requests
+    /// sent via the facade directly are the application's responsibility (#31).
+    /// </summary>
+    /// <remarks>
+    /// Best-effort, not a state machine: if the expected pure-ACK never arrives, the flag stays
+    /// <c>true</c> until this entry is evicted from the bounded thread store (#21). While set, a later
+    /// <i>unsolicited</i> pure-ACK on the same thread is dropped as a loop (a benign over-drop — pure
+    /// ACKs are inert and carry no work). This is acceptable because rule-3 is only defense-in-depth:
+    /// rule-2 (a pure-ACK must not itself request an ACK) is the actual loop barrier.
+    /// </remarks>
+    public bool AckRequested { get; set; }
+
+    /// <summary>
     /// Monotonic last-touched stamp used by <see cref="InMemoryThreadStateStore"/>'s
     /// approximate-LRU eviction to bound the store under a flood of fresh, unauthenticated
     /// thids (issue #21). Not part of the public thread-state contract; other stores ignore it.

@@ -120,6 +120,48 @@ public sealed class ProtocolDispatcherTests
     }
 
     [Fact]
+    public async Task Rule3_drops_a_pure_ack_answering_a_dispatcher_emitted_ack_request()
+    {
+        // FR-THR-04 rule 3 (#31): when the dispatcher's own reply requested an ACK on a thread, the
+        // answering pure-ACK is consumed (DroppedAsAckLoop), not dispatched — which would close a loop.
+        var reg = new ProtocolHandlerRegistry();
+        var ackRequestingReply = new MessageBuilder()
+            .WithType("https://didcomm.org/test/1.0/reply").WithPleaseAck().Build();
+        var handler = new CapturingHandler { ReplyToReturn = ackRequestingReply };
+        reg.Register(handler);
+        var store = new InMemoryThreadStateStore();
+        var dispatcher = new ProtocolDispatcher(reg, store);
+
+        var inbound = Msg("https://didcomm.org/test/1.0/m", id: "in-1");
+        inbound.Thid = "thread-x";
+        var r1 = await dispatcher.DispatchAsync(Unpack(inbound), client: null, new DidCommOptions());
+        r1.Result.Should().Be(DispatchResult.ReplyProduced);
+        store.GetOrCreate("thread-x").AckRequested.Should().BeTrue("the dispatcher recorded its ACK request");
+
+        // The peer's pure-ACK on the same thread answers our request → rule 3 drops it before dispatch.
+        var pureAck = Message.Empty().WithFrom("did:peer:alice").WithTo("did:peer:bob").WithAck("reply-1").Build();
+        pureAck.Thid = "thread-x";
+        var r2 = await dispatcher.DispatchAsync(Unpack(pureAck), client: null, new DidCommOptions());
+        r2.Result.Should().Be(DispatchResult.DroppedAsAckLoop);
+        handler.CallCount.Should().Be(1, "the answering pure-ACK must not reach a handler");
+        store.GetOrCreate("thread-x").AckRequested.Should().BeFalse("the satisfied ACK request is cleared");
+    }
+
+    [Fact]
+    public async Task Rule3_does_not_drop_an_unsolicited_pure_ack()
+    {
+        // No prior dispatcher-emitted ACK request on the thread → rule 3 must NOT fire (no over-drop);
+        // the pure-ACK flows on (here NoHandler, since the Empty type isn't registered in this test).
+        var dispatcher = new ProtocolDispatcher(new ProtocolHandlerRegistry(), new InMemoryThreadStateStore());
+        var pureAck = Message.Empty().WithFrom("did:peer:alice").WithTo("did:peer:bob").WithAck("whatever").Build();
+        pureAck.Thid = "thread-y";
+
+        var result = await dispatcher.DispatchAsync(Unpack(pureAck), client: null, new DidCommOptions());
+        result.Result.Should().NotBe(DispatchResult.DroppedAsAckLoop);
+        result.Result.Should().Be(DispatchResult.NoHandler);
+    }
+
+    [Fact]
     public async Task ThreadState_is_per_thid_and_passed_to_handler()
     {
         var reg = new ProtocolHandlerRegistry();

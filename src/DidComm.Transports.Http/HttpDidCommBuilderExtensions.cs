@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using DidComm.Extensions.DependencyInjection;
+using DidComm.Facade;
 using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -35,8 +36,13 @@ public static class HttpDidCommBuilderExtensions
             .AddHttpClient(HttpDidCommTransport.HttpClientName)
             .ConfigurePrimaryHttpMessageHandler(sp =>
             {
-                var guard = new OutboundEndpointGuard(
-                    sp.GetRequiredService<IOptions<HttpTransportOptions>>().Value.OutboundEndpointPolicy);
+                // Single source of truth (#27): use this transport's explicit policy if set, else inherit
+                // the core DidCommOptions.OutboundEndpointPolicy (the same instance the facade's pre-send
+                // check uses), else a fresh default. So configuring the policy in one place governs both.
+                var policy = sp.GetRequiredService<IOptions<HttpTransportOptions>>().Value.OutboundEndpointPolicy
+                    ?? sp.GetService<IOptions<DidCommOptions>>()?.Value.OutboundEndpointPolicy
+                    ?? new OutboundEndpointPolicy();
+                var guard = new OutboundEndpointGuard(policy);
                 return new SocketsHttpHandler
                 {
                     // The transport follows 307 manually so it can enforce the FR-TRN-06 rule

@@ -40,10 +40,16 @@ public sealed class WebSocketTransportOptions
     public Func<System.Net.WebSockets.WebSocket, Uri, CancellationToken, Task>? Connect { get; set; }
 
     /// <summary>
-    /// SSRF-defense policy applied before the default connect path opens a socket. Defaults to
-    /// blocking private / loopback / link-local / metadata destinations. Skipped when a custom
-    /// <see cref="Connect"/> delegate is supplied (the host then owns connection vetting — used by
-    /// tests against an in-process TestServer).
+    /// SSRF-defense policy applied before the default connect path opens a socket. Skipped when a
+    /// custom <see cref="Connect"/> delegate is supplied (the host then owns connection vetting — used
+    /// by tests against an in-process TestServer).
     /// </summary>
-    public OutboundEndpointPolicy OutboundEndpointPolicy { get; set; } = new();
+    /// <remarks>
+    /// <c>null</c> (the default) means <b>inherit</b> the single source of truth,
+    /// <c>DidCommOptions.OutboundEndpointPolicy</c> (which itself defaults to blocking private /
+    /// loopback / link-local / metadata destinations), so the policy is configured in one place and
+    /// applies to the pre-send check and the transport connect-time pin alike (#27). Set a non-null
+    /// value only to give this transport a policy distinct from the core one.
+    /// </remarks>
+    public OutboundEndpointPolicy? OutboundEndpointPolicy { get; set; }
 }

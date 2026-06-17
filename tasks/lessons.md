@@ -532,3 +532,19 @@ Format per entry:
   "decision already made" (e.g. tripped/silenced) survive eviction (prefer-evict-untripped or a sticky
   marker), and decouple the store's DI lifetime from a handler's (register it as its own singleton) so
   a non-singleton handler can't silently get a fresh store per request.
+
+## L-029 — "required string" guards: use IsNullOrWhiteSpace, and return the CANONICAL form of a validated URL.
+
+- **Lesson (presence):** A `string.IsNullOrEmpty(x)` "required" check accepts a whitespace-only value
+  (`" "`, NBSP, em-space). The #34 OOB `from` guard used `IsNullOrEmpty`, and `Message.Validate()` only
+  rejects *control* chars — so a single space passed as a "present" but meaningless DID. The red-team
+  walked it through both URL forms. Fix: `IsNullOrWhiteSpace` (and `ArgumentException.ThrowIfNullOrWhiteSpace`).
+- **Lesson (canonicalization):** When you validate an attacker-controlled URL with `System.Uri` and then
+  hand it on, return `parsed.AbsoluteUri`, not the raw input. `Uri` tolerates leading control
+  chars/whitespace for *parsing* but they survive in the raw string, so a downstream sink that parses
+  differently can be confused. Also reject non-empty `Uri.UserInfo` — a legitimate redirect never needs
+  `user@host`, and it's a phishing-display vector (#30).
+- **How to apply:** For any "REQUIRED, non-empty" string field, default to `IsNullOrWhiteSpace`. For any
+  validated URL you surface to a consumer, return the canonical `AbsoluteUri` and reject userinfo. When a
+  comment claims a fix "mirrors" an existing guard, verify parity — the OOB redirect guard is the scheme
+  half of TraceObserver's, NOT its allowlist; say so rather than overclaim.

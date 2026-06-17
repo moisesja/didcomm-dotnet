@@ -39,15 +39,24 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <summary>Initialize the transport with bound options.</summary>
     /// <param name="options">Bound <see cref="WebSocketTransportOptions"/>.</param>
     /// <param name="logger">Optional logger; pass <see cref="NullLogger{T}.Instance"/> outside DI.</param>
+    /// <param name="coreOptions">
+    /// Optional core <see cref="DidComm.Facade.DidCommOptions"/>; its <c>OutboundEndpointPolicy</c> is
+    /// inherited as the single source of truth when this transport's policy is left unset (#27).
+    /// </param>
     public WebSocketDidCommTransport(
         IOptions<WebSocketTransportOptions> options,
-        ILogger<WebSocketDidCommTransport>? logger = null)
+        ILogger<WebSocketDidCommTransport>? logger = null,
+        IOptions<DidComm.Facade.DidCommOptions>? coreOptions = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _options = options.Value;
         _logger = logger ?? NullLogger<WebSocketDidCommTransport>.Instance;
         _reconnectPipeline = BuildReconnectPipeline(_options);
-        _guard = new OutboundEndpointGuard(_options.OutboundEndpointPolicy);
+        // Single source of truth (#27): inherit the core policy when this transport's is unset.
+        var policy = _options.OutboundEndpointPolicy
+            ?? coreOptions?.Value.OutboundEndpointPolicy
+            ?? new OutboundEndpointPolicy();
+        _guard = new OutboundEndpointGuard(policy);
         // SSRF defense for the default ClientWebSocket path: pin every connection — the initial
         // handshake and each reconnect — to a guard-vetted IP via a SocketsHttpHandler.ConnectCallback,
         // exactly as the HTTP transport does. OutboundEndpointGuard.ConnectAsync resolves at connect
