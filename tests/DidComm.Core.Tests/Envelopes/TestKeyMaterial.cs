@@ -32,7 +32,7 @@ internal sealed class TestKeyMaterial
     }
 }
 
-internal sealed class DictionarySecretsLookup : IInternalSecretsLookup
+internal sealed class DictionarySecretsLookup : ISecretsResolver
 {
     private readonly Dictionary<string, Jwk> _byKid;
 
@@ -41,10 +41,11 @@ internal sealed class DictionarySecretsLookup : IInternalSecretsLookup
         _byKid = privateJwks.ToDictionary(j => j.Kid!, StringComparer.Ordinal);
     }
 
-    public Jwk? TryGet(string kid) => _byKid.GetValueOrDefault(kid);
+    public Task<Jwk?> FindAsync(string kid, CancellationToken ct = default)
+        => Task.FromResult(_byKid.GetValueOrDefault(kid));
 
-    public IReadOnlyList<string> FindPresent(IEnumerable<string> kids)
-        => kids.Where(k => _byKid.ContainsKey(k)).ToArray();
+    public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<string>>(kids.Where(k => _byKid.ContainsKey(k)).ToArray());
 }
 
 internal sealed class DictionarySenderKeyLookup : IInternalSenderKeyLookup

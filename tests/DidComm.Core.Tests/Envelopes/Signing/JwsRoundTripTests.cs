@@ -12,7 +12,7 @@ namespace DidComm.Tests.Envelopes.Signing;
 /// <summary>
 /// Envelope-level signed round trips. The JWS build/parse primitives now live in
 /// DataProofsDotnet.Jose; these tests exercise the DIDComm signed envelope through
-/// <see cref="EnvelopeWriter.PackSignedAsync"/> + <see cref="EnvelopeReader.Unpack"/> so the
+/// <see cref="EnvelopeWriter.PackSignedAsync"/> + <see cref="EnvelopeReader.UnpackAsync"/> so the
 /// from↔signer binding (FR-CONSIST-03), FR-SIG-06 inner-'to', and the flattened/general JWS shapes
 /// are covered at the composition seam.
 /// </summary>
@@ -21,7 +21,7 @@ public sealed class JwsRoundTripTests
     private static readonly JoseCryptoProvider _crypto = new();
 
     private static UnpackResult Unpack(string packed, Func<string, Jwk?> signerLookup) =>
-        EnvelopeReader.Unpack(
+        EnvelopeReaderTestRunner.Unpack(
             packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null,
@@ -42,7 +42,7 @@ public sealed class JwsRoundTripTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
         var result = Unpack(packed, kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null);
 
@@ -62,7 +62,7 @@ public sealed class JwsRoundTripTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
         // Flip a byte in the base64url payload to invalidate the signature.
         var tampered = packed.Replace("\"payload\":\"e", "\"payload\":\"f", StringComparison.Ordinal);
@@ -82,7 +82,7 @@ public sealed class JwsRoundTripTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
         Action act = () => Unpack(packed, _ => null);
         act.Should().Throw<CryptoException>();
@@ -98,7 +98,7 @@ public sealed class JwsRoundTripTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
         // Flattened JSON: top-level "signature" + "protected", no "signatures" array.
         packed.Should().Contain("\"signature\":");
@@ -116,7 +116,7 @@ public sealed class JwsRoundTripTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signerA.PrivateJwk, signerB.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signerA.PrivateJwk.ToJwsSigner(), signerB.PrivateJwk.ToJwsSigner() }));
 
         packed.Should().Contain("\"signatures\":");
 
@@ -146,7 +146,7 @@ public sealed class JwsRoundTripTests
         Func<Task> act = () => EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256GCM",
-                SignerPrivateJwks: new[] { signer.PrivateJwk }),
+                Signers: new[] { signer.PrivateJwk.ToJwsSigner() }),
             _crypto);
 
         await act.Should().ThrowAsync<MalformedMessageException>().WithMessage("*FR-SIG-06*");
@@ -166,7 +166,7 @@ public sealed class JwsRoundTripTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256GCM",
-                SignerPrivateJwks: new[] { signer.PrivateJwk }),
+                Signers: new[] { signer.PrivateJwk.ToJwsSigner() }),
             _crypto);
         packed.Should().NotBeNullOrEmpty();
     }
@@ -181,7 +181,7 @@ public sealed class JwsRoundTripTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
         Action act = () => Unpack(packed, _ => signer.PublicJwk);
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-03*");

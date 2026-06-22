@@ -21,13 +21,28 @@ public static class FromPriorBuilder
     /// <param name="claims">Sub / Iss / Iat triple.</param>
     /// <param name="signerPrivateJwk">Private JWK; <c>Kid</c> MUST identify a key authorized under <paramref name="claims"/>.Iss <c>authentication</c>.</param>
     /// <param name="ct">Cancellation token.</param>
-    public static async Task<string> BuildAsync(FromPriorClaims claims, Jwk signerPrivateJwk, CancellationToken ct = default)
+    public static Task<string> BuildAsync(FromPriorClaims claims, Jwk signerPrivateJwk, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(signerPrivateJwk);
+        // JwsSignerFactory validates crv/d/kid and adapts the JWK into a NetCrypto-backed signer.
+        return BuildAsync(claims, JwsSignerFactory.FromPrivateJwk(signerPrivateJwk), ct);
+    }
+
+    /// <summary>
+    /// Build a from_prior JWT from validated claims using an opaque-or-extractable JWS signer handle
+    /// (FR-SEC-06). Use this overload to sign the rotation JWT with a key held in a non-extractable
+    /// boundary (HSM / KMS / keychain / <c>NetCrypto.IKeyStore</c>) — e.g.
+    /// <c>new JwsSigner(await keyStore.CreateSignerAsync(alias), kid)</c> — so the prior DID's signing
+    /// scalar never leaves custody. The signer's <c>kid</c> MUST identify a key authorized under
+    /// <paramref name="claims"/>.Iss <c>authentication</c>.
+    /// </summary>
+    /// <param name="claims">Sub / Iss / Iat triple.</param>
+    /// <param name="signer">JWS signer handle whose <c>kid</c> identifies the prior DID's signing key.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public static async Task<string> BuildAsync(FromPriorClaims claims, DpSig.JwsSigner signer, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(claims);
-        ArgumentNullException.ThrowIfNull(signerPrivateJwk);
-
-        // JwsSignerFactory validates crv/d/kid and adapts the JWK into a NetCrypto-backed signer.
-        var signer = JwsSignerFactory.FromPrivateJwk(signerPrivateJwk);
+        ArgumentNullException.ThrowIfNull(signer);
 
         // Claims in lexicographic key order (exp, iat, iss, nbf, sub) so identical inputs produce
         // byte-identical payloads across runs. exp/nbf are emitted only when present (RFC 7519
@@ -63,13 +78,33 @@ public static class FromPriorBuilder
     public static Task<string> BuildAsync(FromPriorClaims claims, Jwk signerPrivateJwk, TimeSpan lifetime, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(claims);
+        return BuildAsync(BoundedClaims(claims, lifetime), signerPrivateJwk, ct);
+    }
+
+    /// <summary>
+    /// Build a freshness-bounded from_prior JWT signed by an opaque-or-extractable JWS signer handle
+    /// (FR-SEC-06). As <see cref="BuildAsync(FromPriorClaims, DpSig.JwsSigner, CancellationToken)"/>,
+    /// but sets <c>exp = <paramref name="claims"/>.Iat + <paramref name="lifetime"/></c> so the rotation
+    /// token cannot be replayed past the window (FR-ROT-05).
+    /// </summary>
+    /// <param name="claims">Sub / Iss / Iat (and optional Nbf); Exp is computed from <paramref name="lifetime"/>.</param>
+    /// <param name="signer">JWS signer handle whose <c>kid</c> identifies the prior DID's signing key.</param>
+    /// <param name="lifetime">Positive validity window added to <c>Iat</c> to form <c>exp</c>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="lifetime"/> is not positive.</exception>
+    public static Task<string> BuildAsync(FromPriorClaims claims, DpSig.JwsSigner signer, TimeSpan lifetime, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(claims);
+        return BuildAsync(BoundedClaims(claims, lifetime), signer, ct);
+    }
+
+    private static FromPriorClaims BoundedClaims(FromPriorClaims claims, TimeSpan lifetime)
+    {
         // exp is second-granular, so a sub-second lifetime would floor to exp == iat — a token already
         // expired at issue. Require at least one whole second (red-team: avoid the silent zero-window).
         if (lifetime < TimeSpan.FromSeconds(1))
             throw new ArgumentOutOfRangeException(nameof(lifetime), lifetime,
                 "from_prior lifetime must be at least 1 second (exp is second-granular).");
-
-        var bounded = claims with { Exp = claims.Iat + (long)lifetime.TotalSeconds };
-        return BuildAsync(bounded, signerPrivateJwk, ct);
+        return claims with { Exp = claims.Iat + (long)lifetime.TotalSeconds };
     }
 }

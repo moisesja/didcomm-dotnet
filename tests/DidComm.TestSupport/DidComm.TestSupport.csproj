@@ -11,4 +11,11 @@
     <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The sync EnvelopeReaderTestRunner bridge references DidComm.Core-internal types, so it stays
+         internal and is surfaced to the test assemblies that drive the envelope layer directly. -->
+    <InternalsVisibleTo Include="DidComm.Core.Tests" />
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
 </Project>

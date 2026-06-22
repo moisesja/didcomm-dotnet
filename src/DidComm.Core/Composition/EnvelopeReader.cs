@@ -7,6 +7,7 @@ using DidComm.Messages;
 using DidComm.Secrets;
 using DpEnc = DataProofsDotnet.Jose.Encryption;
 using DpSig = DataProofsDotnet.Jose.Signing;
+using JoseAlgorithms = DataProofsDotnet.Jose.JoseAlgorithms;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Composition;
@@ -20,39 +21,57 @@ namespace DidComm.Composition;
 /// <see cref="UnpackResult"/> carrying both the inner plaintext and the FR-API-04 metadata.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The JOSE layer (DataProofsDotnet.Jose) verifies signatures and decrypts but knows nothing of the
 /// DIDComm plaintext <c>from</c>/<c>to</c> headers, so it returns the signer/sender/recipient kids
 /// (and the verified payload bytes) and this reader binds them to the message-layer addressing
 /// rules. In particular FR-CONSIST-03 (signed <c>from</c> ↔ signer kid) and FR-SIG-06 (an inner
 /// signed JWM under encryption MUST carry <c>to</c>) are enforced here, against the deserialized
 /// inner message, since the JWS parser returns raw payload bytes rather than a DIDComm message.
+/// </para>
+/// <para>
+/// <strong>Opaque key agreement (FR-SEC-06).</strong> Each encrypt layer is decrypted through the
+/// async <c>JweParser.ParseAsync</c> with an <c>IEcdhKey</c> the <see cref="KeyOperationResolver"/>
+/// resolves for the held recipient kid — opaque (keystore/HSM) or extractable. The recipient private
+/// scalar never enters this layer on the opaque path. The reader always invokes <c>ParseAsync</c>
+/// (with a throwaway decoy handle when no recipient key is held), so from <c>ParseAsync</c> inward the
+/// ECDH/unwrap cost and the uniform decryption failure are constant-work — independent of which (or
+/// whether) recipient key the agent holds (dataproofs #12). Any opaque-handle fault is folded into that
+/// same uniform failure so exception type/shape leaks nothing either. The held path does perform one
+/// extra backing-store lookup to fetch the key before <c>ParseAsync</c> (the unheld path goes straight
+/// to the in-process decoy); on a slow store that prologue is the consumer resolver's responsibility,
+/// outside this layer's constant-work guarantee (as <c>JweParser</c> documents) and covered at the
+/// transport boundary by the receive rejection floor (issue #35).
+/// </para>
 /// </remarks>
 internal static class EnvelopeReader
 {
     /// <summary>Unpack <paramref name="packed"/> into its inner plaintext + metadata.</summary>
     /// <param name="packed">A packed DIDComm message: plaintext JWM, signed JWS, or encrypted JWE.</param>
-    /// <param name="secretsLookup">Internal lookup for recipient private keys (decrypt path).</param>
+    /// <param name="recipientKeys">Resolves the recipient ECDH key-agreement handle (opaque or extractable) for the decrypt path, and answers held-ness for recipient selection.</param>
     /// <param name="senderLookup">Internal lookup for sender public keys (authcrypt path); MAY be null when no authcrypt is expected.</param>
     /// <param name="signerLookup">Function returning the public JWK of a signer kid (verify path); MAY be null when no signed layers are expected.</param>
     /// <param name="cryptoProvider">JOSE crypto provider (NetCrypto-backed).</param>
     /// <param name="resolverCheck">
-    /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship) =&gt; isAuthorized</c>.
+    /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship, ct) =&gt; isAuthorized</c>.
     /// When non-null, the unpack pipeline asserts the inner plaintext's sender / recipient / signer kids are present
     /// under the resolved DID Document's matching relationship. Pass <c>null</c> to short-circuit the check.
     /// </param>
+    /// <param name="ct">Cancellation token for the (possibly I/O-bound) key agreement and DID resolution.</param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
     /// <exception cref="CryptoException">When decryption / verification fails.</exception>
     /// <exception cref="ConsistencyException">When an addressing-consistency rule (FR-CONSIST-*) is violated.</exception>
-    public static UnpackResult Unpack(
+    public static async Task<UnpackResult> UnpackAsync(
         string packed,
-        IInternalSecretsLookup secretsLookup,
+        KeyOperationResolver recipientKeys,
         IInternalSenderKeyLookup? senderLookup,
         Func<string, Jwk?>? signerLookup,
         JoseCryptoProvider cryptoProvider,
-        Func<string, string, string, bool>? resolverCheck = null)
+        Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
-        ArgumentNullException.ThrowIfNull(secretsLookup);
+        ArgumentNullException.ThrowIfNull(recipientKeys);
         ArgumentNullException.ThrowIfNull(cryptoProvider);
 
         var stack = new List<EnvelopeKind>();
@@ -127,17 +146,17 @@ internal static class EnvelopeReader
                     if (resolverCheck is not null)
                     {
                         if (senderKid is not null && message.From is not null)
-                            AddressingConsistency.CheckResolverAuthorization(message.From, senderKid, "keyAgreement", resolverCheck);
+                            await AddressingConsistency.CheckResolverAuthorizationAsync(message.From, senderKid, "keyAgreement", resolverCheck, ct).ConfigureAwait(false);
 
                         if (encrypted && recipientKid is not null)
                         {
                             var recipientDid = DidSubject.DidSubjectOf(recipientKid);
                             if (recipientDid is not null)
-                                AddressingConsistency.CheckResolverAuthorization(recipientDid, recipientKid, "keyAgreement", resolverCheck);
+                                await AddressingConsistency.CheckResolverAuthorizationAsync(recipientDid, recipientKid, "keyAgreement", resolverCheck, ct).ConfigureAwait(false);
                         }
 
                         if (signerKid is not null && message.From is not null)
-                            AddressingConsistency.CheckResolverAuthorization(message.From, signerKid, "authentication", resolverCheck);
+                            await AddressingConsistency.CheckResolverAuthorizationAsync(message.From, signerKid, "authentication", resolverCheck, ct).ConfigureAwait(false);
                     }
 
                     return new UnpackResult(
@@ -222,7 +241,14 @@ internal static class EnvelopeReader
                     DpEnc.JweParseResult jweResult;
                     try
                     {
-                        jweResult = DpEnc.JweParser.Parse(current, secretsLookup, senderLookup, cryptoProvider);
+                        // Discover the recipient kids without any private key, select the held one, and
+                        // resolve its opaque-or-extractable ECDH handle. When none is held we still drive
+                        // a full ParseAsync with a decoy handle — the parser's constant-work path
+                        // (dataproofs #12) makes the ECDH/unwrap cost and the uniform failure identical
+                        // to the held path, closing the held-vs-unheld recipient-enumeration oracle.
+                        var peek = DpEnc.JweParser.PeekRecipients(current);
+                        var recipientKey = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        jweResult = await DpEnc.JweParser.ParseAsync(current, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
                     {
@@ -242,6 +268,20 @@ internal static class EnvelopeReader
                         // one escape UnpackAsync. Neutral message (the cause may be a field length or a
                         // throwing consumer lookup); the original is preserved as InnerException.
                         throw new MalformedMessageException("Malformed JWE.", ex);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException
+                        and not MalformedMessageException and not CryptoException and not ConsistencyException)
+                    {
+                        // Constant-work + FR-API-07: an opaque (keystore/HSM) recipient handle can fault in
+                        // ways the in-process path never does — a KeyNotFoundException when a kid is rotated
+                        // out between selection and derive, a CryptographicException from the enclave, or any
+                        // backing-store error. Fold ALL of them into the SAME uniform decryption failure as a
+                        // wrong-key / tampered-ciphertext failure, so (a) no raw exception escapes the unpack
+                        // contract and (b) the opaque path cannot reintroduce a recipient-possession oracle by
+                        // exception type/shape (the held path would otherwise throw a distinct type the decoy
+                        // path — an in-process RawEcdhKey — never can). The cause is preserved as
+                        // InnerException for diagnosis; cancellation is allowed to propagate.
+                        throw new CryptoException("JWE could not be decrypted.", ex);
                     }
 
                     // The loop unwraps outermost→inner, so the first encrypt layer is the outermost one.
@@ -281,6 +321,40 @@ internal static class EnvelopeReader
         }
 
         throw new MalformedMessageException("Envelope nesting exceeded the legal depth of 4.");
+    }
+
+    /// <summary>
+    /// Resolve the ECDH key-agreement handle the encrypt layer is decrypted with: the first held
+    /// recipient kid's handle (opaque or extractable), or — when none is held or usable — a throwaway
+    /// decoy on a supported curve. The decoy keeps the per-layer work constant whether or not the
+    /// agent holds a recipient key (dataproofs #12); the parser additionally swaps in its own
+    /// work-curve decoy when this handle's curve doesn't match the envelope, so the decoy here only
+    /// needs to exist, not to match.
+    /// </summary>
+    private static async Task<DpEnc.IEcdhKey> ResolveRecipientKeyOrDecoyAsync(
+        KeyOperationResolver recipientKeys,
+        IReadOnlyList<string> recipientKids,
+        JoseCryptoProvider cryptoProvider,
+        CancellationToken ct)
+    {
+        var heldKids = await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
+        foreach (var kid in heldKids)
+        {
+            var handle = await recipientKeys.ResolveKeyAgreementAsync(kid, ct).ConfigureAwait(false);
+            if (handle is not null)
+                return handle;
+        }
+
+        var scalar = new byte[32];
+        cryptoProvider.Fill(scalar);
+        try
+        {
+            return new DpEnc.RawEcdhKey(JoseAlgorithms.CrvX25519, scalar, cryptoProvider);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(scalar);
+        }
     }
 
     /// <summary>A single envelope layer, outer→inner, with the auth/anon distinction the composition gate needs.</summary>

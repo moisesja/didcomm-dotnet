@@ -4,6 +4,7 @@ using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Jose.Signing;
 using DidComm.Messages;
+using DidComm.Secrets;
 using FluentAssertions;
 using NetCrypto;
 using Xunit;
@@ -27,7 +28,7 @@ public sealed class EnvelopeReaderTests
             .Build();
 
         var packed = EnvelopeWriter.PackPlaintext(msg);
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null,
             signerLookup: null,
@@ -51,9 +52,9 @@ public sealed class EnvelopeReaderTests
             .Build();
 
         var packed = await EnvelopeWriter.PackSignedAsync(
-            new PackSignedParameters(msg, new[] { signer.PrivateJwk }));
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null,
             signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
@@ -78,7 +79,7 @@ public sealed class EnvelopeReaderTests
             new PackEncryptedParameters(msg, new[] { bob.PublicJwk }, "A256GCM"),
             _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: null,
             signerLookup: null,
@@ -108,11 +109,11 @@ public sealed class EnvelopeReaderTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid),
             _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
             signerLookup: null,
@@ -141,10 +142,10 @@ public sealed class EnvelopeReaderTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256GCM",
-                SignerPrivateJwks: new[] { signer.PrivateJwk }),
+                Signers: new[] { signer.PrivateJwk.ToJwsSigner() }),
             _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: null,
             signerLookup: _ => signer.PublicJwk,
@@ -172,12 +173,12 @@ public sealed class EnvelopeReaderTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid,
                 ProtectSender: true),
             _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
             signerLookup: null,
@@ -201,7 +202,7 @@ public sealed class EnvelopeReaderTests
             new PackEncryptedParameters(msg, new[] { bob.PublicJwk }, "A256GCM"),
             _crypto);
 
-        Action act = () => EnvelopeReader.Unpack(packed,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: null,
             signerLookup: null,
@@ -227,11 +228,11 @@ public sealed class EnvelopeReaderTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid),
             _crypto);
 
-        Action act = () => EnvelopeReader.Unpack(packed,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
             signerLookup: null,
@@ -258,12 +259,12 @@ public sealed class EnvelopeReaderTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid,
-                SignerPrivateJwks: new[] { carol.PrivateJwk }),
+                Signers: new[] { carol.PrivateJwk.ToJwsSigner() }),
             _crypto);
 
-        Action act = () => EnvelopeReader.Unpack(packed,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
             signerLookup: kid => kid == carol.PublicJwk.Kid ? carol.PublicJwk : null,
@@ -307,7 +308,7 @@ public sealed class EnvelopeReaderTests
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
         var outer = AnoncryptWrap(inner, bob.PublicJwk);
 
-        Action act = () => EnvelopeReader.Unpack(outer,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(outer,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }), senderLookup: null, signerLookup: null, _crypto);
 
         act.Should().Throw<MalformedMessageException>().WithMessage("*Illegal*composition*");
@@ -321,10 +322,10 @@ public sealed class EnvelopeReaderTests
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
         var inner = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk, Skid: alice.PublicJwk.Kid), _crypto);
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto), Skid: alice.PublicJwk.Kid), _crypto);
         var outer = AuthcryptWrap(inner, bob.PublicJwk, alice.PrivateJwk, alice.PublicJwk.Kid!);
 
-        Action act = () => EnvelopeReader.Unpack(outer,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(outer,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
             signerLookup: null, _crypto);
@@ -343,7 +344,7 @@ public sealed class EnvelopeReaderTests
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
         var outer = await SignWrapAsync(inner, signer.PrivateJwk);
 
-        Action act = () => EnvelopeReader.Unpack(outer,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(outer,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: null,
             signerLookup: _ => signer.PublicJwk, _crypto);
@@ -357,10 +358,10 @@ public sealed class EnvelopeReaderTests
         // [Sign, Sign, Plaintext] — double signature is not a legal shape.
         var s1 = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k1");
         var s2 = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k2");
-        var inner = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { s1.PrivateJwk }));
+        var inner = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { s1.PrivateJwk.ToJwsSigner() }));
         var outer = await SignWrapAsync(inner, s2.PrivateJwk);
 
-        Action act = () => EnvelopeReader.Unpack(outer,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(outer,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null,
             signerLookup: kid => kid == s1.PublicJwk.Kid ? s1.PublicJwk : kid == s2.PublicJwk.Kid ? s2.PublicJwk : null,
@@ -381,11 +382,11 @@ public sealed class EnvelopeReaderTests
 
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: aliceKa.PrivateJwk,
+                SenderKey: aliceKa.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: aliceKa.PublicJwk.Kid,
-                SignerPrivateJwks: new[] { aliceSign.PrivateJwk }), _crypto);
+                Signers: new[] { aliceSign.PrivateJwk.ToJwsSigner() }), _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { aliceKa.PublicJwk }),
             signerLookup: kid => kid == aliceSign.PublicJwk.Kid ? aliceSign.PublicJwk : null,
@@ -408,12 +409,12 @@ public sealed class EnvelopeReaderTests
 
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: aliceKa.PrivateJwk,
+                SenderKey: aliceKa.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: aliceKa.PublicJwk.Kid,
-                SignerPrivateJwks: new[] { aliceSign.PrivateJwk },
+                Signers: new[] { aliceSign.PrivateJwk.ToJwsSigner() },
                 ProtectSender: true), _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { aliceKa.PublicJwk }),
             signerLookup: kid => kid == aliceSign.PublicJwk.Kid ? aliceSign.PublicJwk : null,
@@ -426,13 +427,16 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
-    public async Task Wrong_length_iv_throws_MalformedMessageException_honoring_the_unpack_contract()
+    public async Task Wrong_length_iv_is_a_uniform_decrypt_failure_under_constant_work()
     {
-        // Issue #22: a non-canonical iv length must surface as MalformedMessageException, never as a raw
-        // ArgumentException out of unpack. (A256GCM requires a 12-byte iv; splice a 5-byte one.) Note:
-        // the delegated DataProofsDotnet.Jose parser already wraps the AEAD's ArgumentException as
-        // MalformedJoseException, so this is a regression guard on the unpack contract; EnvelopeReader
-        // also carries a defensive ArgumentException boundary catch for any path the delegate doesn't wrap.
+        // Constant-work decrypt (dataproofs #12, consumed via the async ParseAsync path): a non-canonical
+        // iv length is folded into the SAME uniform "JWE could not be decrypted." failure
+        // (JoseCryptoException -> CryptoException) as a wrong-key / tampered-ciphertext failure, so a
+        // malformed iv cannot be distinguished from a decrypt failure by exception type or message —
+        // closing that oracle. (Pre-1.1.0 the synchronous parser surfaced the iv length as an
+        // ArgumentException -> MalformedMessageException; the constant-work path deliberately does not.)
+        // The ArgumentException -> MalformedMessageException boundary guard (#22, FR-API-07) remains
+        // covered by the signed-path test below.
         var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
@@ -441,10 +445,10 @@ public sealed class EnvelopeReaderTests
         jwe["iv"] = DidComm.Jose.Base64Url.Encode(new byte[5]); // valid base64url, wrong length
         var tampered = jwe.ToJsonString();
 
-        Action act = () => EnvelopeReader.Unpack(tampered,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(tampered,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }), senderLookup: null, signerLookup: null, _crypto);
 
-        act.Should().Throw<MalformedMessageException>();
+        act.Should().Throw<CryptoException>();
     }
 
     [Fact]
@@ -455,9 +459,9 @@ public sealed class EnvelopeReaderTests
         // invoked inside the delegated parse). Contract: ANY ArgumentException from the delegated parse
         // becomes MalformedMessageException, never escapes raw; InnerException is preserved for diagnosis.
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
-        var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk }));
+        var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk.ToJwsSigner() }));
 
-        Action act = () => EnvelopeReader.Unpack(packed,
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null,
             signerLookup: _ => throw new ArgumentException("boom from a buggy lookup"),
@@ -479,9 +483,9 @@ public sealed class EnvelopeReaderTests
 
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk, Skid: alice.PublicJwk.Kid, ProtectSender: true), _crypto);
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto), Skid: alice.PublicJwk.Kid, ProtectSender: true), _crypto);
 
-        var unpacked = EnvelopeReader.Unpack(packed,
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: new DictionarySenderKeyLookup(new[] { alice.PublicJwk }),
             signerLookup: null, _crypto);
@@ -489,5 +493,80 @@ public sealed class EnvelopeReaderTests
         unpacked.AnonymousSender.Should().BeTrue();             // outermost layer is anoncrypt
         unpacked.Authenticated.Should().BeTrue();               // inner authcrypt bound the sender
         unpacked.SenderKid.Should().Be(alice.PublicJwk.Kid);
+    }
+
+    [Theory]
+    [InlineData(KeyType.X25519)]
+    [InlineData(KeyType.P256)]
+    [InlineData(KeyType.P384)]
+    [InlineData(KeyType.P521)]
+    public async Task Unheld_recipient_on_every_curve_fails_uniformly_via_the_decoy_path(KeyType keyType)
+    {
+        // PR #46 review, point 2: the reader always drives ParseAsync — with a throwaway X25519 decoy
+        // handle when NO recipient key is held — and the parser substitutes its own work-curve decoy.
+        // So an unheld envelope on ANY agreement curve (notably the NIST curves, where our decoy curve
+        // differs from the envelope's work curve) fails with the SAME uniform CryptoException as a
+        // held-but-wrong-key envelope. This verifies the EC decoy path end-to-end from our side, not just
+        // the X25519 case the other tests cover.
+        var bob = TestKeyMaterial.Generate(keyType, "did:example:bob#enc");
+        // anoncrypt (ECDH-ES) — A256GCM is legal here (FR-ENC-09 only pins authcrypt), and the curve under
+        // test is the recipient's, carried by the ephemeral epk the parser keys its work-curve decoy off.
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
+
+        // Hold NO recipient key: the agent cannot decrypt, so the decoy path must run and fail uniformly.
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()), senderLookup: null, signerLookup: null, _crypto);
+
+        act.Should().Throw<CryptoException>();
+    }
+
+    [Theory]
+    [InlineData(typeof(KeyNotFoundException))]
+    [InlineData(typeof(System.Security.Cryptography.CryptographicException))]
+    public async Task Opaque_recipient_handle_fault_maps_to_uniform_CryptoException(Type faultType)
+    {
+        // Adversarial regression (issue #45 review, Finding 1): an opaque (keystore/HSM) recipient handle
+        // can fault in ways the in-process decoy path never can — a KeyNotFoundException when the kid is
+        // rotated out between selection and derive, or an enclave CryptographicException. UnpackAsync MUST
+        // fold these into the SAME uniform CryptoException as any decrypt failure, so no raw exception
+        // escapes the FR-API-07 contract and the held path leaks no possession oracle by exception type.
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, "did:example:bob#x");
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
+
+        var fault = (Exception)Activator.CreateInstance(faultType)!;
+        var faulting = new FaultingOpaqueResolver(bob.PublicJwk, fault);
+
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed, faulting, senderLookup: null, signerLookup: null, _crypto);
+
+        act.Should().Throw<CryptoException>();
+    }
+
+    // Reports the recipient kid as held and returns a key-agreement handle whose derive throws — modelling
+    // a keystore key that vanishes (or an enclave that errors) between selection and the ECDH operation.
+    private sealed class FaultingOpaqueResolver : ISecretsResolver, IOpaqueKeyResolver
+    {
+        private readonly Jwk _publicJwk;
+        private readonly Exception _fault;
+        public FaultingOpaqueResolver(Jwk publicJwk, Exception fault) { _publicJwk = publicJwk; _fault = fault; }
+
+        public Task<Jwk?> FindAsync(string kid, CancellationToken ct = default)
+            => Task.FromResult<Jwk?>(kid == _publicJwk.Kid ? _publicJwk : null);
+        public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<string>>(kids.Where(k => k == _publicJwk.Kid).ToArray());
+        public Task<ISigner?> ResolveSignerAsync(string kid, CancellationToken ct = default)
+            => Task.FromResult<ISigner?>(null);
+        public Task<DpEnc.IEcdhKey?> ResolveKeyAgreementAsync(string kid, CancellationToken ct = default)
+            => Task.FromResult<DpEnc.IEcdhKey?>(new ThrowingEcdhKey(_publicJwk.Crv!, _fault));
+    }
+
+    private sealed class ThrowingEcdhKey : DpEnc.IEcdhKey
+    {
+        private readonly Exception _fault;
+        public ThrowingEcdhKey(string crv, Exception fault) { Crv = crv; _fault = fault; }
+        public string Crv { get; }
+        public ValueTask<byte[]> DeriveAsync(ReadOnlyMemory<byte> peerPublicKey, CancellationToken ct = default)
+            => throw _fault;
     }
 }

@@ -29,7 +29,9 @@
     <ProjectReference Include="..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
     <ProjectReference Include="..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
     <ProjectReference Include="..\..\src\DidComm.AspNetCore\DidComm.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Adapters.NetDid\DidComm.Adapters.NetDid.csproj" />
     <ProjectReference Include="..\..\samples\02-Cookbook\02-Cookbook.csproj" />
+    <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />
   </ItemGroup>
 
   <!--

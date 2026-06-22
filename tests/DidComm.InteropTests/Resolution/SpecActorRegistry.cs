@@ -1,13 +1,16 @@
 using System.Text.Json;
+using DidComm.Adapters.NetDid;
 using DidComm.Jose;
 using DidComm.Secrets;
+using NetCrypto;
 
 namespace DidComm.InteropTests.Resolution;
 
 /// <summary>
 /// Test-only registry: loads the vendored DIDComm spec Appendix-A secrets for Alice + Bob
-/// from <c>fixtures/secrets/{alice,bob}.json</c> and exposes them as DidComm's internal
-/// <see cref="IInternalSecretsLookup"/> and <see cref="IInternalSenderKeyLookup"/> contracts.
+/// from <c>fixtures/secrets/{alice,bob}.json</c> and exposes them as a public
+/// <see cref="ISecretsResolver"/> (recipient secret-key path) plus the internal
+/// <see cref="IInternalSenderKeyLookup"/> / signer-key lookup contracts.
 /// </summary>
 /// <remarks>
 /// Singleton-style — fixture runners create one instance per test class and share it across
@@ -33,12 +36,44 @@ internal sealed class SpecActorRegistry
         return registry;
     }
 
-    public IInternalSecretsLookup Secrets => new DictionarySecretsLookup(_privates);
     public IInternalSenderKeyLookup SenderKeys => new DictionarySenderKeyLookup(_publics);
     public Func<string, Jwk?> SignerKeys => kid => _publics.GetValueOrDefault(kid);
 
-    /// <summary>Exposes the loaded secrets through the Phase 3 public <see cref="ISecretsResolver"/> contract.</summary>
+    /// <summary>Exposes the loaded secrets through the public <see cref="ISecretsResolver"/> contract (the recipient secret-key path the async unpack drives).</summary>
     public ISecretsResolver AsSecretsResolver() => new DictionarySecretsResolver(_privates);
+
+    /// <summary>
+    /// Seed a <strong>non-extractable</strong> NetCrypto <see cref="InMemoryKeyStore"/> with the same
+    /// Appendix-A private keys (alias == kid) and surface it through the opaque-capable
+    /// <see cref="NetDidKeyStoreSecretsResolver"/> (FR-SEC-06). The private scalars are imported once
+    /// and thereafter live only inside the keystore boundary — the resolver returns public-only JWKs
+    /// and performs signing / ECDH through keystore handles. Lets the facade round-trip tests prove the
+    /// opaque custody path with the very same key material as the extractable path.
+    /// </summary>
+    public NetDidKeyStoreSecretsResolver AsKeyStoreResolver()
+    {
+        var keyGen = new DefaultKeyGenerator();
+        var store = new InMemoryKeyStore(keyGen, new DefaultCryptoProvider());
+        foreach (var (kid, jwk) in _privates)
+        {
+            var keyType = CrvToKeyType(jwk.Crv!);
+            var priv = DataProofsDotnet.Jose.Base64Url.Decode(jwk.D!);
+            var keyPair = keyGen.FromPrivateKey(keyType, priv);
+            store.ImportAsync(kid, keyPair).GetAwaiter().GetResult();
+        }
+        return new NetDidKeyStoreSecretsResolver(store);
+    }
+
+    private static KeyType CrvToKeyType(string crv) => crv switch
+    {
+        "Ed25519" => KeyType.Ed25519,
+        "X25519" => KeyType.X25519,
+        "P-256" => KeyType.P256,
+        "P-384" => KeyType.P384,
+        "P-521" => KeyType.P521,
+        "secp256k1" => KeyType.Secp256k1,
+        _ => throw new NotSupportedException($"Appendix-A crv '{crv}' has no NetCrypto KeyType mapping."),
+    };
 
     public Jwk? GetPrivate(string kid) => _privates.GetValueOrDefault(kid);
     public Jwk? GetPublic(string kid) => _publics.GetValueOrDefault(kid);
@@ -72,15 +107,6 @@ internal sealed class SpecActorRegistry
             _privates[kid] = privateJwk;
             _publics[kid] = publicJwk;
         }
-    }
-
-    private sealed class DictionarySecretsLookup : IInternalSecretsLookup
-    {
-        private readonly Dictionary<string, Jwk> _byKid;
-        public DictionarySecretsLookup(Dictionary<string, Jwk> byKid) => _byKid = byKid;
-        public Jwk? TryGet(string kid) => _byKid.GetValueOrDefault(kid);
-        public IReadOnlyList<string> FindPresent(IEnumerable<string> kids)
-            => kids.Where(_byKid.ContainsKey).ToArray();
     }
 
     private sealed class DictionarySenderKeyLookup : IInternalSenderKeyLookup

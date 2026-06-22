@@ -50,9 +50,9 @@ internal static class FixtureDispatcher
         var packed = LoadPackedInput(manifest, manifestPath);
         var registry = _registry.Value;
 
-        var result = EnvelopeReader.Unpack(
+        var result = EnvelopeReaderTestRunner.Unpack(
             packed,
-            registry.Secrets,
+            registry.AsSecretsResolver(),
             registry.SenderKeys,
             registry.SignerKeys,
             _crypto);
@@ -71,9 +71,9 @@ internal static class FixtureDispatcher
 
         // Run unpack through the EnvelopeReader; verify-only fixtures are signed envelopes
         // that unwrap to plaintext when the signature checks out (FR-SIG-02).
-        var result = EnvelopeReader.Unpack(
+        var result = EnvelopeReaderTestRunner.Unpack(
             packed,
-            registry.Secrets,
+            registry.AsSecretsResolver(),
             registry.SenderKeys,
             registry.SignerKeys,
             _crypto);

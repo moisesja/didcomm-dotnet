@@ -37,13 +37,13 @@ internal static class EnvelopeWriter
     public static Task<string> PackSignedAsync(PackSignedParameters parameters, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(parameters);
-        return SignAsync(parameters.Message, parameters.SignerPrivateJwks, parameters.RequireInnerToHeader, ct);
+        return SignAsync(parameters.Message, parameters.Signers, parameters.RequireInnerToHeader, ct);
     }
 
     /// <summary>
     /// Pack an encrypted DIDComm message. Routes to anoncrypt or authcrypt based on the presence
-    /// of <see cref="PackEncryptedParameters.SenderPrivateJwk"/>; nests a JWS inside when
-    /// <see cref="PackEncryptedParameters.SignerPrivateJwks"/> is provided; optionally wraps the
+    /// of <see cref="PackEncryptedParameters.SenderKey"/>; nests a JWS inside when
+    /// <see cref="PackEncryptedParameters.Signers"/> is provided; optionally wraps the
     /// entire result in an extra anoncrypt layer to protect the <c>skid</c>
     /// (<see cref="PackEncryptedParameters.ProtectSender"/> = anoncrypt(authcrypt(...))).
     /// </summary>
@@ -60,8 +60,8 @@ internal static class EnvelopeWriter
 
         var innerBytes = await BuildInnerBytesAsync(parameters, ct).ConfigureAwait(false);
 
-        var encryptedJson = parameters.SenderPrivateJwk is not null
-            ? PackAuthcrypt(parameters, innerBytes, cryptoProvider)
+        var encryptedJson = parameters.SenderKey is not null
+            ? await PackAuthcryptAsync(parameters, innerBytes, cryptoProvider, ct).ConfigureAwait(false)
             : DpEnc.JweBuilder.BuildEcdhEsA256Kw(
                 innerBytes, parameters.Recipients, parameters.ContentEncryption, cryptoProvider, MediaTypes.Encrypted);
 
@@ -81,7 +81,7 @@ internal static class EnvelopeWriter
 
     private static async Task<byte[]> BuildInnerBytesAsync(PackEncryptedParameters parameters, CancellationToken ct)
     {
-        if (parameters.SignerPrivateJwks is { Count: > 0 } signers)
+        if (parameters.Signers is { Count: > 0 } signers)
         {
             // FR-SIG-06: the inner signed JWM MUST carry 'to'.
             var signedJson = await SignAsync(parameters.Message, signers, requireInnerToHeader: true, ct).ConfigureAwait(false);
@@ -96,13 +96,13 @@ internal static class EnvelopeWriter
 
     private static async Task<string> SignAsync(
         Message message,
-        IReadOnlyList<Jwk>? signerPrivateJwks,
+        IReadOnlyList<DpSig.JwsSigner>? signers,
         bool requireInnerToHeader,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
-        if (signerPrivateJwks is null || signerPrivateJwks.Count == 0)
-            throw new ArgumentException("At least one signer key is required.", nameof(signerPrivateJwks));
+        if (signers is null || signers.Count == 0)
+            throw new ArgumentException("At least one signer is required.", nameof(signers));
 
         message.Validate();
         if (requireInnerToHeader && (message.To is null || message.To.Count == 0))
@@ -110,30 +110,33 @@ internal static class EnvelopeWriter
                 "Sign-then-encrypt requires the inner signed JWM to carry a 'to' header (FR-SIG-06).");
 
         // The JWS payload is the deterministic canonical bytes of the inner JWM (FR-SIG-04),
-        // produced here so DataProofs signs exactly the bytes DIDComm canonicalizes.
+        // produced here so DataProofs signs exactly the bytes DIDComm canonicalizes. The signer
+        // handles are opaque-capable (keystore-backed) or built from a private JWK by the facade —
+        // DataProofs signs through NetCrypto's ISigner either way (FR-SEC-06).
         var node = JsonSerializer.SerializeToNode(message, DidCommJson.Default);
         var payloadBytes = DeterministicJsonWriter.WriteUtf8(node);
-
-        var signers = new List<DpSig.JwsSigner>(signerPrivateJwks.Count);
-        foreach (var jwk in signerPrivateJwks)
-            signers.Add(JwsSignerFactory.FromPrivateJwk(jwk));
 
         return await DpSig.JwsBuilder
             .BuildJsonAsync(payloadBytes, signers, MediaTypes.Signed, detachedPayload: false, ct)
             .ConfigureAwait(false);
     }
 
-    private static string PackAuthcrypt(PackEncryptedParameters parameters, byte[] innerBytes, JoseCryptoProvider cryptoProvider)
+    private static async Task<string> PackAuthcryptAsync(
+        PackEncryptedParameters parameters,
+        byte[] innerBytes,
+        JoseCryptoProvider cryptoProvider,
+        CancellationToken ct)
     {
         if (string.IsNullOrEmpty(parameters.Skid))
             throw new ArgumentException("Authcrypt requires a non-empty 'Skid'.", nameof(parameters));
-        return DpEnc.JweBuilder.BuildEcdh1PuA256Kw(
+        return await DpEnc.JweBuilder.BuildEcdh1PuA256KwAsync(
             innerBytes,
             parameters.Recipients,
-            parameters.SenderPrivateJwk!,
+            parameters.SenderKey!,
             parameters.Skid,
             parameters.ContentEncryption,
             cryptoProvider,
-            MediaTypes.Encrypted);
+            MediaTypes.Encrypted,
+            ct).ConfigureAwait(false);
     }
 }

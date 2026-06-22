@@ -16,9 +16,8 @@ namespace DidComm.Consistency;
 /// </para>
 /// <para>
 /// The resolver-backed authorization check (FR-CONSIST-06) lives in
-/// <see cref="CheckResolverAuthorization"/> and is intentionally a hook in Phase 1 — Phase 3
-/// supplies the real implementation through <c>IDidKeyService</c>. Until then callers may
-/// supply a <c>null</c> resolver and the hook short-circuits to "authorized".
+/// <see cref="CheckResolverAuthorizationAsync"/>, supplied by the facade through <c>IDidKeyService</c>.
+/// Callers may supply a <c>null</c> resolver and the hook short-circuits to "authorized".
 /// </para>
 /// </remarks>
 internal static class AddressingConsistency
@@ -124,24 +123,25 @@ internal static class AddressingConsistency
     }
 
     /// <summary>
-    /// FR-CONSIST-06 — resolver-backed authorization check. This is the hook Phase 3 will
-    /// flesh out via <c>IDidKeyService</c>: the supplied <paramref name="kid"/> must appear in
-    /// the resolved DID document of <paramref name="assertedDid"/> under the required
-    /// verification relationship (<c>keyAgreement</c> or <c>authentication</c>). The Phase 1
-    /// implementation accepts a caller-supplied <paramref name="resolverCheck"/> delegate;
-    /// when none is supplied the check is a no-op (logged via XML doc only — the wiring
-    /// belongs to Phase 3).
+    /// FR-CONSIST-06 — resolver-backed authorization check: the supplied <paramref name="kid"/> must
+    /// appear in the resolved DID document of <paramref name="assertedDid"/> under the required
+    /// verification relationship (<c>keyAgreement</c> or <c>authentication</c>). The facade supplies
+    /// the real implementation backed by <c>IDidKeyService</c>; when no <paramref name="resolverCheck"/>
+    /// is supplied the check is a no-op. Async because DID resolution is I/O-bound — the predicate runs
+    /// natively async now that the unpack pipeline is async (no sync-over-async bridge).
     /// </summary>
     /// <param name="assertedDid">The DID asserted to control the key (the <c>from</c> or matched <c>to</c>).</param>
     /// <param name="kid">The key identifier whose presence in the DID document is being verified.</param>
     /// <param name="relationship">Either <c>"keyAgreement"</c> (for encrypt-side kids) or <c>"authentication"</c> (for signer kids).</param>
-    /// <param name="resolverCheck">Pluggable predicate: returns true when the key is authorized. Phase 3 supplies the real implementation; pass <c>null</c> to short-circuit to "authorized".</param>
+    /// <param name="resolverCheck">Pluggable predicate: returns true when the key is authorized. Pass <c>null</c> to short-circuit to "authorized".</param>
+    /// <param name="ct">Cancellation token for the DID resolution.</param>
     /// <exception cref="ConsistencyException">When the resolver indicates the kid is not authorized.</exception>
-    public static void CheckResolverAuthorization(
+    public static async Task CheckResolverAuthorizationAsync(
         string assertedDid,
         string kid,
         string relationship,
-        Func<string, string, string, bool>? resolverCheck)
+        Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(assertedDid);
         ArgumentException.ThrowIfNullOrEmpty(kid);
@@ -149,7 +149,7 @@ internal static class AddressingConsistency
 
         if (resolverCheck is null) return;
 
-        if (!resolverCheck(assertedDid, kid, relationship))
+        if (!await resolverCheck(assertedDid, kid, relationship, ct).ConfigureAwait(false))
             throw new ConsistencyException(
                 $"Key '{kid}' is not present under '{relationship}' in the resolved DID Document of '{assertedDid}' (FR-CONSIST-06).");
     }
