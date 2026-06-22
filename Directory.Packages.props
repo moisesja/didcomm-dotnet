@@ -20,7 +20,7 @@
     <!-- JOSE composition + crypto substrate (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK).
          Brings NetCrypto transitively; didcomm carries no envelope crypto of its own. 1.0.1
          surfaces the verified JWS signer kid from the unprotected header (dataproofs-dotnet#10). -->
-    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.0.1" />
+    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.1.0" />
     <!-- ASP.NET Core (transports) -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.0-preview.1.25120.3" />
     <!-- Caching -->
