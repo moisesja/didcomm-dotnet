@@ -6,6 +6,66 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-22
+
+### Added — Opaque (non-extractable) signing & key agreement (`feat/opaque-keystore-crypto-45`)
+
+Closes **#45** (depends on, and ships after, `moisesja/dataproofs-dotnet#13`). DIDComm can now sign and
+decrypt with private keys that **never leave a secure boundary** — HSM, cloud KMS, OS keychain, MPC, or
+a `NetCrypto.IKeyStore` — instead of requiring an extractable private `Jwk`. This unblocks
+non-extractable custody for downstream consumers (e.g. net-wallet-sdk's Messaging phase) whose invariant
+is "private keys never leave the keystore" (FR-SEC-06).
+
+Only **two** operations ever need the private key — a raw JWS signature and an ECDH shared-secret
+derivation — so the change is a thin, additive seam; everything downstream of the signature/`Z`
+(Concat-KDF, A256KW key wrap, AEAD, header assembly, signature normalization) is public-data math and is
+untouched.
+
+- **New optional capability `DidComm.Secrets.IOpaqueKeyResolver`.** An `ISecretsResolver` MAY also
+  implement it: `ResolveSignerAsync(kid)` → `NetCrypto.ISigner` and `ResolveKeyAgreementAsync(kid)` →
+  `DataProofsDotnet.Jose.Encryption.IEcdhKey`. When the registered resolver provides it, the facade routes
+  signing (signed envelopes, the inner JWS of sign-then-encrypt, and the `from_prior` JWT) and ECDH
+  (authcrypt send, authcrypt/anoncrypt receive) through these handles. Returns `null` per kid to fall back
+  to the extractable path, so a wallet may **mix** opaque and extractable keys.
+- **`NetDidKeyStoreSecretsResolver` is now a sufficient sole resolver for an HSM-backed agent.** It
+  implements `IOpaqueKeyResolver` over `IKeyStore` (signing via `CreateSignerAsync`, ECDH via the new
+  `KeyStoreEcdhKey` over `DeriveSharedSecretAsync`), surfaces **public-only** JWKs (`d` absent), and gains
+  an optional `kid → alias` mapping hook (identity by default). Its XML docs no longer flag the opaque
+  path as "future work."
+- **`FromPriorBuilder` gains `JwsSigner` overloads** so the rotation JWT can be minted with an opaque
+  signer; the existing `Jwk` overloads delegate to them (back-compatible). EdDSA output is byte-identical
+  to the extractable path (covered by a determinism test).
+- **DI:** `AddDidComm` honors a separately-registered `IOpaqueKeyResolver`, and `UseSecretsResolver`
+  surfaces a resolver's opaque capability automatically. No new required wiring — the facade also
+  auto-detects when the `ISecretsResolver` itself implements `IOpaqueKeyResolver`.
+- **Dependency:** `DataProofsDotnet.Jose` `1.0.1 → 1.1.0` (the additive async `IEcdhKey` ECDH seam +
+  `JweParser.PeekRecipients`/`ParseAsync`, and the constant-work JWE decrypt — dataproofs#12/#13).
+- **Acceptance:** interop round-trips (`DidCommClientOpaqueKeystoreRoundTripTests`) pack authcrypt /
+  anoncrypt / signed / sign-then-encrypt / anoncrypt(authcrypt) and unpack them end-to-end through a
+  non-extractable `InMemoryKeyStore`, plus a cross-custody interop case (opaque ⇄ extractable) — with no
+  private key bytes leaving the store.
+
+### Changed
+
+- **Unpack is now async end-to-end internally.** `DidCommClient.UnpackAsync`'s public signature is
+  unchanged, but the recipient (secret-key) decrypt path now runs natively async through the opaque-or-
+  extractable `IEcdhKey` handles — retiring the `SyncSecretsAdapter` sync-over-async bridge and its
+  documented deadlock caveat for the secrets path. The FR-CONSIST-06 authorization check also runs natively
+  async. Public-key DID-resolution lookups (sender/signer) remain sync-over-async by DataProofs' contract.
+- **Durable constant-work recipient selection (closes #42 / lands dataproofs#12 here).** The unpack path
+  always drives `JweParser.ParseAsync` — with a throwaway decoy `IEcdhKey` when no recipient key is held —
+  so from `ParseAsync` inward the ECDH/unwrap cost and the uniform decryption failure no longer depend on
+  which (or whether) recipient key the agent holds. This is the durable fix the #35 HTTP rejection floor was
+  the compensating edge control for; the floor remains as defense-in-depth for the resolver prologue.
+- **Behavior change — malformed `iv`/`tag`/`encrypted_key` lengths on decrypt now surface as
+  `CryptoException` ("JWE could not be decrypted."), not `MalformedMessageException`.** The constant-work
+  decrypt folds non-canonical AEAD field lengths into the same uniform failure as a wrong-key / tampered-
+  ciphertext failure, so a malformed envelope cannot be distinguished from an undecryptable one by exception
+  type or message. Any opaque-handle fault (e.g. a `KeyNotFoundException` from a key rotated out mid-unpack,
+  or an enclave `CryptographicException`) is likewise folded into that uniform `CryptoException`, so the
+  opaque path leaks no recipient-possession oracle by exception type and no raw exception escapes the
+  FR-API-07 unpack contract. (Adversarial review, Finding 1.)
+
 ### Security — HTTP receive timing side-channel (`feat/security-receive-timing-floor`)
 
 Closes GitHub issue **#35** (High) — the timing residual the #20 red-team explicitly filed (see

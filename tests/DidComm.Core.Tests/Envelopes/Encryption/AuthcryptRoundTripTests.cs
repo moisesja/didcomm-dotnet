@@ -13,7 +13,7 @@ namespace DidComm.Tests.Envelopes.Encryption;
 /// Envelope-level authcrypt round trips. The JWE build/parse primitives (the FR-ENC-09 CBC-HMAC pin,
 /// apu↔skid binding, crit rejection, wire-format validation) now live in DataProofsDotnet.Jose and
 /// are covered there; these tests exercise the DIDComm authcrypt envelope through
-/// <see cref="EnvelopeWriter.PackEncryptedAsync"/> + <see cref="EnvelopeReader.Unpack"/>, including
+/// <see cref="EnvelopeWriter.PackEncryptedAsync"/> + <see cref="EnvelopeReader.UnpackAsync"/>, including
 /// the higher-level behavioral guarantees the envelope layer is responsible for.
 /// </summary>
 public sealed class AuthcryptRoundTripTests
@@ -41,14 +41,14 @@ public sealed class AuthcryptRoundTripTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid),
             _crypto);
 
         var secrets = new DictionarySecretsLookup(new[] { bob.PrivateJwk });
         var senderLookup = new DictionarySenderKeyLookup(new[] { alice.PublicJwk });
 
-        var result = EnvelopeReader.Unpack(packed, secrets, senderLookup, signerLookup: null, _crypto);
+        var result = EnvelopeReaderTestRunner.Unpack(packed, secrets, senderLookup, signerLookup: null, _crypto);
 
         result.Authenticated.Should().BeTrue();
         result.KeyWrap.Should().Be("ECDH-1PU+A256KW");
@@ -69,7 +69,7 @@ public sealed class AuthcryptRoundTripTests
         Func<Task> act = () => EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256GCM",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid),
             _crypto);
 
@@ -86,7 +86,7 @@ public sealed class AuthcryptRoundTripTests
         Func<Task> act = () => EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bobP.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: aliceX.PrivateJwk,
+                SenderKey: aliceX.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: aliceX.PublicJwk.Kid),
             _crypto);
 
@@ -103,14 +103,14 @@ public sealed class AuthcryptRoundTripTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid),
             _crypto);
 
         var secrets = new DictionarySecretsLookup(new[] { bob.PrivateJwk });
 
         // Authcrypt requires the sender public key to derive Zs; with no sender lookup unpack fails.
-        Action act = () => EnvelopeReader.Unpack(packed, secrets, senderLookup: null, signerLookup: null, _crypto);
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed, secrets, senderLookup: null, signerLookup: null, _crypto);
         act.Should().Throw<CryptoException>();
     }
 
@@ -125,7 +125,7 @@ public sealed class AuthcryptRoundTripTests
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(
                 msg, new[] { bob.PublicJwk }, "A256CBC-HS512",
-                SenderPrivateJwk: alice.PrivateJwk,
+                SenderKey: alice.PrivateJwk.ToEcdhKey(_crypto),
                 Skid: alice.PublicJwk.Kid),
             _crypto);
 
@@ -137,7 +137,7 @@ public sealed class AuthcryptRoundTripTests
         var secrets = new DictionarySecretsLookup(new[] { bob.PrivateJwk });
         var senderLookup = new DictionarySenderKeyLookup(new[] { alice.PublicJwk });
 
-        Action act = () => EnvelopeReader.Unpack(tampered, secrets, senderLookup, signerLookup: null, _crypto);
+        Action act = () => EnvelopeReaderTestRunner.Unpack(tampered, secrets, senderLookup, signerLookup: null, _crypto);
         act.Should().Throw<CryptoException>();
     }
 }

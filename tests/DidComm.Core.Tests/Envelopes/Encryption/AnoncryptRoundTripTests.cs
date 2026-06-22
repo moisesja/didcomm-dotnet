@@ -13,7 +13,7 @@ namespace DidComm.Tests.Envelopes.Encryption;
 /// Envelope-level anoncrypt round trips. The JWE build/parse primitives (mixed-curve rejection, apv
 /// recompute, wire-format tamper detection) now live in DataProofsDotnet.Jose and are covered there;
 /// these tests exercise the DIDComm anoncrypt envelope through
-/// <see cref="EnvelopeWriter.PackEncryptedAsync"/> + <see cref="EnvelopeReader.Unpack"/>.
+/// <see cref="EnvelopeWriter.PackEncryptedAsync"/> + <see cref="EnvelopeReader.UnpackAsync"/>.
 /// </summary>
 public sealed class AnoncryptRoundTripTests
 {
@@ -45,7 +45,7 @@ public sealed class AnoncryptRoundTripTests
             _crypto);
 
         var secrets = new DictionarySecretsLookup(new[] { bob.PrivateJwk });
-        var result = EnvelopeReader.Unpack(packed, secrets, senderLookup: null, signerLookup: null, _crypto);
+        var result = EnvelopeReaderTestRunner.Unpack(packed, secrets, senderLookup: null, signerLookup: null, _crypto);
 
         result.Authenticated.Should().BeFalse();
         result.AnonymousSender.Should().BeTrue();
@@ -71,7 +71,7 @@ public sealed class AnoncryptRoundTripTests
         // Each recipient can independently decrypt.
         foreach (var owner in new[] { bob1, bob2, bob3 })
         {
-            var result = EnvelopeReader.Unpack(
+            var result = EnvelopeReaderTestRunner.Unpack(
                 packed,
                 new DictionarySecretsLookup(new[] { owner.PrivateJwk }),
                 senderLookup: null,
@@ -110,7 +110,7 @@ public sealed class AnoncryptRoundTripTests
         var unrelated = TestKeyMaterial.Generate(KeyType.X25519, "did:example:eve#x");
         var secrets = new DictionarySecretsLookup(new[] { unrelated.PrivateJwk });
 
-        Action act = () => EnvelopeReader.Unpack(packed, secrets, senderLookup: null, signerLookup: null, _crypto);
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed, secrets, senderLookup: null, signerLookup: null, _crypto);
         act.Should().Throw<DidCommException>();
     }
 }

@@ -100,18 +100,18 @@ public sealed class AddressingConsistencyTests
     }
 
     [Fact]
-    public void Resolver_authorization_with_null_resolver_short_circuits()
+    public async Task Resolver_authorization_with_null_resolver_short_circuits()
     {
-        AddressingConsistency.CheckResolverAuthorization(
+        await AddressingConsistency.CheckResolverAuthorizationAsync(
             "did:example:alice", "did:example:alice#k", "keyAgreement", resolverCheck: null);
     }
 
     [Fact]
-    public void Resolver_authorization_throws_when_resolver_says_no()
+    public async Task Resolver_authorization_throws_when_resolver_says_no()
     {
-        Action act = () => AddressingConsistency.CheckResolverAuthorization(
+        Func<Task> act = () => AddressingConsistency.CheckResolverAuthorizationAsync(
             "did:example:alice", "did:example:alice#k", "keyAgreement",
-            resolverCheck: (_, _, _) => false);
-        act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-06*");
+            resolverCheck: (_, _, _, _) => Task.FromResult(false));
+        (await act.Should().ThrowAsync<ConsistencyException>()).WithMessage("*FR-CONSIST-06*");
     }
 }

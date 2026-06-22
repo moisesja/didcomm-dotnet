@@ -575,3 +575,33 @@ Format per entry:
   unbounded (network) tail reachable only when the secret is present, say plainly that the floor does not
   close it and name the compensating control — never argue "the other class can't reach it" as if that
   hid the signal. Always re-run the break-it adversarial pass on the *revised* fix, not just the first.
+
+## L-026 — Verify upstream is actually DONE before planning multi-repo work; and re-run the break-it pass on the opaque seam
+
+- **Lesson:** Issue #45 (opaque HSM/KMS custody for DIDComm) looked like a deep multi-repo change — its
+  own first analysis "over-attributed the crypto work" to `didcomm-dotnet` and implied I'd have to modify
+  `DataProofsDotnet.Jose` and cut a new release. Two things were true that only a *source-grounded* check
+  revealed: (a) the only real upstream change (an async `IEcdhKey` ECDH seam, dataproofs#13) was **already
+  implemented, merged, tagged `v1.1.0`, and even on nuget.org** — so #45 collapsed to single-repo wiring;
+  and (b) signing was already opaque-capable for free because the JWS layer signs through NetCrypto's
+  `ISigner` and `EcdsaSignatureCodec.EnsureIeeeP1363` normalizes any encoding. The headline cost was not
+  crypto at all — it was making the **unpack path async** and wiring `PeekRecipients → ParseAsync` with a
+  constant-work decoy. Separately: the adversarial pass on my *finished* seam found a HIGH defect I'd have
+  shipped — a keystore `KeyNotFoundException`/`CryptographicException` from the opaque derive escaped
+  `UnpackAsync` raw, but **only on the held path** (the in-process decoy can never throw it), re-creating
+  the exact recipient-possession oracle the constant-work design exists to kill — plus a redundant second
+  `GetInfoAsync` round-trip that leaked held-ness by timing on a slow store.
+- **Why:** Multi-repo issues are often described from the *requester's* mental model, which front-loads the
+  scary part. Grounding scope in file:line + checking the dependency's git tags / nuget feed before
+  designing keeps me from planning (and a maintainer from approving) work that's already shipped. And an
+  opaque/keystore seam shifts *new exception and latency surfaces* into a path that previously only ran
+  in-process — those asymmetries (an exception type, or an extra I/O round-trip, that appears on the
+  held branch but never the unheld one) are themselves side channels, even when the crypto is identical.
+- **How to apply:** (1) Before proposing a multi-repo plan, read the upstream code/issue *and* check its
+  release state (`git tag`, the nuget flatcontainer index) — confirm what's already done. (2) When routing
+  a secret op through a new opaque backing, audit the *failure* and *latency* parity between the opaque
+  (held) path and the in-process/decoy (unheld) path, not just the success path: fold every backing-store
+  fault into the same uniform `CryptoException` the decoy path produces (exclude only cancellation), and
+  equalize/​minimize pre-crypto round-trips. (3) Always run the break-it adversarial subagent on the
+  *finished* seam and add a regression test per finding (here: a handle whose `DeriveAsync` throws
+  `KeyNotFoundException`/`CryptographicException` must yield the uniform `CryptoException`).

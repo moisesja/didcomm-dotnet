@@ -184,23 +184,32 @@ public sealed class DidCommBuilder
 
     /// <summary>
     /// Register a <typeparamref name="T"/> as the <see cref="ISecretsResolver"/> singleton.
-    /// Required — FR-SEC-02 fails fast if no resolver is registered.
+    /// Required — FR-SEC-02 fails fast if no resolver is registered. When <typeparamref name="T"/>
+    /// also implements <see cref="IOpaqueKeyResolver"/> (e.g. a keystore-backed resolver), the same
+    /// singleton is surfaced as that capability too, so the facade routes signing / ECDH through the
+    /// non-extractable handles (FR-SEC-06).
     /// </summary>
     /// <typeparam name="T">A concrete <see cref="ISecretsResolver"/> implementation.</typeparam>
     public DidCommBuilder UseSecretsResolver<T>() where T : class, ISecretsResolver
     {
         Services.AddSingleton<ISecretsResolver, T>();
+        if (typeof(IOpaqueKeyResolver).IsAssignableFrom(typeof(T)))
+            Services.AddSingleton(sp => (IOpaqueKeyResolver)sp.GetRequiredService<ISecretsResolver>());
         return this;
     }
 
     /// <summary>
-    /// Register an already-constructed <see cref="ISecretsResolver"/> instance as a singleton.
+    /// Register an already-constructed <see cref="ISecretsResolver"/> instance as a singleton. When the
+    /// instance also implements <see cref="IOpaqueKeyResolver"/>, it is surfaced as that capability too
+    /// (non-extractable signing / ECDH; FR-SEC-06).
     /// </summary>
     /// <param name="instance">The resolver to register.</param>
     public DidCommBuilder UseSecretsResolver(ISecretsResolver instance)
     {
         ArgumentNullException.ThrowIfNull(instance);
         Services.AddSingleton(instance);
+        if (instance is IOpaqueKeyResolver opaque)
+            Services.AddSingleton(opaque);
         return this;
     }
 

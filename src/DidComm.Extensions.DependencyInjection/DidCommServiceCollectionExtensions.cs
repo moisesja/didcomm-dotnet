@@ -52,7 +52,12 @@ public static class DidCommServiceCollectionExtensions
             sp.GetService<IServiceEndpointResolver>(),
             sp.GetService<ITransportRouter>(),
             sp.GetRequiredService<IOptions<DidCommOptions>>().Value,
-            sp.GetRequiredService<JoseCryptoProvider>()));
+            sp.GetRequiredService<JoseCryptoProvider>(),
+            // Opaque (non-extractable / keystore) key operations, when a resolver provides them
+            // (FR-SEC-06). Optional: null falls back to the extractable ISecretsResolver path, and the
+            // facade additionally auto-detects the capability when the ISecretsResolver itself
+            // implements IOpaqueKeyResolver (e.g. NetDidKeyStoreSecretsResolver).
+            sp.GetService<IOpaqueKeyResolver>()));
 
         if (!IsRegistered<ISecretsResolver>(services))
         {

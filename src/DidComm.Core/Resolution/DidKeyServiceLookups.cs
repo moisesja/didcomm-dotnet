@@ -12,9 +12,12 @@ namespace DidComm.Resolution;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Sync-over-async at the seam: the public <see cref="IDidKeyService"/> contract is async, but
-/// the JOSE composition layer is sync. The same .NET 10 no-sync-context property that makes
-/// <see cref="SyncSecretsAdapter"/> safe applies here.
+/// Sync-over-async at the seam: the public <see cref="IDidKeyService"/> contract is async, but the
+/// DataProofs JWS verify (<c>JwsParser.Parse</c>) and the authcrypt sender-key resolver
+/// (<c>IJweSenderKeyResolver</c>) are synchronous contracts, so these <em>public-key</em> lookups
+/// bridge sync-over-async. This is safe under .NET 10's no-synchronization-context runtime. (The
+/// <em>secret-key</em> recipient path no longer bridges — it runs natively async through the
+/// opaque-capable ECDH handles; FR-SEC-06.)
 /// </para>
 /// <para>
 /// The DID portion of the kid is extracted by <see cref="DidSubject.DidSubjectOf"/>; for a

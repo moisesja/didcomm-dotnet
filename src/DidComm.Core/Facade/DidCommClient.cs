@@ -7,6 +7,8 @@ using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
+using DpEnc = DataProofsDotnet.Jose.Encryption;
+using DpSig = DataProofsDotnet.Jose.Signing;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.Facade;
@@ -25,6 +27,10 @@ public sealed class DidCommClient
     private readonly ITransportRouter? _transportRouter;
     private readonly DidCommOptions _options;
     private readonly JoseCryptoProvider _cryptoProvider;
+    // Resolves a kid to an opaque-or-extractable JWS signer / ECDH handle (FR-SEC-06). The opaque
+    // path is selected when the registered ISecretsResolver also implements IOpaqueKeyResolver (or
+    // one is registered separately), so non-extractable (HSM/KMS/keystore) keys never surface 'd'.
+    private readonly KeyOperationResolver _keyOps;
 
     /// <summary>Initialize the facade. Routing (FR-ROUTE-*) is unavailable without an <see cref="IServiceEndpointResolver"/>; for that, use the <see cref="DidCommClient(ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions)"/> overload or register the facade through <c>AddDidComm</c>.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -66,14 +72,15 @@ public sealed class DidCommClient
         ArgumentNullException.ThrowIfNull(transportRouter);
     }
 
-    /// <summary>Initialize the facade with a custom crypto provider; used by tests.</summary>
+    /// <summary>Initialize the facade with a custom crypto provider (and optional opaque key resolver); used by tests and DI.</summary>
     internal DidCommClient(
         ISecretsResolver secrets,
         IDidKeyService keyService,
         IServiceEndpointResolver? serviceResolver,
         ITransportRouter? transportRouter,
         DidCommOptions options,
-        JoseCryptoProvider cryptoProvider)
+        JoseCryptoProvider cryptoProvider,
+        IOpaqueKeyResolver? opaqueKeys = null)
     {
         ArgumentNullException.ThrowIfNull(secrets);
         ArgumentNullException.ThrowIfNull(keyService);
@@ -85,6 +92,11 @@ public sealed class DidCommClient
         _transportRouter = transportRouter;
         _options = options;
         _cryptoProvider = cryptoProvider;
+        // Prefer an explicitly-registered IOpaqueKeyResolver; otherwise auto-detect when the secrets
+        // resolver itself implements it (the common case — e.g. a keystore-backed resolver). Either
+        // way the extractable path is preserved when no opaque capability is present (FR-SEC-06).
+        var opaque = opaqueKeys ?? secrets as IOpaqueKeyResolver;
+        _keyOps = new KeyOperationResolver(secrets, opaque, cryptoProvider);
     }
 
     /// <summary>
@@ -120,8 +132,8 @@ public sealed class DidCommClient
         _keyService.RejectUnsupportedMethod(signFrom);
         RejectUnsupportedDidsOnMessage(message);
 
-        var signerPriv = await PickSignerPrivateKeyAsync(signFrom, ct).ConfigureAwait(false);
-        var parameters = new PackSignedParameters(message, new[] { signerPriv });
+        var signer = await PickSignerAsync(signFrom, ct).ConfigureAwait(false);
+        var parameters = new PackSignedParameters(message, new[] { signer });
         return await EnvelopeWriter.PackSignedAsync(parameters, ct).ConfigureAwait(false);
     }
 
@@ -186,9 +198,10 @@ public sealed class DidCommClient
             if (allSenderPubs.Count == 0)
                 throw new DidResolutionException(options.From, "no keyAgreement keys available for sender");
 
-            // Filter to keys for which the registered ISecretsResolver actually holds the private half.
+            // Filter to keys the agent actually holds the private half of — opaque (keystore) or
+            // extractable. FindPresent answers held-ness without exposing key material (FR-SEC-06).
             var senderKids = allSenderPubs.Where(k => k.Kid is not null).Select(k => k.Kid!).ToArray();
-            var heldKids = await _secrets.FindPresentAsync(senderKids, ct).ConfigureAwait(false);
+            var heldKids = await _keyOps.FindPresentAsync(senderKids, ct).ConfigureAwait(false);
             var heldKidSet = new HashSet<string>(heldKids, StringComparer.Ordinal);
             senderPublics = allSenderPubs.Where(k => k.Kid is not null && heldKidSet.Contains(k.Kid!)).ToArray();
             if (senderPublics.Count == 0)
@@ -208,30 +221,32 @@ public sealed class DidCommClient
             chosenRecipients.Add(recipientPublics[did].First(k => k.Crv == chosenCurve));
         }
 
-        Jwk? senderPrivateJwk = null;
+        DpEnc.IEcdhKey? senderKey = null;
         string? skid = null;
         if (options.From is not null)
         {
             var senderPubJwk = senderPublics.First(k => k.Crv == chosenCurve);
             skid = senderPubJwk.Kid;
-            senderPrivateJwk = await _secrets.FindAsync(senderPubJwk.Kid!, ct).ConfigureAwait(false)
+            // Opaque (keystore) or extractable ECDH handle for the sender-static 1PU derivation; the
+            // private scalar never leaves custody on the opaque path (FR-SEC-06).
+            senderKey = await _keyOps.ResolveKeyAgreementAsync(senderPubJwk.Kid!, ct).ConfigureAwait(false)
                 ?? throw new SecretNotFoundException(senderPubJwk.Kid!);
         }
 
-        IReadOnlyList<Jwk>? signerJwks = null;
+        IReadOnlyList<DpSig.JwsSigner>? signers = null;
         if (options.SignFrom is not null)
         {
-            var signerPriv = await PickSignerPrivateKeyAsync(options.SignFrom, ct).ConfigureAwait(false);
-            signerJwks = new[] { signerPriv };
+            var signer = await PickSignerAsync(options.SignFrom, ct).ConfigureAwait(false);
+            signers = new[] { signer };
         }
 
         var parameters = new PackEncryptedParameters(
             Message: message,
             Recipients: chosenRecipients,
             ContentEncryption: encJoseAlg,
-            SenderPrivateJwk: senderPrivateJwk,
+            SenderKey: senderKey,
             Skid: skid,
-            SignerPrivateJwks: signerJwks,
+            Signers: signers,
             ProtectSender: options.ProtectSender);
 
         var innerPacked = await EnvelopeWriter.PackEncryptedAsync(parameters, _cryptoProvider, ct).ConfigureAwait(false);
@@ -328,14 +343,16 @@ public sealed class DidCommClient
     /// FR-CONSIST-01..06 addressing-consistency rules (FR-CONSIST-06 is resolver-backed).
     /// </summary>
     /// <remarks>
-    /// <strong>Support boundary:</strong> the unpack pipeline drives the consumer-supplied
-    /// <see cref="ISecretsResolver"/> and <see cref="IDidKeyService"/> through a sync-over-async
-    /// bridge (the JOSE composition layer is synchronous — see PRD §7). This is safe in hosts
-    /// with no <see cref="System.Threading.SynchronizationContext"/> — ASP.NET Core, console,
-    /// generic-host worker services (the supported targets). Calling this under a captured
-    /// synchronization context (legacy WPF/WinForms or a custom context) can deadlock if a
-    /// resolver implementation has an inner <c>await</c> without <c>ConfigureAwait(false)</c>.
-    /// Invoke from such contexts via <c>Task.Run(() =&gt; client.UnpackAsync(...))</c>.
+    /// <strong>Support boundary:</strong> the recipient (secret-key) decrypt path runs natively async
+    /// as of 1.1.0 — ECDH key agreement flows through opaque-or-extractable <c>IEcdhKey</c> handles
+    /// (FR-SEC-06), so the consumer-supplied <see cref="ISecretsResolver"/> is now <c>await</c>ed
+    /// directly (no sync-over-async bridge, no deadlock risk under a captured
+    /// <see cref="System.Threading.SynchronizationContext"/>). The remaining sync-over-async at the
+    /// seam is confined to <em>public-key</em> DID resolution (<see cref="IDidKeyService"/>) feeding
+    /// DataProofs' synchronous JWS-verify / sender-key contracts; that is safe in hosts with no
+    /// synchronization context — ASP.NET Core, console, generic-host worker services (the supported
+    /// targets) — and, as before, such a host should still ensure resolver implementations use
+    /// <c>ConfigureAwait(false)</c>.
     /// </remarks>
     /// <param name="packed">The packed DIDComm message.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -350,12 +367,17 @@ public sealed class DidCommClient
 
         ct.ThrowIfCancellationRequested();
 
-        var secretsLookup = new SyncSecretsAdapter(_secrets);
         var senderLookup = DidKeyServiceLookups.SenderKeyLookup(_keyService);
         var signerLookup = DidKeyServiceLookups.SignerKeyLookup(_keyService);
         var resolverCheck = BuildResolverAuthorizationPredicate();
 
-        var internalResult = EnvelopeReader.Unpack(packed, secretsLookup, senderLookup, signerLookup, _cryptoProvider, resolverCheck);
+        // The recipient (secret-key) path is now fully async: ECDH key agreement runs through the
+        // KeyOperationResolver's opaque-or-extractable IEcdhKey handles, so the pre-1.1.0
+        // SyncSecretsAdapter sync-over-async bridge is gone. Sender/signer lookups stay sync — they are
+        // public-key DID resolutions and DataProofs' IJweSenderKeyResolver / JwsParser contracts for
+        // them are synchronous (not a secret-key path).
+        var internalResult = await EnvelopeReader.UnpackAsync(
+            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, ct).ConfigureAwait(false);
         var message = internalResult.Message;
 
         if (message.From is not null)
@@ -420,20 +442,20 @@ public sealed class DidCommClient
             FromPrior: fromPrior);
     }
 
-    private async Task<Jwk> PickSignerPrivateKeyAsync(string signerDid, CancellationToken ct)
+    private async Task<DpSig.JwsSigner> PickSignerAsync(string signerDid, CancellationToken ct)
     {
         var pubs = await _keyService.GetVerificationMethodsAsync(signerDid, VerificationRelationship.Authentication, ct).ConfigureAwait(false);
         if (pubs.Count == 0)
             throw new DidResolutionException(signerDid, "no authentication keys available");
 
-        var presentKids = await _secrets.FindPresentAsync(pubs.Where(k => k.Kid is not null).Select(k => k.Kid!), ct).ConfigureAwait(false);
+        var presentKids = await _keyOps.FindPresentAsync(pubs.Where(k => k.Kid is not null).Select(k => k.Kid!), ct).ConfigureAwait(false);
         if (presentKids.Count == 0)
             throw new SecretNotFoundException($"{signerDid} (no authentication key held)");
 
         var kid = presentKids[0];
-        var priv = await _secrets.FindAsync(kid, ct).ConfigureAwait(false)
+        // Opaque (keystore) or extractable JWS signer for the chosen authentication key (FR-SEC-06).
+        return await _keyOps.ResolveSignerAsync(kid, ct).ConfigureAwait(false)
             ?? throw new SecretNotFoundException(kid);
-        return priv;
     }
 
     private void RejectUnsupportedDidsOnMessage(Message message)
@@ -488,22 +510,20 @@ public sealed class DidCommClient
     };
 
     /// <summary>
-    /// Build the FR-CONSIST-06 resolver-backed authorization predicate. The closure does a
-    /// sync-over-async <see cref="IDidKeyService.IsKeyAuthorizedAsync"/> call — safe under
-    /// .NET 10's no-synchronization-context runtime, and warm against the
-    /// <c>CachingDidResolver</c> for resolvers wrapped in net-did's DI builder. See the
-    /// <see cref="UnpackAsync"/> support-boundary note for the synchronization-context caveat.
+    /// Build the FR-CONSIST-06 resolver-backed authorization predicate. Now that the unpack pipeline is
+    /// async end-to-end, the predicate calls <see cref="IDidKeyService.IsKeyAuthorizedAsync"/> natively
+    /// (no sync-over-async), warm against the <c>CachingDidResolver</c> for resolvers wrapped in
+    /// net-did's DI builder.
     /// </summary>
-    private Func<string, string, string, bool> BuildResolverAuthorizationPredicate()
+    private Func<string, string, string, CancellationToken, Task<bool>> BuildResolverAuthorizationPredicate()
     {
         var keyService = _keyService;
-        return (assertedDid, kid, relationship) =>
+        return (assertedDid, kid, relationship, ct) =>
         {
             var rel = string.Equals(relationship, "authentication", StringComparison.Ordinal)
                 ? VerificationRelationship.Authentication
                 : VerificationRelationship.KeyAgreement;
-            return keyService.IsKeyAuthorizedAsync(assertedDid, kid, rel)
-                .ConfigureAwait(false).GetAwaiter().GetResult();
+            return keyService.IsKeyAuthorizedAsync(assertedDid, kid, rel, ct);
         };
     }
 
