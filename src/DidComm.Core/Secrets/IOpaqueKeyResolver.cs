@@ -28,6 +28,17 @@ namespace DidComm.Secrets;
 /// here cover only the secret operation itself; everything downstream (Concat-KDF, A256KW key wrap,
 /// AEAD, header assembly, signature normalization) is public-data math the JOSE layer already owns.
 /// </para>
+/// <para>
+/// <strong>Timing note for implementers.</strong> On receive, the JWE decrypt itself is constant-work
+/// regardless of which (or whether) recipient key is held: the library always runs the full key
+/// agreement, substituting a decoy when nothing is held. However, the library must first <em>resolve</em>
+/// the held key (one <see cref="ResolveKeyAgreementAsync"/> call → a backing-store round-trip) only on
+/// the held path, before that constant-work step. If your backing store's latency depends on whether a
+/// key exists (e.g. a network HSM/KMS), that prologue is a residual held-vs-unheld timing signal this
+/// layer cannot mask. Mitigate it where the threat applies — front the receive endpoint with
+/// authentication / a rate-limiter, and/or rely on the transport receive-rejection floor (a constant-time
+/// reject pad, issue #35). Implementations whose lookup latency is content-independent are unaffected.
+/// </para>
 /// </remarks>
 public interface IOpaqueKeyResolver
 {

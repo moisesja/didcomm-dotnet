@@ -496,6 +496,32 @@ public sealed class EnvelopeReaderTests
     }
 
     [Theory]
+    [InlineData(KeyType.X25519)]
+    [InlineData(KeyType.P256)]
+    [InlineData(KeyType.P384)]
+    [InlineData(KeyType.P521)]
+    public async Task Unheld_recipient_on_every_curve_fails_uniformly_via_the_decoy_path(KeyType keyType)
+    {
+        // PR #46 review, point 2: the reader always drives ParseAsync — with a throwaway X25519 decoy
+        // handle when NO recipient key is held — and the parser substitutes its own work-curve decoy.
+        // So an unheld envelope on ANY agreement curve (notably the NIST curves, where our decoy curve
+        // differs from the envelope's work curve) fails with the SAME uniform CryptoException as a
+        // held-but-wrong-key envelope. This verifies the EC decoy path end-to-end from our side, not just
+        // the X25519 case the other tests cover.
+        var bob = TestKeyMaterial.Generate(keyType, "did:example:bob#enc");
+        // anoncrypt (ECDH-ES) — A256GCM is legal here (FR-ENC-09 only pins authcrypt), and the curve under
+        // test is the recipient's, carried by the ephemeral epk the parser keys its work-curve decoy off.
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(EmptyMessage(), new[] { bob.PublicJwk }, "A256GCM"), _crypto);
+
+        // Hold NO recipient key: the agent cannot decrypt, so the decoy path must run and fail uniformly.
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()), senderLookup: null, signerLookup: null, _crypto);
+
+        act.Should().Throw<CryptoException>();
+    }
+
+    [Theory]
     [InlineData(typeof(KeyNotFoundException))]
     [InlineData(typeof(System.Security.Cryptography.CryptographicException))]
     public async Task Opaque_recipient_handle_fault_maps_to_uniform_CryptoException(Type faultType)

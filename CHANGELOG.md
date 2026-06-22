@@ -8,6 +8,10 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [1.1.0] - 2026-06-22
 
+> Follows the published **1.0.0** line — a normal minor bump (new opt-in feature, no breaking public API).
+> The `DidCommVersion` build property had drifted to `0.1.0` in source after the 1.0.0 release; it is
+> corrected to `1.1.0` here. (The 1.0.0 notes predate this changelog's per-version sectioning.)
+
 ### Added — Opaque (non-extractable) signing & key agreement (`feat/opaque-keystore-crypto-45`)
 
 Closes **#45** (depends on, and ships after, `moisesja/dataproofs-dotnet#13`). DIDComm can now sign and
