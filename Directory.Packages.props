@@ -6,17 +6,23 @@
     <!-- DID resolution only. 2.0.0 relocated all crypto primitives to NetCrypto; didcomm-dotnet
          consumes NetDid solely for resolution (IDidResolver, DID Document model) — see PRD §3.1.
          The JOSE composition + crypto substrate now come from DataProofsDotnet.Jose (which itself
-         builds on NetCrypto 1.1.0), referenced as a project below. -->
-    <PackageVersion Include="NetDid.Core" Version="2.0.1" />
-    <PackageVersion Include="NetDid.Method.Key" Version="2.0.1" />
-    <PackageVersion Include="NetDid.Method.Peer" Version="2.0.1" />
-    <PackageVersion Include="NetDid.Method.WebVh" Version="2.0.1" />
-    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="2.0.1" />
+         builds on NetCrypto 1.2.0), referenced as a project below.
+         2.3.0 is additive over 2.0.1 for DidComm's resolution-only usage: it is did:webvh
+         Update/Deactivate/resolution security + conformance hardening (net-did#101) and forces
+         NetCrypto 1.2.0. Bumped so a wallet pulling DidComm transitively resolves the did:webvh
+         driver at ≥ 2.2.0, letting the net-wallet-sdk 0.2.0 graph converge (didcomm-dotnet#47). -->
+    <PackageVersion Include="NetDid.Core" Version="2.3.0" />
+    <PackageVersion Include="NetDid.Method.Key" Version="2.3.0" />
+    <PackageVersion Include="NetDid.Method.Peer" Version="2.3.0" />
+    <PackageVersion Include="NetDid.Method.WebVh" Version="2.3.0" />
+    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="2.3.0" />
     <!-- NetCrypto: the crypto substrate (arrives transitively via DataProofsDotnet.Jose). DidComm
          references it directly in exactly one place — JwsSignerFactory adapts a private signer JWK
          into a NetCrypto ISigner, because DataProofs' JWS layer signs through ISigner, not raw key
-         bytes. Everything else (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK) is DataProofs. -->
-    <PackageVersion Include="NetCrypto" Version="1.1.0" />
+         bytes. Everything else (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK) is DataProofs.
+         1.2.0 is also the version net-did 2.3.0 depends on, so the direct pin and the transitive
+         graph agree (no NU1605 downgrade). -->
+    <PackageVersion Include="NetCrypto" Version="1.2.0" />
     <!-- JOSE composition + crypto substrate (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK).
          Brings NetCrypto transitively; didcomm carries no envelope crypto of its own. 1.1.0 adds
          the async IEcdhKey ECDH seam + JweParser.PeekRecipients/ParseAsync (dataproofs-dotnet#13)
