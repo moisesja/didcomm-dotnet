@@ -1552,4 +1552,7 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/commits/main
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.0.0...v1.1.0
+[0.1.0-preview.1]: https://github.com/moisesja/didcomm-dotnet/releases/tag/v0.1.0-preview.1
