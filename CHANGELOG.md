@@ -6,6 +6,28 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-13
+
+> Foundation-pin bump only — no public API or behavior change in DidComm itself. Closes **#47**.
+
+### Changed — Dependencies
+
+Bumps the DID + crypto foundation pins so a wallet app that pulls `DidComm.*` transitively resolves
+the `did:webvh` method driver at **≥ 2.2.0**, letting the downstream net-wallet-sdk 0.2.0 graph
+converge on the `DidUpdateResult` evidence its identity document-update / key-rotation integrity
+contract (FR-ID-10) requires. DidComm is the foundation library that references
+`NetDid.Method.WebVh`, so this is the key step for that transitive graph to converge.
+
+- **`NetDid.*` 2.0.1 → 2.3.0** — `NetDid.Core`, `NetDid.Extensions.DependencyInjection`,
+  `NetDid.Method.Key`, `NetDid.Method.Peer`, `NetDid.Method.WebVh`. Pinned to the current latest
+  (2.3.0) rather than the issue's 2.2.0 floor. DidComm consumes net-did for **DID resolution only**,
+  and 2.1→2.3 is additive there: the changes are `did:webvh` Update/Deactivate/resolution security +
+  conformance hardening (stricter SCID identity and controller-proof validation, post-sign
+  nested-member tamper fixes — net-did#82, #91, #101). Resolution-only usage is unaffected.
+- **`NetCrypto` 1.1.0 → 1.2.0** — required by `NetDid.Core 2.3.0`; the direct pin now matches the
+  transitive graph (no `NU1605` downgrade).
+- `DataProofsDotnet.Jose` stays at **1.1.0** (unchanged; already latest).
+
 ## [1.1.0] - 2026-06-22
 
 > Follows the published **1.0.0** line — a normal minor bump (new opt-in feature, no breaking public API).
@@ -1530,4 +1552,7 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/commits/main
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.0.0...v1.1.0
+[0.1.0-preview.1]: https://github.com/moisesja/didcomm-dotnet/releases/tag/v0.1.0-preview.1
