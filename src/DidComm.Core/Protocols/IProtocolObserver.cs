@@ -1,16 +1,26 @@
 namespace DidComm.Protocols;
 
 /// <summary>
-/// A read-only side channel over inbound messages (FR-PROTO-12). The
-/// <see cref="ProtocolDispatcher"/> notifies each registered observer exactly once per
-/// completed dispatch — for every outcome, including <see cref="DispatchResult.NoHandler"/>
-/// and loop-guard drops — AFTER the outcome is determined, so an observer can never influence
-/// handler resolution, replies, or thread state. This is the seam that lets a second consumer
-/// observe traffic whose PIURI is owned by a built-in handler (e.g. a higher-level state
-/// machine reacting to <c>report-problem</c>, or the Discover Features initiator client
-/// correlating a <c>disclose</c> to its pending query) without replacing that handler.
+/// A read-only side channel over inbound messages (FR-PROTO-12). For each registered observer,
+/// the <see cref="ProtocolDispatcher"/> delivers every inbound message that matches
+/// <see cref="ProtocolUriFilter"/> — for every outcome, including <see cref="DispatchResult.NoHandler"/>
+/// and loop-guard drops — so a second consumer can observe traffic whose PIURI is owned by a
+/// built-in handler (e.g. a higher-level state machine reacting to <c>report-problem</c>, or the
+/// Discover Features initiator client correlating a <c>disclose</c> to its pending query) without
+/// replacing that handler.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <strong>Execution model.</strong> Delivery is <em>fully decoupled</em> from dispatch: the
+/// dispatcher enqueues the message onto a per-observer bounded background queue and returns the
+/// outcome immediately, so an observer can never gate reply delivery or change the outcome — even
+/// a hung or faulting observer only backs up (and eventually drops from) its own queue. Because each
+/// observer has its own pump, an observer <strong>may be invoked concurrently</strong> with other
+/// observers and concurrently across inbound messages; a single observer's own invocations are
+/// serialized in arrival order. Implementations MUST be safe under concurrent invocation. If an
+/// observer cannot keep up, its bounded queue drops the newest observations (logged) rather than
+/// growing memory — see <see cref="OnMessageReceivedAsync"/>.
+/// </para>
 /// <para>
 /// <strong>Trust model.</strong> Observers are host-trusted components: they can only be
 /// registered by code composing the DI graph at startup (<c>AddProtocolObserver&lt;T&gt;()</c>),
@@ -19,7 +29,7 @@ namespace DidComm.Protocols;
 /// already-unpacked plaintext. Nothing about the seam is reachable by a remote peer, and
 /// envelope cryptography is unaffected. Read-only is enforced, not assumed: each observer
 /// receives its own defensive clone via <see cref="InboundObservation"/>, and exceptions an
-/// observer throws are logged and swallowed — the dispatch outcome is never affected.
+/// observer throws are logged and isolated — the dispatch outcome is never affected.
 /// </para>
 /// <para>
 /// <strong>Least privilege.</strong> Prefer a narrow <see cref="ProtocolUriFilter"/> over
@@ -37,19 +47,17 @@ public interface IProtocolObserver
     string? ProtocolUriFilter { get; }
 
     /// <summary>
-    /// Called once per completed dispatch for each inbound message that matches
-    /// <see cref="ProtocolUriFilter"/>. Runs after the dispatch outcome is determined.
-    /// Exceptions are caught and logged by the dispatcher; they do not affect the outcome.
+    /// Delivered once per matching inbound message, on the observer's background pump (off the
+    /// dispatch/receive path). Exceptions are caught, logged, and isolated by the dispatcher; they
+    /// never affect the outcome or other observers.
     /// </summary>
     /// <remarks>
-    /// <strong>Return promptly.</strong> Observers are awaited <em>inline and sequentially</em> on
-    /// the receive path, before the transport learns the dispatch outcome and can deliver any reply.
-    /// A slow or blocking observer therefore adds latency to message handling and delays every later
-    /// observer. Observation timing cannot change the outcome <em>value</em>, but it can stall when
-    /// that value is acted on — so do only fast, in-memory work here (e.g. enqueue, signal a waiter,
-    /// update a counter) and offload anything slow (network, disk, DB) to a background worker.
+    /// Delivery is off the critical path, so a slow observer does not block message handling — but a
+    /// persistently slow observer will fall behind and its bounded queue will drop the newest
+    /// observations (logged). For lossless capture of a high-volume stream, hand off quickly here
+    /// (e.g. to your own durable queue) rather than doing slow work inline.
     /// </remarks>
     /// <param name="observation">The read-only view of the inbound message (defensive clone + envelope-auth metadata).</param>
-    /// <param name="ct">Cancellation token flowing from the receive pipeline.</param>
+    /// <param name="ct">Cancellation token for the delivery pump.</param>
     Task OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct);
 }

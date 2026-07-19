@@ -29,6 +29,21 @@ public sealed class DidCommReceiveOptions
     public bool AllowSameSocketReplies { get; set; }
 
     /// <summary>
+    /// When the registry-aware HTTP <c>MapDidCommEndpoint(pattern)</c> overload's dispatcher
+    /// produces a reply (e.g. a Discover Features <c>disclose</c> or a Trust Ping response),
+    /// should the endpoint deliver it <strong>out of band</strong> by resolving the reply
+    /// recipient's <c>DIDCommMessaging</c> service endpoint and sending via
+    /// <see cref="DidComm.Facade.DidCommClient.SendAsync"/>? Defaults to <c>false</c>: HTTP receive
+    /// is one-way per FR-TRN-10 and the inbound POST still answers a bare <c>202</c> regardless.
+    /// When <c>true</c>, the reply is sent as a fresh outbound message to the peer's endpoint (which
+    /// is how a Discover Features round-trip actually completes — the initiator learns the answer at
+    /// its own receive endpoint). Requires the receiving app's <see cref="DidComm.Facade.DidCommClient"/>
+    /// to have a transport router and service resolver wired (e.g. via <c>AddDidComm(b =&gt; b.UseNetDidResolver().UseHttpTransport())</c>).
+    /// A send failure is logged and never changes the inbound <c>202</c>.
+    /// </summary>
+    public bool AutoSendReplies { get; set; }
+
+    /// <summary>
     /// Minimum wall-clock time the HTTP receive endpoint takes before returning the uniform
     /// <c>400</c> rejection. The handler times itself from entry and, before answering 400, waits
     /// out the remainder of this floor so the response time no longer reveals how far envelope

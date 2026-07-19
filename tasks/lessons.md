@@ -656,7 +656,7 @@ Format per entry:
   diff inspection, tests/builds, and submitting the requested review are within a PR-review request;
   changing the PR branch's source/tests/docs still requires the repository's explicit plan approval.
 
-## L-033 — Comparing a DID against a from/to means DID *subjects*, never raw strings (PRD §4.3).
+## L-034 — Comparing a DID against a from/to means DID *subjects*, never raw strings (PRD §4.3).
 
 - **Lesson:** Any equality check involving a `from`/`to` value (which MAY be a DID URL with
   path/query) must use `DidSubject.SameDidSubject` (parse both sides, compare bare DID subjects),
@@ -673,3 +673,27 @@ Format per entry:
   `from`/`to`/`skid`/`kid`; route them through `DidSubject.SameDidSubject`. When a new feature
   consumes `Authenticated`, also verify the key id it relies on is non-empty rather than trusting the
   boolean alone. See [[L-031]], [[L-032]].
+
+## L-035 — Adding an optional ctor param is source- but not binary-compatible; and a "read-only side channel" must be off the critical path, not just non-mutating.
+
+- **Lesson (binary compat):** Adding a parameter to an existing public constructor — even with a
+  default — is a BINARY break: code compiled against the old assembly holds a MemberRef to the old
+  arity and throws `MissingMethodException` at runtime. For a minor release, preserve the exact old
+  constructor as a delegating overload and add a NEW overload (with no default on the extra param, to
+  avoid overload-resolution ambiguity). Wire the ApiCompat gate so the build catches it.
+- **Lesson (side channels):** "Observers can't affect the outcome" is false if the outcome is
+  returned only AFTER awaiting observers — a slow/hung observer then gates reply delivery, and a
+  cancellation/throw on the observer path can clobber the already-computed result. A genuine
+  read-only side channel must be decoupled from the critical path: enqueue to a bounded per-consumer
+  background queue and return immediately; drop-and-log on overflow; isolate each consumer so one
+  hang can't starve another. Also: a DI singleton that implements only `IAsyncDisposable` throws on
+  synchronous container disposal (`using var sp`) — implement BOTH `IDisposable` and `IAsyncDisposable`.
+- **Why:** PR #51's second reviewer caught all of these: the `ProtocolDispatcher` 4→5-arg ctor break,
+  observers inline-awaited on the receive path (head-of-line blocking + cancellation clobber), and
+  the "round-trip" that no shipped transport actually completed (proven only by a test that hand-fed
+  the reply).
+- **How to apply:** When touching a public ctor/signature in a shipped library, ask "does an app
+  compiled against the last release still bind?" and keep the old member. When adding a "notify N
+  consumers" hook, put it off the request path with backpressure, not inline. Prove cross-agent
+  features with a real two-endpoint integration test, not a single-dispatcher injection. See
+  [[L-034]] (DID-subject compares), [[L-032]] (fail-closed parsing).

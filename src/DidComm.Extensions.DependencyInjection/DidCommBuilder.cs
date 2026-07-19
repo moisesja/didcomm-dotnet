@@ -61,7 +61,17 @@ public sealed class DidCommBuilder
             }
             return registry;
         });
-        Services.TryAddSingleton<ProtocolDispatcher>();
+        // Explicit factory rather than TryAddSingleton<ProtocolDispatcher>(): the default greediest-
+        // constructor selection would only pick the observer-aware ctor when TraceOptions also happens
+        // to be registered (i.e. EnableTracing was called), silently dropping observers otherwise. The
+        // factory always calls the observer-aware ctor, resolving the optional pieces explicitly, so
+        // FR-PROTO-12 observers (e.g. DiscoverFeaturesClient) are wired regardless of tracing.
+        Services.TryAddSingleton<ProtocolDispatcher>(sp => new ProtocolDispatcher(
+            sp.GetRequiredService<ProtocolHandlerRegistry>(),
+            sp.GetRequiredService<IThreadStateStore>(),
+            sp.GetService<ILogger<ProtocolDispatcher>>(),
+            sp.GetService<TraceOptions>(),
+            sp.GetServices<IProtocolObserver>()));
     }
 
     /// <summary>

@@ -89,9 +89,12 @@ public sealed class DiscoverFeaturesClientTests
         var client = Client(out var sent);
         var registry = new ProtocolHandlerRegistry();
         registry.Register(new DiscoverFeaturesHandler(Array.Empty<IFeatureProvider>()));
-        var dispatcher = new ProtocolDispatcher(
-            registry, new InMemoryThreadStateStore(), observers: new IProtocolObserver[] { client });
+        await using var dispatcher = new ProtocolDispatcher(
+            registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null,
+            observers: new IProtocolObserver[] { client });
 
+        // The disclose is delivered to the client observer via the background queue; `await task`
+        // (the QueryFeaturesAsync waiter) naturally waits for that async delivery to complete it.
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
         var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -112,7 +115,20 @@ public sealed class DiscoverFeaturesClientTests
         var act = async () => await client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromMilliseconds(50));
 
         (await act.Should().ThrowAsync<TimeoutException>())
-            .Which.Message.Should().Contain("no correlated 'disclose'");
+            .Which.Message.Should().Contain("did not complete");
+    }
+
+    [Fact]
+    public async Task A_transport_send_failure_propagates_unchanged_not_mislabeled_as_timeout()
+    {
+        // Regression for the broad catch(TimeoutException): a transport/send failure must surface as
+        // itself, not be relabeled "no correlated disclose".
+        var boom = new InvalidOperationException("transport exploded");
+        var client = new DiscoverFeaturesClient((_, _, _) => throw boom);
+
+        var act = async () => await client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Should().BeSameAs(boom);
     }
 
     [Fact]

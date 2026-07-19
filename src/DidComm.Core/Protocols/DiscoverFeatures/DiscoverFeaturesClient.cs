@@ -75,13 +75,13 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
     /// correlated <c>disclose</c> (FR-PROTO-05a).
     /// </summary>
     /// <param name="from">Initiator DID (authcrypt sender — the peer must be able to tell who is asking, and the reply comes back addressed to this DID).</param>
-    /// <param name="to">Responder DID. Only an authenticated <c>disclose</c> from exactly this DID can complete the query.</param>
+    /// <param name="to">Responder DID. Only an authenticated <c>disclose</c> from exactly this DID (compared as a DID subject) can complete the query.</param>
     /// <param name="queries">One or more feature queries (see <see cref="FeatureQuery"/>).</param>
-    /// <param name="timeout">How long to wait for the disclosure before failing with <see cref="TimeoutException"/>. Pass <see cref="Timeout.InfiniteTimeSpan"/> to wait on <paramref name="ct"/> alone.</param>
+    /// <param name="timeout">Deadline for the <strong>whole operation</strong> — the send and the wait for the disclosure together. If it elapses before a correlated <c>disclose</c> arrives, the call fails with <see cref="TimeoutException"/>. Pass <see cref="Timeout.InfiniteTimeSpan"/> to bound only by <paramref name="ct"/>.</param>
     /// <param name="serviceEndpointOverride">Optional explicit endpoint URI, forwarded to <see cref="SendOptions.ServiceEndpointOverride"/> (skips DID-document service resolution).</param>
     /// <param name="ct">Cancellation token; cancelling abandons the pending query.</param>
     /// <returns>The disclosures the peer returned. An empty list is meaningful per FR-PROTO-05: it asserts "no matches", not "Discover Features unsupported".</returns>
-    /// <exception cref="TimeoutException">No correlated <c>disclose</c> arrived within <paramref name="timeout"/>.</exception>
+    /// <exception cref="TimeoutException">The operation did not complete (send + correlated <c>disclose</c>) within <paramref name="timeout"/>.</exception>
     public async Task<IReadOnlyList<FeatureDisclosure>> QueryFeaturesAsync(
         string from,
         string to,
@@ -105,6 +105,13 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
         if (!_pending.TryAdd(message.Id, new PendingQuery(to, completion)))
             throw new InvalidOperationException($"Duplicate pending Discover Features query id '{message.Id}'.");
 
+        // One deadline over BOTH the send and the wait. A linked token carries the timeout into the
+        // transport too, so a slow send counts against the budget instead of starting the clock only
+        // after it returns. Only OUR timeout is translated to TimeoutException — a transport failure
+        // (or a caller cancellation) propagates unchanged rather than being mislabeled "no disclose".
+        using var timeoutCts = timeout == Timeout.InfiniteTimeSpan ? null : new CancellationTokenSource(timeout);
+        using var linked = timeoutCts is null ? null : CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var effectiveCt = linked?.Token ?? ct;
         try
         {
             await _send(
@@ -113,14 +120,14 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
                     Recipients: new[] { to },
                     From: from,
                     ServiceEndpointOverride: serviceEndpointOverride),
-                ct).ConfigureAwait(false);
+                effectiveCt).ConfigureAwait(false);
 
-            return await completion.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
+            return await completion.Task.WaitAsync(effectiveCt).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        catch (OperationCanceledException) when (timeoutCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"Discover Features query '{message.Id}' to '{to}' received no correlated 'disclose' within {timeout} (FR-PROTO-05a).");
+                $"Discover Features query '{message.Id}' to '{to}' did not complete (send + correlated 'disclose') within {timeout} (FR-PROTO-05a).");
         }
         finally
         {

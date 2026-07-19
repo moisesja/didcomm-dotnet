@@ -7,6 +7,7 @@ using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.OutOfBand;
+using DidComm.Transports;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -140,7 +141,10 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <see cref="IProtocolHandler"/> via <see cref="ProtocolDispatcher"/>. Any reply the
     /// handler produces is LOGGED (HTTP receive is one-way per FR-TRN-10) — operators that
     /// want to deliver the reply schedule an outbound send out of band, typically using
-    /// <see cref="DidCommClient.SendAsync"/> from inside the handler itself.
+    /// <see cref="DidCommClient.SendAsync"/> from inside the handler itself, or by opting in to
+    /// <see cref="DidCommReceiveOptions.AutoSendReplies"/> so this endpoint forwards the reply to
+    /// the peer's own endpoint automatically (this is how a Discover Features round-trip completes).
+    /// The inbound POST still answers a bare <c>202</c> regardless.
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
@@ -192,6 +196,10 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
                 var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+                // FR-TRN-10 opt-in: deliver a handler reply out of band to the peer's own endpoint.
+                // A send failure is logged inside the helper and never changes the inbound 202.
+                if (receiveOptions.AutoSendReplies && outcome is { Result: DispatchResult.ReplyProduced, Reply: not null })
+                    await TrySendReplyOutOfBandAsync(client, outcome.Reply, logger, httpContext.RequestAborted).ConfigureAwait(false);
                 LogOutcome(logger, outcome, sameSocketDelivered: false);
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
@@ -410,6 +418,43 @@ public static class DidCommEndpointRouteBuilderExtensions
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    // FR-TRN-10 out-of-band reply delivery (opt-in via DidCommReceiveOptions.AutoSendReplies).
+    // Sends the handler's reply to the reply recipient's own DIDCommMessaging endpoint as a fresh
+    // outbound message. Failures are swallowed + logged: the inbound POST already answered 202 and
+    // the peer must not be able to distinguish reply-delivery outcomes.
+    private static async Task TrySendReplyOutOfBandAsync(
+        DidCommClient client,
+        DidComm.Messages.Message reply,
+        ILogger? logger,
+        CancellationToken ct)
+    {
+        if (reply.To is not { Count: > 0 } || string.IsNullOrEmpty(reply.From))
+        {
+            logger?.LogWarning(
+                "MapDidCommEndpoint: AutoSendReplies is on but the handler reply lacks from/to; cannot deliver out of band. Reply id: {ReplyId}.",
+                reply.Id);
+            return;
+        }
+        var recipients = reply.To.ToArray();
+        try
+        {
+            await client.SendAsync(
+                reply,
+                new SendOptions(Recipients: recipients, From: reply.From),
+                ct).ConfigureAwait(false);
+            logger?.LogInformation(
+                "MapDidCommEndpoint: delivered handler reply '{ReplyType}' out of band to {Recipients} (FR-TRN-10 AutoSendReplies).",
+                reply.Type, string.Join(",", recipients));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                ex,
+                "MapDidCommEndpoint: AutoSendReplies failed to deliver reply '{ReplyType}' to {Recipients}; the inbound 202 is unaffected.",
+                reply.Type, string.Join(",", recipients));
         }
     }
 

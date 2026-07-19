@@ -70,13 +70,15 @@ public sealed class CookbookContext : IAsyncDisposable
         var secrets = new InMemorySecretsResolver();
 
         var services = new ServiceCollection();
+        // In-process transport so sections can exercise SendAsync / QueryFeaturesAsync without a
+        // network (see LoopbackTransport). Harmless for sections that only pack/unpack.
+        services.AddSingleton<DidComm.Transports.IDidCommTransport, LoopbackTransport>();
         services.AddDidComm(b =>
         {
             b.UseNetDidResolver();
             b.UseSecretsResolver(secrets);
-            // Phase 6.2a: register the spec built-in protocol handlers (Trust Ping + Empty
-            // today; Discover Features in 6.2b; Report Problem / Trace in 6.2c). Sections S/W
-            // rely on these being present.
+            // Register the spec built-in protocol handlers (Trust Ping, Empty, Discover Features
+            // with its initiator client, Report Problem). Sections S/T/W rely on these.
             b.AddBuiltInProtocols();
         });
 

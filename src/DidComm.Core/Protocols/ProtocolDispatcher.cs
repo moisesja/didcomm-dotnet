@@ -23,26 +23,44 @@ namespace DidComm.Protocols;
 /// transport-agnostic also makes it directly testable from unit tests without spinning up an
 /// ASP.NET Core host.
 /// </remarks>
-public sealed class ProtocolDispatcher
+public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 {
     private readonly ProtocolHandlerRegistry _registry;
     private readonly IThreadStateStore _threads;
     private readonly ILogger<ProtocolDispatcher>? _logger;
     private readonly TraceOptions? _traceOptions;
-    private readonly IProtocolObserver[] _observers;
+    private readonly ObserverDelivery? _observers;
 
-    /// <summary>Construct a dispatcher bound to a registry and thread-state store.</summary>
+    /// <summary>
+    /// Construct a dispatcher bound to a registry and thread-state store. This is the exact 1.2.0
+    /// signature, preserved for binary compatibility; it delegates to the observer-aware constructor
+    /// with no observers.
+    /// </summary>
     /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
     /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
     /// <param name="logger">Optional structured logger; warnings are emitted for FR-THR-04 rule 3 drops.</param>
     /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11). Registered via <c>DidCommBuilder.EnableTracing(...)</c>; when supplied, every inbound message is checked against <see cref="TraceObserver.ShouldReport"/> and an authorised trace-report intent is logged at <c>Information</c>. HTTP POST integration is deferred.</param>
-    /// <param name="observers">Optional read-only inbound observers (FR-PROTO-12). Fixed at construction — there is deliberately no runtime add/remove — and enumerated in an Information log line so the registration set is operator-auditable.</param>
     public ProtocolDispatcher(
         ProtocolHandlerRegistry registry,
         IThreadStateStore threads,
         ILogger<ProtocolDispatcher>? logger = null,
-        TraceOptions? traceOptions = null,
-        IEnumerable<IProtocolObserver>? observers = null)
+        TraceOptions? traceOptions = null)
+        : this(registry, threads, logger, traceOptions, observers: null)
+    {
+    }
+
+    /// <summary>Construct a dispatcher with read-only inbound observers (FR-PROTO-12).</summary>
+    /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
+    /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
+    /// <param name="logger">Optional structured logger.</param>
+    /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11).</param>
+    /// <param name="observers">Read-only inbound observers. Fixed at construction — there is deliberately no runtime add/remove — enumerated in an Information log line so the registration set is operator-auditable. Notified off the dispatch path via a bounded background queue, so they never gate reply delivery or affect the outcome.</param>
+    public ProtocolDispatcher(
+        ProtocolHandlerRegistry registry,
+        IThreadStateStore threads,
+        ILogger<ProtocolDispatcher>? logger,
+        TraceOptions? traceOptions,
+        IEnumerable<IProtocolObserver>? observers)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(threads);
@@ -50,15 +68,16 @@ public sealed class ProtocolDispatcher
         _threads = threads;
         _logger = logger;
         _traceOptions = traceOptions;
-        _observers = observers?.ToArray() ?? Array.Empty<IProtocolObserver>();
-        if (_observers.Length > 0)
+        var observerList = observers?.ToArray() ?? Array.Empty<IProtocolObserver>();
+        if (observerList.Length > 0)
         {
             // FR-PROTO-12 audit trail: observers see decrypted inbound plaintext, so the set of
             // registered observer types must be visible to an operator reading startup logs — a
             // stowaway registration from a compromised dependency should not be silent.
             _logger?.LogInformation(
                 "Inbound protocol observers registered (read-only side channel, FR-PROTO-12): {Observers}.",
-                string.Join("; ", _observers.Select(o => $"{o.GetType().FullName} (filter: {o.ProtocolUriFilter ?? "ALL"})")));
+                string.Join("; ", observerList.Select(o => $"{o.GetType().FullName} (filter: {o.ProtocolUriFilter ?? "ALL"})")));
+            _observers = new ObserverDelivery(observerList, logger);
         }
     }
 
@@ -82,11 +101,12 @@ public sealed class ProtocolDispatcher
 
         var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
 
-        // FR-PROTO-12: observers are notified exactly once per completed dispatch, AFTER the
-        // outcome is determined and for every outcome path (handled, NoReply, NoHandler, and
-        // the loop-guard drops) — so observer state or timing can never influence handling,
-        // and an initiator with no handler registered for a PIURI can still observe its traffic.
-        await NotifyObserversAsync(received, ct).ConfigureAwait(false);
+        // FR-PROTO-12: hand the inbound to the observers' bounded background queue and return
+        // immediately. Enqueue is non-blocking, runs for every outcome path (handled, NoReply,
+        // NoHandler, loop-guard drops), and NEVER awaits observer work — so a slow or faulting
+        // observer can neither gate this reply's delivery nor change the computed outcome, and an
+        // initiator with no handler registered for a PIURI can still observe its traffic.
+        _observers?.Enqueue(received);
         return outcome;
     }
 
@@ -166,59 +186,23 @@ public sealed class ProtocolDispatcher
         return new DispatchOutcome(DispatchResult.ReplyProduced, reply, handler);
     }
 
-    private async Task NotifyObserversAsync(UnpackResult received, CancellationToken ct)
+    /// <summary>
+    /// Test/diagnostic seam: complete when every observation enqueued before this call has been
+    /// delivered to its observer. Observer delivery is otherwise asynchronous and off the dispatch
+    /// path, so tests use this to make observation deterministic. A never-completing observer will
+    /// not drain, so callers pass a <paramref name="timeout"/>. No-op when no observers are registered.
+    /// </summary>
+    /// <param name="timeout">Maximum time to wait for the queues to drain.</param>
+    internal Task FlushObserversAsync(TimeSpan timeout)
+        => _observers?.FlushAsync(timeout) ?? Task.CompletedTask;
+
+    /// <summary>Stop the observer delivery pumps synchronously (best effort; does not block on in-flight observers). Invoked by the DI container on synchronous shutdown.</summary>
+    public void Dispose() => _observers?.Dispose();
+
+    /// <summary>Stop the observer delivery pumps, awaiting drain. Invoked by the DI container on asynchronous shutdown.</summary>
+    public async ValueTask DisposeAsync()
     {
-        if (_observers.Length == 0)
-            return;
-
-        foreach (var observer in _observers)
-        {
-            // Everything per-observer — the filter check, the defensive clone, and the callback —
-            // runs inside one try/catch. FR-PROTO-12 guarantees observation can NEVER change the
-            // dispatch outcome: the outcome is already computed by the caller, so even a
-            // pathological message that trips ObserverMatches or the clone must be swallowed here
-            // rather than propagate out of DispatchAsync and clobber it.
-            try
-            {
-                if (!ObserverMatches(observer.ProtocolUriFilter, received.Message.Type))
-                    continue;
-
-                // Each observer gets its OWN deep clone: mutation by one observer can reach neither
-                // the pipeline's live message nor another observer's view. Observer counts are
-                // small, so per-observer cloning costs less than the isolation is worth.
-                var observation = InboundObservation.FromUnpackResult(received);
-                await observer.OnMessageReceivedAsync(observation, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(
-                    ex,
-                    "IProtocolObserver '{ObserverType}' threw while observing inbound message {MessageId}; the dispatch outcome is unaffected (FR-PROTO-12).",
-                    observer.GetType().FullName, received.Message.Id);
-            }
-        }
-    }
-
-    // A filter observes its whole protocol family: same protocol name and major version, any
-    // minor (a 2.0 filter sees 2.1 traffic). This reuses the registry's FR-PROTO-01/02 matching
-    // rules minus the older-minor tie-break, which only exists to pick a single handler.
-    private static bool ObserverMatches(string? filter, string? messageType)
-    {
-        if (filter is null)
-            return true;
-        if (!MessageTypeUri.TryParse(messageType, out var mturi))
-            return false;
-        if (!ProtocolIdentifier.TryParse(filter, out var filterPiuri))
-            return false;
-        // TryParse, not Parse: the MTURI docUri group (`.+?`) tolerates a trailing '/' that the
-        // stricter PIURI group (`.+?[^/]`) rejects, so a crafted double-slash `type` parses as an
-        // MTURI but its derived PIURI does not. Fail closed to "no match" rather than throw.
-        if (!ProtocolIdentifier.TryParse(mturi!.ProtocolIdentifier, out var inboundPiuri))
-            return false;
-        return filterPiuri.MatchesProtocolAndMajor(inboundPiuri);
+        if (_observers is not null)
+            await _observers.DisposeAsync().ConfigureAwait(false);
     }
 }
