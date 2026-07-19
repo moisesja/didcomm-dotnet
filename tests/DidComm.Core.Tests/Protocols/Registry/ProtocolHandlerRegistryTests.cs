@@ -87,6 +87,24 @@ public sealed class ProtocolHandlerRegistryTests
     }
 
     [Fact]
+    public void Double_slash_type_that_parses_as_MTURI_but_not_PIURI_returns_false_without_throwing()
+    {
+        // Parser differential: the MTURI docUri group (`.+?`) tolerates a trailing '/', so
+        // "https://didcomm.org//x/1.0/m" parses as an MTURI with docUri "https://didcomm.org/";
+        // but the stricter PIURI group (`.+?[^/]`) rejects the derived PIURI. TryResolve MUST
+        // fail closed to "no handler", not throw ProtocolException on the dispatch path — a
+        // remote peer sets Message.Type, so a throw here would be remotely triggerable.
+        var reg = new ProtocolHandlerRegistry();
+        reg.Register(new StaticHandler("https://didcomm.org/x/1.0"));
+
+        Action act = () => reg.TryResolve("https://didcomm.org//x/1.0/m", out _);
+
+        act.Should().NotThrow();
+        reg.TryResolve("https://didcomm.org//x/1.0/m", out var handler).Should().BeFalse();
+        handler.Should().BeNull();
+    }
+
+    [Fact]
     public void Re_registering_same_PIURI_replaces_handler()
     {
         var reg = new ProtocolHandlerRegistry();

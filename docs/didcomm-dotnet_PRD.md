@@ -444,7 +444,8 @@ public sealed class DidComm {
 | ID | Keyword | Requirement | Acceptance |
 |---|---|---|---|
 | FR-PROTO-04 | MUST | **Trust Ping 2.0**: handle `ping` (`response_requested` default true) → reply `ping-response` with `thid`=ping.id; suppress reply when false. | Ping/response thread linkage correct. |
-| FR-PROTO-05 | MUST | **Discover Features 2.0**: handle `queries` (feature-types `protocol`, `goal-code`, `header`, `constraint`; `*` wildcard, prefix match) → `disclose`; ignore unrecognized feature-types; empty disclosures ≠ "unsupported". Support the `max_receive_bytes` constraint query/disclosure. | Wildcard + `max_receive_bytes` flows work. |
+| FR-PROTO-05 | MUST | **Discover Features 2.0 (responder)**: handle `queries` (feature-types `protocol`, `goal-code`, `header`, `constraint`; `*` wildcard, prefix match) → `disclose`; ignore unrecognized feature-types; empty disclosures ≠ "unsupported". Support the `max_receive_bytes` constraint query/disclosure. | Wildcard + `max_receive_bytes` flows work. |
+| FR-PROTO-05a | MUST | **Discover Features 2.0 (initiator)**: provide an async round-trip that sends a `queries` and awaits the correlated `disclose` — `QueryFeaturesAsync(from, to, queries, timeout, …)`. Correlate the reply by `thid` == the query `id`; fail with a timeout if none arrives. A `disclose` MUST complete a pending query ONLY when the envelope authenticates the sender (authcrypt or verified signature) AND `from` equals the queried DID; an unauthenticated or wrong-sender disclosure MUST NOT complete (or cancel) the waiter. Sits on the FR-PROTO-12 observer seam so the responder-side handler (FR-PROTO-05) is unchanged — an inbound `disclose` remains a terminal leaf in dispatch. | Round-trip returns correlated disclosures; timeout throws; forged (unauthenticated / wrong-`from`) disclose is ignored. |
 | FR-PROTO-06 | MUST | **Empty 1.0**: support `https://didcomm.org/empty/1.0/empty` for header-only transmissions (used by ACKs). | Empty message packs/unpacks. |
 | FR-PROTO-07 | MUST | **Report Problem 2.0**: build/parse `problem-report` with REQUIRED `pthid` (the failing thread's `thid`) and `code`; optional `comment` (with `{n}` interpolation from `args`), `args`, `escalate_to`, optional `ack`. | Example problem-report round-trips; interpolation honored (missing arg→`?`, extras appended). |
 | FR-PROTO-08 | MUST | Implement the problem-code taxonomy: sorter (`e`/`w`), scope (`p`/`m`/state-name), descriptors (`trust`, `trust.crypto`, `xfer`, `did`, `msg`, `me`, `me.res[.net/.memory/.storage/.compute/.money]`, `req`, `req.time`, `legal`). Match by prefix. | Prefix matching recognizes `e.p.xfer.*` from a longer code. |
@@ -452,6 +453,7 @@ public sealed class DidComm {
 | FR-PROTO-10 | SHOULD | Implement cascading-problem guards: per-thread max-error count; on breach emit `e.p.req.max-errors-exceeded` and cease responding on that `thid`. | Breach stops further responses. |
 | FR-PROTO-11 | MAY | **Trace 2.0**: support honoring the `trace` header by POSTing a `trace_report` to its URI when explicitly enabled. | On-demand trace report posts when enabled. |
 | FR-PROTO-11a | MUST | Tracing MUST default to **off**: a `trace` request MUST be rejected/ignored unless the operator has explicitly configured safeguards (privacy/loop protection). | With default config, a `trace` header produces no report. |
+| FR-PROTO-12 | MUST | **Inbound observer seam**: provide `IProtocolObserver` that the dispatcher notifies for every completed inbound dispatch (all outcomes, including `NoHandler` and loop-guard drops), so a second consumer can observe traffic whose PIURI is owned by a built-in handler (e.g. react to inbound `report-problem`, correlate a Discover Features `disclose`) without replacing that handler. **Threat model:** the seam is host-trusted and read-only. Observers (a) are registrable ONLY at DI-composition time (`AddProtocolObserver<T>()`), never at runtime and never by a remote peer; (b) are notified AFTER the outcome is determined, so they cannot influence handler resolution, replies, or thread state; (c) receive a defensive deep clone of the message plus envelope-auth metadata via `InboundObservation` — never the live instance, the facade, or the thread store — so a buggy/hostile observer can neither tamper nor send as the agent; (d) are scoped by a per-PIURI `ProtocolUriFilter` (least privilege; `null` = all); (e) are enumerated in an Information log line at dispatcher construction (operator-auditable against a stowaway registration). Observer exceptions are caught and logged; the dispatch outcome is unaffected. Envelope cryptography is untouched. | Observer sees handled + `NoHandler` + dropped inbounds; a mutating observer cannot affect the handler input, the reply, or another observer's view; a filtered observer sees only its protocol family; an observer exception does not change the outcome. |
 
 ### 10.3 Out-of-Band 2.0 (§Out Of Band Messages)
 
@@ -926,10 +928,20 @@ await didcomm.SendAsync(ping, new SendOptions(From: "did:peer:alice", To: ["did:
 // Bob's TrustPingHandler auto-replies ping-response with thid == ping.Id.
 ```
 
-**T. Discover Features (FR-PROTO-05)**
+**T. Discover Features (FR-PROTO-05 / FR-PROTO-05a)**
 ```csharp
-var query = DiscoverFeatures.CreateQuery(to: "did:peer:bob", match: "https://didcomm.org/*");
-// Responder returns a `disclose` listing supported protocols/goal-codes/headers/constraints.
+// Responder side is automatic once AddBuiltInProtocols() is called: an inbound `queries`
+// is answered with a `disclose` listing supported protocols/goal-codes/headers/constraints.
+
+// Initiator side — send a `queries` and await the peer's correlated `disclose`:
+var client = serviceProvider.GetRequiredService<DiscoverFeaturesClient>();
+var disclosures = await client.QueryFeaturesAsync(
+    from: "did:peer:alice",
+    to: "did:peer:bob",
+    queries: new[] { new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" } },
+    timeout: TimeSpan.FromSeconds(30));
+// disclosures lists what Bob supports. Only an authenticated `disclose` from Bob completes
+// the call; a timeout throws TimeoutException. Empty list = "no matches", not "unsupported".
 ```
 
 **U. Report a problem (FR-PROTO-07/08)**

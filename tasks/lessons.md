@@ -605,3 +605,40 @@ Format per entry:
   equalize/​minimize pre-crypto round-trips. (3) Always run the break-it adversarial subagent on the
   *finished* seam and add a regression test per finding (here: a handle whose `DeriveAsync` throws
   `KeyNotFoundException`/`CryptographicException` must yield the uniform `CryptoException`).
+
+## L-031 — A plan that adds an extension/observability seam must state its threat model up front.
+
+- **Lesson:** When proposing any seam that exposes message/handler traffic to pluggable
+  components (observers, middleware, decorators, event hooks), the plan itself must answer:
+  who can register, at what time (startup vs runtime), what they can see, what they can
+  mutate, and where the trust boundary sits relative to existing primitives. "Read-only
+  side channel" is a claim to enforce (defensive clone, narrow payload, no facade handle),
+  not a doc-comment.
+- **Why:** The issue-#49/#50 plan proposed an `IProtocolObserver` seam passing the live
+  `ProtocolContext` + `Message`. The user asked "who is a registered observer? Are we
+  introducing a man-in-the-middle sniffer?" — and inspection showed `Message.Body` is a
+  mutable `JsonObject`, so an unhardened observer would have been a potential tamperer,
+  and `ProtocolContext` over-grants (facade send access, mutable thread store).
+- **How to apply:** Any plan touching `ProtocolDispatcher`, handler registration, or adding
+  a pluggable callback: include a "threat model" block (registration surface, visibility,
+  mutability, audit trail, least-privilege filter) and an adversarial test line item
+  (tamper + spoof) before presenting the plan.
+
+## L-032 — MTURI-parses ≠ PIURI-parses: never derive a PIURI with the throwing Parse on the dispatch path.
+
+- **Lesson:** The MTURI regex doc-uri group is `.+?` (tolerates a trailing `/`) but the PIURI
+  regex is `.+?[^/]` (forbids it). So a `type` with a doubled slash
+  (`https://didcomm.org//x/1.0/m`) passes `MessageTypeUri.TryParse` yet its derived
+  `ProtocolIdentifier` fails to parse. Any code that does
+  `ProtocolIdentifier.Parse(mturi.ProtocolIdentifier)` throws on that remotely-settable value.
+  On the dispatch path (`ProtocolHandlerRegistry.TryResolve`, observer filter matching) always
+  use `TryParse` and fail closed to "no handler / no match".
+- **Why:** The adversarial pass on the #49/#50 observer seam found `TryResolve` (pre-existing)
+  and the new `ObserverMatches` both used the throwing `Parse`. A crafted inbound `type` threw
+  `ProtocolException` on dispatch — contained by the shipped transports (HTTP→400, WS→log-continue)
+  but wrong semantics and unhandled for any direct `ProtocolDispatcher` caller. Also delivered via
+  a pure-ACK-that-requests-an-ACK, which bypasses `TryResolve` and hits the observer matcher.
+- **How to apply:** When converting one URI shape to a stricter one, use the Try* variant and treat
+  failure as a normal negative result, never an exception — a remote peer controls `Message.Type`.
+  Prove security regressions red-green: revert the fix, confirm the test fails, restore. See also
+  [[L-031]] (extension-seam threat models) — this is why that plan mandated an adversarial pass.

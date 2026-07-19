@@ -12,6 +12,9 @@ namespace DidComm.Protocols;
 /// loop-guard pre-filter, calls the handler, validates any reply against
 /// <see cref="AckLoopGuard.IsSafeToSend"/> (FR-THR-04 rule 2), and returns a
 /// <see cref="DispatchOutcome"/> describing what the transport layer should do next.
+/// After the outcome is determined, registered <see cref="IProtocolObserver"/>s are notified
+/// on a read-only side channel (FR-PROTO-12) — see <see cref="IProtocolObserver"/> for the
+/// trust model.
 /// </summary>
 /// <remarks>
 /// The dispatcher does NOT itself send replies — that decision is the transport's, because
@@ -26,17 +29,20 @@ public sealed class ProtocolDispatcher
     private readonly IThreadStateStore _threads;
     private readonly ILogger<ProtocolDispatcher>? _logger;
     private readonly TraceOptions? _traceOptions;
+    private readonly IProtocolObserver[] _observers;
 
     /// <summary>Construct a dispatcher bound to a registry and thread-state store.</summary>
     /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
     /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
     /// <param name="logger">Optional structured logger; warnings are emitted for FR-THR-04 rule 3 drops.</param>
     /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11). Registered via <c>DidCommBuilder.EnableTracing(...)</c>; when supplied, every inbound message is checked against <see cref="TraceObserver.ShouldReport"/> and an authorised trace-report intent is logged at <c>Information</c>. HTTP POST integration is deferred.</param>
+    /// <param name="observers">Optional read-only inbound observers (FR-PROTO-12). Fixed at construction — there is deliberately no runtime add/remove — and enumerated in an Information log line so the registration set is operator-auditable.</param>
     public ProtocolDispatcher(
         ProtocolHandlerRegistry registry,
         IThreadStateStore threads,
         ILogger<ProtocolDispatcher>? logger = null,
-        TraceOptions? traceOptions = null)
+        TraceOptions? traceOptions = null,
+        IEnumerable<IProtocolObserver>? observers = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(threads);
@@ -44,6 +50,16 @@ public sealed class ProtocolDispatcher
         _threads = threads;
         _logger = logger;
         _traceOptions = traceOptions;
+        _observers = observers?.ToArray() ?? Array.Empty<IProtocolObserver>();
+        if (_observers.Length > 0)
+        {
+            // FR-PROTO-12 audit trail: observers see decrypted inbound plaintext, so the set of
+            // registered observer types must be visible to an operator reading startup logs — a
+            // stowaway registration from a compromised dependency should not be silent.
+            _logger?.LogInformation(
+                "Inbound protocol observers registered (read-only side channel, FR-PROTO-12): {Observers}.",
+                string.Join("; ", _observers.Select(o => $"{o.GetType().FullName} (filter: {o.ProtocolUriFilter ?? "ALL"})")));
+        }
     }
 
     /// <summary>
@@ -64,6 +80,22 @@ public sealed class ProtocolDispatcher
         ArgumentNullException.ThrowIfNull(received);
         ArgumentNullException.ThrowIfNull(options);
 
+        var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+
+        // FR-PROTO-12: observers are notified exactly once per completed dispatch, AFTER the
+        // outcome is determined and for every outcome path (handled, NoReply, NoHandler, and
+        // the loop-guard drops) — so observer state or timing can never influence handling,
+        // and an initiator with no handler registered for a PIURI can still observe its traffic.
+        await NotifyObserversAsync(received, ct).ConfigureAwait(false);
+        return outcome;
+    }
+
+    private async Task<DispatchOutcome> DispatchCoreAsync(
+        UnpackResult received,
+        DidCommClient? client,
+        DidCommOptions options,
+        CancellationToken ct)
+    {
         // FR-PROTO-11: when Trace 2.0 is opted in via EnableTracing, exercise the decision logic
         // on every inbound. Today the observable side effect is a structured Information log
         // line — HTTP POST integration is deferred to the runtime hook in a later phase.
@@ -132,5 +164,61 @@ public sealed class ProtocolDispatcher
             thread.AckRequested = true;
 
         return new DispatchOutcome(DispatchResult.ReplyProduced, reply, handler);
+    }
+
+    private async Task NotifyObserversAsync(UnpackResult received, CancellationToken ct)
+    {
+        if (_observers.Length == 0)
+            return;
+
+        foreach (var observer in _observers)
+        {
+            // Everything per-observer — the filter check, the defensive clone, and the callback —
+            // runs inside one try/catch. FR-PROTO-12 guarantees observation can NEVER change the
+            // dispatch outcome: the outcome is already computed by the caller, so even a
+            // pathological message that trips ObserverMatches or the clone must be swallowed here
+            // rather than propagate out of DispatchAsync and clobber it.
+            try
+            {
+                if (!ObserverMatches(observer.ProtocolUriFilter, received.Message.Type))
+                    continue;
+
+                // Each observer gets its OWN deep clone: mutation by one observer can reach neither
+                // the pipeline's live message nor another observer's view. Observer counts are
+                // small, so per-observer cloning costs less than the isolation is worth.
+                var observation = InboundObservation.FromUnpackResult(received);
+                await observer.OnMessageReceivedAsync(observation, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "IProtocolObserver '{ObserverType}' threw while observing inbound message {MessageId}; the dispatch outcome is unaffected (FR-PROTO-12).",
+                    observer.GetType().FullName, received.Message.Id);
+            }
+        }
+    }
+
+    // A filter observes its whole protocol family: same protocol name and major version, any
+    // minor (a 2.0 filter sees 2.1 traffic). This reuses the registry's FR-PROTO-01/02 matching
+    // rules minus the older-minor tie-break, which only exists to pick a single handler.
+    private static bool ObserverMatches(string? filter, string? messageType)
+    {
+        if (filter is null)
+            return true;
+        if (!MessageTypeUri.TryParse(messageType, out var mturi))
+            return false;
+        if (!ProtocolIdentifier.TryParse(filter, out var filterPiuri))
+            return false;
+        // TryParse, not Parse: the MTURI docUri group (`.+?`) tolerates a trailing '/' that the
+        // stricter PIURI group (`.+?[^/]`) rejects, so a crafted double-slash `type` parses as an
+        // MTURI but its derived PIURI does not. Fail closed to "no match" rather than throw.
+        if (!ProtocolIdentifier.TryParse(mturi!.ProtocolIdentifier, out var inboundPiuri))
+            return false;
+        return filterPiuri.MatchesProtocolAndMajor(inboundPiuri);
     }
 }

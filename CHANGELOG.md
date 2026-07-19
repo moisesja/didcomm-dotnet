@@ -6,6 +6,66 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-19
+
+> Additive feature release — new public API, no wire change, no breaking change. Closes **#49**
+> and **#50**.
+
+### Added — Discover Features 2.0 initiator round-trip (`feat/discover-features-initiator-49`)
+
+Closes **#49**. Discover Features 2.0 previously shipped only the **responder** side (auto-reply to
+`queries`, auto-disclosure of registered PIURIs). An application could construct a `queries` and
+parse a `disclose`, but could not **correlate** the response: an inbound `disclose` was consumed by
+the built-in handler and never surfaced, so the protocol's requester role — programmatic capability
+discovery — was effectively unimplemented.
+
+- **New `DiscoverFeaturesClient.QueryFeaturesAsync(from, to, queries, timeout, …)` (FR-PROTO-05a).**
+  Sends a `queries` and awaits the peer's `disclose`, correlating by `thid` == the query `id`;
+  throws `TimeoutException` if none arrives in time. Registered automatically by
+  `AddBuiltInProtocols()`; resolve it from DI.
+- **Spoofing-resistant.** A `disclose` completes a pending query only when the envelope
+  authenticated its sender (authcrypt or a verified signature) **and** its `from` is exactly the DID
+  the query was sent to. A forged anoncrypt/plaintext disclosure — or one from a third party that
+  guessed the query id — is logged and ignored, and deliberately does **not** cancel the pending
+  query, so a forgery can neither answer for the peer nor deny the legitimate response.
+- **Responder side unchanged.** An inbound `disclose` remains a terminal leaf in dispatch; the
+  correlation rides the new observer seam below, not a change to `DiscoverFeaturesHandler`.
+
+### Added — Inbound protocol observer seam (`IProtocolObserver`, FR-PROTO-12)
+
+Closes **#50**. The dispatcher routed each inbound message to exactly one handler resolved by PIURI,
+with no observation seam — so a component layered on top of DIDComm could not observe a message whose
+PIURI is owned by a built-in handler (most importantly `report-problem/2.0`) without **replacing**
+that handler and re-implementing its behaviour (including the FR-PROTO-10 cascade-budget guard).
+
+- **New `IProtocolObserver` + `DidCommBuilder.AddProtocolObserver<T>()`.** The dispatcher notifies
+  each registered observer once per completed dispatch — for every outcome, including `NoHandler` and
+  loop-guard drops — so e.g. a higher-level state machine can react to an inbound `report-problem`
+  while the built-in handler still performs its cascade bookkeeping.
+- **Read-only by construction, not by convention.** Observers are notified *after* the dispatch
+  outcome is determined (they cannot influence handling, replies, or thread state); each receives a
+  defensive deep clone of the message plus envelope-auth metadata via `InboundObservation` — never
+  the live message, the `DidCommClient` facade, or the thread store; observer exceptions are caught
+  and logged without affecting the outcome.
+- **Least privilege + auditability.** Each observer declares a `ProtocolUriFilter` (a PIURI, or
+  `null` for all) so it sees only its protocol family; the dispatcher logs the registered observer
+  set (types + filters) at construction so a stowaway registration is operator-visible. Observers can
+  be registered only at DI-composition time and are not reachable by a remote peer; envelope
+  cryptography is untouched.
+
+### Hardened — Malformed `type` no longer throws on the dispatch path
+
+Surfaced by the adversarial review of the observer seam. `ProtocolHandlerRegistry.TryResolve` (and the
+new observer-filter matcher) derived a PIURI from an inbound message type with the **throwing**
+`ProtocolIdentifier.Parse`. Because the MTURI regex's doc-uri group (`.+?`) tolerates a trailing
+slash that the stricter PIURI group (`.+?[^/]`) rejects, a crafted `type` with a doubled slash (e.g.
+`https://didcomm.org//x/1.0/m`) parsed as an MTURI but threw `ProtocolException` when its derived PIURI
+was parsed — a remotely-settable value throwing on the dispatch path. Both call sites now use
+`ProtocolIdentifier.TryParse` and fail closed (no handler / no observer match). Both shipped transports
+already contained the throw (HTTP → 400, WebSocket → log-and-continue), so there was no crash; the fix
+restores correct `NoHandler` semantics and protects any host that calls `ProtocolDispatcher` directly.
+`ProtocolIdentifier.TryParse` also gained a `[NotNullWhen(true)]` annotation.
+
 ## [1.2.0] - 2026-07-13
 
 > Foundation-pin bump only — no public API or behavior change in DidComm itself. Closes **#47**.
@@ -1552,7 +1612,8 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.0.0...v1.1.0
 [0.1.0-preview.1]: https://github.com/moisesja/didcomm-dotnet/releases/tag/v0.1.0-preview.1
