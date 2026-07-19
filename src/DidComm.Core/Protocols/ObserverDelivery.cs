@@ -46,6 +46,10 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
     private sealed class ObserverChannel
     {
         public required IProtocolObserver Observer { get; init; }
+        /// <summary>The observer's PIURI filter, read exactly once at construction (see below). Never re-read on the dispatch path.</summary>
+        public required string? Filter { get; init; }
+        /// <summary><c>true</c> when the filter getter threw at construction — the observer is disabled (a broken observer must not get a firehose, and its code must never run on the hot path).</summary>
+        public required bool Disabled { get; init; }
         public required Channel<WorkItem> Channel { get; init; }
         public required Task Pump { get; init; }
         public long Dropped;
@@ -60,6 +64,23 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
         for (var i = 0; i < observers.Count; i++)
         {
             var observer = observers[i];
+            // Read ProtocolUriFilter EXACTLY ONCE, here, guarded. It is arbitrary observer code; reading
+            // it on every Enqueue (the dispatch path) would let a blocking getter gate reply delivery or
+            // a throwing getter clobber the outcome. Cache the value; if the getter throws, disable the
+            // observer rather than let it observe everything or break dispatch.
+            string? filter = null;
+            var disabled = false;
+            try
+            {
+                filter = observer.ProtocolUriFilter;
+            }
+            catch (Exception ex)
+            {
+                disabled = true;
+                _logger?.LogWarning(ex,
+                    "IProtocolObserver '{Observer}' threw from ProtocolUriFilter at registration; it is disabled and will receive nothing (FR-PROTO-12).",
+                    observer.GetType().FullName);
+            }
             var channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(capacity)
             {
                 // Wait mode + TryWrite lets us observe "full" and apply our own drop-and-log policy,
@@ -71,8 +92,10 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
             _channels[i] = new ObserverChannel
             {
                 Observer = observer,
+                Filter = filter,
+                Disabled = disabled,
                 Channel = channel,
-                Pump = Task.Run(() => PumpAsync(observer, channel)),
+                Pump = disabled ? Task.CompletedTask : Task.Run(() => PumpAsync(observer, channel)),
             };
         }
     }
@@ -83,9 +106,13 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
     /// </summary>
     public void Enqueue(UnpackResult received)
     {
+        // Structurally non-throwing and runs NO observer code: only the cached filter is consulted, so
+        // a blocking/throwing observer cannot gate reply delivery or clobber the dispatch outcome here.
         foreach (var oc in _channels)
         {
-            if (!ObserverMatches(oc.Observer.ProtocolUriFilter, received.Message.Type))
+            if (oc.Disabled)
+                continue;
+            if (!ObserverMatches(oc.Filter, received.Message.Type))
                 continue;
             if (!oc.Channel.Writer.TryWrite(new WorkItem(received, Barrier: null)))
             {
@@ -135,12 +162,19 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
         var barriers = new List<Task>(_channels.Length);
         foreach (var oc in _channels)
         {
+            if (oc.Disabled)
+                continue; // no pump to drain; a barrier would never complete
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             await oc.Channel.Writer.WriteAsync(new WorkItem(Received: null, Barrier: tcs)).ConfigureAwait(false);
             barriers.Add(tcs.Task);
         }
         await Task.WhenAll(barriers).WaitAsync(timeout).ConfigureAwait(false);
     }
+
+    /// <summary>Audit description of registered observers, computed from cached data — invokes NO observer code.</summary>
+    public string Describe()
+        => string.Join("; ", _channels.Select(c =>
+            $"{c.Observer.GetType().FullName} (filter: {c.Filter ?? "ALL"}{(c.Disabled ? "; DISABLED" : "")})"));
 
     /// <summary>Signal the pumps to stop (completes the channels); does not block on in-flight observers.</summary>
     public void Dispose()

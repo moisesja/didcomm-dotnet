@@ -39,7 +39,14 @@ public sealed class DidCommReceiveOptions
     /// is how a Discover Features round-trip actually completes — the initiator learns the answer at
     /// its own receive endpoint). Requires the receiving app's <see cref="DidComm.Facade.DidCommClient"/>
     /// to have a transport router and service resolver wired (e.g. via <c>AddDidComm(b =&gt; b.UseNetDidResolver().UseHttpTransport())</c>).
-    /// A send failure is logged and never changes the inbound <c>202</c>.
+    /// A send failure (including a downstream timeout) is logged and never changes the inbound <c>202</c>.
+    /// <para>
+    /// <strong>Security.</strong> The auto-reply fires ONLY when the inbound envelope authenticated its
+    /// sender (authcrypt or a verified signature) and is delivered ONLY to that authenticated sender's
+    /// DID. An unauthenticated inbound (plaintext / anoncrypt) has an attacker-settable <c>from</c>, so
+    /// auto-replying to it would make the server an authenticated outbound reflector/amplifier — that
+    /// case is skipped (logged) and no outbound send occurs.
+    /// </para>
     /// </summary>
     public bool AutoSendReplies { get; set; }
 

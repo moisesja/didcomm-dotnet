@@ -71,13 +71,16 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         var observerList = observers?.ToArray() ?? Array.Empty<IProtocolObserver>();
         if (observerList.Length > 0)
         {
+            // ObserverDelivery reads each ProtocolUriFilter exactly once, guarded, at construction; we
+            // then log its cached description rather than re-invoking observer code here (a throwing
+            // filter getter must not be able to break dispatcher construction).
+            _observers = new ObserverDelivery(observerList, logger);
             // FR-PROTO-12 audit trail: observers see decrypted inbound plaintext, so the set of
             // registered observer types must be visible to an operator reading startup logs — a
             // stowaway registration from a compromised dependency should not be silent.
             _logger?.LogInformation(
                 "Inbound protocol observers registered (read-only side channel, FR-PROTO-12): {Observers}.",
-                string.Join("; ", observerList.Select(o => $"{o.GetType().FullName} (filter: {o.ProtocolUriFilter ?? "ALL"})")));
-            _observers = new ObserverDelivery(observerList, logger);
+                _observers.Describe());
         }
     }
 

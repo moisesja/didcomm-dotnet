@@ -43,10 +43,14 @@ public sealed class DiscoverFeaturesRoundTripTests
     {
         Logs.Clear();
 
-        // One shared secrets store + two peer identities whose DID docs are derived from the very
-        // keys held here — so both agents can decrypt for each other (no fixture decoy keys).
-        var secrets = new InMemorySecretsResolver();
-        var (aliceDid, bobDid) = await CreateTwoPeersAsync(secrets);
+        // SEPARATE per-agent secret stores: Alice holds only her private keys, Bob only his. Each
+        // still resolves the other's public keys via did:peer (self-resolving). This is faithful — a
+        // single shared store could mask wrong-recipient routing since either host could decrypt for
+        // either identity. Two peer identities whose DID docs derive from the very keys held (no
+        // fixture decoy keys).
+        var aliceSecrets = new InMemorySecretsResolver();
+        var bobSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid) = await CreateTwoPeersAsync(aliceSecrets, bobSecrets);
 
         // Late-bound handlers: each agent's outbound HTTP transport targets the OTHER agent's
         // in-process TestServer, whose handler only exists after it starts.
@@ -56,11 +60,11 @@ public sealed class DiscoverFeaturesRoundTripTests
         // Bob: responder — his endpoint auto-forwards the disclose to Alice; a fake service resolver
         // maps Alice's DID to her endpoint; loopback is permitted so the SSRF guard allows the
         // in-process TestServer address.
-        var bob = await BuildAgentAsync("bob", secrets, outboundTo: aliceInbox, autoSendReplies: true,
+        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, autoSendReplies: true,
             serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"));
 
         // Alice: initiator — her endpoint dispatches the inbound disclose to her observer.
-        var alice = await BuildAgentAsync("alice", secrets, outboundTo: bobInbox, autoSendReplies: false,
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, autoSendReplies: false,
             serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"));
 
         aliceInbox.Target = alice.Server.CreateHandler();
@@ -94,13 +98,14 @@ public sealed class DiscoverFeaturesRoundTripTests
         await bob.App.DisposeAsync();
     }
 
-    private static async Task<(string AliceDid, string BobDid)> CreateTwoPeersAsync(InMemorySecretsResolver secrets)
+    private static async Task<(string AliceDid, string BobDid)> CreateTwoPeersAsync(
+        InMemorySecretsResolver aliceSecrets, InMemorySecretsResolver bobSecrets)
     {
         var services = new ServiceCollection();
         services.AddDidComm(b =>
         {
             b.UseNetDidResolver();
-            b.UseSecretsResolver(secrets);
+            b.UseSecretsResolver(new InMemorySecretsResolver());
         });
         await using var sp = services.BuildServiceProvider();
         var manager = sp.GetRequiredService<IDidManager>();
@@ -109,8 +114,8 @@ public sealed class DiscoverFeaturesRoundTripTests
 
         var alice = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto);
         var bob = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto);
-        foreach (var jwk in alice.Privates) secrets.Add(jwk);
-        foreach (var jwk in bob.Privates) secrets.Add(jwk);
+        foreach (var jwk in alice.Privates) aliceSecrets.Add(jwk); // Alice holds only her own keys
+        foreach (var jwk in bob.Privates) bobSecrets.Add(jwk);     // Bob holds only his own keys
         return (alice.Did, bob.Did);
     }
 

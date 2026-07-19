@@ -108,6 +108,28 @@ A blocking code review of the PR drove the design to its final shape:
   and signed envelopes (including post-sign tampering and a self-consistent third-party forgery),
   replacing tests that hand-built the trust metadata.
 
+A second review round hardened the new surface it introduced:
+
+- **`AutoSendReplies` is no longer an authenticated reflector (security).** The auto-reply now fires
+  ONLY when the inbound envelope authenticated its sender (authcrypt skid or a verified JWS signer)
+  and delivers ONLY to that authenticated sender — never to a handler-chosen recipient. A plaintext or
+  anoncrypt inbound (attacker-settable `from`) triggers no outbound send. Negative integration tests
+  prove no send occurs for plaintext/anoncrypt.
+- **A downstream send failure never turns a dispatched message into HTTP 400.** The out-of-band send
+  swallows cancellation-shaped downstream failures (e.g. a resolver/transport timeout) while the
+  inbound request is not aborted, so the receive still answers a bare `202` — closing a
+  success-vs-timeout distinction. Tested.
+- **No observer code runs on the dispatch path.** `ProtocolUriFilter` is read once, guarded, at
+  construction (a throwing getter disables that observer); the enqueue step is structurally
+  non-throwing, so a blocking/throwing filter can no longer gate reply delivery, clobber the outcome,
+  or break dispatcher construction.
+- **Docs corrected to match behavior.** Observer delivery is documented as **best-effort /
+  at-most-once** (the bounded queue drops on overflow), and the `InboundObservation` threat model no
+  longer claims capability isolation — the defensive clone prevents mutation *through the payload*, but
+  observers are trusted in-process host code and are not sandboxed. The cookbook claims HTTP only
+  (WebSocket same-socket receive is not implemented). PR CI now runs `dotnet pack` so the ApiCompat
+  gate blocks incompatible PRs, not just releases.
+
 ## [1.2.0] - 2026-07-13
 
 > Foundation-pin bump only — no public API or behavior change in DidComm itself. Closes **#47**.

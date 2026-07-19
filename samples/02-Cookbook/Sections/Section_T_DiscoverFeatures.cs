@@ -36,8 +36,8 @@ public static class Section_T_DiscoverFeatures
 
         // The initiator client is the requester side of Discover Features: you call QueryFeaturesAsync
         // and it returns the peer's disclosures once they arrive. It is registered by
-        // AddBuiltInProtocols(), so resolve it from DI. In a real app its send goes over your
-        // HTTP/WebSocket transport and the peer's `disclose` arrives at your own receive endpoint —
+        // AddBuiltInProtocols(), so resolve it from DI. In a real app its send goes over your HTTP
+        // transport and the peer's `disclose` arrives out-of-band at your own receive endpoint —
         // here the cookbook's in-process loopback transport plays the peer so the sample needs no
         // network. The endpoint override just points the send at that loopback.
         var initiator = ctx.ServiceProvider.GetRequiredService<DiscoverFeaturesClient>();

@@ -134,7 +134,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     }
 
     [Fact]
-    public async Task A_post_sign_tampered_disclose_is_rejected_at_unpack_and_never_observed()
+    public async Task An_authcrypt_tampered_disclose_is_rejected_at_unpack_and_never_observed()
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
@@ -145,18 +145,54 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
         var packed = (await w.Client.PackEncryptedAsync(disclose,
             new PackEncryptedOptions(Recipients: new[] { w.Alice }, From: w.Bob))).Message;
 
-        // Flip a byte in the ciphertext: AEAD fails, so UnpackAsync throws and the message never
-        // reaches dispatch or the observer — a tampered disclose can't complete a query.
-        var tampered = CorruptCiphertext(packed);
+        // Flip a byte in the ciphertext: the AEAD tag fails, so UnpackAsync throws and the message
+        // never reaches dispatch or the observer — a tampered disclose can't complete a query.
+        var tampered = CorruptField(packed, "ciphertext");
         var act = async () => await w.Client.UnpackAsync(tampered);
-        await act.Should().ThrowAsync<Exception>("post-sign/encrypt tampering must be rejected at unpack");
+        await act.Should().ThrowAsync<Exception>("authcrypt tampering must be rejected at unpack");
     }
 
-    private static string CorruptCiphertext(string jweJson)
+    [Fact]
+    public async Task A_post_sign_tampered_signed_disclose_is_rejected_at_unpack_and_never_observed()
     {
-        var node = System.Text.Json.Nodes.JsonNode.Parse(jweJson)!.AsObject();
-        var ct = node["ciphertext"]!.GetValue<string>();
-        node["ciphertext"] = ct[..^1] + (ct[^1] == 'A' ? 'B' : 'A');
+        var w = await BuildAsync();
+        var (client, lastQuery, dispatcher) = NewInitiator();
+        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+
+        var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
+            new FeatureDisclosure { FeatureType = "protocol", Id = "will-be-tampered" });
+        var signed = await w.Client.PackSignedAsync(disclose, signFrom: w.Bob); // JWS
+
+        // Flip a byte in the signed payload AFTER signing: the JWS signature no longer verifies, so
+        // UnpackAsync rejects it — genuine post-sign tamper detection, not just AEAD.
+        var tampered = CorruptField(signed, "payload");
+        var act = async () => await w.Client.UnpackAsync(tampered);
+        await act.Should().ThrowAsync<Exception>("post-sign JWS tampering must be rejected at unpack");
+    }
+
+    [Fact]
+    public async Task A_self_consistent_Mallory_SIGNED_disclose_cannot_answer_the_query_for_Bob()
+    {
+        var w = await BuildAsync();
+        var (client, lastQuery, dispatcher) = NewInitiator();
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+
+        // Mallory produces a fully valid, genuinely-signed disclose from herself (from = Mallory,
+        // verified JWS signer = Mallory) with the guessed thid. It unpacks with Authenticated = true
+        // and a real SignerKid — but the anti-spoof rejects it because Mallory is not the queried Bob.
+        var forged = DiscoverFeaturesApi.CreateDisclose(from: w.Mallory, to: w.Alice, thid: lastQuery().Id,
+            new FeatureDisclosure { FeatureType = "protocol", Id = "forged-signed" });
+        var signed = await w.Client.PackSignedAsync(forged, signFrom: w.Mallory);
+
+        await DispatchAsync(dispatcher, w.Client, signed);
+        task.IsCompleted.Should().BeFalse("a genuinely-signed disclose from a third party must not answer Bob's query");
+    }
+
+    private static string CorruptField(string jsonEnvelope, string field)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(jsonEnvelope)!.AsObject();
+        var v = node[field]!.GetValue<string>();
+        node[field] = v[..^1] + (v[^1] == 'A' ? 'B' : 'A'); // still base64url, but the tag/signature fails
         return node.ToJsonString();
     }
 }

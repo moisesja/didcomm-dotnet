@@ -697,3 +697,28 @@ Format per entry:
   consumers" hook, put it off the request path with backpressure, not inline. Prove cross-agent
   features with a real two-endpoint integration test, not a single-dispatcher injection. See
   [[L-034]] (DID-subject compares), [[L-032]] (fail-closed parsing).
+
+## L-036 — An opt-in convenience that auto-sends on an unauthenticated inbound is a reflector; and "isolation" claims must name what is and isn't isolated.
+
+- **Lesson (reflector):** Any feature that auto-emits an outbound message in response to an inbound
+  one MUST gate on the inbound being cryptographically authenticated, and MUST address the reply to
+  the AUTHENTICATED sender — never to a handler-echoed `from`/`to`. An unauthenticated inbound
+  (plaintext/anoncrypt) has an attacker-settable `from`; auto-replying to it turns the server into an
+  authenticated outbound reflector/amplifier. "Opt-in" does not make unsafe-by-default acceptable.
+- **Lesson (false 202/oracle):** A side-effect that "must never change the response" must swallow
+  cancellation-shaped downstream failures too — catching only `ex is not OperationCanceledException`
+  lets a downstream timeout (TaskCanceledException, caller token NOT cancelled) escape and flip a 202
+  into a 400, creating a success-vs-timeout oracle. Rethrow OCE only when the request token is
+  actually cancelled.
+- **Lesson (isolation surface):** "Observers can't affect dispatch" is false if ANY observer code
+  runs on the dispatch path — including a property getter like a filter. Read such values ONCE,
+  guarded, at construction; make the hot path structurally non-throwing. And don't overclaim: omitting
+  a facade from a callback payload prevents mutation THROUGH the payload, not host code from acting —
+  in-process observers are trusted and can inject whatever they need. State the real boundary.
+- **Why:** PR #51's second review round found the `AutoSendReplies` reflector, the OCE-escape false
+  400, the `ProtocolUriFilter` getter still on the dispatch path, and threat-model prose claiming
+  capability isolation the design does not provide.
+- **How to apply:** For auto-reply/echo features: require `Authenticated` + bind to the authenticated
+  sender + negative tests (plaintext/anoncrypt → no send). For swallow-and-continue side effects:
+  handle OCE by token state. For "can't affect X" claims: enumerate every code path that runs before
+  X is final. See [[L-035]], [[L-034]].

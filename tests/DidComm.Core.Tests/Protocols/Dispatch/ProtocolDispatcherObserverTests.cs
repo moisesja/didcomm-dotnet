@@ -74,12 +74,13 @@ public sealed class ProtocolDispatcherObserverTests
     private sealed class BlockingObserver : IProtocolObserver
     {
         private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string? ProtocolUriFilter => null;
-        public int Started;
+        public Task Started => _started.Task;
         public void Release() => _gate.TrySetResult();
         public async Task OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct)
         {
-            Interlocked.Increment(ref Started);
+            _started.TrySetResult();
             await _gate.Task.ConfigureAwait(false);
         }
     }
@@ -192,11 +193,41 @@ public sealed class ProtocolDispatcherObserverTests
 
         // The healthy observer drains on its own pump despite `hung` being stuck on its own — wait on
         // its signal (not the global flush, whose hung barrier never completes; not a poll, which can
-        // flake under parallel-test thread-pool contention).
+        // flake under parallel-test thread-pool contention). Both observers run on independent pumps,
+        // so await each signal rather than assuming an ordering between them.
         await healthy.Observed.WaitAsync(TimeSpan.FromSeconds(10));
-        hung.Started.Should().Be(1, "the hung observer did start (and is still blocked)");
+        await hung.Started.WaitAsync(TimeSpan.FromSeconds(10)); // it started (on its own pump) and is now blocked
 
         hung.Release();
+    }
+
+    /// <summary>Observer whose <see cref="ProtocolUriFilter"/> getter throws — must not break dispatch
+    /// or construction; the observer is disabled and sees nothing.</summary>
+    private sealed class ThrowingFilterObserver : IProtocolObserver
+    {
+        public string? ProtocolUriFilter => throw new InvalidOperationException("hostile filter getter");
+        public int Delivered;
+        public Task OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct)
+        {
+            Interlocked.Increment(ref Delivered);
+            return Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task A_throwing_ProtocolUriFilter_getter_disables_that_observer_without_breaking_construction_or_dispatch()
+    {
+        var hostile = new ThrowingFilterObserver();
+        var healthy = new RecordingObserver();
+        // Construction reads the filter once, guarded — a throwing getter must not break the ctor.
+        await using var dispatcher = Dispatcher(new ProtocolHandlerRegistry(), hostile, healthy);
+
+        var outcome = await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/x/1.0/m")), client: null, new DidCommOptions());
+        await dispatcher.FlushObserversAsync(Flush);
+
+        outcome.Result.Should().Be(DispatchResult.NoHandler, "a hostile filter getter must not affect the outcome");
+        hostile.Delivered.Should().Be(0, "an observer whose filter getter threw is disabled and sees nothing");
+        healthy.Observations.Should().HaveCount(1, "the healthy observer is unaffected");
     }
 
     [Fact]

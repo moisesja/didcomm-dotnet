@@ -199,7 +199,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // FR-TRN-10 opt-in: deliver a handler reply out of band to the peer's own endpoint.
                 // A send failure is logged inside the helper and never changes the inbound 202.
                 if (receiveOptions.AutoSendReplies && outcome is { Result: DispatchResult.ReplyProduced, Reply: not null })
-                    await TrySendReplyOutOfBandAsync(client, outcome.Reply, logger, httpContext.RequestAborted).ConfigureAwait(false);
+                    await TrySendReplyOutOfBandAsync(client, unpacked, outcome.Reply, logger, httpContext.RequestAborted).ConfigureAwait(false);
                 LogOutcome(logger, outcome, sameSocketDelivered: false);
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
@@ -425,36 +425,70 @@ public static class DidCommEndpointRouteBuilderExtensions
     // Sends the handler's reply to the reply recipient's own DIDCommMessaging endpoint as a fresh
     // outbound message. Failures are swallowed + logged: the inbound POST already answered 202 and
     // the peer must not be able to distinguish reply-delivery outcomes.
+    //
+    // SECURITY: an unauthenticated inbound's `from` is attacker-controlled, so auto-replying to it
+    // would turn the server into an authenticated outbound reflector/amplifier (POST a plaintext ping
+    // with from=<victim>, to=<server> → server sends an authenticated message to the victim). We
+    // therefore auto-send ONLY when the inbound sender is cryptographically authenticated (authcrypt
+    // skid or a verified JWS signer), and ONLY to that authenticated sender's DID subject — never to
+    // an arbitrary handler-chosen recipient. See UnpackResult's trust-boundary note (FR-CONSIST).
     private static async Task TrySendReplyOutOfBandAsync(
         DidCommClient client,
+        UnpackResult inbound,
         DidComm.Messages.Message reply,
         ILogger? logger,
         CancellationToken ct)
     {
-        if (reply.To is not { Count: > 0 } || string.IsNullOrEmpty(reply.From))
+        if (!inbound.Authenticated || string.IsNullOrEmpty(inbound.SenderKid) && string.IsNullOrEmpty(inbound.SignerKid))
         {
             logger?.LogWarning(
-                "MapDidCommEndpoint: AutoSendReplies is on but the handler reply lacks from/to; cannot deliver out of band. Reply id: {ReplyId}.",
+                "MapDidCommEndpoint: AutoSendReplies skipped — the inbound '{Type}' did not authenticate its sender (anoncrypt/plaintext), so its 'from' cannot drive an outbound reply (reflector guard). Reply id: {ReplyId}.",
+                inbound.Message.Type, reply.Id);
+            return;
+        }
+        var authenticatedSender = inbound.Message.From;
+        if (reply.To is not { Count: > 0 } || string.IsNullOrEmpty(reply.From) || string.IsNullOrEmpty(authenticatedSender))
+        {
+            logger?.LogWarning(
+                "MapDidCommEndpoint: AutoSendReplies is on but the reply/inbound lacks from/to; cannot deliver out of band. Reply id: {ReplyId}.",
                 reply.Id);
             return;
         }
-        var recipients = reply.To.ToArray();
+        // Only auto-send a straightforward flip-reply back to the authenticated peer. Built-in handlers
+        // set reply.To to the inbound `from` verbatim, so this is an exact-string sanity check (no
+        // DID-URL-form ambiguity — it is the same string echoed); a reply addressed elsewhere is not
+        // auto-delivered. The recipient we actually send to is the AUTHENTICATED sender, never a
+        // handler-chosen value, so an echoed attacker field cannot redirect the send.
+        if (!reply.To.Contains(authenticatedSender, StringComparer.Ordinal))
+        {
+            logger?.LogWarning(
+                "MapDidCommEndpoint: AutoSendReplies skipped — reply recipient(s) [{To}] do not include the authenticated inbound sender '{Sender}'. Reply id: {ReplyId}.",
+                string.Join(",", reply.To), authenticatedSender, reply.Id);
+            return;
+        }
         try
         {
             await client.SendAsync(
                 reply,
-                new SendOptions(Recipients: recipients, From: reply.From),
+                new SendOptions(Recipients: new[] { authenticatedSender }, From: reply.From),
                 ct).ConfigureAwait(false);
             logger?.LogInformation(
-                "MapDidCommEndpoint: delivered handler reply '{ReplyType}' out of band to {Recipients} (FR-TRN-10 AutoSendReplies).",
-                reply.Type, string.Join(",", recipients));
+                "MapDidCommEndpoint: delivered handler reply '{ReplyType}' out of band to the authenticated sender {Recipient} (FR-TRN-10 AutoSendReplies).",
+                reply.Type, authenticatedSender);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            throw; // genuine inbound-request abort — let the endpoint handle it
+        }
+        catch (Exception ex)
+        {
+            // Includes a downstream resolver/transport TaskCanceledException (its own timeout) while
+            // the inbound request token is NOT cancelled: swallow it so a dispatched message still
+            // answers 202 and reply-delivery outcomes stay indistinguishable to the peer.
             logger?.LogWarning(
                 ex,
-                "MapDidCommEndpoint: AutoSendReplies failed to deliver reply '{ReplyType}' to {Recipients}; the inbound 202 is unaffected.",
-                reply.Type, string.Join(",", recipients));
+                "MapDidCommEndpoint: AutoSendReplies failed to deliver reply '{ReplyType}' to {Recipient}; the inbound 202 is unaffected.",
+                reply.Type, authenticatedSender);
         }
     }
 

@@ -35,6 +35,14 @@ jobs:
       - name: Test
         run: dotnet test DidComm.sln --configuration Release --no-build --logger "trx;LogFileName=test-results.trx" --collect "XPlat Code Coverage"
 
+      # Binary/API-compatibility gate: pack every publishable package so SDK Package Validation
+      # (EnablePackageValidation, backed by ApiCompat) compares it against the last released version
+      # on NuGet and fails the PR on any binary-incompatible change. Runs on Ubuntu only — the check
+      # is platform-independent and packing once is sufficient.
+      - name: Pack (API/binary compatibility gate)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet pack DidComm.sln --configuration Release --no-build
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

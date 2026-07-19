@@ -1,8 +1,8 @@
 namespace DidComm.Protocols;
 
 /// <summary>
-/// A read-only side channel over inbound messages (FR-PROTO-12). For each registered observer,
-/// the <see cref="ProtocolDispatcher"/> delivers every inbound message that matches
+/// A read-only side channel over inbound messages (FR-PROTO-12). For each registered observer, the
+/// <see cref="ProtocolDispatcher"/> attempts to deliver every inbound message that matches
 /// <see cref="ProtocolUriFilter"/> — for every outcome, including <see cref="DispatchResult.NoHandler"/>
 /// and loop-guard drops — so a second consumer can observe traffic whose PIURI is owned by a
 /// built-in handler (e.g. a higher-level state machine reacting to <c>report-problem</c>, or the
@@ -11,15 +11,16 @@ namespace DidComm.Protocols;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>Execution model.</strong> Delivery is <em>fully decoupled</em> from dispatch: the
-/// dispatcher enqueues the message onto a per-observer bounded background queue and returns the
-/// outcome immediately, so an observer can never gate reply delivery or change the outcome — even
-/// a hung or faulting observer only backs up (and eventually drops from) its own queue. Because each
-/// observer has its own pump, an observer <strong>may be invoked concurrently</strong> with other
-/// observers and concurrently across inbound messages; a single observer's own invocations are
-/// serialized in arrival order. Implementations MUST be safe under concurrent invocation. If an
-/// observer cannot keep up, its bounded queue drops the newest observations (logged) rather than
-/// growing memory — see <see cref="OnMessageReceivedAsync"/>.
+/// <strong>Delivery is best-effort (at-most-once), not guaranteed.</strong> Delivery is <em>fully
+/// decoupled</em> from dispatch: the dispatcher enqueues the message onto a per-observer bounded
+/// background queue and returns the outcome immediately, so an observer can never gate reply delivery
+/// or change the outcome — even a hung or faulting observer only backs up (and eventually drops from)
+/// its own queue. When an observer falls behind, its newest observations are <strong>dropped</strong>
+/// (and logged) rather than buffered without bound — so do not rely on this seam for lossless capture;
+/// hand off to your own durable store quickly. Because each observer has its own pump, an observer
+/// <strong>may be invoked concurrently</strong> with other observers and across inbound messages;
+/// a single observer's own invocations are serialized in arrival order. Implementations MUST be safe
+/// under concurrent invocation.
 /// </para>
 /// <para>
 /// <strong>Trust model.</strong> Observers are host-trusted components: they can only be
@@ -47,7 +48,7 @@ public interface IProtocolObserver
     string? ProtocolUriFilter { get; }
 
     /// <summary>
-    /// Delivered once per matching inbound message, on the observer's background pump (off the
+    /// Delivered at most once per matching inbound message, on the observer's background pump (off the
     /// dispatch/receive path). Exceptions are caught, logged, and isolated by the dispatcher; they
     /// never affect the outcome or other observers.
     /// </summary>
