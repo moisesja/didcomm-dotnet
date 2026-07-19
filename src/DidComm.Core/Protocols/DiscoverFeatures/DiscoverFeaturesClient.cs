@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using DidComm.Consistency;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Transports;
@@ -148,7 +149,23 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
                 thid, message.Id);
             return Task.CompletedTask;
         }
-        if (!string.Equals(message.From, pending.ResponderDid, StringComparison.Ordinal))
+        // Defense in depth: `Authenticated` implies the sender is bound to an authenticating key id
+        // (authcrypt skid or a verified JWS signer kid) — that binding is what makes `from`
+        // trustworthy (FR-CONSIST-01/03). Require the key id to actually be present before we trust
+        // `from`, so a hypothetical envelope-layer regression that set `Authenticated` without a
+        // skid/signer kid cannot let a forged `from` complete the query. Fail closed.
+        if (string.IsNullOrEmpty(observation.SenderKid) && string.IsNullOrEmpty(observation.SignerKid))
+        {
+            _logger?.LogWarning(
+                "Ignored a 'disclose' for pending query {Thid}: envelope reports authenticated but carries no sender/signer key id. Message id: {MessageId}.",
+                thid, message.Id);
+            return Task.CompletedTask;
+        }
+        // Compare DID subjects, not raw strings (PRD §4.3): `from` and the queried `to` are DIDs or
+        // DID URLs without a fragment, so a subject-wise match avoids dropping a legitimate reply
+        // whose `from` differs only in DID-URL form. Still fails closed — an unparseable or
+        // different-subject `from` does not complete the waiter.
+        if (!DidSubject.SameDidSubject(message.From, pending.ResponderDid))
         {
             _logger?.LogWarning(
                 "Ignored a 'disclose' for pending query {Thid}: sender '{From}' is not the queried responder. Message id: {MessageId}.",

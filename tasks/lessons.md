@@ -642,3 +642,34 @@ Format per entry:
   failure as a normal negative result, never an exception — a remote peer controls `Message.Type`.
   Prove security regressions red-green: revert the fix, confirm the test fails, restore. See also
   [[L-031]] (extension-seam threat models) — this is why that plan mandated an adversarial pass.
+
+## L-033 — A PR-review request already authorizes the review; the implementation-plan gate is not a second consent gate for read-only analysis or the requested review submission.
+
+- **Lesson:** When the user asks to inspect a PR and post a review, proceed after documenting any
+  required plan. Do not stop for separate plan approval unless the task will edit source, tests, or
+  product documentation, or will take an external action outside the review the user explicitly
+  requested.
+- **Why:** I incorrectly treated AGENTS.md's approval gate for implementation edits as applying to a
+  read-only PR audit and its explicitly requested GitHub review. That created a pointless approval
+  round-trip even though the user had already authorized the exact external action.
+- **How to apply:** Distinguish implementation authorization from review authorization. PR metadata,
+  diff inspection, tests/builds, and submitting the requested review are within a PR-review request;
+  changing the PR branch's source/tests/docs still requires the repository's explicit plan approval.
+
+## L-033 — Comparing a DID against a from/to means DID *subjects*, never raw strings (PRD §4.3).
+
+- **Lesson:** Any equality check involving a `from`/`to` value (which MAY be a DID URL with
+  path/query) must use `DidSubject.SameDidSubject` (parse both sides, compare bare DID subjects),
+  not `string.Equals(..., Ordinal)`. Raw compare is safe in the reject direction but silently drops
+  legitimate inputs that differ only in DID-URL form — here, a spurious `TimeoutException` in the
+  Discover Features initiator.
+- **Why:** The second adversarial pass on #49/#50 flagged the anti-spoof `from == queried-to` check
+  as a raw Ordinal compare, inconsistent with the codebase's normative §4.3 rule and the
+  FR-CONSIST-* checks that all pivot on `DidSubjectOf`. Switched to `SameDidSubject` (still fails
+  closed on unparseable/other-subject input). Also added a defense-in-depth key-id gate: trusting
+  `Authenticated + From` requires the authenticating key id (skid or signer kid) to actually be
+  present, so a downstream consumer doesn't over-trust the envelope layer's flag.
+- **How to apply:** Grep for `string.Equals(.*[Ff]rom` / `== .*ResponderDid`-style compares near
+  `from`/`to`/`skid`/`kid`; route them through `DidSubject.SameDidSubject`. When a new feature
+  consumes `Authenticated`, also verify the key id it relies on is non-empty rather than trusting the
+  boolean alone. See [[L-031]], [[L-032]].

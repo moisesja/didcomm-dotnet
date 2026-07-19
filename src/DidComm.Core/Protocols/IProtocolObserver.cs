@@ -41,6 +41,14 @@ public interface IProtocolObserver
     /// <see cref="ProtocolUriFilter"/>. Runs after the dispatch outcome is determined.
     /// Exceptions are caught and logged by the dispatcher; they do not affect the outcome.
     /// </summary>
+    /// <remarks>
+    /// <strong>Return promptly.</strong> Observers are awaited <em>inline and sequentially</em> on
+    /// the receive path, before the transport learns the dispatch outcome and can deliver any reply.
+    /// A slow or blocking observer therefore adds latency to message handling and delays every later
+    /// observer. Observation timing cannot change the outcome <em>value</em>, but it can stall when
+    /// that value is acted on — so do only fast, in-memory work here (e.g. enqueue, signal a waiter,
+    /// update a counter) and offload anything slow (network, disk, DB) to a background worker.
+    /// </remarks>
     /// <param name="observation">The read-only view of the inbound message (defensive clone + envelope-auth metadata).</param>
     /// <param name="ct">Cancellation token flowing from the receive pipeline.</param>
     Task OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct);

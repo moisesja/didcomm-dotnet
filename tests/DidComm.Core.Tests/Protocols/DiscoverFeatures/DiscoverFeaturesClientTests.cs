@@ -39,7 +39,9 @@ public sealed class DiscoverFeaturesClientTests
     }
 
     private static InboundObservation Disclose(
-        string thid, string from = Bob, bool authenticated = true, params FeatureDisclosure[] disclosures)
+        string thid, string from = Bob, bool authenticated = true,
+        string? senderKid = "did:peer:bob#key-1", string? signerKid = null,
+        params FeatureDisclosure[] disclosures)
     {
         var msg = DiscoverFeaturesApi.CreateDisclose(from: from, to: Alice, thid: thid, disclosures: disclosures);
         return new InboundObservation(
@@ -48,8 +50,8 @@ public sealed class DiscoverFeaturesClientTests
             Authenticated: authenticated,
             NonRepudiation: false,
             AnonymousSender: !authenticated,
-            SenderKid: null,
-            SignerKid: null);
+            SenderKid: authenticated ? senderKid : null,
+            SignerKid: authenticated ? signerKid : null);
     }
 
     private static Task Feed(DiscoverFeaturesClient client, InboundObservation observation)
@@ -141,6 +143,56 @@ public sealed class DiscoverFeaturesClientTests
 
         await Feed(client, Disclose(query.Id, from: Bob, disclosures: Legit()));
         (await task).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
+    public async Task Authenticated_disclose_without_a_sender_or_signer_key_id_is_ignored()
+    {
+        // Defense in depth (F4): `Authenticated` must be backed by an actual authenticating key id
+        // (skid or signer kid) — that binding is what makes `from` trustworthy. An envelope that
+        // reports authenticated but carries neither must not complete the waiter.
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Feed(client, Disclose(query.Id, senderKid: null, signerKid: null, disclosures: Forged()));
+        task.IsCompleted.Should().BeFalse("an authenticated-but-keyless envelope must not complete a pending query");
+
+        await Feed(client, Disclose(query.Id, disclosures: Legit()));
+        (await task).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
+    public async Task Signed_only_disclose_with_a_signer_kid_completes()
+    {
+        // Authenticated via a verified JWS signer (no authcrypt skid) is a valid authenticated
+        // envelope — the F4 key-id gate accepts a SignerKid too.
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Feed(client, Disclose(query.Id, senderKid: null, signerKid: "did:peer:bob#sig-1",
+            disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "signed-ok" }));
+
+        (await task).Should().ContainSingle(d => d.Id == "signed-ok");
+    }
+
+    [Fact]
+    public async Task Disclose_from_a_did_url_form_of_the_queried_responder_still_completes()
+    {
+        // F3: `from` and the queried `to` are DIDs or DID URLs without a fragment; correlation
+        // compares DID subjects (PRD §4.3), so a legitimate reply whose `from` differs only in
+        // DID-URL form (here a query parameter) still matches — a raw string compare would have
+        // dropped it into a spurious timeout.
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Feed(client, Disclose(query.Id, from: "did:peer:bob?service=inbox",
+            senderKid: "did:peer:bob#key-1",
+            disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "did-url-ok" }));
+
+        (await task).Should().ContainSingle(d => d.Id == "did-url-ok");
     }
 
     [Fact]

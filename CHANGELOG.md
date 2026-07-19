@@ -66,6 +66,15 @@ already contained the throw (HTTP → 400, WebSocket → log-and-continue), so t
 restores correct `NoHandler` semantics and protects any host that calls `ProtocolDispatcher` directly.
 `ProtocolIdentifier.TryParse` also gained a `[NotNullWhen(true)]` annotation.
 
+A second adversarial pass confirmed the read-only isolation, "observer cannot change the outcome",
+and the initiator anti-spoof as sound, and drove three further refinements: the `disclose`→pending-query
+sender check now compares **DID subjects** via the normative PRD §4.3 primitive
+(`DidSubject.SameDidSubject`) instead of a raw string compare (avoids dropping a legitimate reply whose
+`from` differs only in DID-URL form; still fails closed); a **defense-in-depth** gate ignores a
+`disclose` that reports authenticated yet carries no sender/signer key id (so a hypothetical
+envelope-layer regression cannot let a forged `from` complete a query); and `IProtocolObserver` now
+documents that observers run inline on the receive path and MUST return promptly (offload slow work).
+
 ## [1.2.0] - 2026-07-13
 
 > Foundation-pin bump only — no public API or behavior change in DidComm itself. Closes **#47**.
