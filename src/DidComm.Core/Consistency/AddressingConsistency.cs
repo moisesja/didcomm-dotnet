@@ -40,6 +40,23 @@ internal static class AddressingConsistency
     }
 
     /// <summary>
+    /// FR-CONSIST-01 precondition — an authenticated (authcrypt) decrypt MUST surface the sender
+    /// key identifier (<c>skid</c>). The JOSE layer defines <c>IsAuthenticated</c> as "skid
+    /// present", so a missing skid on an authenticated result means that upstream invariant
+    /// regressed; fail closed so <see cref="CheckAuthcryptFromMatchesSkid"/> cannot silently
+    /// no-op while the envelope is still reported authenticated. Parity with the JWS branch's
+    /// empty-signer-kid guard. (Issue #52.)
+    /// </summary>
+    /// <param name="skid">The sender key identifier surfaced by the authenticated decrypt.</param>
+    /// <exception cref="ConsistencyException">When <paramref name="skid"/> is null or empty.</exception>
+    public static void CheckAuthcryptSkidSurfaced(string? skid)
+    {
+        if (string.IsNullOrEmpty(skid))
+            throw new ConsistencyException(
+                "Authenticated (authcrypt) envelope did not surface a sender 'skid'; cannot bind the message 'from' to the sender (FR-CONSIST-01).");
+    }
+
+    /// <summary>
     /// FR-CONSIST-02 — recipient <c>to</c> ↔ <c>kid</c>. When plaintext <c>to</c> is present,
     /// the DID subject of the recipient key actually used to decrypt MUST be a member of
     /// the <c>to</c> list (compared as DID subjects).

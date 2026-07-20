@@ -6,6 +6,19 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — fail-closed skid guard on authenticated decrypt (defense in depth, #52)
+
+Closes **#52**. The authcrypt unpack branch trusted the JOSE layer's definitional invariant
+`IsAuthenticated ⟺ non-empty skid` without asserting it; had that invariant ever regressed
+upstream, a null skid would have silently skipped the FR-CONSIST-01 `from`↔`skid` binding on an
+envelope still reported authenticated (and an empty skid would have escaped as a raw
+`ArgumentException`, off the FR-API-07 contract). `EnvelopeReader` now asserts a surfaced skid
+whenever a decrypt is authenticated, rejecting with `ConsistencyException` — parity with the JWS
+branch's empty-signer-kid guard. The check lives in `AddressingConsistency` as
+`CheckAuthcryptSkidSurfaced` so it is directly unit-tested; it is unreachable through today's
+parser, so no current input changes behavior. The JWS branch's `CryptoException` guard is
+deliberately untouched.
+
 ### Changed — lazy UTF-8 size on the inbound snapshot (perf, #53)
 
 Closes **#53**. Every successful `UnpackAsync` registers an `InboundMessageSnapshot`, but only the
