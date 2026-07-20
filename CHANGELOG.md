@@ -11,124 +11,74 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 > Additive feature release — new public API, no wire change, no breaking change. Closes **#49**
 > and **#50**.
 
-### Added — Discover Features 2.0 initiator round-trip (`feat/discover-features-initiator-49`)
+### Added — Discover Features 2.0 initiator round-trip (FR-PROTO-05a)
 
-Closes **#49**. Discover Features 2.0 previously shipped only the **responder** side (auto-reply to
-`queries`, auto-disclosure of registered PIURIs). An application could construct a `queries` and
-parse a `disclose`, but could not **correlate** the response: an inbound `disclose` was consumed by
-the built-in handler and never surfaced, so the protocol's requester role — programmatic capability
-discovery — was effectively unimplemented.
+Closes **#49**. Discover Features 2.0 previously shipped only the **responder** side; an application
+could build a `queries` and parse a `disclose` but could not **correlate** the response, so the
+requester role (programmatic capability discovery) was effectively unimplemented.
 
-- **New `DiscoverFeaturesClient.QueryFeaturesAsync(from, to, queries, timeout, …)` (FR-PROTO-05a).**
-  Sends a `queries` and awaits the peer's `disclose`, correlating by `thid` == the query `id`.
-  Registered automatically by `AddBuiltInProtocols()`; resolve it from DI. The `timeout` bounds the
-  **whole operation** (send + await) under one deadline; a transport/send failure propagates
-  unchanged rather than being mislabeled as "no disclose".
-- **A real round-trip is delivered, not just correlated.** The DIDComm reply model is out-of-band
-  (FR-TRN-10): the initiator must run a receive endpoint, and the peer's `disclose` arrives there as
-  a fresh inbound message that completes the awaiting call. The registry-aware HTTP receive endpoint
-  gains an opt-in `DidCommReceiveOptions.AutoSendReplies` that forwards a handler's reply to the
-  peer's endpoint automatically, so `MapDidCommEndpoint` + `AddBuiltInProtocols` complete the
-  round-trip with no bespoke wiring. A two-agent HTTP integration test exercises the whole path end
-  to end (Alice's DI-resolved `QueryFeaturesAsync` → Bob's endpoint → back to Alice) with no manual
-  disclosure injection.
-- **Spoofing-resistant.** A `disclose` completes a pending query only when the envelope
-  authenticated its sender (authcrypt or a verified signature) **and** its `from` is exactly the DID
-  the query was sent to. A forged anoncrypt/plaintext disclosure — or one from a third party that
-  guessed the query id — is logged and ignored, and deliberately does **not** cancel the pending
-  query, so a forgery can neither answer for the peer nor deny the legitimate response.
-- **Responder side unchanged.** An inbound `disclose` remains a terminal leaf in dispatch; the
-  correlation rides the new observer seam below, not a change to `DiscoverFeaturesHandler`.
+- **New `DiscoverFeaturesClient.QueryFeaturesAsync(from, to, queries, timeout, …)`.** Sends a
+  `queries` and awaits the peer's `disclose`, correlating by `thid` == the query `id`. Registered by
+  `AddBuiltInProtocols()`; resolve it from DI. The `timeout` bounds the **whole operation** (send +
+  await) under one deadline; a transport/send failure propagates unchanged rather than being
+  mislabeled "no disclose".
+- **Lossless, spoofing-resistant correlation.** The disclose→pending-query correlation runs as an
+  internal, synchronous **`IInboundCorrelator`** invoked inline by the dispatcher — NOT through the
+  best-effort observer queue below — so a genuine authenticated response completes even under a flood
+  of unsolicited disclosures. A `disclose` completes a pending query only when the envelope
+  authenticated its sender (authcrypt or a verified signature), carries a sender/signer key id, and
+  its `from` is the queried DID (compared as a DID subject, PRD §4.3). A forged (anoncrypt/plaintext,
+  keyless, or wrong-sender) disclosure is logged and ignored and does **not** cancel the pending
+  query, so it can neither answer for the peer nor deny the legitimate response. Responder side
+  unchanged — an inbound `disclose` stays a terminal leaf in dispatch.
+- **Reply delivery is the responder application's job, out of band (FR-TRN-10).** The initiator runs
+  a receive endpoint; the responder sends its `disclose` there with `DidCommClient.SendAsync`, bound
+  to the authenticated inbound sender. The library ships **no automatic inbound-triggered egress** —
+  an auto-send that trusts a message's (possibly attacker-advertised) `from`/endpoint is a
+  reflector / cross-tenant / DoS hazard. A two-agent HTTP integration test proves the full round-trip
+  (Alice's DI-resolved `QueryFeaturesAsync` → Bob's endpoint → Bob's app sends the disclose back →
+  Alice completes) with no manual disclosure injection and separate per-agent key stores.
 
 ### Added — Inbound protocol observer seam (`IProtocolObserver`, FR-PROTO-12)
 
-Closes **#50**. The dispatcher routed each inbound message to exactly one handler resolved by PIURI,
-with no observation seam — so a component layered on top of DIDComm could not observe a message whose
-PIURI is owned by a built-in handler (most importantly `report-problem/2.0`) without **replacing**
-that handler and re-implementing its behaviour (including the FR-PROTO-10 cascade-budget guard).
+Closes **#50**. Lets an application observe inbound traffic whose PIURI is owned by a built-in handler
+(e.g. react to an inbound `report-problem/2.0`) without **replacing** that handler.
 
-- **New `IProtocolObserver` + `DidCommBuilder.AddProtocolObserver<T>()`.** The dispatcher delivers
-  every matching inbound message to each observer — for every outcome, including `NoHandler` and
-  loop-guard drops — so e.g. a higher-level state machine can react to an inbound `report-problem`
-  while the built-in handler still performs its cascade bookkeeping.
-- **Fully decoupled from dispatch — not merely "non-mutating".** Delivery runs off the receive path
-  on a **per-observer bounded background queue**: the dispatcher enqueues and returns the outcome
-  immediately, so a slow, hung, or faulting observer can neither gate reply delivery nor change the
-  outcome, and one hung observer cannot starve another (each has its own queue). If an observer can't
-  keep up, its queue drops the newest observations (logged) rather than growing memory. Observers may
-  therefore be invoked concurrently and must be thread-safe.
-- **Read-only by construction.** Each observer receives a defensive deep clone of the message plus
-  envelope-auth metadata via `InboundObservation` — never the live message, the `DidCommClient`
-  facade, or the thread store; observer exceptions are isolated and logged.
-- **Least privilege + auditability.** Each observer declares a `ProtocolUriFilter` (a PIURI, or
-  `null` for all) so it sees only its protocol family; the dispatcher logs the registered observer
-  set (types + filters) at construction so a stowaway registration is operator-visible. Observers can
-  be registered only at DI-composition time and are not reachable by a remote peer; envelope
-  cryptography is untouched.
+- **New `IProtocolObserver` + `DidCommBuilder.AddProtocolObserver<T>()`.** Opt-in only —
+  `AddBuiltInProtocols()` registers **no** default observer (Discover Features correlation uses the
+  lossless inline correlator above), so a default deployment has no observer/firehose surface for a
+  remote flood to target.
+- **Fully decoupled from dispatch.** Delivery runs off the receive path on a **per-observer bounded
+  background queue**: the dispatcher enqueues and returns the outcome immediately, so a slow, hung, or
+  faulting observer can neither gate reply delivery nor change the outcome, and one hung observer
+  can't starve another. Each queue is bounded by BOTH an item count and a **byte budget**; overflow
+  drops the newest observation with **rate-limited** logging — a flood can't exhaust memory or
+  amplify logging. Delivery is therefore **best-effort / at-most-once**. Each observation is
+  **snapshotted (cloned) at enqueue**, so a handler/caller mutating the live message after dispatch
+  can't change what an observer sees. Pumps honor a shutdown token cancelled on disposal. Observers
+  may run concurrently and must be thread-safe.
+- **Read-only, not a sandbox.** Each observer receives a defensive deep clone via `InboundObservation`
+  (never the live message, the facade, or the thread store); the clone prevents mutation *through the
+  payload*, but observers are trusted in-process host code registered at DI-composition time and are
+  not otherwise sandboxed. No observer code runs on the dispatch path — the `ProtocolUriFilter` getter
+  is read once, guarded, at construction (a throwing getter disables that observer). The registered
+  observer set is logged at construction (operator-auditable).
 - **`ProtocolDispatcher` is now `IDisposable` / `IAsyncDisposable`** (additive) so the DI container
-  stops the delivery pumps on shutdown; both sync and async container disposal are supported.
+  stops the delivery pumps on shutdown (both sync and async disposal).
 
-### Hardened — Malformed `type` no longer throws on the dispatch path
+### Hardened — surfaced by adversarial + code review
 
-Surfaced by the adversarial review of the observer seam. `ProtocolHandlerRegistry.TryResolve` (and the
-new observer-filter matcher) derived a PIURI from an inbound message type with the **throwing**
-`ProtocolIdentifier.Parse`. Because the MTURI regex's doc-uri group (`.+?`) tolerates a trailing
-slash that the stricter PIURI group (`.+?[^/]`) rejects, a crafted `type` with a doubled slash (e.g.
-`https://didcomm.org//x/1.0/m`) parsed as an MTURI but threw `ProtocolException` when its derived PIURI
-was parsed — a remotely-settable value throwing on the dispatch path. Both call sites now use
-`ProtocolIdentifier.TryParse` and fail closed (no handler / no observer match). Both shipped transports
-already contained the throw (HTTP → 400, WebSocket → log-and-continue), so there was no crash; the fix
-restores correct `NoHandler` semantics and protects any host that calls `ProtocolDispatcher` directly.
-`ProtocolIdentifier.TryParse` also gained a `[NotNullWhen(true)]` annotation.
-
-A second adversarial pass confirmed the read-only isolation, "observer cannot change the outcome",
-and the initiator anti-spoof as sound, and drove three further refinements: the `disclose`→pending-query
-sender check now compares **DID subjects** via the normative PRD §4.3 primitive
-(`DidSubject.SameDidSubject`) instead of a raw string compare (avoids dropping a legitimate reply whose
-`from` differs only in DID-URL form; still fails closed); a **defense-in-depth** gate ignores a
-`disclose` that reports authenticated yet carries no sender/signer key id (so a hypothetical
-envelope-layer regression cannot let a forged `from` complete a query); and the observer contract was
-clarified.
-
-### Hardened — code-review remediation (binary compatibility, observer execution model, delivery proof)
-
-A blocking code review of the PR drove the design to its final shape:
-
-- **Binary compatibility preserved.** The observer-aware constructor was added as a **separate**
-  overload; `ProtocolDispatcher`'s exact 1.2.0 four-argument constructor is retained (adding a
-  parameter to the existing one, even with a default, is a runtime `MissingMethodException` for code
-  compiled against 1.2.0). A new **SDK Package Validation** gate (`EnablePackageValidation`, backed by
-  Microsoft.DotNet.ApiCompat) now compares every package against its last release at pack time and
-  fails the build on any binary-incompatible change.
-- **Observer execution model made truly non-blocking** (the bounded background queue described
-  above), replacing the initial inline-await that let a slow observer gate reply delivery and let a
-  cancellation clobber the computed outcome.
-- **Round-trip proven end to end** over the shipped HTTP transport (the `AutoSendReplies` affordance +
-  two-agent integration test), and the initiator/anti-spoof paths re-tested against **real** authcrypt
-  and signed envelopes (including post-sign tampering and a self-consistent third-party forgery),
-  replacing tests that hand-built the trust metadata.
-
-A second review round hardened the new surface it introduced:
-
-- **`AutoSendReplies` is no longer an authenticated reflector (security).** The auto-reply now fires
-  ONLY when the inbound envelope authenticated its sender (authcrypt skid or a verified JWS signer)
-  and delivers ONLY to that authenticated sender — never to a handler-chosen recipient. A plaintext or
-  anoncrypt inbound (attacker-settable `from`) triggers no outbound send. Negative integration tests
-  prove no send occurs for plaintext/anoncrypt.
-- **A downstream send failure never turns a dispatched message into HTTP 400.** The out-of-band send
-  swallows cancellation-shaped downstream failures (e.g. a resolver/transport timeout) while the
-  inbound request is not aborted, so the receive still answers a bare `202` — closing a
-  success-vs-timeout distinction. Tested.
-- **No observer code runs on the dispatch path.** `ProtocolUriFilter` is read once, guarded, at
-  construction (a throwing getter disables that observer); the enqueue step is structurally
-  non-throwing, so a blocking/throwing filter can no longer gate reply delivery, clobber the outcome,
-  or break dispatcher construction.
-- **Docs corrected to match behavior.** Observer delivery is documented as **best-effort /
-  at-most-once** (the bounded queue drops on overflow), and the `InboundObservation` threat model no
-  longer claims capability isolation — the defensive clone prevents mutation *through the payload*, but
-  observers are trusted in-process host code and are not sandboxed. The cookbook claims HTTP only
-  (WebSocket same-socket receive is not implemented). PR CI now runs `dotnet pack` so the ApiCompat
-  gate blocks incompatible PRs, not just releases.
+- **Binary compatibility preserved + gated.** `ProtocolDispatcher`'s exact 1.2.0 four-argument
+  constructor is retained (a new overload adds observers; the internal correlator ctor is separate),
+  so code compiled against 1.2.0 keeps binding. **SDK Package Validation** (ApiCompat vs the published
+  1.2.0 packages) runs at pack time AND in PR CI, failing on any binary-incompatible change.
+- **Malformed `type` no longer throws on the dispatch path.** A crafted doubled-slash `type` (e.g.
+  `https://didcomm.org//x/1.0/m`) parses as an MTURI but its derived PIURI does not; `TryResolve` and
+  the observer filter now use `ProtocolIdentifier.TryParse` and fail closed (no handler / no match).
+- **Real-crypto tests.** The initiator/anti-spoof paths are exercised against genuine authcrypt and
+  JWS-signed envelopes unpacked end to end: legitimate ones complete; an authcrypt-tampered and a
+  post-sign **signature-verification** tamper are rejected at unpack (`CryptoException`); a
+  self-consistent third-party (authcrypt and signed) forgery cannot answer the query.
 
 ## [1.2.0] - 2026-07-13
 

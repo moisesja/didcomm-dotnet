@@ -62,16 +62,18 @@ public sealed class DidCommBuilder
             return registry;
         });
         // Explicit factory rather than TryAddSingleton<ProtocolDispatcher>(): the default greediest-
-        // constructor selection would only pick the observer-aware ctor when TraceOptions also happens
-        // to be registered (i.e. EnableTracing was called), silently dropping observers otherwise. The
-        // factory always calls the observer-aware ctor, resolving the optional pieces explicitly, so
-        // FR-PROTO-12 observers (e.g. DiscoverFeaturesClient) are wired regardless of tracing.
+        // constructor selection would only pick the observer/correlator-aware ctor when TraceOptions
+        // also happens to be registered (i.e. EnableTracing was called), silently dropping them
+        // otherwise. The factory always calls the full ctor, resolving the optional pieces explicitly,
+        // so FR-PROTO-12 observers AND FR-PROTO-05a inline correlators (e.g. DiscoverFeaturesClient)
+        // are wired regardless of tracing.
         Services.TryAddSingleton<ProtocolDispatcher>(sp => new ProtocolDispatcher(
             sp.GetRequiredService<ProtocolHandlerRegistry>(),
             sp.GetRequiredService<IThreadStateStore>(),
             sp.GetService<ILogger<ProtocolDispatcher>>(),
             sp.GetService<TraceOptions>(),
-            sp.GetServices<IProtocolObserver>()));
+            sp.GetServices<IProtocolObserver>(),
+            sp.GetServices<IInboundCorrelator>()));
     }
 
     /// <summary>
@@ -109,9 +111,15 @@ public sealed class DidCommBuilder
         AddProtocol<DiscoverFeaturesHandler>();
         AddProtocol<ProblemReportHandler>();
         // FR-PROTO-05a: the Discover Features initiator (QueryFeaturesAsync). Registered as an
-        // IProtocolObserver too, so the dispatcher hands it inbound `disclose`s to correlate
-        // with pending queries (FR-PROTO-12 seam).
-        AddProtocolObserver<DiscoverFeaturesClient>();
+        // internal IInboundCorrelator (NOT a queued observer): the dispatcher hands it each inbound
+        // `disclose` inline, synchronously, so a genuine authenticated response completes losslessly —
+        // it is never dropped behind a flood of unsolicited traffic in the best-effort observer queue.
+        // This is also why AddBuiltInProtocols registers no default IProtocolObserver: there is no
+        // default firehose consumer for an attacker to exploit.
+        Services.TryAddSingleton<DiscoverFeaturesClient>();
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IInboundCorrelator, DiscoverFeaturesClient>(
+                sp => sp.GetRequiredService<DiscoverFeaturesClient>()));
         // The FR-PROTO-10 cascade budget (#36) lives in a dedicated store registered as its OWN
         // singleton, so the budget persists even if the handler is (mis)registered non-singleton.
         Services.TryAddSingleton<CascadeBudgetStore>();

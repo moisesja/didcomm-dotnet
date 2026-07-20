@@ -38,24 +38,36 @@ public sealed class DiscoverFeaturesClientTests
         });
     }
 
-    private static InboundObservation Disclose(
+    private static UnpackResult Disclose(
         string thid, string from = Bob, bool authenticated = true,
         string? senderKid = "did:peer:bob#key-1", string? signerKid = null,
         params FeatureDisclosure[] disclosures)
     {
         var msg = DiscoverFeaturesApi.CreateDisclose(from: from, to: Alice, thid: thid, disclosures: disclosures);
-        return new InboundObservation(
+        return new UnpackResult(
             Message: msg,
+            Stack: Array.Empty<DidComm.Jose.EnvelopeKind>(),
             Encrypted: authenticated,
             Authenticated: authenticated,
             NonRepudiation: false,
             AnonymousSender: !authenticated,
+            ContentEncryption: null,
+            KeyWrap: null,
+            SignatureAlgorithm: null,
+            SignerKid: authenticated ? signerKid : null,
             SenderKid: authenticated ? senderKid : null,
-            SignerKid: authenticated ? signerKid : null);
+            RecipientKid: null,
+            AllRecipientKids: Array.Empty<string>(),
+            FromPrior: null);
     }
 
-    private static Task Feed(DiscoverFeaturesClient client, InboundObservation observation)
-        => ((IProtocolObserver)client).OnMessageReceivedAsync(observation, CancellationToken.None);
+    // Correlation is a synchronous internal correlator (IInboundCorrelator), invoked inline by the
+    // dispatcher; here we call it directly with the unpacked disclose.
+    private static Task Feed(DiscoverFeaturesClient client, UnpackResult disclose)
+    {
+        ((IInboundCorrelator)client).OnInbound(disclose);
+        return Task.CompletedTask;
+    }
 
     [Fact]
     public async Task Round_trip_returns_the_correlated_disclosures_and_sends_authcrypt()
@@ -83,18 +95,16 @@ public sealed class DiscoverFeaturesClientTests
     [Fact]
     public async Task Round_trip_completes_through_a_real_dispatcher()
     {
-        // End-to-end through the FR-PROTO-12 seam: the built-in handler still owns the PIURI
-        // and treats the inbound disclose as a terminal leaf (NoReply); the observer side
-        // channel is what completes the waiting initiator.
+        // End-to-end: the built-in handler still owns the PIURI and treats the inbound disclose as a
+        // terminal leaf (NoReply); the inline correlator is what completes the waiting initiator —
+        // synchronously, so `await task` is already complete when DispatchAsync returns.
         var client = Client(out var sent);
         var registry = new ProtocolHandlerRegistry();
         registry.Register(new DiscoverFeaturesHandler(Array.Empty<IFeatureProvider>()));
         await using var dispatcher = new ProtocolDispatcher(
             registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null,
-            observers: new IProtocolObserver[] { client });
+            observers: null, correlators: new IInboundCorrelator[] { client });
 
-        // The disclose is delivered to the client observer via the background queue; `await task`
-        // (the QueryFeaturesAsync waiter) naturally waits for that async delivery to complete it.
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
         var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -212,12 +222,14 @@ public sealed class DiscoverFeaturesClientTests
         (await task).Should().ContainSingle(d => d.Id == "signed-ok");
     }
 
-    // NOTE: correlation compares DID *subjects* (PRD §4.3, `DidSubject.SameDidSubject`) so a reply
-    // whose `from` differs only in DID-URL form (path/query) still matches. That behavior is covered
-    // indirectly by the real-crypto interop round-trip; a unit test asserting it directly was removed
-    // because it depended on net-did's DID-URL suffix parser, which returns different subjects for a
-    // `?query` form on Windows vs. Linux (an upstream cross-platform inconsistency, flagged separately).
-    // In practice `from`/`to` are bare DIDs, so the production behavior is unaffected.
+    // NOTE: correlation compares DID *subjects* (PRD §4.3, `DidSubject.SameDidSubject`), which is a
+    // strict superset of a raw-string compare and only ever accepts MORE than raw equality. The
+    // remaining tests exercise the equal-subject accept and the different-subject reject paths. The
+    // narrow "differs only in DID-URL path/query but same subject" case is deliberately NOT unit-tested
+    // here: it hinges on net-did's DID-URL suffix parser, which returns a different subject for a
+    // `?query` form on Windows vs. Linux (an upstream cross-platform inconsistency, filed separately) —
+    // it is NOT covered by the bare-DID round-trip. In practice `from`/`to` are bare DIDs, so the
+    // production behavior is unaffected either way.
 
     [Fact]
     public async Task Unsolicited_disclose_is_ignored_without_error()

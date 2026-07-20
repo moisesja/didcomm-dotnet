@@ -1,6 +1,7 @@
 using DidComm.AspNetCore;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
+using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Resolution;
 using DidComm.Samples.Shared;
@@ -26,13 +27,13 @@ using TrustPingApi = DidComm.Protocols.TrustPing.TrustPing;
 namespace DidComm.InteropTests.Protocols;
 
 /// <summary>
-/// FR-PROTO-05a end-to-end (PR #51 review finding 1): a real two-agent Discover Features round-trip
-/// over the shipped HTTP transport. Alice calls the DI-resolved
-/// <see cref="DiscoverFeaturesClient.QueryFeaturesAsync"/>; her query is POSTed to Bob's
-/// <c>MapDidCommEndpoint</c>; Bob's built-in handler produces the <c>disclose</c> and his endpoint
-/// (with <see cref="DidCommReceiveOptions.AutoSendReplies"/>) forwards it out of band to Alice's own
-/// endpoint; Alice's dispatcher hands it to her <see cref="DiscoverFeaturesClient"/> observer, which
-/// completes the awaiting call — <strong>with no manual disclosure injection anywhere</strong>.
+/// FR-PROTO-05a end-to-end: a real two-agent Discover Features round-trip over the shipped HTTP
+/// transport. Alice calls the DI-resolved <see cref="DiscoverFeaturesClient.QueryFeaturesAsync"/>;
+/// her query is POSTed to Bob's <c>MapDidCommEndpoint</c>; Bob's built-in handler produces the
+/// <c>disclose</c> and his endpoint's <c>onReceive</c> callback (APP code — the library ships no
+/// automatic egress) sends it out of band to Alice's endpoint, bound to the authenticated inbound
+/// sender; Alice's dispatcher hands it to her inline <c>IInboundCorrelator</c>, which completes the
+/// awaiting call — <strong>with no manual disclosure injection anywhere</strong>.
 /// </summary>
 public sealed class DiscoverFeaturesRoundTripTests
 {
@@ -57,45 +58,50 @@ public sealed class DiscoverFeaturesRoundTripTests
         var aliceInbox = new LateBoundHandler();
         var bobInbox = new LateBoundHandler();
 
-        // Bob: responder — his endpoint auto-forwards the disclose to Alice; a fake service resolver
-        // maps Alice's DID to her endpoint; loopback is permitted so the SSRF guard allows the
-        // in-process TestServer address.
-        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, autoSendReplies: true,
+        // Bob: responder — his endpoint (app code) sends the disclose back to the authenticated sender;
+        // a fake service resolver maps Alice's DID to her endpoint; loopback is permitted so the SSRF
+        // guard allows the in-process TestServer address.
+        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, isResponder: true,
             serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"));
 
-        // Alice: initiator — her endpoint dispatches the inbound disclose to her observer.
-        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, autoSendReplies: false,
+        // Alice: initiator — her endpoint dispatches the inbound disclose to her inline correlator.
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
             serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"));
 
         aliceInbox.Target = alice.Server.CreateHandler();
         bobInbox.Target = bob.Server.CreateHandler();
 
-        var discoverClient = alice.Services.GetRequiredService<DiscoverFeaturesClient>();
-
-        IReadOnlyList<FeatureDisclosure> disclosures;
         try
         {
-            disclosures = await discoverClient.QueryFeaturesAsync(
-                from: aliceDid,
-                to: bobDid,
-                queries: new[] { new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" } },
-                timeout: TimeSpan.FromSeconds(30),
-                serviceEndpointOverride: new Uri("http://localhost/didcomm"));
-        }
-        catch (Exception ex)
-        {
-            throw new Xunit.Sdk.XunitException($"round-trip failed: {ex.Message}\nLOGS:\n{string.Join("\n", Logs)}");
-        }
+            var discoverClient = alice.Services.GetRequiredService<DiscoverFeaturesClient>();
 
-        disclosures.Select(d => d.Id).Should().Contain(new[]
-        {
-            TrustPingApi.ProtocolUri,
-            DidComm.Protocols.Empty.EmptyProtocol.ProtocolUri,
-            DiscoverFeaturesApi.ProtocolUri,
-        }, "Alice learns Bob's registered protocols by the real round-trip, not a hand-fed disclose");
+            IReadOnlyList<FeatureDisclosure> disclosures;
+            try
+            {
+                disclosures = await discoverClient.QueryFeaturesAsync(
+                    from: aliceDid,
+                    to: bobDid,
+                    queries: new[] { new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" } },
+                    timeout: TimeSpan.FromSeconds(30),
+                    serviceEndpointOverride: new Uri("http://localhost/didcomm"));
+            }
+            catch (Exception ex)
+            {
+                throw new Xunit.Sdk.XunitException($"round-trip failed: {ex.Message}\nLOGS:\n{string.Join("\n", Logs)}");
+            }
 
-        await alice.App.DisposeAsync();
-        await bob.App.DisposeAsync();
+            disclosures.Select(d => d.Id).Should().Contain(new[]
+            {
+                TrustPingApi.ProtocolUri,
+                DidComm.Protocols.Empty.EmptyProtocol.ProtocolUri,
+                DiscoverFeaturesApi.ProtocolUri,
+            }, "Alice learns Bob's registered protocols by the real round-trip, not a hand-fed disclose");
+        }
+        finally
+        {
+            await alice.App.DisposeAsync();
+            await bob.App.DisposeAsync();
+        }
     }
 
     private static async Task<(string AliceDid, string BobDid)> CreateTwoPeersAsync(
@@ -122,7 +128,7 @@ public sealed class DiscoverFeaturesRoundTripTests
     private sealed record Agent(WebApplication App, TestServer Server, IServiceProvider Services);
 
     private static async Task<Agent> BuildAgentAsync(
-        string tag, InMemorySecretsResolver secrets, LateBoundHandler outboundTo, bool autoSendReplies,
+        string tag, InMemorySecretsResolver secrets, LateBoundHandler outboundTo, bool isResponder,
         IServiceEndpointResolver serviceResolver)
     {
         var builder = WebApplication.CreateBuilder();
@@ -156,12 +162,35 @@ public sealed class DiscoverFeaturesRoundTripTests
             b.Configure(o => o.OutboundEndpointPolicy.BlockPrivateNetworks = false); // permit the loopback TestServer
         });
 
-        if (autoSendReplies)
-            builder.Services.Configure<DidCommReceiveOptions>(o => o.AutoSendReplies = true);
-
         var app = builder.Build();
         app.UseRouting();
-        app.MapDidCommEndpoint("/didcomm");
+        if (isResponder)
+        {
+            // The responder (Bob) delivers its disclose out of band with APP code — the library does
+            // not auto-send. This models the correct, safe pattern: dispatch, then (only for an
+            // AUTHENTICATED inbound) send the reply back to the authenticated sender, as the identity
+            // that decrypted it. There is no library egress that trusts an attacker-controlled from.
+            app.MapDidCommEndpoint("/didcomm", async (unpacked, ct) =>
+            {
+                var client = app.Services.GetRequiredService<DidCommClient>();
+                var dispatcher = app.Services.GetRequiredService<ProtocolDispatcher>();
+                var options = app.Services.GetRequiredService<IOptions<DidCommOptions>>().Value;
+
+                var outcome = await dispatcher.DispatchAsync(unpacked, client, options, ct);
+                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: { From: { Length: > 0 } replyFrom } reply }
+                    && unpacked.Authenticated
+                    && unpacked.Message.From is { Length: > 0 } authenticatedSender)
+                {
+                    await client.SendAsync(reply, new SendOptions(Recipients: new[] { authenticatedSender }, From: replyFrom), ct);
+                }
+            });
+        }
+        else
+        {
+            // The initiator (Alice) just dispatches inbound messages; the inline Discover Features
+            // correlator completes her awaiting QueryFeaturesAsync when the disclose arrives.
+            app.MapDidCommEndpoint("/didcomm");
+        }
         await app.StartAsync();
         return new Agent(app, app.GetTestServer(), app.Services);
     }

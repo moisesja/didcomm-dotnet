@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using DidComm.Consistency;
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.Protocols;
 using DidComm.Transports;
 using Microsoft.Extensions.Logging;
 
@@ -16,22 +17,25 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Correlation rides the <see cref="IProtocolObserver"/> seam (FR-PROTO-12): this class
-/// observes inbound <c>discover-features/2.0</c> traffic only, matches a <c>disclose</c> to a
-/// pending query by <c>thid</c> == the query's <c>id</c>, and completes the awaiting caller.
-/// The responder-side handler is untouched — an inbound <c>disclose</c> remains a terminal
-/// leaf in dispatch, whether or not anyone is awaiting it.
+/// Correlation runs as a fast, <strong>lossless</strong>, synchronous inbound correlator
+/// (<see cref="IInboundCorrelator"/>), NOT through the best-effort <see cref="IProtocolObserver"/>
+/// queue. The dispatcher hands each dispatched inbound message to this correlator inline; it matches
+/// a <c>disclose</c> to a pending query by <c>thid</c> == the query's <c>id</c> and completes the
+/// awaiting caller. Because the work is O(1) and non-blocking, it is not subject to queue drops — a
+/// genuine authenticated response completes even under a flood of unsolicited disclosures. The
+/// responder-side handler is untouched — an inbound <c>disclose</c> remains a terminal leaf in
+/// dispatch, whether or not anyone is awaiting it.
 /// </para>
 /// <para>
 /// <strong>Spoofing defense.</strong> A <c>disclose</c> completes a pending query only when the
 /// envelope authenticated its sender (authcrypt or a verified signature) AND the message's
-/// <c>from</c> is exactly the DID the query was sent to. An anoncrypt/plaintext disclosure, or
-/// one from a third party that guessed the query id, is logged and ignored — and deliberately
-/// does NOT cancel the pending query, so a forgery cannot deny the legitimate response either.
+/// <c>from</c> is the DID the query was sent to (compared as a DID subject). An anoncrypt/plaintext
+/// disclosure, or one from a third party that guessed the query id, is logged and ignored — and
+/// deliberately does NOT cancel the pending query, so a forgery cannot deny the legitimate response.
 /// </para>
 /// <para>Thread-safe; intended as a singleton (registered by <c>AddBuiltInProtocols()</c>).</para>
 /// </remarks>
-public sealed class DiscoverFeaturesClient : IProtocolObserver
+public sealed class DiscoverFeaturesClient : IInboundCorrelator
 {
     private readonly Func<Message, SendOptions, CancellationToken, Task> _send;
     private readonly ILogger<DiscoverFeaturesClient>? _logger;
@@ -66,9 +70,6 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
         ArgumentNullException.ThrowIfNull(client);
         return (message, options, ct) => client.SendAsync(message, options, ct);
     }
-
-    /// <summary>Observe only the Discover Features 2.x family (least privilege, FR-PROTO-12).</summary>
-    string? IProtocolObserver.ProtocolUriFilter => DiscoverFeatures.ProtocolUri;
 
     /// <summary>
     /// Send a Discover Features 2.0 <c>queries</c> to <paramref name="to"/> and await the
@@ -135,38 +136,43 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
         }
     }
 
-    /// <inheritdoc />
-    Task IProtocolObserver.OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct)
+    /// <summary>
+    /// Correlate a dispatched inbound message to a pending query (FR-PROTO-05a). Synchronous, O(1),
+    /// non-blocking, and lossless — invoked inline by the dispatcher, guarded, per
+    /// <see cref="IInboundCorrelator"/>. Reads directly from the <see cref="UnpackResult"/> (no clone
+    /// needed: it only reads, and it runs inline before the caller regains control to mutate).
+    /// </summary>
+    /// <param name="received">The unpack result for the dispatched inbound message.</param>
+    void IInboundCorrelator.OnInbound(UnpackResult received)
     {
-        ArgumentNullException.ThrowIfNull(observation);
-        var message = observation.Message;
+        var message = received.Message;
 
         if (!string.Equals(message.Type, DiscoverFeatures.DiscloseType, StringComparison.OrdinalIgnoreCase))
-            return Task.CompletedTask;
+            return;
         if (message.Thid is not { Length: > 0 } thid || !_pending.TryGetValue(thid, out var pending))
-            return Task.CompletedTask; // unsolicited disclose — stays a terminal leaf (FR-PROTO-05)
+            return; // unsolicited disclose — stays a terminal leaf (FR-PROTO-05)
 
         // Spoofing defense: never complete a waiter off an unauthenticated envelope or a sender
         // other than the DID we queried. The pending entry is left intact so a forgery cannot
         // deny the legitimate response.
-        if (!observation.Authenticated)
+        if (!received.Authenticated)
         {
             _logger?.LogWarning(
                 "Ignored a 'disclose' for pending query {Thid}: envelope does not authenticate the sender (anoncrypt/plaintext). Message id: {MessageId}.",
                 thid, message.Id);
-            return Task.CompletedTask;
+            return;
         }
         // Defense in depth: `Authenticated` implies the sender is bound to an authenticating key id
         // (authcrypt skid or a verified JWS signer kid) — that binding is what makes `from`
         // trustworthy (FR-CONSIST-01/03). Require the key id to actually be present before we trust
         // `from`, so a hypothetical envelope-layer regression that set `Authenticated` without a
         // skid/signer kid cannot let a forged `from` complete the query. Fail closed.
-        if (string.IsNullOrEmpty(observation.SenderKid) && string.IsNullOrEmpty(observation.SignerKid))
+        if (string.IsNullOrEmpty(received.SenderKid) && string.IsNullOrEmpty(received.SignerKid))
         {
             _logger?.LogWarning(
                 "Ignored a 'disclose' for pending query {Thid}: envelope reports authenticated but carries no sender/signer key id. Message id: {MessageId}.",
                 thid, message.Id);
-            return Task.CompletedTask;
+            return;
         }
         // Compare DID subjects, not raw strings (PRD §4.3): `from` and the queried `to` are DIDs or
         // DID URLs without a fragment, so a subject-wise match avoids dropping a legitimate reply
@@ -177,10 +183,11 @@ public sealed class DiscoverFeaturesClient : IProtocolObserver
             _logger?.LogWarning(
                 "Ignored a 'disclose' for pending query {Thid}: sender '{From}' is not the queried responder. Message id: {MessageId}.",
                 thid, message.From, message.Id);
-            return Task.CompletedTask;
+            return;
         }
 
+        // TrySetResult with RunContinuationsAsynchronously (see the TCS construction) never runs the
+        // awaiter's continuation inline, so this returns immediately and cannot gate the dispatch path.
         pending.Completion.TrySetResult(DiscoverFeatures.ReadDisclosures(message));
-        return Task.CompletedTask;
     }
 }

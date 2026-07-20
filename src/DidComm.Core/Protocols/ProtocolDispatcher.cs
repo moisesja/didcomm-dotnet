@@ -30,6 +30,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     private readonly ILogger<ProtocolDispatcher>? _logger;
     private readonly TraceOptions? _traceOptions;
     private readonly ObserverDelivery? _observers;
+    private readonly IInboundCorrelator[] _correlators;
 
     /// <summary>
     /// Construct a dispatcher bound to a registry and thread-state store. This is the exact 1.2.0
@@ -61,6 +62,22 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         ILogger<ProtocolDispatcher>? logger,
         TraceOptions? traceOptions,
         IEnumerable<IProtocolObserver>? observers)
+        : this(registry, threads, logger, traceOptions, observers, correlators: null)
+    {
+    }
+
+    /// <summary>
+    /// Construct a dispatcher with observers (queued) and internal inbound correlators (invoked
+    /// inline, synchronously, guarded). Used by DI to wire built-in correlators such as the Discover
+    /// Features initiator client, which need lossless, non-queued delivery.
+    /// </summary>
+    internal ProtocolDispatcher(
+        ProtocolHandlerRegistry registry,
+        IThreadStateStore threads,
+        ILogger<ProtocolDispatcher>? logger,
+        TraceOptions? traceOptions,
+        IEnumerable<IProtocolObserver>? observers,
+        IEnumerable<IInboundCorrelator>? correlators)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(threads);
@@ -68,6 +85,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         _threads = threads;
         _logger = logger;
         _traceOptions = traceOptions;
+        _correlators = correlators?.ToArray() ?? Array.Empty<IInboundCorrelator>();
         var observerList = observers?.ToArray() ?? Array.Empty<IProtocolObserver>();
         if (observerList.Length > 0)
         {
@@ -104,6 +122,13 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 
         var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
 
+        // Internal correlators (FR-PROTO-05a): invoked inline, synchronously, guarded. These are
+        // library-owned, O(1), non-blocking hooks (e.g. the Discover Features initiator completing a
+        // pending query) — running lossless and inline so a genuine authenticated response is not
+        // subject to the observer queue's best-effort drops. Guarded so a throw can't clobber the
+        // outcome; the IInboundCorrelator contract forbids blocking so it can't gate the path.
+        NotifyCorrelators(received);
+
         // FR-PROTO-12: hand the inbound to the observers' bounded background queue and return
         // immediately. Enqueue is non-blocking, runs for every outcome path (handled, NoReply,
         // NoHandler, loop-guard drops), and NEVER awaits observer work — so a slow or faulting
@@ -111,6 +136,24 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         // initiator with no handler registered for a PIURI can still observe its traffic.
         _observers?.Enqueue(received);
         return outcome;
+    }
+
+    private void NotifyCorrelators(UnpackResult received)
+    {
+        foreach (var correlator in _correlators)
+        {
+            try
+            {
+                correlator.OnInbound(received);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "IInboundCorrelator '{Correlator}' threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected.",
+                    correlator.GetType().FullName, received.Message.Id);
+            }
+        }
     }
 
     private async Task<DispatchOutcome> DispatchCoreAsync(

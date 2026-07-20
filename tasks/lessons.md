@@ -722,3 +722,25 @@ Format per entry:
   sender + negative tests (plaintext/anoncrypt → no send). For swallow-and-continue side effects:
   handle OCE by token state. For "can't affect X" claims: enumerate every code path that runs before
   X is final. See [[L-035]], [[L-034]].
+
+## L-037 — When a feature keeps generating security findings, remove the surface; don't keep adding guards.
+
+- **Lesson:** If successive reviews keep finding new exploits in the SAME added feature, the feature
+  itself is the problem, not the individual holes. Stop guarding and delete the surface. Two classes
+  that are almost always attractive nuisances: (1) an inbound-triggered, inline, automatic OUTBOUND
+  egress ("auto-reply") — it is inherently a reflector / cross-tenant / amplification / shared-resource
+  DoS surface, because it trusts a remote message's from/endpoint and consumes local egress on a remote
+  trigger; (2) a DEFAULT firehose consumer on a lossy queue fed by remote traffic — it hands attackers
+  memory/log/backpressure amplification and can drop the one legitimate message you needed.
+- **Why:** PR #51 went three review rounds. Rounds 1–2 kept patching `AutoSendReplies` (auth gate,
+  recipient binding, cancellation handling) and the observer queue (filter isolation, drop policy);
+  round 3 still found a cross-tenant sender oracle, an attacker-advertised-endpoint reflector +
+  circuit-breaker DoS, and gigabyte memory exhaustion via the default observer. The decisive fix was
+  to REMOVE the auto-egress entirely (reply delivery is the app's explicit, policy-bound job) and to
+  move the correlation OFF the queue onto a lossless synchronous internal hook so there is NO default
+  observer/firehose — which killed the whole class at the root.
+- **How to apply:** Before adding a convenience that (a) sends outbound as a side effect of receiving,
+  or (b) registers a default consumer on a queue fed by untrusted traffic — don't. Make the outbound
+  action the caller's explicit decision, and keep default consumers off shared lossy queues. If a
+  reviewer keeps finding moles in one feature, delete the feature, don't add a fifth guard.
+  See [[L-036]], [[L-035]].

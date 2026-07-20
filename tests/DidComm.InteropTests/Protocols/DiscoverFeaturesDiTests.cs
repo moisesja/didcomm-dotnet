@@ -94,7 +94,7 @@ public sealed class DiscoverFeaturesDiTests
     }
 
     [Fact]
-    public void AddBuiltInProtocols_registers_one_DiscoverFeaturesClient_exposed_once_as_observer()
+    public void AddBuiltInProtocols_registers_one_DiscoverFeaturesClient_correlator_and_no_default_observers()
     {
         var services = new ServiceCollection();
         services.AddDidComm(b =>
@@ -109,9 +109,13 @@ public sealed class DiscoverFeaturesDiTests
         var clients = sp.GetServices<DiscoverFeaturesClient>().ToList();
         clients.Should().HaveCount(1, "exactly one initiator client");
 
-        var observers = sp.GetServices<IProtocolObserver>().ToList();
-        observers.OfType<DiscoverFeaturesClient>().Should().HaveCount(1, "the client is exposed exactly once as an observer");
-        observers.Single(o => o is DiscoverFeaturesClient).Should().BeSameAs(clients[0], "same singleton instance is the observer");
+        var correlators = sp.GetServices<IInboundCorrelator>().ToList();
+        correlators.OfType<DiscoverFeaturesClient>().Should().HaveCount(1, "the client is exposed exactly once as an inline correlator");
+        correlators.Single(c => c is DiscoverFeaturesClient).Should().BeSameAs(clients[0], "same singleton instance");
+
+        // Root-cause fix for the flood/memory finding: AddBuiltInProtocols installs NO default
+        // observer, so the best-effort observer queue has no default firehose consumer to exploit.
+        sp.GetServices<IProtocolObserver>().Should().BeEmpty("no default observer is registered");
     }
 
     [Fact]

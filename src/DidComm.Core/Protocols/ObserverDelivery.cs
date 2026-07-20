@@ -5,69 +5,76 @@ using Microsoft.Extensions.Logging;
 namespace DidComm.Protocols;
 
 /// <summary>
-/// Bounded, background delivery of inbound observations to <see cref="IProtocolObserver"/>s
-/// (FR-PROTO-12). Each observer gets its <em>own</em> bounded channel drained by its own pump, so:
-/// <list type="bullet">
-///   <item><description>enqueue is non-blocking and never gates the dispatch outcome or reply
-///     delivery — <see cref="ProtocolDispatcher"/> enqueues and returns immediately;</description></item>
-///   <item><description>a slow or never-completing observer backs up only its own channel (and
-///     eventually drops, per the overflow policy) — it cannot starve other observers or block the
-///     receive path;</description></item>
-///   <item><description>observer faults are isolated and logged; they can never reach the
-///     dispatch result.</description></item>
-/// </list>
-/// The message is deep-cloned lazily <em>in the pump</em>, so a dropped observation pays no clone
-/// cost and each observer still gets its own isolated copy.
+/// Bounded, background, best-effort delivery of inbound observations to
+/// <see cref="IProtocolObserver"/>s (FR-PROTO-12). Each observer gets its own bounded channel drained
+/// by its own pump, so enqueue is non-blocking (never gates the dispatch outcome or reply delivery),
+/// a slow/hung observer backs up only its own channel, and observer faults are isolated and logged.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>Overflow policy.</strong> Channels are bounded to a fixed capacity; when an
-/// observer's channel is full (it is not keeping up) the newest observation for that observer is
-/// dropped and a warning is logged with a running drop count. Dropping is explicit and visible
-/// rather than growing memory unboundedly.
+/// <strong>Snapshot at enqueue.</strong> Each observation is deep-cloned into an immutable
+/// <see cref="InboundObservation"/> synchronously at enqueue, so a handler or caller that mutates the
+/// live message after dispatch cannot change what an observer later sees, and no two observers can see
+/// different states.
 /// </para>
 /// <para>
-/// <strong>Concurrency.</strong> Observers may be invoked concurrently with one another (each has
-/// its own pump) and concurrently across inbound messages; per observer, its own invocations are
-/// serialized in arrival order by its single-reader pump. An observer implementation MUST be safe
-/// under concurrent invocation.
+/// <strong>Bounded, best-effort.</strong> Each observer's queue is bounded by BOTH an item count and a
+/// byte budget (default a few MiB); when either is exceeded the newest observation is dropped and a
+/// <em>rate-limited</em> warning is logged (first drop + periodically), so a flood cannot exhaust
+/// memory or amplify logging. Delivery is therefore best-effort / at-most-once. Note the built-in
+/// Discover Features correlation does NOT use this queue — it is a lossless inline
+/// <see cref="IInboundCorrelator"/> — so a default deployment registers no observer here and has no
+/// queue to flood.
+/// </para>
+/// <para>
+/// <strong>Concurrency.</strong> Observers may be invoked concurrently with one another; per observer,
+/// its own invocations are serialized in arrival order. Implementations MUST be thread-safe.
 /// </para>
 /// </remarks>
 internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
 {
-    /// <summary>Default per-observer channel capacity before the overflow policy drops.</summary>
-    internal const int DefaultCapacity = 1024;
+    /// <summary>Default per-observer queued-item cap.</summary>
+    internal const int DefaultCapacity = 64;
+
+    /// <summary>Default per-observer queued-byte budget (approximate serialized size).</summary>
+    internal const long DefaultByteBudget = 4L * 1024 * 1024;
+
+    /// <summary>Log at most one drop warning per this many drops (after the first), to avoid log amplification.</summary>
+    private const long DropLogEvery = 1000;
 
     private readonly ObserverChannel[] _channels;
     private readonly ILogger? _logger;
+    private readonly CancellationTokenSource _shutdown = new();
+    private int _disposed; // 0/1 — makes Dispose()/DisposeAsync() idempotent (a CTS throws if cancelled after dispose)
 
-    private sealed record WorkItem(UnpackResult? Received, TaskCompletionSource? Barrier);
+    private sealed record WorkItem(InboundObservation? Observation, int Bytes, TaskCompletionSource? Barrier);
 
     private sealed class ObserverChannel
     {
         public required IProtocolObserver Observer { get; init; }
-        /// <summary>The observer's PIURI filter, read exactly once at construction (see below). Never re-read on the dispatch path.</summary>
         public required string? Filter { get; init; }
-        /// <summary><c>true</c> when the filter getter threw at construction — the observer is disabled (a broken observer must not get a firehose, and its code must never run on the hot path).</summary>
         public required bool Disabled { get; init; }
+        public required long ByteBudget { get; init; }
         public required Channel<WorkItem> Channel { get; init; }
-        public required Task Pump { get; init; }
+        public Task Pump = Task.CompletedTask; // assigned after construction so the pump can reference `this`
+        public long QueuedBytes;
         public long Dropped;
     }
 
-    public ObserverDelivery(IReadOnlyList<IProtocolObserver> observers, ILogger? logger, int capacity = DefaultCapacity)
+    public ObserverDelivery(
+        IReadOnlyList<IProtocolObserver> observers, ILogger? logger,
+        int capacity = DefaultCapacity, long byteBudget = DefaultByteBudget)
     {
         ArgumentNullException.ThrowIfNull(observers);
         if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+        if (byteBudget < 1) throw new ArgumentOutOfRangeException(nameof(byteBudget));
         _logger = logger;
         _channels = new ObserverChannel[observers.Count];
         for (var i = 0; i < observers.Count; i++)
         {
             var observer = observers[i];
-            // Read ProtocolUriFilter EXACTLY ONCE, here, guarded. It is arbitrary observer code; reading
-            // it on every Enqueue (the dispatch path) would let a blocking getter gate reply delivery or
-            // a throwing getter clobber the outcome. Cache the value; if the getter throws, disable the
-            // observer rather than let it observe everything or break dispatch.
+            // Read ProtocolUriFilter EXACTLY ONCE, here, guarded — it is arbitrary observer code and
+            // must never run on the dispatch path (Enqueue). If the getter throws, disable the observer.
             string? filter = null;
             var disabled = false;
             try
@@ -83,92 +90,130 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
             }
             var channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(capacity)
             {
-                // Wait mode + TryWrite lets us observe "full" and apply our own drop-and-log policy,
-                // rather than DropWrite silently discarding.
-                FullMode = BoundedChannelFullMode.Wait,
+                FullMode = BoundedChannelFullMode.Wait, // TryWrite returns false when full → our drop policy
                 SingleReader = true,
                 SingleWriter = false,
             });
-            _channels[i] = new ObserverChannel
+            var oc = new ObserverChannel
             {
                 Observer = observer,
                 Filter = filter,
                 Disabled = disabled,
+                ByteBudget = byteBudget,
                 Channel = channel,
-                Pump = disabled ? Task.CompletedTask : Task.Run(() => PumpAsync(observer, channel)),
             };
+            // Start the pump after the channel object exists so it can decrement that channel's
+            // queued-byte counter as it drains.
+            if (!disabled)
+                oc.Pump = Task.Run(() => PumpAsync(oc, _shutdown.Token));
+            _channels[i] = oc;
         }
     }
 
     /// <summary>
-    /// Enqueue an inbound message for every observer whose filter matches. Non-blocking: on a full
-    /// channel the observation is dropped for that observer and a warning is logged.
+    /// Enqueue an inbound message for every observer whose filter matches. Non-blocking and
+    /// structurally non-throwing: runs no observer code, snapshots the message at enqueue, and drops
+    /// (with a rate-limited log) when an observer's item-count or byte budget is exceeded.
     /// </summary>
     public void Enqueue(UnpackResult received)
     {
-        // Structurally non-throwing and runs NO observer code: only the cached filter is consulted, so
-        // a blocking/throwing observer cannot gate reply delivery or clobber the dispatch outcome here.
         foreach (var oc in _channels)
         {
             if (oc.Disabled)
                 continue;
             if (!ObserverMatches(oc.Filter, received.Message.Type))
                 continue;
-            if (!oc.Channel.Writer.TryWrite(new WorkItem(received, Barrier: null)))
+
+            // Byte-budget pre-check BEFORE cloning: a byte-flood is dropped without paying the clone
+            // cost. (Item-count is enforced by the bounded channel's TryWrite below.)
+            if (Interlocked.Read(ref oc.QueuedBytes) >= oc.ByteBudget)
             {
-                var n = Interlocked.Increment(ref oc.Dropped);
-                _logger?.LogWarning(
-                    "Observer '{Observer}' is not keeping up; its queue is full (capacity {Capacity}) so inbound observation {MessageId} was dropped. Total dropped for this observer: {Dropped} (FR-PROTO-12).",
-                    oc.Observer.GetType().FullName, DefaultCapacity, received.Message.Id, n);
+                Drop(oc, received.Message.Id);
+                continue;
+            }
+
+            var observation = InboundObservation.FromUnpackResult(received, out var bytes);
+            // Reserve-then-verify so the byte budget is a HARD bound even under concurrent enqueues:
+            // atomically add first, and if that put us over budget, back the reservation out and drop.
+            // (Without this, N concurrent enqueues could each pass the pre-check and all add, overshooting.)
+            if (Interlocked.Add(ref oc.QueuedBytes, bytes) > oc.ByteBudget)
+            {
+                Interlocked.Add(ref oc.QueuedBytes, -bytes);
+                Drop(oc, received.Message.Id);
+            }
+            else if (!oc.Channel.Writer.TryWrite(new WorkItem(observation, bytes, Barrier: null)))
+            {
+                Interlocked.Add(ref oc.QueuedBytes, -bytes); // item-count full: release the reservation
+                Drop(oc, received.Message.Id);
             }
         }
     }
 
-    private async Task PumpAsync(IProtocolObserver observer, Channel<WorkItem> channel)
+    private void Drop(ObserverChannel oc, string messageId)
     {
-        await foreach (var item in channel.Reader.ReadAllAsync().ConfigureAwait(false))
+        var n = Interlocked.Increment(ref oc.Dropped);
+        // Rate-limit: log the first drop and then only periodically, so a flood cannot amplify into
+        // one synchronous log write per message.
+        if (n == 1 || n % DropLogEvery == 0)
         {
-            if (item.Barrier is not null)
-            {
-                // Flush marker: everything queued for this observer before it has now been processed.
-                item.Barrier.TrySetResult();
-                continue;
-            }
+            _logger?.LogWarning(
+                "Observer '{Observer}' is not keeping up; dropped inbound observation {MessageId} (queue full: capacity {Capacity} items / {ByteBudget} bytes). Total dropped for this observer: {Dropped} (FR-PROTO-12, best-effort delivery).",
+                oc.Observer.GetType().FullName, DefaultCapacity, oc.ByteBudget, messageId, n);
+        }
+    }
 
-            try
+    private async Task PumpAsync(ObserverChannel oc, CancellationToken shutdown)
+    {
+        try
+        {
+            await foreach (var item in oc.Channel.Reader.ReadAllAsync(shutdown).ConfigureAwait(false))
             {
-                // Deep clone here (not at enqueue): dropped items pay no clone cost, and each
-                // observer gets its own isolated copy that mutation can never leak out of.
-                var observation = InboundObservation.FromUnpackResult(item.Received!);
-                await observer.OnMessageReceivedAsync(observation, CancellationToken.None).ConfigureAwait(false);
+                if (item.Barrier is not null)
+                {
+                    item.Barrier.TrySetResult(); // flush marker
+                    continue;
+                }
+
+                // Free the item's reserved bytes as it leaves the queue (before the callback, so a slow
+                // callback doesn't count against the budget for messages already dequeued).
+                Interlocked.Add(ref oc.QueuedBytes, -item.Bytes);
+                try
+                {
+                    await oc.Observer.OnMessageReceivedAsync(item.Observation!, shutdown).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(
+                        ex,
+                        "IProtocolObserver '{Observer}' threw while observing inbound message {MessageId}; isolated — the dispatch outcome is unaffected (FR-PROTO-12).",
+                        oc.Observer.GetType().FullName, item.Observation!.Message.Id);
+                }
             }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(
-                    ex,
-                    "IProtocolObserver '{Observer}' threw while observing inbound message {MessageId}; isolated — the dispatch outcome is unaffected (FR-PROTO-12).",
-                    observer.GetType().FullName, item.Received!.Message.Id);
-            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown requested; stop draining.
         }
     }
 
     /// <summary>
     /// Test/diagnostic seam: complete when every observation enqueued <em>before this call</em> has
-    /// been processed. Enqueues a FIFO barrier per observer and awaits it. A never-completing
-    /// observer will not complete its barrier, so callers pass a <paramref name="timeout"/>.
+    /// been processed. Honors <paramref name="timeout"/> for the WHOLE operation (including writing the
+    /// barrier into a full channel), so a hung/full observer cannot block it forever.
     /// </summary>
     public async Task FlushAsync(TimeSpan timeout)
     {
+        using var cts = new CancellationTokenSource(timeout);
         var barriers = new List<Task>(_channels.Length);
         foreach (var oc in _channels)
         {
             if (oc.Disabled)
                 continue; // no pump to drain; a barrier would never complete
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await oc.Channel.Writer.WriteAsync(new WorkItem(Received: null, Barrier: tcs)).ConfigureAwait(false);
+            await oc.Channel.Writer.WriteAsync(new WorkItem(Observation: null, Bytes: 0, Barrier: tcs), cts.Token).ConfigureAwait(false);
             barriers.Add(tcs.Task);
         }
-        await Task.WhenAll(barriers).WaitAsync(timeout).ConfigureAwait(false);
+        await Task.WhenAll(barriers).WaitAsync(cts.Token).ConfigureAwait(false);
     }
 
     /// <summary>Audit description of registered observers, computed from cached data — invokes NO observer code.</summary>
@@ -176,15 +221,20 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
         => string.Join("; ", _channels.Select(c =>
             $"{c.Observer.GetType().FullName} (filter: {c.Filter ?? "ALL"}{(c.Disabled ? "; DISABLED" : "")})"));
 
-    /// <summary>Signal the pumps to stop (completes the channels); does not block on in-flight observers.</summary>
+    /// <summary>Cancel the pumps and complete the channels; does not block. (Best-effort synchronous stop.)</summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return; // idempotent
+        _shutdown.Cancel();
         foreach (var oc in _channels)
             oc.Channel.Writer.TryComplete();
+        _shutdown.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return; // idempotent
+        _shutdown.Cancel(); // real shutdown: cancels ReadAllAsync + the in-flight observer callback token
         foreach (var oc in _channels)
             oc.Channel.Writer.TryComplete();
         try
@@ -193,13 +243,16 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
         }
         catch (TimeoutException)
         {
-            // A hung observer can keep its pump from draining; don't block disposal on it.
+            // An observer that ignores its cancellation token can still hang; don't block disposal on it.
+        }
+        finally
+        {
+            _shutdown.Dispose();
         }
     }
 
-    // A filter observes its whole protocol family: same protocol name and major version, any minor
-    // (a 2.0 filter sees 2.1 traffic). TryParse throughout so a crafted/malformed type fails closed
-    // to "no match" rather than throwing (see L-032).
+    // A filter observes its whole protocol family: same protocol name and major version, any minor.
+    // TryParse throughout so a crafted/malformed type fails closed to "no match" rather than throwing.
     internal static bool ObserverMatches(string? filter, string? messageType)
     {
         if (filter is null)

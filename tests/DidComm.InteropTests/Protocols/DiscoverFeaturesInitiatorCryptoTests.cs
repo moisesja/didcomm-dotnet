@@ -27,7 +27,11 @@ namespace DidComm.InteropTests.Protocols;
 /// </summary>
 public sealed class DiscoverFeaturesInitiatorCryptoTests
 {
-    private sealed record World(DidCommClient Client, string Alice, string Bob, string Mallory);
+    private sealed record World(ServiceProvider Sp, DidCommClient Client, string Alice, string Bob, string Mallory)
+        : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => Sp.DisposeAsync();
+    }
 
     private static async Task<World> BuildAsync()
     {
@@ -50,11 +54,11 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
         foreach (var id in new[] { alice, bob, mallory })
             foreach (var jwk in id.Privates) secrets.Add(jwk);
 
-        return new World(sp.GetRequiredService<DidCommClient>(), alice.Did, bob.Did, mallory.Did);
+        return new World(sp, sp.GetRequiredService<DidCommClient>(), alice.Did, bob.Did, mallory.Did);
     }
 
     /// <summary>Drive a DiscoverFeaturesClient that captures its outbound query, and dispatch real
-    /// unpacked disclosures into it through a dispatcher wired with it as the observer.</summary>
+    /// unpacked disclosures into it through a dispatcher wired with it as the inline correlator.</summary>
     private static (DiscoverFeaturesClient Client, Func<Message> LastQuery, ProtocolDispatcher Dispatcher) NewInitiator()
     {
         Message? captured = null;
@@ -63,21 +67,22 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
         registry.Register(new DiscoverFeaturesHandler(Array.Empty<IFeatureProvider>()));
         var dispatcher = new ProtocolDispatcher(
             registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null,
-            observers: new IProtocolObserver[] { client });
+            observers: null, correlators: new IInboundCorrelator[] { client });
         return (client, () => captured ?? throw new InvalidOperationException("no query captured"), dispatcher);
     }
 
+    // Correlation is synchronous and inline, so once DispatchAsync returns the pending query is
+    // already completed (or rejected) — no flush needed.
     private async Task DispatchAsync(ProtocolDispatcher dispatcher, DidCommClient client, string packed)
     {
         var unpacked = await client.UnpackAsync(packed);
         await dispatcher.DispatchAsync(unpacked, client, new DidCommOptions());
-        await dispatcher.FlushObserversAsync(TimeSpan.FromSeconds(30));
     }
 
     [Fact]
     public async Task A_real_authcrypt_disclose_from_the_queried_peer_completes_the_query()
     {
-        var w = await BuildAsync();
+        await using var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
         var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
@@ -93,7 +98,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     [Fact]
     public async Task A_real_signed_disclose_from_the_queried_peer_completes_the_query()
     {
-        var w = await BuildAsync();
+        await using var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
         var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
@@ -108,7 +113,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     [Fact]
     public async Task A_real_self_consistent_Mallory_authcrypt_disclose_cannot_answer_the_query_for_Bob()
     {
-        var w = await BuildAsync();
+        await using var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
         var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
@@ -136,46 +141,43 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     [Fact]
     public async Task An_authcrypt_tampered_disclose_is_rejected_at_unpack_and_never_observed()
     {
-        var w = await BuildAsync();
-        var (client, lastQuery, dispatcher) = NewInitiator();
-        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
-
-        var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
+        await using var w = await BuildAsync();
+        var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: "some-query-id",
             new FeatureDisclosure { FeatureType = "protocol", Id = "will-be-tampered" });
         var packed = (await w.Client.PackEncryptedAsync(disclose,
             new PackEncryptedOptions(Recipients: new[] { w.Alice }, From: w.Bob))).Message;
 
-        // Flip a byte in the ciphertext: the AEAD tag fails, so UnpackAsync throws and the message
-        // never reaches dispatch or the observer — a tampered disclose can't complete a query.
-        var tampered = CorruptField(packed, "ciphertext");
+        // Flip an interior byte of the ciphertext (stays valid base64url): the AEAD tag fails, so
+        // UnpackAsync rejects it and the message never reaches dispatch — a tampered disclose can't
+        // complete a query.
+        var tampered = CorruptFieldInterior(packed, "ciphertext");
         var act = async () => await w.Client.UnpackAsync(tampered);
-        await act.Should().ThrowAsync<Exception>("authcrypt tampering must be rejected at unpack");
+        await act.Should().ThrowAsync<DidComm.Exceptions.CryptoException>("authcrypt tampering must be rejected at unpack");
     }
 
     [Fact]
-    public async Task A_post_sign_tampered_signed_disclose_is_rejected_at_unpack_and_never_observed()
+    public async Task A_post_sign_tampered_signed_disclose_fails_signature_verification_at_unpack()
     {
-        var w = await BuildAsync();
-        var (client, lastQuery, dispatcher) = NewInitiator();
-        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
-
-        var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
+        await using var w = await BuildAsync();
+        var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: "some-query-id",
             new FeatureDisclosure { FeatureType = "protocol", Id = "will-be-tampered" });
         var signed = await w.Client.PackSignedAsync(disclose, signFrom: w.Bob); // JWS
 
-        // Flip a byte in the signed payload AFTER signing: the JWS signature no longer verifies, so
-        // UnpackAsync rejects it — genuine post-sign tamper detection, not just AEAD.
-        var tampered = CorruptField(signed, "payload");
+        // Corrupt the SIGNATURE itself (an interior byte, still valid base64url), so the failure is a
+        // genuine signature-verification rejection — not a base64/JSON decode error that could pass
+        // before verification is even reached.
+        var tampered = CorruptSignature(signed);
         var act = async () => await w.Client.UnpackAsync(tampered);
-        await act.Should().ThrowAsync<Exception>("post-sign JWS tampering must be rejected at unpack");
+        await act.Should().ThrowAsync<DidComm.Exceptions.CryptoException>("post-sign JWS tampering must fail signature verification");
     }
 
     [Fact]
     public async Task A_self_consistent_Mallory_SIGNED_disclose_cannot_answer_the_query_for_Bob()
     {
-        var w = await BuildAsync();
+        await using var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
+        using var cts = new CancellationTokenSource();
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, Timeout.InfiniteTimeSpan, ct: cts.Token);
 
         // Mallory produces a fully valid, genuinely-signed disclose from herself (from = Mallory,
         // verified JWS signer = Mallory) with the guessed thid. It unpacks with Authenticated = true
@@ -186,13 +188,43 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
 
         await DispatchAsync(dispatcher, w.Client, signed);
         task.IsCompleted.Should().BeFalse("a genuinely-signed disclose from a third party must not answer Bob's query");
+
+        cts.Cancel(); // abandon the still-pending query so nothing leaks
+        await task.Invoking(t => t).Should().ThrowAsync<OperationCanceledException>();
     }
 
-    private static string CorruptField(string jsonEnvelope, string field)
+    // Flip an INTERIOR base64url char (not the last one, which could be dropped as non-canonical
+    // padding before the value is used) so the change survives decode and reaches the crypto check.
+    private static string CorruptFieldInterior(string jsonEnvelope, string field)
     {
         var node = System.Text.Json.Nodes.JsonNode.Parse(jsonEnvelope)!.AsObject();
-        var v = node[field]!.GetValue<string>();
-        node[field] = v[..^1] + (v[^1] == 'A' ? 'B' : 'A'); // still base64url, but the tag/signature fails
+        node[field] = Flip(node[field]!.GetValue<string>());
         return node.ToJsonString();
+    }
+
+    // Corrupt the JWS signature bytes (interior), so unpack fails at SIGNATURE VERIFICATION rather
+    // than at base64/JSON decode. Handles both flattened ("signature") and general ("signatures")
+    // JWS JSON shapes.
+    private static string CorruptSignature(string jws)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(jws)!.AsObject();
+        if (node["signature"] is System.Text.Json.Nodes.JsonNode flat)
+        {
+            node["signature"] = Flip(flat.GetValue<string>());
+        }
+        else
+        {
+            var sig = node["signatures"]!.AsArray()[0]!.AsObject();
+            sig["signature"] = Flip(sig["signature"]!.GetValue<string>());
+        }
+        return node.ToJsonString();
+    }
+
+    private static string Flip(string base64Url)
+    {
+        var i = base64Url.Length / 2; // an interior char
+        var c = base64Url[i];
+        var replacement = c == 'A' ? 'B' : 'A';
+        return base64Url[..i] + replacement + base64Url[(i + 1)..];
     }
 }

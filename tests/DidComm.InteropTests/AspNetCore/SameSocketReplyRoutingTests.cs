@@ -15,7 +15,9 @@ namespace DidComm.InteropTests.AspNetCore;
 /// </summary>
 public sealed class SameSocketReplyRoutingTests
 {
-    private static UnpackResult InboundFrom(string? from, params string[] to) =>
+    private static UnpackResult InboundFrom(string? from, params string[] to) => InboundFrom(from, authenticated: true, to);
+
+    private static UnpackResult InboundFrom(string? from, bool authenticated, params string[] to) =>
         new(
             Message: new MessageBuilder()
                 .WithType("https://didcomm.org/test/1.0/m")
@@ -23,8 +25,8 @@ public sealed class SameSocketReplyRoutingTests
                 .WithTo(to)
                 .Build(),
             Stack: Array.Empty<DidComm.Jose.EnvelopeKind>(),
-            Encrypted: false,
-            Authenticated: false,
+            Encrypted: authenticated,
+            Authenticated: authenticated,
             NonRepudiation: false,
             AnonymousSender: false,
             ContentEncryption: null,
@@ -42,6 +44,23 @@ public sealed class SameSocketReplyRoutingTests
             .WithFrom(from ?? string.Empty)
             .WithTo(to)
             .Build();
+
+    [Fact]
+    public void Rejects_a_same_socket_reply_to_an_unauthenticated_inbound()
+    {
+        // SSRF/reflector guard: an anoncrypt/plaintext inbound's `from` is attacker-settable and
+        // unresolved, so a same-socket reply to it (which would resolve that DID) is refused.
+        var inbound = InboundFrom("did:web:attacker.example", authenticated: false, "did:peer:bob");
+        var reply = Reply("did:peer:bob", "did:web:attacker.example");
+
+        var ok = DidCommEndpointRouteBuilderExtensions.TryRouteSameSocketReply(
+            inbound, reply, out var from, out var peerDid, out var reason);
+
+        ok.Should().BeFalse();
+        from.Should().BeNull();
+        peerDid.Should().BeNull();
+        reason.Should().Contain("authenticate");
+    }
 
     [Fact]
     public void Allows_reply_addressed_to_inbound_peer_and_returns_handler_chosen_from()

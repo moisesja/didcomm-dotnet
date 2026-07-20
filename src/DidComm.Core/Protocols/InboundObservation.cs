@@ -44,10 +44,23 @@ public sealed record InboundObservation(
     /// </summary>
     /// <param name="received">The unpack result for the inbound message.</param>
     public static InboundObservation FromUnpackResult(UnpackResult received)
+        => FromUnpackResult(received, out _);
+
+    /// <summary>
+    /// As <see cref="FromUnpackResult(UnpackResult)"/>, also reporting the message clone's approximate
+    /// size in bytes (the serialized JSON length) — used by the observer queue's byte-aware bound.
+    /// </summary>
+    /// <param name="received">The unpack result for the inbound message.</param>
+    /// <param name="approxBytes">The serialized JSON length of the cloned message, an approximate retained-size estimate.</param>
+    internal static InboundObservation FromUnpackResult(UnpackResult received, out int approxBytes)
     {
         ArgumentNullException.ThrowIfNull(received);
-        var clone = JsonSerializer.SerializeToNode(received.Message, DidCommJson.Default)!
-            .Deserialize<Message>(DidCommJson.Default)!;
+        // Serialize to a string once (measure it), then deserialize the snapshot: an immutable copy
+        // taken AT ENQUEUE, so a handler or caller mutating the live message after dispatch cannot
+        // change what an observer later sees.
+        var json = JsonSerializer.Serialize(received.Message, DidCommJson.Default);
+        approxBytes = json.Length;
+        var clone = JsonSerializer.Deserialize<Message>(json, DidCommJson.Default)!;
         return new InboundObservation(
             Message: clone,
             Encrypted: received.Encrypted,

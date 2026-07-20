@@ -11,7 +11,7 @@ namespace DidComm.Samples.Cookbook;
 /// without a real network. It plays "the other agent": it unpacks the message you send, runs it
 /// through the same dispatcher (so the built-in handler answers), and delivers any reply back into
 /// the dispatcher — which is what completes an initiator awaiting a response. In a real app this is
-/// your HTTP/WebSocket transport and the reply arrives at your own receive endpoint.
+/// your HTTP transport and the reply arrives at your own receive endpoint.
 /// </summary>
 internal sealed class LoopbackTransport(IServiceProvider services) : IDidCommTransport
 {
