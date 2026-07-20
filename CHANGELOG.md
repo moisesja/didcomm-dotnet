@@ -4,7 +4,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-06-22
 
 ### Added — fail-closed skid guard on authenticated decrypt (defense in depth, #52)
 
@@ -83,8 +83,8 @@ Closes **#50**. Lets an application observe inbound traffic whose PIURI is owned
   at-most-once and rate-limited logs report the actual message id, configured capacity/budget, and
   cumulative drops. Each accepted observer materializes its own clone from the pre-handler snapshot.
 - **Read-only, not a sandbox.** Each observer receives a defensive deep clone via `InboundObservation`
-  (never the live message, the facade, or the thread store); the clone prevents mutation *through the
-  payload*, but observers are trusted in-process host code registered at DI-composition time and are
+  (never the live message, the facade, or the thread store); the clone prevents mutation _through the
+  payload_, but observers are trusted in-process host code registered at DI-composition time and are
   not otherwise sandboxed. No observer code runs on the dispatch path — the `ProtocolUriFilter` getter
   is read once, guarded, at construction (a throwing getter disables that observer). The registered
   observer set is logged at construction (operator-auditable).
@@ -216,7 +216,7 @@ caught — and the fix folds in — two further residuals.
   duration. **Behavior change:** rejected requests now take ≥ the floor; legitimate received messages
   answer `202` and are never padded (the hot path is untouched), and `415`/`413` pre-decrypt rejections
   are unchanged. The cost is paid only on rejected — typically hostile or malformed — traffic.
-- **Red-team Finding 1 (folded in): floor measured after the body read.** The pad clock starts *after*
+- **Red-team Finding 1 (folded in): floor measured after the body read.** The pad clock starts _after_
   `ReadCappedAsync`, not at handler entry — otherwise a peer could pad the envelope toward
   `MaxReceiveBytes` so the (kid-independent) body read alone exhausts the floor, collapse the pad to
   zero, and re-expose the gap. Covered by `Large_body_rejection_is_still_padded_to_the_floor`.
@@ -276,15 +276,15 @@ Review remediation (PR #41 review):
   when the transport policy is unset, plus a complement proving the default blocking policy governs when
   no policy is configured anywhere — so the positive test cannot pass vacuously).
 - **#30 — open-redirect contract documented on the public API.** `OutOfBand.ReadWebRedirect` now carries
-  a `<remarks>` warning (surfaced in IntelliSense) that a non-null result is a *candidate* navigation
+  a `<remarks>` warning (surfaced in IntelliSense) that a non-null result is a _candidate_ navigation
   target, not a vetted one, and the consumer MUST confirm it before navigating.
 - **#31 — `AckRequested` limitation documented.** `ThreadState.AckRequested` now documents that, if the
   answering pure-ACK never arrives, the flag persists until the entry is evicted from the bounded store
-  (#21), during which a later *unsolicited* pure-ACK on the same thread is dropped (a benign over-drop —
+  (#21), during which a later _unsolicited_ pure-ACK on the same thread is dropped (a benign over-drop —
   pure ACKs are inert; rule-2 remains the actual loop barrier).
 - **`IsSafeRedirectUrl` numeric-IP handling clarified.** Added a comment pinning that `System.Uri`
   canonicalizes numeric-encoded IPv4 literals (decimal/hex/octal/short) to dotted form with
-  `HostNameType == IPv4` *before* the guard runs, so the private/reserved check catches them (verified
+  `HostNameType == IPv4` _before_ the guard runs, so the private/reserved check catches them (verified
   empirically) — and noting the guard would need its own normalization if a future parser stopped
   canonicalizing.
 
@@ -305,7 +305,7 @@ first cut. Full suite (631 tests) green.
   tripped thread's silenced decision survives a fresh-`pthid` flood without exempting entries from
   eviction (still bounded). Registered as its own DI singleton so the budget persists regardless of the
   handler's lifetime. Residual: a determined attacker can still pressure the bound with distinct-`pthid`
-  *error reports* (far costlier than the original cheap-`thid` reset); a distributed/persistent budget
+  _error reports_ (far costlier than the original cheap-`thid` reset); a distributed/persistent budget
   is the path to a hard guarantee for horizontally-scaled hosts.
 - **Unrepliable-stream counter/log flood capped (#29).** A sustained stream of unrepliable
   (anoncrypt/from-less) over-threshold reports previously incremented the counter and emitted an Info
