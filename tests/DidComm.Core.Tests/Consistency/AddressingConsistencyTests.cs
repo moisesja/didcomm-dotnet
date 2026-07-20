@@ -34,6 +34,23 @@ public sealed class AddressingConsistencyTests
         AddressingConsistency.CheckAuthcryptFromMatchesSkid(from: null, "did:example:alice#k");
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Authenticated_decrypt_without_surfaced_skid_fails_closed(string? skid)
+    {
+        // Issue #52 — if the JOSE layer's IsAuthenticated ⟺ non-empty-skid invariant ever
+        // regressed, the guard must reject rather than let the from↔skid binding no-op.
+        Action act = () => AddressingConsistency.CheckAuthcryptSkidSurfaced(skid);
+        act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-01*");
+    }
+
+    [Fact]
+    public void Authenticated_decrypt_with_surfaced_skid_passes()
+    {
+        AddressingConsistency.CheckAuthcryptSkidSurfaced("did:example:alice#key-x25519-1");
+    }
+
     [Fact]
     public void Recipient_kid_membership_succeeds_when_subject_matches_any_to_entry()
     {

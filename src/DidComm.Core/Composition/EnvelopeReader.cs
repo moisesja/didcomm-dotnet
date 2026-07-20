@@ -318,6 +318,14 @@ internal static class EnvelopeReader
 
                     if (jweResult.IsAuthenticated)
                     {
+                        // Fail closed: an authenticated decrypt MUST surface the sender skid,
+                        // else the FR-CONSIST-01 from↔skid check in the Plaintext branch would
+                        // silently no-op while the message is still reported authenticated —
+                        // letting 'from' assert an identity the envelope never bound. Guaranteed
+                        // by DataProofs' IsAuthenticated ⟺ non-empty-skid contract today; assert
+                        // it so the identity binding never depends on the delegated parser
+                        // upholding it (issue #52; parity with the JWS signer-kid guard above).
+                        AddressingConsistency.CheckAuthcryptSkidSurfaced(jweResult.SenderKid);
                         authenticated = true;
                         senderKid = jweResult.SenderKid;
                         shape.Add(LayerShape.AuthEncrypt);
