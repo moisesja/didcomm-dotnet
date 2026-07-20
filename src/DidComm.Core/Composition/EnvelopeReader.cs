@@ -4,6 +4,7 @@ using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Messages;
+using DidComm.Protocols;
 using DidComm.Secrets;
 using DpEnc = DataProofsDotnet.Jose.Encryption;
 using DpSig = DataProofsDotnet.Jose.Signing;
@@ -158,6 +159,21 @@ internal static class EnvelopeReader
                         if (signerKid is not null && message.From is not null)
                             await AddressingConsistency.CheckResolverAuthorizationAsync(message.From, signerKid, "authentication", resolverCheck, ct).ConfigureAwait(false);
                     }
+
+                    // Preserve the exact verified plaintext and the trust fields established above
+                    // before the mutable public Message leaves the unpack boundary. Protocol
+                    // correlators and observers consume this immutable sidecar, so later caller or
+                    // handler mutation cannot rewrite the identity/body they act on.
+                    InboundMessageSnapshot.RegisterVerified(
+                        message,
+                        current,
+                        encrypted,
+                        authenticated,
+                        nonRepudiation,
+                        anonymous,
+                        senderKid,
+                        signerKid,
+                        recipientKid);
 
                     return new UnpackResult(
                         Message: message,

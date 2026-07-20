@@ -5,6 +5,7 @@ using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Threading;
 using DidComm.Transports;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 // L-014: alias the DiscoverFeatures static API class to dodge namespace shadowing.
@@ -41,22 +42,24 @@ public sealed class DiscoverFeaturesClientTests
     private static UnpackResult Disclose(
         string thid, string from = Bob, bool authenticated = true,
         string? senderKid = "did:peer:bob#key-1", string? signerKid = null,
+        string to = Alice, string? recipientKid = null, bool? encrypted = null,
         params FeatureDisclosure[] disclosures)
     {
-        var msg = DiscoverFeaturesApi.CreateDisclose(from: from, to: Alice, thid: thid, disclosures: disclosures);
+        var msg = DiscoverFeaturesApi.CreateDisclose(from: from, to: to, thid: thid, disclosures: disclosures);
+        var isEncrypted = encrypted ?? (authenticated && senderKid is not null);
         return new UnpackResult(
             Message: msg,
             Stack: Array.Empty<DidComm.Jose.EnvelopeKind>(),
-            Encrypted: authenticated,
+            Encrypted: isEncrypted,
             Authenticated: authenticated,
-            NonRepudiation: false,
-            AnonymousSender: !authenticated,
+            NonRepudiation: authenticated && signerKid is not null,
+            AnonymousSender: isEncrypted && !authenticated,
             ContentEncryption: null,
             KeyWrap: null,
             SignatureAlgorithm: null,
             SignerKid: authenticated ? signerKid : null,
             SenderKid: authenticated ? senderKid : null,
-            RecipientKid: null,
+            RecipientKid: isEncrypted ? recipientKid ?? $"{to}#key-1" : null,
             AllRecipientKids: Array.Empty<string>(),
             FromPrior: null);
     }
@@ -65,8 +68,35 @@ public sealed class DiscoverFeaturesClientTests
     // dispatcher; here we call it directly with the unpacked disclose.
     private static Task Feed(DiscoverFeaturesClient client, UnpackResult disclose)
     {
-        ((IInboundCorrelator)client).OnInbound(disclose);
+        ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(disclose));
         return Task.CompletedTask;
+    }
+
+    private sealed class MutatingHandler(Action<Message> mutate, bool throws = false) : IProtocolHandler
+    {
+        public string ProtocolUri => "https://didcomm.org/discover-features/2.0";
+
+        public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+        {
+            mutate(message);
+            return throws
+                ? Task.FromException<Message?>(new InvalidOperationException("handler exploded"))
+                : Task.FromResult<Message?>(null);
+        }
+    }
+
+    private sealed class CountingLogger<T> : ILogger<T>
+    {
+        private int _warnings;
+        public int Warnings => Volatile.Read(ref _warnings);
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+                Interlocked.Increment(ref _warnings);
+        }
     }
 
     [Fact]
@@ -115,6 +145,81 @@ public sealed class DiscoverFeaturesClientTests
         outcome.Result.Should().Be(DispatchResult.NoReply, "the responder-side handler still drops a disclose (terminal leaf)");
         var disclosures = await task;
         disclosures.Should().ContainSingle(d => d.Id == "https://didcomm.org/empty/1.0");
+    }
+
+    [Fact]
+    public async Task Correlation_uses_the_pre_handler_snapshot_even_when_the_handler_mutates_then_throws()
+    {
+        var client = Client(out var sent);
+        var registry = new ProtocolHandlerRegistry();
+        registry.Register(new MutatingHandler(message =>
+        {
+            message.From = Mallory;
+            message.To = new[] { Mallory };
+            message.Thid = "rewritten";
+            message.Body = null;
+        }, throws: true));
+        await using var dispatcher = new ProtocolDispatcher(
+            registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null,
+            observers: null, correlators: new IInboundCorrelator[] { client });
+
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var inbound = Authcrypt(DiscoverFeaturesApi.CreateDisclose(Bob, Alice, query.Id,
+            new FeatureDisclosure { FeatureType = "protocol", Id = "original" }));
+
+        var dispatch = async () => await dispatcher.DispatchAsync(inbound, client: null, new DidCommOptions());
+        await dispatch.Should().ThrowAsync<InvalidOperationException>();
+
+        (await queryTask).Should().ContainSingle(d => d.Id == "original",
+            "correlation must complete from the immutable pre-handler message even when handler code mutates and fails");
+    }
+
+    [Fact]
+    public async Task Handler_cannot_rewrite_a_wrong_responder_into_the_expected_identity()
+    {
+        var client = Client(out var sent);
+        var registry = new ProtocolHandlerRegistry();
+        registry.Register(new MutatingHandler(message => message.From = Bob));
+        await using var dispatcher = new ProtocolDispatcher(
+            registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null,
+            observers: null, correlators: new IInboundCorrelator[] { client });
+
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var forged = DiscoverFeaturesApi.CreateDisclose(Mallory, Alice, query.Id,
+            new FeatureDisclosure { FeatureType = "protocol", Id = "forged" });
+
+        await dispatcher.DispatchAsync(Authcrypt(forged), client: null, new DidCommOptions());
+        queryTask.IsCompleted.Should().BeFalse(
+            "the responder check must use the immutable pre-handler sender, not the handler-rewritten Message.From");
+
+        var legitimate = DiscoverFeaturesApi.CreateDisclose(Bob, Alice, query.Id,
+            new FeatureDisclosure { FeatureType = "protocol", Id = "legit" });
+        await dispatcher.DispatchAsync(Authcrypt(legitimate), client: null, new DidCommOptions());
+        (await queryTask).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
+    public async Task Synthetic_snapshot_failure_is_guarded_and_cannot_clobber_dispatch()
+    {
+        var client = Client(out _);
+        var registry = new ProtocolHandlerRegistry();
+        registry.Register(new MutatingHandler(_ => { }));
+        await using var dispatcher = new ProtocolDispatcher(
+            registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null,
+            observers: null, correlators: new IInboundCorrelator[] { client });
+        var message = DiscoverFeaturesApi.CreateDisclose(Bob, Alice, "no-pending-query");
+        message.AdditionalHeaders = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["undefined-cannot-serialize"] = default,
+        };
+
+        var dispatch = async () => await dispatcher.DispatchAsync(Authcrypt(message), client: null, new DidCommOptions());
+
+        var result = await dispatch.Should().NotThrowAsync(
+            "an optional internal snapshot must not turn a valid handler outcome into a dispatcher failure");
+        result.Which.Result.Should().Be(DispatchResult.NoReply);
     }
 
     [Fact]
@@ -191,6 +296,34 @@ public sealed class DiscoverFeaturesClientTests
     }
 
     [Fact]
+    public async Task Disclose_not_addressed_to_the_query_requester_is_ignored()
+    {
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Feed(client, Disclose(query.Id, to: Mallory, disclosures: Forged()));
+        task.IsCompleted.Should().BeFalse("a response for another local identity cannot answer Alice's query");
+
+        await Feed(client, Disclose(query.Id, disclosures: Legit()));
+        (await task).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
+    public async Task Encrypted_disclose_decrypted_for_another_local_identity_is_ignored()
+    {
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Feed(client, Disclose(query.Id, recipientKid: $"{Mallory}#key-1", disclosures: Forged()));
+        task.IsCompleted.Should().BeFalse("message.to alone is insufficient in a multi-DID secret store; the decrypting recipient must be Alice");
+
+        await Feed(client, Disclose(query.Id, disclosures: Legit()));
+        (await task).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
     public async Task Authenticated_disclose_without_a_sender_or_signer_key_id_is_ignored()
     {
         // Defense in depth (F4): `Authenticated` must be backed by an actual authenticating key id
@@ -220,6 +353,27 @@ public sealed class DiscoverFeaturesClientTests
             disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "signed-ok" }));
 
         (await task).Should().ContainSingle(d => d.Id == "signed-ok");
+    }
+
+    [Fact]
+    public async Task Authenticating_key_ids_must_match_the_claimed_responder_did_subject()
+    {
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Feed(client, Disclose(query.Id, senderKid: $"{Mallory}#key-1", disclosures: Forged()));
+        task.IsCompleted.Should().BeFalse("a Bob plaintext cannot be authenticated by Mallory's authcrypt key");
+
+        await Feed(client, Disclose(query.Id, senderKid: $"{Bob}#key-1", signerKid: $"{Mallory}#sig-1",
+            disclosures: Forged()));
+        task.IsCompleted.Should().BeFalse("every present authenticating key must agree with the claimed sender");
+
+        await Feed(client, Disclose(query.Id, senderKid: "not-a-did-key", disclosures: Forged()));
+        task.IsCompleted.Should().BeFalse("an unparseable key id cannot back an authenticated sender claim");
+
+        await Feed(client, Disclose(query.Id, disclosures: Legit()));
+        (await task).Should().ContainSingle(d => d.Id == "legit");
     }
 
     // NOTE: correlation compares DID *subjects* (PRD §4.3, `DidSubject.SameDidSubject`), which is a
@@ -262,6 +416,122 @@ public sealed class DiscoverFeaturesClientTests
     }
 
     [Fact]
+    public async Task Disclosure_parsing_runs_after_the_inline_correlator_returns()
+    {
+        var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var parserStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseParser = new ManualResetEventSlim();
+        var client = new DiscoverFeaturesClient(
+            (message, _, _) => { sent.TrySetResult(message); return Task.CompletedTask; },
+            snapshot =>
+            {
+                parserStarted.TrySetResult();
+                releaseParser.Wait();
+                return DiscoverFeaturesApi.ReadDisclosures(snapshot.DeserializeMessage());
+            });
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var snapshot = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit()));
+
+        var correlate = Task.Run(() => ((IInboundCorrelator)client).OnInbound(snapshot));
+        await parserStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await correlate.WaitAsync(TimeSpan.FromSeconds(5));
+        queryTask.IsCompleted.Should().BeFalse("the requester continuation is blocked in its parser, not the receive correlator");
+
+        releaseParser.Set();
+        (await queryTask).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
+    public async Task Reentrant_send_response_never_parses_on_the_calling_transport_thread()
+    {
+        DiscoverFeaturesClient? client = null;
+        var parserThread = 0;
+        client = new DiscoverFeaturesClient(
+            (query, _, _) =>
+            {
+                var response = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit()));
+                ((IInboundCorrelator)client!).OnInbound(response);
+                return Task.CompletedTask;
+            },
+            snapshot =>
+            {
+                parserThread = Environment.CurrentManagedThreadId;
+                return DiscoverFeaturesApi.ReadDisclosures(snapshot.DeserializeMessage());
+            });
+
+        var callerThread = 0;
+        var completed = new TaskCompletionSource<IReadOnlyList<FeatureDisclosure>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            callerThread = Environment.CurrentManagedThreadId;
+            try
+            {
+                var result = client.QueryFeaturesAsync(
+                    Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                completed.TrySetResult(result);
+            }
+            catch (Exception ex)
+            {
+                completed.TrySetException(ex);
+            }
+        });
+        thread.Start();
+
+        var disclosures = await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        thread.Join(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        disclosures.Should().ContainSingle(d => d.Id == "legit");
+        parserThread.Should().NotBe(callerThread,
+            "even an already-completed response must force parsing off the reentrant send/transport stack");
+    }
+
+    [Fact]
+    public async Task Duplicate_valid_disclosures_have_one_atomic_winner_and_parse_once()
+    {
+        var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var parses = 0;
+        var client = new DiscoverFeaturesClient(
+            (message, _, _) => { sent.TrySetResult(message); return Task.CompletedTask; },
+            snapshot =>
+            {
+                Interlocked.Increment(ref parses);
+                return DiscoverFeaturesApi.ReadDisclosures(snapshot.DeserializeMessage());
+            });
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var correlator = (IInboundCorrelator)client;
+
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id,
+            disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "winner" })));
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id,
+            disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "duplicate" })));
+
+        (await queryTask).Should().ContainSingle(d => d.Id == "winner");
+        parses.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Invalid_known_thread_logging_is_rate_limited()
+    {
+        var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var logger = new CountingLogger<DiscoverFeaturesClient>();
+        var client = new DiscoverFeaturesClient(
+            (message, _, _) => { sent.TrySetResult(message); return Task.CompletedTask; }, logger);
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var forged = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, authenticated: false, disclosures: Forged()));
+        var correlator = (IInboundCorrelator)client;
+
+        for (var i = 0; i < 10_000; i++)
+            correlator.OnInbound(forged);
+
+        logger.Warnings.Should().Be(11, "only rejection 1 and each multiple of 1000 should log");
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit())));
+        (await queryTask).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
     public async Task Cancellation_abandons_the_pending_query()
     {
         var client = Client(out var sent);
@@ -272,6 +542,57 @@ public sealed class DiscoverFeaturesClientTests
         cts.Cancel();
 
         await ((Func<Task>)(async () => await task)).Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task Response_and_cancellation_have_one_terminal_winner_and_never_parse_after_cancellation_wins()
+    {
+        // Exercise the race repeatedly. The response and cancellation callbacks both compete on the
+        // PendingQuery CAS: success parses exactly once; cancellation parses zero times. A late token
+        // signal cannot retroactively replace a response that already won the terminal transition.
+        for (var i = 0; i < 256; i++)
+        {
+            var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var parses = 0;
+            var client = new DiscoverFeaturesClient(
+                (message, _, _) => { sent.TrySetResult(message); return Task.CompletedTask; },
+                snapshot =>
+                {
+                    Interlocked.Increment(ref parses);
+                    return DiscoverFeaturesApi.ReadDisclosures(snapshot.DeserializeMessage());
+                });
+            using var cts = new CancellationTokenSource();
+            var queryTask = client.QueryFeaturesAsync(
+                Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(30), ct: cts.Token);
+            var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var response = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit()));
+            using var start = new ManualResetEventSlim();
+
+            var complete = Task.Run(() =>
+            {
+                start.Wait();
+                ((IInboundCorrelator)client).OnInbound(response);
+            });
+            var cancel = Task.Run(() =>
+            {
+                start.Wait();
+                cts.Cancel();
+            });
+            start.Set();
+            await Task.WhenAll(complete, cancel).WaitAsync(TimeSpan.FromSeconds(5));
+
+            try
+            {
+                (await queryTask.WaitAsync(TimeSpan.FromSeconds(5))).Should()
+                    .ContainSingle(disclosure => disclosure.Id == "legit");
+                Volatile.Read(ref parses).Should().Be(1);
+            }
+            catch (OperationCanceledException)
+            {
+                Volatile.Read(ref parses).Should().Be(0,
+                    "a cancellation-winning terminal transition cancels the TCS before parsing");
+            }
+        }
     }
 
     [Fact]
@@ -308,8 +629,8 @@ public sealed class DiscoverFeaturesClientTests
         KeyWrap: null,
         SignatureAlgorithm: null,
         SignerKid: null,
-        SenderKid: $"{Bob}#key-1",
-        RecipientKid: null,
+        SenderKid: $"{msg.From}#key-1",
+        RecipientKid: $"{msg.To![0]}#key-1",
         AllRecipientKids: Array.Empty<string>(),
         FromPrior: null);
 }

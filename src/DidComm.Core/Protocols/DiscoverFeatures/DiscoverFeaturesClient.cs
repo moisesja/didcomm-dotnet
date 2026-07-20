@@ -17,14 +17,14 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Correlation runs as a fast, <strong>lossless</strong>, synchronous inbound correlator
+/// Correlation runs as a small synchronous inbound correlator
 /// (<see cref="IInboundCorrelator"/>), NOT through the best-effort <see cref="IProtocolObserver"/>
 /// queue. The dispatcher hands each dispatched inbound message to this correlator inline; it matches
 /// a <c>disclose</c> to a pending query by <c>thid</c> == the query's <c>id</c> and completes the
-/// awaiting caller. Because the work is O(1) and non-blocking, it is not subject to queue drops — a
-/// genuine authenticated response completes even under a flood of unsolicited disclosures. The
-/// responder-side handler is untouched — an inbound <c>disclose</c> remains a terminal leaf in
-/// dispatch, whether or not anyone is awaiting it.
+/// awaiting caller. The inline phase performs only bounded header/trust checks and an atomic claim;
+/// typed body deserialization runs later on the requester's continuation. It is not subject to
+/// observer-queue drops, while an inbound <c>disclose</c> remains a terminal leaf in dispatch whether
+/// or not anyone is awaiting it.
 /// </para>
 /// <para>
 /// <strong>Spoofing defense.</strong> A <c>disclose</c> completes a pending query only when the
@@ -37,13 +37,58 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// </remarks>
 public sealed class DiscoverFeaturesClient : IInboundCorrelator
 {
+    private const long RejectedLogEvery = 1000;
+
     private readonly Func<Message, SendOptions, CancellationToken, Task> _send;
+    private readonly Func<InboundMessageSnapshot, IReadOnlyList<FeatureDisclosure>> _parseDisclosures;
     private readonly ILogger<DiscoverFeaturesClient>? _logger;
     private readonly ConcurrentDictionary<string, PendingQuery> _pending = new(StringComparer.Ordinal);
 
-    private sealed record PendingQuery(
-        string ResponderDid,
-        TaskCompletionSource<IReadOnlyList<FeatureDisclosure>> Completion);
+    private sealed class PendingQuery
+    {
+        private const int Waiting = 0;
+        private const int Completed = 1;
+        private const int Abandoned = 2;
+
+        private int _terminalState;
+        private long _rejected;
+
+        public PendingQuery(string requesterDid, string responderDid)
+        {
+            RequesterDid = requesterDid;
+            ResponderDid = responderDid;
+            Completion = new TaskCompletionSource<InboundMessageSnapshot>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public string RequesterDid { get; }
+        public string ResponderDid { get; }
+        public TaskCompletionSource<InboundMessageSnapshot> Completion { get; }
+        public bool IsWaiting => Volatile.Read(ref _terminalState) == Waiting;
+
+        public bool TryComplete(InboundMessageSnapshot snapshot)
+        {
+            if (Interlocked.CompareExchange(ref _terminalState, Completed, Waiting) != Waiting)
+                return false;
+            Completion.TrySetResult(snapshot);
+            return true;
+        }
+
+        public bool TryAbandon(CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.CompareExchange(ref _terminalState, Abandoned, Waiting) != Waiting)
+                return false;
+            if (cancellationToken.CanBeCanceled)
+                Completion.TrySetCanceled(cancellationToken);
+            return true;
+        }
+
+        public bool ShouldLogRejection(out long rejected)
+        {
+            rejected = Interlocked.Increment(ref _rejected);
+            return rejected == 1 || rejected % RejectedLogEvery == 0;
+        }
+    }
 
     /// <summary>Construct the initiator client over the DIDComm facade.</summary>
     /// <param name="client">The facade used to send the <c>queries</c> message (requires a transport router, like any <see cref="DidCommClient.SendAsync"/> caller).</param>
@@ -59,9 +104,23 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
     internal DiscoverFeaturesClient(
         Func<Message, SendOptions, CancellationToken, Task> send,
         ILogger<DiscoverFeaturesClient>? logger = null)
+        : this(
+            send,
+            static snapshot => DiscoverFeatures.ReadDisclosures(snapshot.DeserializeMessage()),
+            logger)
+    {
+    }
+
+    /// <summary>Test seam that makes off-receive-path disclosure parsing directly observable.</summary>
+    internal DiscoverFeaturesClient(
+        Func<Message, SendOptions, CancellationToken, Task> send,
+        Func<InboundMessageSnapshot, IReadOnlyList<FeatureDisclosure>> parseDisclosures,
+        ILogger<DiscoverFeaturesClient>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(send);
+        ArgumentNullException.ThrowIfNull(parseDisclosures);
         _send = send;
+        _parseDisclosures = parseDisclosures;
         _logger = logger;
     }
 
@@ -98,12 +157,11 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
             throw new ArgumentOutOfRangeException(nameof(timeout), timeout, "Timeout must be positive (or Timeout.InfiniteTimeSpan).");
 
         var message = DiscoverFeatures.CreateQuery(from, to, queries.ToArray());
-        var completion = new TaskCompletionSource<IReadOnlyList<FeatureDisclosure>>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new PendingQuery(from, to);
 
         // Register BEFORE sending: on a fast same-socket transport the disclose can arrive
         // before SendAsync even returns.
-        if (!_pending.TryAdd(message.Id, new PendingQuery(to, completion)))
+        if (!_pending.TryAdd(message.Id, pending))
             throw new InvalidOperationException($"Duplicate pending Discover Features query id '{message.Id}'.");
 
         // One deadline over BOTH the send and the wait. A linked token carries the timeout into the
@@ -113,6 +171,14 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         using var timeoutCts = timeout == Timeout.InfiniteTimeSpan ? null : new CancellationTokenSource(timeout);
         using var linked = timeoutCts is null ? null : CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var effectiveCt = linked?.Token ?? ct;
+        using var cancellationRegistration = effectiveCt.Register(() =>
+        {
+            // Cancellation and a valid response compete on PendingQuery's single terminal CAS.
+            // The winner removes this exact dictionary entry and settles the TCS; there is no
+            // remove-before-complete window in which a response can be lost or parsed twice.
+            if (pending.TryAbandon(effectiveCt))
+                RemovePending(message.Id, pending);
+        });
         try
         {
             await _send(
@@ -123,7 +189,15 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
                     ServiceEndpointOverride: serviceEndpointOverride),
                 effectiveCt).ConfigureAwait(false);
 
-            return await completion.Task.WaitAsync(effectiveCt).ConfigureAwait(false);
+            var disclose = await pending.Completion.Task.ConfigureAwait(false);
+            // The TCS is settled only by PendingQuery's terminal CAS. Once a response wins that CAS,
+            // a later cancellation must not retroactively replace it after body parsing has begun.
+            // Conversely, when cancellation wins, the await above throws and parsing never runs.
+            // Force an asynchronous thread-pool continuation even when a reentrant/loopback send
+            // completed the TCS before `_send` returned, so parsing never extends the inbound
+            // dispatcher/correlator call stack.
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+            return _parseDisclosures(disclose);
         }
         catch (OperationCanceledException) when (timeoutCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
         {
@@ -132,24 +206,23 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         }
         finally
         {
-            _pending.TryRemove(message.Id, out _);
+            pending.TryAbandon();
+            RemovePending(message.Id, pending);
         }
     }
 
     /// <summary>
-    /// Correlate a dispatched inbound message to a pending query (FR-PROTO-05a). Synchronous, O(1),
-    /// non-blocking, and lossless — invoked inline by the dispatcher, guarded, per
-    /// <see cref="IInboundCorrelator"/>. Reads directly from the <see cref="UnpackResult"/> (no clone
-    /// needed: it only reads, and it runs inline before the caller regains control to mutate).
+    /// Correlate an immutable inbound snapshot to a pending query (FR-PROTO-05a). Invoked inline by
+    /// the dispatcher before application handlers and guarded per <see cref="IInboundCorrelator"/>.
+    /// The bounded hook only validates fixed headers/trust metadata and atomically transfers the
+    /// snapshot; disclosure parsing runs on the awaiting requester's continuation.
     /// </summary>
-    /// <param name="received">The unpack result for the dispatched inbound message.</param>
-    void IInboundCorrelator.OnInbound(UnpackResult received)
+    /// <param name="received">The immutable plaintext/trust snapshot created during unpack.</param>
+    void IInboundCorrelator.OnInbound(InboundMessageSnapshot received)
     {
-        var message = received.Message;
-
-        if (!string.Equals(message.Type, DiscoverFeatures.DiscloseType, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(received.Type, DiscoverFeatures.DiscloseType, StringComparison.OrdinalIgnoreCase))
             return;
-        if (message.Thid is not { Length: > 0 } thid || !_pending.TryGetValue(thid, out var pending))
+        if (received.Thid is not { Length: > 0 } thid || !_pending.TryGetValue(thid, out var pending) || !pending.IsWaiting)
             return; // unsolicited disclose — stays a terminal leaf (FR-PROTO-05)
 
         // Spoofing defense: never complete a waiter off an unauthenticated envelope or a sender
@@ -157,9 +230,8 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         // deny the legitimate response.
         if (!received.Authenticated)
         {
-            _logger?.LogWarning(
-                "Ignored a 'disclose' for pending query {Thid}: envelope does not authenticate the sender (anoncrypt/plaintext). Message id: {MessageId}.",
-                thid, message.Id);
+            LogRejected(pending, thid, received,
+                "envelope does not authenticate the sender (anoncrypt/plaintext)");
             return;
         }
         // Defense in depth: `Authenticated` implies the sender is bound to an authenticating key id
@@ -169,25 +241,67 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         // skid/signer kid cannot let a forged `from` complete the query. Fail closed.
         if (string.IsNullOrEmpty(received.SenderKid) && string.IsNullOrEmpty(received.SignerKid))
         {
-            _logger?.LogWarning(
-                "Ignored a 'disclose' for pending query {Thid}: envelope reports authenticated but carries no sender/signer key id. Message id: {MessageId}.",
-                thid, message.Id);
+            LogRejected(pending, thid, received,
+                "envelope reports authenticated but carries no sender/signer key id");
+            return;
+        }
+        if ((!string.IsNullOrEmpty(received.SenderKid)
+                && !DidSubject.SameDidSubject(received.SenderKid, received.From))
+            || (!string.IsNullOrEmpty(received.SignerKid)
+                && !DidSubject.SameDidSubject(received.SignerKid, received.From)))
+        {
+            LogRejected(pending, thid, received,
+                "plaintext sender does not match its authenticating key DID subject");
             return;
         }
         // Compare DID subjects, not raw strings (PRD §4.3): `from` and the queried `to` are DIDs or
         // DID URLs without a fragment, so a subject-wise match avoids dropping a legitimate reply
         // whose `from` differs only in DID-URL form. Still fails closed — an unparseable or
         // different-subject `from` does not complete the waiter.
-        if (!DidSubject.SameDidSubject(message.From, pending.ResponderDid))
+        if (!DidSubject.SameDidSubject(received.From, pending.ResponderDid))
         {
-            _logger?.LogWarning(
-                "Ignored a 'disclose' for pending query {Thid}: sender '{From}' is not the queried responder. Message id: {MessageId}.",
-                thid, message.From, message.Id);
+            LogRejected(pending, thid, received,
+                "sender is not the queried responder");
             return;
         }
 
-        // TrySetResult with RunContinuationsAsynchronously (see the TCS construction) never runs the
-        // awaiter's continuation inline, so this returns immediately and cannot gate the dispatch path.
-        pending.Completion.TrySetResult(DiscoverFeatures.ReadDisclosures(message));
+        // Bind the response to the local identity that originated this exact query. `to` is covered by
+        // the authenticated envelope/signature; on encrypted messages RecipientKid additionally proves
+        // which local DID actually decrypted it in a multi-tenant secrets store.
+        if (!received.To.Any(to => DidSubject.SameDidSubject(to, pending.RequesterDid)))
+        {
+            LogRejected(pending, thid, received,
+                "message is not addressed to the requester");
+            return;
+        }
+        if (received.Encrypted && !DidSubject.SameDidSubject(received.RecipientKid, pending.RequesterDid))
+        {
+            LogRejected(pending, thid, received,
+                "envelope was not decrypted by the requester");
+            return;
+        }
+
+        // One atomic terminal transition wins against duplicates and timeout/cancellation cleanup.
+        // RunContinuationsAsynchronously prevents typed body parsing from running on this receive path.
+        if (pending.TryComplete(received))
+            RemovePending(thid, pending);
     }
+
+    private void LogRejected(
+        PendingQuery pending,
+        string thid,
+        InboundMessageSnapshot received,
+        string reason)
+    {
+        if (_logger is null || !pending.ShouldLogRejection(out var rejected))
+            return;
+
+        _logger.LogWarning(
+            "Ignored a 'disclose' for pending query {Thid}: {Reason}. Message id: {MessageId}; from: {From}; to: {To}; recipient kid: {RecipientKid}; requester: {Requester}; responder: {Responder}. Rejected known-thread disclosures: {Rejected} (first, then every {LogEvery}).",
+            thid, reason, received.Id, received.From, received.To, received.RecipientKid,
+            pending.RequesterDid, pending.ResponderDid, rejected, RejectedLogEvery);
+    }
+
+    private void RemovePending(string thid, PendingQuery pending)
+        => _pending.TryRemove(new KeyValuePair<string, PendingQuery>(thid, pending));
 }

@@ -1,16 +1,14 @@
-using DidComm.Facade;
-
 namespace DidComm.Protocols;
 
 /// <summary>
-/// An internal, trusted, <strong>synchronous and lossless</strong> inbound hook the
-/// <see cref="ProtocolDispatcher"/> invokes inline (guarded) after it has computed the dispatch
-/// outcome. Unlike the public <see cref="IProtocolObserver"/> seam — which is for arbitrary,
+/// An internal, trusted, synchronous inbound hook the
+/// <see cref="ProtocolDispatcher"/> invokes inline (guarded) before application handler code. Unlike
+/// the public <see cref="IProtocolObserver"/> seam — which is for arbitrary,
 /// possibly-slow application code and is therefore delivered off-path through a bounded queue that
-/// may drop under load — a correlator is library-owned plumbing whose work is O(1) and non-blocking
-/// (a dictionary lookup + a <c>TaskCompletionSource.TrySetResult</c>), so it runs inline and is
-/// never subject to queue drops. That is what lets an initiator's genuine, authenticated response
-/// complete even while an attacker floods the same PIURI with unsolicited traffic.
+/// may drop under load — a correlator is library-owned plumbing whose inline work is bounded to
+/// immutable header/trust matching plus a <c>TaskCompletionSource.TrySetResult</c>. It performs no
+/// body parsing or I/O and is never subject to observer-queue drops. A matching response therefore
+/// competes directly for its pending operation instead of waiting behind the observer firehose.
 /// </summary>
 /// <remarks>
 /// Contract: <see cref="OnInbound"/> MUST return promptly, MUST NOT block or perform I/O, and MUST
@@ -22,7 +20,7 @@ namespace DidComm.Protocols;
 /// </remarks>
 internal interface IInboundCorrelator
 {
-    /// <summary>Inspect a dispatched inbound message and complete any matching pending operation. Fast, non-blocking, no I/O.</summary>
-    /// <param name="received">The unpack result for the inbound message. Read-only in practice; do not mutate.</param>
-    void OnInbound(UnpackResult received);
+    /// <summary>Inspect an immutable inbound snapshot and complete any matching pending operation. Fast, non-blocking, no I/O.</summary>
+    /// <param name="received">The immutable plaintext/trust snapshot created at the unpack boundary.</param>
+    void OnInbound(InboundMessageSnapshot received);
 }

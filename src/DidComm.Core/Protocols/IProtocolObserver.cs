@@ -5,9 +5,9 @@ namespace DidComm.Protocols;
 /// <see cref="ProtocolDispatcher"/> attempts to deliver every inbound message that matches
 /// <see cref="ProtocolUriFilter"/> — for every outcome, including <see cref="DispatchResult.NoHandler"/>
 /// and loop-guard drops — so a second consumer can observe traffic whose PIURI is owned by a
-/// built-in handler (e.g. a higher-level state machine reacting to <c>report-problem</c>, or the
-/// Discover Features initiator client correlating a <c>disclose</c> to its pending query) without
-/// replacing that handler.
+/// built-in handler (e.g. a higher-level state machine reacting to <c>report-problem</c>) without
+/// replacing that handler. Loss-sensitive built-in correlation uses a separate internal inline hook,
+/// not this best-effort extension queue.
 /// </summary>
 /// <remarks>
 /// <para>

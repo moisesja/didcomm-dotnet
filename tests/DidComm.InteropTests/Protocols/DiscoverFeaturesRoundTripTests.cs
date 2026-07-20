@@ -1,6 +1,8 @@
 using DidComm.AspNetCore;
+using DidComm.Consistency;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
+using DidComm.Json;
 using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Resolution;
@@ -62,11 +64,13 @@ public sealed class DiscoverFeaturesRoundTripTests
         // a fake service resolver maps Alice's DID to her endpoint; loopback is permitted so the SSRF
         // guard allows the in-process TestServer address.
         var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, isResponder: true,
-            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"));
+            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"),
+            localDid: bobDid, expectedPeerDid: aliceDid);
 
         // Alice: initiator — her endpoint dispatches the inbound disclose to her inline correlator.
         var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
-            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"));
+            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
+            localDid: aliceDid, expectedPeerDid: bobDid);
 
         aliceInbox.Target = alice.Server.CreateHandler();
         bobInbox.Target = bob.Server.CreateHandler();
@@ -104,6 +108,57 @@ public sealed class DiscoverFeaturesRoundTripTests
         }
     }
 
+    [Fact]
+    public async Task HTTP_responder_uses_the_real_decrypting_tenant_when_plaintext_to_puts_another_tenant_first()
+    {
+        var aliceSecrets = new InMemorySecretsResolver();
+        var sharedResponderSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid, carolDid) = await CreateThreePeersAsync(aliceSecrets, sharedResponderSecrets);
+        var aliceInbox = new LateBoundHandler();
+        var bobInbox = new LateBoundHandler();
+        var receivedReply = new TaskCompletionSource<UnpackResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var bob = await BuildAgentAsync("bob", sharedResponderSecrets, outboundTo: aliceInbox, isResponder: true,
+            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"),
+            localDid: bobDid, expectedPeerDid: aliceDid);
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
+            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
+            localDid: aliceDid, expectedPeerDid: bobDid, captureInbound: receivedReply);
+        aliceInbox.Target = alice.Server.CreateHandler();
+        bobInbox.Target = bob.Server.CreateHandler();
+
+        try
+        {
+            // Bob's process hosts Bob and Carol. The attacker-controlled plaintext puts Carol first,
+            // while the real JWE recipient is Bob. Neither the handler nor the app egress policy may
+            // turn that ordering into a Carol-authenticated response.
+            var query = DiscoverFeaturesApi.CreateQuery(
+                aliceDid,
+                bobDid,
+                new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" });
+            query.To = new[] { carolDid, bobDid };
+
+            var client = alice.Services.GetRequiredService<DidCommClient>();
+            await client.SendAsync(query, new SendOptions(
+                Recipients: new[] { bobDid },
+                From: aliceDid,
+                ServiceEndpointOverride: new Uri("http://localhost/didcomm")));
+
+            var reply = await receivedReply.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            reply.Encrypted.Should().BeTrue();
+            reply.Authenticated.Should().BeTrue();
+            reply.Message.From.Should().Be(bobDid);
+            reply.Message.To.Should().Equal(aliceDid);
+            reply.SenderKid.Should().StartWith($"{bobDid}#");
+            reply.RecipientKid.Should().StartWith($"{aliceDid}#");
+        }
+        finally
+        {
+            await alice.App.DisposeAsync();
+            await bob.App.DisposeAsync();
+        }
+    }
+
     private static async Task<(string AliceDid, string BobDid)> CreateTwoPeersAsync(
         InMemorySecretsResolver aliceSecrets, InMemorySecretsResolver bobSecrets)
     {
@@ -125,11 +180,36 @@ public sealed class DiscoverFeaturesRoundTripTests
         return (alice.Did, bob.Did);
     }
 
+    private static async Task<(string AliceDid, string BobDid, string CarolDid)> CreateThreePeersAsync(
+        InMemorySecretsResolver aliceSecrets,
+        InMemorySecretsResolver sharedResponderSecrets)
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+        });
+        await using var sp = services.BuildServiceProvider();
+        var manager = sp.GetRequiredService<IDidManager>();
+        var keyGen = sp.GetRequiredService<IKeyGenerator>();
+        var crypto = sp.GetRequiredService<ICryptoProvider>();
+
+        var alice = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto);
+        var bob = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto);
+        var carol = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto);
+        foreach (var jwk in alice.Privates) aliceSecrets.Add(jwk);
+        foreach (var jwk in bob.Privates) sharedResponderSecrets.Add(jwk);
+        foreach (var jwk in carol.Privates) sharedResponderSecrets.Add(jwk);
+        return (alice.Did, bob.Did, carol.Did);
+    }
+
     private sealed record Agent(WebApplication App, TestServer Server, IServiceProvider Services);
 
     private static async Task<Agent> BuildAgentAsync(
         string tag, InMemorySecretsResolver secrets, LateBoundHandler outboundTo, bool isResponder,
-        IServiceEndpointResolver serviceResolver)
+        IServiceEndpointResolver serviceResolver, string localDid, string expectedPeerDid,
+        TaskCompletionSource<UnpackResult>? captureInbound = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -177,11 +257,28 @@ public sealed class DiscoverFeaturesRoundTripTests
                 var options = app.Services.GetRequiredService<IOptions<DidCommOptions>>().Value;
 
                 var outcome = await dispatcher.DispatchAsync(unpacked, client, options, ct);
-                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: { From: { Length: > 0 } replyFrom } reply }
-                    && unpacked.Authenticated
-                    && unpacked.Message.From is { Length: > 0 } authenticatedSender)
+                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: not null })
                 {
-                    await client.SendAsync(reply, new SendOptions(Recipients: new[] { authenticatedSender }, From: replyFrom), ct);
+                    // This is application egress policy, not automatic library egress. Bind the peer
+                    // and local identities to the verified envelope keys, require the exact expected
+                    // relationship, and snapshot the mutable handler reply before validating/sending.
+                    var replyJson = System.Text.Json.JsonSerializer.Serialize(outcome.Reply, DidCommJson.Default);
+                    var reply = System.Text.Json.JsonSerializer.Deserialize<DidComm.Messages.Message>(replyJson, DidCommJson.Default)!;
+                    var authenticatedPeerDid = DidSubject.DidSubjectOf(unpacked.SenderKid ?? unpacked.SignerKid);
+                    var decryptingDid = DidSubject.DidSubjectOf(unpacked.RecipientKid);
+
+                    if (unpacked.Encrypted
+                        && unpacked.Authenticated
+                        && string.Equals(authenticatedPeerDid, expectedPeerDid, StringComparison.Ordinal)
+                        && string.Equals(decryptingDid, localDid, StringComparison.Ordinal)
+                        && DidSubject.SameDidSubject(reply.From, decryptingDid)
+                        && reply.To is { Count: 1 }
+                        && DidSubject.SameDidSubject(reply.To[0], authenticatedPeerDid))
+                    {
+                        await client.SendAsync(reply, new SendOptions(
+                            Recipients: new[] { authenticatedPeerDid! },
+                            From: decryptingDid!), ct);
+                    }
                 }
             });
         }
@@ -189,7 +286,18 @@ public sealed class DiscoverFeaturesRoundTripTests
         {
             // The initiator (Alice) just dispatches inbound messages; the inline Discover Features
             // correlator completes her awaiting QueryFeaturesAsync when the disclose arrives.
-            app.MapDidCommEndpoint("/didcomm");
+            if (captureInbound is null)
+            {
+                app.MapDidCommEndpoint("/didcomm");
+            }
+            else
+            {
+                app.MapDidCommEndpoint("/didcomm", (unpacked, _) =>
+                {
+                    captureInbound.TrySetResult(unpacked);
+                    return Task.CompletedTask;
+                });
+            }
         }
         await app.StartAsync();
         return new Agent(app, app.GetTestServer(), app.Services);

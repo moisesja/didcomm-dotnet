@@ -1,10 +1,14 @@
 using System.Net.WebSockets;
 using DidComm.AspNetCore;
+using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.InteropTests.Resolution;
 using DidComm.Messages;
+using DidComm.Protocols.TrustPing;
 using DidComm.Resolution;
+using DidComm.Samples.Shared;
 using DidComm.Secrets;
+using DidComm.TestSupport;
 using DidComm.Transports;
 using DidComm.Transports.WebSocket;
 using FluentAssertions;
@@ -15,6 +19,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using NetCrypto;
+using NetDid.Core;
 using Xunit;
 
 namespace DidComm.InteropTests.Transports;
@@ -30,6 +36,82 @@ namespace DidComm.InteropTests.Transports;
 /// </summary>
 public sealed class WebSocketTransportRoundTripTests
 {
+    [Fact]
+    public async Task Registry_reply_uses_real_decrypting_identity_when_another_tenant_is_first_in_to()
+    {
+        var aliceSecrets = new InMemorySecretsResolver();
+        var sharedServerSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid, carolDid) = await CreateThreePeersAsync(aliceSecrets, sharedServerSecrets);
+        await using var serverApp = await BuildReplyingServerAsync(sharedServerSecrets);
+        var server = serverApp.GetTestServer();
+        await using var aliceServices = BuildPeerServices(aliceSecrets);
+        var client = aliceServices.GetRequiredService<DidCommClient>();
+
+        // The shared server holds both Bob and Carol. The plaintext puts Carol first, but the real
+        // authcrypt recipient is Bob. The old path would successfully authenticate the reply as
+        // Carol, so this is a real cross-tenant regression—not merely a missing-key failure.
+        var ping = new MessageBuilder()
+            .WithType(TrustPing.PingType)
+            .WithFrom(aliceDid)
+            .WithTo(carolDid, bobDid)
+            .Build();
+        var packed = await client.PackEncryptedAsync(ping, new PackEncryptedOptions(
+            Recipients: new[] { bobDid },
+            From: aliceDid,
+            Forward: false));
+
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(packed.Message);
+        await socket.SendAsync(bytes, WebSocketMessageType.Binary, endOfMessage: true, default);
+
+        var buffer = new byte[64 * 1024];
+        var result = await socket.ReceiveAsync(buffer, default);
+        result.MessageType.Should().Be(WebSocketMessageType.Binary);
+        result.EndOfMessage.Should().BeTrue();
+
+        var replyEnvelope = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+        var reply = await client.UnpackAsync(replyEnvelope);
+        reply.Encrypted.Should().BeTrue();
+        reply.Authenticated.Should().BeTrue();
+        reply.Message.Type.Should().Be(TrustPing.ResponseType);
+        reply.Message.From.Should().Be(bobDid);
+        reply.Message.To.Should().Equal(aliceDid);
+        reply.SenderKid.Should().StartWith($"{bobDid}#");
+        reply.RecipientKid.Should().StartWith($"{aliceDid}#");
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
+    [Fact]
+    public async Task Registry_does_not_emit_a_same_socket_reply_for_signed_only_input()
+    {
+        var aliceSecrets = new InMemorySecretsResolver();
+        var serverSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid, _) = await CreateThreePeersAsync(aliceSecrets, serverSecrets);
+        await using var serverApp = await BuildReplyingServerAsync(serverSecrets);
+        var server = serverApp.GetTestServer();
+        await using var aliceServices = BuildPeerServices(aliceSecrets);
+        var client = aliceServices.GetRequiredService<DidCommClient>();
+
+        var ping = TrustPing.CreatePing(aliceDid, bobDid);
+        var signed = await client.PackSignedAsync(ping, aliceDid);
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(signed),
+            WebSocketMessageType.Binary,
+            endOfMessage: true,
+            default);
+
+        using var noReply = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var receive = async () => await socket.ReceiveAsync(new byte[4096], noReply.Token);
+        await receive.Should().ThrowAsync<OperationCanceledException>(
+            "signed-only input has no cryptographically selected local recipient for automatic egress");
+
+        socket.Abort();
+    }
+
     [Fact]
     public async Task RoundTrip_Alice_WebSocket_to_Bob_unpacks_original_plaintext()
     {
@@ -193,6 +275,62 @@ public sealed class WebSocketTransportRoundTripTests
 
         await app.StartAsync();
         return (app.GetTestServer(), received);
+    }
+
+    private static async Task<WebApplication> BuildReplyingServerAsync(InMemorySecretsResolver bobSecrets)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(bobSecrets);
+            b.AddBuiltInProtocols();
+        });
+        builder.Services.AddOptions<DidCommReceiveOptions>()
+            .Configure(o => o.AllowSameSocketReplies = true);
+
+        var app = builder.Build();
+        app.UseWebSockets();
+        app.UseRouting();
+        app.MapDidCommWebSocket("/ws/didcomm");
+        await app.StartAsync();
+        return app;
+    }
+
+    private static ServiceProvider BuildPeerServices(InMemorySecretsResolver secrets)
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(secrets);
+        });
+        return services.BuildServiceProvider();
+    }
+
+    private static async Task<(string AliceDid, string BobDid, string CarolDid)> CreateThreePeersAsync(
+        InMemorySecretsResolver aliceSecrets,
+        InMemorySecretsResolver sharedServerSecrets)
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+        });
+        await using var provider = services.BuildServiceProvider();
+        var manager = provider.GetRequiredService<IDidManager>();
+        var keyGenerator = provider.GetRequiredService<IKeyGenerator>();
+        var crypto = provider.GetRequiredService<ICryptoProvider>();
+
+        var alice = await PeerIdentityFactory.CreateAsync(manager, keyGenerator, crypto);
+        var bob = await PeerIdentityFactory.CreateAsync(manager, keyGenerator, crypto);
+        var carol = await PeerIdentityFactory.CreateAsync(manager, keyGenerator, crypto);
+        foreach (var jwk in alice.Privates) aliceSecrets.Add(jwk);
+        foreach (var jwk in bob.Privates) sharedServerSecrets.Add(jwk);
+        foreach (var jwk in carol.Privates) sharedServerSecrets.Add(jwk);
+        return (alice.Did, bob.Did, carol.Did);
     }
 
     private static Uri BuildWebSocketUri(TestServer server, string path)

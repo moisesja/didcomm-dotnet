@@ -1,3 +1,4 @@
+using DidComm.Consistency;
 using DidComm.Messages;
 
 namespace DidComm.Protocols.TrustPing;
@@ -17,6 +18,7 @@ public sealed class TrustPingHandler : IProtocolHandler
     public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(context);
         // The registry only invokes us for the trust-ping PIURI, but the protocol covers both
         // `ping` and `ping-response`. We auto-reply ONLY to a ping; a ping-response is the
         // terminating leaf and never warrants a further reply.
@@ -26,7 +28,10 @@ public sealed class TrustPingHandler : IProtocolHandler
         if (!TrustPing.IsResponseRequested(message))
             return Task.FromResult<Message?>(null);
 
-        var response = TrustPing.CreateResponse(message);
+        var decryptingDid = DidSubject.DidSubjectOf(context.Received.RecipientKid);
+        var response = decryptingDid is null
+            ? TrustPing.CreateResponse(message)
+            : TrustPing.CreateResponse(message, decryptingDid);
         return Task.FromResult<Message?>(response);
     }
 }

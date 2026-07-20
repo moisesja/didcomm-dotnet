@@ -22,22 +22,24 @@ requester role (programmatic capability discovery) was effectively unimplemented
   `AddBuiltInProtocols()`; resolve it from DI. The `timeout` bounds the **whole operation** (send +
   await) under one deadline; a transport/send failure propagates unchanged rather than being
   mislabeled "no disclose".
-- **Lossless, spoofing-resistant correlation.** The disclose→pending-query correlation runs as an
-  internal, synchronous **`IInboundCorrelator`** invoked inline by the dispatcher — NOT through the
-  best-effort observer queue below — so a genuine authenticated response completes even under a flood
-  of unsolicited disclosures. A `disclose` completes a pending query only when the envelope
-  authenticated its sender (authcrypt or a verified signature), carries a sender/signer key id, and
-  its `from` is the queried DID (compared as a DID subject, PRD §4.3). A forged (anoncrypt/plaintext,
-  keyless, or wrong-sender) disclosure is logged and ignored and does **not** cancel the pending
-  query, so it can neither answer for the peer nor deny the legitimate response. Responder side
-  unchanged — an inbound `disclose` stays a terminal leaf in dispatch.
-- **Reply delivery is the responder application's job, out of band (FR-TRN-10).** The initiator runs
+- **Queue-independent, spoofing-resistant correlation.** Successful unpack preserves one immutable
+  copy of the exact verified plaintext and trust metadata before mutable handlers run. A bounded
+  synchronous **`IInboundCorrelator`** checks that snapshot and atomically claims a pending query;
+  typed disclosure parsing is forced onto the requester's continuation, even for reentrant loopback
+  sends. This is NOT the best-effort observer queue, so legitimate responses are not dropped behind
+  that firehose. Completion requires an authenticated sender whose sender/signer key DID subject
+  matches plaintext `from` and the queried responder, a signed `to` naming the requester, and—for
+  encrypted replies—a `RecipientKid` naming the requester that decrypted it. Rejected forgeries leave
+  the waiter pending; response/cancellation races settle once, and only a response winner parses.
+- **Out-of-band reply delivery is the responder application's job (FR-TRN-10).** The initiator runs
   a receive endpoint; the responder sends its `disclose` there with `DidCommClient.SendAsync`, bound
-  to the authenticated inbound sender. The library ships **no automatic inbound-triggered egress** —
-  an auto-send that trusts a message's (possibly attacker-advertised) `from`/endpoint is a
-  reflector / cross-tenant / DoS hazard. A two-agent HTTP integration test proves the full round-trip
-  (Alice's DI-resolved `QueryFeaturesAsync` → Bob's endpoint → Bob's app sends the disclose back →
-  Alice completes) with no manual disclosure injection and separate per-agent key stores.
+  to the authenticated inbound sender and local decrypting identity. The library performs **no
+  automatic out-of-band endpoint egress**—avoiding the reflector / cross-tenant / endpoint-SSRF / DoS
+  class. The pre-existing opt-in same-WebSocket convenience remains, but now requires encrypted+
+  authenticated input and derives both participants from verified key ids; signed-only, plaintext,
+  anoncrypt, keyless, cross-tenant, and fan-out cases emit no frame. A two-agent HTTP test proves the
+  application-wired round-trip with separate key stores; real WebSocket crypto tests prove the
+  decrypting tenant is selected even when another hosted tenant is first in plaintext `to`.
 
 ### Added — Inbound protocol observer seam (`IProtocolObserver`, FR-PROTO-12)
 
@@ -45,26 +47,28 @@ Closes **#50**. Lets an application observe inbound traffic whose PIURI is owned
 (e.g. react to an inbound `report-problem/2.0`) without **replacing** that handler.
 
 - **New `IProtocolObserver` + `DidCommBuilder.AddProtocolObserver<T>()`.** Opt-in only —
-  `AddBuiltInProtocols()` registers **no** default observer (Discover Features correlation uses the
-  lossless inline correlator above), so a default deployment has no observer/firehose surface for a
-  remote flood to target.
-- **Fully decoupled from dispatch.** Delivery runs off the receive path on a **per-observer bounded
-  background queue**: the dispatcher enqueues and returns the outcome immediately, so a slow, hung, or
-  faulting observer can neither gate reply delivery nor change the outcome, and one hung observer
-  can't starve another. Each queue is bounded by BOTH an item count and a **byte budget**; overflow
-  drops the newest observation with **rate-limited** logging — a flood can't exhaust memory or
-  amplify logging. Delivery is therefore **best-effort / at-most-once**. Each observation is
-  **snapshotted (cloned) at enqueue**, so a handler/caller mutating the live message after dispatch
-  can't change what an observer sees. Pumps honor a shutdown token cancelled on disposal. Observers
-  may run concurrently and must be thread-safe.
+  `AddBuiltInProtocols()` registers **no** default observer (Discover Features uses the bounded inline
+  claim hook above), so a default deployment has no observer/firehose surface for a remote flood to
+  target.
+- **Admission before work, fully decoupled from dispatch.** Each per-observer queue atomically reserves
+  both one outstanding item and the immutable snapshot's **exact UTF-8 byte count** before any
+  observer-private deserialization. Bounds include queued + in-flight work, so count-full, cumulative-
+  byte-full, oversized, and shutdown-racing drops perform zero clone work and cannot overshoot under
+  concurrent producers. The dispatcher returns immediately; slow/hung/faulting observers cannot gate
+  replies or alter outcomes, and independent pumps prevent starvation. Overflow is best-effort /
+  at-most-once and rate-limited logs report the actual message id, configured capacity/budget, and
+  cumulative drops. Each accepted observer materializes its own clone from the pre-handler snapshot.
 - **Read-only, not a sandbox.** Each observer receives a defensive deep clone via `InboundObservation`
   (never the live message, the facade, or the thread store); the clone prevents mutation *through the
   payload*, but observers are trusted in-process host code registered at DI-composition time and are
   not otherwise sandboxed. No observer code runs on the dispatch path — the `ProtocolUriFilter` getter
   is read once, guarded, at construction (a throwing getter disables that observer). The registered
   observer set is logged at construction (operator-auditable).
-- **`ProtocolDispatcher` is now `IDisposable` / `IAsyncDisposable`** (additive) so the DI container
-  stops the delivery pumps on shutdown (both sync and async disposal).
+- **`ProtocolDispatcher` is now `IDisposable` / `IAsyncDisposable`** (additive). Shutdown stops
+  admission, cancels cooperative callbacks, drains queued plaintext/barriers, releases reservations,
+  and observes pump faults before disposing their token source. .NET cannot kill trusted callback code
+  that ignores cancellation; only its single in-flight snapshot may remain beyond the async grace,
+  while the rest of that observer's queue is released immediately.
 
 ### Hardened — surfaced by adversarial + code review
 
@@ -79,6 +83,10 @@ Closes **#50**. Lets an application observe inbound traffic whose PIURI is owned
   JWS-signed envelopes unpacked end to end: legitimate ones complete; an authcrypt-tampered and a
   post-sign **signature-verification** tamper are rejected at unpack (`CryptoException`); a
   self-consistent third-party (authcrypt and signed) forgery cannot answer the query.
+- **Same-socket identity binding.** Automatic WebSocket replies use verified `SenderKid`/`SignerKid`
+  for the peer and `RecipientKid` for the local tenant, require the reply to name exactly that pair,
+  and deep-snapshot the mutable handler reply before validation/packing. Discover Features and Trust
+  Ping handlers prefer the actual decrypting DID instead of plaintext recipient ordering.
 
 ## [1.2.0] - 2026-07-13
 

@@ -16,11 +16,11 @@ namespace DidComm.Tests.Protocols.DiscoverFeatures;
 
 public sealed class DiscoverFeaturesHandlerTests
 {
-    private static ProtocolContext Ctx(Message m, DidCommOptions? options = null)
+    private static ProtocolContext Ctx(Message m, DidCommOptions? options = null, string? recipientKid = null)
     {
         var unpacked = new UnpackResult(
             m, Array.Empty<DidComm.Jose.EnvelopeKind>(),
-            false, false, false, false, null, null, null, null, null, null,
+            recipientKid is not null, false, false, false, null, null, null, null, null, recipientKid,
             Array.Empty<string>(), null);
         return new ProtocolContext(unpacked, new DidComm.Threading.ThreadState(m.Thid ?? m.Id), Client: null, options ?? new DidCommOptions(), new InMemoryThreadStateStore());
     }
@@ -155,6 +155,30 @@ public sealed class DiscoverFeaturesHandlerTests
         var anonymous = new MessageBuilder().WithType(DiscoverFeaturesApi.QueriesType).Build();
         var reply = await handler.HandleAsync(anonymous, Ctx(anonymous), CancellationToken.None);
         reply.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Reply_from_prefers_actual_decrypting_DID_over_first_plaintext_recipient()
+    {
+        var (_, handler) = BuildHandler();
+        var query = new MessageBuilder()
+            .WithType(DiscoverFeaturesApi.QueriesType)
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:other-tenant", "did:example:bob")
+            .WithBody(new System.Text.Json.Nodes.JsonObject
+            {
+                ["queries"] = new System.Text.Json.Nodes.JsonArray(),
+            })
+            .Build();
+
+        var reply = await handler.HandleAsync(
+            query,
+            Ctx(query, recipientKid: "did:example:bob#key-agreement-1"),
+            CancellationToken.None);
+
+        reply.Should().NotBeNull();
+        reply!.From.Should().Be("did:example:bob");
+        reply.To.Should().Equal("did:example:alice");
     }
 
     [Fact]

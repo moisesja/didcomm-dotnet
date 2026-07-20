@@ -56,9 +56,24 @@ public static class TrustPing
         if (ping.To is null || ping.To.Count == 0 || string.IsNullOrEmpty(ping.To[0]))
             throw new ArgumentException("TrustPing.CreateResponse requires the ping to carry at least one 'to' DID.", nameof(ping));
 
+        return CreateResponse(ping, ping.To[0]);
+    }
+
+    /// <summary>
+    /// Build a response as the cryptographically selected responder rather than trusting the
+    /// ordering of the plaintext ping's <c>to</c> array. Kept internal so the public construction
+    /// API and its first-recipient semantics remain unchanged.
+    /// </summary>
+    internal static Message CreateResponse(Message ping, string responderDid)
+    {
+        ArgumentNullException.ThrowIfNull(ping);
+        ArgumentException.ThrowIfNullOrEmpty(responderDid);
+        if (string.IsNullOrEmpty(ping.From))
+            throw new ArgumentException("TrustPing.CreateResponse requires the ping to carry a 'from' DID.", nameof(ping));
+
         return new MessageBuilder()
             .WithType(ResponseType)
-            .WithFrom(ping.To[0])
+            .WithFrom(responderDid)
             .WithTo(ping.From)
             .WithThid(ping.Id)
             .Build();

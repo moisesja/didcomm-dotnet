@@ -112,8 +112,9 @@ public sealed class DidCommBuilder
         AddProtocol<ProblemReportHandler>();
         // FR-PROTO-05a: the Discover Features initiator (QueryFeaturesAsync). Registered as an
         // internal IInboundCorrelator (NOT a queued observer): the dispatcher hands it each inbound
-        // `disclose` inline, synchronously, so a genuine authenticated response completes losslessly —
-        // it is never dropped behind a flood of unsolicited traffic in the best-effort observer queue.
+        // `disclose` inline, synchronously, so it is not dropped behind unsolicited traffic in the
+        // best-effort observer queue. The bounded inline phase only checks headers/trust and claims
+        // the pending operation; body parsing happens on the requester continuation.
         // This is also why AddBuiltInProtocols registers no default IProtocolObserver: there is no
         // default firehose consumer for an attacker to exploit.
         Services.TryAddSingleton<DiscoverFeaturesClient>();

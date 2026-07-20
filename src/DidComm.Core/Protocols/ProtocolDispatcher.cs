@@ -120,25 +120,48 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(received);
         ArgumentNullException.ThrowIfNull(options);
 
-        var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+        InboundMessageSnapshot? snapshot = null;
+        if (_correlators.Length > 0 || _observers is not null)
+        {
+            try
+            {
+                // Normal path: EnvelopeReader attached the exact verified plaintext at unpack. The
+                // fallback preserves the public DispatchAsync contract for callers/tests that build
+                // UnpackResult themselves; it is guarded so a malformed synthetic object cannot
+                // clobber dispatch merely because an observer/correlator is configured.
+                if (!InboundMessageSnapshot.TryGetFor(received.Message, out snapshot))
+                    snapshot = InboundMessageSnapshot.CreateFallback(received);
+            }
+            catch (Exception ex)
+            {
+                SafeLogWarning(
+                    ex,
+                    "Could not snapshot synthetic inbound message {MessageId}; correlation and observer delivery are skipped, but protocol dispatch continues.",
+                    received.Message.Id);
+            }
+        }
 
-        // Internal correlators (FR-PROTO-05a): invoked inline, synchronously, guarded. These are
-        // library-owned, O(1), non-blocking hooks (e.g. the Discover Features initiator completing a
-        // pending query) — running lossless and inline so a genuine authenticated response is not
-        // subject to the observer queue's best-effort drops. Guarded so a throw can't clobber the
-        // outcome; the IInboundCorrelator contract forbids blocking so it can't gate the path.
-        NotifyCorrelators(received);
+        // Internal correlators (FR-PROTO-05a): run against the immutable unpack snapshot BEFORE
+        // application handler code. A handler therefore cannot mutate sender/thread/body fields or
+        // throw before a genuine authenticated response reaches its waiter. The hook only validates
+        // fixed headers and transfers the snapshot into a TCS; typed body parsing happens on the
+        // requester's continuation, off this receive path.
+        if (snapshot is not null)
+            NotifyCorrelators(snapshot);
+
+        var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
 
         // FR-PROTO-12: hand the inbound to the observers' bounded background queue and return
         // immediately. Enqueue is non-blocking, runs for every outcome path (handled, NoReply,
         // NoHandler, loop-guard drops), and NEVER awaits observer work — so a slow or faulting
         // observer can neither gate this reply's delivery nor change the computed outcome, and an
         // initiator with no handler registered for a PIURI can still observe its traffic.
-        _observers?.Enqueue(received);
+        if (snapshot is not null)
+            _observers?.Enqueue(snapshot);
         return outcome;
     }
 
-    private void NotifyCorrelators(UnpackResult received)
+    private void NotifyCorrelators(InboundMessageSnapshot received)
     {
         foreach (var correlator in _correlators)
         {
@@ -148,11 +171,24 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning(
+                SafeLogWarning(
                     ex,
                     "IInboundCorrelator '{Correlator}' threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected.",
-                    correlator.GetType().FullName, received.Message.Id);
+                    correlator.GetType().FullName, received.Id);
             }
+        }
+    }
+
+    private void SafeLogWarning(Exception exception, string message, params object?[] args)
+    {
+        try
+        {
+            _logger?.LogWarning(exception, message, args);
+        }
+        catch
+        {
+            // This is an isolation boundary. A host logging provider must not turn optional
+            // correlation/observation failure into a changed protocol dispatch outcome.
         }
     }
 

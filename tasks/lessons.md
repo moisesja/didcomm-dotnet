@@ -744,3 +744,18 @@ Format per entry:
   action the caller's explicit decision, and keep default consumers off shared lossy queues. If a
   reviewer keeps finding moles in one feature, delete the feature, don't add a fifth guard.
   See [[L-036]], [[L-035]].
+
+## L-038 — After repeated review rounds, stop acting only as the reviewer and own the remediation as one invariant-driven change.
+
+- **Lesson:** When the user asks to end a review whack-a-mole cycle, consolidate every open finding
+  into a single root-cause remediation plan, state the invariants that make the whole class of bugs
+  impossible, and then implement and adversarially verify that plan. Do not merely post another
+  review, patch the latest symptom, or leave the user to translate findings into architecture.
+- **Why:** PR #51 accumulated successive fixes around automatic reply identity, observer snapshots,
+  queue bounds, correlator ordering, and shutdown. Re-reviewing exposed real issues, but another list
+  of local guards was no longer useful; the user explicitly asked me to take ownership and address the
+  design so the same failure classes stop resurfacing.
+- **How to apply:** On the second substantive review round of the same subsystem, group findings by
+  trust boundary and lifecycle, define one authoritative identity source, one immutable inbound
+  snapshot, admission-before-work resource accounting, and explicit shutdown semantics. Plan all
+  affected code, tests, docs, and compatibility checks together before editing.

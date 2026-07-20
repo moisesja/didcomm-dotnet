@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using DidComm.Facade;
 using DidComm.Json;
@@ -48,10 +49,11 @@ public sealed record InboundObservation(
 
     /// <summary>
     /// As <see cref="FromUnpackResult(UnpackResult)"/>, also reporting the message clone's approximate
-    /// size in bytes (the serialized JSON length) — used by the observer queue's byte-aware bound.
+    /// exact UTF-8 size in bytes — retained as an internal compatibility helper. Normal observer
+    /// delivery uses the verified unpack snapshot's exact plaintext byte count.
     /// </summary>
     /// <param name="received">The unpack result for the inbound message.</param>
-    /// <param name="approxBytes">The serialized JSON length of the cloned message, an approximate retained-size estimate.</param>
+    /// <param name="approxBytes">The serialized clone's exact UTF-8 byte count.</param>
     internal static InboundObservation FromUnpackResult(UnpackResult received, out int approxBytes)
     {
         ArgumentNullException.ThrowIfNull(received);
@@ -59,7 +61,7 @@ public sealed record InboundObservation(
         // taken AT ENQUEUE, so a handler or caller mutating the live message after dispatch cannot
         // change what an observer later sees.
         var json = JsonSerializer.Serialize(received.Message, DidCommJson.Default);
-        approxBytes = json.Length;
+        approxBytes = Encoding.UTF8.GetByteCount(json);
         var clone = JsonSerializer.Deserialize<Message>(json, DidCommJson.Default)!;
         return new InboundObservation(
             Message: clone,
@@ -69,5 +71,22 @@ public sealed record InboundObservation(
             AnonymousSender: received.AnonymousSender,
             SenderKid: received.SenderKid,
             SignerKid: received.SignerKid);
+    }
+
+    /// <summary>
+    /// Materialize one observer-private message clone from an immutable verified inbound snapshot.
+    /// This runs on the observer's background pump only, after item and exact UTF-8 byte admission.
+    /// </summary>
+    internal static InboundObservation FromSnapshot(InboundMessageSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return new InboundObservation(
+            Message: snapshot.DeserializeMessage(),
+            Encrypted: snapshot.Encrypted,
+            Authenticated: snapshot.Authenticated,
+            NonRepudiation: snapshot.NonRepudiation,
+            AnonymousSender: snapshot.AnonymousSender,
+            SenderKid: snapshot.SenderKid,
+            SignerKid: snapshot.SignerKid);
     }
 }

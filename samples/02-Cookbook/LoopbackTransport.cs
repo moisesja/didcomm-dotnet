@@ -32,7 +32,7 @@ internal sealed class LoopbackTransport(IServiceProvider services) : IDidCommTra
 
         if (outcome is { Reply: { To.Count: > 0, From: not null } reply })
         {
-            // Deliver the reply back the same way, so an awaiting initiator's observer sees it.
+            // Deliver the reply back the same way, so the initiator's inline correlator claims it.
             var packedReply = (await client.PackEncryptedAsync(
                 reply,
                 new PackEncryptedOptions(Recipients: reply.To.ToArray(), From: reply.From),

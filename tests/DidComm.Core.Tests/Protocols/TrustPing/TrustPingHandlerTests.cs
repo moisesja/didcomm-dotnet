@@ -13,11 +13,11 @@ namespace DidComm.Tests.Protocols.TrustPing;
 
 public sealed class TrustPingHandlerTests
 {
-    private static ProtocolContext Ctx(Message m)
+    private static ProtocolContext Ctx(Message m, string? recipientKid = null)
     {
         var unpacked = new UnpackResult(
             m, Array.Empty<DidComm.Jose.EnvelopeKind>(),
-            false, false, false, false, null, null, null, null, null, null,
+            recipientKid is not null, false, false, false, null, null, null, null, null, recipientKid,
             Array.Empty<string>(), null);
         return new ProtocolContext(unpacked, new DidComm.Threading.ThreadState(m.Thid ?? m.Id), Client: null, new DidCommOptions(), new InMemoryThreadStateStore());
     }
@@ -51,6 +51,25 @@ public sealed class TrustPingHandlerTests
             .WithFrom("did:peer:bob").WithTo("did:peer:alice").WithThid("ping-id-1").Build();
         var reply = await handler.HandleAsync(pingResp, Ctx(pingResp), CancellationToken.None);
         reply.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Reply_from_prefers_actual_decrypting_DID_over_first_plaintext_recipient()
+    {
+        var ping = new MessageBuilder()
+            .WithType(TrustPingApi.PingType)
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:other-tenant", "did:example:bob")
+            .Build();
+
+        var reply = await new TrustPingHandler().HandleAsync(
+            ping,
+            Ctx(ping, recipientKid: "did:example:bob#key-agreement-1"),
+            CancellationToken.None);
+
+        reply.Should().NotBeNull();
+        reply!.From.Should().Be("did:example:bob");
+        reply.To.Should().Equal("did:example:alice");
     }
 
     [Fact]

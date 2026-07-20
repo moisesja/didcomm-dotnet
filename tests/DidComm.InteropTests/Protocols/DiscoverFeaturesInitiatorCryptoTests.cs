@@ -22,8 +22,7 @@ namespace DidComm.InteropTests.Protocols;
 /// FR-PROTO-05a with REAL cryptography (PR #51 review finding 4): the initiator correlation and its
 /// anti-spoof gate are exercised against genuine authcrypt/signed envelopes unpacked through
 /// <see cref="DidCommClient.UnpackAsync"/> — so a regression in envelope unpacking, sender binding,
-/// or <see cref="InboundObservation.FromUnpackResult"/> would fail these, unlike tests that hand-build
-/// the trust metadata.
+/// or immutable inbound-snapshot capture would fail these, unlike tests that hand-build trust metadata.
 /// </summary>
 public sealed class DiscoverFeaturesInitiatorCryptoTests
 {
@@ -93,6 +92,52 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
 
         await DispatchAsync(dispatcher, w.Client, packed);
         (await task).Should().ContainSingle(d => d.Id == "https://didcomm.org/trust-ping/2.0");
+    }
+
+    [Fact]
+    public async Task Plaintext_unpack_preserves_the_exact_verified_json_in_the_weak_snapshot_sidecar()
+    {
+        await using var w = await BuildAsync();
+        const string plaintext = "{\n  \"id\": \"snapshot-1\", \"type\": \"https://didcomm.org/test/1.0/message\",\n  \"attachments\": [{ \"id\": \"a1\", \"data\": { \"base64\": \"aGVsbG8=\" } }],\n  \"x-extra\": { \"emoji\": \"😀\" }\n}";
+
+        var unpacked = await w.Client.UnpackAsync(plaintext);
+
+        InboundMessageSnapshot.TryGetFor(unpacked.Message, out var snapshot).Should().BeTrue();
+        snapshot.PlaintextJson.Should().Be(plaintext, "the unpack boundary must reuse the verified raw plaintext rather than reserialize it");
+        snapshot.Utf8ByteCount.Should().Be(System.Text.Encoding.UTF8.GetByteCount(plaintext));
+        var cloned = snapshot.DeserializeMessage();
+        cloned.AdditionalHeaders.Should().ContainKey("x-extra");
+        cloned.Attachments.Should().ContainSingle().Which.Id.Should().Be("a1");
+    }
+
+    [Fact]
+    public async Task Real_unpack_snapshot_is_immune_to_live_message_mutation_before_dispatch()
+    {
+        await using var w = await BuildAsync();
+        var (client, lastQuery, dispatcher) = NewInitiator();
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob,
+            new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
+
+        var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
+            new FeatureDisclosure { FeatureType = "protocol", Id = "verified-original" });
+        var packed = (await w.Client.PackEncryptedAsync(disclose,
+            new PackEncryptedOptions(Recipients: new[] { w.Alice }, From: w.Bob))).Message;
+        var unpacked = await w.Client.UnpackAsync(packed);
+
+        InboundMessageSnapshot.TryGetFor(unpacked.Message, out var snapshot).Should().BeTrue();
+        snapshot.From.Should().Be(w.Bob);
+        snapshot.To.Should().ContainSingle().Which.Should().Be(w.Alice);
+        snapshot.RecipientKid.Should().StartWith(w.Alice);
+
+        // The public Message is intentionally mutable. Correlation must still use the exact verified
+        // plaintext/trust sidecar captured before this caller-controlled mutation.
+        unpacked.Message.From = w.Mallory;
+        unpacked.Message.To = new[] { w.Mallory };
+        unpacked.Message.Thid = "rewritten-thread";
+        unpacked.Message.Body = new System.Text.Json.Nodes.JsonObject();
+
+        await dispatcher.DispatchAsync(unpacked, w.Client, new DidCommOptions());
+        (await task).Should().ContainSingle(d => d.Id == "verified-original");
     }
 
     [Fact]
