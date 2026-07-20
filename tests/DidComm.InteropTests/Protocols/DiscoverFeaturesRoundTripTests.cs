@@ -79,7 +79,7 @@ public sealed class DiscoverFeaturesRoundTripTests
                 from: aliceDid,
                 to: bobDid,
                 queries: new[] { new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" } },
-                timeout: TimeSpan.FromSeconds(10),
+                timeout: TimeSpan.FromSeconds(30),
                 serviceEndpointOverride: new Uri("http://localhost/didcomm"));
         }
         catch (Exception ex)

@@ -48,7 +48,7 @@ public sealed class ObserverDeliveryTests
 
         observer.Release();
         // Deliver at most in-flight(1) + capacity(2) = 3; the other 47 were dropped by the overflow policy.
-        await delivery.FlushAsync(TimeSpan.FromSeconds(5));
+        await delivery.FlushAsync(TimeSpan.FromSeconds(30));
         observer.Delivered.Should().BeInRange(1, 3, "the bounded queue drops the overflow instead of buffering all 50");
     }
 

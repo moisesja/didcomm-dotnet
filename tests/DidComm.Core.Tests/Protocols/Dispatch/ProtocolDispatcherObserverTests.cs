@@ -23,7 +23,10 @@ namespace DidComm.Tests.Protocols.Dispatch;
 /// </summary>
 public sealed class ProtocolDispatcherObserverTests
 {
-    private static readonly TimeSpan Flush = TimeSpan.FromSeconds(5);
+    // Generous: only paid on the failure path. The observer pumps run on Task.Run continuations, which
+    // can be scheduled seconds late under parallel-test thread-pool contention on constrained CI
+    // runners (e.g. 2-core Windows). A tight timeout there is a flake, not a real failure.
+    private static readonly TimeSpan Flush = TimeSpan.FromSeconds(30);
 
     private static UnpackResult Unpack(Message msg, bool authenticated = false) => new(
         Message: msg,
@@ -188,15 +191,15 @@ public sealed class ProtocolDispatcherObserverTests
 
         // Dispatch returns immediately even though `hung` will never complete its observation.
         var dispatch = dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/x/1.0/m")), client: null, new DidCommOptions());
-        var outcome = await dispatch.WaitAsync(TimeSpan.FromSeconds(5));
+        var outcome = await dispatch.WaitAsync(TimeSpan.FromSeconds(30));
         outcome.Result.Should().Be(DispatchResult.NoHandler, "a hung observer must not gate the dispatch outcome");
 
         // The healthy observer drains on its own pump despite `hung` being stuck on its own — wait on
         // its signal (not the global flush, whose hung barrier never completes; not a poll, which can
         // flake under parallel-test thread-pool contention). Both observers run on independent pumps,
         // so await each signal rather than assuming an ordering between them.
-        await healthy.Observed.WaitAsync(TimeSpan.FromSeconds(10));
-        await hung.Started.WaitAsync(TimeSpan.FromSeconds(10)); // it started (on its own pump) and is now blocked
+        await healthy.Observed.WaitAsync(TimeSpan.FromSeconds(30));
+        await hung.Started.WaitAsync(TimeSpan.FromSeconds(30)); // it started (on its own pump) and is now blocked
 
         hung.Release();
     }

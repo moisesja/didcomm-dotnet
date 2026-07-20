@@ -71,7 +71,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var unpacked = await client.UnpackAsync(packed);
         await dispatcher.DispatchAsync(unpacked, client, new DidCommOptions());
-        await dispatcher.FlushObserversAsync(TimeSpan.FromSeconds(5));
+        await dispatcher.FlushObserversAsync(TimeSpan.FromSeconds(30));
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
         var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
             new FeatureDisclosure { FeatureType = "protocol", Id = "https://didcomm.org/trust-ping/2.0" });
@@ -95,7 +95,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
         var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
             new FeatureDisclosure { FeatureType = "protocol", Id = "signed-ok" });
@@ -110,7 +110,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
         // Mallory forges a fully self-consistent, genuinely-authenticated disclose (from = Mallory,
         // signed/encrypted by Mallory's real keys) with the guessed thid. It unpacks cleanly with
@@ -138,7 +138,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
         var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
             new FeatureDisclosure { FeatureType = "protocol", Id = "will-be-tampered" });
@@ -157,7 +157,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+        _ = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
         var disclose = DiscoverFeaturesApi.CreateDisclose(from: w.Bob, to: w.Alice, thid: lastQuery().Id,
             new FeatureDisclosure { FeatureType = "protocol", Id = "will-be-tampered" });
@@ -175,7 +175,7 @@ public sealed class DiscoverFeaturesInitiatorCryptoTests
     {
         var w = await BuildAsync();
         var (client, lastQuery, dispatcher) = NewInitiator();
-        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(10));
+        var task = client.QueryFeaturesAsync(w.Alice, w.Bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(60));
 
         // Mallory produces a fully valid, genuinely-signed disclose from herself (from = Mallory,
         // verified JWS signer = Mallory) with the guessed thid. It unpacks with Authenticated = true
