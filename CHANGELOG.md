@@ -6,6 +6,17 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — lazy UTF-8 size on the inbound snapshot (perf, #53)
+
+Closes **#53**. Every successful `UnpackAsync` registers an `InboundMessageSnapshot`, but only the
+observer byte-budget admission ever reads its UTF-8 size. The `Encoding.UTF8.GetByteCount` scan
+(O(plaintext), bounded by `MaxReceiveBytes`) moved from the snapshot constructor to first access of
+`Utf8ByteCount`, so unpack-only consumers and dispatcher graphs without observers no longer pay an
+O(plaintext) pass per inbound message. Snapshot registration stays at the unpack boundary — the
+verified-at-unpack immutability binding from #51 is unchanged, and all #51 correlator/observer trust
+tests pass unmodified. New tests pin the lazy contract (no scan on registration, exact multibyte
+count on first read, memoized thereafter).
+
 ## [1.3.0] - 2026-07-19
 
 > Additive feature release — new public API, no wire change, no breaking change. Closes **#49**
