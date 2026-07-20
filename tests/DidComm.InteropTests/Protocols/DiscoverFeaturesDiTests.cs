@@ -94,6 +94,53 @@ public sealed class DiscoverFeaturesDiTests
     }
 
     [Fact]
+    public void AddBuiltInProtocols_registers_one_DiscoverFeaturesClient_correlator_and_no_default_observers()
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.AddBuiltInProtocols();
+            b.AddBuiltInProtocols(); // idempotent — calling twice must not duplicate
+        });
+        using var sp = services.BuildServiceProvider();
+
+        var clients = sp.GetServices<DiscoverFeaturesClient>().ToList();
+        clients.Should().HaveCount(1, "exactly one initiator client");
+
+        var correlators = sp.GetServices<IInboundCorrelator>().ToList();
+        correlators.OfType<DiscoverFeaturesClient>().Should().HaveCount(1, "the client is exposed exactly once as an inline correlator");
+        correlators.Single(c => c is DiscoverFeaturesClient).Should().BeSameAs(clients[0], "same singleton instance");
+
+        // Root-cause fix for the flood/memory finding: AddBuiltInProtocols installs NO default
+        // observer, so the best-effort observer queue has no default firehose consumer to exploit.
+        sp.GetServices<IProtocolObserver>().Should().BeEmpty("no default observer is registered");
+    }
+
+    [Fact]
+    public void AddProtocolObserver_is_idempotent()
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.AddProtocolObserver<CountingObserver>();
+            b.AddProtocolObserver<CountingObserver>();
+        });
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetServices<IProtocolObserver>().OfType<CountingObserver>().Should().HaveCount(1);
+    }
+
+    private sealed class CountingObserver : IProtocolObserver
+    {
+        public string? ProtocolUriFilter => null;
+        public Task OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    [Fact]
     public void AddFeatureProvider_appends_consumer_provider_alongside_defaults()
     {
         var services = new ServiceCollection();

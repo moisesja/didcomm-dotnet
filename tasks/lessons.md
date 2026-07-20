@@ -605,3 +605,157 @@ Format per entry:
   equalize/​minimize pre-crypto round-trips. (3) Always run the break-it adversarial subagent on the
   *finished* seam and add a regression test per finding (here: a handle whose `DeriveAsync` throws
   `KeyNotFoundException`/`CryptographicException` must yield the uniform `CryptoException`).
+
+## L-031 — A plan that adds an extension/observability seam must state its threat model up front.
+
+- **Lesson:** When proposing any seam that exposes message/handler traffic to pluggable
+  components (observers, middleware, decorators, event hooks), the plan itself must answer:
+  who can register, at what time (startup vs runtime), what they can see, what they can
+  mutate, and where the trust boundary sits relative to existing primitives. "Read-only
+  side channel" is a claim to enforce (defensive clone, narrow payload, no facade handle),
+  not a doc-comment.
+- **Why:** The issue-#49/#50 plan proposed an `IProtocolObserver` seam passing the live
+  `ProtocolContext` + `Message`. The user asked "who is a registered observer? Are we
+  introducing a man-in-the-middle sniffer?" — and inspection showed `Message.Body` is a
+  mutable `JsonObject`, so an unhardened observer would have been a potential tamperer,
+  and `ProtocolContext` over-grants (facade send access, mutable thread store).
+- **How to apply:** Any plan touching `ProtocolDispatcher`, handler registration, or adding
+  a pluggable callback: include a "threat model" block (registration surface, visibility,
+  mutability, audit trail, least-privilege filter) and an adversarial test line item
+  (tamper + spoof) before presenting the plan.
+
+## L-032 — MTURI-parses ≠ PIURI-parses: never derive a PIURI with the throwing Parse on the dispatch path.
+
+- **Lesson:** The MTURI regex doc-uri group is `.+?` (tolerates a trailing `/`) but the PIURI
+  regex is `.+?[^/]` (forbids it). So a `type` with a doubled slash
+  (`https://didcomm.org//x/1.0/m`) passes `MessageTypeUri.TryParse` yet its derived
+  `ProtocolIdentifier` fails to parse. Any code that does
+  `ProtocolIdentifier.Parse(mturi.ProtocolIdentifier)` throws on that remotely-settable value.
+  On the dispatch path (`ProtocolHandlerRegistry.TryResolve`, observer filter matching) always
+  use `TryParse` and fail closed to "no handler / no match".
+- **Why:** The adversarial pass on the #49/#50 observer seam found `TryResolve` (pre-existing)
+  and the new `ObserverMatches` both used the throwing `Parse`. A crafted inbound `type` threw
+  `ProtocolException` on dispatch — contained by the shipped transports (HTTP→400, WS→log-continue)
+  but wrong semantics and unhandled for any direct `ProtocolDispatcher` caller. Also delivered via
+  a pure-ACK-that-requests-an-ACK, which bypasses `TryResolve` and hits the observer matcher.
+- **How to apply:** When converting one URI shape to a stricter one, use the Try* variant and treat
+  failure as a normal negative result, never an exception — a remote peer controls `Message.Type`.
+  Prove security regressions red-green: revert the fix, confirm the test fails, restore. See also
+  [[L-031]] (extension-seam threat models) — this is why that plan mandated an adversarial pass.
+
+## L-033 — A PR-review request already authorizes the review; the implementation-plan gate is not a second consent gate for read-only analysis or the requested review submission.
+
+- **Lesson:** When the user asks to inspect a PR and post a review, proceed after documenting any
+  required plan. Do not stop for separate plan approval unless the task will edit source, tests, or
+  product documentation, or will take an external action outside the review the user explicitly
+  requested.
+- **Why:** I incorrectly treated AGENTS.md's approval gate for implementation edits as applying to a
+  read-only PR audit and its explicitly requested GitHub review. That created a pointless approval
+  round-trip even though the user had already authorized the exact external action.
+- **How to apply:** Distinguish implementation authorization from review authorization. PR metadata,
+  diff inspection, tests/builds, and submitting the requested review are within a PR-review request;
+  changing the PR branch's source/tests/docs still requires the repository's explicit plan approval.
+
+## L-034 — Comparing a DID against a from/to means DID *subjects*, never raw strings (PRD §4.3).
+
+- **Lesson:** Any equality check involving a `from`/`to` value (which MAY be a DID URL with
+  path/query) must use `DidSubject.SameDidSubject` (parse both sides, compare bare DID subjects),
+  not `string.Equals(..., Ordinal)`. Raw compare is safe in the reject direction but silently drops
+  legitimate inputs that differ only in DID-URL form — here, a spurious `TimeoutException` in the
+  Discover Features initiator.
+- **Why:** The second adversarial pass on #49/#50 flagged the anti-spoof `from == queried-to` check
+  as a raw Ordinal compare, inconsistent with the codebase's normative §4.3 rule and the
+  FR-CONSIST-* checks that all pivot on `DidSubjectOf`. Switched to `SameDidSubject` (still fails
+  closed on unparseable/other-subject input). Also added a defense-in-depth key-id gate: trusting
+  `Authenticated + From` requires the authenticating key id (skid or signer kid) to actually be
+  present, so a downstream consumer doesn't over-trust the envelope layer's flag.
+- **How to apply:** Grep for `string.Equals(.*[Ff]rom` / `== .*ResponderDid`-style compares near
+  `from`/`to`/`skid`/`kid`; route them through `DidSubject.SameDidSubject`. When a new feature
+  consumes `Authenticated`, also verify the key id it relies on is non-empty rather than trusting the
+  boolean alone. See [[L-031]], [[L-032]].
+
+## L-035 — Adding an optional ctor param is source- but not binary-compatible; and a "read-only side channel" must be off the critical path, not just non-mutating.
+
+- **Lesson (binary compat):** Adding a parameter to an existing public constructor — even with a
+  default — is a BINARY break: code compiled against the old assembly holds a MemberRef to the old
+  arity and throws `MissingMethodException` at runtime. For a minor release, preserve the exact old
+  constructor as a delegating overload and add a NEW overload (with no default on the extra param, to
+  avoid overload-resolution ambiguity). Wire the ApiCompat gate so the build catches it.
+- **Lesson (side channels):** "Observers can't affect the outcome" is false if the outcome is
+  returned only AFTER awaiting observers — a slow/hung observer then gates reply delivery, and a
+  cancellation/throw on the observer path can clobber the already-computed result. A genuine
+  read-only side channel must be decoupled from the critical path: enqueue to a bounded per-consumer
+  background queue and return immediately; drop-and-log on overflow; isolate each consumer so one
+  hang can't starve another. Also: a DI singleton that implements only `IAsyncDisposable` throws on
+  synchronous container disposal (`using var sp`) — implement BOTH `IDisposable` and `IAsyncDisposable`.
+- **Why:** PR #51's second reviewer caught all of these: the `ProtocolDispatcher` 4→5-arg ctor break,
+  observers inline-awaited on the receive path (head-of-line blocking + cancellation clobber), and
+  the "round-trip" that no shipped transport actually completed (proven only by a test that hand-fed
+  the reply).
+- **How to apply:** When touching a public ctor/signature in a shipped library, ask "does an app
+  compiled against the last release still bind?" and keep the old member. When adding a "notify N
+  consumers" hook, put it off the request path with backpressure, not inline. Prove cross-agent
+  features with a real two-endpoint integration test, not a single-dispatcher injection. See
+  [[L-034]] (DID-subject compares), [[L-032]] (fail-closed parsing).
+
+## L-036 — An opt-in convenience that auto-sends on an unauthenticated inbound is a reflector; and "isolation" claims must name what is and isn't isolated.
+
+- **Lesson (reflector):** Any feature that auto-emits an outbound message in response to an inbound
+  one MUST gate on the inbound being cryptographically authenticated, and MUST address the reply to
+  the AUTHENTICATED sender — never to a handler-echoed `from`/`to`. An unauthenticated inbound
+  (plaintext/anoncrypt) has an attacker-settable `from`; auto-replying to it turns the server into an
+  authenticated outbound reflector/amplifier. "Opt-in" does not make unsafe-by-default acceptable.
+- **Lesson (false 202/oracle):** A side-effect that "must never change the response" must swallow
+  cancellation-shaped downstream failures too — catching only `ex is not OperationCanceledException`
+  lets a downstream timeout (TaskCanceledException, caller token NOT cancelled) escape and flip a 202
+  into a 400, creating a success-vs-timeout oracle. Rethrow OCE only when the request token is
+  actually cancelled.
+- **Lesson (isolation surface):** "Observers can't affect dispatch" is false if ANY observer code
+  runs on the dispatch path — including a property getter like a filter. Read such values ONCE,
+  guarded, at construction; make the hot path structurally non-throwing. And don't overclaim: omitting
+  a facade from a callback payload prevents mutation THROUGH the payload, not host code from acting —
+  in-process observers are trusted and can inject whatever they need. State the real boundary.
+- **Why:** PR #51's second review round found the `AutoSendReplies` reflector, the OCE-escape false
+  400, the `ProtocolUriFilter` getter still on the dispatch path, and threat-model prose claiming
+  capability isolation the design does not provide.
+- **How to apply:** For auto-reply/echo features: require `Authenticated` + bind to the authenticated
+  sender + negative tests (plaintext/anoncrypt → no send). For swallow-and-continue side effects:
+  handle OCE by token state. For "can't affect X" claims: enumerate every code path that runs before
+  X is final. See [[L-035]], [[L-034]].
+
+## L-037 — When a feature keeps generating security findings, remove the surface; don't keep adding guards.
+
+- **Lesson:** If successive reviews keep finding new exploits in the SAME added feature, the feature
+  itself is the problem, not the individual holes. Stop guarding and delete the surface. Two classes
+  that are almost always attractive nuisances: (1) an inbound-triggered, inline, automatic OUTBOUND
+  egress ("auto-reply") — it is inherently a reflector / cross-tenant / amplification / shared-resource
+  DoS surface, because it trusts a remote message's from/endpoint and consumes local egress on a remote
+  trigger; (2) a DEFAULT firehose consumer on a lossy queue fed by remote traffic — it hands attackers
+  memory/log/backpressure amplification and can drop the one legitimate message you needed.
+- **Why:** PR #51 went three review rounds. Rounds 1–2 kept patching `AutoSendReplies` (auth gate,
+  recipient binding, cancellation handling) and the observer queue (filter isolation, drop policy);
+  round 3 still found a cross-tenant sender oracle, an attacker-advertised-endpoint reflector +
+  circuit-breaker DoS, and gigabyte memory exhaustion via the default observer. The decisive fix was
+  to REMOVE the auto-egress entirely (reply delivery is the app's explicit, policy-bound job) and to
+  move the correlation OFF the queue onto a lossless synchronous internal hook so there is NO default
+  observer/firehose — which killed the whole class at the root.
+- **How to apply:** Before adding a convenience that (a) sends outbound as a side effect of receiving,
+  or (b) registers a default consumer on a queue fed by untrusted traffic — don't. Make the outbound
+  action the caller's explicit decision, and keep default consumers off shared lossy queues. If a
+  reviewer keeps finding moles in one feature, delete the feature, don't add a fifth guard.
+  See [[L-036]], [[L-035]].
+
+## L-038 — After repeated review rounds, stop acting only as the reviewer and own the remediation as one invariant-driven change.
+
+- **Lesson:** When the user asks to end a review whack-a-mole cycle, consolidate every open finding
+  into a single root-cause remediation plan, state the invariants that make the whole class of bugs
+  impossible, and then implement and adversarially verify that plan. Do not merely post another
+  review, patch the latest symptom, or leave the user to translate findings into architecture.
+- **Why:** PR #51 accumulated successive fixes around automatic reply identity, observer snapshots,
+  queue bounds, correlator ordering, and shutdown. Re-reviewing exposed real issues, but another list
+  of local guards was no longer useful; the user explicitly asked me to take ownership and address the
+  design so the same failure classes stop resurfacing.
+- **How to apply:** On the second substantive review round of the same subsystem, group findings by
+  trust boundary and lifecycle, define one authoritative identity source, one immutable inbound
+  snapshot, admission-before-work resource accounting, and explicit shutdown semantics. Plan all
+  affected code, tests, docs, and compatibility checks together before editing.

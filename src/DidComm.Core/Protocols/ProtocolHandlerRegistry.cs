@@ -46,7 +46,11 @@ public sealed class ProtocolHandlerRegistry
         handler = null;
         if (!MessageTypeUri.TryParse(messageType, out var mturi)) return false;
 
-        var inboundPiuri = ProtocolIdentifier.Parse(mturi!.ProtocolIdentifier);
+        // TryParse, not Parse: the MTURI docUri group (`.+?`) tolerates a trailing '/' that the
+        // stricter PIURI group (`.+?[^/]`) rejects, so a crafted double-slash `type` (e.g.
+        // "https://didcomm.org//x/1.0/m") parses as an MTURI but its derived PIURI does not.
+        // A malformed inbound type must resolve to "no handler", not throw on the dispatch path.
+        if (!ProtocolIdentifier.TryParse(mturi!.ProtocolIdentifier, out var inboundPiuri)) return false;
 
         IProtocolHandler? best = null;
         ProtocolVersion bestVersion = default;

@@ -6,6 +6,88 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-19
+
+> Additive feature release — new public API, no wire change, no breaking change. Closes **#49**
+> and **#50**.
+
+### Added — Discover Features 2.0 initiator round-trip (FR-PROTO-05a)
+
+Closes **#49**. Discover Features 2.0 previously shipped only the **responder** side; an application
+could build a `queries` and parse a `disclose` but could not **correlate** the response, so the
+requester role (programmatic capability discovery) was effectively unimplemented.
+
+- **New `DiscoverFeaturesClient.QueryFeaturesAsync(from, to, queries, timeout, …)`.** Sends a
+  `queries` and awaits the peer's `disclose`, correlating by `thid` == the query `id`. Registered by
+  `AddBuiltInProtocols()`; resolve it from DI. The `timeout` bounds the **whole operation** (send +
+  await) under one deadline; a transport/send failure propagates unchanged rather than being
+  mislabeled "no disclose".
+- **Queue-independent, spoofing-resistant correlation.** Successful unpack preserves one immutable
+  copy of the exact verified plaintext and trust metadata before mutable handlers run. A bounded
+  synchronous **`IInboundCorrelator`** checks that snapshot and atomically claims a pending query;
+  typed disclosure parsing is forced onto the requester's continuation, even for reentrant loopback
+  sends. This is NOT the best-effort observer queue, so legitimate responses are not dropped behind
+  that firehose. Completion requires an authenticated sender whose sender/signer key DID subject
+  matches plaintext `from` and the queried responder, a signed `to` naming the requester, and—for
+  encrypted replies—a `RecipientKid` naming the requester that decrypted it. Rejected forgeries leave
+  the waiter pending; response/cancellation races settle once, and only a response winner parses.
+- **Out-of-band reply delivery is the responder application's job (FR-TRN-10).** The initiator runs
+  a receive endpoint; the responder sends its `disclose` there with `DidCommClient.SendAsync`, bound
+  to the authenticated inbound sender and local decrypting identity. The library performs **no
+  automatic out-of-band endpoint egress**—avoiding the reflector / cross-tenant / endpoint-SSRF / DoS
+  class. The pre-existing opt-in same-WebSocket convenience remains, but now requires encrypted+
+  authenticated input and derives both participants from verified key ids; signed-only, plaintext,
+  anoncrypt, keyless, cross-tenant, and fan-out cases emit no frame. A two-agent HTTP test proves the
+  application-wired round-trip with separate key stores; real WebSocket crypto tests prove the
+  decrypting tenant is selected even when another hosted tenant is first in plaintext `to`.
+
+### Added — Inbound protocol observer seam (`IProtocolObserver`, FR-PROTO-12)
+
+Closes **#50**. Lets an application observe inbound traffic whose PIURI is owned by a built-in handler
+(e.g. react to an inbound `report-problem/2.0`) without **replacing** that handler.
+
+- **New `IProtocolObserver` + `DidCommBuilder.AddProtocolObserver<T>()`.** Opt-in only —
+  `AddBuiltInProtocols()` registers **no** default observer (Discover Features uses the bounded inline
+  claim hook above), so a default deployment has no observer/firehose surface for a remote flood to
+  target.
+- **Admission before work, fully decoupled from dispatch.** Each per-observer queue atomically reserves
+  both one outstanding item and the immutable snapshot's **exact UTF-8 byte count** before any
+  observer-private deserialization. Bounds include queued + in-flight work, so count-full, cumulative-
+  byte-full, oversized, and shutdown-racing drops perform zero clone work and cannot overshoot under
+  concurrent producers. The dispatcher returns immediately; slow/hung/faulting observers cannot gate
+  replies or alter outcomes, and independent pumps prevent starvation. Overflow is best-effort /
+  at-most-once and rate-limited logs report the actual message id, configured capacity/budget, and
+  cumulative drops. Each accepted observer materializes its own clone from the pre-handler snapshot.
+- **Read-only, not a sandbox.** Each observer receives a defensive deep clone via `InboundObservation`
+  (never the live message, the facade, or the thread store); the clone prevents mutation *through the
+  payload*, but observers are trusted in-process host code registered at DI-composition time and are
+  not otherwise sandboxed. No observer code runs on the dispatch path — the `ProtocolUriFilter` getter
+  is read once, guarded, at construction (a throwing getter disables that observer). The registered
+  observer set is logged at construction (operator-auditable).
+- **`ProtocolDispatcher` is now `IDisposable` / `IAsyncDisposable`** (additive). Shutdown stops
+  admission, cancels cooperative callbacks, drains queued plaintext/barriers, releases reservations,
+  and observes pump faults before disposing their token source. .NET cannot kill trusted callback code
+  that ignores cancellation; only its single in-flight snapshot may remain beyond the async grace,
+  while the rest of that observer's queue is released immediately.
+
+### Hardened — surfaced by adversarial + code review
+
+- **Binary compatibility preserved + gated.** `ProtocolDispatcher`'s exact 1.2.0 four-argument
+  constructor is retained (a new overload adds observers; the internal correlator ctor is separate),
+  so code compiled against 1.2.0 keeps binding. **SDK Package Validation** (ApiCompat vs the published
+  1.2.0 packages) runs at pack time AND in PR CI, failing on any binary-incompatible change.
+- **Malformed `type` no longer throws on the dispatch path.** A crafted doubled-slash `type` (e.g.
+  `https://didcomm.org//x/1.0/m`) parses as an MTURI but its derived PIURI does not; `TryResolve` and
+  the observer filter now use `ProtocolIdentifier.TryParse` and fail closed (no handler / no match).
+- **Real-crypto tests.** The initiator/anti-spoof paths are exercised against genuine authcrypt and
+  JWS-signed envelopes unpacked end to end: legitimate ones complete; an authcrypt-tampered and a
+  post-sign **signature-verification** tamper are rejected at unpack (`CryptoException`); a
+  self-consistent third-party (authcrypt and signed) forgery cannot answer the query.
+- **Same-socket identity binding.** Automatic WebSocket replies use verified `SenderKid`/`SignerKid`
+  for the peer and `RecipientKid` for the local tenant, require the reply to name exactly that pair,
+  and deep-snapshot the mutable handler reply before validation/packing. Discover Features and Trust
+  Ping handlers prefer the actual decrypting DID instead of plaintext recipient ordering.
+
 ## [1.2.0] - 2026-07-13
 
 > Foundation-pin bump only — no public API or behavior change in DidComm itself. Closes **#47**.
@@ -1552,7 +1634,8 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.0.0...v1.1.0
 [0.1.0-preview.1]: https://github.com/moisesja/didcomm-dotnet/releases/tag/v0.1.0-preview.1

@@ -61,7 +61,19 @@ public sealed class DidCommBuilder
             }
             return registry;
         });
-        Services.TryAddSingleton<ProtocolDispatcher>();
+        // Explicit factory rather than TryAddSingleton<ProtocolDispatcher>(): the default greediest-
+        // constructor selection would only pick the observer/correlator-aware ctor when TraceOptions
+        // also happens to be registered (i.e. EnableTracing was called), silently dropping them
+        // otherwise. The factory always calls the full ctor, resolving the optional pieces explicitly,
+        // so FR-PROTO-12 observers AND FR-PROTO-05a inline correlators (e.g. DiscoverFeaturesClient)
+        // are wired regardless of tracing.
+        Services.TryAddSingleton<ProtocolDispatcher>(sp => new ProtocolDispatcher(
+            sp.GetRequiredService<ProtocolHandlerRegistry>(),
+            sp.GetRequiredService<IThreadStateStore>(),
+            sp.GetService<ILogger<ProtocolDispatcher>>(),
+            sp.GetService<TraceOptions>(),
+            sp.GetServices<IProtocolObserver>(),
+            sp.GetServices<IInboundCorrelator>()));
     }
 
     /// <summary>
@@ -87,9 +99,10 @@ public sealed class DidCommBuilder
     /// <summary>
     /// Register the spec-defined built-in protocol handlers: Trust Ping 2.0 (FR-PROTO-04),
     /// Empty 1.0 (FR-PROTO-06), Discover Features 2.0 (FR-PROTO-05) with its default
-    /// <see cref="IFeatureProvider"/>s, and Report Problem 2.0 (FR-PROTO-07/08/10). Trace 2.0
-    /// is NOT registered here — it is off by default per FR-PROTO-11a; opt in via
-    /// <see cref="EnableTracing"/>.
+    /// <see cref="IFeatureProvider"/>s and the initiator-side
+    /// <see cref="DiscoverFeaturesClient"/> (FR-PROTO-05a), and Report Problem 2.0
+    /// (FR-PROTO-07/08/10). Trace 2.0 is NOT registered here — it is off by default per
+    /// FR-PROTO-11a; opt in via <see cref="EnableTracing"/>.
     /// </summary>
     public DidCommBuilder AddBuiltInProtocols()
     {
@@ -97,6 +110,17 @@ public sealed class DidCommBuilder
         AddProtocol<EmptyHandler>();
         AddProtocol<DiscoverFeaturesHandler>();
         AddProtocol<ProblemReportHandler>();
+        // FR-PROTO-05a: the Discover Features initiator (QueryFeaturesAsync). Registered as an
+        // internal IInboundCorrelator (NOT a queued observer): the dispatcher hands it each inbound
+        // `disclose` inline, synchronously, so it is not dropped behind unsolicited traffic in the
+        // best-effort observer queue. The bounded inline phase only checks headers/trust and claims
+        // the pending operation; body parsing happens on the requester continuation.
+        // This is also why AddBuiltInProtocols registers no default IProtocolObserver: there is no
+        // default firehose consumer for an attacker to exploit.
+        Services.TryAddSingleton<DiscoverFeaturesClient>();
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IInboundCorrelator, DiscoverFeaturesClient>(
+                sp => sp.GetRequiredService<DiscoverFeaturesClient>()));
         // The FR-PROTO-10 cascade budget (#36) lives in a dedicated store registered as its OWN
         // singleton, so the budget persists even if the handler is (mis)registered non-singleton.
         Services.TryAddSingleton<CascadeBudgetStore>();
@@ -154,6 +178,29 @@ public sealed class DidCommBuilder
         Services.TryAddSingleton<T>();
         Services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IFeatureProvider, T>(sp => sp.GetRequiredService<T>()));
+        return this;
+    }
+
+    /// <summary>
+    /// Register an <see cref="IProtocolObserver"/> — a read-only side channel the
+    /// <see cref="ProtocolDispatcher"/> notifies for every completed inbound dispatch
+    /// (FR-PROTO-12). Use this to observe traffic whose PIURI is owned by a built-in handler
+    /// (e.g. reacting to inbound <c>report-problem</c>s) without replacing that handler.
+    /// </summary>
+    /// <remarks>
+    /// Observers are host-trusted: they see decrypted inbound plaintext (scoped by their
+    /// <see cref="IProtocolObserver.ProtocolUriFilter"/>), can only be registered here at
+    /// composition time, and are enumerated in an Information log line at dispatcher
+    /// construction. They receive defensive clones and cannot influence dispatch outcomes —
+    /// see <see cref="IProtocolObserver"/> for the full trust model. Idempotent in the DI
+    /// graph: repeat registration of the same type is a no-op.
+    /// </remarks>
+    /// <typeparam name="T">A concrete <see cref="IProtocolObserver"/> resolvable from DI.</typeparam>
+    public DidCommBuilder AddProtocolObserver<T>() where T : class, IProtocolObserver
+    {
+        Services.TryAddSingleton<T>();
+        Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IProtocolObserver, T>(sp => sp.GetRequiredService<T>()));
         return this;
     }
 

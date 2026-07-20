@@ -32,34 +32,36 @@ public static class Section_T_DiscoverFeatures
     /// <param name="ctx">The shared cookbook context.</param>
     public static async Task RunAsync(CookbookContext ctx)
     {
-        ctx.Narrator.Section("T", "Discover Features (queries → disclose)");
+        ctx.Narrator.Section("T", "Discover Features (initiator: ask, then await the answer)");
 
-        var dispatcher = ctx.ServiceProvider.GetRequiredService<ProtocolDispatcher>();
-        var options = ctx.ServiceProvider.GetRequiredService<IOptions<DidCommOptions>>().Value;
+        // The initiator client is the requester side of Discover Features: you call QueryFeaturesAsync
+        // and it returns the peer's disclosures once they arrive. It is registered by
+        // AddBuiltInProtocols(), so resolve it from DI. In a real app its send goes over your HTTP
+        // transport and the peer's `disclose` arrives out-of-band at your own receive endpoint —
+        // here the cookbook's in-process loopback transport plays the peer so the sample needs no
+        // network. The endpoint override just points the send at that loopback.
+        var initiator = ctx.ServiceProvider.GetRequiredService<DiscoverFeaturesClient>();
 
         // Alice asks two questions in one shot: "list every PIURI under didcomm.org" and
-        // "what's your max_receive_bytes?". Both pack into one queries message.
-        var query = DiscoverFeaturesApi.CreateQuery(ctx.Alice.Did, ctx.Bob.Did,
-            new FeatureQuery { FeatureType = DiscoverFeaturesApi.FeatureTypeProtocol, Match = "https://didcomm.org/*" },
-            new FeatureQuery { FeatureType = DiscoverFeaturesApi.FeatureTypeConstraint, Match = DiscoverFeaturesApi.ConstraintMaxReceiveBytes });
+        // "what's your max_receive_bytes?" — then awaits Bob's answer.
+        ctx.Narrator.Step("Alice calls QueryFeaturesAsync and awaits Bob's disclose.");
+        var disclosures = await initiator.QueryFeaturesAsync(
+            from: ctx.Alice.Did,
+            to: ctx.Bob.Did,
+            queries: new[]
+            {
+                new FeatureQuery { FeatureType = DiscoverFeaturesApi.FeatureTypeProtocol, Match = "https://didcomm.org/*" },
+                new FeatureQuery { FeatureType = DiscoverFeaturesApi.FeatureTypeConstraint, Match = DiscoverFeaturesApi.ConstraintMaxReceiveBytes },
+            },
+            timeout: TimeSpan.FromSeconds(10),
+            serviceEndpointOverride: new Uri("loopback://cookbook/didcomm"));
 
-        ctx.Narrator.Step("Alice packs a Discover Features 'queries' message with 2 queries.");
-        var packed = (await ctx.Client.PackEncryptedAsync(query, new PackEncryptedOptions(
-            Recipients: new[] { ctx.Bob.Did }, From: ctx.Alice.Did))).Message;
-
-        var unpacked = await ctx.Client.UnpackAsync(packed);
-        var outcome = await dispatcher.DispatchAsync(unpacked, ctx.Client, options);
-        ctx.Narrator.Value("DispatchResult", outcome.Result);
-        ctx.Narrator.Value("Reply.Type", outcome.Reply?.Type);
-        ctx.Narrator.Value("Reply.Thid == query.Id", outcome.Reply?.Thid == query.Id);
-
-        var disclosures = DiscoverFeaturesApi.ReadDisclosures(outcome.Reply!);
         ctx.Narrator.Value("Disclosure count", disclosures.Count);
         foreach (var d in disclosures)
         {
             var value = d.Value is long v ? $" (value={v})" : string.Empty;
             ctx.Narrator.Value($"- {d.FeatureType}", $"{d.Id}{value}");
         }
-        ctx.Narrator.Note("Unrecognized feature-types are silently ignored per FR-PROTO-05; empty disclosures ≠ \"unsupported\".");
+        ctx.Narrator.Note("Only an authenticated disclose from the queried peer completes the call; a timeout throws. Empty disclosures ≠ \"unsupported\".");
     }
 }

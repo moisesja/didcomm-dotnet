@@ -2,11 +2,15 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Net.Mime;
 using System.Net.WebSockets;
+using System.Text.Json;
+using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
+using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.OutOfBand;
+using DidComm.Transports;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -138,9 +142,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <c>onReceive</c>-callback overload (validates content-type → 415, caps body → 413,
     /// returns 202 on success) but resolves the inbound message to a registered
     /// <see cref="IProtocolHandler"/> via <see cref="ProtocolDispatcher"/>. Any reply the
-    /// handler produces is LOGGED (HTTP receive is one-way per FR-TRN-10) — operators that
-    /// want to deliver the reply schedule an outbound send out of band, typically using
-    /// <see cref="DidCommClient.SendAsync"/> from inside the handler itself.
+    /// handler produces is LOGGED (HTTP receive is one-way per FR-TRN-10). Delivering a reply is
+    /// the application's decision, made out of band with <see cref="DidCommClient.SendAsync"/> —
+    /// deliberately NOT automatic: an inbound-triggered outbound send that trusts the message's
+    /// (possibly attacker-advertised) sender/endpoint is a reflection / amplification / cross-tenant
+    /// hazard. Use the <c>onReceive</c>-callback overload if you want to dispatch and then send a
+    /// reply under your own egress policy (bind the recipient to the authenticated inbound sender).
+    /// A Discover Features round-trip completes when the responder app sends its <c>disclose</c> back
+    /// to the initiator's endpoint this way.
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
@@ -192,6 +201,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
                 var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+                // HTTP receive is one-way (FR-TRN-10): the reply is logged, not sent. Delivering it is
+                // the application's decision — see the onReceive-callback overload and MapDidCommEndpoint's
+                // remarks for why an automatic inbound-triggered outbound send is deliberately absent.
                 LogOutcome(logger, outcome, sameSocketDelivered: false);
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
@@ -283,9 +295,11 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// callback overload (FR-TRN-09/10/API-06 enforced); each reassembled envelope is unpacked
     /// and dispatched through <see cref="ProtocolDispatcher"/>. When the inbound endpoint's
     /// <see cref="DidCommReceiveOptions.AllowSameSocketReplies"/> is <c>true</c>, any handler
-    /// reply is packed (authcrypt back to the original sender) and written on the same socket
-    /// as a single binary message — the chat-style convenience. Defaults to <c>false</c> per
-    /// FR-TRN-10's one-way reading.
+    /// reply may be packed and written on the same socket as one binary message. This convenience
+    /// fails closed unless the inbound was encrypted and authenticated, verified sender/signer and
+    /// recipient key ids bind the peer and local DID, and the reply names exactly those participants.
+    /// Signed-only, plaintext, anoncrypt, keyless, cross-tenant, and fan-out cases emit no frame.
+    /// Defaults to <c>false</c> per FR-TRN-10's one-way reading.
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -421,27 +435,30 @@ public static class DidCommEndpointRouteBuilderExtensions
         ILogger? logger,
         CancellationToken ct)
     {
-        // The handler owns identity selection (from/to); we only enforce what this socket
-        // dictates — see TryRouteSameSocketReply for the rules.
-        if (!TryRouteSameSocketReply(inbound, reply, out var from, out var peerDid, out var reason))
+        DidComm.Messages.Message replySnapshot;
+        try
+        {
+            // Message is deliberately mutable. Snapshot the handler-owned instance before validation
+            // and packing so a handler retaining and mutating it cannot race the security gate.
+            var json = JsonSerializer.Serialize(reply, DidCommJson.Default);
+            replySnapshot = JsonSerializer.Deserialize<DidComm.Messages.Message>(json, DidCommJson.Default)
+                ?? throw new JsonException("Handler reply deserialized to null.");
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "MapDidCommWebSocket: dropping same-socket reply because it could not be snapshotted.");
+            return false;
+        }
+
+        if (!TryRouteSameSocketReply(inbound, replySnapshot, out var from, out var peerDid, out var reason))
         {
             logger?.LogWarning("MapDidCommWebSocket: dropping same-socket reply — {Reason}", reason);
             return false;
         }
 
-        // Defense-in-depth advisory: reply.From should normally be one of the identities the
-        // inbound was addressed to. Log if not, but proceed — legitimate multi-DID setups may
-        // legitimately rebind on reply, and authcrypt will still bind the chosen sender key.
-        if (inbound.Message.To is { Count: > 0 } && !inbound.Message.To.Contains(from!, StringComparer.Ordinal))
-        {
-            logger?.LogWarning(
-                "MapDidCommWebSocket: handler reply.from '{From}' is not among inbound.to ({InboundTo}); delivering anyway, but this may indicate a misconfigured handler.",
-                from, string.Join(",", inbound.Message.To));
-        }
-
         try
         {
-            var packed = await client.PackEncryptedAsync(reply, new PackEncryptedOptions(
+            var packed = await client.PackEncryptedAsync(replySnapshot, new PackEncryptedOptions(
                 Recipients: new[] { peerDid! }, From: from!), ct).ConfigureAwait(false);
             var bytes = System.Text.Encoding.UTF8.GetBytes(packed.Message);
             await socket.SendAsync(bytes, WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
@@ -456,16 +473,15 @@ public static class DidCommEndpointRouteBuilderExtensions
 
     /// <summary>
     /// Decide whether a handler's reply can be delivered back on the SAME WebSocket as the
-    /// inbound envelope. The handler owns <c>from</c>/<c>to</c> selection — the only thing this
-    /// gate enforces is what the socket dictates: any envelope written here is consumed by the
-    /// inbound peer, so the reply MUST be addressed to that peer (otherwise we'd be writing
-    /// ciphertext the peer cannot decrypt onto its socket). Handlers fanning out to other
-    /// recipients must use <c>ProtocolContext.Client.SendAsync</c> (out-of-band per FR-TRN-10).
+    /// inbound envelope. Sender and responder identities come from verified envelope key ids, not
+    /// from handler-selected or plaintext ordering. Any envelope written here is consumed by the
+    /// authenticated inbound peer, so the reply MUST target exactly that peer. Handlers fanning out
+    /// or rebinding identities must use <c>ProtocolContext.Client.SendAsync</c> under application policy.
     /// </summary>
     /// <param name="inbound">The unpack result for the inbound envelope.</param>
     /// <param name="reply">The handler-produced reply message.</param>
-    /// <param name="from">The sender DID to pack authcrypt as (<c>reply.From</c>) on success.</param>
-    /// <param name="peerDid">The single recipient DID to pack for (the inbound peer) on success.</param>
+    /// <param name="from">The bare DID subject of the key that decrypted the inbound on success.</param>
+    /// <param name="peerDid">The bare DID subject of the authenticated inbound peer on success.</param>
     /// <param name="reason">Human-readable failure reason on rejection; <c>null</c> on success.</param>
     /// <returns><c>true</c> when the reply is safe to deliver on this socket.</returns>
     internal static bool TryRouteSameSocketReply(
@@ -481,24 +497,69 @@ public static class DidCommEndpointRouteBuilderExtensions
         peerDid = null;
         reason = null;
 
-        if (string.IsNullOrEmpty(reply.From))
+        // Same-socket convenience is deliberately narrower than general DIDComm replies: require an
+        // encrypted, authenticated inbound so both ends are bound to verified envelope key ids.
+        // Signed-only, plaintext, and anoncrypt inputs cannot supply both bindings and fail closed.
+        if (!inbound.Encrypted || !inbound.Authenticated)
         {
-            reason = "handler reply has no 'from'; cannot pack authcrypt for same-socket delivery.";
-            return false;
-        }
-        if (string.IsNullOrEmpty(inbound.Message.From))
-        {
-            reason = "inbound envelope has no 'from'; same-socket reply has no addressable peer.";
-            return false;
-        }
-        if (reply.To is null || !reply.To.Contains(inbound.Message.From, StringComparer.Ordinal))
-        {
-            reason = $"handler reply.to does not include the inbound peer '{inbound.Message.From}'; use ProtocolContext.Client.SendAsync for out-of-band recipients.";
+            reason = "inbound envelope must be both encrypted and authenticated for a same-socket reply.";
             return false;
         }
 
-        from = reply.From;
-        peerDid = inbound.Message.From;
+        string? senderDid = null;
+        if (!string.IsNullOrEmpty(inbound.SenderKid))
+        {
+            senderDid = DidSubject.DidSubjectOf(inbound.SenderKid);
+            if (senderDid is null)
+            {
+                reason = "authenticated sender kid is not a valid DID or DID URL.";
+                return false;
+            }
+        }
+
+        string? signerDid = null;
+        if (!string.IsNullOrEmpty(inbound.SignerKid))
+        {
+            signerDid = DidSubject.DidSubjectOf(inbound.SignerKid);
+            if (signerDid is null)
+            {
+                reason = "authenticated signer kid is not a valid DID or DID URL.";
+                return false;
+            }
+        }
+
+        if (senderDid is null && signerDid is null)
+        {
+            reason = "authenticated inbound has no sender or signer key id to bind its peer identity.";
+            return false;
+        }
+        if (senderDid is not null && signerDid is not null && !string.Equals(senderDid, signerDid, StringComparison.Ordinal))
+        {
+            reason = "sender and signer key ids identify different DID subjects.";
+            return false;
+        }
+
+        var authenticatedPeerDid = senderDid ?? signerDid!;
+        var decryptingDid = DidSubject.DidSubjectOf(inbound.RecipientKid);
+        if (decryptingDid is null)
+        {
+            reason = "inbound has no valid recipient key id identifying the local decrypting DID.";
+            return false;
+        }
+        if (!DidSubject.SameDidSubject(reply.From, decryptingDid))
+        {
+            reason = "handler reply.from does not match the local decrypting key DID subject.";
+            return false;
+        }
+
+        if (reply.To is not { Count: 1 } || !DidSubject.SameDidSubject(reply.To[0], authenticatedPeerDid))
+        {
+            reason = $"handler reply.to must contain exactly the authenticated inbound peer '{authenticatedPeerDid}'; use ProtocolContext.Client.SendAsync for other recipients.";
+            return false;
+        }
+
+        from = decryptingDid;
+        peerDid = authenticatedPeerDid;
         return true;
     }
 

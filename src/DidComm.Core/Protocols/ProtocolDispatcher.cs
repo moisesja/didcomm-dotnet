@@ -12,6 +12,9 @@ namespace DidComm.Protocols;
 /// loop-guard pre-filter, calls the handler, validates any reply against
 /// <see cref="AckLoopGuard.IsSafeToSend"/> (FR-THR-04 rule 2), and returns a
 /// <see cref="DispatchOutcome"/> describing what the transport layer should do next.
+/// After the outcome is determined, registered <see cref="IProtocolObserver"/>s are notified
+/// on a read-only side channel (FR-PROTO-12) — see <see cref="IProtocolObserver"/> for the
+/// trust model.
 /// </summary>
 /// <remarks>
 /// The dispatcher does NOT itself send replies — that decision is the transport's, because
@@ -20,14 +23,20 @@ namespace DidComm.Protocols;
 /// transport-agnostic also makes it directly testable from unit tests without spinning up an
 /// ASP.NET Core host.
 /// </remarks>
-public sealed class ProtocolDispatcher
+public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 {
     private readonly ProtocolHandlerRegistry _registry;
     private readonly IThreadStateStore _threads;
     private readonly ILogger<ProtocolDispatcher>? _logger;
     private readonly TraceOptions? _traceOptions;
+    private readonly ObserverDelivery? _observers;
+    private readonly IInboundCorrelator[] _correlators;
 
-    /// <summary>Construct a dispatcher bound to a registry and thread-state store.</summary>
+    /// <summary>
+    /// Construct a dispatcher bound to a registry and thread-state store. This is the exact 1.2.0
+    /// signature, preserved for binary compatibility; it delegates to the observer-aware constructor
+    /// with no observers.
+    /// </summary>
     /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
     /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
     /// <param name="logger">Optional structured logger; warnings are emitted for FR-THR-04 rule 3 drops.</param>
@@ -37,6 +46,38 @@ public sealed class ProtocolDispatcher
         IThreadStateStore threads,
         ILogger<ProtocolDispatcher>? logger = null,
         TraceOptions? traceOptions = null)
+        : this(registry, threads, logger, traceOptions, observers: null)
+    {
+    }
+
+    /// <summary>Construct a dispatcher with read-only inbound observers (FR-PROTO-12).</summary>
+    /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
+    /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
+    /// <param name="logger">Optional structured logger.</param>
+    /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11).</param>
+    /// <param name="observers">Read-only inbound observers. Fixed at construction — there is deliberately no runtime add/remove — enumerated in an Information log line so the registration set is operator-auditable. Notified off the dispatch path via a bounded background queue, so they never gate reply delivery or affect the outcome.</param>
+    public ProtocolDispatcher(
+        ProtocolHandlerRegistry registry,
+        IThreadStateStore threads,
+        ILogger<ProtocolDispatcher>? logger,
+        TraceOptions? traceOptions,
+        IEnumerable<IProtocolObserver>? observers)
+        : this(registry, threads, logger, traceOptions, observers, correlators: null)
+    {
+    }
+
+    /// <summary>
+    /// Construct a dispatcher with observers (queued) and internal inbound correlators (invoked
+    /// inline, synchronously, guarded). Used by DI to wire built-in correlators such as the Discover
+    /// Features initiator client, which need lossless, non-queued delivery.
+    /// </summary>
+    internal ProtocolDispatcher(
+        ProtocolHandlerRegistry registry,
+        IThreadStateStore threads,
+        ILogger<ProtocolDispatcher>? logger,
+        TraceOptions? traceOptions,
+        IEnumerable<IProtocolObserver>? observers,
+        IEnumerable<IInboundCorrelator>? correlators)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(threads);
@@ -44,6 +85,21 @@ public sealed class ProtocolDispatcher
         _threads = threads;
         _logger = logger;
         _traceOptions = traceOptions;
+        _correlators = correlators?.ToArray() ?? Array.Empty<IInboundCorrelator>();
+        var observerList = observers?.ToArray() ?? Array.Empty<IProtocolObserver>();
+        if (observerList.Length > 0)
+        {
+            // ObserverDelivery reads each ProtocolUriFilter exactly once, guarded, at construction; we
+            // then log its cached description rather than re-invoking observer code here (a throwing
+            // filter getter must not be able to break dispatcher construction).
+            _observers = new ObserverDelivery(observerList, logger);
+            // FR-PROTO-12 audit trail: observers see decrypted inbound plaintext, so the set of
+            // registered observer types must be visible to an operator reading startup logs — a
+            // stowaway registration from a compromised dependency should not be silent.
+            _logger?.LogInformation(
+                "Inbound protocol observers registered (read-only side channel, FR-PROTO-12): {Observers}.",
+                _observers.Describe());
+        }
     }
 
     /// <summary>
@@ -64,6 +120,102 @@ public sealed class ProtocolDispatcher
         ArgumentNullException.ThrowIfNull(received);
         ArgumentNullException.ThrowIfNull(options);
 
+        InboundMessageSnapshot? snapshot = null;
+        if (_correlators.Length > 0 || _observers is not null)
+        {
+            try
+            {
+                // Normal path: EnvelopeReader attached the exact verified plaintext at unpack. The
+                // fallback preserves the public DispatchAsync contract for callers/tests that build
+                // UnpackResult themselves; it is guarded so a malformed synthetic object cannot
+                // clobber dispatch merely because an observer/correlator is configured.
+                if (!InboundMessageSnapshot.TryGetFor(received.Message, out snapshot))
+                    snapshot = InboundMessageSnapshot.CreateFallback(received);
+            }
+            catch (Exception ex)
+            {
+                SafeLogWarning(
+                    ex,
+                    "Could not snapshot synthetic inbound message {MessageId}; correlation and observer delivery are skipped, but protocol dispatch continues.",
+                    received.Message.Id);
+            }
+        }
+
+        // Internal correlators (FR-PROTO-05a): run against the immutable unpack snapshot BEFORE
+        // application handler code. A handler therefore cannot mutate sender/thread/body fields or
+        // throw before a genuine authenticated response reaches its waiter. The hook only validates
+        // fixed headers and transfers the snapshot into a TCS; typed body parsing happens on the
+        // requester's continuation, off this receive path.
+        if (snapshot is not null)
+            NotifyCorrelators(snapshot);
+
+        try
+        {
+            return await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            // FR-PROTO-12: hand the inbound to the observers' bounded background queue. In a finally so
+            // it runs for EVERY outcome path — handled, NoReply, NoHandler, loop-guard drops, and even
+            // a handler that threw — so a second consumer observes all inbound traffic (an initiator
+            // with no handler registered for a PIURI still sees it too). Enqueue is non-blocking and
+            // never awaits observer work, so it can neither gate reply delivery nor change the outcome.
+            // The try/catch is defense-in-depth: Enqueue is structurally non-throwing today, but a
+            // future change that made it throw must not escape this finally and mask the real result.
+            if (snapshot is not null && _observers is not null)
+            {
+                try
+                {
+                    _observers.Enqueue(snapshot);
+                }
+                catch (Exception ex)
+                {
+                    SafeLogWarning(
+                        ex,
+                        "Observer enqueue threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected (FR-PROTO-12).",
+                        received.Message.Id);
+                }
+            }
+        }
+    }
+
+    private void NotifyCorrelators(InboundMessageSnapshot received)
+    {
+        foreach (var correlator in _correlators)
+        {
+            try
+            {
+                correlator.OnInbound(received);
+            }
+            catch (Exception ex)
+            {
+                SafeLogWarning(
+                    ex,
+                    "IInboundCorrelator '{Correlator}' threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected.",
+                    correlator.GetType().FullName, received.Id);
+            }
+        }
+    }
+
+    private void SafeLogWarning(Exception exception, string message, params object?[] args)
+    {
+        try
+        {
+            _logger?.LogWarning(exception, message, args);
+        }
+        catch
+        {
+            // This is an isolation boundary. A host logging provider must not turn optional
+            // correlation/observation failure into a changed protocol dispatch outcome.
+        }
+    }
+
+    private async Task<DispatchOutcome> DispatchCoreAsync(
+        UnpackResult received,
+        DidCommClient? client,
+        DidCommOptions options,
+        CancellationToken ct)
+    {
         // FR-PROTO-11: when Trace 2.0 is opted in via EnableTracing, exercise the decision logic
         // on every inbound. Today the observable side effect is a structured Information log
         // line — HTTP POST integration is deferred to the runtime hook in a later phase.
@@ -132,5 +284,25 @@ public sealed class ProtocolDispatcher
             thread.AckRequested = true;
 
         return new DispatchOutcome(DispatchResult.ReplyProduced, reply, handler);
+    }
+
+    /// <summary>
+    /// Test/diagnostic seam: complete when every observation enqueued before this call has been
+    /// delivered to its observer. Observer delivery is otherwise asynchronous and off the dispatch
+    /// path, so tests use this to make observation deterministic. A never-completing observer will
+    /// not drain, so callers pass a <paramref name="timeout"/>. No-op when no observers are registered.
+    /// </summary>
+    /// <param name="timeout">Maximum time to wait for the queues to drain.</param>
+    internal Task FlushObserversAsync(TimeSpan timeout)
+        => _observers?.FlushAsync(timeout) ?? Task.CompletedTask;
+
+    /// <summary>Stop the observer delivery pumps synchronously (best effort; does not block on in-flight observers). Invoked by the DI container on synchronous shutdown.</summary>
+    public void Dispose() => _observers?.Dispose();
+
+    /// <summary>Stop the observer delivery pumps, awaiting drain. Invoked by the DI container on asynchronous shutdown.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (_observers is not null)
+            await _observers.DisposeAsync().ConfigureAwait(false);
     }
 }

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.RegularExpressions;
 using DidComm.Exceptions;
 
@@ -39,7 +40,7 @@ public sealed partial record class ProtocolIdentifier(
     /// <summary>Try-parse a PIURI string.</summary>
     /// <param name="value">Candidate PIURI string.</param>
     /// <param name="id">Parsed result on success; <c>null</c> otherwise.</param>
-    public static bool TryParse(string? value, out ProtocolIdentifier? id)
+    public static bool TryParse(string? value, [NotNullWhen(true)] out ProtocolIdentifier? id)
     {
         id = null;
         if (string.IsNullOrEmpty(value)) return false;
