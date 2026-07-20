@@ -32,7 +32,6 @@ internal sealed class InboundMessageSnapshot
         string? recipientKid)
     {
         PlaintextJson = plaintextJson;
-        Utf8ByteCount = Encoding.UTF8.GetByteCount(plaintextJson);
         Id = id;
         Type = type;
         Thid = thid;
@@ -47,8 +46,26 @@ internal sealed class InboundMessageSnapshot
         RecipientKid = recipientKid;
     }
 
+    private int _utf8ByteCount = -1;
+
     internal string PlaintextJson { get; }
-    internal int Utf8ByteCount { get; }
+
+    internal int Utf8ByteCount
+    {
+        get
+        {
+            // Lazy: only ObserverDelivery's byte-budget admission reads this; the plain
+            // unpack path must not pay an O(plaintext) scan (#53). Benign race by design:
+            // GetByteCount is deterministic over the immutable PlaintextJson and int
+            // writes are atomic, so concurrent first readers at worst recompute the
+            // same value.
+            var count = _utf8ByteCount;
+            if (count < 0)
+                _utf8ByteCount = count = Encoding.UTF8.GetByteCount(PlaintextJson);
+            return count;
+        }
+    }
+
     internal string Id { get; }
     internal string Type { get; }
     internal string? Thid { get; }
