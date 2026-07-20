@@ -133,6 +133,31 @@ public sealed class ProtocolDispatcherObserverTests
         seen.Authenticated.Should().BeTrue("envelope-auth metadata must flow through for trust decisions");
     }
 
+    private sealed class ThrowingHandler : IProtocolHandler
+    {
+        public string ProtocolUri => "https://didcomm.org/test/1.0";
+        public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+            => throw new InvalidOperationException("handler blew up");
+    }
+
+    [Fact]
+    public async Task Observer_still_sees_the_inbound_when_the_handler_throws()
+    {
+        // FR-PROTO-12: observation is a side channel independent of handler success. Even when the
+        // handler throws (and the exception propagates to the caller), the observer must still see the
+        // inbound — the enqueue runs in a finally, off the dispatch outcome.
+        var reg = new ProtocolHandlerRegistry();
+        reg.Register(new ThrowingHandler());
+        var observer = new RecordingObserver();
+        await using var dispatcher = Dispatcher(reg, observer);
+
+        var act = async () => await dispatcher.DispatchAsync(Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null, new DidCommOptions());
+        await act.Should().ThrowAsync<InvalidOperationException>("the handler's exception still propagates to the caller");
+
+        await dispatcher.FlushObserversAsync(Flush);
+        observer.Observations.Should().HaveCount(1, "the observer sees the inbound regardless of handler outcome");
+    }
+
     [Fact]
     public async Task Observer_is_notified_on_NoHandler()
     {

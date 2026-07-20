@@ -149,16 +149,34 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         if (snapshot is not null)
             NotifyCorrelators(snapshot);
 
-        var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
-
-        // FR-PROTO-12: hand the inbound to the observers' bounded background queue and return
-        // immediately. Enqueue is non-blocking, runs for every outcome path (handled, NoReply,
-        // NoHandler, loop-guard drops), and NEVER awaits observer work — so a slow or faulting
-        // observer can neither gate this reply's delivery nor change the computed outcome, and an
-        // initiator with no handler registered for a PIURI can still observe its traffic.
-        if (snapshot is not null)
-            _observers?.Enqueue(snapshot);
-        return outcome;
+        try
+        {
+            return await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            // FR-PROTO-12: hand the inbound to the observers' bounded background queue. In a finally so
+            // it runs for EVERY outcome path — handled, NoReply, NoHandler, loop-guard drops, and even
+            // a handler that threw — so a second consumer observes all inbound traffic (an initiator
+            // with no handler registered for a PIURI still sees it too). Enqueue is non-blocking and
+            // never awaits observer work, so it can neither gate reply delivery nor change the outcome.
+            // The try/catch is defense-in-depth: Enqueue is structurally non-throwing today, but a
+            // future change that made it throw must not escape this finally and mask the real result.
+            if (snapshot is not null && _observers is not null)
+            {
+                try
+                {
+                    _observers.Enqueue(snapshot);
+                }
+                catch (Exception ex)
+                {
+                    SafeLogWarning(
+                        ex,
+                        "Observer enqueue threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected (FR-PROTO-12).",
+                        received.Message.Id);
+                }
+            }
+        }
     }
 
     private void NotifyCorrelators(InboundMessageSnapshot received)
