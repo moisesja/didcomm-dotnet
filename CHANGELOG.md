@@ -46,13 +46,51 @@ API documentation now explicitly calls out as *not* same-resolution controller p
 Downstream consumers (e.g. opaqai-wallet-platform) can drop global resolver-observation ledgers
 and read the message-scoped bindings instead.
 
-New requirement FR-CONSIST-07 (and the FR-API-04 update) document the invariant in the PRD.
-36 new tests cover the acceptance criteria: rotated-kid races in both orderings (signed and
-authcrypt), controller splices, duplicate/shadowed kids, relative/embedded/referenced ids,
-missing and cross-DID controllers, wrong relationships, nested compositions
+### Fixed — `from_prior` rotation accepted across two DID resolutions (same bug class, #56 review)
+
+`FromPriorValidator` authorized the rotation JWT's signer kid in one resolution
+(`IsKeyAuthorizedAsync`) and then fetched the verifying key in a second
+(`GetVerificationMethodsAsync`). A resolver whose document changed between the two calls could
+authorize the victim's genuine key while the JWT was verified with a replacement key under the
+same kid — a forged accepted rotation, which hands the attacker whatever relationship the prior
+DID held. On the provenance-capable path both now come from a single resolution, with the same
+controller rule applied to that binding (duplicate kids fail closed there too, where the old
+`FirstOrDefault` silently took the first match). Legacy key services keep the old shape.
+
+### Fixed — decrypted recipient entry must match its own label (#56 review)
+
+The recipient `kid` a JWE reports is the label of whichever recipient entry the derived KEK
+opened, and those labels are attacker-authored: `apv` commits only to the *sorted* kid list, so
+permuting two entries' labels leaves the envelope cryptographically intact. An envelope whose
+real key-wrap was labelled with another DID's kid therefore decrypted with the local key while
+reporting someone else's — and the new `RecipientKeyBinding` would have described that other key
+as the one that decrypted. Unpack now rejects (`ConsistencyException`) unless the reported
+recipient kid is exactly the kid whose key agreement produced the KEK (new FR-CONSIST-08). The
+check runs only after a successful decrypt, so it reveals nothing about which recipient keys are
+held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trustworthy.
+
+### Notes for upgraders
+
+- `VerifiedKeyBinding.AuthorizedForDid` records the asserted identity the controller rule was
+  evaluated against, and is **null** when the plaintext carried no `from` — in that case the
+  binding is key evidence only and its `Controller` was never compared to a claimed identity.
+- `VerifiedKeyBinding` implements value equality, so `UnpackResult` / `InboundObservation` record
+  equality keeps comparing structurally as it did in 1.3.0 (their synthesized `Equals` now also
+  covers the three new properties).
+- Key services that implement `IDidKeyBindingService` no longer have `IsKeyAuthorizedAsync`
+  called during unpack — any extra policy it enforced must move into `ResolveKeyBindingAsync`
+  (return null to reject). A decorator that wraps a capable service without forwarding the
+  interface silently reverts to the legacy path; forward it.
+- Authorization now compares DID *subjects* (per PRD §4.3), so a `from` that is a DID URL with a
+  query string is accepted where the legacy path's raw-string resolution rejected it.
+
+New requirements FR-CONSIST-07 / FR-CONSIST-08 (and the FR-API-04 update) document the invariants
+in the PRD. 45 new tests cover the acceptance criteria: rotated-kid races in both orderings
+(signed and authcrypt), controller splices, duplicate/shadowed kids, relative/embedded/referenced
+ids, missing and cross-DID controllers, wrong relationships, nested compositions
 (`anoncrypt(sign)`, `anoncrypt(authcrypt(sign))`), from-less signed envelopes, concurrent-unpack
-independence, observer/snapshot propagation, synthetic-result denial, and legacy-path
-compatibility.
+independence, observer/snapshot propagation, synthetic-result denial, legacy-path compatibility,
+`from_prior` single-resolution rotation, and the swapped-recipient-label envelope.
 
 ## [1.3.0] - 2026-06-22
 

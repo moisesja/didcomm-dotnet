@@ -332,6 +332,44 @@ public sealed class SameDocumentProvenanceTests
         result.NonRepudiation.Should().BeTrue();
         result.SignerKeyBinding.Should().NotBeNull();
         result.SignerKeyBinding!.Did.Should().Be(Alice);
+        result.SignerKeyBinding.AuthorizedForDid.Should().BeNull(
+            "with no plaintext 'from' there was no asserted identity to authorize the key against — " +
+            "the controller value is self-declared evidence, not an identity proof");
+    }
+
+    [Fact]
+    public async Task Signed_WithFromHeader_BindingRecordsWhatItWasAuthorizedAgainst()
+    {
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = Client(resolver);
+
+        var result = await recipient.UnpackAsync(packed);
+
+        result.SignerKeyBinding!.AuthorizedForDid.Should().Be(Alice);
+    }
+
+    [Fact]
+    public async Task Bindings_CompareStructurally_SoResultEqualityIsPreserved()
+    {
+        // VerifiedKeyBinding is a class, not a record: without value equality two results from
+        // unpacking the same bytes twice would compare unequal, silently changing UnpackResult's
+        // record equality for consumers upgrading from 1.3.0.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = Client(resolver);
+
+        var first = await recipient.UnpackAsync(packed);
+        var second = await recipient.UnpackAsync(packed);
+
+        first.SignerKeyBinding.Should().Be(second.SignerKeyBinding);
+        first.SignerKeyBinding!.GetHashCode().Should().Be(second.SignerKeyBinding!.GetHashCode());
     }
 
     // ---------------------------------------------------------------------------------------

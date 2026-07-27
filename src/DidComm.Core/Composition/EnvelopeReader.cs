@@ -182,7 +182,10 @@ internal static class EnvelopeReader
                                     $"No same-document key binding was captured for authcrypt sender '{senderKid}' (FR-CONSIST-06, #56).");
                             if (message.From is not null)
                                 AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
-                            senderBinding = new VerifiedKeyBinding(captured);
+                            // AuthorizedForDid records whether the controller rule actually ran: with no
+                            // plaintext 'from' there is no asserted identity to authorize against, so the
+                            // binding is key evidence only and must not read as an identity proof.
+                            senderBinding = new VerifiedKeyBinding(captured, message.From);
                         }
 
                         if (encrypted && recipientKid is not null)
@@ -194,7 +197,7 @@ internal static class EnvelopeReader
                                     ?? throw new ConsistencyException(
                                         $"Key '{recipientKid}' is not present under 'keyAgreement' in the resolved DID Document of '{recipientDid}' (FR-CONSIST-06).");
                                 AddressingConsistency.CheckCapturedBindingAuthorized(recipientDid, captured);
-                                recipientBinding = new VerifiedKeyBinding(captured);
+                                recipientBinding = new VerifiedKeyBinding(captured, recipientDid);
                             }
                         }
 
@@ -205,7 +208,7 @@ internal static class EnvelopeReader
                                     $"No same-document key binding was captured for signer '{signerKid}' (FR-CONSIST-06, #56).");
                             if (message.From is not null)
                                 AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
-                            signerBinding = new VerifiedKeyBinding(captured);
+                            signerBinding = new VerifiedKeyBinding(captured, message.From);
                         }
                     }
                     else if (resolverCheck is not null)
@@ -327,6 +330,7 @@ internal static class EnvelopeReader
                 case EnvelopeKind.Encrypted:
                 {
                     DpEnc.JweParseResult jweResult;
+                    string? decryptingKid;
                     try
                     {
                         // Discover the recipient kids without any private key, select the held one, and
@@ -335,7 +339,8 @@ internal static class EnvelopeReader
                         // (dataproofs #12) makes the ECDH/unwrap cost and the uniform failure identical
                         // to the held path, closing the held-vs-unheld recipient-enumeration oracle.
                         var peek = DpEnc.JweParser.PeekRecipients(current);
-                        var recipientKey = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        decryptingKid = heldKid;
                         jweResult = await DpEnc.JweParser.ParseAsync(current, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
@@ -378,6 +383,21 @@ internal static class EnvelopeReader
                     // OR-accumulating across layers (#23). For legal shapes the #17 gate already
                     // guarantees anoncrypt-if-present is outermost; deriving here keeps the flag correct
                     // by construction regardless.
+                    // The recipient kid the parser reports is the LABEL of whichever recipient entry
+                    // the derived KEK happened to open — and those labels are attacker-authored, not
+                    // covered by the AEAD's per-entry binding (apv commits only to the sorted kid
+                    // list). So a hostile envelope can wrap the real key-wrap under a label naming a
+                    // different DID's key: decryption succeeds with OUR key while the reported
+                    // recipient kid points elsewhere. Fail closed unless the reported kid is exactly
+                    // the kid whose key agreement produced the KEK — otherwise RecipientKid (and the
+                    // RecipientKeyBinding derived from it) would describe a key that did not decrypt
+                    // this envelope. Runs only after a successful decrypt, so it reveals nothing
+                    // about which recipient keys are held (#56).
+                    if (!string.Equals(jweResult.RecipientKid, decryptingKid, StringComparison.Ordinal))
+                        throw new ConsistencyException(
+                            "The decrypted recipient entry is labelled with a kid other than the one whose key " +
+                            "agreement opened it; the envelope's recipient labelling is not trustworthy (FR-CONSIST-02).");
+
                     var isOutermostEncryptLayer = !encrypted;
                     encrypted = true;
                     contentEnc = jweResult.ContentEncryption;
@@ -427,7 +447,11 @@ internal static class EnvelopeReader
     /// work-curve decoy when this handle's curve doesn't match the envelope, so the decoy here only
     /// needs to exist, not to match.
     /// </summary>
-    private static async Task<DpEnc.IEcdhKey> ResolveRecipientKeyOrDecoyAsync(
+    /// <returns>
+    /// The handle plus the kid it belongs to — <c>null</c> for the decoy, which no real envelope can
+    /// open, so a successful decrypt on a null kid fails the caller's recipient-label check.
+    /// </returns>
+    private static async Task<(DpEnc.IEcdhKey Key, string? Kid)> ResolveRecipientKeyOrDecoyAsync(
         KeyOperationResolver recipientKeys,
         IReadOnlyList<string> recipientKids,
         JoseCryptoProvider cryptoProvider,
@@ -438,14 +462,14 @@ internal static class EnvelopeReader
         {
             var handle = await recipientKeys.ResolveKeyAgreementAsync(kid, ct).ConfigureAwait(false);
             if (handle is not null)
-                return handle;
+                return (handle, kid);
         }
 
         var scalar = new byte[32];
         cryptoProvider.Fill(scalar);
         try
         {
-            return new DpEnc.RawEcdhKey(JoseAlgorithms.CrvX25519, scalar, cryptoProvider);
+            return (new DpEnc.RawEcdhKey(JoseAlgorithms.CrvX25519, scalar, cryptoProvider), null);
         }
         finally
         {

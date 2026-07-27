@@ -18,6 +18,23 @@ namespace DidComm.Resolution;
 /// that path <c>DidComm.Facade.UnpackResult</c> surfaces no <c>VerifiedKeyBinding</c> —
 /// kid strings and flags alone are <em>not</em> same-resolution controller provenance.
 /// </para>
+/// <para>
+/// <strong>Implementers: adding this interface replaces your authorization hook during unpack.</strong>
+/// Re-resolving after the cryptographic layer is exactly the gap this closes, so on the capability
+/// path the pipeline never calls <see cref="IDidKeyService.IsKeyAuthorizedAsync"/> for the sender,
+/// signer, or recipient — it applies the built-in id-subject + <c>controller</c> rule to the
+/// captured binding instead. Any extra policy your <c>IsKeyAuthorizedAsync</c> enforced (revocation
+/// lists, allowlists, key-purpose or method restrictions) MUST move into
+/// <see cref="ResolveKeyBindingAsync"/>: return <c>null</c> for a key your policy rejects, so the
+/// rejection happens against the same document the key came from. <c>IsKeyAuthorizedAsync</c> is
+/// still used elsewhere (e.g. mediator routing-key checks), so keep it implemented.
+/// </para>
+/// <para>
+/// The capability is discovered by an interface probe on the registered service instance, so a
+/// decorator (caching, logging, tenant routing) that wraps a capable service without also
+/// implementing this interface silently returns the whole unpack path to the pre-1.4.0 behavior
+/// and to null bindings. Forward the capability in decorators.
+/// </para>
 /// </remarks>
 public interface IDidKeyBindingService
 {

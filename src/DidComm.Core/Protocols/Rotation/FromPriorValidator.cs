@@ -1,4 +1,5 @@
 using System.Text.Json;
+using DidComm.Consistency;
 using DidComm.Crypto.KeyAgreement;
 using DidComm.Exceptions;
 using DidComm.Jose;
@@ -15,6 +16,12 @@ namespace DidComm.Protocols.Rotation;
 /// (FR-ROT-05) is the application's responsibility — the validator surfaces the iat / iss
 /// pair so a higher layer can compare against its known-active state.
 /// </summary>
+/// <remarks>
+/// When the supplied key service implements <see cref="IDidKeyBindingService"/>, authority and
+/// verifying key are taken from a single resolution (FR-CONSIST-07 / #56) so a rotation can never
+/// be accepted by combining two document versions. Legacy key services keep the pre-1.4.0
+/// two-resolution behavior.
+/// </remarks>
 public static class FromPriorValidator
 {
     /// <summary>Validate a from_prior JWT against <paramref name="currentSenderDid"/> and return its claims.</summary>
@@ -110,19 +117,51 @@ public static class FromPriorValidator
                 $"from_prior 'sub' ({claims.Sub}) does not match message 'from' ({currentSenderDid}) (FR-ROT-02).");
         }
 
-        // FR-ROT-01 — the JWT MUST be signed by a key authorized in the prior DID's authentication relationship.
-        var authorized = await keyService.IsKeyAuthorizedAsync(
-            claims.Iss, kid, VerificationRelationship.Authentication, ct).ConfigureAwait(false);
-        if (!authorized)
+        // FR-ROT-01 — the JWT MUST be signed by a key authorized in the prior DID's authentication
+        // relationship. FR-CONSIST-07 (#56): the authority evidence and the key that verifies the
+        // signature MUST come from the SAME resolved document. The pre-1.4.0 shape authorized the kid
+        // in one resolution and then fetched the verifying key in a second, so a resolver whose
+        // document changed between the calls could authorize a victim's key while the JWT was verified
+        // with a replacement key under the same kid — forging an accepted rotation that hands the
+        // attacker the prior DID's relationships. Resolve once and use that binding for both.
+        Jwk signerJwk;
+        if (keyService is IDidKeyBindingService bindingService)
         {
-            throw new ConsistencyException(
-                $"from_prior signer kid '{kid}' is not authorized under '{claims.Iss}' authentication (FR-ROT-01).");
-        }
+            var binding = await bindingService.ResolveKeyBindingAsync(
+                kid, VerificationRelationship.Authentication, ct).ConfigureAwait(false)
+                ?? throw new ConsistencyException(
+                    $"from_prior signer kid '{kid}' is not authorized under '{claims.Iss}' authentication (FR-ROT-01).");
 
-        var signerPubs = await keyService.GetVerificationMethodsAsync(
-            claims.Iss, VerificationRelationship.Authentication, ct).ConfigureAwait(false);
-        var signerJwk = signerPubs.FirstOrDefault(k => string.Equals(k.Kid, kid, StringComparison.Ordinal))
-            ?? throw new ConsistencyException($"from_prior signer kid '{kid}' not present in resolved keys (FR-ROT-01).");
+            // The binding proves which document the key came from; the controller rule proves that
+            // document's subject really authorizes it for 'iss'.
+            try
+            {
+                AddressingConsistency.CheckCapturedBindingAuthorized(claims.Iss, binding);
+            }
+            catch (ConsistencyException ex)
+            {
+                throw new ConsistencyException(
+                    $"from_prior signer kid '{kid}' is not authorized under '{claims.Iss}' authentication (FR-ROT-01). {ex.Message}", ex);
+            }
+
+            signerJwk = binding.PublicJwk;
+        }
+        else
+        {
+            // Legacy key services (no binding capability) keep the pre-1.4.0 two-resolution shape.
+            var authorized = await keyService.IsKeyAuthorizedAsync(
+                claims.Iss, kid, VerificationRelationship.Authentication, ct).ConfigureAwait(false);
+            if (!authorized)
+            {
+                throw new ConsistencyException(
+                    $"from_prior signer kid '{kid}' is not authorized under '{claims.Iss}' authentication (FR-ROT-01).");
+            }
+
+            var signerPubs = await keyService.GetVerificationMethodsAsync(
+                claims.Iss, VerificationRelationship.Authentication, ct).ConfigureAwait(false);
+            signerJwk = signerPubs.FirstOrDefault(k => string.Equals(k.Kid, kid, StringComparison.Ordinal))
+                ?? throw new ConsistencyException($"from_prior signer kid '{kid}' not present in resolved keys (FR-ROT-01).");
+        }
 
         var (_, publicBytes) = DpJwkConversion.ExtractPublicKey(signerJwk);
         var signingInput = Encoding.ASCII.GetBytes($"{parts[0]}.{parts[1]}");

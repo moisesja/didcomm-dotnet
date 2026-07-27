@@ -759,3 +759,38 @@ Format per entry:
   trust boundary and lifecycle, define one authoritative identity source, one immutable inbound
   snapshot, admission-before-work resource accounting, and explicit shutdown semantics. Plan all
   affected code, tests, docs, and compatibility checks together before editing.
+
+## L-039 — When fixing a two-resolution TOCTOU, sweep the whole call for the same pattern; one fixed role is not the fix.
+
+- **Lesson:** A report naming one instance of "authorize against resolution B a key that resolution A
+  supplied" is a report about a *pattern*. Before declaring the fix done, enumerate every place in the
+  same operation that resolves anything, and check each for the same shape — including protocol
+  side-paths the issue never mentioned. In this codebase the reported gap was sender/signer, but
+  `FromPriorValidator` had the identical shape (`IsKeyAuthorizedAsync` then
+  `GetVerificationMethodsAsync`, verifying with the second document's key) with a worse payoff: a
+  forged accepted rotation inherits the prior DID's relationships.
+- **Why:** Issue #56 listed sender, signer, and recipient. Implementing exactly that list left
+  `from_prior` — reached from the same `UnpackAsync` — still splicing two documents; only an
+  adversarial pass over the finished diff caught it. Shipping would have "closed" the issue while
+  leaving the strongest instance of the same bug open.
+- **How to apply:** For any TOCTOU/provenance fix, grep the operation for every resolver/lookup call
+  (not just the ones the issue cites) and write down which document each accepted fact came from.
+  Fix or explicitly justify each. See [[L-034]].
+
+## L-040 — Metadata the wire lets an attacker label is not evidence; before promoting it to a security-typed property, bind it to what the crypto actually used.
+
+- **Lesson:** Turning an existing untrusted field into a new "verified" type raises the bar it must
+  meet. A JWE's reported recipient `kid` is the *label* of whichever recipient entry the derived KEK
+  opened, and `apv` commits only to the **sorted** kid list — so permuting two entries' labels leaves
+  the envelope cryptographically intact while the decrypt reports another DID's kid. Publishing that
+  as a `VerifiedKeyBinding` would have asserted "this key decrypted the envelope" about a key that
+  did not. The fix is to bind the reported label to the kid whose key agreement actually produced the
+  KEK, and fail closed otherwise.
+- **Why:** Reviewing the #56 fix surfaced that `RecipientKeyBinding` inherited `RecipientKid`'s
+  untrustworthiness while its XML docs promised proof. Tolerable as loose metadata in 1.3.0; a false
+  security claim once wrapped in an evidence type.
+- **How to apply:** When adding a property that *proves* something, ask what an attacker controls in
+  each input it derives from, and check what the AEAD/signature actually covers (per-entry vs
+  aggregate commitments). Prove the new check matters by disabling it and watching the test fail.
+  Also state, in the type itself, when a check did NOT run (e.g. no plaintext `from` ⇒ no controller
+  rule ⇒ evidence only). See [[L-035]].
