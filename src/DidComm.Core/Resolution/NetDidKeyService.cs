@@ -29,7 +29,7 @@ namespace DidComm.Resolution;
 /// decrypt (NetCrypto 1.1.0 guarantees the on-curve check in <c>JwkConverter.ExtractPublicKey</c>).
 /// </para>
 /// </remarks>
-public sealed class NetDidKeyService : IDidKeyService
+public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
 {
     private readonly IDidResolver _resolver;
 
@@ -152,6 +152,78 @@ public sealed class NetDidKeyService : IDidKeyService
         }
 
         return false;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Same-document key provenance (#56): one <c>ResolveAsync</c> call; the JWK, controller,
+    /// and relationship evidence in the returned binding all come from that single
+    /// <c>DidDocument</c> instance. Duplicate / shadowed matches for the normalized kid are
+    /// rejected instead of silently taking the first — an ambiguous binding is no binding.
+    /// </remarks>
+    public async Task<ResolvedKeyBinding?> ResolveKeyBindingAsync(
+        string kid,
+        VerificationRelationship relationship,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(kid);
+        var did = DidSubject.DidSubjectOf(kid);
+        if (did is null)
+            return null; // not a DID URL — nothing to bind
+        RejectUnsupportedMethod(did);
+
+        var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
+        if (result.DidDocument is null)
+        {
+            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
+            throw new DidResolutionException(did, error);
+        }
+
+        var entries = relationship switch
+        {
+            VerificationRelationship.KeyAgreement => result.DidDocument.KeyAgreement,
+            VerificationRelationship.Authentication => result.DidDocument.Authentication,
+            _ => throw new ArgumentOutOfRangeException(nameof(relationship), relationship, "Unknown VerificationRelationship."),
+        };
+        if (entries is null || entries.Count == 0)
+            return null;
+
+        VerificationMethod? match = null;
+        foreach (var entry in entries)
+        {
+            var method = ResolveVerificationMethod(result.DidDocument, entry, did);
+            var methodId = method.Id is { } id && id.StartsWith('#') ? did + id : method.Id;
+            if (!string.Equals(methodId, kid, StringComparison.Ordinal))
+                continue;
+
+            if (match is not null)
+            {
+                // Fail closed on duplicate/shadowed ids: two relationship entries normalizing to
+                // the same kid make the binding ambiguous — a shadowing entry could carry
+                // different key material or a different controller than the one JOSE would use.
+                throw new DidResolutionException(
+                    did,
+                    $"verification method id '{kid}' matches more than one entry under '{relationship}' — ambiguous key binding rejected (#56)");
+            }
+            match = method;
+        }
+
+        if (match is null)
+            return null;
+
+        var jwk = TryMaterialise(match, relationship);
+        if (jwk is null)
+            return null; // curve unusable for this relationship — the JOSE layer could never use it
+
+        if (jwk.Kid is { } jwkKid && jwkKid.StartsWith('#'))
+            jwk.Kid = did + jwkKid;
+
+        return new ResolvedKeyBinding(
+            kid: kid,
+            did: did,
+            controller: match.Controller.Value is { Length: > 0 } controller ? controller : null,
+            relationship: relationship,
+            publicJwk: jwk);
     }
 
     /// <summary>

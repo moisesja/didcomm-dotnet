@@ -4,6 +4,56 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-26
+
+> Additive security release — new public API, no wire change, no breaking change (ApiCompat /
+> package validation clean against 1.3.0). Closes **#56**.
+
+### Fixed — same-document key provenance on unpack (TOCTOU identity gap, #56)
+
+`UnpackAsync` used to verify/decrypt with public-key material from one DID resolution (the
+sender/signer JOSE lookups) and then authorize the same kid against a **second** resolution
+(`IsKeyAuthorizedAsync` behind the FR-CONSIST-06 predicate). With a mutable, stale/fresh,
+evicted-cache, or inconsistent resolver, the two documents can differ — so an envelope verified
+with a rotated-out key `KA` could be reported authenticated because a later document still lists
+the same kid (now bound to `KB`), and key/controller facts could be spliced across document
+versions that were never simultaneously true.
+
+On the provenance-capable path (the built-in `NetDidKeyService`), unpack now:
+
+- **captures the binding atomically**: each sender/signer key lookup resolves the kid's DID once
+  and retains the exact JWK together with the normalized kid, DID subject, controller, and
+  relationship from that single `DidDocument` (`IDidKeyBindingService.ResolveKeyBindingAsync`,
+  new optional capability interface; duplicate/shadowed relationship entries for the same
+  normalized kid fail closed with `DidResolutionException`);
+- **never re-resolves sender/signer authority after crypto**: the FR-CONSIST-06 controller rule
+  is evaluated against the captured binding (`ConsistencyException` semantics unchanged);
+  recipient evidence is resolved exactly once, after the decrypting kid is known;
+- **scopes evidence to the operation**: a per-unpack lookup context serves the existing JOSE
+  callback contracts — no process-global state, no `AsyncLocal`, no TTL/eviction, no
+  cross-message races (concurrent unpacks of the same kid hold independent bindings);
+- **surfaces immutable evidence**: new `VerifiedKeyBinding` (kid, DID, controller, relationship,
+  RFC 7638 SHA-256 key thumbprint; internal constructor — consumers can read, never forge)
+  carried as `SenderKeyBinding` / `SignerKeyBinding` / `RecipientKeyBinding` on `UnpackResult`,
+  the verified inbound snapshot, and `InboundObservation` (public-get/internal-init properties;
+  the v1.3.0 positional constructors are untouched, so the release is binary compatible).
+  Synthetic `UnpackResult`s (constructed by callers rather than produced by a real unpack)
+  yield no bindings — flags alone cannot manufacture provenance.
+
+Custom `IDidKeyService` implementations remain source- and binary-compatible: without the new
+capability they keep the pre-1.4.0 two-resolution behavior and surface null bindings, which the
+API documentation now explicitly calls out as *not* same-resolution controller provenance.
+Downstream consumers (e.g. opaqai-wallet-platform) can drop global resolver-observation ledgers
+and read the message-scoped bindings instead.
+
+New requirement FR-CONSIST-07 (and the FR-API-04 update) document the invariant in the PRD.
+36 new tests cover the acceptance criteria: rotated-kid races in both orderings (signed and
+authcrypt), controller splices, duplicate/shadowed kids, relative/embedded/referenced ids,
+missing and cross-DID controllers, wrong relationships, nested compositions
+(`anoncrypt(sign)`, `anoncrypt(authcrypt(sign))`), from-less signed envelopes, concurrent-unpack
+independence, observer/snapshot propagation, synthetic-result denial, and legacy-path
+compatibility.
+
 ## [1.3.0] - 2026-06-22
 
 ### Added — fail-closed skid guard on authenticated decrypt (defense in depth, #52)

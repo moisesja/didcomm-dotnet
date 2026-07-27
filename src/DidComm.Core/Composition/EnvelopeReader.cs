@@ -1,10 +1,12 @@
 using System.Text.Json;
 using DidComm.Consistency;
 using DidComm.Exceptions;
+using DidComm.Facade;
 using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
+using DidComm.Resolution;
 using DidComm.Secrets;
 using DpEnc = DataProofsDotnet.Jose.Encryption;
 using DpSig = DataProofsDotnet.Jose.Signing;
@@ -57,6 +59,15 @@ internal static class EnvelopeReader
     /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship, ct) =&gt; isAuthorized</c>.
     /// When non-null, the unpack pipeline asserts the inner plaintext's sender / recipient / signer kids are present
     /// under the resolved DID Document's matching relationship. Pass <c>null</c> to short-circuit the check.
+    /// Ignored for sender/signer/recipient authorization when <paramref name="bindingContext"/> is provenance-capable
+    /// (the same-binding path replaces the re-resolving predicate; #56).
+    /// </param>
+    /// <param name="bindingContext">
+    /// Per-unpack key-binding context (#56). When provenance-capable, sender/signer authorization is
+    /// evaluated against the bindings captured by this operation's own key lookups (same resolved
+    /// document as the crypto), the recipient binding is resolved exactly once after the decrypting
+    /// kid is known, and the resulting <see cref="Facade.VerifiedKeyBinding"/> evidence is attached
+    /// to the result. Null / non-capable falls back to <paramref name="resolverCheck"/>.
     /// </param>
     /// <param name="ct">Cancellation token for the (possibly I/O-bound) key agreement and DID resolution.</param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
@@ -69,6 +80,7 @@ internal static class EnvelopeReader
         Func<string, Jwk?>? signerLookup,
         JoseCryptoProvider cryptoProvider,
         Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
+        UnpackKeyBindingContext? bindingContext = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
@@ -142,9 +154,61 @@ internal static class EnvelopeReader
                             "Sign-then-encrypt composition: the inner signed JWM MUST carry 'to' (FR-SIG-06).");
 
                     // FR-CONSIST-06 — the kids surfaced by the cryptographic layers must be
-                    // genuinely authorized in their asserted DID Documents. The predicate is
-                    // supplied by the facade (backed by IDidKeyService); when null the check is skipped.
-                    if (resolverCheck is not null)
+                    // genuinely authorized in their asserted DID Documents.
+                    //
+                    // Same-document path (#56): when the per-unpack binding context is provenance-
+                    // capable, sender/signer authority is checked against the binding CAPTURED by
+                    // this operation's own key lookup — the very document that supplied the key the
+                    // JOSE layer verified/decrypted with. No re-resolution after crypto, so the
+                    // authorization can never be satisfied by a different document version than the
+                    // one that satisfied the cryptography (the TOCTOU the two-resolution design
+                    // allowed). The recipient key is local (it came from the secrets resolver, not
+                    // DID resolution), so its evidence is resolved exactly once, here, after the
+                    // decrypting kid is known.
+                    //
+                    // Legacy path: the facade-supplied predicate (backed by IDidKeyService) re-resolves;
+                    // kept verbatim for custom key services without the binding capability. No strong
+                    // provenance is attached on that path.
+                    VerifiedKeyBinding? senderBinding = null, signerBinding = null, recipientBinding = null;
+                    if (bindingContext is { ProvenanceCapable: true })
+                    {
+                        if (senderKid is not null)
+                        {
+                            // Fail closed: crypto surfaced an authenticated skid, so this operation's
+                            // sender lookup must have captured its binding — a miss means the key the
+                            // JOSE layer used cannot be tied to any resolved document.
+                            var captured = bindingContext.GetCaptured(senderKid, VerificationRelationship.KeyAgreement)
+                                ?? throw new ConsistencyException(
+                                    $"No same-document key binding was captured for authcrypt sender '{senderKid}' (FR-CONSIST-06, #56).");
+                            if (message.From is not null)
+                                AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
+                            senderBinding = new VerifiedKeyBinding(captured);
+                        }
+
+                        if (encrypted && recipientKid is not null)
+                        {
+                            var recipientDid = DidSubject.DidSubjectOf(recipientKid);
+                            if (recipientDid is not null)
+                            {
+                                var captured = await bindingContext.CaptureRecipientBindingAsync(recipientKid, ct).ConfigureAwait(false)
+                                    ?? throw new ConsistencyException(
+                                        $"Key '{recipientKid}' is not present under 'keyAgreement' in the resolved DID Document of '{recipientDid}' (FR-CONSIST-06).");
+                                AddressingConsistency.CheckCapturedBindingAuthorized(recipientDid, captured);
+                                recipientBinding = new VerifiedKeyBinding(captured);
+                            }
+                        }
+
+                        if (signerKid is not null)
+                        {
+                            var captured = bindingContext.GetCaptured(signerKid, VerificationRelationship.Authentication)
+                                ?? throw new ConsistencyException(
+                                    $"No same-document key binding was captured for signer '{signerKid}' (FR-CONSIST-06, #56).");
+                            if (message.From is not null)
+                                AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
+                            signerBinding = new VerifiedKeyBinding(captured);
+                        }
+                    }
+                    else if (resolverCheck is not null)
                     {
                         if (senderKid is not null && message.From is not null)
                             await AddressingConsistency.CheckResolverAuthorizationAsync(message.From, senderKid, "keyAgreement", resolverCheck, ct).ConfigureAwait(false);
@@ -173,7 +237,10 @@ internal static class EnvelopeReader
                         anonymous,
                         senderKid,
                         signerKid,
-                        recipientKid);
+                        recipientKid,
+                        senderBinding,
+                        signerBinding,
+                        recipientBinding);
 
                     return new UnpackResult(
                         Message: message,
@@ -193,7 +260,12 @@ internal static class EnvelopeReader
                         SignerKid: signerKid,
                         SenderKid: senderKid,
                         RecipientKid: recipientKid,
-                        AllRecipientKids: allRecipientKids);
+                        AllRecipientKids: allRecipientKids)
+                    {
+                        SenderKeyBinding = senderBinding,
+                        SignerKeyBinding = signerBinding,
+                        RecipientKeyBinding = recipientBinding,
+                    };
                 }
 
                 case EnvelopeKind.Signed:
