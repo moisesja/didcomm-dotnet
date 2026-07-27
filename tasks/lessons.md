@@ -794,3 +794,32 @@ Format per entry:
   aggregate commitments). Prove the new check matters by disabling it and watching the test fail.
   Also state, in the type itself, when a check did NOT run (e.g. no plaintext `from` ⇒ no controller
   rule ⇒ evidence only). See [[L-035]].
+
+## L-041 — A fail-closed check must be selected the same way the thing it checks was selected, or it rejects honest traffic.
+
+- **Lesson:** When adding a check that "X must equal Y", verify both sides are derived by the *same
+  ordering/selection rule*. The recipient-label check compared the kid we chose a key for against the
+  kid the parser reported; we iterated `FindPresentAsync`'s output while the parser scanned envelope
+  order. `ISecretsResolver` promises a subset, not an order, so for an envelope carrying the same key
+  material under two kids (one key published by two DIDs) a compliant keystore could make the two
+  disagree and reject a legitimate message.
+- **Why:** The second adversarial pass over the #56 fix built exactly that envelope and flipped the
+  resolver's return order; the security property held, but availability broke. A fail-closed check
+  that fires on honest traffic gets disabled by operators, taking the security property with it.
+- **How to apply:** For every new equality-based rejection, write down how each side is produced and
+  make the derivations share an order (here: select held kids by walking the envelope's list). Then
+  test the check with the *upstream contract's* freedom exercised — reverse the order a doc says is
+  unspecified — not just with the convenient implementation's behavior. See [[L-040]].
+
+## L-042 — Write the security comment you can defend, not the one that sounds reassuring.
+
+- **Lesson:** "Runs only after a successful decrypt, so it reveals nothing about which recipient keys
+  are held" was false: reaching that throw *means* our key opened an entry, which is precisely the
+  possession fact. The defensible claim is narrower — it is not a **new** distinguisher, because
+  decrypt success already reveals the same bit, so the layer's constant-work guarantee is unaffected.
+- **Why:** A reviewer checked the claim, not the code, and the claim was the weakest part. An
+  overstated comment is worse than none: it tells the next engineer a property has been verified when
+  it hasn't, and it will be quoted in a design review.
+- **How to apply:** Before writing "this reveals nothing / is constant-time / cannot happen", state
+  the precondition for reaching that line and ask what an attacker learns from reaching it. Compare
+  against the pre-existing signal and claim only the delta. See [[L-040]].

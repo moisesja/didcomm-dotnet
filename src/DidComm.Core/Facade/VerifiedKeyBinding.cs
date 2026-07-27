@@ -99,4 +99,15 @@ public sealed class VerifiedKeyBinding : IEquatable<VerifiedKeyBinding>
     /// <inheritdoc />
     public override int GetHashCode()
         => HashCode.Combine(Kid, Did, Controller, Relationship, PublicKeyThumbprint, AuthorizedForDid);
+
+    /// <summary>Structural equality — kept in step with <see cref="Equals(VerifiedKeyBinding?)"/> so <c>==</c> never disagrees with <c>Equals</c>.</summary>
+    /// <param name="left">Left operand.</param>
+    /// <param name="right">Right operand.</param>
+    public static bool operator ==(VerifiedKeyBinding? left, VerifiedKeyBinding? right)
+        => left is null ? right is null : left.Equals(right);
+
+    /// <summary>Structural inequality.</summary>
+    /// <param name="left">Left operand.</param>
+    /// <param name="right">Right operand.</param>
+    public static bool operator !=(VerifiedKeyBinding? left, VerifiedKeyBinding? right) => !(left == right);
 }

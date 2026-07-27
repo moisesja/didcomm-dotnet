@@ -3,6 +3,7 @@ using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Resolution;
+using DidComm.Secrets;
 using DidComm.Tests.Envelopes;
 using FluentAssertions;
 using Microsoft.IdentityModel.Tokens;
@@ -28,6 +29,8 @@ public sealed class RecipientLabelBindingTests
     private const string Carol = "did:example:carol";
     private const string BobKid = "did:example:bob#ka-1";
     private const string CarolKid = "did:example:carol#ka-1";
+    private const string AliasDid = "did:example:bobalias";
+    private const string AliasKid = "did:example:bobalias#ka-1";
 
     [Fact]
     public async Task SwappedRecipientLabels_DecryptedEntryMislabelled_Rejected()
@@ -63,6 +66,83 @@ public sealed class RecipientLabelBindingTests
         result.RecipientKeyBinding!.Kid.Should().Be(BobKid);
         result.RecipientKeyBinding.Did.Should().Be(Bob);
         result.RecipientKeyBinding.AuthorizedForDid.Should().Be(Bob);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SameKeyMaterialUnderTwoDids_ResolverOrderIndependent_StillUnpacks(bool reverseFindPresent)
+    {
+        // One key published by two DIDs (a legitimate alias) means both recipient entries wrap to
+        // the SAME KEK, so the parser reports whichever entry comes FIRST in the envelope.
+        // ISecretsResolver promises only a subset from FindPresentAsync, not an order, so a keystore
+        // that returns the alias first must not make the label check reject a legitimate message —
+        // the reader selects in envelope order to stay in step with the parser's scan.
+        var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var aliasPrivate = CloneJwk(bobKa.PrivateJwk, AliasKid);
+        var aliasPublic = CloneJwk(bobKa.PublicJwk, AliasKid);
+        var resolver = new StaticResolver(
+            (Bob, Doc(Bob, bobKa.PublicJwk)),
+            (AliasDid, Doc(AliasDid, aliasPublic)));
+
+        var sender = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+
+        var message = new MessageBuilder()
+            .WithType("https://example.com/protocols/test/1.0/ping")
+            .WithTo(Bob, AliasDid)
+            .WithBody(JsonNode.Parse("""{"v":1}""")!.AsObject())
+            .Build();
+
+        var packed = (await sender.PackEncryptedAsync(
+            message,
+            new PackEncryptedOptions(Recipients: new[] { Bob, AliasDid }))).Message;
+
+        var secrets = new OrderedSecretsLookup(new[] { bobKa.PrivateJwk, aliasPrivate }, reverseFindPresent);
+        var bob = new DidCommClient(secrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var result = await bob.UnpackAsync(packed);
+
+        result.RecipientKid.Should().Be(BobKid, "the parser reports the first envelope entry the KEK opens");
+        result.RecipientKeyBinding!.Kid.Should().Be(BobKid);
+    }
+
+    private static Jwk CloneJwk(Jwk source, string kid) => new()
+    {
+        Kty = source.Kty,
+        Crv = source.Crv,
+        X = source.X,
+        Y = source.Y,
+        D = source.D,
+        Kid = kid,
+        Alg = source.Alg,
+        Use = source.Use,
+    };
+
+    /// <summary>Secrets resolver whose <c>FindPresentAsync</c> can return hits in a non-envelope order.</summary>
+    private sealed class OrderedSecretsLookup : ISecretsResolver
+    {
+        private readonly Dictionary<string, Jwk> _byKid;
+        private readonly bool _reverse;
+
+        public OrderedSecretsLookup(IEnumerable<Jwk> privateJwks, bool reverseFindPresent)
+        {
+            _byKid = privateJwks.ToDictionary(j => j.Kid!, StringComparer.Ordinal);
+            _reverse = reverseFindPresent;
+        }
+
+        public Task<Jwk?> FindAsync(string kid, CancellationToken ct = default)
+            => Task.FromResult(_byKid.GetValueOrDefault(kid));
+
+        public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
+        {
+            var hits = kids.Where(_byKid.ContainsKey).ToList();
+            if (_reverse)
+                hits.Reverse();
+            return Task.FromResult<IReadOnlyList<string>>(hits);
+        }
     }
 
     private static async Task<(string Packed, TestKeyMaterial BobKa, IDidResolver Resolver)> PackToBoth()

@@ -391,6 +391,17 @@ public static class DidCommEndpointRouteBuilderExtensions
                     logger?.LogWarning(ex, "MapDidCommWebSocket: discarding undecryptable envelope");
                     continue;
                 }
+                catch (DidCommException ex)
+                {
+                    // Any other typed unpack rejection — consistency, DID resolution, did:web,
+                    // missing secret, protocol — is a property of THIS envelope, not of the
+                    // connection. Without this the first such message escapes the loop and tears
+                    // down a socket that may be carrying other peers' traffic, handing an attacker a
+                    // one-envelope disconnect. The HTTP path already collapses every unpack failure
+                    // into one opaque rejection; this is the socket equivalent: log and drop.
+                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding rejected envelope");
+                    continue;
+                }
 
                 DispatchOutcome outcome;
                 try

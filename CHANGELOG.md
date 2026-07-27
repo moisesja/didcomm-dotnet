@@ -72,6 +72,28 @@ recipient kid is exactly the kid whose key agreement produced the KEK (new FR-CO
 check runs only after a successful decrypt, so it reveals nothing about which recipient keys are
 held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trustworthy.
 
+### Also hardened (second adversarial pass over the fix)
+
+- **Recipient selection now follows envelope order.** The reader picked the first kid
+  `ISecretsResolver.FindPresentAsync` returned, but that contract promises a subset, not an order,
+  while the parser scans recipient entries in envelope order. For an envelope carrying the same key
+  material under two kids (one key published by two DIDs), a keystore returning the alias first
+  would have made the new label check reject a legitimate message. Selection is now by envelope
+  order, keeping the reader and the parser in step.
+- **`from_prior` `iss` must be a bare DID.** Authorization compares DID subjects, so `did:x`,
+  `did:x?v=1`, and `did:x/p` all authorize identically while remaining distinct strings — and `iss`
+  is what an application keys its rotation-replay state on (FR-ROT-05 is delegated to that layer).
+  The prior key's holder could otherwise mint unlimited equivalent-but-distinct `iss` values, each
+  correctly signed. This restores the strictness the pre-1.4.0 path had implicitly.
+- **A rejected envelope no longer tears down a WebSocket connection.** `MapDidCommWebSocket`
+  discarded only `MalformedMessageException` and `CryptoException`; any other typed unpack
+  rejection (consistency, DID resolution, `did:web`, missing secret, protocol) escaped the receive
+  loop and closed a socket that may carry other peers' traffic — a one-envelope disconnect. It now
+  logs and drops any `DidCommException`, matching the HTTP path's uniform rejection. Pre-existing
+  (a mismatched plaintext `to` already reached it), but the new label check widened reachability.
+- `VerifiedKeyBinding.AuthorizedForDid` stores the DID subject that was compared rather than `from`
+  verbatim, and `==` / `!=` now match `Equals` instead of falling back to reference equality.
+
 ### Notes for upgraders
 
 - `VerifiedKeyBinding.AuthorizedForDid` records the asserted identity the controller rule was
@@ -93,7 +115,8 @@ in the PRD. 45 new tests cover the acceptance criteria: rotated-kid races in bot
 ids, missing and cross-DID controllers, wrong relationships, nested compositions
 (`anoncrypt(sign)`, `anoncrypt(authcrypt(sign))`), from-less signed envelopes, concurrent-unpack
 independence, observer/snapshot propagation, synthetic-result denial, legacy-path compatibility,
-`from_prior` single-resolution rotation, and the swapped-recipient-label envelope.
+`from_prior` single-resolution rotation, decorated-`iss` rejection, the swapped-recipient-label
+envelope, and resolver-order independence for aliased recipient keys.
 
 ## [1.3.0] - 2026-06-22
 

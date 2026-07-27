@@ -117,6 +117,18 @@ public static class FromPriorValidator
                 $"from_prior 'sub' ({claims.Sub}) does not match message 'from' ({currentSenderDid}) (FR-ROT-02).");
         }
 
+        // 'iss' MUST be a bare DID, not a decorated DID URL. Authorization below compares DID
+        // subjects, so 'did:x', 'did:x?v=1', and 'did:x/p' would all authorize identically while
+        // remaining distinct strings — and 'iss' is exactly what an application keys its rotation
+        // replay / already-rotated state on (FR-ROT-05 is delegated to that layer). Whoever holds the
+        // prior DID's key could otherwise mint unlimited equivalent-but-distinct 'iss' values, each
+        // with a valid signature, and slip past such a check.
+        if (!string.Equals(DidSubject.DidSubjectOf(claims.Iss), claims.Iss, StringComparison.Ordinal))
+        {
+            throw new ConsistencyException(
+                $"from_prior 'iss' ({claims.Iss}) must be a bare DID, not a DID URL (FR-ROT-01).");
+        }
+
         // FR-ROT-01 — the JWT MUST be signed by a key authorized in the prior DID's authentication
         // relationship. FR-CONSIST-07 (#56): the authority evidence and the key that verifies the
         // signature MUST come from the SAME resolved document. The pre-1.4.0 shape authorized the kid

@@ -18,9 +18,10 @@ namespace DidComm.Composition;
 /// <summary>
 /// High-level unpack orchestrator. Auto-detects the envelope structure (FR-API-03), recursively
 /// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …) by delegating each JWE/
-/// JWS layer to DataProofsDotnet.Jose, runs the addressing-consistency checks FR-CONSIST-01/02/03/05
-/// as each layer reveals enough information (FR-CONSIST-04 is an advisory SHOULD;
-/// FR-CONSIST-06's resolver-backed authorization is supplied by the facade), and returns an
+/// JWS layer to DataProofsDotnet.Jose, runs the addressing-consistency checks
+/// FR-CONSIST-01/02/03/05/08 as each layer reveals enough information (FR-CONSIST-04 is an advisory
+/// SHOULD; FR-CONSIST-06's resolver-backed authorization is supplied by the facade, and
+/// FR-CONSIST-07's same-document form is evaluated against the per-unpack binding context), and returns an
 /// <see cref="UnpackResult"/> carrying both the inner plaintext and the FR-API-04 metadata.
 /// </summary>
 /// <remarks>
@@ -184,8 +185,11 @@ internal static class EnvelopeReader
                                 AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
                             // AuthorizedForDid records whether the controller rule actually ran: with no
                             // plaintext 'from' there is no asserted identity to authorize against, so the
-                            // binding is key evidence only and must not read as an identity proof.
-                            senderBinding = new VerifiedKeyBinding(captured, message.From);
+                            // binding is key evidence only and must not read as an identity proof. Store
+                            // the DID *subject* that was compared, not 'from' verbatim: the rule compares
+                            // subjects, so that is the value actually checked, and the property is then a
+                            // bare DID on every path (the facade separately refuses a decorated 'from').
+                            senderBinding = new VerifiedKeyBinding(captured, DidSubject.DidSubjectOf(message.From));
                         }
 
                         if (encrypted && recipientKid is not null)
@@ -208,7 +212,7 @@ internal static class EnvelopeReader
                                     $"No same-document key binding was captured for signer '{signerKid}' (FR-CONSIST-06, #56).");
                             if (message.From is not null)
                                 AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
-                            signerBinding = new VerifiedKeyBinding(captured, message.From);
+                            signerBinding = new VerifiedKeyBinding(captured, DidSubject.DidSubjectOf(message.From));
                         }
                     }
                     else if (resolverCheck is not null)
@@ -391,12 +395,18 @@ internal static class EnvelopeReader
                     // recipient kid points elsewhere. Fail closed unless the reported kid is exactly
                     // the kid whose key agreement produced the KEK — otherwise RecipientKid (and the
                     // RecipientKeyBinding derived from it) would describe a key that did not decrypt
-                    // this envelope. Runs only after a successful decrypt, so it reveals nothing
-                    // about which recipient keys are held (#56).
+                    // this envelope (FR-CONSIST-08, #56).
+                    //
+                    // On held-ness disclosure: reaching this throw means our key opened an entry, so
+                    // it does distinguish a holder from a non-holder (who gets the uniform decrypt
+                    // failure). That is not a NEW distinguisher — decrypt success itself already is
+                    // one, and an unmodified envelope reveals the same bit — so the constant-work
+                    // guarantee this layer owns (identical work and identical failure for the unheld
+                    // path, dataproofs #12) is unaffected.
                     if (!string.Equals(jweResult.RecipientKid, decryptingKid, StringComparison.Ordinal))
                         throw new ConsistencyException(
                             "The decrypted recipient entry is labelled with a kid other than the one whose key " +
-                            "agreement opened it; the envelope's recipient labelling is not trustworthy (FR-CONSIST-02).");
+                            "agreement opened it; the envelope's recipient labelling is not trustworthy (FR-CONSIST-08).");
 
                     var isOutermostEncryptLayer = !encrypted;
                     encrypted = true;
@@ -458,11 +468,24 @@ internal static class EnvelopeReader
         CancellationToken ct)
     {
         var heldKids = await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
-        foreach (var kid in heldKids)
+        // Walk the ENVELOPE's order and keep the held ones, rather than trusting the order
+        // FindPresentAsync returns (ISecretsResolver promises a subset, not an ordering). The parser
+        // scans recipient entries in envelope order and reports the first one the KEK opens, so
+        // selecting in that same order keeps the two in step. Without it, an envelope that wraps the
+        // same key material under two kids (a key published under an alias) could have the parser
+        // report the earlier entry while we recorded the later one — a false rejection by the
+        // recipient-label check below, on a legitimate message.
+        var held = heldKids.Count == 0 ? null : new HashSet<string>(heldKids, StringComparer.Ordinal);
+        if (held is not null)
         {
-            var handle = await recipientKeys.ResolveKeyAgreementAsync(kid, ct).ConfigureAwait(false);
-            if (handle is not null)
-                return (handle, kid);
+            foreach (var kid in recipientKids)
+            {
+                if (!held.Contains(kid))
+                    continue;
+                var handle = await recipientKeys.ResolveKeyAgreementAsync(kid, ct).ConfigureAwait(false);
+                if (handle is not null)
+                    return (handle, kid);
+            }
         }
 
         var scalar = new byte[32];

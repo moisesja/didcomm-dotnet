@@ -353,6 +353,29 @@ public sealed class SameDocumentProvenanceTests
     }
 
     [Fact]
+    public async Task DecoratedFromDidUrl_RejectedAtThePerimeter()
+    {
+        // Guards the assumption behind AuthorizedForDid holding a bare DID: the facade refuses a
+        // 'from' that is not a bare DID on both pack and unpack, so a decorated identity never
+        // reaches the binding in the first place. (The binding stores the compared DID subject
+        // regardless, so the property is a bare DID by construction on every path.)
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var message = new MessageBuilder()
+            .WithType("https://example.com/protocols/test/1.0/ping")
+            .WithFrom(Alice + "?versionId=3")
+            .WithTo(Bob)
+            .WithBody(JsonNode.Parse("""{"v":1}""")!.AsObject())
+            .Build();
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var client = Client(resolver, keyA.PrivateJwk);
+
+        await client.Invoking(c => c.PackSignedAsync(message, Alice))
+            .Should().ThrowAsync<DidResolutionException>();
+    }
+
+    [Fact]
     public async Task Bindings_CompareStructurally_SoResultEqualityIsPreserved()
     {
         // VerifiedKeyBinding is a class, not a record: without value equality two results from

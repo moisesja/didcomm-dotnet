@@ -115,6 +115,28 @@ public sealed class FromPriorProvenanceTests
         resolver.CountFor("did:example:eve").Should().Be(0);
     }
 
+    [Theory]
+    [InlineData("did:example:alice?versionId=9")]
+    [InlineData("did:example:alice/path")]
+    public async Task DecoratedIssDidUrl_Rejected(string decoratedIss)
+    {
+        // Authorization compares DID subjects, so 'did:x' and 'did:x?v=1' would authorize
+        // identically while staying distinct strings — and 'iss' is what an application keys its
+        // rotation replay state on. The prior DID's key holder must not be able to mint unlimited
+        // equivalent-but-distinct 'iss' values that each carry a valid signature.
+        var priorKey = TestKeyMaterial.Generate(KeyType.Ed25519, PriorKid);
+        var jwt = await FromPriorBuilder.BuildAsync(
+            new FromPriorClaims(Sub: NewDid, Iss: decoratedIss, Iat: 1700000000), priorKey.PrivateJwk);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(PriorDid, Doc(PriorDid, priorKey.PublicJwk));
+        var keyService = new NetDidKeyService(resolver);
+
+        var act = () => FromPriorValidator.ValidateAsync(jwt, NewDid, keyService);
+
+        await act.Should().ThrowAsync<ConsistencyException>().WithMessage("*bare DID*");
+    }
+
     [Fact]
     public async Task LegacyKeyService_KeepsTwoResolutionBehavior()
     {
