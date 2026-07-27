@@ -55,7 +55,10 @@ authorize the victim's genuine key while the JWT was verified with a replacement
 same kid — a forged accepted rotation, which hands the attacker whatever relationship the prior
 DID held. On the provenance-capable path both now come from a single resolution, with the same
 controller rule applied to that binding (duplicate kids fail closed there too, where the old
-`FirstOrDefault` silently took the first match). Legacy key services keep the old shape.
+`FirstOrDefault` silently took the first match). Because that lookup resolves the kid's own DID
+rather than `iss`, the signer kid is now required to sit under `iss` before any resolution runs, so
+an attacker-chosen kid cannot steer the agent into resolving an arbitrary DID first. Legacy key
+services keep the old shape.
 
 ### Fixed — decrypted recipient entry must match its own label (#56 review)
 
