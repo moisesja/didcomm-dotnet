@@ -24,6 +24,14 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// output alongside the source to see how each flag maps to a layer in the envelope.
 /// </para>
 /// <para>
+/// It also prints the key <em>bindings</em>. A flag and a kid tell you a key named X satisfied
+/// the cryptography; a binding additionally proves that key and the DID document entry
+/// authorizing it were read together, in one resolution, during this unpack — so a document
+/// that changes between checks cannot let a rotated-out or foreign-controlled key pass as
+/// authorized. Use these when the sender's identity decides what your application allows
+/// (FR-CONSIST-07).
+/// </para>
+/// <para>
 /// Maps to PRD §14.2 task <strong>K</strong> (FR-API-04 — unpack metadata surface).
 /// </para>
 /// </remarks>
@@ -71,6 +79,24 @@ public static class Section_K_UnpackMetadata
         ctx.Narrator.Value("Message.From",       result.Message.From);
         ctx.Narrator.Value("Message.Body[content]", result.Message.Body?["content"]);
 
+        // The kids above name keys; they don't prove the key that did the crypto is the same key
+        // the DID document authorizes. The *KeyBinding properties do: each one is read from a
+        // single DID resolution, so the key material and the "who controls it" answer can never
+        // come from two different versions of the document (FR-CONSIST-07). The thumbprint
+        // fingerprints the exact public key, so you can pin or audit it without trusting kid
+        // strings. Present because the library's own resolver adapter supplies this evidence;
+        // a custom IDidKeyService that doesn't implement IDidKeyBindingService leaves them null.
+        var signerBinding = result.SignerKeyBinding;
+        ctx.Narrator.Value("SignerKeyBinding.Did",             signerBinding?.Did);
+        ctx.Narrator.Value("SignerKeyBinding.Controller",      signerBinding?.Controller);
+        ctx.Narrator.Value("SignerKeyBinding.KeyThumbprint",   signerBinding?.PublicKeyThumbprint);
+        // Non-null means the controller rule really ran against the 'from' this message asserts.
+        // Null would mean the envelope authenticated a key but claimed no identity to check it against.
+        ctx.Narrator.Value("SignerKeyBinding.AuthorizedForDid", signerBinding?.AuthorizedForDid);
+        ctx.Narrator.Value("SenderKeyBinding.KeyThumbprint",    result.SenderKeyBinding?.PublicKeyThumbprint);
+        ctx.Narrator.Value("RecipientKeyBinding.KeyThumbprint", result.RecipientKeyBinding?.PublicKeyThumbprint);
+
         ctx.Narrator.Note("Three flags are true at once because three layers stack: the outer JWE gives Encrypted+Authenticated, the inner JWS adds NonRepudiation.");
+        ctx.Narrator.Note("Check the *KeyBinding properties, not just the flags, when a message's identity decides an authorization.");
     }
 }
