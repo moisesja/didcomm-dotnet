@@ -239,6 +239,98 @@ public sealed class ResolveKeyBindingTests
     }
 
     [Fact]
+    public async Task ResolverReturnsAnotherSubjectsDocument_Rejected()
+    {
+        // The binding records the REQUESTED did, so a resolver that answers with a different
+        // subject's document (cross-wired composite, mis-keyed cache, hostile implementation) would
+        // have Eve's contents attributed to Alice. The document's own id must match what we asked for.
+        var vm = X25519Vm("did:example:alice#ka-1");
+        var eveDoc = new DidDocument
+        {
+            Id = new Did("did:example:eve"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver(("did:example:alice", eveDoc)));
+
+        var act = () => sut.ResolveKeyBindingAsync("did:example:alice#ka-1", VerificationRelationship.KeyAgreement);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .WithMessage("*whose id is 'did:example:eve'*");
+    }
+
+    [Fact]
+    public async Task ResolverReturnsAnotherSubjectsDocument_AlsoRejectedOnLegacyPaths()
+    {
+        // Same misattribution would break FR-CONSIST-06 authorization and key projection, so the
+        // check guards every resolution this adapter performs, not just the binding path.
+        var vm = X25519Vm("did:example:alice#ka-1");
+        var eveDoc = new DidDocument
+        {
+            Id = new Did("did:example:eve"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromEmbedded(vm) },
+        };
+        var sut = new NetDidKeyService(new StubResolver(("did:example:alice", eveDoc)));
+
+        await sut.Invoking(s => s.GetVerificationMethodsAsync("did:example:alice", VerificationRelationship.KeyAgreement))
+            .Should().ThrowAsync<DidResolutionException>();
+        await sut.Invoking(s => s.IsKeyAuthorizedAsync("did:example:alice", "did:example:alice#ka-1", VerificationRelationship.KeyAgreement))
+            .Should().ThrowAsync<DidResolutionException>();
+    }
+
+    [Fact]
+    public async Task DuplicateTopLevelVerificationMethodIds_ReferencedOnce_Rejected()
+    {
+        // The duplicate check on relationship ENTRIES is not enough: a single reference that
+        // dereferences to two same-id top-level methods is equally ambiguous — the first one wins
+        // silently, and the shadowed one may carry different key material or controller.
+        var canonical = X25519Vm("did:example:alice#ka-1");
+        var shadow = new VerificationMethod
+        {
+            Id = "did:example:alice#ka-1",
+            Type = "JsonWebKey2020",
+            Controller = new Did("did:example:alice"),
+            PublicKeyJwk = new JsonWebKey { Kty = "OKP", Crv = "X25519", X = "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo" },
+        };
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { canonical, shadow },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromReference("did:example:alice#ka-1") },
+        };
+        var sut = new NetDidKeyService(new StubResolver(("did:example:alice", doc)));
+
+        var act = () => sut.ResolveKeyBindingAsync("did:example:alice#ka-1", VerificationRelationship.KeyAgreement);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .WithMessage("*matches more than one entry*");
+    }
+
+    [Theory]
+    // relative reference → absolute method id, and the mirror case
+    [InlineData("#ka-1", "did:example:alice#ka-1")]
+    [InlineData("did:example:alice#ka-1", "#ka-1")]
+    public async Task MixedRelativeAndAbsoluteReference_Dereferences(string reference, string methodId)
+    {
+        // DID Core allows either side to be relative; a raw string compare would miss the match and
+        // report the reference as absent (or, worse, silently drop a key from the projection).
+        var vm = X25519Vm(methodId);
+        var doc = new DidDocument
+        {
+            Id = new Did("did:example:alice"),
+            VerificationMethod = new[] { vm },
+            KeyAgreement = new[] { VerificationRelationshipEntry.FromReference(reference) },
+        };
+        var sut = new NetDidKeyService(new StubResolver(("did:example:alice", doc)));
+
+        var binding = await sut.ResolveKeyBindingAsync("did:example:alice#ka-1", VerificationRelationship.KeyAgreement);
+
+        binding.Should().NotBeNull();
+        binding!.Kid.Should().Be("did:example:alice#ka-1");
+    }
+
+    [Fact]
     public async Task Projection_UsesExactlyOneResolution()
     {
         var vm = X25519Vm("did:example:alice#ka-1");

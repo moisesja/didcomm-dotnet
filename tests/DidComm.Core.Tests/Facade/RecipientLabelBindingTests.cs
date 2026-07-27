@@ -43,8 +43,32 @@ public sealed class RecipientLabelBindingTests
             new DidCommOptions());
 
         await bob.Invoking(c => c.UnpackAsync(packed))
-            .Should().ThrowAsync<ConsistencyException>()
-            .WithMessage("*labelled with a kid other than the one whose key agreement opened it*");
+            .Should().ThrowAsync<CryptoException>();
+    }
+
+    [Fact]
+    public async Task SwappedRecipientLabels_HeldAndUnheldFailIdentically_NoCustodyOracle()
+    {
+        // The rejection must not tell a peer whether we hold a recipient key: a holder reaches the
+        // label check (their key opened an entry) while a non-holder fails in the decoy path. Both
+        // must surface the SAME exception type and message, or the category itself is the oracle
+        // that the constant-work decrypt path exists to close.
+        var (packed, bobKa, resolver) = await PackToBothAndSwapLabels();
+
+        var holder = new DidCommClient(
+            new DictionarySecretsLookup(new[] { bobKa.PrivateJwk }),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+        var stranger = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+
+        var holderFailure = (await holder.Invoking(c => c.UnpackAsync(packed)).Should().ThrowAsync<CryptoException>()).Which;
+        var strangerFailure = (await stranger.Invoking(c => c.UnpackAsync(packed)).Should().ThrowAsync<CryptoException>()).Which;
+
+        holderFailure.GetType().Should().Be(strangerFailure.GetType());
+        holderFailure.Message.Should().Be(strangerFailure.Message);
     }
 
     [Fact]
@@ -66,6 +90,75 @@ public sealed class RecipientLabelBindingTests
         result.RecipientKeyBinding!.Kid.Should().Be(BobKid);
         result.RecipientKeyBinding.Did.Should().Be(Bob);
         result.RecipientKeyBinding.AuthorizedForDid.Should().Be(Bob);
+    }
+
+    [Fact]
+    public async Task OurOwnKidRotatedToNewMaterial_MessageStillUnpacks_ButNoRecipientProvenance()
+    {
+        // Our document rotates kid K from KA to KB while we still hold KA. A message encrypted to KA
+        // decrypts fine and must keep working (rotation grace) — but the key the DOCUMENT now
+        // publishes for K is not the key that decrypted, so attesting KB's thumbprint would be a
+        // false statement about which key opened this envelope.
+        var oldKey = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var newKey = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+
+        var senderResolver = new StaticResolver((Bob, Doc(Bob, oldKey.PublicJwk)));
+        var sender = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(senderResolver),
+            new DidCommOptions());
+
+        var message = new MessageBuilder()
+            .WithType("https://example.com/protocols/test/1.0/ping")
+            .WithTo(Bob)
+            .WithBody(JsonNode.Parse("""{"v":1}""")!.AsObject())
+            .Build();
+        var packed = (await sender.PackEncryptedAsync(
+            message, new PackEncryptedOptions(Recipients: new[] { Bob }))).Message;
+
+        // Post-rotation document: same kid, replacement key material.
+        var rotatedResolver = new StaticResolver((Bob, Doc(Bob, newKey.PublicJwk)));
+        var bob = new DidCommClient(
+            new DictionarySecretsLookup(new[] { oldKey.PrivateJwk }),
+            new NetDidKeyService(rotatedResolver),
+            new DidCommOptions());
+
+        var result = await bob.UnpackAsync(packed);
+
+        result.RecipientKid.Should().Be(BobKid);
+        result.RecipientKeyBinding.Should().BeNull(
+            "the resolved key is not the key that decrypted, so no recipient provenance may be claimed");
+    }
+
+    [Fact]
+    public async Task OpaqueResolverWithoutPublicIdentity_YieldsNoRecipientProvenance()
+    {
+        // A custom resolver that exposes no public material for a held kid cannot prove the resolved
+        // key is the one that decrypted, so it gets no recipient binding rather than an unproven one.
+        var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var resolver = new StaticResolver((Bob, Doc(Bob, bobKa.PublicJwk)));
+
+        var sender = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+        var message = new MessageBuilder()
+            .WithType("https://example.com/protocols/test/1.0/ping")
+            .WithTo(Bob)
+            .WithBody(JsonNode.Parse("""{"v":1}""")!.AsObject())
+            .Build();
+        var packed = (await sender.PackEncryptedAsync(
+            message, new PackEncryptedOptions(Recipients: new[] { Bob }))).Message;
+
+        var bob = new DidCommClient(
+            new PublicIdentityHidingSecrets(bobKa.PrivateJwk),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+
+        var result = await bob.UnpackAsync(packed);
+
+        result.RecipientKid.Should().Be(BobKid);
+        result.RecipientKeyBinding.Should().BeNull();
     }
 
     [Theory]
@@ -120,6 +213,34 @@ public sealed class RecipientLabelBindingTests
         Alg = source.Alg,
         Use = source.Use,
     };
+
+    /// <summary>
+    /// Holds a key for decryption but exposes no public identity — models an opaque resolver whose
+    /// backing store answers "held" and derives, without surfacing key material at all.
+    /// </summary>
+    private sealed class PublicIdentityHidingSecrets : ISecretsResolver, IOpaqueKeyResolver
+    {
+        private readonly Jwk _privateJwk;
+        public PublicIdentityHidingSecrets(Jwk privateJwk) => _privateJwk = privateJwk;
+
+        public Task<Jwk?> FindAsync(string kid, CancellationToken ct = default) => Task.FromResult<Jwk?>(null);
+
+        public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<string>>(
+                kids.Where(k => string.Equals(k, _privateJwk.Kid, StringComparison.Ordinal)).ToArray());
+
+        public Task<NetCrypto.ISigner?> ResolveSignerAsync(string kid, CancellationToken ct = default)
+            => Task.FromResult<NetCrypto.ISigner?>(null);
+
+        public Task<DataProofsDotnet.Jose.Encryption.IEcdhKey?> ResolveKeyAgreementAsync(string kid, CancellationToken ct = default)
+        {
+            if (!string.Equals(kid, _privateJwk.Kid, StringComparison.Ordinal))
+                return Task.FromResult<DataProofsDotnet.Jose.Encryption.IEcdhKey?>(null);
+            var scalar = DataProofsDotnet.Jose.Base64Url.Decode(_privateJwk.D!);
+            return Task.FromResult<DataProofsDotnet.Jose.Encryption.IEcdhKey?>(
+                new DataProofsDotnet.Jose.Encryption.RawEcdhKey(_privateJwk.Crv!, scalar, new DataProofsDotnet.Jose.JoseCryptoProvider()));
+        }
+    }
 
     /// <summary>Secrets resolver whose <c>FindPresentAsync</c> can return hits in a non-envelope order.</summary>
     private sealed class OrderedSecretsLookup : ISecretsResolver

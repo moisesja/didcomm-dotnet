@@ -401,19 +401,58 @@ public sealed class SameDocumentProvenanceTests
     [Fact]
     public async Task ConcurrentUnpacks_SameKid_IndependentBindings()
     {
+        // Forced overlap: the resolver holds every caller inside ResolveAsync until all of them have
+        // arrived, so the unpacks are genuinely in flight together. (Awaiting a list of already-
+        // synchronously-completed tasks would prove nothing about concurrency.)
+        const int concurrency = 12;
         var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
-        var doc = Doc(Alice, Auth(keyA.PublicJwk));
         var packed = await PackSigned(keyA);
         var expected = DpJwkThumbprint.ComputeBase64Url(keyA.PublicJwk);
 
-        var resolver = new VersionedResolver();
-        resolver.SetSequence(Alice, doc);
+        var resolver = new RendezvousResolver(Doc(Alice, Auth(keyA.PublicJwk)), concurrency);
         var recipient = Client(resolver);
 
-        var results = await Task.WhenAll(Enumerable.Range(0, 24).Select(_ => recipient.UnpackAsync(packed)));
+        var results = await Task.WhenAll(Enumerable.Range(0, concurrency)
+            .Select(_ => Task.Run(() => recipient.UnpackAsync(packed))));
 
+        resolver.MaxObservedConcurrency.Should().Be(concurrency, "the unpacks must actually have overlapped");
         results.Should().OnlyContain(r =>
             r.SignerKeyBinding != null && r.SignerKeyBinding.PublicKeyThumbprint == expected);
+    }
+
+    [Fact]
+    public async Task ConcurrentUnpacks_DifferentKeysSameKid_NeitherSeesTheOthersEvidence()
+    {
+        // Two envelopes signed by DIFFERENT keys under the SAME kid, unpacked concurrently against a
+        // resolver that alternates documents. Whichever pairing each operation gets, the invariant is
+        // absolute: a result that verified may only ever report the key that verified IT. A shared or
+        // leaked binding context would show up here as a result carrying the other envelope's key.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var keyB = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packedA = await PackSigned(keyA);
+        var packedB = await PackSigned(keyB);
+        var thumbA = DpJwkThumbprint.ComputeBase64Url(keyA.PublicJwk);
+        var thumbB = DpJwkThumbprint.ComputeBase64Url(keyB.PublicJwk);
+
+        // Documents are handed out in arrival order, and the test parks the first unpack inside the
+        // resolver before starting the second — so the pairing is deterministic (A↔KA, B↔KB) while
+        // both operations are genuinely in flight at the same time. If the two operations shared
+        // captured evidence, one would report the other's key or fail to verify.
+        var resolver = new ArrivalOrderedResolver(Doc(Alice, Auth(keyA.PublicJwk)), Doc(Alice, Auth(keyB.PublicJwk)));
+        var recipient = Client(resolver);
+
+        var first = Task.Run(() => recipient.UnpackAsync(packedA));
+        await resolver.WaitForArrivalsAsync(1);
+        var second = Task.Run(() => recipient.UnpackAsync(packedB));
+        await resolver.WaitForArrivalsAsync(2);
+        resolver.Release();
+
+        var resultA = await first;
+        var resultB = await second;
+
+        resolver.MaxObservedConcurrency.Should().Be(2, "both unpacks must have been in flight together");
+        resultA.SignerKeyBinding!.PublicKeyThumbprint.Should().Be(thumbA);
+        resultB.SignerKeyBinding!.PublicKeyThumbprint.Should().Be(thumbB);
     }
 
     [Fact]
@@ -496,6 +535,32 @@ public sealed class SameDocumentProvenanceTests
 
         observation.SignerKeyBinding.Should().NotBeNull();
         observation.SignerKeyBinding!.PublicKeyThumbprint.Should().Be(result.SignerKeyBinding!.PublicKeyThumbprint);
+    }
+
+    [Fact]
+    public async Task Observation_FromMutatedVerifiedMessage_DropsBindings()
+    {
+        // Message is mutable and the verified snapshot is keyed by object identity, so an in-place
+        // edit keeps that identity: without a content check, a caller could rewrite a verified
+        // message and hand an observer Alice's binding attached to content Alice never signed.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = Client(resolver);
+        var result = await recipient.UnpackAsync(packed);
+
+        InboundObservation.FromUnpackResult(result).SignerKeyBinding.Should().NotBeNull();
+
+        // Mutate the verified message in place — same object, different content.
+        result.Message.Body = JsonNode.Parse("""{"content":"attacker-substituted"}""")!.AsObject();
+
+        var afterMutation = InboundObservation.FromUnpackResult(result);
+
+        afterMutation.SignerKeyBinding.Should().BeNull("the evidence does not cover mutated content");
+        afterMutation.SenderKeyBinding.Should().BeNull();
+        afterMutation.RecipientKeyBinding.Should().BeNull();
     }
 
     [Fact]
@@ -672,6 +737,109 @@ public sealed class SameDocumentProvenanceTests
                     ResolutionMetadata = new DidResolutionMetadata(),
                 });
             }
+        }
+    }
+
+    /// <summary>
+    /// Serves one document, but holds every caller inside <c>ResolveAsync</c> until
+    /// <paramref name="participants"/> callers have arrived — forcing the unpacks to genuinely
+    /// overlap instead of completing one after another on synchronously-completed tasks.
+    /// </summary>
+    private sealed class RendezvousResolver : IDidResolver
+    {
+        private readonly DidDocument _document;
+        private readonly int _participants;
+        private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _arrived;
+        private int _inFlight;
+
+        public RendezvousResolver(DidDocument document, int participants)
+        {
+            _document = document;
+            _participants = participants;
+        }
+
+        public int MaxObservedConcurrency { get; private set; }
+
+        public bool CanResolve(string did) => true;
+
+        public async Task<DidResolutionResult> ResolveAsync(string did, DidResolutionOptions? options = null, CancellationToken ct = default)
+        {
+            var current = Interlocked.Increment(ref _inFlight);
+            lock (_gate)
+            {
+                if (current > MaxObservedConcurrency)
+                    MaxObservedConcurrency = current;
+            }
+
+            if (Interlocked.Increment(ref _arrived) >= _participants)
+                _gate.TrySetResult();
+            await _gate.Task.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+
+            Interlocked.Decrement(ref _inFlight);
+            return Answer(did);
+        }
+
+        private DidResolutionResult Answer(string did)
+            => new() { DidDocument = _document, ResolutionMetadata = new DidResolutionMetadata() };
+    }
+
+    /// <summary>
+    /// Hands out documents in arrival order and parks every caller until <see cref="Release"/>, so a
+    /// test can drive a deterministic pairing (first arrival ↔ first document) while keeping the
+    /// operations concurrently in flight.
+    /// </summary>
+    private sealed class ArrivalOrderedResolver : IDidResolver
+    {
+        private readonly DidDocument[] _documents;
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly object _gate = new();
+        private int _arrived;
+        private int _inFlight;
+
+        public ArrivalOrderedResolver(params DidDocument[] documents) => _documents = documents;
+
+        public int MaxObservedConcurrency { get; private set; }
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task WaitForArrivalsAsync(int count)
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (Volatile.Read(ref _arrived) < count)
+            {
+                if (DateTime.UtcNow > deadline)
+                    throw new TimeoutException($"only {Volatile.Read(ref _arrived)} of {count} resolutions arrived");
+                await Task.Delay(5);
+            }
+        }
+
+        public bool CanResolve(string did) => true;
+
+        public async Task<DidResolutionResult> ResolveAsync(string did, DidResolutionOptions? options = null, CancellationToken ct = default)
+        {
+            int index;
+            lock (_gate)
+            {
+                index = _arrived;
+                _inFlight++;
+                if (_inFlight > MaxObservedConcurrency)
+                    MaxObservedConcurrency = _inFlight;
+            }
+            Interlocked.Increment(ref _arrived);
+
+            await _release.Task.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+
+            lock (_gate)
+            {
+                _inFlight--;
+            }
+
+            return new DidResolutionResult
+            {
+                DidDocument = _documents[Math.Min(index, _documents.Length - 1)],
+                ResolutionMetadata = new DidResolutionMetadata(),
+            };
         }
     }
 

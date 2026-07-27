@@ -201,7 +201,24 @@ internal static class EnvelopeReader
                                     ?? throw new ConsistencyException(
                                         $"Key '{recipientKid}' is not present under 'keyAgreement' in the resolved DID Document of '{recipientDid}' (FR-CONSIST-06).");
                                 AddressingConsistency.CheckCapturedBindingAuthorized(recipientDid, captured);
-                                recipientBinding = new VerifiedKeyBinding(captured, recipientDid);
+
+                                // Unlike the sender/signer roles — where the resolved key IS the key the
+                                // JOSE layer used — the recipient key came from the local secrets
+                                // resolver, and the document was consulted separately. If our own
+                                // document rotated that kid to new material while we still hold the old
+                                // private key, the envelope decrypts fine but the resolved key is NOT
+                                // the key that decrypted it. Publishing its thumbprint would be a false
+                                // attestation, so surface recipient evidence only when the resolved
+                                // public key matches the local key's public identity. Unproven means no
+                                // binding — not a rejection: a message encrypted to a still-held,
+                                // rotated-out key stays valid, it just carries no recipient provenance.
+                                var localPublic = await recipientKeys.TryGetPublicIdentityAsync(recipientKid, ct).ConfigureAwait(false);
+                                var localThumbprint = localPublic is null ? null : SafeThumbprint(localPublic);
+                                if (localThumbprint is not null
+                                    && string.Equals(localThumbprint, captured.PublicKeyThumbprint, StringComparison.Ordinal))
+                                {
+                                    recipientBinding = new VerifiedKeyBinding(captured, recipientDid);
+                                }
                             }
                         }
 
@@ -397,16 +414,16 @@ internal static class EnvelopeReader
                     // RecipientKeyBinding derived from it) would describe a key that did not decrypt
                     // this envelope (FR-CONSIST-08, #56).
                     //
-                    // On held-ness disclosure: reaching this throw means our key opened an entry, so
-                    // it does distinguish a holder from a non-holder (who gets the uniform decrypt
-                    // failure). That is not a NEW distinguisher — decrypt success itself already is
-                    // one, and an unmodified envelope reveals the same bit — so the constant-work
-                    // guarantee this layer owns (identical work and identical failure for the unheld
-                    // path, dataproofs #12) is unaffected.
+                    // Reported as the SAME uniform decryption failure a non-holder gets, deliberately:
+                    // reaching this line means our key opened an entry, so a distinct exception type
+                    // (or message) would let a peer tell a holder from a non-holder by category —
+                    // exactly the recipient-possession oracle the decoy/constant-work path
+                    // (dataproofs #12) exists to close. A mismatched label means we cannot attribute
+                    // the decryption to a recipient entry, so "could not be decrypted" is also the
+                    // honest answer, and every caller that already handles an undecryptable envelope
+                    // (including the WebSocket receive loop) handles this unchanged.
                     if (!string.Equals(jweResult.RecipientKid, decryptingKid, StringComparison.Ordinal))
-                        throw new ConsistencyException(
-                            "The decrypted recipient entry is labelled with a kid other than the one whose key " +
-                            "agreement opened it; the envelope's recipient labelling is not trustworthy (FR-CONSIST-08).");
+                        throw new CryptoException("JWE could not be decrypted.");
 
                     var isOutermostEncryptLayer = !encrypted;
                     encrypted = true;
@@ -497,6 +514,23 @@ internal static class EnvelopeReader
         finally
         {
             CryptographicOperations.ZeroMemory(scalar);
+        }
+    }
+
+    /// <summary>
+    /// RFC 7638 thumbprint of a locally-held public JWK, or <c>null</c> when the key's shape cannot be
+    /// canonicalized. A malformed local key must not fault the unpack — it just means the recipient
+    /// binding stays unproven, which is exactly how a missing local public identity is treated.
+    /// </summary>
+    private static string? SafeThumbprint(Jwk publicJwk)
+    {
+        try
+        {
+            return DataProofsDotnet.Jose.JwkThumbprint.ComputeBase64Url(publicJwk);
+        }
+        catch (DataProofsDotnet.Jose.MalformedJoseException)
+        {
+            return null;
         }
     }
 

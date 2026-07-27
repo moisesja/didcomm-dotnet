@@ -66,17 +66,12 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
         ArgumentException.ThrowIfNullOrEmpty(did);
         RejectUnsupportedMethod(did);
 
-        var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
-        if (result.DidDocument is null)
-        {
-            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
-            throw new DidResolutionException(did, error);
-        }
+        var document = await ResolveDocumentAsync(did, ct).ConfigureAwait(false);
 
         var entries = relationship switch
         {
-            VerificationRelationship.KeyAgreement => result.DidDocument.KeyAgreement,
-            VerificationRelationship.Authentication => result.DidDocument.Authentication,
+            VerificationRelationship.KeyAgreement => document.KeyAgreement,
+            VerificationRelationship.Authentication => document.Authentication,
             _ => throw new ArgumentOutOfRangeException(nameof(relationship), relationship, "Unknown VerificationRelationship."),
         };
 
@@ -86,7 +81,7 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
         var keys = new List<Jwk>(entries.Count);
         foreach (var entry in entries)
         {
-            var method = ResolveVerificationMethod(result.DidDocument, entry, did);
+            var method = ResolveVerificationMethod(document, entry, did);
             var jwk = TryMaterialise(method, relationship);
             if (jwk is not null)
             {
@@ -119,17 +114,12 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
         // and authorize the matching kid only when its id-subject AND its controller are the asserted
         // DID — rejecting a key that sits under the relationship but is controlled by a different DID,
         // or an embedded VM whose id belongs to another DID. (Issue #18.)
-        var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
-        if (result.DidDocument is null)
-        {
-            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
-            throw new DidResolutionException(did, error);
-        }
+        var document = await ResolveDocumentAsync(did, ct).ConfigureAwait(false);
 
         var entries = relationship switch
         {
-            VerificationRelationship.KeyAgreement => result.DidDocument.KeyAgreement,
-            VerificationRelationship.Authentication => result.DidDocument.Authentication,
+            VerificationRelationship.KeyAgreement => document.KeyAgreement,
+            VerificationRelationship.Authentication => document.Authentication,
             _ => throw new ArgumentOutOfRangeException(nameof(relationship), relationship, "Unknown VerificationRelationship."),
         };
         if (entries is null || entries.Count == 0)
@@ -137,7 +127,7 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
 
         foreach (var entry in entries)
         {
-            var method = ResolveVerificationMethod(result.DidDocument, entry, did);
+            var method = ResolveVerificationMethod(document, entry, did);
 
             // VerificationMethod.id MAY be a relative DID URL ("#key-1"); normalize to absolute so it
             // matches the absolute kid the envelope layer uses and so DidSubjectOf can extract a DID.
@@ -172,17 +162,12 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
             return null; // not a DID URL — nothing to bind
         RejectUnsupportedMethod(did);
 
-        var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
-        if (result.DidDocument is null)
-        {
-            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
-            throw new DidResolutionException(did, error);
-        }
+        var document = await ResolveDocumentAsync(did, ct).ConfigureAwait(false);
 
         var entries = relationship switch
         {
-            VerificationRelationship.KeyAgreement => result.DidDocument.KeyAgreement,
-            VerificationRelationship.Authentication => result.DidDocument.Authentication,
+            VerificationRelationship.KeyAgreement => document.KeyAgreement,
+            VerificationRelationship.Authentication => document.Authentication,
             _ => throw new ArgumentOutOfRangeException(nameof(relationship), relationship, "Unknown VerificationRelationship."),
         };
         if (entries is null || entries.Count == 0)
@@ -191,7 +176,7 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
         VerificationMethod? match = null;
         foreach (var entry in entries)
         {
-            var method = ResolveVerificationMethod(result.DidDocument, entry, did);
+            var method = ResolveVerificationMethod(document, entry, did);
             var methodId = method.Id is { } id && id.StartsWith('#') ? did + id : method.Id;
             if (!string.Equals(methodId, kid, StringComparison.Ordinal))
                 continue;
@@ -227,6 +212,40 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
     }
 
     /// <summary>
+    /// Resolve <paramref name="did"/> and return the document, asserting the resolver actually
+    /// answered for the DID that was asked for.
+    /// </summary>
+    /// <remarks>
+    /// Every downstream claim ("this key is authorized by <paramref name="did"/>", and the #56
+    /// binding's <c>Did</c>) is recorded from the REQUEST, not from the document, so a resolver that
+    /// returns some other subject's document — a cross-wired composite resolver, a shared cache
+    /// keyed wrongly, a hostile implementation — would have its contents attributed to
+    /// <paramref name="did"/>. The document's own <c>id</c> is the resolver's self-declared answer to
+    /// "whose document is this"; requiring it to match makes the misattribution impossible instead of
+    /// merely unlikely (W3C DID Core §3.1: the document's <c>id</c> MUST be the DID that was
+    /// resolved).
+    /// </remarks>
+    private async Task<DidDocument> ResolveDocumentAsync(string did, CancellationToken ct)
+    {
+        var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
+        if (result.DidDocument is null)
+        {
+            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
+            throw new DidResolutionException(did, error);
+        }
+
+        var documentId = result.DidDocument.Id.Value;
+        if (!string.Equals(documentId, did, StringComparison.Ordinal))
+        {
+            throw new DidResolutionException(
+                did,
+                $"resolver returned a document whose id is '{documentId}'; refusing to attribute another subject's document to '{did}'");
+        }
+
+        return result.DidDocument;
+    }
+
+    /// <summary>
     /// FR-CONSIST-06 controller rule: a verification method is authorized for <paramref name="did"/>
     /// only when its (absolute) id resolves to the asserted DID subject AND its <c>controller</c>
     /// (when present) is the asserted DID. An absent controller falls back to the id-subject rule.
@@ -248,6 +267,15 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
     /// id up in the document's top-level <c>verificationMethod</c> array; when it's embedded,
     /// return it as-is.
     /// </summary>
+    /// <remarks>
+    /// Both sides of the comparison are normalized to absolute DID URLs first, because W3C DID Core
+    /// lets either the reference or the method id be relative (<c>#key-1</c>) — a raw string compare
+    /// misses a relative reference pointing at an absolute id and vice versa. More than one
+    /// normalized match is rejected rather than resolved to the first: DID Core requires
+    /// verification-method ids to be unique, and silently preferring one of two same-id methods
+    /// would let a shadowing entry supply different key material or a different controller than the
+    /// one the JOSE layer is about to use (#56).
+    /// </remarks>
     private static VerificationMethod ResolveVerificationMethod(
         DidDocument doc,
         VerificationRelationshipEntry entry,
@@ -256,20 +284,32 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
         if (!entry.IsReference)
             return entry.EmbeddedMethod!;
 
-        var reference = entry.Reference!;
+        var reference = Absolute(entry.Reference!, did);
+        VerificationMethod? match = null;
         if (doc.VerificationMethod is not null)
         {
             foreach (var vm in doc.VerificationMethod)
             {
-                if (string.Equals(vm.Id, reference, StringComparison.Ordinal))
-                    return vm;
+                if (!string.Equals(Absolute(vm.Id, did), reference, StringComparison.Ordinal))
+                    continue;
+                if (match is not null)
+                {
+                    throw new DidResolutionException(
+                        did,
+                        $"verification-relationship reference '{reference}' matches more than one entry in the document's verificationMethod array — ambiguous dereference rejected (#56)");
+                }
+                match = vm;
             }
         }
 
-        throw new DidResolutionException(
+        return match ?? throw new DidResolutionException(
             did,
             $"verification-relationship reference '{reference}' is not present in the document's verificationMethod array");
     }
+
+    /// <summary>Normalize a possibly-relative DID URL (<c>#key-1</c>) to absolute against <paramref name="did"/>.</summary>
+    private static string? Absolute(string? id, string did)
+        => id is not null && id.StartsWith('#') ? did + id : id;
 
     /// <summary>
     /// Convert a <see cref="VerificationMethod"/> to a DIDComm <see cref="Jwk"/>, filtering out

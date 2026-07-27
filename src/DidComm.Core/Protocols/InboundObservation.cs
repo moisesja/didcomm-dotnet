@@ -77,13 +77,19 @@ public sealed record InboundObservation(
         approxBytes = Encoding.UTF8.GetByteCount(json);
         var clone = JsonSerializer.Deserialize<Message>(json, DidCommJson.Default)!;
 
-        // Key bindings ride along only when this exact Message instance is still the one the
-        // unpack pipeline verified (#56): the registered snapshot is keyed by object identity,
-        // so a caller-assembled or with-cloned result — whose message may have been mutated —
-        // yields no strong provenance here. The result's own binding properties are unforgeable
-        // (internal init), but re-attaching them to a possibly-diverged message would overstate
-        // what was proven.
+        // Key bindings ride along only when this exact Message instance is still the one the unpack
+        // pipeline verified AND its content still matches what was verified (#56). Object identity
+        // alone is not enough: Message is mutable, and an in-place edit keeps the identity the
+        // weak-table snapshot is keyed by — so a caller could rewrite a verified message's body or
+        // 'from' and hand an observer content that Alice's binding never covered. Comparing the
+        // re-serialized snapshot against the current serialization (same serializer both sides, so
+        // only real content differences show) drops the evidence exactly when it stopped applying.
         InboundMessageSnapshot.TryGetFor(received.Message, out var snapshot);
+        if (snapshot is not null
+            && !string.Equals(JsonSerializer.Serialize(snapshot.DeserializeMessage(), DidCommJson.Default), json, StringComparison.Ordinal))
+        {
+            snapshot = null;
+        }
         return new InboundObservation(
             Message: clone,
             Encrypted: received.Encrypted,

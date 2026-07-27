@@ -72,6 +72,40 @@ recipient kid is exactly the kid whose key agreement produced the KEK (new FR-CO
 check runs only after a successful decrypt, so it reveals nothing about which recipient keys are
 held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trustworthy.
 
+### Also hardened (PR review)
+
+- **Recipient provenance is now proven, not assumed.** The recipient key comes from the local
+  secrets resolver while its evidence came from a separate document resolution, so if our own
+  document rotated that kid to new material while we still held the old private key, the binding
+  would have attested a key that did not decrypt the message. `RecipientKeyBinding` is now surfaced
+  only when the resolved public key matches the local key's public identity (obtained without
+  touching private material — the shipped keystore adapter answers it from the store's public key).
+  Unproven means no binding, **not** a rejection: a message encrypted to a still-held, rotated-out
+  key stays valid, it just carries no recipient provenance.
+- **The FR-CONSIST-08 rejection is now the uniform decrypt failure.** Reporting it as a distinct
+  `ConsistencyException` let a peer tell a key holder (who reaches the label check) from a
+  non-holder (who fails in the decoy path) by exception category — the very recipient-possession
+  oracle the constant-work decrypt path exists to close. It now throws the same `CryptoException`
+  with the same message as any undecryptable envelope, which also means every caller that already
+  handled an undecryptable envelope handles it unchanged.
+- **A resolver must answer for the DID it was asked about.** All three `NetDidKeyService`
+  resolution paths now reject a document whose `id` is not the requested DID. Authorization and
+  binding evidence record the *requested* DID, so a cross-wired composite resolver, a mis-keyed
+  cache, or a hostile implementation could otherwise have another subject's document attributed to
+  it — including under FR-CONSIST-06 on the legacy path.
+- **Duplicate-id rejection now covers dereferenced methods too.** A single relationship reference
+  pointing at two same-id top-level `verificationMethod` entries was previously resolved to the
+  first silently; it now fails closed, and dereferencing normalizes relative/absolute ids on both
+  sides so `#key-1` and `did:x#key-1` match as DID Core intends.
+- **Observer evidence cannot ride on mutated content.** `InboundObservation.FromUnpackResult` keyed
+  the bindings on message object identity, which an in-place mutation preserves — so a caller could
+  rewrite a verified message and hand an observer evidence that no longer covered it. Bindings are
+  now dropped when the current content differs from the verified snapshot.
+- The `ConcurrentUnpacks_SameKid_IndependentBindings` test did not actually run concurrently
+  (synchronously-completed tasks). It now forces genuine overlap through a rendezvous resolver, and
+  a second test races two envelopes signed by different keys under the same kid with a
+  deterministic pairing.
+
 ### Also hardened (second adversarial pass over the fix)
 
 - **Recipient selection now follows envelope order.** The reader picked the first kid
@@ -110,13 +144,17 @@ held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trus
   query string is accepted where the legacy path's raw-string resolution rejected it.
 
 New requirements FR-CONSIST-07 / FR-CONSIST-08 (and the FR-API-04 update) document the invariants
-in the PRD. 45 new tests cover the acceptance criteria: rotated-kid races in both orderings
-(signed and authcrypt), controller splices, duplicate/shadowed kids, relative/embedded/referenced
-ids, missing and cross-DID controllers, wrong relationships, nested compositions
-(`anoncrypt(sign)`, `anoncrypt(authcrypt(sign))`), from-less signed envelopes, concurrent-unpack
-independence, observer/snapshot propagation, synthetic-result denial, legacy-path compatibility,
-`from_prior` single-resolution rotation, decorated-`iss` rejection, the swapped-recipient-label
-envelope, and resolver-order independence for aliased recipient keys.
+in the PRD. 62 new tests cover the acceptance criteria: rotated-kid races in both orderings
+(signed and authcrypt), controller splices, duplicate/shadowed kids (both as relationship entries
+and as top-level methods behind one reference), relative/embedded/referenced ids and mixed
+relative/absolute dereference, missing and cross-DID controllers, wrong relationships, documents
+returned for the wrong subject, nested compositions (`anoncrypt(sign)`,
+`anoncrypt(authcrypt(sign))`), from-less signed envelopes, genuinely-overlapping concurrent unpacks
+(including two envelopes signed by different keys under one kid), observer/snapshot propagation,
+mutated-content and synthetic-result denial, legacy-path compatibility, `from_prior`
+single-resolution rotation, decorated-`iss` rejection, the swapped-recipient-label envelope,
+recipient-key rotation, held-vs-unheld failure equivalence, resolver-order independence for aliased
+recipient keys, and a WebSocket connection surviving a rejected envelope.
 
 ## [1.3.0] - 2026-06-22
 
