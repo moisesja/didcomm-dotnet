@@ -119,12 +119,16 @@ held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trus
   is what an application keys its rotation-replay state on (FR-ROT-05 is delegated to that layer).
   The prior key's holder could otherwise mint unlimited equivalent-but-distinct `iss` values, each
   correctly signed. This restores the strictness the pre-1.4.0 path had implicitly.
-- **A rejected envelope no longer tears down a WebSocket connection.** `MapDidCommWebSocket`
-  discarded only `MalformedMessageException` and `CryptoException`; any other typed unpack
-  rejection (consistency, DID resolution, `did:web`, missing secret, protocol) escaped the receive
-  loop and closed a socket that may carry other peers' traffic — a one-envelope disconnect. It now
-  logs and drops any `DidCommException`, matching the HTTP path's uniform rejection. Pre-existing
-  (a mismatched plaintext `to` already reached it), but the new label check widened reachability.
+- **A rejected envelope no longer tears down a WebSocket connection.** Both `MapDidCommWebSocket`
+  receive loops (the dispatcher one and the delegate one) discarded only `MalformedMessageException`
+  and `CryptoException`; anything else escaped and closed a socket that may carry other peers'
+  traffic — a one-envelope disconnect. They now log and drop any unpack failure, including untyped
+  faults the unpack contract is not supposed to emit but can (a non-string JOSE `kid` currently
+  surfaces a raw `InvalidOperationException` from the delegated parser — see #58; a DID-resolution
+  timeout arrives as `TaskCanceledException` with our token not cancelled). A genuine shutdown still
+  ends the loop, and a throwing receive callback is logged instead of killing the connection.
+  Pre-existing (a mismatched plaintext `to` already reached it), but the new label check widened
+  reachability.
 - `VerifiedKeyBinding.AuthorizedForDid` stores the DID subject that was compared rather than `from`
   verbatim, and `==` / `!=` now match `Equals` instead of falling back to reference equality.
 

@@ -208,6 +208,48 @@ public sealed class WebSocketTransportRoundTripTests
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
     }
 
+    [Fact]
+    public async Task Malformed_jose_header_member_is_dropped_and_the_socket_keeps_serving()
+    {
+        // Same connection-resilience property against a fault the unpack contract is not supposed to
+        // emit at all: a non-string JWS 'kid' currently surfaces a raw InvalidOperationException from
+        // the delegated parser (tracked separately). The receive loop must still drop that one
+        // message rather than let an untyped fault close the socket.
+        var (server, received) = await BuildServerAsync();
+
+        var actors = SpecActorRegistry.LoadDefault();
+        var keyService = new NetDidKeyService(LoadResolver());
+        var aliceClient = new DidCommClient(actors.AsSecretsResolver(), keyService, new DidCommOptions());
+
+        var signed = await aliceClient.PackSignedAsync(NewProposal(), "did:example:alice");
+        var hostile = System.Text.Json.Nodes.JsonNode.Parse(signed)!.AsObject();
+        hostile["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
+
+        var valid = await aliceClient.PackEncryptedAsync(NewProposal(), new PackEncryptedOptions(
+            Recipients: new[] { "did:example:bob" },
+            From: "did:example:alice"));
+
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(valid.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(10));
+        received.Should().HaveCount(1, "sanity: a valid envelope is delivered before the hostile one");
+
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(hostile.ToJsonString()), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(valid.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+
+        await WaitUntilAsync(() => received.Count >= 2, TimeSpan.FromSeconds(10));
+
+        socket.State.Should().Be(WebSocketState.Open);
+        received.Should().HaveCount(2, "the hostile envelope costs its sender that message, not the connection");
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
     /// <summary>Rewrite the sole recipient entry's kid, leaving its <c>encrypted_key</c> in place.</summary>
     private static string RelabelSingleRecipient(string packedJwe, string replacementKid)
     {

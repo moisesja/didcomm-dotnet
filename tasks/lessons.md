@@ -823,3 +823,31 @@ Format per entry:
 - **How to apply:** Before writing "this reveals nothing / is constant-time / cannot happen", state
   the precondition for reaching that line and ask what an attacker learns from reaching it. Compare
   against the pre-existing signal and claim only the delta. See [[L-040]].
+
+## L-043 — When hardening a receive path, find every loop that reads from it; one hardened loop is a half-fix.
+
+- **Lesson:** `MapDidCommWebSocket` has TWO receive loops — a dispatcher-backed one and a delegate-backed
+  one — with independently written catch blocks. I hardened the first, wrote a test that exercised the
+  second, and the test failed: a hostile envelope still tore down the connection. Grep for the *pattern*
+  (`catch (MalformedMessageException`) rather than fixing the call site you happened to open.
+- **Why:** PR #57 review finding #2 asked for connection resilience. The first fix looked complete and
+  even had a passing test — because that test's envelope threw `CryptoException`, which BOTH loops
+  already caught. Only an envelope that produced an untyped fault revealed the unfixed loop.
+- **How to apply:** After changing exception handling on an ingress path, grep the file/assembly for the
+  other handlers of the same exception types and confirm each. Write the regression test against the
+  entry point a *consumer* uses (here: the delegate overload), not the one you edited. See [[L-039]].
+
+## L-044 — An assertion that depends on which racer won is a flaky test, not a concurrency test.
+
+- **Lesson:** Racing two operations against a resolver that alternates documents and then asserting
+  "at least one pairing matched" fails whenever both draw the wrong document — it encodes luck, not an
+  invariant. Force the ordering instead: park the first operation inside the dependency until it has
+  arrived, start the second, then release both. The operations still genuinely overlap, but the pairing
+  is deterministic, so the assertion is about the design.
+- **Why:** The first version of `ConcurrentUnpacks_DifferentKeysSameKid` failed on its first full-suite
+  run for exactly this reason, right after replacing a test that wasn't concurrent at all (the review's
+  finding: `Task.WhenAll` over synchronously-completed tasks proves nothing).
+- **How to apply:** For a concurrency test, state the invariant that must hold for *every* interleaving,
+  assert that per-result; and where you need a specific interleaving, drive it with a rendezvous
+  (TaskCompletionSource / arrival counter) rather than hoping the scheduler produces it. Assert the
+  overlap actually happened (max observed concurrency), or the test can silently degrade to sequential.
