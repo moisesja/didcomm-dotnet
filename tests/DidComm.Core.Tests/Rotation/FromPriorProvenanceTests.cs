@@ -98,6 +98,24 @@ public sealed class FromPriorProvenanceTests
     }
 
     [Fact]
+    public async Task RotationSignerKidNamingAnotherDid_RejectedWithoutResolvingIt()
+    {
+        // A kid under a DID other than 'iss' can never authorize this rotation. Rejecting before
+        // resolution also means an attacker-chosen kid cannot steer us into resolving arbitrary DIDs.
+        var evilKey = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:eve#auth-1");
+        var jwt = await FromPriorBuilder.BuildAsync(Claims(), evilKey.PrivateJwk);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence("did:example:eve", Doc("did:example:eve", evilKey.PublicJwk));
+        var keyService = new NetDidKeyService(resolver);
+
+        var act = () => FromPriorValidator.ValidateAsync(jwt, NewDid, keyService);
+
+        await act.Should().ThrowAsync<ConsistencyException>().WithMessage("*FR-ROT-01*");
+        resolver.CountFor("did:example:eve").Should().Be(0);
+    }
+
+    [Fact]
     public async Task LegacyKeyService_KeepsTwoResolutionBehavior()
     {
         // Custom services without the binding capability are unchanged (source/binary compatible).

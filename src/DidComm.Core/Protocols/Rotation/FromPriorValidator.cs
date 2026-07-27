@@ -127,6 +127,16 @@ public static class FromPriorValidator
         Jwk signerJwk;
         if (keyService is IDidKeyBindingService bindingService)
         {
+            // The binding is looked up by kid, so the document resolved is the KID's subject rather
+            // than 'iss' as in the legacy shape. Bind the two before resolving: a kid naming some
+            // other DID can never authorize this rotation anyway, and rejecting it up front means an
+            // attacker-chosen kid cannot make us resolve an arbitrary DID first (FR-ROT-01).
+            if (!DidSubject.SameDidSubject(kid, claims.Iss))
+            {
+                throw new ConsistencyException(
+                    $"from_prior signer kid '{kid}' is not under the prior DID '{claims.Iss}' (FR-ROT-01).");
+            }
+
             var binding = await bindingService.ResolveKeyBindingAsync(
                 kid, VerificationRelationship.Authentication, ct).ConfigureAwait(false)
                 ?? throw new ConsistencyException(
