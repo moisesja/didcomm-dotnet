@@ -333,7 +333,12 @@ public sealed class ObserverDeliveryTests
         await delivery.DisposeAsync();
         stopwatch.Stop();
 
-        stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(2));
+        // The real proof that dispose did not wait for the callback is structural (the assertion
+        // below: ShutdownCompletion is still pending because the callback is still in flight, and it
+        // only ends when the test calls Release). This bound just rules out "blocked on the hung
+        // callback", which is unbounded — so it is deliberately generous: a 2s bound flaked on a
+        // constrained Windows CI runner at 2.96s while the invariant held.
+        stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(30));
         delivery.ShutdownCompletion.IsCompleted.Should().BeFalse(
             "the trusted callback genuinely ignores cancellation and is still in flight");
         delivery.GetOutstanding(0).Items.Should().Be(1,

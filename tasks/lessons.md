@@ -759,3 +759,95 @@ Format per entry:
   trust boundary and lifecycle, define one authoritative identity source, one immutable inbound
   snapshot, admission-before-work resource accounting, and explicit shutdown semantics. Plan all
   affected code, tests, docs, and compatibility checks together before editing.
+
+## L-039 — When fixing a two-resolution TOCTOU, sweep the whole call for the same pattern; one fixed role is not the fix.
+
+- **Lesson:** A report naming one instance of "authorize against resolution B a key that resolution A
+  supplied" is a report about a *pattern*. Before declaring the fix done, enumerate every place in the
+  same operation that resolves anything, and check each for the same shape — including protocol
+  side-paths the issue never mentioned. In this codebase the reported gap was sender/signer, but
+  `FromPriorValidator` had the identical shape (`IsKeyAuthorizedAsync` then
+  `GetVerificationMethodsAsync`, verifying with the second document's key) with a worse payoff: a
+  forged accepted rotation inherits the prior DID's relationships.
+- **Why:** Issue #56 listed sender, signer, and recipient. Implementing exactly that list left
+  `from_prior` — reached from the same `UnpackAsync` — still splicing two documents; only an
+  adversarial pass over the finished diff caught it. Shipping would have "closed" the issue while
+  leaving the strongest instance of the same bug open.
+- **How to apply:** For any TOCTOU/provenance fix, grep the operation for every resolver/lookup call
+  (not just the ones the issue cites) and write down which document each accepted fact came from.
+  Fix or explicitly justify each. See [[L-034]].
+
+## L-040 — Metadata the wire lets an attacker label is not evidence; before promoting it to a security-typed property, bind it to what the crypto actually used.
+
+- **Lesson:** Turning an existing untrusted field into a new "verified" type raises the bar it must
+  meet. A JWE's reported recipient `kid` is the *label* of whichever recipient entry the derived KEK
+  opened, and `apv` commits only to the **sorted** kid list — so permuting two entries' labels leaves
+  the envelope cryptographically intact while the decrypt reports another DID's kid. Publishing that
+  as a `VerifiedKeyBinding` would have asserted "this key decrypted the envelope" about a key that
+  did not. The fix is to bind the reported label to the kid whose key agreement actually produced the
+  KEK, and fail closed otherwise.
+- **Why:** Reviewing the #56 fix surfaced that `RecipientKeyBinding` inherited `RecipientKid`'s
+  untrustworthiness while its XML docs promised proof. Tolerable as loose metadata in 1.3.0; a false
+  security claim once wrapped in an evidence type.
+- **How to apply:** When adding a property that *proves* something, ask what an attacker controls in
+  each input it derives from, and check what the AEAD/signature actually covers (per-entry vs
+  aggregate commitments). Prove the new check matters by disabling it and watching the test fail.
+  Also state, in the type itself, when a check did NOT run (e.g. no plaintext `from` ⇒ no controller
+  rule ⇒ evidence only). See [[L-035]].
+
+## L-041 — A fail-closed check must be selected the same way the thing it checks was selected, or it rejects honest traffic.
+
+- **Lesson:** When adding a check that "X must equal Y", verify both sides are derived by the *same
+  ordering/selection rule*. The recipient-label check compared the kid we chose a key for against the
+  kid the parser reported; we iterated `FindPresentAsync`'s output while the parser scanned envelope
+  order. `ISecretsResolver` promises a subset, not an order, so for an envelope carrying the same key
+  material under two kids (one key published by two DIDs) a compliant keystore could make the two
+  disagree and reject a legitimate message.
+- **Why:** The second adversarial pass over the #56 fix built exactly that envelope and flipped the
+  resolver's return order; the security property held, but availability broke. A fail-closed check
+  that fires on honest traffic gets disabled by operators, taking the security property with it.
+- **How to apply:** For every new equality-based rejection, write down how each side is produced and
+  make the derivations share an order (here: select held kids by walking the envelope's list). Then
+  test the check with the *upstream contract's* freedom exercised — reverse the order a doc says is
+  unspecified — not just with the convenient implementation's behavior. See [[L-040]].
+
+## L-042 — Write the security comment you can defend, not the one that sounds reassuring.
+
+- **Lesson:** "Runs only after a successful decrypt, so it reveals nothing about which recipient keys
+  are held" was false: reaching that throw *means* our key opened an entry, which is precisely the
+  possession fact. The defensible claim is narrower — it is not a **new** distinguisher, because
+  decrypt success already reveals the same bit, so the layer's constant-work guarantee is unaffected.
+- **Why:** A reviewer checked the claim, not the code, and the claim was the weakest part. An
+  overstated comment is worse than none: it tells the next engineer a property has been verified when
+  it hasn't, and it will be quoted in a design review.
+- **How to apply:** Before writing "this reveals nothing / is constant-time / cannot happen", state
+  the precondition for reaching that line and ask what an attacker learns from reaching it. Compare
+  against the pre-existing signal and claim only the delta. See [[L-040]].
+
+## L-043 — When hardening a receive path, find every loop that reads from it; one hardened loop is a half-fix.
+
+- **Lesson:** `MapDidCommWebSocket` has TWO receive loops — a dispatcher-backed one and a delegate-backed
+  one — with independently written catch blocks. I hardened the first, wrote a test that exercised the
+  second, and the test failed: a hostile envelope still tore down the connection. Grep for the *pattern*
+  (`catch (MalformedMessageException`) rather than fixing the call site you happened to open.
+- **Why:** PR #57 review finding #2 asked for connection resilience. The first fix looked complete and
+  even had a passing test — because that test's envelope threw `CryptoException`, which BOTH loops
+  already caught. Only an envelope that produced an untyped fault revealed the unfixed loop.
+- **How to apply:** After changing exception handling on an ingress path, grep the file/assembly for the
+  other handlers of the same exception types and confirm each. Write the regression test against the
+  entry point a *consumer* uses (here: the delegate overload), not the one you edited. See [[L-039]].
+
+## L-044 — An assertion that depends on which racer won is a flaky test, not a concurrency test.
+
+- **Lesson:** Racing two operations against a resolver that alternates documents and then asserting
+  "at least one pairing matched" fails whenever both draw the wrong document — it encodes luck, not an
+  invariant. Force the ordering instead: park the first operation inside the dependency until it has
+  arrived, start the second, then release both. The operations still genuinely overlap, but the pairing
+  is deterministic, so the assertion is about the design.
+- **Why:** The first version of `ConcurrentUnpacks_DifferentKeysSameKid` failed on its first full-suite
+  run for exactly this reason, right after replacing a test that wasn't concurrent at all (the review's
+  finding: `Task.WhenAll` over synchronously-completed tasks proves nothing).
+- **How to apply:** For a concurrency test, state the invariant that must hold for *every* interleaving,
+  assert that per-result; and where you need a specific interleaving, drive it with a rendezvous
+  (TaskCompletionSource / arrival counter) rather than hoping the scheduler produces it. Assert the
+  overlap actually happened (max observed concurrency), or the test can silently degrade to sequential.

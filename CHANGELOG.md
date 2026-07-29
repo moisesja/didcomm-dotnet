@@ -4,6 +4,229 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-26
+
+> Additive security release — new public API, no wire change, no breaking change (ApiCompat /
+> package validation clean against 1.3.0). Closes **#56**.
+
+### Fixed — same-document key provenance on unpack (TOCTOU identity gap, #56)
+
+`UnpackAsync` used to verify/decrypt with public-key material from one DID resolution (the
+sender/signer JOSE lookups) and then authorize the same kid against a **second** resolution
+(`IsKeyAuthorizedAsync` behind the FR-CONSIST-06 predicate). With a mutable, stale/fresh,
+evicted-cache, or inconsistent resolver, the two documents can differ — so an envelope verified
+with a rotated-out key `KA` could be reported authenticated because a later document still lists
+the same kid (now bound to `KB`), and key/controller facts could be spliced across document
+versions that were never simultaneously true.
+
+On the provenance-capable path (the built-in `NetDidKeyService`), unpack now:
+
+- **captures the binding atomically**: each sender/signer key lookup resolves the kid's DID once
+  and retains the exact JWK together with the normalized kid, DID subject, controller, and
+  relationship from that single `DidDocument` (`IDidKeyBindingService.ResolveKeyBindingAsync`,
+  new optional capability interface; duplicate/shadowed relationship entries for the same
+  normalized kid fail closed with `DidResolutionException`);
+- **never re-resolves sender/signer authority after crypto**: the FR-CONSIST-06 controller rule
+  is evaluated against the captured binding (`ConsistencyException` semantics unchanged);
+  recipient evidence is resolved exactly once, after the decrypting kid is known;
+- **scopes evidence to the operation**: a per-unpack lookup context serves the existing JOSE
+  callback contracts — no process-global state, no `AsyncLocal`, no TTL/eviction, no
+  cross-message races (concurrent unpacks of the same kid hold independent bindings);
+- **surfaces immutable evidence**: new `VerifiedKeyBinding` (kid, DID, controller, relationship,
+  RFC 7638 SHA-256 key thumbprint; internal constructor — consumers can read, never forge)
+  carried as `SenderKeyBinding` / `SignerKeyBinding` / `RecipientKeyBinding` on `UnpackResult`,
+  the verified inbound snapshot, and `InboundObservation` (public-get/internal-init properties;
+  the v1.3.0 positional constructors are untouched, so the release is binary compatible).
+  Synthetic `UnpackResult`s (constructed by callers rather than produced by a real unpack)
+  yield no bindings — flags alone cannot manufacture provenance.
+
+Custom `IDidKeyService` implementations remain source- and binary-compatible: without the new
+capability they keep the pre-1.4.0 two-resolution behavior and surface null bindings, which the
+API documentation now explicitly calls out as *not* same-resolution controller provenance.
+Downstream consumers (e.g. opaqai-wallet-platform) can drop global resolver-observation ledgers
+and read the message-scoped bindings instead.
+
+### Fixed — `from_prior` rotation accepted across two DID resolutions (same bug class, #56 review)
+
+`FromPriorValidator` authorized the rotation JWT's signer kid in one resolution
+(`IsKeyAuthorizedAsync`) and then fetched the verifying key in a second
+(`GetVerificationMethodsAsync`). A resolver whose document changed between the two calls could
+authorize the victim's genuine key while the JWT was verified with a replacement key under the
+same kid — a forged accepted rotation, which hands the attacker whatever relationship the prior
+DID held. On the provenance-capable path both now come from a single resolution, with the same
+controller rule applied to that binding (duplicate kids fail closed there too, where the old
+`FirstOrDefault` silently took the first match). Because that lookup resolves the kid's own DID
+rather than `iss`, the signer kid is now required to sit under `iss` before any resolution runs, so
+an attacker-chosen kid cannot steer the agent into resolving an arbitrary DID first. Legacy key
+services keep the old shape.
+
+### Fixed — decrypted recipient entry must match its own label (#56 review)
+
+The recipient `kid` a JWE reports is the label of whichever recipient entry the derived KEK
+opened, and those labels are attacker-authored: `apv` commits only to the *sorted* kid list, so
+permuting two entries' labels leaves the envelope cryptographically intact. An envelope whose
+real key-wrap was labelled with another DID's kid therefore decrypted with the local key while
+reporting someone else's — and the new `RecipientKeyBinding` would have described that other key
+as the one that decrypted. Unpack now rejects (`ConsistencyException`) unless the reported
+recipient kid is exactly the kid whose key agreement produced the KEK (new FR-CONSIST-08). The
+check runs only after a successful decrypt, so it reveals nothing about which recipient keys are
+held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trustworthy.
+
+### Also hardened (PR review)
+
+- **Recipient provenance is now proven, not assumed.** The recipient key comes from the local
+  secrets resolver while its evidence came from a separate document resolution, so if our own
+  document rotated that kid to new material while we still held the old private key, the binding
+  would have attested a key that did not decrypt the message. `RecipientKeyBinding` is now surfaced
+  only when the resolved public key matches the local key's public identity (obtained without
+  touching private material — the shipped keystore adapter answers it from the store's public key).
+  Unproven means no binding, **not** a rejection: a message encrypted to a still-held, rotated-out
+  key stays valid, it just carries no recipient provenance.
+- **The FR-CONSIST-08 rejection is now the uniform decrypt failure.** Reporting it as a distinct
+  `ConsistencyException` let a peer tell a key holder (who reaches the label check) from a
+  non-holder (who fails in the decoy path) by exception category — the very recipient-possession
+  oracle the constant-work decrypt path exists to close. It now throws the same `CryptoException`
+  with the same message as any undecryptable envelope, which also means every caller that already
+  handled an undecryptable envelope handles it unchanged.
+- **A resolver must answer for the DID it was asked about.** All three `NetDidKeyService`
+  resolution paths now reject a document whose `id` is not the requested DID. Authorization and
+  binding evidence record the *requested* DID, so a cross-wired composite resolver, a mis-keyed
+  cache, or a hostile implementation could otherwise have another subject's document attributed to
+  it — including under FR-CONSIST-06 on the legacy path.
+- **Duplicate-id rejection now covers dereferenced methods too.** A single relationship reference
+  pointing at two same-id top-level `verificationMethod` entries was previously resolved to the
+  first silently; it now fails closed, and dereferencing normalizes relative/absolute ids on both
+  sides so `#key-1` and `did:x#key-1` match as DID Core intends.
+- **Observer evidence cannot ride on mutated content.** `InboundObservation.FromUnpackResult` keyed
+  the bindings on message object identity, which an in-place mutation preserves — so a caller could
+  rewrite a verified message and hand an observer evidence that no longer covered it. Bindings are
+  now dropped when the current content differs from the verified snapshot.
+- The `ConcurrentUnpacks_SameKid_IndependentBindings` test did not actually run concurrently
+  (synchronously-completed tasks). It now forces genuine overlap through a rendezvous resolver, and
+  a second test races two envelopes signed by different keys under the same kid with a
+  deterministic pairing.
+
+### Also hardened (second adversarial pass over the fix)
+
+- **Recipient selection now follows envelope order.** The reader picked the first kid
+  `ISecretsResolver.FindPresentAsync` returned, but that contract promises a subset, not an order,
+  while the parser scans recipient entries in envelope order. For an envelope carrying the same key
+  material under two kids (one key published by two DIDs), a keystore returning the alias first
+  would have made the new label check reject a legitimate message. Selection is now by envelope
+  order, keeping the reader and the parser in step.
+- **`from_prior` `iss` must be a bare DID.** Authorization compares DID subjects, so `did:x`,
+  `did:x?v=1`, and `did:x/p` all authorize identically while remaining distinct strings — and `iss`
+  is what an application keys its rotation-replay state on (FR-ROT-05 is delegated to that layer).
+  The prior key's holder could otherwise mint unlimited equivalent-but-distinct `iss` values, each
+  correctly signed. This restores the strictness the pre-1.4.0 path had implicitly.
+- **A rejected envelope no longer tears down a WebSocket connection.** Both `MapDidCommWebSocket`
+  receive loops (the dispatcher one and the delegate one) discarded only `MalformedMessageException`
+  and `CryptoException`; anything else escaped and closed a socket that may carry other peers'
+  traffic — a one-envelope disconnect. They now log and drop any unpack failure, including untyped
+  faults the unpack contract is not supposed to emit but can (a non-string JOSE `kid` currently
+  surfaces a raw `InvalidOperationException` from the delegated parser — see #58; a DID-resolution
+  timeout arrives as `TaskCanceledException` with our token not cancelled). A genuine shutdown still
+  ends the loop, and a throwing receive callback is logged instead of killing the connection.
+  Pre-existing (a mismatched plaintext `to` already reached it), but the new label check widened
+  reachability.
+- `VerifiedKeyBinding.AuthorizedForDid` stores the DID subject that was compared rather than `from`
+  verbatim, and `==` / `!=` now match `Equals` instead of falling back to reference equality.
+
+### Notes for upgraders
+
+- `VerifiedKeyBinding.AuthorizedForDid` records the asserted identity the controller rule was
+  evaluated against, and is **null** when the plaintext carried no `from` — in that case the
+  binding is key evidence only and its `Controller` was never compared to a claimed identity.
+- `VerifiedKeyBinding` implements value equality, so `UnpackResult` / `InboundObservation` record
+  equality keeps comparing structurally as it did in 1.3.0 (their synthesized `Equals` now also
+  covers the three new properties).
+- Key services that implement `IDidKeyBindingService` no longer have `IsKeyAuthorizedAsync`
+  called during unpack — any extra policy it enforced must move into `ResolveKeyBindingAsync`
+  (return null to reject). A decorator that wraps a capable service without forwarding the
+  interface silently reverts to the legacy path; forward it.
+- Authorization now compares DID *subjects* (per PRD §4.3), so a `from` that is a DID URL with a
+  query string is accepted where the legacy path's raw-string resolution rejected it.
+
+New requirements FR-CONSIST-07 / FR-CONSIST-08 (and the FR-API-04 update) document the invariants
+in the PRD. 62 new tests cover the acceptance criteria: rotated-kid races in both orderings
+(signed and authcrypt), controller splices, duplicate/shadowed kids (both as relationship entries
+and as top-level methods behind one reference), relative/embedded/referenced ids and mixed
+relative/absolute dereference, missing and cross-DID controllers, wrong relationships, documents
+returned for the wrong subject, nested compositions (`anoncrypt(sign)`,
+`anoncrypt(authcrypt(sign))`), from-less signed envelopes, genuinely-overlapping concurrent unpacks
+(including two envelopes signed by different keys under one kid), observer/snapshot propagation,
+mutated-content and synthetic-result denial, legacy-path compatibility, `from_prior`
+single-resolution rotation, decorated-`iss` rejection, the swapped-recipient-label envelope,
+recipient-key rotation, held-vs-unheld failure equivalence, resolver-order independence for aliased
+recipient keys, and a WebSocket connection surviving a rejected envelope.
+
+### Fixed — untyped faults could escape `UnpackAsync` on the signed path (FR-API-07, #58)
+
+`DidCommClient.UnpackAsync` could throw a raw `System.InvalidOperationException`, breaking the
+FR-API-07 promise that every unpack failure is a `DidCommException` subtype — the contract
+`catch (DidCommException)` in consumer code and in the samples relies on. A remote,
+**unauthenticated** peer triggered it with a flattened JWS whose unprotected `header.kid` was any
+non-string JSON value: the read happens while the parser enumerates raw signatures, *before* any
+signature is checked, so no key material and no prior relationship were required.
+
+`EnvelopeReader`'s signed branch already mapped `MalformedJoseException`, `JoseCryptoException`, and
+`ArgumentException` onto the contract, and its sibling JWE branch already had a catch-all. That
+`ArgumentException` guard is now widened to the whole untyped-fault class: any exception from the
+delegated JWS parse that is neither a cancellation nor already a `DidCommException` surfaces as
+`MalformedMessageException` with the original preserved as `InnerException`.
+
+Two deliberate details:
+
+- The filter excludes the **entire `DidCommException` hierarchy**, not a hand-listed set. On the
+  built-in `NetDidKeyService` the signer lookup *is* the DID-resolution path, so a
+  `DidResolutionException` stays a resolution failure with its `Did` / `Reason` intact rather than
+  being relabelled "malformed JWS".
+- It maps to `MalformedMessageException`, **not** the uniform `CryptoException` the JWE branch's
+  catch-all uses. That branch deliberately flattens failure shape to deny a recipient-possession
+  oracle; the signed path has no such oracle to close.
+
+The guard is independent of the dependency bump below. Verified both ways: with
+`DataProofsDotnet.Jose` pinned back to 1.1.0 (the version carrying the upstream bug) the reported
+repro still fails as a typed `DidCommException`, and with the guard removed the new
+untyped-fault test fails.
+
+Three tests cover it — the reported repro (contract), a signer lookup raising a raw
+`InvalidOperationException` (the guard itself, which no dependency fix can satisfy), and a
+`DidResolutionException` passing through untouched (so the filter cannot be narrowed later without
+a failing test). The transports were already resilient to this fault class: the HTTP receive
+endpoint collapses every unpack failure into one opaque 400, and both WebSocket receive loops
+drop-and-continue.
+
+### Changed — dependency refresh
+
+First-party pins moved to current, and the graph now converges on a single `NetCrypto` and a single
+`DataProofsDotnet.Core` version (no `NU1605`). No source changes were required; the full suite and
+the Release build (including package validation against the 1.3.0 baseline) are clean.
+
+- **`NetDid.*` 2.3.0 → 3.0.0** (`Core`, `Method.Key`, `Method.Peer`, `Method.WebVh`,
+  `Extensions.DependencyInjection`). The major signals the scale of net-did's release — a new
+  `did:ethr` method, shipped as a separate `NetDid.Method.Ethr` package DidComm does not reference,
+  and the `DataProofsDotnet` major crossing beneath `did:webvh` — not a break: every public-API
+  change 2.x consumers compile against is additive.
+- **`NetCrypto` 1.2.0 → 1.4.0.** Additive and unused here (EC point decompression; recoverable
+  secp256k1 signing for EVM flows, whose new `IKeyStore` member ships as a throwing default
+  interface implementation so external key stores stay source- and binary-compatible). This is also
+  net-did 3.0.0's own pin, so the direct reference and the transitive graph agree.
+- **`DataProofsDotnet.Jose` 1.1.0 → 1.1.1.** Fixes dataproofs-dotnet#15 — the upstream root cause
+  of #58 above — and additionally wraps `JwsParser`'s top-level `JsonDocument.Parse` so malformed
+  JSON surfaces as `MalformedJoseException`.
+- **`Microsoft.Extensions.*` 10.0.8 → 10.0.10**, **`OpenTelemetry.Api` 1.15.3 → 1.17.0**,
+  **`Polly` 8.5.0 → 8.7.0** — servicing/minor updates.
+- **`Microsoft.AspNetCore.TestHost` 10.0.0-preview.1.25120.3 → 10.0.10** — a .NET 10 *preview* pin
+  left over from pre-GA scaffolding, now on the GA servicing line. Test/sample-only.
+
+The test stack is held deliberately, not by neglect: `FluentAssertions` stays on 7.0.0 because 8.x
+relicensed under Xceed (free for open source, paid for commercial use) and breaks API across the
+suite — keeping 7.0.0 leaves this library's test dependencies unencumbered for downstream
+contributors. `Microsoft.NET.Test.Sdk`, `xunit.runner.visualstudio`, `NSubstitute`,
+`coverlet.collector`, and `Microsoft.SourceLink.GitHub` likewise stay put; moving the test stack is
+its own change with its own risk. `dotnet list package --vulnerable --include-transitive` is clean.
+
 ## [1.3.0] - 2026-06-22
 
 ### Added — fail-closed skid guard on authenticated decrypt (defense in depth, #52)

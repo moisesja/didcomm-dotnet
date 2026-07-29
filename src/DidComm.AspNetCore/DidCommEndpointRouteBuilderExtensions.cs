@@ -391,6 +391,22 @@ public static class DidCommEndpointRouteBuilderExtensions
                     logger?.LogWarning(ex, "MapDidCommWebSocket: discarding undecryptable envelope");
                     continue;
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    // ANY other unpack failure is a property of THIS envelope, not of the connection.
+                    // Without this the first such message escapes the loop and tears down a socket
+                    // that may be carrying other peers' traffic — a one-envelope disconnect. That
+                    // covers the typed rejections (consistency, DID resolution, did:web, missing
+                    // secret, protocol) AND untyped faults that the unpack contract is not supposed
+                    // to emit but can: a malformed JOSE header member currently surfaces a raw
+                    // InvalidOperationException from the delegated parser, and a DID-resolution
+                    // timeout arrives as a TaskCanceledException with our token NOT cancelled. The
+                    // HTTP path already collapses every unpack failure into one opaque rejection for
+                    // the same reason; this is the socket equivalent. A genuine shutdown (our token
+                    // cancelled) still propagates and ends the loop.
+                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding rejected envelope");
+                    continue;
+                }
 
                 DispatchOutcome outcome;
                 try
@@ -696,18 +712,44 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // #35: no constant-time pad here (unlike the HTTP 400 path) — a failed unpack is logged
                 // and discarded with nothing written back, so there is no per-message response a peer can
                 // time to enumerate held recipient kids.
+                UnpackResult unpacked;
                 try
                 {
-                    var unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
-                    await onReceive(unpacked, ct).ConfigureAwait(false);
+                    unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
                 }
                 catch (MalformedMessageException ex)
                 {
                     logger?.LogWarning(ex, "MapDidCommWebSocket: discarding malformed envelope");
+                    continue;
                 }
                 catch (CryptoException ex)
                 {
                     logger?.LogWarning(ex, "MapDidCommWebSocket: discarding undecryptable envelope");
+                    continue;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    // Any other unpack failure belongs to THIS envelope, not to the connection —
+                    // otherwise one hostile message disconnects a socket that may be carrying other
+                    // peers' traffic. Covers the typed rejections (consistency, DID resolution,
+                    // did:web, missing secret, protocol) and untyped faults the unpack contract is
+                    // not supposed to emit but can: a malformed JOSE header member currently
+                    // surfaces a raw InvalidOperationException from the delegated parser, and a
+                    // DID-resolution timeout arrives as TaskCanceledException with our token NOT
+                    // cancelled. A genuine shutdown (our token cancelled) still ends the loop.
+                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding rejected envelope");
+                    continue;
+                }
+
+                try
+                {
+                    await onReceive(unpacked, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    // The receive callback is the host's own code; a fault in it is the host's
+                    // concern, and it must not take the connection (or the next message) down.
+                    logger?.LogError(ex, "MapDidCommWebSocket: receive callback threw; continuing");
                 }
             }
         }

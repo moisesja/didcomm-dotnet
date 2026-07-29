@@ -1,4 +1,5 @@
 using DidComm.Exceptions;
+using DidComm.Resolution;
 
 namespace DidComm.Consistency;
 
@@ -169,5 +170,37 @@ internal static class AddressingConsistency
         if (!await resolverCheck(assertedDid, kid, relationship, ct).ConfigureAwait(false))
             throw new ConsistencyException(
                 $"Key '{kid}' is not present under '{relationship}' in the resolved DID Document of '{assertedDid}' (FR-CONSIST-06).");
+    }
+
+    /// <summary>
+    /// FR-CONSIST-06, same-document form (#56): authorize a kid against the binding captured
+    /// from the SAME resolution that fed the cryptographic layer — no re-resolution. The
+    /// controller rule mirrors <c>NetDidKeyService.IsControlledBy</c>: the binding's id-subject
+    /// must be the asserted DID, and its <c>controller</c> (when declared) must also be the
+    /// asserted DID; an absent controller falls back to the id-subject rule.
+    /// </summary>
+    /// <param name="assertedDid">The DID asserted to control the key (the <c>from</c>, or the recipient kid's own subject).</param>
+    /// <param name="binding">The binding captured during this unpack's key lookup.</param>
+    /// <exception cref="ConsistencyException">When the captured evidence does not authorize the kid for <paramref name="assertedDid"/>.</exception>
+    public static void CheckCapturedBindingAuthorized(string assertedDid, ResolvedKeyBinding binding)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(assertedDid);
+        ArgumentNullException.ThrowIfNull(binding);
+
+        var assertedSubject = DidSubject.DidSubjectOf(assertedDid)
+            ?? throw new ConsistencyException(
+                $"Asserted DID '{assertedDid}' is not parseable; cannot authorize key '{binding.Kid}' (FR-CONSIST-06).");
+
+        if (!string.Equals(binding.Did, assertedSubject, StringComparison.Ordinal))
+            throw new ConsistencyException(
+                $"Key '{binding.Kid}' belongs to '{binding.Did}', not the asserted '{assertedSubject}' (FR-CONSIST-06).");
+
+        if (binding.Controller is { Length: > 0 } controller)
+        {
+            var controllerSubject = DidSubject.DidSubjectOf(controller);
+            if (!string.Equals(controllerSubject, assertedSubject, StringComparison.Ordinal))
+                throw new ConsistencyException(
+                    $"Key '{binding.Kid}' is controlled by '{controller}', not the asserted '{assertedSubject}' (FR-CONSIST-06).");
+        }
     }
 }

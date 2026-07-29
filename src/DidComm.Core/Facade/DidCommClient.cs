@@ -367,8 +367,16 @@ public sealed class DidCommClient
 
         ct.ThrowIfCancellationRequested();
 
-        var senderLookup = DidKeyServiceLookups.SenderKeyLookup(_keyService);
-        var signerLookup = DidKeyServiceLookups.SignerKeyLookup(_keyService);
+        // Per-unpack key-binding context (#56): when the registered key service can project
+        // same-document bindings (IDidKeyBindingService — NetDidKeyService does), the sender/signer
+        // lookups below capture the exact binding each JOSE key came from, and the envelope layer
+        // authorizes identity against that captured evidence instead of re-resolving (which could
+        // observe a different document version). The legacy resolver predicate remains for custom
+        // key services without the capability. The context lives and dies with this call — no
+        // static, AsyncLocal, or cross-message state.
+        var bindingContext = new UnpackKeyBindingContext(_keyService);
+        var senderLookup = bindingContext.SenderLookup;
+        var signerLookup = bindingContext.SignerLookup;
         var resolverCheck = BuildResolverAuthorizationPredicate();
 
         // The recipient (secret-key) path is now fully async: ECDH key agreement runs through the
@@ -377,7 +385,7 @@ public sealed class DidCommClient
         // public-key DID resolutions and DataProofs' IJweSenderKeyResolver / JwsParser contracts for
         // them are synchronous (not a secret-key path).
         var internalResult = await EnvelopeReader.UnpackAsync(
-            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, ct).ConfigureAwait(false);
+            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext, ct).ConfigureAwait(false);
         var message = internalResult.Message;
 
         if (message.From is not null)
@@ -439,7 +447,12 @@ public sealed class DidCommClient
             SenderKid: internalResult.SenderKid,
             RecipientKid: internalResult.RecipientKid,
             AllRecipientKids: internalResult.AllRecipientKids,
-            FromPrior: fromPrior);
+            FromPrior: fromPrior)
+        {
+            SenderKeyBinding = internalResult.SenderKeyBinding,
+            SignerKeyBinding = internalResult.SignerKeyBinding,
+            RecipientKeyBinding = internalResult.RecipientKeyBinding,
+        };
     }
 
     private async Task<DpSig.JwsSigner> PickSignerAsync(string signerDid, CancellationToken ct)

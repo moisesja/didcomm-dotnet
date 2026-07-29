@@ -1,10 +1,12 @@
 using System.Text.Json;
 using DidComm.Consistency;
 using DidComm.Exceptions;
+using DidComm.Facade;
 using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
+using DidComm.Resolution;
 using DidComm.Secrets;
 using DpEnc = DataProofsDotnet.Jose.Encryption;
 using DpSig = DataProofsDotnet.Jose.Signing;
@@ -16,9 +18,10 @@ namespace DidComm.Composition;
 /// <summary>
 /// High-level unpack orchestrator. Auto-detects the envelope structure (FR-API-03), recursively
 /// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …) by delegating each JWE/
-/// JWS layer to DataProofsDotnet.Jose, runs the addressing-consistency checks FR-CONSIST-01/02/03/05
-/// as each layer reveals enough information (FR-CONSIST-04 is an advisory SHOULD;
-/// FR-CONSIST-06's resolver-backed authorization is supplied by the facade), and returns an
+/// JWS layer to DataProofsDotnet.Jose, runs the addressing-consistency checks
+/// FR-CONSIST-01/02/03/05/08 as each layer reveals enough information (FR-CONSIST-04 is an advisory
+/// SHOULD; FR-CONSIST-06's resolver-backed authorization is supplied by the facade, and
+/// FR-CONSIST-07's same-document form is evaluated against the per-unpack binding context), and returns an
 /// <see cref="UnpackResult"/> carrying both the inner plaintext and the FR-API-04 metadata.
 /// </summary>
 /// <remarks>
@@ -57,6 +60,15 @@ internal static class EnvelopeReader
     /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship, ct) =&gt; isAuthorized</c>.
     /// When non-null, the unpack pipeline asserts the inner plaintext's sender / recipient / signer kids are present
     /// under the resolved DID Document's matching relationship. Pass <c>null</c> to short-circuit the check.
+    /// Ignored for sender/signer/recipient authorization when <paramref name="bindingContext"/> is provenance-capable
+    /// (the same-binding path replaces the re-resolving predicate; #56).
+    /// </param>
+    /// <param name="bindingContext">
+    /// Per-unpack key-binding context (#56). When provenance-capable, sender/signer authorization is
+    /// evaluated against the bindings captured by this operation's own key lookups (same resolved
+    /// document as the crypto), the recipient binding is resolved exactly once after the decrypting
+    /// kid is known, and the resulting <see cref="Facade.VerifiedKeyBinding"/> evidence is attached
+    /// to the result. Null / non-capable falls back to <paramref name="resolverCheck"/>.
     /// </param>
     /// <param name="ct">Cancellation token for the (possibly I/O-bound) key agreement and DID resolution.</param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
@@ -69,6 +81,7 @@ internal static class EnvelopeReader
         Func<string, Jwk?>? signerLookup,
         JoseCryptoProvider cryptoProvider,
         Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
+        UnpackKeyBindingContext? bindingContext = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
@@ -142,9 +155,84 @@ internal static class EnvelopeReader
                             "Sign-then-encrypt composition: the inner signed JWM MUST carry 'to' (FR-SIG-06).");
 
                     // FR-CONSIST-06 — the kids surfaced by the cryptographic layers must be
-                    // genuinely authorized in their asserted DID Documents. The predicate is
-                    // supplied by the facade (backed by IDidKeyService); when null the check is skipped.
-                    if (resolverCheck is not null)
+                    // genuinely authorized in their asserted DID Documents.
+                    //
+                    // Same-document path (#56): when the per-unpack binding context is provenance-
+                    // capable, sender/signer authority is checked against the binding CAPTURED by
+                    // this operation's own key lookup — the very document that supplied the key the
+                    // JOSE layer verified/decrypted with. No re-resolution after crypto, so the
+                    // authorization can never be satisfied by a different document version than the
+                    // one that satisfied the cryptography (the TOCTOU the two-resolution design
+                    // allowed). The recipient key is local (it came from the secrets resolver, not
+                    // DID resolution), so its evidence is resolved exactly once, here, after the
+                    // decrypting kid is known.
+                    //
+                    // Legacy path: the facade-supplied predicate (backed by IDidKeyService) re-resolves;
+                    // kept verbatim for custom key services without the binding capability. No strong
+                    // provenance is attached on that path.
+                    VerifiedKeyBinding? senderBinding = null, signerBinding = null, recipientBinding = null;
+                    if (bindingContext is { ProvenanceCapable: true })
+                    {
+                        if (senderKid is not null)
+                        {
+                            // Fail closed: crypto surfaced an authenticated skid, so this operation's
+                            // sender lookup must have captured its binding — a miss means the key the
+                            // JOSE layer used cannot be tied to any resolved document.
+                            var captured = bindingContext.GetCaptured(senderKid, VerificationRelationship.KeyAgreement)
+                                ?? throw new ConsistencyException(
+                                    $"No same-document key binding was captured for authcrypt sender '{senderKid}' (FR-CONSIST-06, #56).");
+                            if (message.From is not null)
+                                AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
+                            // AuthorizedForDid records whether the controller rule actually ran: with no
+                            // plaintext 'from' there is no asserted identity to authorize against, so the
+                            // binding is key evidence only and must not read as an identity proof. Store
+                            // the DID *subject* that was compared, not 'from' verbatim: the rule compares
+                            // subjects, so that is the value actually checked, and the property is then a
+                            // bare DID on every path (the facade separately refuses a decorated 'from').
+                            senderBinding = new VerifiedKeyBinding(captured, DidSubject.DidSubjectOf(message.From));
+                        }
+
+                        if (encrypted && recipientKid is not null)
+                        {
+                            var recipientDid = DidSubject.DidSubjectOf(recipientKid);
+                            if (recipientDid is not null)
+                            {
+                                var captured = await bindingContext.CaptureRecipientBindingAsync(recipientKid, ct).ConfigureAwait(false)
+                                    ?? throw new ConsistencyException(
+                                        $"Key '{recipientKid}' is not present under 'keyAgreement' in the resolved DID Document of '{recipientDid}' (FR-CONSIST-06).");
+                                AddressingConsistency.CheckCapturedBindingAuthorized(recipientDid, captured);
+
+                                // Unlike the sender/signer roles — where the resolved key IS the key the
+                                // JOSE layer used — the recipient key came from the local secrets
+                                // resolver, and the document was consulted separately. If our own
+                                // document rotated that kid to new material while we still hold the old
+                                // private key, the envelope decrypts fine but the resolved key is NOT
+                                // the key that decrypted it. Publishing its thumbprint would be a false
+                                // attestation, so surface recipient evidence only when the resolved
+                                // public key matches the local key's public identity. Unproven means no
+                                // binding — not a rejection: a message encrypted to a still-held,
+                                // rotated-out key stays valid, it just carries no recipient provenance.
+                                var localPublic = await recipientKeys.TryGetPublicIdentityAsync(recipientKid, ct).ConfigureAwait(false);
+                                var localThumbprint = localPublic is null ? null : SafeThumbprint(localPublic);
+                                if (localThumbprint is not null
+                                    && string.Equals(localThumbprint, captured.PublicKeyThumbprint, StringComparison.Ordinal))
+                                {
+                                    recipientBinding = new VerifiedKeyBinding(captured, recipientDid);
+                                }
+                            }
+                        }
+
+                        if (signerKid is not null)
+                        {
+                            var captured = bindingContext.GetCaptured(signerKid, VerificationRelationship.Authentication)
+                                ?? throw new ConsistencyException(
+                                    $"No same-document key binding was captured for signer '{signerKid}' (FR-CONSIST-06, #56).");
+                            if (message.From is not null)
+                                AddressingConsistency.CheckCapturedBindingAuthorized(message.From, captured);
+                            signerBinding = new VerifiedKeyBinding(captured, DidSubject.DidSubjectOf(message.From));
+                        }
+                    }
+                    else if (resolverCheck is not null)
                     {
                         if (senderKid is not null && message.From is not null)
                             await AddressingConsistency.CheckResolverAuthorizationAsync(message.From, senderKid, "keyAgreement", resolverCheck, ct).ConfigureAwait(false);
@@ -173,7 +261,10 @@ internal static class EnvelopeReader
                         anonymous,
                         senderKid,
                         signerKid,
-                        recipientKid);
+                        recipientKid,
+                        senderBinding,
+                        signerBinding,
+                        recipientBinding);
 
                     return new UnpackResult(
                         Message: message,
@@ -193,7 +284,12 @@ internal static class EnvelopeReader
                         SignerKid: signerKid,
                         SenderKid: senderKid,
                         RecipientKid: recipientKid,
-                        AllRecipientKids: allRecipientKids);
+                        AllRecipientKids: allRecipientKids)
+                    {
+                        SenderKeyBinding = senderBinding,
+                        SignerKeyBinding = signerBinding,
+                        RecipientKeyBinding = recipientBinding,
+                    };
                 }
 
                 case EnvelopeKind.Signed:
@@ -221,6 +317,24 @@ internal static class EnvelopeReader
                         // from the delegated JWS parse (a non-canonical field length, or a throwing
                         // consumer signer lookup) to the documented unpack contract, so a raw
                         // ArgumentException never escapes UnpackAsync. InnerException is preserved.
+                        throw new MalformedMessageException("Malformed JWS.", ex);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException and not DidCommException)
+                    {
+                        // FR-API-07 (#58): the same boundary guard as above, widened from ArgumentException
+                        // to the whole untyped-fault class. The delegated parser enumerates attacker-supplied
+                        // structure BEFORE any signature check, so an untyped fault here is remotely reachable
+                        // pre-authentication — dataproofs-dotnet#15 was exactly that (a non-string unprotected
+                        // 'kid' escaping as InvalidOperationException, fixed in DataProofsDotnet.Jose 1.1.1).
+                        // Pinning the fixed parser closes that one input; this closes the class, including
+                        // faults the consumer's own signer lookup can raise that this layer cannot enumerate.
+                        // The filter excludes the entire DidCommException hierarchy rather than a hand-listed
+                        // set, so an already-typed failure passes through with its own semantics intact — a
+                        // DidResolutionException from the built-in NetDidKeyService signer lookup must stay a
+                        // resolution failure, not be relabelled "malformed JWS". Cancellation propagates.
+                        // Unlike the JWE branch's catch-all, this one maps to MalformedMessageException rather
+                        // than a uniform CryptoException: that branch deliberately flattens failure shape to
+                        // deny a recipient-possession oracle, and the signed path has no such oracle to close.
                         throw new MalformedMessageException("Malformed JWS.", ex);
                     }
 
@@ -255,6 +369,7 @@ internal static class EnvelopeReader
                 case EnvelopeKind.Encrypted:
                 {
                     DpEnc.JweParseResult jweResult;
+                    string? decryptingKid;
                     try
                     {
                         // Discover the recipient kids without any private key, select the held one, and
@@ -263,7 +378,8 @@ internal static class EnvelopeReader
                         // (dataproofs #12) makes the ECDH/unwrap cost and the uniform failure identical
                         // to the held path, closing the held-vs-unheld recipient-enumeration oracle.
                         var peek = DpEnc.JweParser.PeekRecipients(current);
-                        var recipientKey = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        decryptingKid = heldKid;
                         jweResult = await DpEnc.JweParser.ParseAsync(current, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
@@ -306,6 +422,27 @@ internal static class EnvelopeReader
                     // OR-accumulating across layers (#23). For legal shapes the #17 gate already
                     // guarantees anoncrypt-if-present is outermost; deriving here keeps the flag correct
                     // by construction regardless.
+                    // The recipient kid the parser reports is the LABEL of whichever recipient entry
+                    // the derived KEK happened to open — and those labels are attacker-authored, not
+                    // covered by the AEAD's per-entry binding (apv commits only to the sorted kid
+                    // list). So a hostile envelope can wrap the real key-wrap under a label naming a
+                    // different DID's key: decryption succeeds with OUR key while the reported
+                    // recipient kid points elsewhere. Fail closed unless the reported kid is exactly
+                    // the kid whose key agreement produced the KEK — otherwise RecipientKid (and the
+                    // RecipientKeyBinding derived from it) would describe a key that did not decrypt
+                    // this envelope (FR-CONSIST-08, #56).
+                    //
+                    // Reported as the SAME uniform decryption failure a non-holder gets, deliberately:
+                    // reaching this line means our key opened an entry, so a distinct exception type
+                    // (or message) would let a peer tell a holder from a non-holder by category —
+                    // exactly the recipient-possession oracle the decoy/constant-work path
+                    // (dataproofs #12) exists to close. A mismatched label means we cannot attribute
+                    // the decryption to a recipient entry, so "could not be decrypted" is also the
+                    // honest answer, and every caller that already handles an undecryptable envelope
+                    // (including the WebSocket receive loop) handles this unchanged.
+                    if (!string.Equals(jweResult.RecipientKid, decryptingKid, StringComparison.Ordinal))
+                        throw new CryptoException("JWE could not be decrypted.");
+
                     var isOutermostEncryptLayer = !encrypted;
                     encrypted = true;
                     contentEnc = jweResult.ContentEncryption;
@@ -355,29 +492,63 @@ internal static class EnvelopeReader
     /// work-curve decoy when this handle's curve doesn't match the envelope, so the decoy here only
     /// needs to exist, not to match.
     /// </summary>
-    private static async Task<DpEnc.IEcdhKey> ResolveRecipientKeyOrDecoyAsync(
+    /// <returns>
+    /// The handle plus the kid it belongs to — <c>null</c> for the decoy, which no real envelope can
+    /// open, so a successful decrypt on a null kid fails the caller's recipient-label check.
+    /// </returns>
+    private static async Task<(DpEnc.IEcdhKey Key, string? Kid)> ResolveRecipientKeyOrDecoyAsync(
         KeyOperationResolver recipientKeys,
         IReadOnlyList<string> recipientKids,
         JoseCryptoProvider cryptoProvider,
         CancellationToken ct)
     {
         var heldKids = await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
-        foreach (var kid in heldKids)
+        // Walk the ENVELOPE's order and keep the held ones, rather than trusting the order
+        // FindPresentAsync returns (ISecretsResolver promises a subset, not an ordering). The parser
+        // scans recipient entries in envelope order and reports the first one the KEK opens, so
+        // selecting in that same order keeps the two in step. Without it, an envelope that wraps the
+        // same key material under two kids (a key published under an alias) could have the parser
+        // report the earlier entry while we recorded the later one — a false rejection by the
+        // recipient-label check below, on a legitimate message.
+        var held = heldKids.Count == 0 ? null : new HashSet<string>(heldKids, StringComparer.Ordinal);
+        if (held is not null)
         {
-            var handle = await recipientKeys.ResolveKeyAgreementAsync(kid, ct).ConfigureAwait(false);
-            if (handle is not null)
-                return handle;
+            foreach (var kid in recipientKids)
+            {
+                if (!held.Contains(kid))
+                    continue;
+                var handle = await recipientKeys.ResolveKeyAgreementAsync(kid, ct).ConfigureAwait(false);
+                if (handle is not null)
+                    return (handle, kid);
+            }
         }
 
         var scalar = new byte[32];
         cryptoProvider.Fill(scalar);
         try
         {
-            return new DpEnc.RawEcdhKey(JoseAlgorithms.CrvX25519, scalar, cryptoProvider);
+            return (new DpEnc.RawEcdhKey(JoseAlgorithms.CrvX25519, scalar, cryptoProvider), null);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(scalar);
+        }
+    }
+
+    /// <summary>
+    /// RFC 7638 thumbprint of a locally-held public JWK, or <c>null</c> when the key's shape cannot be
+    /// canonicalized. A malformed local key must not fault the unpack — it just means the recipient
+    /// binding stays unproven, which is exactly how a missing local public identity is treated.
+    /// </summary>
+    private static string? SafeThumbprint(Jwk publicJwk)
+    {
+        try
+        {
+            return DataProofsDotnet.Jose.JwkThumbprint.ComputeBase64Url(publicJwk);
+        }
+        catch (DataProofsDotnet.Jose.MalformedJoseException)
+        {
+            return null;
         }
     }
 

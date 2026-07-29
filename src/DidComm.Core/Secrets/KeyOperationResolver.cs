@@ -40,6 +40,37 @@ internal sealed class KeyOperationResolver
         => _secrets.FindPresentAsync(kids, ct);
 
     /// <summary>
+    /// The <em>public</em> identity of a locally-held key: the resolver's JWK for
+    /// <paramref name="kid"/> with any private member dropped, or <c>null</c> when the key is not
+    /// held or the resolver exposes no usable public coordinates.
+    /// </summary>
+    /// <remarks>
+    /// Used to prove that a key resolved from a DID document is the key this agent actually decrypted
+    /// with (#56) — an <see cref="IEcdhKey"/> handle is deliberately opaque (curve + derive only), so
+    /// the public half has to come from the resolver. The shipped keystore adapter answers this from
+    /// the store's public key without touching private material; a custom opaque resolver that
+    /// returns nothing here simply yields no recipient provenance, which is the honest outcome.
+    /// </remarks>
+    public async Task<Jwk?> TryGetPublicIdentityAsync(string kid, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(kid);
+        var jwk = await _secrets.FindAsync(kid, ct).ConfigureAwait(false);
+        if (jwk is null || string.IsNullOrEmpty(jwk.Kty) || string.IsNullOrEmpty(jwk.Crv) || string.IsNullOrEmpty(jwk.X))
+            return null;
+
+        return new Jwk
+        {
+            Kty = jwk.Kty,
+            Crv = jwk.Crv,
+            X = jwk.X,
+            Y = jwk.Y,
+            Kid = jwk.Kid,
+            Alg = jwk.Alg,
+            Use = jwk.Use,
+        };
+    }
+
+    /// <summary>
     /// Build a JWS signer for <paramref name="kid"/> — opaque if the resolver holds it that way, else
     /// from the extractable private JWK — or <c>null</c> when no signing key is held.
     /// </summary>

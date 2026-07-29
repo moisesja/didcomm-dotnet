@@ -1,3 +1,4 @@
+using DidComm.Facade;
 using DidComm.Jose;
 using DidComm.Messages;
 
@@ -34,4 +35,14 @@ internal sealed record UnpackResult(
     string? SignerKid,
     string? SenderKid,
     string? RecipientKid,
-    IReadOnlyList<string> AllRecipientKids);
+    IReadOnlyList<string> AllRecipientKids)
+{
+    /// <summary>Same-document sender (authcrypt skid) evidence captured during this unpack, when available (#56).</summary>
+    public VerifiedKeyBinding? SenderKeyBinding { get; init; }
+
+    /// <summary>Same-document signer evidence captured during this unpack, when available (#56).</summary>
+    public VerifiedKeyBinding? SignerKeyBinding { get; init; }
+
+    /// <summary>Same-document recipient (decrypting kid) evidence captured during this unpack, when available (#56).</summary>
+    public VerifiedKeyBinding? RecipientKeyBinding { get; init; }
+}

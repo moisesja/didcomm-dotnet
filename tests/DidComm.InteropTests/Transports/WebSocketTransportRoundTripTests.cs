@@ -172,6 +172,95 @@ public sealed class WebSocketTransportRoundTripTests
     }
 
     [Fact]
+    public async Task Rejected_envelope_is_dropped_and_the_socket_keeps_serving()
+    {
+        // A hostile envelope must cost the sender that one message, not the connection: the receive
+        // loop drops any typed rejection and keeps reading. Driven here with a swapped-recipient-
+        // label JWE (rejected by the FR-CONSIST-08 check), followed by a valid envelope on the SAME
+        // socket, which must still be unpacked and dispatched.
+        var (server, received) = await BuildServerAsync();
+
+        var actors = SpecActorRegistry.LoadDefault();
+        var resolver = LoadResolver();
+        var keyService = new NetDidKeyService(resolver);
+        var aliceClient = new DidCommClient(actors.AsSecretsResolver(), keyService, new DidCommOptions());
+
+        var packed = await aliceClient.PackEncryptedAsync(NewProposal(), new PackEncryptedOptions(
+            Recipients: new[] { "did:example:bob" },
+            From: "did:example:alice"));
+
+        var hostile = RelabelSingleRecipient(packed.Message, "did:example:mediator1#key-x25519-1");
+
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(hostile), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(packed.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+
+        await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(10));
+
+        socket.State.Should().Be(WebSocketState.Open, "one rejected envelope must not tear down the connection");
+        received.Should().HaveCount(1, "the hostile envelope is dropped, the valid one is still delivered");
+        received[0].Message.From.Should().Be("did:example:alice");
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
+    [Fact]
+    public async Task Malformed_jose_header_member_is_dropped_and_the_socket_keeps_serving()
+    {
+        // Same connection-resilience property, driven by the #58 input: a non-string JWS 'kid'. That
+        // now fails as a typed MalformedMessageException (DataProofsDotnet.Jose 1.1.1 rejects it, and
+        // the EnvelopeReader JWS catch-all covers the wider class), so this test no longer depends on
+        // an untyped fault existing. It stays because the property it pins is the transport's, not the
+        // contract's: the receive loop drops ANY failing message and keeps serving, independent of what
+        // unpack throws — a socket may carry other peers' traffic, so one hostile frame must not end it.
+        var (server, received) = await BuildServerAsync();
+
+        var actors = SpecActorRegistry.LoadDefault();
+        var keyService = new NetDidKeyService(LoadResolver());
+        var aliceClient = new DidCommClient(actors.AsSecretsResolver(), keyService, new DidCommOptions());
+
+        var signed = await aliceClient.PackSignedAsync(NewProposal(), "did:example:alice");
+        var hostile = System.Text.Json.Nodes.JsonNode.Parse(signed)!.AsObject();
+        hostile["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
+
+        var valid = await aliceClient.PackEncryptedAsync(NewProposal(), new PackEncryptedOptions(
+            Recipients: new[] { "did:example:bob" },
+            From: "did:example:alice"));
+
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(valid.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(10));
+        received.Should().HaveCount(1, "sanity: a valid envelope is delivered before the hostile one");
+
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(hostile.ToJsonString()), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(valid.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+
+        await WaitUntilAsync(() => received.Count >= 2, TimeSpan.FromSeconds(10));
+
+        socket.State.Should().Be(WebSocketState.Open);
+        received.Should().HaveCount(2, "the hostile envelope costs its sender that message, not the connection");
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
+    /// <summary>Rewrite the sole recipient entry's kid, leaving its <c>encrypted_key</c> in place.</summary>
+    private static string RelabelSingleRecipient(string packedJwe, string replacementKid)
+    {
+        var jwe = System.Text.Json.Nodes.JsonNode.Parse(packedJwe)!.AsObject();
+        jwe["recipients"]!.AsArray()[0]!["header"]!["kid"] = replacementKid;
+        return jwe.ToJsonString();
+    }
+
+    [Fact]
     public async Task Oversize_message_triggers_1009_close_per_FR_API_06()
     {
         var (server, received) = await BuildServerAsync(opts => opts.MaxReceiveBytes = 64);

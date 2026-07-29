@@ -39,6 +39,19 @@ public sealed record InboundObservation(
     string? SignerKid)
 {
     /// <summary>
+    /// Same-document sender key evidence (mirrors <see cref="UnpackResult.SenderKeyBinding"/>; #56).
+    /// Present only when the observation derives from a real verified unpack whose key service
+    /// captured provenance — a synthetic <see cref="UnpackResult"/> cannot manufacture it.
+    /// </summary>
+    public VerifiedKeyBinding? SenderKeyBinding { get; internal init; }
+
+    /// <summary>Same-document signer key evidence (mirrors <see cref="UnpackResult.SignerKeyBinding"/>; #56).</summary>
+    public VerifiedKeyBinding? SignerKeyBinding { get; internal init; }
+
+    /// <summary>Same-document recipient key evidence (mirrors <see cref="UnpackResult.RecipientKeyBinding"/>; #56).</summary>
+    public VerifiedKeyBinding? RecipientKeyBinding { get; internal init; }
+
+    /// <summary>
     /// Build an observation from an unpack result, deep-cloning the message (serialize →
     /// deserialize through the DIDComm JSON options, so extension headers and attachments
     /// survive intact) so the observer can never reach the pipeline's live instance.
@@ -63,6 +76,20 @@ public sealed record InboundObservation(
         var json = JsonSerializer.Serialize(received.Message, DidCommJson.Default);
         approxBytes = Encoding.UTF8.GetByteCount(json);
         var clone = JsonSerializer.Deserialize<Message>(json, DidCommJson.Default)!;
+
+        // Key bindings ride along only when this exact Message instance is still the one the unpack
+        // pipeline verified AND its content still matches what was verified (#56). Object identity
+        // alone is not enough: Message is mutable, and an in-place edit keeps the identity the
+        // weak-table snapshot is keyed by — so a caller could rewrite a verified message's body or
+        // 'from' and hand an observer content that Alice's binding never covered. Comparing the
+        // re-serialized snapshot against the current serialization (same serializer both sides, so
+        // only real content differences show) drops the evidence exactly when it stopped applying.
+        InboundMessageSnapshot.TryGetFor(received.Message, out var snapshot);
+        if (snapshot is not null
+            && !string.Equals(JsonSerializer.Serialize(snapshot.DeserializeMessage(), DidCommJson.Default), json, StringComparison.Ordinal))
+        {
+            snapshot = null;
+        }
         return new InboundObservation(
             Message: clone,
             Encrypted: received.Encrypted,
@@ -70,7 +97,12 @@ public sealed record InboundObservation(
             NonRepudiation: received.NonRepudiation,
             AnonymousSender: received.AnonymousSender,
             SenderKid: received.SenderKid,
-            SignerKid: received.SignerKid);
+            SignerKid: received.SignerKid)
+        {
+            SenderKeyBinding = snapshot?.SenderKeyBinding,
+            SignerKeyBinding = snapshot?.SignerKeyBinding,
+            RecipientKeyBinding = snapshot?.RecipientKeyBinding,
+        };
     }
 
     /// <summary>
@@ -87,6 +119,11 @@ public sealed record InboundObservation(
             NonRepudiation: snapshot.NonRepudiation,
             AnonymousSender: snapshot.AnonymousSender,
             SenderKid: snapshot.SenderKid,
-            SignerKid: snapshot.SignerKid);
+            SignerKid: snapshot.SignerKid)
+        {
+            SenderKeyBinding = snapshot.SenderKeyBinding,
+            SignerKeyBinding = snapshot.SignerKeyBinding,
+            RecipientKeyBinding = snapshot.RecipientKeyBinding,
+        };
     }
 }
