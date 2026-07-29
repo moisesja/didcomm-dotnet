@@ -4,6 +4,58 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> Additive — new public API, no wire change, no breaking change (ApiCompat / package validation
+> clean against 1.3.0). Closes **#59**.
+
+### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
+
+The spec's SHOULD-level rule — *the recipient SHOULD verify that their own identifier appears in
+the `to` list … MUST NOT fail to accept … but SHOULD give a warning* — existed only as the
+never-called pure function `AddressingConsistency.IsRecipientInTo`, so no code path could ever
+emit the warning. It is now wired into the unpack pipeline and surfaced **as data** rather than a
+log line, so applications can act on it in policy code:
+
+- **New `UnpackResult.RecipientAddressing`** (public-get/internal-init, additive over the v1.3.0
+  positional constructor — binary compatible, consumers can read but never forge it): a
+  three-state enum. `Addressed` — one of the agent's own identifiers appears in `to` (compared as
+  DID subjects); `NotAddressed` — `to` is present, an own identifier was known, and none appear —
+  the FR-CONSIST-04 warning, delivered anyway; `NotEvaluated` — no `to` header or no own
+  identifier to check against (also the default on synthetically constructed results).
+- **New `DidCommOptions.OwnIdentifiers`** (default empty): the DIDs (or DID URLs) the agent
+  considers its own identity. The check evaluates the union of these and the decrypting recipient
+  kid's DID subject. Declaring identities is what makes the warning reachable on **signed-only
+  and plaintext** receives — the paths that previously had no addressing check at all; an entry
+  that does not parse as a DID is skipped, never counted as "checked and absent".
+- **Interaction with FR-CONSIST-02 (unchanged):** for encrypted envelopes with a present `to`,
+  the stronger MUST already rejects a message whose `to` omits the decrypting kid's DID subject —
+  that ordering is preserved (the MUST throws before the advisory is computed), which is why the
+  warning primarily matters on non-encrypted receives.
+
+The rule lives with its siblings as `AddressingConsistency.CheckRecipientAddressing`, replacing the
+never-called `IsRecipientInTo` predicate whose absence of a caller was the defect.
+
+Advisory only: no `RecipientAddressing` value ever affects delivery, and the surfaced value is an
+enum — no plaintext body content enters logs or metadata (NFR-04). Three properties of the
+implementation are load-bearing and were validated adversarially before release:
+
+- **No identity-enumeration oracle.** The sender-authored `to` list is parsed once into a subject
+  set and every own identifier is answered by hash lookup with no early exit, so the running time
+  depends only on the two list sizes — both already known to the sender. A short-circuiting
+  implementation leaked, via wall-clock alone, whether a guessed DID was one of the agent's and its
+  position in the configured list; an unauthenticated plaintext message could probe it for free and
+  enumerate a mediator's subscriber roster (measured 675× spread before, flat after).
+- **No CPU amplification.** That same single pass makes the cost `O(|to| + |own|)` rather than
+  `O(|to| × |own|)`, removing a multiplier that let one 1 MiB unauthenticated message cost ~24 ms
+  of parsing per declared identity (1.2 s at 50 identities; 12 ms after).
+- **Delivery really is unaffected.** `OwnIdentifiers` is snapshotted and validated once at
+  `DidCommClient` construction: enumerating the caller's live, mutable collection mid-unpack could
+  throw `InvalidOperationException` — dropping a message the advisory check must never touch — and
+  an entry that is not a parseable DID now fails at construction with `ArgumentException` instead of
+  being skipped silently on every message, which would have left the warning permanently dead with
+  no signal to the operator.
+
 ## [1.4.0] - 2026-07-26
 
 > Additive security release — new public API, no wire change, no breaking change (ApiCompat /

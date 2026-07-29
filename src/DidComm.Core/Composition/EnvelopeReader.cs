@@ -20,7 +20,9 @@ namespace DidComm.Composition;
 /// unwraps nested compositions (anoncrypt(authcrypt), anoncrypt(sign), …) by delegating each JWE/
 /// JWS layer to DataProofsDotnet.Jose, runs the addressing-consistency checks
 /// FR-CONSIST-01/02/03/05/08 as each layer reveals enough information (FR-CONSIST-04 is an advisory
-/// SHOULD; FR-CONSIST-06's resolver-backed authorization is supplied by the facade, and
+/// SHOULD, computed against the caller-supplied own identifiers and surfaced as
+/// <see cref="Facade.RecipientAddressing"/> rather than thrown; FR-CONSIST-06's resolver-backed
+/// authorization is supplied by the facade, and
 /// FR-CONSIST-07's same-document form is evaluated against the per-unpack binding context), and returns an
 /// <see cref="UnpackResult"/> carrying both the inner plaintext and the FR-API-04 metadata.
 /// </summary>
@@ -70,6 +72,12 @@ internal static class EnvelopeReader
     /// kid is known, and the resulting <see cref="Facade.VerifiedKeyBinding"/> evidence is attached
     /// to the result. Null / non-capable falls back to <paramref name="resolverCheck"/>.
     /// </param>
+    /// <param name="ownIdentifiers">
+    /// The DIDs (or DID URLs) the receiving agent considers its own identity (FR-CONSIST-04, #59).
+    /// Combined with the decrypting kid's DID subject to compute the advisory
+    /// <see cref="Facade.RecipientAddressing"/> outcome on the result; never causes a rejection.
+    /// Null/empty means only the decrypting kid (when the envelope was encrypted) is checked.
+    /// </param>
     /// <param name="ct">Cancellation token for the (possibly I/O-bound) key agreement and DID resolution.</param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
     /// <exception cref="CryptoException">When decryption / verification fails.</exception>
@@ -82,6 +90,7 @@ internal static class EnvelopeReader
         JoseCryptoProvider cryptoProvider,
         Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
         UnpackKeyBindingContext? bindingContext = null,
+        IReadOnlyCollection<string>? ownIdentifiers = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
@@ -153,6 +162,12 @@ internal static class EnvelopeReader
                     if (encrypted && nonRepudiation && (message.To is null || message.To.Count == 0))
                         throw new ConsistencyException(
                             "Sign-then-encrypt composition: the inner signed JWM MUST carry 'to' (FR-SIG-06).");
+
+                    // FR-CONSIST-04 (#59) — advisory, evaluated only after the MUST rules above so a
+                    // rejection always wins: is one of this agent's own identifiers named in 'to'?
+                    // Surfaced on the result rather than thrown; the spec forbids failing delivery here.
+                    var recipientAddressing = AddressingConsistency.CheckRecipientAddressing(
+                        message.To, recipientKid, ownIdentifiers);
 
                     // FR-CONSIST-06 — the kids surfaced by the cryptographic layers must be
                     // genuinely authorized in their asserted DID Documents.
@@ -289,6 +304,7 @@ internal static class EnvelopeReader
                         SenderKeyBinding = senderBinding,
                         SignerKeyBinding = signerBinding,
                         RecipientKeyBinding = recipientBinding,
+                        RecipientAddressing = recipientAddressing,
                     };
                 }
 

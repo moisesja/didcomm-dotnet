@@ -1,4 +1,5 @@
 using DidComm.Exceptions;
+using DidComm.Facade;
 using DidComm.Resolution;
 
 namespace DidComm.Consistency;
@@ -103,24 +104,58 @@ internal static class AddressingConsistency
     }
 
     /// <summary>
-    /// FR-CONSIST-04 — recipient self-presence in <c>to</c>. Returns true (no warning) when
-    /// <paramref name="recipientDid"/>'s DID subject appears in <paramref name="to"/>; returns
-    /// false (caller should emit a warning) when it does not. Per SHOULD, we do not throw.
+    /// FR-CONSIST-04 — recipient self-presence in <c>to</c> (#59). Reports whether one of the
+    /// recipient's own identifiers — the DID subject of the kid that actually decrypted, plus the
+    /// identifiers the application declared in <c>DidCommOptions.OwnIdentifiers</c> — appears in a
+    /// present <c>to</c> header. Per the SHOULD this never throws: the outcome is surfaced on
+    /// <c>UnpackResult.RecipientAddressing</c> and the message is delivered either way.
     /// </summary>
-    /// <param name="to">The plaintext <c>to</c> array; may be null/empty.</param>
-    /// <param name="recipientDid">The local recipient's DID.</param>
-    public static bool IsRecipientInTo(IEnumerable<string>? to, string recipientDid)
+    /// <remarks>
+    /// An identifier that does not parse as a DID/DID URL is skipped rather than counted as
+    /// "checked and absent", so one misconfigured entry cannot manufacture a spurious warning on
+    /// every message. The attacker-authored <c>to</c> list is parsed exactly once into a subject
+    /// set and each own identifier is then answered by hash lookup, with no early exit: the work —
+    /// and so the wall-clock — depends only on the list sizes, both already known to the sender.
+    /// Short-circuiting on the first match would leak whether a guessed DID is one of ours and its
+    /// position in the configured list, an identity-enumeration oracle that an unauthenticated
+    /// plaintext message could probe for free.
+    /// </remarks>
+    /// <param name="to">The plaintext <c>to</c> array; null means the header was absent.</param>
+    /// <param name="recipientKid">The kid whose private key decrypted this envelope, or null when there was none.</param>
+    /// <param name="ownIdentifiers">Application-declared own DIDs / DID URLs; may be null or empty.</param>
+    public static RecipientAddressing CheckRecipientAddressing(
+        IEnumerable<string>? to,
+        string? recipientKid,
+        IReadOnlyCollection<string>? ownIdentifiers)
     {
-        if (to is null) return false;
-        var subject = DidSubject.DidSubjectOf(recipientDid);
-        if (subject is null) return false;
+        if (to is null) return RecipientAddressing.NotEvaluated;
+
+        var toSubjects = new HashSet<string>(StringComparer.Ordinal);
         foreach (var t in to)
         {
-            var toSubject = DidSubject.DidSubjectOf(t);
-            if (toSubject is not null && string.Equals(toSubject, subject, StringComparison.Ordinal))
-                return true;
+            if (DidSubject.DidSubjectOf(t) is { } toSubject)
+                toSubjects.Add(toSubject);
         }
-        return false;
+
+        bool evaluated = false, addressed = false;
+        if (recipientKid is not null && DidSubject.DidSubjectOf(recipientKid) is { } kidSubject)
+        {
+            evaluated = true;
+            addressed |= toSubjects.Contains(kidSubject);
+        }
+
+        if (ownIdentifiers is not null)
+        {
+            foreach (var identifier in ownIdentifiers)
+            {
+                if (DidSubject.DidSubjectOf(identifier) is not { } ownSubject) continue;
+                evaluated = true;
+                addressed |= toSubjects.Contains(ownSubject);
+            }
+        }
+
+        if (!evaluated) return RecipientAddressing.NotEvaluated;
+        return addressed ? RecipientAddressing.Addressed : RecipientAddressing.NotAddressed;
     }
 
     /// <summary>

@@ -76,6 +76,15 @@ public static class Section_K_UnpackMetadata
         ctx.Narrator.Value("AllRecipientKids.Count", result.AllRecipientKids.Count);
         ctx.Narrator.Value("Stack",              string.Join(" ⊃ ", result.Stack));   // envelope shape, outermost first
         ctx.Narrator.Value("FromPrior",          result.FromPrior);          // populated only on rotation messages (Section N)
+        // Was this agent actually named in the message's 'to' list? Addressed here, because the
+        // decrypting key belongs to Bob and 'to' names Bob. NotAddressed is the advisory warning
+        // that a delivered message never named you — worth logging or alerting on, since it can
+        // mean the message was forwarded or re-wrapped by someone else (FR-CONSIST-04). Declare
+        // additional identities via DidCommOptions.OwnIdentifiers to cover signed-only and
+        // plaintext receives, which have no decrypting key. Act on the warning, not on Addressed:
+        // 'to' is written by the sender, so anyone can name you — it means something only when the
+        // envelope also authenticates who wrote it, as this one does.
+        ctx.Narrator.Value("RecipientAddressing", result.RecipientAddressing);
         ctx.Narrator.Value("Message.From",       result.Message.From);
         ctx.Narrator.Value("Message.Body[content]", result.Message.Body?["content"]);
 

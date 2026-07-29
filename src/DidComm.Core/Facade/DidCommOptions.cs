@@ -45,6 +45,18 @@ public sealed class DidCommOptions
     /// </summary>
     public OutboundEndpointPolicy OutboundEndpointPolicy { get; set; } = new();
 
+    /// <summary>
+    /// The DIDs (or DID URLs) this agent considers its own identity, used by the FR-CONSIST-04
+    /// recipient-addressing check (#59): when an unpacked message carries a <c>to</c> header,
+    /// <c>UnpackAsync</c> reports on <see cref="UnpackResult.RecipientAddressing"/> whether one
+    /// of these identifiers — or the decrypting recipient kid's DID subject — appears in the
+    /// list. Comparison is by DID subject, so a DID URL entry matches its bare DID. Empty by
+    /// default: unconfigured agents are still covered on encrypted envelopes via the decrypting
+    /// kid, while signed-only and plaintext messages report
+    /// <see cref="RecipientAddressing.NotEvaluated"/>. Advisory only — never affects delivery.
+    /// </summary>
+    public IReadOnlyCollection<string> OwnIdentifiers { get; set; } = Array.Empty<string>();
+
     /// <summary>Resolved clock helper.</summary>
     internal DateTimeOffset Now() => Clock?.Invoke() ?? DateTimeOffset.UtcNow;
 }

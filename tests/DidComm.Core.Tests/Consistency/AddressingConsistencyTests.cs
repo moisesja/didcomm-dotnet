@@ -1,5 +1,6 @@
 using DidComm.Consistency;
 using DidComm.Exceptions;
+using DidComm.Facade;
 using FluentAssertions;
 using Xunit;
 
@@ -90,15 +91,56 @@ public sealed class AddressingConsistencyTests
     }
 
     [Fact]
-    public void Is_recipient_in_to_returns_true_on_match_and_false_on_absence()
+    public void Recipient_addressing_matches_on_decrypting_kid_or_declared_identifier()
     {
-        AddressingConsistency
-            .IsRecipientInTo(new[] { "did:example:alice", "did:example:bob" }, "did:example:bob")
-            .Should().BeTrue();
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice", "did:example:bob" }, "did:example:bob#x", ownIdentifiers: null)
+            .Should().Be(RecipientAddressing.Addressed);
 
-        AddressingConsistency
-            .IsRecipientInTo(new[] { "did:example:alice" }, "did:example:bob")
-            .Should().BeFalse();
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice" }, recipientKid: null, new[] { "did:example:bob" })
+            .Should().Be(RecipientAddressing.NotAddressed);
+    }
+
+    [Fact]
+    public void Recipient_addressing_is_not_evaluated_without_a_to_header_or_an_own_identity()
+    {
+        AddressingConsistency.CheckRecipientAddressing(to: null, "did:example:bob#x", new[] { "did:example:bob" })
+            .Should().Be(RecipientAddressing.NotEvaluated);
+
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice" }, recipientKid: null, ownIdentifiers: null)
+            .Should().Be(RecipientAddressing.NotEvaluated);
+    }
+
+    [Fact]
+    public void Recipient_addressing_skips_unparseable_identifiers_rather_than_warning()
+    {
+        // A misconfigured entry must not be counted as "checked and absent" — otherwise every
+        // to-carrying message would warn. With nothing else to check, the rule did not run.
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice" }, recipientKid: null, new[] { "not-a-did" })
+            .Should().Be(RecipientAddressing.NotEvaluated);
+
+        // Unparseable 'to' entries are likewise ignored, leaving the parseable ones to decide.
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "not-a-did", "did:example:bob" }, recipientKid: null, new[] { "did:example:bob" })
+            .Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
+    public void Recipient_addressing_checks_every_identifier_regardless_of_match_position()
+    {
+        // No early exit: a match in the last position is found, and the same set of identifiers is
+        // examined either way, so the running time cannot reveal which one (if any) matched.
+        var many = Enumerable.Range(0, 32).Select(i => $"did:example:tenant{i}").ToArray();
+
+        AddressingConsistency.CheckRecipientAddressing(new[] { "did:example:tenant31" }, null, many)
+            .Should().Be(RecipientAddressing.Addressed);
+        AddressingConsistency.CheckRecipientAddressing(new[] { "did:example:tenant0" }, null, many)
+            .Should().Be(RecipientAddressing.Addressed);
+        AddressingConsistency.CheckRecipientAddressing(new[] { "did:example:nobody" }, null, many)
+            .Should().Be(RecipientAddressing.NotAddressed);
     }
 
     [Fact]

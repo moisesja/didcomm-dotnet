@@ -45,4 +45,7 @@ internal sealed record UnpackResult(
 
     /// <summary>Same-document recipient (decrypting kid) evidence captured during this unpack, when available (#56).</summary>
     public VerifiedKeyBinding? RecipientKeyBinding { get; init; }
+
+    /// <summary>Outcome of the advisory FR-CONSIST-04 recipient-addressing check (#59).</summary>
+    public RecipientAddressing RecipientAddressing { get; init; }
 }

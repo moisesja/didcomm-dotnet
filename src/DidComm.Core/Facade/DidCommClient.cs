@@ -1,4 +1,5 @@
 using DidComm.Composition;
+using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
@@ -31,6 +32,11 @@ public sealed class DidCommClient
     // path is selected when the registered ISecretsResolver also implements IOpaqueKeyResolver (or
     // one is registered separately), so non-extractable (HSM/KMS/keystore) keys never surface 'd'.
     private readonly KeyOperationResolver _keyOps;
+    // Snapshot of DidCommOptions.OwnIdentifiers taken at construction (FR-CONSIST-04, #59). The
+    // options object is mutable and shared: enumerating the caller's live collection mid-unpack
+    // would throw if the app appended to it (e.g. provisioning a new DID), turning an advisory
+    // check into a dropped message. Copying once keeps the "never affects delivery" guarantee true.
+    private readonly IReadOnlyCollection<string> _ownIdentifiers;
 
     /// <summary>Initialize the facade. Routing (FR-ROUTE-*) is unavailable without an <see cref="IServiceEndpointResolver"/>; for that, use the <see cref="DidCommClient(ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions)"/> overload or register the facade through <c>AddDidComm</c>.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -97,6 +103,32 @@ public sealed class DidCommClient
         // way the extractable path is preserved when no opaque capability is present (FR-SEC-06).
         var opaque = opaqueKeys ?? secrets as IOpaqueKeyResolver;
         _keyOps = new KeyOperationResolver(secrets, opaque, cryptoProvider);
+        _ownIdentifiers = SnapshotOwnIdentifiers(options.OwnIdentifiers);
+    }
+
+    /// <summary>
+    /// Copy and validate <see cref="DidCommOptions.OwnIdentifiers"/> once (FR-CONSIST-04, #59). An
+    /// entry that is not a parseable DID / DID URL is rejected here rather than silently skipped per
+    /// message: skipping is the correct behavior for the check itself (a typo must not make every
+    /// message warn), but it makes a misconfigured agent indistinguishable from an unconfigured one,
+    /// so the recipient-addressing signal would be permanently dead with no indication. Failing at
+    /// construction turns that into a startup error the operator can actually see.
+    /// </summary>
+    private static IReadOnlyCollection<string> SnapshotOwnIdentifiers(IReadOnlyCollection<string>? configured)
+    {
+        if (configured is null || configured.Count == 0) return Array.Empty<string>();
+
+        var snapshot = configured.ToArray();
+        foreach (var identifier in snapshot)
+        {
+            if (DidSubject.DidSubjectOf(identifier) is null)
+            {
+                throw new ArgumentException(
+                    $"DidCommOptions.OwnIdentifiers contains '{identifier}', which is not a parseable DID or DID URL (FR-CONSIST-04).",
+                    nameof(configured));
+            }
+        }
+        return snapshot;
     }
 
     /// <summary>
@@ -340,7 +372,10 @@ public sealed class DidCommClient
     /// Unpack <paramref name="packed"/>, auto-detecting the envelope shape (plaintext / signed
     /// / encrypted) and recursively unwrapping nested compositions per FR-API-03. Enforces
     /// FR-API-05 expiry, FR-API-06 size limit, FR-DID-06 did:web rejection, and the
-    /// FR-CONSIST-01..06 addressing-consistency rules (FR-CONSIST-06 is resolver-backed).
+    /// FR-CONSIST-01..06 addressing-consistency rules (FR-CONSIST-06 is resolver-backed;
+    /// FR-CONSIST-04 is advisory — evaluated against <see cref="DidCommOptions.OwnIdentifiers"/>
+    /// and the decrypting kid, surfaced as <see cref="UnpackResult.RecipientAddressing"/>, and
+    /// never rejects the message).
     /// </summary>
     /// <remarks>
     /// <strong>Support boundary:</strong> the recipient (secret-key) decrypt path runs natively async
@@ -385,7 +420,8 @@ public sealed class DidCommClient
         // public-key DID resolutions and DataProofs' IJweSenderKeyResolver / JwsParser contracts for
         // them are synchronous (not a secret-key path).
         var internalResult = await EnvelopeReader.UnpackAsync(
-            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext, ct).ConfigureAwait(false);
+            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext,
+            _ownIdentifiers, ct).ConfigureAwait(false);
         var message = internalResult.Message;
 
         if (message.From is not null)
@@ -452,6 +488,7 @@ public sealed class DidCommClient
             SenderKeyBinding = internalResult.SenderKeyBinding,
             SignerKeyBinding = internalResult.SignerKeyBinding,
             RecipientKeyBinding = internalResult.RecipientKeyBinding,
+            RecipientAddressing = internalResult.RecipientAddressing,
         };
     }
 
