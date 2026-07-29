@@ -471,6 +471,76 @@ public sealed class EnvelopeReaderTests
     }
 
     [Fact]
+    public async Task Non_string_unprotected_kid_stays_inside_the_typed_exception_hierarchy()
+    {
+        // Issue #58, the reported repro. A remote, unauthenticated peer sends a flattened JWS whose
+        // unprotected 'header.kid' is a JSON number. The read happens while the parser enumerates raw
+        // signatures — before any signature is checked — so no key material and no prior relationship
+        // are needed to reach it. FR-API-07 promises every unpack failure is a DidCommException, which
+        // is what `catch (DidCommException)` in consumer code (and in the samples) relies on.
+        //
+        // This pins the CONTRACT, not the mechanism: with DataProofsDotnet.Jose 1.1.1 the parser itself
+        // rejects the non-string kid as MalformedJoseException, so the existing handler satisfies this.
+        // Under 1.1.0 it escaped as a raw InvalidOperationException. Either way the assertion is the
+        // same, which is the point — it holds no matter which layer does the rejecting.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk.ToJwsSigner() }));
+
+        var hostile = System.Text.Json.Nodes.JsonNode.Parse(packed)!.AsObject();
+        hostile["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
+
+        Action act = () => EnvelopeReaderTestRunner.Unpack(hostile.ToJsonString(),
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
+            _crypto);
+
+        act.Should().Throw<DidCommException>();
+    }
+
+    [Fact]
+    public async Task Untyped_fault_from_the_delegated_JWS_parse_maps_to_MalformedMessageException()
+    {
+        // Issue #58, the guard itself. Unlike the test above, this one cannot be satisfied by a fixed
+        // dependency: it drives an InvalidOperationException — which nothing in the JWS catch list
+        // handled before — through the consumer's signer lookup, the one input to the delegated parse
+        // this library can neither validate nor enumerate the failure modes of. Deleting the catch-all
+        // fails this test. That is what makes the guard load-bearing rather than merely coexisting with
+        // DataProofsDotnet.Jose 1.1.1.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk.ToJwsSigner() }));
+
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: _ => throw new InvalidOperationException("an untyped fault the parser never wrapped"),
+            _crypto);
+
+        act.Should().Throw<MalformedMessageException>().WithInnerException<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task Typed_DidComm_failures_from_the_signer_lookup_pass_through_the_guard_untouched()
+    {
+        // Issue #58, the other half of the contract. The catch-all excludes the whole DidCommException
+        // hierarchy rather than a hand-listed set, because on the built-in NetDidKeyService the signer
+        // lookup IS the DID-resolution path: a DidResolutionException must stay a resolution failure
+        // with its Did/Reason intact, not be flattened into "Malformed JWS." This guards against the
+        // filter being narrowed to `is not MalformedMessageException` later, which would silently
+        // relabel every resolution failure on the signed path.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk.ToJwsSigner() }));
+
+        Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: _ => throw new DidResolutionException("did:example:alice", "resolver is unreachable"),
+            _crypto);
+
+        act.Should().Throw<DidResolutionException>().Which.Did.Should().Be("did:example:alice");
+    }
+
+    [Fact]
     public async Task AnonymousSender_reflects_the_outermost_encrypt_layer_not_accumulation()
     {
         // Issue #23 — characterization / defense-in-depth (NOT a regression guard: the #17 gate already

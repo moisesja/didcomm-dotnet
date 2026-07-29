@@ -160,6 +160,73 @@ single-resolution rotation, decorated-`iss` rejection, the swapped-recipient-lab
 recipient-key rotation, held-vs-unheld failure equivalence, resolver-order independence for aliased
 recipient keys, and a WebSocket connection surviving a rejected envelope.
 
+### Fixed — untyped faults could escape `UnpackAsync` on the signed path (FR-API-07, #58)
+
+`DidCommClient.UnpackAsync` could throw a raw `System.InvalidOperationException`, breaking the
+FR-API-07 promise that every unpack failure is a `DidCommException` subtype — the contract
+`catch (DidCommException)` in consumer code and in the samples relies on. A remote,
+**unauthenticated** peer triggered it with a flattened JWS whose unprotected `header.kid` was any
+non-string JSON value: the read happens while the parser enumerates raw signatures, *before* any
+signature is checked, so no key material and no prior relationship were required.
+
+`EnvelopeReader`'s signed branch already mapped `MalformedJoseException`, `JoseCryptoException`, and
+`ArgumentException` onto the contract, and its sibling JWE branch already had a catch-all. That
+`ArgumentException` guard is now widened to the whole untyped-fault class: any exception from the
+delegated JWS parse that is neither a cancellation nor already a `DidCommException` surfaces as
+`MalformedMessageException` with the original preserved as `InnerException`.
+
+Two deliberate details:
+
+- The filter excludes the **entire `DidCommException` hierarchy**, not a hand-listed set. On the
+  built-in `NetDidKeyService` the signer lookup *is* the DID-resolution path, so a
+  `DidResolutionException` stays a resolution failure with its `Did` / `Reason` intact rather than
+  being relabelled "malformed JWS".
+- It maps to `MalformedMessageException`, **not** the uniform `CryptoException` the JWE branch's
+  catch-all uses. That branch deliberately flattens failure shape to deny a recipient-possession
+  oracle; the signed path has no such oracle to close.
+
+The guard is independent of the dependency bump below. Verified both ways: with
+`DataProofsDotnet.Jose` pinned back to 1.1.0 (the version carrying the upstream bug) the reported
+repro still fails as a typed `DidCommException`, and with the guard removed the new
+untyped-fault test fails.
+
+Three tests cover it — the reported repro (contract), a signer lookup raising a raw
+`InvalidOperationException` (the guard itself, which no dependency fix can satisfy), and a
+`DidResolutionException` passing through untouched (so the filter cannot be narrowed later without
+a failing test). The transports were already resilient to this fault class: the HTTP receive
+endpoint collapses every unpack failure into one opaque 400, and both WebSocket receive loops
+drop-and-continue.
+
+### Changed — dependency refresh
+
+First-party pins moved to current, and the graph now converges on a single `NetCrypto` and a single
+`DataProofsDotnet.Core` version (no `NU1605`). No source changes were required; the full suite and
+the Release build (including package validation against the 1.3.0 baseline) are clean.
+
+- **`NetDid.*` 2.3.0 → 3.0.0** (`Core`, `Method.Key`, `Method.Peer`, `Method.WebVh`,
+  `Extensions.DependencyInjection`). The major signals the scale of net-did's release — a new
+  `did:ethr` method, shipped as a separate `NetDid.Method.Ethr` package DidComm does not reference,
+  and the `DataProofsDotnet` major crossing beneath `did:webvh` — not a break: every public-API
+  change 2.x consumers compile against is additive.
+- **`NetCrypto` 1.2.0 → 1.4.0.** Additive and unused here (EC point decompression; recoverable
+  secp256k1 signing for EVM flows, whose new `IKeyStore` member ships as a throwing default
+  interface implementation so external key stores stay source- and binary-compatible). This is also
+  net-did 3.0.0's own pin, so the direct reference and the transitive graph agree.
+- **`DataProofsDotnet.Jose` 1.1.0 → 1.1.1.** Fixes dataproofs-dotnet#15 — the upstream root cause
+  of #58 above — and additionally wraps `JwsParser`'s top-level `JsonDocument.Parse` so malformed
+  JSON surfaces as `MalformedJoseException`.
+- **`Microsoft.Extensions.*` 10.0.8 → 10.0.10**, **`OpenTelemetry.Api` 1.15.3 → 1.17.0**,
+  **`Polly` 8.5.0 → 8.7.0** — servicing/minor updates.
+- **`Microsoft.AspNetCore.TestHost` 10.0.0-preview.1.25120.3 → 10.0.10** — a .NET 10 *preview* pin
+  left over from pre-GA scaffolding, now on the GA servicing line. Test/sample-only.
+
+The test stack is held deliberately, not by neglect: `FluentAssertions` stays on 7.0.0 because 8.x
+relicensed under Xceed (free for open source, paid for commercial use) and breaks API across the
+suite — keeping 7.0.0 leaves this library's test dependencies unencumbered for downstream
+contributors. `Microsoft.NET.Test.Sdk`, `xunit.runner.visualstudio`, `NSubstitute`,
+`coverlet.collector`, and `Microsoft.SourceLink.GitHub` likewise stay put; moving the test stack is
+its own change with its own risk. `dotnet list package --vulnerable --include-transitive` is clean.
+
 ## [1.3.0] - 2026-06-22
 
 ### Added — fail-closed skid guard on authenticated decrypt (defense in depth, #52)

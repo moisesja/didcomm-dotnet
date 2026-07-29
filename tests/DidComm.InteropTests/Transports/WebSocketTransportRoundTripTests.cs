@@ -211,10 +211,12 @@ public sealed class WebSocketTransportRoundTripTests
     [Fact]
     public async Task Malformed_jose_header_member_is_dropped_and_the_socket_keeps_serving()
     {
-        // Same connection-resilience property against a fault the unpack contract is not supposed to
-        // emit at all: a non-string JWS 'kid' currently surfaces a raw InvalidOperationException from
-        // the delegated parser (tracked separately). The receive loop must still drop that one
-        // message rather than let an untyped fault close the socket.
+        // Same connection-resilience property, driven by the #58 input: a non-string JWS 'kid'. That
+        // now fails as a typed MalformedMessageException (DataProofsDotnet.Jose 1.1.1 rejects it, and
+        // the EnvelopeReader JWS catch-all covers the wider class), so this test no longer depends on
+        // an untyped fault existing. It stays because the property it pins is the transport's, not the
+        // contract's: the receive loop drops ANY failing message and keeps serving, independent of what
+        // unpack throws — a socket may carry other peers' traffic, so one hostile frame must not end it.
         var (server, received) = await BuildServerAsync();
 
         var actors = SpecActorRegistry.LoadDefault();

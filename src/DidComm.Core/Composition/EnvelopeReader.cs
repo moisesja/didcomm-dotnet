@@ -319,6 +319,24 @@ internal static class EnvelopeReader
                         // ArgumentException never escapes UnpackAsync. InnerException is preserved.
                         throw new MalformedMessageException("Malformed JWS.", ex);
                     }
+                    catch (Exception ex) when (ex is not OperationCanceledException and not DidCommException)
+                    {
+                        // FR-API-07 (#58): the same boundary guard as above, widened from ArgumentException
+                        // to the whole untyped-fault class. The delegated parser enumerates attacker-supplied
+                        // structure BEFORE any signature check, so an untyped fault here is remotely reachable
+                        // pre-authentication — dataproofs-dotnet#15 was exactly that (a non-string unprotected
+                        // 'kid' escaping as InvalidOperationException, fixed in DataProofsDotnet.Jose 1.1.1).
+                        // Pinning the fixed parser closes that one input; this closes the class, including
+                        // faults the consumer's own signer lookup can raise that this layer cannot enumerate.
+                        // The filter excludes the entire DidCommException hierarchy rather than a hand-listed
+                        // set, so an already-typed failure passes through with its own semantics intact — a
+                        // DidResolutionException from the built-in NetDidKeyService signer lookup must stay a
+                        // resolution failure, not be relabelled "malformed JWS". Cancellation propagates.
+                        // Unlike the JWE branch's catch-all, this one maps to MalformedMessageException rather
+                        // than a uniform CryptoException: that branch deliberately flattens failure shape to
+                        // deny a recipient-possession oracle, and the signed path has no such oracle to close.
+                        throw new MalformedMessageException("Malformed JWS.", ex);
+                    }
 
                     // Fail closed: a verified JWS MUST surface a signer kid. Otherwise FR-CONSIST-03
                     // (signed 'from' ↔ signer) and FR-CONSIST-05 (inner signer ↔ skid) would silently
