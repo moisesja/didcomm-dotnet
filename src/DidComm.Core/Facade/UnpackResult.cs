@@ -84,4 +84,22 @@ public sealed record UnpackResult(
     /// (#56). Null when the envelope was not encrypted or on the legacy key-service path.
     /// </summary>
     public VerifiedKeyBinding? RecipientKeyBinding { get; internal init; }
+
+    /// <summary>
+    /// Outcome of the advisory FR-CONSIST-04 recipient-addressing check (#59): whether one of
+    /// this agent's own identifiers (<see cref="DidCommOptions.OwnIdentifiers"/> plus the
+    /// decrypting kid's DID subject) appears in the message's <c>to</c> header. A
+    /// <see cref="RecipientAddressing.NotAddressed"/> value is the spec's SHOULD-level warning —
+    /// the message was delivered anyway, but its <c>to</c> never names this agent, which can
+    /// indicate surreptitious forwarding or misdelivery. Settable only by the unpack pipeline;
+    /// note that the sender-authored <c>to</c> makes the <see cref="RecipientAddressing.Addressed"/>
+    /// value meaningless on unauthenticated envelopes — see
+    /// <see cref="RecipientAddressing"/>'s trust-boundary remarks before acting on it. It is also
+    /// computed against <see cref="Message"/> as unpacked: a <c>with</c>-clone carrying a different
+    /// message, or an in-place edit of <c>Message.To</c> afterwards, leaves this value describing
+    /// the original. Unlike the <see cref="SenderKeyBinding"/> family it has no snapshot backstop and
+    /// is not mirrored onto <c>InboundObservation</c>, so observer-only code cannot read it and a
+    /// pipeline that rewrites addressing must re-check it (tracked in issue #61).
+    /// </summary>
+    public RecipientAddressing RecipientAddressing { get; internal init; }
 }

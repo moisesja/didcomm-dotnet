@@ -1,5 +1,7 @@
+using System.Collections;
 using DidComm.Consistency;
 using DidComm.Exceptions;
+using DidComm.Facade;
 using FluentAssertions;
 using Xunit;
 
@@ -89,16 +91,151 @@ public sealed class AddressingConsistencyTests
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-03*");
     }
 
-    [Fact]
-    public void Is_recipient_in_to_returns_true_on_match_and_false_on_absence()
-    {
-        AddressingConsistency
-            .IsRecipientInTo(new[] { "did:example:alice", "did:example:bob" }, "did:example:bob")
-            .Should().BeTrue();
+    private static IReadOnlySet<string> Own(params string[] didSubjects)
+        => new HashSet<string>(didSubjects, StringComparer.Ordinal);
 
-        AddressingConsistency
-            .IsRecipientInTo(new[] { "did:example:alice" }, "did:example:bob")
-            .Should().BeFalse();
+    [Fact]
+    public void Recipient_addressing_matches_on_decrypting_kid_or_declared_identifier()
+    {
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice", "did:example:bob" }, "did:example:bob#x", ownDidSubjects: null)
+            .Should().Be(RecipientAddressing.Addressed);
+
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice" }, recipientKid: null, Own("did:example:bob"))
+            .Should().Be(RecipientAddressing.NotAddressed);
+    }
+
+    [Fact]
+    public void Recipient_addressing_is_not_evaluated_without_a_to_header_or_an_own_identity()
+    {
+        AddressingConsistency.CheckRecipientAddressing(to: null, "did:example:bob#x", Own("did:example:bob"))
+            .Should().Be(RecipientAddressing.NotEvaluated);
+
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice" }, recipientKid: null, ownDidSubjects: null)
+            .Should().Be(RecipientAddressing.NotEvaluated);
+
+        // An empty declared set is the same "nothing to check against" state as a null one.
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "did:example:alice" }, recipientKid: null, Own())
+            .Should().Be(RecipientAddressing.NotEvaluated);
+    }
+
+    [Fact]
+    public void Recipient_addressing_treats_unparseable_to_entries_as_non_matches()
+    {
+        // Malformed addressing on the wire must not decide the outcome; the parseable entries do.
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "not-a-did", "did:example:bob" }, recipientKid: null, Own("did:example:bob"))
+            .Should().Be(RecipientAddressing.Addressed);
+
+        AddressingConsistency.CheckRecipientAddressing(
+                new[] { "not-a-did" }, recipientKid: null, Own("did:example:bob"))
+            .Should().Be(RecipientAddressing.NotAddressed);
+    }
+
+    [Fact]
+    public void Recipient_addressing_consumes_the_whole_to_sequence_even_when_the_first_entry_matches()
+    {
+        // The no-early-exit property, asserted on behavior rather than inferred from the return
+        // value: a short-circuiting implementation yields the same enum but stops enumerating, and
+        // the number of entries it got through is what a remote sender could time. Counting the
+        // enumeration is what actually pins the property.
+        var to = new CountingSequence(new[] { "did:example:bob", "did:example:carol", "did:example:dave" });
+
+        AddressingConsistency.CheckRecipientAddressing(to, recipientKid: null, Own("did:example:bob"))
+            .Should().Be(RecipientAddressing.Addressed);
+
+        to.Yielded.Should().Be(3, "every 'to' entry must be examined regardless of where the match is");
+        to.EnumerationCount.Should().Be(1, "the sequence is walked exactly once, not once per identity");
+    }
+
+    [Theory]
+    [InlineData("did:example:bob", "did:example:carol", "did:example:dave", RecipientAddressing.Addressed)]
+    [InlineData("did:example:carol", "did:example:bob", "did:example:dave", RecipientAddressing.Addressed)]
+    [InlineData("did:example:carol", "did:example:dave", "did:example:bob", RecipientAddressing.Addressed)]
+    [InlineData("did:example:carol", "did:example:dave", "did:example:erin", RecipientAddressing.NotAddressed)]
+    public void Recipient_addressing_probes_every_to_entry_without_enumerating_the_declared_identity_set(
+        string first,
+        string second,
+        string third,
+        RecipientAddressing expected)
+    {
+        // Per-message work must scale with the bounded wire input, not with the host's roster: an
+        // agent declaring 100k identities must not pay 100k DID parses for a one-entry 'to'. That is
+        // structural, not a timing measurement. The check may only probe the prebuilt set, so
+        // enumerating it fails here. The exact Contains count also pins the non-short-circuiting
+        // lookup shape: first/middle/last/miss must all perform one lookup per parseable wire entry.
+        var own = new ProbeOnlySet("did:example:bob");
+        var to = new[] { first, second, third };
+
+        AddressingConsistency.CheckRecipientAddressing(to, "did:example:zoe#x", own)
+            .Should().Be(expected);
+
+        own.EnumerationCount.Should().Be(0, "the declared roster must never be walked per message");
+        own.ContainsCalls.Should().Be(to.Length,
+            "every parseable wire entry must be probed even after an earlier match");
+    }
+
+    /// <summary>Counts how many entries were pulled, and how many times the sequence was walked.</summary>
+    private sealed class CountingSequence(IReadOnlyList<string> items) : IEnumerable<string>
+    {
+        public int Yielded { get; private set; }
+        public int EnumerationCount { get; private set; }
+
+        public IEnumerator<string> GetEnumerator()
+        {
+            EnumerationCount++;
+            return Iterate();
+        }
+
+        private IEnumerator<string> Iterate()
+        {
+            foreach (var item in items)
+            {
+                Yielded++;
+                yield return item;
+            }
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    /// <summary>
+    /// A declared-identity set that permits only <c>Count</c> and <c>Contains</c>. Enumeration is
+    /// counted (and the returned enumerator is empty) so a per-message walk of the roster shows up as
+    /// a failed assertion rather than as a silent performance regression.
+    /// </summary>
+    private sealed class ProbeOnlySet(params string[] subjects) : IReadOnlySet<string>
+    {
+        private readonly HashSet<string> _inner = new(subjects, StringComparer.Ordinal);
+
+        public int ContainsCalls { get; private set; }
+        public int EnumerationCount { get; private set; }
+
+        public int Count => _inner.Count;
+
+        public bool Contains(string item)
+        {
+            ContainsCalls++;
+            return _inner.Contains(item);
+        }
+
+        public IEnumerator<string> GetEnumerator()
+        {
+            EnumerationCount++;
+            return Enumerable.Empty<string>().GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+        public bool IsProperSubsetOf(IEnumerable<string> other) => throw new NotSupportedException();
+        public bool IsProperSupersetOf(IEnumerable<string> other) => throw new NotSupportedException();
+        public bool IsSubsetOf(IEnumerable<string> other) => throw new NotSupportedException();
+        public bool IsSupersetOf(IEnumerable<string> other) => throw new NotSupportedException();
+        public bool Overlaps(IEnumerable<string> other) => throw new NotSupportedException();
+        public bool SetEquals(IEnumerable<string> other) => throw new NotSupportedException();
     }
 
     [Fact]

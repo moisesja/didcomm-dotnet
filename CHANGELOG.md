@@ -4,6 +4,71 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> Additive — new public API, no wire change, no breaking change (ApiCompat / package validation
+> clean against 1.3.0). Closes **#59**.
+
+### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
+
+The spec's SHOULD-level rule — *the recipient SHOULD verify that their own identifier appears in
+the `to` list … MUST NOT fail to accept … but SHOULD give a warning* — existed only as the
+never-called pure function `AddressingConsistency.IsRecipientInTo`, so no code path could ever
+emit the warning. It is now wired into the unpack pipeline and surfaced **as data** rather than a
+log line, so applications can act on it in policy code:
+
+- **New `UnpackResult.RecipientAddressing`** (public-get/internal-init, additive over the v1.3.0
+  positional constructor — binary compatible, consumers can read but never forge it): a
+  three-state enum. `Addressed` — one of the agent's own identifiers appears in `to` (compared as
+  DID subjects); `NotAddressed` — `to` is present, an own identifier was known, and none appear —
+  the FR-CONSIST-04 warning, delivered anyway; `NotEvaluated` — no `to` header or no own
+  identifier to check against (also the default on synthetically constructed results).
+- **New `DidCommOptions.OwnIdentifiers`** (default empty): the DIDs (or DID URLs) the agent
+  considers its own identity. The check evaluates the union of these and the decrypting recipient
+  kid's DID subject. Declaring identities is what makes the warning reachable on **signed-only
+  and plaintext** receives — the paths that previously had no addressing check at all. An entry
+  that does not parse as a DID is rejected when `DidCommClient` is constructed so a typo cannot
+  silently disable the signal.
+- **Interaction with FR-CONSIST-02 (unchanged):** for encrypted envelopes with a present `to`,
+  the stronger MUST already rejects a message whose `to` omits the decrypting kid's DID subject —
+  that ordering is preserved (the MUST throws before the advisory is computed), which is why the
+  warning primarily matters on non-encrypted receives.
+
+The rule lives with its siblings as `AddressingConsistency.CheckRecipientAddressing`, replacing the
+never-called `IsRecipientInTo` predicate whose absence of a caller was the defect.
+
+Advisory only: no `RecipientAddressing` value ever affects delivery, and the surfaced value is an
+enum — no plaintext body content enters logs or metadata (NFR-04).
+
+Three properties of the implementation are load-bearing, and each is pinned by a test that fails
+against the implementation that lacks it (verified by injecting the defect):
+
+- **Per-message operation count has no roster-linear term.** `OwnIdentifiers` is
+  parsed to DID subjects, deduplicated, and frozen once at `DidCommClient` construction; unpack then
+  walks only the `to` list against that prebuilt set and never enumerates it. Calling the old
+  per-identifier predicate once for every configured identity would cost
+  `O(|to| × |own|)`; the first wired implementation improved that to `O(|to| + |own|)` but still
+  made every unauthenticated message pay a roster-sized term. The frozen-set design removes that
+  receiver-chosen CPU multiplier and the roster-proportional latency term; ordinary cache effects
+  may still vary with set size. `Recipient_addressing_probes_every_to_entry_without_enumerating_the_declared_identity_set`
+  asserts the operation-count invariant structurally rather than by timing.
+- **No match-position-dependent operation count.** Which `to` entry matched, or that none did,
+  does not change the number of parses or set lookups performed.
+  `Recipient_addressing_consumes_the_whole_to_sequence_even_when_the_first_entry_matches` counts
+  wire enumeration, while the parameterized probe-set test requires one lookup per parseable
+  entry for first/middle/last/miss. This removes the coarse short-circuit channel; it is *not* a
+  constant-time membership guarantee. Frozen-set hit/miss paths and ordinal string equality are
+  data-dependent, and repeated guessed DIDs can amplify that residual difference.
+- **Delivery really is unaffected.** Snapshotting also decouples the check from the caller's live,
+  mutable collection, which if enumerated mid-unpack could throw `InvalidOperationException` and
+  drop a message the advisory check must never touch. An entry that is not a parseable DID fails at
+  construction with `ArgumentException` rather than being skipped silently on every message, which
+  would leave the warning permanently dead with no signal to the operator.
+
+Known limitation: the outcome is not mirrored onto `InboundMessageSnapshot` / `InboundObservation`,
+so observer-only applications cannot read it and the value goes stale if a caller rewrites
+`Message.To` or clones the result onto another message — tracked in **#61**.
+
 ## [1.4.0] - 2026-07-26
 
 > Additive security release — new public API, no wire change, no breaking change (ApiCompat /

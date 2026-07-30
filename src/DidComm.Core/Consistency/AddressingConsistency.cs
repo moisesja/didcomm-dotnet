@@ -1,4 +1,5 @@
 using DidComm.Exceptions;
+using DidComm.Facade;
 using DidComm.Resolution;
 
 namespace DidComm.Consistency;
@@ -103,24 +104,74 @@ internal static class AddressingConsistency
     }
 
     /// <summary>
-    /// FR-CONSIST-04 — recipient self-presence in <c>to</c>. Returns true (no warning) when
-    /// <paramref name="recipientDid"/>'s DID subject appears in <paramref name="to"/>; returns
-    /// false (caller should emit a warning) when it does not. Per SHOULD, we do not throw.
+    /// FR-CONSIST-04 — recipient self-presence in <c>to</c> (#59). Reports whether one of the
+    /// recipient's own identifiers — the DID subject of the kid that actually decrypted, plus the
+    /// identifiers the application declared in <c>DidCommOptions.OwnIdentifiers</c> — appears in a
+    /// present <c>to</c> header. Per the SHOULD this never throws: the outcome is surfaced on
+    /// <c>UnpackResult.RecipientAddressing</c> and the message is delivered either way.
     /// </summary>
-    /// <param name="to">The plaintext <c>to</c> array; may be null/empty.</param>
-    /// <param name="recipientDid">The local recipient's DID.</param>
-    public static bool IsRecipientInTo(IEnumerable<string>? to, string recipientDid)
+    /// <remarks>
+    /// <para>
+    /// <strong>Per-message work is bounded by the wire input, never by the host's roster.</strong>
+    /// The declared identifiers arrive already normalized to DID subjects and deduplicated — built
+    /// once when the facade is constructed — so this walks the attacker-controlled <c>to</c>
+    /// sequence exactly once, parsing each entry and answering it by hash lookup against that
+    /// prebuilt set. <paramref name="ownDidSubjects"/> is never enumerated here: an agent hosting
+    /// 100k identities must not pay 100k DID parses for a one-entry <c>to</c>, or unauthenticated
+    /// traffic could amplify CPU by a receiver-chosen factor and leak the roster's scale through
+    /// latency. <c>Count</c> is read only to decide whether any identity exists to check at all.
+    /// </para>
+    /// <para>
+    /// There is also no early exit on the first match, so which entry matched (or that none did)
+    /// does not change the number of parses or lookups performed. That removes the coarse
+    /// match-position signal a short-circuit would create. It does <em>not</em> make membership
+    /// testing constant-time: hash-set hit/miss paths and ordinal string equality
+    /// are data-dependent, and a sender can repeat one guessed DID throughout the bounded
+    /// <c>to</c> list to amplify that residual difference. The guarantee here is deliberately
+    /// narrower: per-message parse/lookup count has no term linear in the configured roster, and
+    /// those operation counts do not change with match position.
+    /// </para>
+    /// <para>
+    /// One coarse distinction does remain by design: with no identity to check against, the method
+    /// returns before walking <c>to</c> at all, so timing can reveal <em>whether</em> this agent
+    /// evaluates addressing — a static local configuration fact, not roster size, membership, or
+    /// anything per-message. Walking <c>to</c> anyway would make every unconfigured agent pay full
+    /// parsing cost on every message for an outcome that cannot exist, which is the worse trade.
+    /// </para>
+    /// <para>
+    /// A <c>to</c> entry that does not parse as a DID/DID URL cannot match and is skipped. If a
+    /// present <c>to</c> list contains no parseable own DID subject, the outcome is
+    /// <see cref="RecipientAddressing.NotAddressed"/>; structural validation of FR-MSG-07 is a
+    /// separate responsibility.
+    /// </para>
+    /// </remarks>
+    /// <param name="to">The plaintext <c>to</c> array; null means the header was absent.</param>
+    /// <param name="recipientKid">The kid whose private key decrypted this envelope, or null when there was none.</param>
+    /// <param name="ownDidSubjects">
+    /// The agent's own identities, pre-normalized to bare DID subjects and deduplicated (see
+    /// <c>DidCommClient</c>'s construction-time snapshot). Must contain DID subjects, not DID URLs —
+    /// entries are compared verbatim. May be null or empty.
+    /// </param>
+    public static RecipientAddressing CheckRecipientAddressing(
+        IEnumerable<string>? to,
+        string? recipientKid,
+        IReadOnlySet<string>? ownDidSubjects)
     {
-        if (to is null) return false;
-        var subject = DidSubject.DidSubjectOf(recipientDid);
-        if (subject is null) return false;
+        if (to is null) return RecipientAddressing.NotEvaluated;
+
+        var kidSubject = recipientKid is null ? null : DidSubject.DidSubjectOf(recipientKid);
+        var haveDeclared = ownDidSubjects is { Count: > 0 };
+        if (kidSubject is null && !haveDeclared) return RecipientAddressing.NotEvaluated;
+
+        var addressed = false;
         foreach (var t in to)
         {
-            var toSubject = DidSubject.DidSubjectOf(t);
-            if (toSubject is not null && string.Equals(toSubject, subject, StringComparison.Ordinal))
-                return true;
+            if (DidSubject.DidSubjectOf(t) is not { } toSubject) continue;
+            addressed |= kidSubject is not null && string.Equals(toSubject, kidSubject, StringComparison.Ordinal);
+            addressed |= haveDeclared && ownDidSubjects!.Contains(toSubject);
         }
-        return false;
+
+        return addressed ? RecipientAddressing.Addressed : RecipientAddressing.NotAddressed;
     }
 
     /// <summary>

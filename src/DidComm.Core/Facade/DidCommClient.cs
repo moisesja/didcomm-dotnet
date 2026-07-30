@@ -1,4 +1,6 @@
+using System.Collections.Frozen;
 using DidComm.Composition;
+using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
@@ -31,6 +33,10 @@ public sealed class DidCommClient
     // path is selected when the registered ISecretsResolver also implements IOpaqueKeyResolver (or
     // one is registered separately), so non-extractable (HSM/KMS/keystore) keys never surface 'd'.
     private readonly KeyOperationResolver _keyOps;
+    // DidCommOptions.OwnIdentifiers, normalized to bare DID subjects and frozen at construction
+    // (FR-CONSIST-04, #59). Prebuilt so per-message addressing work scales with the wire's 'to'
+    // list only, never with the declared roster — see SnapshotOwnIdentifiers.
+    private readonly FrozenSet<string> _ownDidSubjects;
 
     /// <summary>Initialize the facade. Routing (FR-ROUTE-*) is unavailable without an <see cref="IServiceEndpointResolver"/>; for that, use the <see cref="DidCommClient(ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions)"/> overload or register the facade through <c>AddDidComm</c>.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -97,6 +103,41 @@ public sealed class DidCommClient
         // way the extractable path is preserved when no opaque capability is present (FR-SEC-06).
         var opaque = opaqueKeys ?? secrets as IOpaqueKeyResolver;
         _keyOps = new KeyOperationResolver(secrets, opaque, cryptoProvider);
+        _ownDidSubjects = SnapshotOwnIdentifiers(options.OwnIdentifiers);
+    }
+
+    /// <summary>
+    /// Resolve <see cref="DidCommOptions.OwnIdentifiers"/> to a frozen set of DID subjects, once
+    /// (FR-CONSIST-04, #59). Every per-message cost of the recipient-addressing check is paid here
+    /// instead: parsing each declared DID URL down to its subject, deduplicating, and building the
+    /// lookup. Unpack then walks only the wire's <c>to</c> list against this set, so an agent
+    /// declaring a large tenant roster does not turn each unauthenticated inbound message into a
+    /// roster-sized parse — the amplification and latency-visible roster signal that made a
+    /// per-message loop over the raw strings unacceptable.
+    /// </summary>
+    /// <remarks>
+    /// Snapshotting also decouples the check from the caller's live, mutable collection: enumerating
+    /// that mid-unpack would throw if the app appended to it, turning an advisory check into a
+    /// dropped message. An entry that is not a parseable DID / DID URL is rejected here rather than
+    /// silently skipped per message: skipping is right for the check itself (a typo must not make
+    /// every message warn), but it renders a misconfigured agent indistinguishable from an
+    /// unconfigured one, leaving the signal permanently dead with no indication. Failing at
+    /// construction turns that into a startup error the operator can actually see.
+    /// </remarks>
+    private static FrozenSet<string> SnapshotOwnIdentifiers(IReadOnlyCollection<string>? configured)
+    {
+        if (configured is null || configured.Count == 0) return FrozenSet<string>.Empty;
+
+        var subjects = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var identifier in configured)
+        {
+            var subject = DidSubject.DidSubjectOf(identifier)
+                ?? throw new ArgumentException(
+                    $"DidCommOptions.OwnIdentifiers contains '{identifier}', which is not a parseable DID or DID URL (FR-CONSIST-04).",
+                    nameof(configured));
+            subjects.Add(subject);
+        }
+        return subjects.ToFrozenSet(StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -340,7 +381,10 @@ public sealed class DidCommClient
     /// Unpack <paramref name="packed"/>, auto-detecting the envelope shape (plaintext / signed
     /// / encrypted) and recursively unwrapping nested compositions per FR-API-03. Enforces
     /// FR-API-05 expiry, FR-API-06 size limit, FR-DID-06 did:web rejection, and the
-    /// FR-CONSIST-01..06 addressing-consistency rules (FR-CONSIST-06 is resolver-backed).
+    /// FR-CONSIST-01..06 addressing-consistency rules (FR-CONSIST-06 is resolver-backed;
+    /// FR-CONSIST-04 is advisory — evaluated against <see cref="DidCommOptions.OwnIdentifiers"/>
+    /// and the decrypting kid, surfaced as <see cref="UnpackResult.RecipientAddressing"/>, and
+    /// never rejects the message).
     /// </summary>
     /// <remarks>
     /// <strong>Support boundary:</strong> the recipient (secret-key) decrypt path runs natively async
@@ -385,7 +429,8 @@ public sealed class DidCommClient
         // public-key DID resolutions and DataProofs' IJweSenderKeyResolver / JwsParser contracts for
         // them are synchronous (not a secret-key path).
         var internalResult = await EnvelopeReader.UnpackAsync(
-            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext, ct).ConfigureAwait(false);
+            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext,
+            _ownDidSubjects, ct).ConfigureAwait(false);
         var message = internalResult.Message;
 
         if (message.From is not null)
@@ -452,6 +497,7 @@ public sealed class DidCommClient
             SenderKeyBinding = internalResult.SenderKeyBinding,
             SignerKeyBinding = internalResult.SignerKeyBinding,
             RecipientKeyBinding = internalResult.RecipientKeyBinding,
+            RecipientAddressing = internalResult.RecipientAddressing,
         };
     }
 

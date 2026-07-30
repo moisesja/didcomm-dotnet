@@ -144,6 +144,106 @@ public sealed class DidCommClientUnitTests
             .Where(e => e.Message.Contains("MaxReceiveBytes"));
     }
 
+    [Fact]
+    public async Task Unpack_WarnsWhenOwnIdentifierAbsentFromTo_FrConsist04()
+    {
+        // The agent declared who it is; the message's 'to' names someone else. The advisory
+        // FR-CONSIST-04 outcome must warn — and still deliver the message (#59).
+        var options = new DidCommOptions { OwnIdentifiers = new[] { "did:example:frank" } };
+        var client = NewClient(options);
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+        result.Message.Type.Should().Be("http://example.com/p/1.0/m");
+    }
+
+    [Fact]
+    public async Task Unpack_ReportsAddressedWhenOwnIdentifierInTo_FrConsist04()
+    {
+        var options = new DidCommOptions { OwnIdentifiers = new[] { "did:example:bob" } };
+        var client = NewClient(options);
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
+    public async Task Unpack_ReportsNotEvaluatedWhenUnconfigured_FrConsist04()
+    {
+        // No declared identity and no decrypting key on a plaintext message — nothing to check.
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
+    }
+
+    [Fact]
+    public async Task Unpack_NormalizesOwnIdentifierDidUrlToItsSubject_FrConsist04()
+    {
+        // Declaring a full key reference still matches the bare DID in 'to': the facade reduces each
+        // configured identifier to its DID subject once, at construction, so the per-message check
+        // compares subjects without re-parsing anything.
+        var options = new DidCommOptions { OwnIdentifiers = new[] { "did:example:bob#key-1" } };
+        var client = NewClient(options);
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
+    public async Task Unpack_DeduplicatesOwnIdentifiersSharingASubject_FrConsist04()
+    {
+        // Several DID URLs of the same subject collapse to one entry, so a roster of key references
+        // cannot inflate the prebuilt lookup.
+        var options = new DidCommOptions
+        {
+            OwnIdentifiers = new[] { "did:example:bob#key-1", "did:example:bob#key-2", "did:example:bob" },
+        };
+        var client = NewClient(options);
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
+    public void Construction_RejectsUnparseableOwnIdentifier_FrConsist04()
+    {
+        // A typo'd entry would otherwise be skipped silently on every message, leaving the
+        // recipient-addressing warning permanently dead with no indication to the operator.
+        var options = new DidCommOptions { OwnIdentifiers = new[] { "did:example:bob", "bob@example.com" } };
+
+        Action act = () => NewClient(options);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*bob@example.com*FR-CONSIST-04*");
+    }
+
+    [Fact]
+    public async Task Unpack_IsUnaffectedByOwnIdentifiersMutatedAfterConstruction_FrConsist04()
+    {
+        // The options object is shared and mutable; enumerating it live mid-unpack would throw
+        // (and drop the message) the moment the app appended to its own list. The advisory check
+        // must never affect delivery, so the client works from a construction-time snapshot.
+        var live = new List<string> { "did:example:frank" };
+        var client = NewClient(new DidCommOptions { OwnIdentifiers = live });
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        live.Add("did:example:bob"); // would make it "Addressed" if read live
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+    }
+
     /// <summary>Empty resolver — every secrets call returns null / empty.</summary>
     private sealed class EmptySecretsResolver : ISecretsResolver
     {
