@@ -15,11 +15,16 @@ namespace DidComm.Tests.Envelopes.Composition;
 /// FR-CONSIST-04 (#59) — the advisory "recipient not named in 'to'" check. The outcome rides on
 /// <see cref="UnpackResult.RecipientAddressing"/>: <c>NotAddressed</c> is the spec's SHOULD-level
 /// warning and never rejects the message. Own identity = the decrypting kid's DID subject plus the
-/// caller-declared own identifiers (facade: <c>DidCommOptions.OwnIdentifiers</c>).
+/// declared own DID subjects. The envelope layer receives those already normalized; the facade's
+/// construction-time normalization (DID URL ⇒ subject, dedupe, reject unparseable) is covered in
+/// <c>DidCommClientUnitTests</c>.
 /// </summary>
 public sealed class RecipientAddressingTests
 {
     private static readonly JoseCryptoProvider _crypto = new();
+
+    private static IReadOnlySet<string> Own(params string[] didSubjects)
+        => new HashSet<string>(didSubjects, StringComparer.Ordinal);
 
     private static Message BuildMessage(string? from = null, params string[] to)
     {
@@ -74,7 +79,7 @@ public sealed class RecipientAddressingTests
         Action act = () => EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(new[] { bob.PrivateJwk }),
             senderLookup: null, signerLookup: null, _crypto,
-            ownIdentifiers: new[] { "did:example:bob" });
+            ownDidSubjects: Own("did:example:bob"));
 
         act.Should().Throw<ConsistencyException>().WithMessage("*FR-CONSIST-02*");
     }
@@ -92,7 +97,7 @@ public sealed class RecipientAddressingTests
             senderLookup: null,
             signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
             _crypto,
-            ownIdentifiers: new[] { "did:example:bob" });
+            ownDidSubjects: Own("did:example:bob"));
 
         unpacked.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
         unpacked.Message.Type.Should().Be("https://didcomm.org/empty/1.0/empty");
@@ -111,25 +116,7 @@ public sealed class RecipientAddressingTests
             senderLookup: null,
             signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
             _crypto,
-            ownIdentifiers: new[] { "did:example:bob" });
-
-        unpacked.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
-    }
-
-    [Fact]
-    public async Task Own_identifier_given_as_did_url_matches_bare_did_in_to()
-    {
-        // Comparison is by DID subject, so declaring a full key reference still matches.
-        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
-        var packed = await PackSignedAsync(
-            BuildMessage(from: "did:example:alice", to: "did:example:bob"), signer);
-
-        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
-            new DictionarySecretsLookup(Array.Empty<Jwk>()),
-            senderLookup: null,
-            signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
-            _crypto,
-            ownIdentifiers: new[] { "did:example:bob#key-1" });
+            ownDidSubjects: Own("did:example:bob"));
 
         unpacked.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
     }
@@ -159,7 +146,7 @@ public sealed class RecipientAddressingTests
         var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null, signerLookup: null, _crypto,
-            ownIdentifiers: new[] { "did:example:bob" });
+            ownDidSubjects: Own("did:example:bob"));
 
         unpacked.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
         unpacked.Message.Type.Should().Be("https://didcomm.org/empty/1.0/empty");
@@ -173,24 +160,9 @@ public sealed class RecipientAddressingTests
         var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
             senderLookup: null, signerLookup: null, _crypto,
-            ownIdentifiers: new[] { "did:example:bob" });
+            ownDidSubjects: Own("did:example:bob"));
 
         unpacked.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
-    }
-
-    [Fact]
-    public void Unparseable_own_identifier_does_not_manufacture_a_warning()
-    {
-        // A misconfigured entry that is not a DID must be skipped, not counted as
-        // "checked and absent" — otherwise every to-carrying message would warn.
-        var packed = EnvelopeWriter.PackPlaintext(BuildMessage(to: "did:example:carol"));
-
-        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
-            new DictionarySecretsLookup(Array.Empty<Jwk>()),
-            senderLookup: null, signerLookup: null, _crypto,
-            ownIdentifiers: new[] { "not-a-did" });
-
-        unpacked.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
     }
 
     [Fact]

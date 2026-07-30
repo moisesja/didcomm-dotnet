@@ -184,6 +184,38 @@ public sealed class DidCommClientUnitTests
     }
 
     [Fact]
+    public async Task Unpack_NormalizesOwnIdentifierDidUrlToItsSubject_FrConsist04()
+    {
+        // Declaring a full key reference still matches the bare DID in 'to': the facade reduces each
+        // configured identifier to its DID subject once, at construction, so the per-message check
+        // compares subjects without re-parsing anything.
+        var options = new DidCommOptions { OwnIdentifiers = new[] { "did:example:bob#key-1" } };
+        var client = NewClient(options);
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
+    public async Task Unpack_DeduplicatesOwnIdentifiersSharingASubject_FrConsist04()
+    {
+        // Several DID URLs of the same subject collapse to one entry, so a roster of key references
+        // cannot inflate the prebuilt lookup.
+        var options = new DidCommOptions
+        {
+            OwnIdentifiers = new[] { "did:example:bob#key-1", "did:example:bob#key-2", "did:example:bob" },
+        };
+        var client = NewClient(options);
+        var packed = await client.PackPlaintextAsync(NewMessage());
+
+        var result = await client.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
     public void Construction_RejectsUnparseableOwnIdentifier_FrConsist04()
     {
         // A typo'd entry would otherwise be skipped silently on every message, leaving the

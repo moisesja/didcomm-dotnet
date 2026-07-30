@@ -37,24 +37,35 @@ The rule lives with its siblings as `AddressingConsistency.CheckRecipientAddress
 never-called `IsRecipientInTo` predicate whose absence of a caller was the defect.
 
 Advisory only: no `RecipientAddressing` value ever affects delivery, and the surfaced value is an
-enum — no plaintext body content enters logs or metadata (NFR-04). Three properties of the
-implementation are load-bearing and were validated adversarially before release:
+enum — no plaintext body content enters logs or metadata (NFR-04).
 
-- **No identity-enumeration oracle.** The sender-authored `to` list is parsed once into a subject
-  set and every own identifier is answered by hash lookup with no early exit, so the running time
-  depends only on the two list sizes — both already known to the sender. A short-circuiting
-  implementation leaked, via wall-clock alone, whether a guessed DID was one of the agent's and its
-  position in the configured list; an unauthenticated plaintext message could probe it for free and
-  enumerate a mediator's subscriber roster (measured 675× spread before, flat after).
-- **No CPU amplification.** That same single pass makes the cost `O(|to| + |own|)` rather than
-  `O(|to| × |own|)`, removing a multiplier that let one 1 MiB unauthenticated message cost ~24 ms
-  of parsing per declared identity (1.2 s at 50 identities; 12 ms after).
-- **Delivery really is unaffected.** `OwnIdentifiers` is snapshotted and validated once at
-  `DidCommClient` construction: enumerating the caller's live, mutable collection mid-unpack could
-  throw `InvalidOperationException` — dropping a message the advisory check must never touch — and
-  an entry that is not a parseable DID now fails at construction with `ArgumentException` instead of
-  being skipped silently on every message, which would have left the warning permanently dead with
-  no signal to the operator.
+Three properties of the implementation are load-bearing, and each is pinned by a test that fails
+against the implementation that lacks it (verified by injecting the defect):
+
+- **Per-message work is bounded by the wire input, never by the host's roster.** `OwnIdentifiers` is
+  parsed to DID subjects, deduplicated, and frozen once at `DidCommClient` construction; unpack then
+  walks only the `to` list against that prebuilt set and never enumerates it. The natural shape — a
+  per-message loop over the configured identifiers — instead makes cost `O(|to| × |own|)`, so an
+  agent declaring a large tenant roster would pay a roster-sized DID parse for every inbound
+  message, letting unauthenticated traffic amplify CPU by a receiver-chosen factor and exposing the
+  roster's scale through latency. `Recipient_addressing_never_enumerates_the_declared_identity_set`
+  asserts this structurally rather than by timing.
+- **No early exit.** Which `to` entry matched, or that none did, does not change the number of
+  parses or lookups performed, so a sender cannot time a large `to` list to learn whether a guessed
+  DID is one of the agent's. `Recipient_addressing_consumes_the_whole_to_sequence_even_when_the_first_entry_matches`
+  counts the enumeration, because a short-circuiting version returns the same enum value and would
+  otherwise pass. Note this is *not* a constant-time comparison — hash lookups and string equality
+  are data-dependent, and no claim is made against fine-grained microarchitectural analysis; the
+  goal is that the dominant, network-visible cost carries no such signal.
+- **Delivery really is unaffected.** Snapshotting also decouples the check from the caller's live,
+  mutable collection, which if enumerated mid-unpack could throw `InvalidOperationException` and
+  drop a message the advisory check must never touch. An entry that is not a parseable DID fails at
+  construction with `ArgumentException` rather than being skipped silently on every message, which
+  would leave the warning permanently dead with no signal to the operator.
+
+Known limitation: the outcome is not mirrored onto `InboundMessageSnapshot` / `InboundObservation`,
+so observer-only applications cannot read it and the value goes stale if a caller rewrites
+`Message.To` or clones the result onto another message — tracked in **#61**.
 
 ## [1.4.0] - 2026-07-26
 

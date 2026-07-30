@@ -20,14 +20,14 @@ internal static class EnvelopeReaderTestRunner
         Func<string, Jwk?>? signerLookup,
         JoseCryptoProvider crypto,
         Func<string, string, string, bool>? resolverCheck = null,
-        IReadOnlyCollection<string>? ownIdentifiers = null)
+        IReadOnlySet<string>? ownDidSubjects = null)
     {
         var keyOps = new KeyOperationResolver(secrets, secrets as IOpaqueKeyResolver, crypto);
         Func<string, string, string, CancellationToken, Task<bool>>? asyncCheck =
             resolverCheck is null ? null : (a, b, c, _) => Task.FromResult(resolverCheck(a, b, c));
         return EnvelopeReader
             .UnpackAsync(packed, keyOps, senderLookup, signerLookup, crypto, asyncCheck,
-                ownIdentifiers: ownIdentifiers)
+                ownDidSubjects: ownDidSubjects)
             .GetAwaiter().GetResult();
     }
 }

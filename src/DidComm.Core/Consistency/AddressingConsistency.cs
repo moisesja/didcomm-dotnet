@@ -111,50 +111,63 @@ internal static class AddressingConsistency
     /// <c>UnpackResult.RecipientAddressing</c> and the message is delivered either way.
     /// </summary>
     /// <remarks>
-    /// An identifier that does not parse as a DID/DID URL is skipped rather than counted as
-    /// "checked and absent", so one misconfigured entry cannot manufacture a spurious warning on
-    /// every message. The attacker-authored <c>to</c> list is parsed exactly once into a subject
-    /// set and each own identifier is then answered by hash lookup, with no early exit: the work —
-    /// and so the wall-clock — depends only on the list sizes, both already known to the sender.
-    /// Short-circuiting on the first match would leak whether a guessed DID is one of ours and its
-    /// position in the configured list, an identity-enumeration oracle that an unauthenticated
-    /// plaintext message could probe for free.
+    /// <para>
+    /// <strong>Per-message work is bounded by the wire input, never by the host's roster.</strong>
+    /// The declared identifiers arrive already normalized to DID subjects and deduplicated — built
+    /// once when the facade is constructed — so this walks the attacker-controlled <c>to</c>
+    /// sequence exactly once, parsing each entry and answering it by hash lookup against that
+    /// prebuilt set. <paramref name="ownDidSubjects"/> is never enumerated here: an agent hosting
+    /// 100k identities must not pay 100k DID parses for a one-entry <c>to</c>, or unauthenticated
+    /// traffic could amplify CPU by a receiver-chosen factor and leak the roster's scale through
+    /// latency. <c>Count</c> is read only to decide whether any identity exists to check at all.
+    /// </para>
+    /// <para>
+    /// There is also no early exit on the first match, so which entry matched (or that none did)
+    /// does not change the number of parses or lookups performed. That removes the coarse,
+    /// remotely-observable signal a short-circuit would give — a sender could otherwise time a
+    /// large <c>to</c> list to learn whether a guessed DID is one of ours. This is emphatically
+    /// <em>not</em> a constant-time comparison: <see cref="HashSet{T}"/> lookups and ordinal string
+    /// equality are data-dependent, and no claim is made against fine-grained microarchitectural
+    /// analysis. The goal is that the dominant, network-visible cost carries no such signal.
+    /// </para>
+    /// <para>
+    /// One coarse distinction does remain by design: with no identity to check against, the method
+    /// returns before walking <c>to</c> at all, so timing can reveal <em>whether</em> this agent
+    /// evaluates addressing — a static local configuration fact, not roster size, membership, or
+    /// anything per-message. Walking <c>to</c> anyway would make every unconfigured agent pay full
+    /// parsing cost on every message for an outcome that cannot exist, which is the worse trade.
+    /// </para>
+    /// <para>
+    /// A <c>to</c> entry that does not parse as a DID/DID URL is skipped rather than counted as
+    /// "checked and absent", so malformed addressing cannot manufacture a spurious warning.
+    /// </para>
     /// </remarks>
     /// <param name="to">The plaintext <c>to</c> array; null means the header was absent.</param>
     /// <param name="recipientKid">The kid whose private key decrypted this envelope, or null when there was none.</param>
-    /// <param name="ownIdentifiers">Application-declared own DIDs / DID URLs; may be null or empty.</param>
+    /// <param name="ownDidSubjects">
+    /// The agent's own identities, pre-normalized to bare DID subjects and deduplicated (see
+    /// <c>DidCommClient</c>'s construction-time snapshot). Must contain DID subjects, not DID URLs —
+    /// entries are compared verbatim. May be null or empty.
+    /// </param>
     public static RecipientAddressing CheckRecipientAddressing(
         IEnumerable<string>? to,
         string? recipientKid,
-        IReadOnlyCollection<string>? ownIdentifiers)
+        IReadOnlySet<string>? ownDidSubjects)
     {
         if (to is null) return RecipientAddressing.NotEvaluated;
 
-        var toSubjects = new HashSet<string>(StringComparer.Ordinal);
+        var kidSubject = recipientKid is null ? null : DidSubject.DidSubjectOf(recipientKid);
+        var haveDeclared = ownDidSubjects is { Count: > 0 };
+        if (kidSubject is null && !haveDeclared) return RecipientAddressing.NotEvaluated;
+
+        var addressed = false;
         foreach (var t in to)
         {
-            if (DidSubject.DidSubjectOf(t) is { } toSubject)
-                toSubjects.Add(toSubject);
+            if (DidSubject.DidSubjectOf(t) is not { } toSubject) continue;
+            addressed |= kidSubject is not null && string.Equals(toSubject, kidSubject, StringComparison.Ordinal);
+            addressed |= haveDeclared && ownDidSubjects!.Contains(toSubject);
         }
 
-        bool evaluated = false, addressed = false;
-        if (recipientKid is not null && DidSubject.DidSubjectOf(recipientKid) is { } kidSubject)
-        {
-            evaluated = true;
-            addressed |= toSubjects.Contains(kidSubject);
-        }
-
-        if (ownIdentifiers is not null)
-        {
-            foreach (var identifier in ownIdentifiers)
-            {
-                if (DidSubject.DidSubjectOf(identifier) is not { } ownSubject) continue;
-                evaluated = true;
-                addressed |= toSubjects.Contains(ownSubject);
-            }
-        }
-
-        if (!evaluated) return RecipientAddressing.NotEvaluated;
         return addressed ? RecipientAddressing.Addressed : RecipientAddressing.NotAddressed;
     }
 

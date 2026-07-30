@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using DidComm.Composition;
 using DidComm.Consistency;
 using DidComm.Exceptions;
@@ -32,11 +33,10 @@ public sealed class DidCommClient
     // path is selected when the registered ISecretsResolver also implements IOpaqueKeyResolver (or
     // one is registered separately), so non-extractable (HSM/KMS/keystore) keys never surface 'd'.
     private readonly KeyOperationResolver _keyOps;
-    // Snapshot of DidCommOptions.OwnIdentifiers taken at construction (FR-CONSIST-04, #59). The
-    // options object is mutable and shared: enumerating the caller's live collection mid-unpack
-    // would throw if the app appended to it (e.g. provisioning a new DID), turning an advisory
-    // check into a dropped message. Copying once keeps the "never affects delivery" guarantee true.
-    private readonly IReadOnlyCollection<string> _ownIdentifiers;
+    // DidCommOptions.OwnIdentifiers, normalized to bare DID subjects and frozen at construction
+    // (FR-CONSIST-04, #59). Prebuilt so per-message addressing work scales with the wire's 'to'
+    // list only, never with the declared roster — see SnapshotOwnIdentifiers.
+    private readonly FrozenSet<string> _ownDidSubjects;
 
     /// <summary>Initialize the facade. Routing (FR-ROUTE-*) is unavailable without an <see cref="IServiceEndpointResolver"/>; for that, use the <see cref="DidCommClient(ISecretsResolver, IDidKeyService, IServiceEndpointResolver, DidCommOptions)"/> overload or register the facade through <c>AddDidComm</c>.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -103,32 +103,41 @@ public sealed class DidCommClient
         // way the extractable path is preserved when no opaque capability is present (FR-SEC-06).
         var opaque = opaqueKeys ?? secrets as IOpaqueKeyResolver;
         _keyOps = new KeyOperationResolver(secrets, opaque, cryptoProvider);
-        _ownIdentifiers = SnapshotOwnIdentifiers(options.OwnIdentifiers);
+        _ownDidSubjects = SnapshotOwnIdentifiers(options.OwnIdentifiers);
     }
 
     /// <summary>
-    /// Copy and validate <see cref="DidCommOptions.OwnIdentifiers"/> once (FR-CONSIST-04, #59). An
-    /// entry that is not a parseable DID / DID URL is rejected here rather than silently skipped per
-    /// message: skipping is the correct behavior for the check itself (a typo must not make every
-    /// message warn), but it makes a misconfigured agent indistinguishable from an unconfigured one,
-    /// so the recipient-addressing signal would be permanently dead with no indication. Failing at
-    /// construction turns that into a startup error the operator can actually see.
+    /// Resolve <see cref="DidCommOptions.OwnIdentifiers"/> to a frozen set of DID subjects, once
+    /// (FR-CONSIST-04, #59). Every per-message cost of the recipient-addressing check is paid here
+    /// instead: parsing each declared DID URL down to its subject, deduplicating, and building the
+    /// lookup. Unpack then walks only the wire's <c>to</c> list against this set, so an agent
+    /// declaring a large tenant roster does not turn each unauthenticated inbound message into a
+    /// roster-sized parse — the amplification and latency-visible roster signal that made a
+    /// per-message loop over the raw strings unacceptable.
     /// </summary>
-    private static IReadOnlyCollection<string> SnapshotOwnIdentifiers(IReadOnlyCollection<string>? configured)
+    /// <remarks>
+    /// Snapshotting also decouples the check from the caller's live, mutable collection: enumerating
+    /// that mid-unpack would throw if the app appended to it, turning an advisory check into a
+    /// dropped message. An entry that is not a parseable DID / DID URL is rejected here rather than
+    /// silently skipped per message: skipping is right for the check itself (a typo must not make
+    /// every message warn), but it renders a misconfigured agent indistinguishable from an
+    /// unconfigured one, leaving the signal permanently dead with no indication. Failing at
+    /// construction turns that into a startup error the operator can actually see.
+    /// </remarks>
+    private static FrozenSet<string> SnapshotOwnIdentifiers(IReadOnlyCollection<string>? configured)
     {
-        if (configured is null || configured.Count == 0) return Array.Empty<string>();
+        if (configured is null || configured.Count == 0) return FrozenSet<string>.Empty;
 
-        var snapshot = configured.ToArray();
-        foreach (var identifier in snapshot)
+        var subjects = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var identifier in configured)
         {
-            if (DidSubject.DidSubjectOf(identifier) is null)
-            {
-                throw new ArgumentException(
+            var subject = DidSubject.DidSubjectOf(identifier)
+                ?? throw new ArgumentException(
                     $"DidCommOptions.OwnIdentifiers contains '{identifier}', which is not a parseable DID or DID URL (FR-CONSIST-04).",
                     nameof(configured));
-            }
+            subjects.Add(subject);
         }
-        return snapshot;
+        return subjects.ToFrozenSet(StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -421,7 +430,7 @@ public sealed class DidCommClient
         // them are synchronous (not a secret-key path).
         var internalResult = await EnvelopeReader.UnpackAsync(
             packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext,
-            _ownIdentifiers, ct).ConfigureAwait(false);
+            _ownDidSubjects, ct).ConfigureAwait(false);
         var message = internalResult.Message;
 
         if (message.From is not null)

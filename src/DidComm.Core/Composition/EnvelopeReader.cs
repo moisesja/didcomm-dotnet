@@ -72,11 +72,13 @@ internal static class EnvelopeReader
     /// kid is known, and the resulting <see cref="Facade.VerifiedKeyBinding"/> evidence is attached
     /// to the result. Null / non-capable falls back to <paramref name="resolverCheck"/>.
     /// </param>
-    /// <param name="ownIdentifiers">
-    /// The DIDs (or DID URLs) the receiving agent considers its own identity (FR-CONSIST-04, #59).
-    /// Combined with the decrypting kid's DID subject to compute the advisory
-    /// <see cref="Facade.RecipientAddressing"/> outcome on the result; never causes a rejection.
-    /// Null/empty means only the decrypting kid (when the envelope was encrypted) is checked.
+    /// <param name="ownDidSubjects">
+    /// The receiving agent's own identities as bare DID subjects, pre-normalized and deduplicated by
+    /// the facade at construction (FR-CONSIST-04, #59) so this call's cost tracks the wire's
+    /// <c>to</c> list rather than the declared roster. Combined with the decrypting kid's DID subject
+    /// to compute the advisory <see cref="Facade.RecipientAddressing"/> outcome on the result; never
+    /// causes a rejection. Null/empty means only the decrypting kid (when the envelope was
+    /// encrypted) is checked.
     /// </param>
     /// <param name="ct">Cancellation token for the (possibly I/O-bound) key agreement and DID resolution.</param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
@@ -90,7 +92,7 @@ internal static class EnvelopeReader
         JoseCryptoProvider cryptoProvider,
         Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
         UnpackKeyBindingContext? bindingContext = null,
-        IReadOnlyCollection<string>? ownIdentifiers = null,
+        IReadOnlySet<string>? ownDidSubjects = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
@@ -167,7 +169,7 @@ internal static class EnvelopeReader
                     // rejection always wins: is one of this agent's own identifiers named in 'to'?
                     // Surfaced on the result rather than thrown; the spec forbids failing delivery here.
                     var recipientAddressing = AddressingConsistency.CheckRecipientAddressing(
-                        message.To, recipientKid, ownIdentifiers);
+                        message.To, recipientKid, ownDidSubjects);
 
                     // FR-CONSIST-06 — the kids surfaced by the cryptographic layers must be
                     // genuinely authorized in their asserted DID Documents.
