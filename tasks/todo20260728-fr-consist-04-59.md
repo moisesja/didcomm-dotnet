@@ -48,13 +48,13 @@ Nine findings. Three were real and are fixed; the rest are documentation or acce
 
 | # | Sev | Finding | Disposition |
 |---|-----|---------|-------------|
-| 1 | High | Identity-enumeration **timing oracle**: early-exit on first match let an unauthenticated 1 MiB plaintext reveal whether a guessed DID is ours and its index in `OwnIdentifiers` (675× spread) | **Fixed** — single-pass subject set, no early exit. Re-measured: 9.3 / 9.3 / 9.5 ms for first / middle / last match vs 11.0 ms miss — flat |
-| 2 | High | **CPU amplification**: cost was O(\|to\| × \|own\|) (~24 ms per identity per MiB; 1.2 s at 50) | **Fixed** by the same rewrite → O(\|to\| + \|own\|). Re-measured 9.5 ms (0 ids) → 11.6 ms (50) → 13.5 ms (200) |
+| 1 | High | An early exit made parse/lookup count depend on match position | **Fixed** — every parseable wire entry is parsed and probed. This removes the coarse work-count channel, not all membership timing: set hit/miss paths and string equality remain data-dependent |
+| 2 | High | **CPU amplification:** calling the old predicate once per configured identity cost O(\|to\| × \|own\|); the first wired rewrite improved that to O(\|to\| + \|own\|) but retained a roster-sized per-message term | **Fixed** — declared subjects are normalized/deduplicated/frozen once; per-message work is O(\|to\|) |
 | 3 | Med | "Never affects delivery" was **false**: enumerating the caller's live mutable `OwnIdentifiers` mid-unpack threw `InvalidOperationException`, dropping the message | **Fixed** — snapshotted at `DidCommClient` construction; regression test added |
-| 5 | Med | A typo'd identifier was skipped silently, leaving the warning permanently dead with no operator signal | **Fixed** — `ArgumentException` at construction; the per-message skip stays as defense in depth |
+| 5 | Med | A typo'd configured identifier was skipped silently, leaving the warning permanently dead with no operator signal | **Fixed** — `ArgumentException` at construction; the per-message path receives only validated, normalized subjects |
 | 4 | Med | `Addressed` is attacker-authored on unauthenticated envelopes; omitting `to` silences the warning | **Documented** — trust-boundary remarks on the enum, `UnpackResult`, and the cookbook. Splitting `NotEvaluated` into no-`to` vs not-configured is a possible follow-up |
 | 6, 7 | Low | A `with`-clone or an in-place `Message.To` edit leaves the enum stale; no snapshot backstop like the #56 bindings | **Documented** as the weaker channel (plan scoped snapshot/observation mirroring out). Follow-up candidate |
-| 8, 9 | Info | `DidSubjectOf` normalization gaps all fail *safe* (toward a spurious warning, never a suppressed one); decrypting-kid match short-circuits `OwnIdentifiers` on the encrypted path | Accepted; noted |
+| 8, 9 | Info | `DidSubjectOf` normalization gaps fail toward `NotAddressed`; encrypted envelopes also carry the stronger FR-CONSIST-02 check | Accepted; documented |
 
 Explicitly cleared: FR-CONSIST-02/01/03/05 ordering unchanged (advisory runs strictly after every
 MUST); direct forgery blocked (`internal init` — verified by compile failure from an external
@@ -86,23 +86,24 @@ Also addressed:
 - **Tests that actually pin the properties.** The reviewer was right that the old
   `..._regardless_of_match_position` test asserted only enum values a short-circuit would also
   return. Replaced with two instrumented tests — a counting `to` sequence (asserts all entries
-  consumed, sequence walked once) and a `ProbeOnlySet` that counts enumeration and `Contains` calls
-  (asserts the roster is never walked). **Verified they have teeth by injecting the two defects and
-  confirming exactly those two tests fail** while the other 21 pass.
+  consumed, sequence walked once) and a parameterized `ProbeOnlySet` covering first/middle/last/miss
+  (asserts the roster is never walked and every parseable wire entry triggers exactly one
+  `Contains` call). The exact lookup count matters: `addressed || Contains(...)` would keep parsing
+  the wire after a match while silently skipping later lookups.
 - **Overclaimed language corrected.** Dropped "no identity-enumeration oracle" and the
   machine-specific ms figures from CHANGELOG/PRD in favor of the structural invariants the tests
-  pin, and stated plainly that this is *not* constant-time (hash lookups and string equality are
-  data-dependent; no claim against microarchitectural analysis). Also documented the one coarse
-  distinction that remains by design: with nothing to check, the method returns before parsing `to`,
-  so timing reveals *whether* the agent evaluates addressing — a static config fact, not roster size
-  or membership. Walking `to` anyway would tax every unconfigured agent on every message.
+  pin. The guarantee is only that per-message work is independent of roster size and operation
+  counts are independent of match position. Frozen-set hit/miss paths and ordinal equality are
+  data-dependent, and repeated guessed DIDs can amplify that residual timing difference. Also
+  documented the coarse distinction that remains by design: with nothing to check, the method
+  returns before parsing `to`, so timing reveals whether the agent evaluates addressing at all.
 - **Completeness gap filed, not left in prose.** Snapshot/observation mirroring is now issue **#61**,
   linked from the `UnpackResult` XML doc and the CHANGELOG.
 
 ### Verification
 
 - `dotnet build DidComm.sln -c Release /warnaserror` — 0 warnings, 0 errors
-- `dotnet test DidComm.sln -c Release` — **843 passed** (682 Core + 161 interop), 0 failed
+- `dotnet test DidComm.sln -c Release` — **846 passed** (685 Core + 161 interop), 0 failed
 - `dotnet pack DidComm.sln -c Release` — ApiCompat / package validation clean against the 1.3.0 baseline (member is non-positional `public get` / `internal init`; positional ctors untouched)
 - Cookbook Section K runs and prints `RecipientAddressing = Addressed`
 - Timing/DoS fixes measured directly through the public facade, not asserted by inspection

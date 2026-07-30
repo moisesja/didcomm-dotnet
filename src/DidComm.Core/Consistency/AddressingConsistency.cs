@@ -123,12 +123,13 @@ internal static class AddressingConsistency
     /// </para>
     /// <para>
     /// There is also no early exit on the first match, so which entry matched (or that none did)
-    /// does not change the number of parses or lookups performed. That removes the coarse,
-    /// remotely-observable signal a short-circuit would give — a sender could otherwise time a
-    /// large <c>to</c> list to learn whether a guessed DID is one of ours. This is emphatically
-    /// <em>not</em> a constant-time comparison: <see cref="HashSet{T}"/> lookups and ordinal string
-    /// equality are data-dependent, and no claim is made against fine-grained microarchitectural
-    /// analysis. The goal is that the dominant, network-visible cost carries no such signal.
+    /// does not change the number of parses or lookups performed. That removes the coarse
+    /// match-position signal a short-circuit would create. It does <em>not</em> make membership
+    /// testing constant-time: hash-set hit/miss paths and ordinal string equality
+    /// are data-dependent, and a sender can repeat one guessed DID throughout the bounded
+    /// <c>to</c> list to amplify that residual difference. The guarantee here is deliberately
+    /// narrower: per-message parse/lookup count has no term linear in the configured roster, and
+    /// those operation counts do not change with match position.
     /// </para>
     /// <para>
     /// One coarse distinction does remain by design: with no identity to check against, the method
@@ -138,8 +139,10 @@ internal static class AddressingConsistency
     /// parsing cost on every message for an outcome that cannot exist, which is the worse trade.
     /// </para>
     /// <para>
-    /// A <c>to</c> entry that does not parse as a DID/DID URL is skipped rather than counted as
-    /// "checked and absent", so malformed addressing cannot manufacture a spurious warning.
+    /// A <c>to</c> entry that does not parse as a DID/DID URL cannot match and is skipped. If a
+    /// present <c>to</c> list contains no parseable own DID subject, the outcome is
+    /// <see cref="RecipientAddressing.NotAddressed"/>; structural validation of FR-MSG-07 is a
+    /// separate responsibility.
     /// </para>
     /// </remarks>
     /// <param name="to">The plaintext <c>to</c> array; null means the header was absent.</param>

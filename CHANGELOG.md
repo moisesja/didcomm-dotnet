@@ -26,8 +26,9 @@ log line, so applications can act on it in policy code:
 - **New `DidCommOptions.OwnIdentifiers`** (default empty): the DIDs (or DID URLs) the agent
   considers its own identity. The check evaluates the union of these and the decrypting recipient
   kid's DID subject. Declaring identities is what makes the warning reachable on **signed-only
-  and plaintext** receives — the paths that previously had no addressing check at all; an entry
-  that does not parse as a DID is skipped, never counted as "checked and absent".
+  and plaintext** receives — the paths that previously had no addressing check at all. An entry
+  that does not parse as a DID is rejected when `DidCommClient` is constructed so a typo cannot
+  silently disable the signal.
 - **Interaction with FR-CONSIST-02 (unchanged):** for encrypted envelopes with a present `to`,
   the stronger MUST already rejects a message whose `to` omits the decrypting kid's DID subject —
   that ordering is preserved (the MUST throws before the advisory is computed), which is why the
@@ -42,21 +43,22 @@ enum — no plaintext body content enters logs or metadata (NFR-04).
 Three properties of the implementation are load-bearing, and each is pinned by a test that fails
 against the implementation that lacks it (verified by injecting the defect):
 
-- **Per-message work is bounded by the wire input, never by the host's roster.** `OwnIdentifiers` is
+- **Per-message operation count has no roster-linear term.** `OwnIdentifiers` is
   parsed to DID subjects, deduplicated, and frozen once at `DidCommClient` construction; unpack then
-  walks only the `to` list against that prebuilt set and never enumerates it. The natural shape — a
-  per-message loop over the configured identifiers — instead makes cost `O(|to| × |own|)`, so an
-  agent declaring a large tenant roster would pay a roster-sized DID parse for every inbound
-  message, letting unauthenticated traffic amplify CPU by a receiver-chosen factor and exposing the
-  roster's scale through latency. `Recipient_addressing_never_enumerates_the_declared_identity_set`
-  asserts this structurally rather than by timing.
-- **No early exit.** Which `to` entry matched, or that none did, does not change the number of
-  parses or lookups performed, so a sender cannot time a large `to` list to learn whether a guessed
-  DID is one of the agent's. `Recipient_addressing_consumes_the_whole_to_sequence_even_when_the_first_entry_matches`
-  counts the enumeration, because a short-circuiting version returns the same enum value and would
-  otherwise pass. Note this is *not* a constant-time comparison — hash lookups and string equality
-  are data-dependent, and no claim is made against fine-grained microarchitectural analysis; the
-  goal is that the dominant, network-visible cost carries no such signal.
+  walks only the `to` list against that prebuilt set and never enumerates it. Calling the old
+  per-identifier predicate once for every configured identity would cost
+  `O(|to| × |own|)`; the first wired implementation improved that to `O(|to| + |own|)` but still
+  made every unauthenticated message pay a roster-sized term. The frozen-set design removes that
+  receiver-chosen CPU multiplier and the roster-proportional latency term; ordinary cache effects
+  may still vary with set size. `Recipient_addressing_probes_every_to_entry_without_enumerating_the_declared_identity_set`
+  asserts the operation-count invariant structurally rather than by timing.
+- **No match-position-dependent operation count.** Which `to` entry matched, or that none did,
+  does not change the number of parses or set lookups performed.
+  `Recipient_addressing_consumes_the_whole_to_sequence_even_when_the_first_entry_matches` counts
+  wire enumeration, while the parameterized probe-set test requires one lookup per parseable
+  entry for first/middle/last/miss. This removes the coarse short-circuit channel; it is *not* a
+  constant-time membership guarantee. Frozen-set hit/miss paths and ordinal string equality are
+  data-dependent, and repeated guessed DIDs can amplify that residual difference.
 - **Delivery really is unaffected.** Snapshotting also decouples the check from the caller's live,
   mutable collection, which if enumerated mid-unpack could throw `InvalidOperationException` and
   drop a message the advisory check must never touch. An entry that is not a parseable DID fails at

@@ -123,7 +123,7 @@ public sealed class AddressingConsistencyTests
     }
 
     [Fact]
-    public void Recipient_addressing_skips_unparseable_to_entries_rather_than_warning()
+    public void Recipient_addressing_treats_unparseable_to_entries_as_non_matches()
     {
         // Malformed addressing on the wire must not decide the outcome; the parseable entries do.
         AddressingConsistency.CheckRecipientAddressing(
@@ -151,22 +151,31 @@ public sealed class AddressingConsistencyTests
         to.EnumerationCount.Should().Be(1, "the sequence is walked exactly once, not once per identity");
     }
 
-    [Fact]
-    public void Recipient_addressing_never_enumerates_the_declared_identity_set()
+    [Theory]
+    [InlineData("did:example:bob", "did:example:carol", "did:example:dave", RecipientAddressing.Addressed)]
+    [InlineData("did:example:carol", "did:example:bob", "did:example:dave", RecipientAddressing.Addressed)]
+    [InlineData("did:example:carol", "did:example:dave", "did:example:bob", RecipientAddressing.Addressed)]
+    [InlineData("did:example:carol", "did:example:dave", "did:example:erin", RecipientAddressing.NotAddressed)]
+    public void Recipient_addressing_probes_every_to_entry_without_enumerating_the_declared_identity_set(
+        string first,
+        string second,
+        string third,
+        RecipientAddressing expected)
     {
         // Per-message work must scale with the bounded wire input, not with the host's roster: an
         // agent declaring 100k identities must not pay 100k DID parses for a one-entry 'to'. That is
-        // structural, not a timing measurement — the check may only probe the prebuilt set, so
-        // enumerating it (or reading anything but Count) fails here.
+        // structural, not a timing measurement. The check may only probe the prebuilt set, so
+        // enumerating it fails here. The exact Contains count also pins the non-short-circuiting
+        // lookup shape: first/middle/last/miss must all perform one lookup per parseable wire entry.
         var own = new ProbeOnlySet("did:example:bob");
-        var to = new[] { "did:example:carol", "did:example:bob", "did:example:dave" };
+        var to = new[] { first, second, third };
 
-        AddressingConsistency.CheckRecipientAddressing(to, "did:example:erin#x", own)
-            .Should().Be(RecipientAddressing.Addressed);
+        AddressingConsistency.CheckRecipientAddressing(to, "did:example:zoe#x", own)
+            .Should().Be(expected);
 
         own.EnumerationCount.Should().Be(0, "the declared roster must never be walked per message");
-        own.ContainsCalls.Should().BeLessThanOrEqualTo(to.Length,
-            "lookups are bounded by the wire's 'to' length, independent of roster size");
+        own.ContainsCalls.Should().Be(to.Length,
+            "every parseable wire entry must be probed even after an earlier match");
     }
 
     /// <summary>Counts how many entries were pulled, and how many times the sequence was walked.</summary>
