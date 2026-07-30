@@ -33,7 +33,10 @@ Maintenance rules:
 
 - Use subagents liberally to keep main context window clean
 - Offload research, exploration, and parallel analysis to subagents
-- Always use adversarial agents to attempt to exploit the code that is being generated. The adversarial agents must report in detail about any findings
+- When planning, use the Software Architect agent to provide a comprehensive design and plan. This agent knows the time proven software engineering patterns appropriate for the request.
+- Once approved, the implementation is handed to a top Staff level Software Engineer agent or agents. They understand all the implications of the design and always write flawless code.
+- Testing must be performed by a team of skilled QA agents that test not only the happy path, but all permutations. These team of Staff Engineers fixes all code reported as faulty and/or vulnerable.
+- Once the code is tested and given the ok by QA, use adversarial agents to attempt to exploit the code that has been generated. The adversarial agents must report in detail about any findings
 - For complex problems, throw more compute at it via subagents
 - One task per subagent for focused execution
 
