@@ -109,7 +109,27 @@ public sealed record InboundObservation(
     /// snapshot supplies the six positional members; its bindings remain null and its addressing
     /// remains <see cref="RecipientAddressing.NotEvaluated"/> (#61).
     /// </summary>
+    /// <remarks>
+    /// <strong>Thread affinity is the caller's (#63).</strong> This method reads
+    /// <paramref name="received"/>'s live <see cref="Message"/> — the caller's own instance, which
+    /// this library does not own or lock. <see cref="Message"/> is mutable, so another thread
+    /// mutating it (most easily its <c>To</c> or <c>ack</c> list) while the clone is being
+    /// serialized makes the serializer throw. Callers must therefore treat the message as
+    /// single-threaded for the duration of this call — or clone it first and pass the clone.
+    /// <para>
+    /// The library's own receive path never has this exposure and needs no such care: observer
+    /// delivery materializes every observation from the immutable inbound snapshot, which holds
+    /// verified plaintext as a string rather than a reference to any mutable message.
+    /// </para>
+    /// </remarks>
     /// <param name="received">The unpack result for the inbound message.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="received"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">Another thread mutated
+    /// <paramref name="received"/>'s <see cref="Message"/> — typically a collection-valued header
+    /// such as <c>To</c> or <c>ack</c> — while this method was serializing it.</exception>
+    /// <exception cref="JsonException">The message could not be serialized or the clone could not
+    /// be read back (for example, a caller-populated extension header holding a value the DIDComm
+    /// JSON options cannot round-trip).</exception>
     public static InboundObservation FromUnpackResult(UnpackResult received)
         => FromUnpackResult(received, out _);
 
@@ -118,6 +138,13 @@ public sealed record InboundObservation(
     /// exact UTF-8 size in bytes — retained as an internal compatibility helper. Normal observer
     /// delivery uses the verified unpack snapshot's exact plaintext byte count.
     /// </summary>
+    /// <remarks>
+    /// This is where both overloads serialize the caller's live <see cref="Message"/>, so this is
+    /// where the caller-owned thread-affinity requirement documented on
+    /// <see cref="FromUnpackResult(UnpackResult)"/> actually bites. Every in-library caller of this
+    /// seam must either own the message exclusively or run guarded — <c>ProtocolDispatcher</c> does
+    /// the latter (#63).
+    /// </remarks>
     /// <param name="received">The unpack result for the inbound message.</param>
     /// <param name="approxBytes">The serialized clone's exact UTF-8 byte count.</param>
     internal static InboundObservation FromUnpackResult(UnpackResult received, out int approxBytes)

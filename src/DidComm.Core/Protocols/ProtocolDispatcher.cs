@@ -134,10 +134,16 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
             }
             catch (Exception ex)
             {
+                // Null-conditional deliberately (#63): a null Message is one of the faults this
+                // handler catches (both snapshot paths null-check it), so dereferencing it here
+                // would throw a NullReferenceException out of the catch itself — turning the
+                // isolation boundary into the failure. With '?.' the caller sees the same clean
+                // ArgumentNullException from DispatchCoreAsync it would get with no observers or
+                // correlators registered, instead of a different fault for the same bad input.
                 SafeLogWarning(
                     ex,
                     "Could not snapshot synthetic inbound message {MessageId}; correlation and observer delivery are skipped, but protocol dispatch continues.",
-                    received.Message.Id);
+                    received.Message?.Id);
             }
         }
 
@@ -170,10 +176,15 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
+                    // Reaching here implies a non-null Message (both snapshot paths null-check it
+                    // before 'snapshot' can be set), but the null-conditional above already told the
+                    // compiler otherwise — and an isolation boundary is the wrong place to argue
+                    // with it. '?.' costs nothing and keeps every logging site in this method
+                    // incapable of raising a second fault while handling the first.
                     SafeLogWarning(
                         ex,
                         "Observer enqueue threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected (FR-PROTO-12).",
-                        received.Message.Id);
+                        received.Message?.Id);
                 }
             }
         }
