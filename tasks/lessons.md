@@ -886,3 +886,17 @@ Format per entry:
   the failure mode is accepted. Reserve "pre-existing" for what predates the branch. For
   acceptance-critical values, prefer a required parameter over a defaulted one — the safe-direction
   default is still a silent loss of signal. See [[L-038]].
+
+## L-047 — A direct PR review request is the execution approval; do not ask twice.
+
+- **Lesson:** When the user explicitly asks to review or re-check a pull request, that request
+  authorizes the normal review workflow: inspect the current revision, run proportionate validation,
+  and publish the requested review disposition. Write the required task plan for traceability, but do
+  not stop for a redundant second approval before doing the review.
+- **Why:** After explicitly asking to re-check PR #62, the user was forced through an unnecessary
+  approval gate even though no source implementation or unrelated external action was proposed. That
+  added friction without reducing risk.
+- **How to apply:** Treat “review this PR,” “re-check the PR,” and equivalent explicit requests as
+  approval of the PR-review plan and its ordinary GitHub review/comment write. Ask only when scope is
+  genuinely ambiguous or a materially different action is needed, such as editing the branch,
+  merging, closing issues, or changing repository settings.

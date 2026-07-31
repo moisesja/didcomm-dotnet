@@ -77,24 +77,29 @@ same snapshot backstop #56 built for the key bindings.
   positional constructor — binary compatible): observers receive the outcome on every dispatch
   path — handled, `NoHandler`, ack-loop drop, and handler failure — so an application that does
   its addressing policy in an `IProtocolObserver` actually sees the warning.
-- **Unforgeable at construction, never desynced by the library:** the observation value is
-  populated exclusively from the verified-at-unpack snapshot, never from the caller-supplied
-  result — a synthetic `UnpackResult` claiming `Addressed` (or a fallback snapshot built for one)
-  reads `NotEvaluated`. Observer delivery materializes the message and the outcome from the same
-  snapshot, so an in-place edit after unpack cannot hand an observer a (content, outcome) pair
-  the unpack never produced; `InboundObservation.FromUnpackResult` over content that diverged
-  from the verified snapshot reads `NotEvaluated`. The facade property remains the weaker,
-  `with`-clonable view; the observation is the snapshot-backed channel. **Scope:**
-  `InboundObservation` is itself a record, so a consumer's `with`-clone copies the stored value
-  onto whatever `Message` the clone carries — the guarantee covers observations as the library
-  constructs them, and a clone's value describes the message the observation was *built* from
-  (pinned by a test documenting the limitation).
-- **Trust metadata reads from the snapshot too:** when the verified snapshot still covers the
-  content, `InboundObservation.FromUnpackResult` now sources `Encrypted` / `Authenticated` /
-  `NonRepudiation` / `AnonymousSender` / `SenderKid` / `SignerKid` from it rather than from the
-  caller's result. The addressing outcome (and the #56 bindings) are documented as safe to act on
-  only together with those flags, and the result record's flags are rewritable by any `with`-clone
-  — so a clone that upgrades `Authenticated` can no longer change how a genuine outcome is read.
+- **Three explicit trust-source states:** `InboundObservation.FromUnpackResult` no longer treats
+  verified-content divergence like a synthetic result.
+  - When the verified snapshot still covers the current message content, all observation metadata
+    comes from it: the six positional trust members (`Encrypted` / `Authenticated` /
+    `NonRepudiation` / `AnonymousSender` / `SenderKid` / `SignerKid`), all three #56 key bindings,
+    and `RecipientAddressing`. Verified null kids and bindings remain null; they never fall back to
+    caller claims.
+  - When a verified snapshot exists for the message instance but its content has diverged, the
+    observation fails closed: all four flags are `false`, both kids and all three bindings are
+    null, and addressing is `NotEvaluated`. No caller-supplied trust value survives.
+  - Only a message that was never associated with a verified snapshot takes the synthetic
+    compatibility path. It preserves the caller's six positional members, but all three bindings
+    remain null and addressing remains `NotEvaluated`, whatever the synthetic result claims.
+- **Never desynced on the verified-snapshot path:** normal observer delivery for a real unpack
+  materializes the message and all metadata from the same verified snapshot, so an in-place edit
+  after unpack cannot hand an observer a (content, metadata) pair the unpack never produced.
+  The public dispatcher also accepts caller-created synthetic results; that fallback preserves
+  only the six positional caller claims and is not cryptographic evidence. **Scope:**
+  `InboundObservation` is itself a record. A consumer's `with`-clone copies the stored values onto
+  whatever `Message` the clone carries, and direct mutation changes the mutable message without
+  recomputing metadata. The pairing guarantee therefore covers observations as the library
+  constructs them; after either consumer action, stored values still describe the message the
+  observation was *built* from (pinned by a test documenting the clone limitation).
 
 ### Notes for upgraders
 
@@ -105,10 +110,12 @@ same snapshot backstop #56 built for the key bindings.
   consumer-constructed one holding the default `NotEvaluated` — no longer compare equal, where
   before this release they did. Binary and source compatibility are unaffected; code that
   compared observations across that boundary should compare the members it means.
-- `InboundObservation.FromUnpackResult` now prefers the verified snapshot for the six
-  trust-metadata members (`Encrypted` / `Authenticated` / `NonRepudiation` / `AnonymousSender` /
-  `SenderKid` / `SignerKid`): a result whose flags or kids were rewritten via `with`-clone yields
-  an observation carrying the verified values whenever the snapshot still covers the content.
+- `InboundObservation.FromUnpackResult` now has three trust-source states. A covering verified
+  snapshot supplies all six positional members, all three key bindings, and addressing. A
+  verified snapshot whose message content has diverged supplies none of them: the four flags are
+  `false`, both kids and all three bindings are null, and addressing is `NotEvaluated`. Only a
+  never-snapshotted synthetic message preserves the caller's six positional members for
+  compatibility; caller-supplied bindings and addressing are never preserved.
 
 ## [1.4.0] - 2026-07-26
 

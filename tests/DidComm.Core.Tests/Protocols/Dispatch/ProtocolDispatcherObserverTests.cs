@@ -126,7 +126,7 @@ public sealed class ProtocolDispatcherObserverTests
             recipientAddressing: recipientAddressing);
 
     [Fact]
-    public async Task Observer_is_notified_after_a_handled_dispatch_with_a_faithful_clone()
+    public async Task Synthetic_dispatch_observer_preserves_only_positional_claims_on_a_faithful_clone()
     {
         var reg = new ProtocolHandlerRegistry();
         var handler = new CapturingHandler { ReplyToReturn = new MessageBuilder().WithType("https://didcomm.org/test/1.0/reply").Build() };
@@ -137,7 +137,16 @@ public sealed class ProtocolDispatcherObserverTests
         var msg = Msg("https://didcomm.org/test/1.0/m");
         msg.Body = new JsonObject { ["k"] = "v" };
 
-        var outcome = await dispatcher.DispatchAsync(Unpack(msg, authenticated: true), client: null, new DidCommOptions());
+        var synthetic = Unpack(msg, authenticated: true) with
+        {
+            NonRepudiation = true,
+            AnonymousSender = true,
+            SenderKid = "did:example:alice#ka",
+            SignerKid = "did:example:alice#sign",
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+
+        var outcome = await dispatcher.DispatchAsync(synthetic, client: null, new DidCommOptions());
         await dispatcher.FlushObserversAsync(Flush);
 
         outcome.Result.Should().Be(DispatchResult.ReplyProduced);
@@ -147,7 +156,17 @@ public sealed class ProtocolDispatcherObserverTests
         seen.Message.Body.Should().NotBeSameAs(msg.Body);
         seen.Message.Id.Should().Be(msg.Id);
         seen.Message.Body!["k"]!.GetValue<string>().Should().Be("v");
-        seen.Authenticated.Should().BeTrue("envelope-auth metadata must flow through for trust decisions");
+        seen.Encrypted.Should().BeTrue();
+        seen.Authenticated.Should().BeTrue();
+        seen.NonRepudiation.Should().BeTrue();
+        seen.AnonymousSender.Should().BeTrue();
+        seen.SenderKid.Should().Be("did:example:alice#ka");
+        seen.SignerKid.Should().Be("did:example:alice#sign");
+        seen.SenderKeyBinding.Should().BeNull();
+        seen.SignerKeyBinding.Should().BeNull();
+        seen.RecipientKeyBinding.Should().BeNull();
+        seen.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated,
+            "synthetic positional values are caller claims, not verified trust evidence");
     }
 
     private sealed class ThrowingHandler : IProtocolHandler

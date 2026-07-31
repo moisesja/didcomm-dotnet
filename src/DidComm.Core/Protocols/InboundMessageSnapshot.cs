@@ -8,9 +8,11 @@ using DidComm.Messages;
 namespace DidComm.Protocols;
 
 /// <summary>
-/// Immutable, library-internal snapshot of a successfully unpacked inbound plaintext and the trust
-/// metadata established while unpacking it. The snapshot deliberately contains no reference to the
-/// mutable <see cref="Message"/> used as its weak-table key.
+/// Immutable, library-internal snapshot of inbound plaintext and metadata. Normal unpack creates a
+/// verified snapshot whose trust fields were established while unpacking; the public dispatcher's
+/// synthetic compatibility path can create a fallback snapshot whose positional fields are caller
+/// claims and whose bindings/addressing are neutral. The snapshot deliberately contains no reference
+/// to the mutable <see cref="Message"/> used as a verified snapshot's weak-table key.
 /// </summary>
 internal sealed class InboundMessageSnapshot
 {
