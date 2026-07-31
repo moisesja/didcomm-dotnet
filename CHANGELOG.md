@@ -6,6 +6,46 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-31
+
+> Test-only. No shipped code changed — the six packages are functionally identical to 1.4.0, and
+> package validation is clean against the 1.4.0 baseline. Closes **#66**.
+
+### Fixed — flaky Discover Features correlator test under thread-pool contention (#66)
+
+`DiscoverFeaturesClientTests.Disclosure_parsing_runs_after_the_inline_correlator_returns` timed out
+on the ubuntu leg of CI while the Windows leg and the same tree on `main` passed — a scheduling
+flake, not an assertion failure. Reaching the wait it timed out on requires two thread-pool
+scheduling hops (the `Task.Run` that invokes the correlator, and the asynchronous requester
+continuation that calls the parser) while the test itself parks a pool thread. On a two-core runner
+the pool injects threads at roughly one per 500 ms once the initial burst is spent, so the 5 s
+budget was not generous.
+
+- **The trigger is gone.** The concurrent-unpack test added in #63 queued 64 `Task.Run` unpacks;
+  it now uses 16. The invariant it pins — every concurrent unpack registers exactly one snapshot —
+  does not get truer with more threads, but xUnit runs test collections in parallel, so that burst
+  could saturate a small runner's pool and starve waits in whatever ran alongside it.
+- **The fragility is gone.** Test-synchronization waits in `DiscoverFeaturesClientTests` now use a
+  named 30-second `SyncTimeout`, following the precedent `ProtocolDispatcherObserverTests` already
+  set for observer-pump scheduling: a budget paid only on the failure path, where a tight value
+  reports contention as a defect. Client deadline arguments that are themselves under test — every
+  `QueryFeaturesAsync` timeout assertion — are deliberately untouched at 5 s.
+- **One less scheduling hop.** That test's correlator call now runs on a dedicated thread rather
+  than the pool; the call is synchronous and the continuation it releases blocks, so the pool was
+  the wrong home for it. The remaining hop is the asynchronous requester continuation, which is the
+  behavior under test.
+
+Not reproducible locally — three pre-fix runs under `DOTNET_PROCESSOR_COUNT=2` passed, since that
+knob caps the runtime's CPU heuristics while real cores stay available. The change is reasoned from
+the stack trace and existing precedent rather than validated against a live repro; if it recurs, the
+next step is a genuinely constrained runner rather than a larger timeout.
+
+### Changed — package validation baseline moved to 1.4.0
+
+`PackageValidationBaselineVersion` now points at 1.4.0, the previous published release, so each pack
+compares against what consumers actually have. Routine post-release bookkeeping (see the note in
+[`Directory.Build.props`](Directory.Build.props)).
+
 ## [1.4.0] - 2026-07-31
 
 > Additive security + feature release — new public API, no wire change, no breaking change
@@ -2023,7 +2063,8 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.1.0...v1.2.0
