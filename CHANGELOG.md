@@ -8,7 +8,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 > Additive — new public API, no wire change, binary/API compatible (ApiCompat / package validation
 > clean against 1.3.0). Record value-equality semantics extend to the new members — see the
-> upgrader notes below. Closes **#59**, **#61**.
+> upgrader notes below. Closes **#59**, **#61**, **#63**.
 
 ### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
 
@@ -100,6 +100,37 @@ same snapshot backstop #56 built for the key bindings.
   recomputing metadata. The pairing guarantee therefore covers observations as the library
   constructs them; after either consumer action, stored values still describe the message the
   observation was *built* from (pinned by a test documenting the clone limitation).
+
+### Fixed — the dispatcher's snapshot guard could raise a second fault while handling the first (#63)
+
+`ProtocolDispatcher.DispatchAsync` wraps snapshot creation in a `catch` so a malformed caller-created
+`UnpackResult` cannot break dispatch. That handler logged `received.Message.Id` — the very expression
+whose null-ness is one of the faults it catches (both snapshot paths null-check the message). A
+caller-constructed `UnpackResult` with a null `Message` therefore surfaced as `NullReferenceException`
+*thrown from inside the catch* when an observer or correlator was registered, but as a clean
+`ArgumentNullException` when neither was — the same input, two different faults depending on host
+configuration. The message id is now read null-conditionally, so both configurations produce the same
+`ArgumentNullException`. Not reachable from the wire: the library never produces a null `Message`, and
+no unpack path accepts one — `UnpackResult` is a positional record, so only a caller can build this.
+
+### Documentation
+
+- **`InboundObservation.FromUnpackResult` thread affinity (#63).** The compatibility overload
+  serializes the caller's live `Message`, so a caller mutating that message on another thread —
+  most easily a collection-valued header such as `to` or `ack` — makes the serializer throw. The
+  exception is now documented (`InvalidOperationException`, alongside `ArgumentNullException` and
+  `JsonException`) together with the contract it implies: callers own the message's thread affinity
+  for the duration of the call. No behavior change, and the library's own receive path is unaffected
+  — observer delivery materializes every observation from the immutable snapshot, never from a
+  mutable message.
+- **Registration invariant pinned by test (#63).** `RegisterVerified` stores into a
+  `ConditionalWeakTable` with `Add`, which throws on a duplicate key; what keeps that safe is that
+  there is exactly one registration per unpack. New tests assert the count directly across all
+  envelope shapes, envelope-shaped body/attachment/extension-header payloads, and repeated
+  sequential and concurrent unpacks of identical bytes — so a future second registration site fails
+  loudly in CI whether or not it reuses the same message instance. The fail-fast `Add` is deliberate
+  and is now documented as such: `AddOrUpdate` would let a later, weaker registration silently
+  replace verified trust metadata.
 
 ### Notes for upgraders
 

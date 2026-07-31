@@ -26,14 +26,17 @@ public sealed class InboundMessageSnapshotTests
             "InboundMessageSnapshot._utf8ByteCount not found — if the lazy backing field was " +
             "renamed, update this test so it keeps proving the unpack path does not scan the plaintext.");
 
-    private static InboundMessageSnapshot RegisteredSnapshot()
-    {
-        var message = new Message { Id = "m1", Type = "https://didcomm.org/x/1.0/m" };
+    private static void Register(Message message, string plaintextJson) =>
         InboundMessageSnapshot.RegisterVerified(
-            message, PlaintextJson,
+            message, plaintextJson,
             encrypted: false, authenticated: false, nonRepudiation: false, anonymousSender: false,
             senderKid: null, signerKid: null, recipientKid: null,
             recipientAddressing: RecipientAddressing.NotEvaluated);
+
+    private static InboundMessageSnapshot RegisteredSnapshot()
+    {
+        var message = new Message { Id = "m1", Type = "https://didcomm.org/x/1.0/m" };
+        Register(message, PlaintextJson);
         InboundMessageSnapshot.TryGetFor(message, out var snapshot).Should().BeTrue();
         return snapshot;
     }
@@ -66,6 +69,28 @@ public sealed class InboundMessageSnapshotTests
 
         ByteCountField.GetValue(snapshot).Should().Be(first, "the first read must cache the computed size");
         snapshot.Utf8ByteCount.Should().Be(first);
+    }
+
+    [Fact]
+    public void RegisterVerified_TwiceForTheSameMessage_ThrowsInsteadOfOverwriting()
+    {
+        // #63 positive control, in two parts.
+        // (1) It documents the deliberate choice of ConditionalWeakTable.Add over AddOrUpdate: the
+        //     key can only ever be a fresh per-unpack instance, so overwrite semantics buy nothing —
+        //     but if a second registration site ever appeared, silent overwrite would let a later,
+        //     weaker registration replace verified trust metadata. Failing fast is the safe posture.
+        // (2) It proves the registration-count assertions in SnapshotRegistrationTests are not
+        //     vacuous: a duplicate registration really is detectable, so their silence means "one".
+        var message = new Message { Id = "m1", Type = "https://didcomm.org/x/1.0/m" };
+        Register(message, PlaintextJson);
+
+        var second = () => Register(message, /*lang=json,strict*/ """{"id":"m1","type":"https://didcomm.org/x/1.0/m","body":{}}""");
+
+        second.Should().Throw<ArgumentException>(
+            "a second registration for the same message must fail loudly rather than silently " +
+            "replace the verified snapshot (#63)");
+        InboundMessageSnapshot.TryGetFor(message, out var snapshot).Should().BeTrue();
+        snapshot.PlaintextJson.Should().Be(PlaintextJson, "the first, verified registration must survive");
     }
 
     [Fact]

@@ -231,6 +231,54 @@ public sealed class ProtocolDispatcherObserverTests
     }
 
     // ---------------------------------------------------------------------------------------
+    // #63: the snapshot guard's catch handler must not become the failure. A null Message is one
+    // of the faults it catches (both snapshot paths null-check it), so logging Message.Id from
+    // inside the catch threw NullReferenceException — but only when an observer or correlator was
+    // registered, giving the same bad input two different faults depending on host configuration.
+    // The library never produces a null Message; UnpackResult is a positional record, so a caller
+    // can still construct one. These two pin the parity, not just the fix.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Null_message_faults_identically_whether_or_not_an_observer_is_registered()
+    {
+        await using var withObserver = Dispatcher(new ProtocolHandlerRegistry(), new RecordingObserver());
+        await using var withoutObserver = Dispatcher(new ProtocolHandlerRegistry());
+
+        var observed = async () => await withObserver.DispatchAsync(Unpack(null!), client: null, new DidCommOptions());
+        var unobserved = async () => await withoutObserver.DispatchAsync(Unpack(null!), client: null, new DidCommOptions());
+
+        await observed.Should().ThrowExactlyAsync<ArgumentNullException>(
+            "the catch that isolates snapshot failure must not itself dereference the null it is handling (#63)");
+        await unobserved.Should().ThrowExactlyAsync<ArgumentNullException>(
+            "the no-observer path is the baseline the observed path must match");
+    }
+
+    [Fact]
+    public async Task Null_message_with_a_correlator_registered_still_faults_as_ArgumentNullException()
+    {
+        // A correlator alone (no observer) also opens the snapshot block, so it reaches the same
+        // catch by the same route.
+        await using var dispatcher = new ProtocolDispatcher(
+            new ProtocolHandlerRegistry(),
+            new InMemoryThreadStateStore(),
+            logger: null,
+            traceOptions: null,
+            observers: null,
+            correlators: new IInboundCorrelator[] { new NoOpCorrelator() });
+
+        var act = async () => await dispatcher.DispatchAsync(Unpack(null!), client: null, new DidCommOptions());
+
+        await act.Should().ThrowExactlyAsync<ArgumentNullException>();
+    }
+
+    private sealed class NoOpCorrelator : IInboundCorrelator
+    {
+        public void OnInbound(InboundMessageSnapshot received)
+        {
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // #61 acceptance: on every observer-only outcome path — NoHandler, ack-loop drop, handler
     // failure — the observation mirrors the verified snapshot's FR-CONSIST-04 outcome, so an
     // application doing its addressing policy in an observer actually sees the warning.
