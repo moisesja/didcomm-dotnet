@@ -32,7 +32,8 @@ internal sealed class InboundMessageSnapshot
         string? recipientKid,
         VerifiedKeyBinding? senderKeyBinding,
         VerifiedKeyBinding? signerKeyBinding,
-        VerifiedKeyBinding? recipientKeyBinding)
+        VerifiedKeyBinding? recipientKeyBinding,
+        RecipientAddressing recipientAddressing)
     {
         PlaintextJson = plaintextJson;
         Id = id;
@@ -50,6 +51,7 @@ internal sealed class InboundMessageSnapshot
         SenderKeyBinding = senderKeyBinding;
         SignerKeyBinding = signerKeyBinding;
         RecipientKeyBinding = recipientKeyBinding;
+        RecipientAddressing = recipientAddressing;
     }
 
     private int _utf8ByteCount = -1;
@@ -87,6 +89,7 @@ internal sealed class InboundMessageSnapshot
     internal VerifiedKeyBinding? SenderKeyBinding { get; }
     internal VerifiedKeyBinding? SignerKeyBinding { get; }
     internal VerifiedKeyBinding? RecipientKeyBinding { get; }
+    internal RecipientAddressing RecipientAddressing { get; }
 
     /// <summary>Associate verified unpack output with its mutable public message by object identity.</summary>
     internal static void RegisterVerified(
@@ -101,7 +104,8 @@ internal sealed class InboundMessageSnapshot
         string? recipientKid,
         VerifiedKeyBinding? senderKeyBinding = null,
         VerifiedKeyBinding? signerKeyBinding = null,
-        VerifiedKeyBinding? recipientKeyBinding = null)
+        VerifiedKeyBinding? recipientKeyBinding = null,
+        RecipientAddressing recipientAddressing = RecipientAddressing.NotEvaluated)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(plaintextJson);
@@ -122,7 +126,8 @@ internal sealed class InboundMessageSnapshot
             recipientKid,
             senderKeyBinding,
             signerKeyBinding,
-            recipientKeyBinding));
+            recipientKeyBinding,
+            recipientAddressing));
     }
 
     /// <summary>Look up the verified snapshot associated with an unpacked message.</summary>
@@ -164,10 +169,14 @@ internal sealed class InboundMessageSnapshot
             // Deliberately no key bindings (#56): this synthetic path never saw the packed bytes,
             // and the caller-supplied result's message may have diverged from whatever unpack (if
             // any) produced its binding evidence. Strong provenance is only attached when the
-            // verified-at-unpack snapshot itself carries it.
+            // verified-at-unpack snapshot itself carries it. The result's claimed
+            // RecipientAddressing is refused for the same reason (#61): no unpack evaluated this
+            // message's 'to', so a hand-built result cannot launder an Addressed/NotAddressed
+            // outcome into observers.
             senderKeyBinding: null,
             signerKeyBinding: null,
-            recipientKeyBinding: null);
+            recipientKeyBinding: null,
+            recipientAddressing: RecipientAddressing.NotEvaluated);
     }
 
     /// <summary>Create an independent mutable message instance from the immutable plaintext.</summary>

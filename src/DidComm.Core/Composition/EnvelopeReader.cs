@@ -281,7 +281,8 @@ internal static class EnvelopeReader
                         recipientKid,
                         senderBinding,
                         signerBinding,
-                        recipientBinding);
+                        recipientBinding,
+                        recipientAddressing);
 
                     return new UnpackResult(
                         Message: message,

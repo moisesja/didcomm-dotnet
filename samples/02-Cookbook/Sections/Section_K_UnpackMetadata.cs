@@ -83,7 +83,11 @@ public static class Section_K_UnpackMetadata
         // additional identities via DidCommOptions.OwnIdentifiers to cover signed-only and
         // plaintext receives, which have no decrypting key. Act on the warning, not on Addressed:
         // 'to' is written by the sender, so anyone can name you — it means something only when the
-        // envelope also authenticates who wrote it, as this one does.
+        // envelope also authenticates who wrote it, as this one does. Protocol observers see this
+        // same value on InboundObservation.RecipientAddressing, delivered together with the exact
+        // message content the library verified — a hand-built result can't forge it (observers
+        // read NotEvaluated), and editing the message after unpack can't detach the value from
+        // the content it describes (#61).
         ctx.Narrator.Value("RecipientAddressing", result.RecipientAddressing);
         ctx.Narrator.Value("Message.From",       result.Message.From);
         ctx.Narrator.Value("Message.Body[content]", result.Message.Body?["content"]);

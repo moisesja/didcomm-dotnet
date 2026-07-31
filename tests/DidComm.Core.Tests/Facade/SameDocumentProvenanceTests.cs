@@ -27,6 +27,7 @@ public sealed class SameDocumentProvenanceTests
 {
     private const string Alice = "did:example:alice";
     private const string Bob = "did:example:bob";
+    private const string Carol = "did:example:carol";
     private const string AliceAuthKid = "did:example:alice#auth-1";
     private const string AliceKaKid = "did:example:alice#ka-1";
     private const string BobKaKid = "did:example:bob#ka-1";
@@ -593,6 +594,115 @@ public sealed class SameDocumentProvenanceTests
         fallback.SignerKeyBinding.Should().BeNull();
         fallback.SenderKeyBinding.Should().BeNull();
         fallback.RecipientKeyBinding.Should().BeNull();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Acceptance (#61): the FR-CONSIST-04 addressing outcome rides the same snapshot backstop
+    // as the bindings — mirrored onto observations, reset by mutation, unlaunderable.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Observation_FromRealUnpack_CarriesRecipientAddressing()
+    {
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        // Carol unpacks a message addressed to bob only — the FR-CONSIST-04 warning case.
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+        InboundObservation.FromUnpackResult(result).RecipientAddressing.Should().Be(
+            RecipientAddressing.NotAddressed,
+            "observer-only applications must see the addressing warning (#61)");
+    }
+
+    [Fact]
+    public async Task Observation_FromMutatedVerifiedMessage_ResetsRecipientAddressingToNotEvaluated()
+    {
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        // Load-bearing precondition: the value is non-default before mutation, so the reset below
+        // is a real transition and not the unconfigured default.
+        InboundObservation.FromUnpackResult(result).RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+
+        // Mutate the verified message in place — same object identity, different content.
+        result.Message.Body = JsonNode.Parse("""{"content":"attacker-substituted"}""")!.AsObject();
+
+        InboundObservation.FromUnpackResult(result).RecipientAddressing.Should().Be(
+            RecipientAddressing.NotEvaluated,
+            "an addressing outcome does not cover content the unpack never evaluated");
+    }
+
+    [Fact]
+    public async Task Observation_FromForgedFlagsOnVerifiedResult_ReadsTrustMetadataFromSnapshot()
+    {
+        // UnpackResult is a record, so a with-clone can rewrite the flags an application is told
+        // to interpret the addressing outcome (and the bindings) with. When the verified snapshot
+        // still covers the content, the observation's trust metadata must come from the snapshot,
+        // not the caller's result — a rewritten flag or kid must not survive.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = Client(resolver);
+        var result = await recipient.UnpackAsync(packed);
+
+        var forged = result with
+        {
+            Authenticated = false,
+            NonRepudiation = false,
+            SignerKid = "did:example:mallory#k",
+        };
+
+        var observation = InboundObservation.FromUnpackResult(forged);
+
+        observation.Authenticated.Should().BeTrue("the unpack authenticated this content; a clone cannot unsay it");
+        observation.NonRepudiation.Should().BeTrue();
+        observation.SignerKid.Should().Be(AliceAuthKid, "a clone cannot reattribute the verified signature");
+        observation.SignerKeyBinding.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Observation_FromSyntheticResult_CannotLaunderRecipientAddressing()
+    {
+        // A consumer-assembled result claiming Addressed must not propagate the claim: the value
+        // is sourced only from the verified-at-unpack snapshot, which a synthetic result lacks.
+        var synthetic = new UnpackResult(
+            Message: NewMessage(),
+            Stack: new[] { Jose.EnvelopeKind.Signed, Jose.EnvelopeKind.Plaintext },
+            Encrypted: false,
+            Authenticated: true,
+            NonRepudiation: true,
+            AnonymousSender: false,
+            ContentEncryption: null,
+            KeyWrap: null,
+            SignatureAlgorithm: "EdDSA",
+            SignerKid: AliceAuthKid,
+            SenderKid: null,
+            RecipientKid: null,
+            AllRecipientKids: Array.Empty<string>(),
+            FromPrior: null)
+        {
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+
+        InboundObservation.FromUnpackResult(synthetic).RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
+        InboundMessageSnapshot.CreateFallback(synthetic).RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
     }
 
     // ---------------------------------------------------------------------------------------

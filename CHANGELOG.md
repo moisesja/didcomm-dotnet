@@ -7,7 +7,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 ## [Unreleased]
 
 > Additive — new public API, no wire change, no breaking change (ApiCompat / package validation
-> clean against 1.3.0). Closes **#59**.
+> clean against 1.3.0). Closes **#59**, **#61**.
 
 ### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
 
@@ -65,9 +65,31 @@ against the implementation that lacks it (verified by injecting the defect):
   construction with `ArgumentException` rather than being skipped silently on every message, which
   would leave the warning permanently dead with no signal to the operator.
 
-Known limitation: the outcome is not mirrored onto `InboundMessageSnapshot` / `InboundObservation`,
-so observer-only applications cannot read it and the value goes stale if a caller rewrites
-`Message.To` or clones the result onto another message — tracked in **#61**.
+### Added — FR-CONSIST-04 outcome mirrored onto the verified snapshot and `InboundObservation` (#61)
+
+The wiring above originally left the outcome on the facade `UnpackResult` only, so observer-only
+applications could not read it, and the value went stale if a caller rewrote `Message.To` or
+`with`-cloned the result onto another message. Resolved before release: the outcome now rides the
+same snapshot backstop #56 built for the key bindings.
+
+- **New `InboundObservation.RecipientAddressing`** (public-get/internal-init, additive over the
+  positional constructor — binary compatible): observers receive the outcome on every dispatch
+  path — handled, `NoHandler`, ack-loop drop, and handler failure — so an application that does
+  its addressing policy in an `IProtocolObserver` actually sees the warning.
+- **Unlaunderable, and never desynced from content:** the observation value is populated
+  exclusively from the verified-at-unpack snapshot, never from the caller-supplied result — a
+  synthetic `UnpackResult` claiming `Addressed` (or a fallback snapshot built for one) reads
+  `NotEvaluated`. Observer delivery materializes the message and the outcome from the same
+  snapshot, so an in-place edit after unpack cannot hand an observer a (content, outcome) pair
+  the unpack never produced; `InboundObservation.FromUnpackResult` over content that diverged
+  from the verified snapshot reads `NotEvaluated`. The facade property remains the weaker,
+  `with`-clonable view; the observation is the snapshot-backed channel.
+- **Trust metadata reads from the snapshot too:** when the verified snapshot still covers the
+  content, `InboundObservation.FromUnpackResult` now sources `Encrypted` / `Authenticated` /
+  `NonRepudiation` / `AnonymousSender` / `SenderKid` / `SignerKid` from it rather than from the
+  caller's result. The addressing outcome (and the #56 bindings) are documented as safe to act on
+  only together with those flags, and the result record's flags are rewritable by any `with`-clone
+  — so a clone that upgrades `Authenticated` can no longer change how a genuine outcome is read.
 
 ## [1.4.0] - 2026-07-26
 

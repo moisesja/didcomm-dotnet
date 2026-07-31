@@ -52,6 +52,25 @@ public sealed record InboundObservation(
     public VerifiedKeyBinding? RecipientKeyBinding { get; internal init; }
 
     /// <summary>
+    /// Outcome of the advisory FR-CONSIST-04 recipient-addressing check (mirrors
+    /// <see cref="UnpackResult.RecipientAddressing"/>; #61), populated at construction only from
+    /// the verified unpack snapshot — never from a caller-supplied result, so a synthetic
+    /// <see cref="UnpackResult"/> reads <see cref="RecipientAddressing.NotEvaluated"/> whatever
+    /// it claims. What is guaranteed is the pairing with <see cref="Message"/>: observer
+    /// delivery materializes both from the same snapshot, so observers receive the verified
+    /// plaintext together with the outcome computed for exactly that content, and
+    /// <see cref="FromUnpackResult(UnpackResult)"/> resets to <c>NotEvaluated</c> when the live
+    /// message no longer matches the verified content. A <c>with</c>-clone of an observation
+    /// copies this value like any record member — it describes the message the observation was
+    /// built from, not a <c>Message</c> transplanted afterwards. It is still a warning channel,
+    /// not a trust signal: the <c>to</c> header is sender-authored, so act on
+    /// <see cref="RecipientAddressing.NotAddressed"/> but never treat
+    /// <see cref="RecipientAddressing.Addressed"/> as authorization — see
+    /// <see cref="Facade.RecipientAddressing"/>'s trust-boundary remarks.
+    /// </summary>
+    public RecipientAddressing RecipientAddressing { get; internal init; }
+
+    /// <summary>
     /// Build an observation from an unpack result, deep-cloning the message (serialize →
     /// deserialize through the DIDComm JSON options, so extension headers and attachments
     /// survive intact) so the observer can never reach the pipeline's live instance.
@@ -90,18 +109,28 @@ public sealed record InboundObservation(
         {
             snapshot = null;
         }
+        // When the verified snapshot still covers this content, the trust metadata comes from it
+        // too — not just the bindings and addressing. The received result is a record whose flags
+        // a with-clone can rewrite, and the addressing/binding evidence below is only safe to act
+        // on when read together with the flags computed by the unpack that produced it (#61).
+        // Explicit null-checks rather than ??: a verified null (e.g. no SenderKid) must not fall
+        // back to a caller-supplied value.
         return new InboundObservation(
             Message: clone,
-            Encrypted: received.Encrypted,
-            Authenticated: received.Authenticated,
-            NonRepudiation: received.NonRepudiation,
-            AnonymousSender: received.AnonymousSender,
-            SenderKid: received.SenderKid,
-            SignerKid: received.SignerKid)
+            Encrypted: snapshot is null ? received.Encrypted : snapshot.Encrypted,
+            Authenticated: snapshot is null ? received.Authenticated : snapshot.Authenticated,
+            NonRepudiation: snapshot is null ? received.NonRepudiation : snapshot.NonRepudiation,
+            AnonymousSender: snapshot is null ? received.AnonymousSender : snapshot.AnonymousSender,
+            SenderKid: snapshot is null ? received.SenderKid : snapshot.SenderKid,
+            SignerKid: snapshot is null ? received.SignerKid : snapshot.SignerKid)
         {
             SenderKeyBinding = snapshot?.SenderKeyBinding,
             SignerKeyBinding = snapshot?.SignerKeyBinding,
             RecipientKeyBinding = snapshot?.RecipientKeyBinding,
+            // Deliberately never received.RecipientAddressing: sourcing the value only from the
+            // verified snapshot is what keeps a hand-built or mutated result from laundering an
+            // addressing outcome into observers (#61).
+            RecipientAddressing = snapshot?.RecipientAddressing ?? RecipientAddressing.NotEvaluated,
         };
     }
 
@@ -124,6 +153,7 @@ public sealed record InboundObservation(
             SenderKeyBinding = snapshot.SenderKeyBinding,
             SignerKeyBinding = snapshot.SignerKeyBinding,
             RecipientKeyBinding = snapshot.RecipientKeyBinding,
+            RecipientAddressing = snapshot.RecipientAddressing,
         };
     }
 }
