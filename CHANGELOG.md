@@ -6,9 +6,12 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
-> Additive — new public API, no wire change, binary/API compatible (ApiCompat / package validation
-> clean against 1.3.0). Record value-equality semantics extend to the new members — see the
-> upgrader notes below. Closes **#59**, **#61**, **#63**.
+## [1.4.0] - 2026-07-31
+
+> Additive security + feature release — new public API, no wire change, no breaking change
+> (ApiCompat / package validation clean against the 1.3.0 baseline). Record value-equality
+> semantics extend to the new members — see the upgrader notes below. Closes **#56**, **#58**,
+> **#59**, **#61**, **#63**.
 
 ### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
 
@@ -100,58 +103,6 @@ same snapshot backstop #56 built for the key bindings.
   recomputing metadata. The pairing guarantee therefore covers observations as the library
   constructs them; after either consumer action, stored values still describe the message the
   observation was *built* from (pinned by a test documenting the clone limitation).
-
-### Fixed — the dispatcher's snapshot guard could raise a second fault while handling the first (#63)
-
-`ProtocolDispatcher.DispatchAsync` wraps snapshot creation in a `catch` so a malformed caller-created
-`UnpackResult` cannot break dispatch. That handler logged `received.Message.Id` — the very expression
-whose null-ness is one of the faults it catches (both snapshot paths null-check the message). A
-caller-constructed `UnpackResult` with a null `Message` therefore surfaced as `NullReferenceException`
-*thrown from inside the catch* when an observer or correlator was registered, but as a clean
-`ArgumentNullException` when neither was — the same input, two different faults depending on host
-configuration. The message id is now read null-conditionally, so both configurations produce the same
-`ArgumentNullException`. Not reachable from the wire: the library never produces a null `Message`, and
-no unpack path accepts one — `UnpackResult` is a positional record, so only a caller can build this.
-
-### Documentation
-
-- **`InboundObservation.FromUnpackResult` thread affinity (#63).** The compatibility overload
-  serializes the caller's live `Message`, so a caller mutating that message on another thread —
-  most easily a collection-valued header such as `to` or `ack` — makes the serializer throw. The
-  exception is now documented (`InvalidOperationException`, alongside `ArgumentNullException` and
-  `JsonException`) together with the contract it implies: callers own the message's thread affinity
-  for the duration of the call. No behavior change, and the library's own receive path is unaffected
-  — observer delivery materializes every observation from the immutable snapshot, never from a
-  mutable message.
-- **Registration invariant pinned by test (#63).** `RegisterVerified` stores into a
-  `ConditionalWeakTable` with `Add`, which throws on a duplicate key; what keeps that safe is that
-  there is exactly one registration per unpack. New tests assert the count directly across all
-  envelope shapes, envelope-shaped body/attachment/extension-header payloads, and repeated
-  sequential and concurrent unpacks of identical bytes — so a future second registration site fails
-  loudly in CI whether or not it reuses the same message instance. The fail-fast `Add` is deliberate
-  and is now documented as such: `AddOrUpdate` would let a later, weaker registration silently
-  replace verified trust metadata.
-
-### Notes for upgraders
-
-- `RecipientAddressing` participates in record value equality: the synthesized `Equals` /
-  `GetHashCode` / `ToString` of `UnpackResult` (#59) and `InboundObservation` (#61) now cover the
-  new member. Two observations that agree on all seven positional members but differ on
-  `RecipientAddressing` — e.g. a library-produced observation carrying `NotAddressed` versus a
-  consumer-constructed one holding the default `NotEvaluated` — no longer compare equal, where
-  before this release they did. Binary and source compatibility are unaffected; code that
-  compared observations across that boundary should compare the members it means.
-- `InboundObservation.FromUnpackResult` now has three trust-source states. A covering verified
-  snapshot supplies all six positional members, all three key bindings, and addressing. A
-  verified snapshot whose message content has diverged supplies none of them: the four flags are
-  `false`, both kids and all three bindings are null, and addressing is `NotEvaluated`. Only a
-  never-snapshotted synthetic message preserves the caller's six positional members for
-  compatibility; caller-supplied bindings and addressing are never preserved.
-
-## [1.4.0] - 2026-07-26
-
-> Additive security release — new public API, no wire change, no breaking change (ApiCompat /
-> package validation clean against 1.3.0). Closes **#56**.
 
 ### Fixed — same-document key provenance on unpack (TOCTOU identity gap, #56)
 
@@ -276,7 +227,7 @@ held. `RecipientKid` was already untrusted metadata in 1.3.0; this makes it trus
 - `VerifiedKeyBinding.AuthorizedForDid` stores the DID subject that was compared rather than `from`
   verbatim, and `==` / `!=` now match `Equals` instead of falling back to reference equality.
 
-### Notes for upgraders
+### Notes for upgraders — same-document key provenance (#56)
 
 - `VerifiedKeyBinding.AuthorizedForDid` records the asserted identity the controller rule was
   evaluated against, and is **null** when the plaintext carried no `from` — in that case the
@@ -370,6 +321,53 @@ suite — keeping 7.0.0 leaves this library's test dependencies unencumbered for
 contributors. `Microsoft.NET.Test.Sdk`, `xunit.runner.visualstudio`, `NSubstitute`,
 `coverlet.collector`, and `Microsoft.SourceLink.GitHub` likewise stay put; moving the test stack is
 its own change with its own risk. `dotnet list package --vulnerable --include-transitive` is clean.
+
+### Fixed — the dispatcher's snapshot guard could raise a second fault while handling the first (#63)
+
+`ProtocolDispatcher.DispatchAsync` wraps snapshot creation in a `catch` so a malformed caller-created
+`UnpackResult` cannot break dispatch. That handler logged `received.Message.Id` — the very expression
+whose null-ness is one of the faults it catches (both snapshot paths null-check the message). A
+caller-constructed `UnpackResult` with a null `Message` therefore surfaced as `NullReferenceException`
+*thrown from inside the catch* when an observer or correlator was registered, but as a clean
+`ArgumentNullException` when neither was — the same input, two different faults depending on host
+configuration. The message id is now read null-conditionally, so both configurations produce the same
+`ArgumentNullException`. Not reachable from the wire: the library never produces a null `Message`, and
+no unpack path accepts one — `UnpackResult` is a positional record, so only a caller can build this.
+
+### Documentation
+
+- **`InboundObservation.FromUnpackResult` thread affinity (#63).** The compatibility overload
+  serializes the caller's live `Message`, so a caller mutating that message on another thread —
+  most easily a collection-valued header such as `to` or `ack` — makes the serializer throw. The
+  exception is now documented (`InvalidOperationException`, alongside `ArgumentNullException` and
+  `JsonException`) together with the contract it implies: callers own the message's thread affinity
+  for the duration of the call. No behavior change, and the library's own receive path is unaffected
+  — observer delivery materializes every observation from the immutable snapshot, never from a
+  mutable message.
+- **Registration invariant pinned by test (#63).** `RegisterVerified` stores into a
+  `ConditionalWeakTable` with `Add`, which throws on a duplicate key; what keeps that safe is that
+  there is exactly one registration per unpack. New tests assert the count directly across all
+  envelope shapes, envelope-shaped body/attachment/extension-header payloads, and repeated
+  sequential and concurrent unpacks of identical bytes — so a future second registration site fails
+  loudly in CI whether or not it reuses the same message instance. The fail-fast `Add` is deliberate
+  and is now documented as such: `AddOrUpdate` would let a later, weaker registration silently
+  replace verified trust metadata.
+
+### Notes for upgraders — recipient addressing and observations (#59, #61)
+
+- `RecipientAddressing` participates in record value equality: the synthesized `Equals` /
+  `GetHashCode` / `ToString` of `UnpackResult` (#59) and `InboundObservation` (#61) now cover the
+  new member. Two observations that agree on all seven positional members but differ on
+  `RecipientAddressing` — e.g. a library-produced observation carrying `NotAddressed` versus a
+  consumer-constructed one holding the default `NotEvaluated` — no longer compare equal, where
+  before this release they did. Binary and source compatibility are unaffected; code that
+  compared observations across that boundary should compare the members it means.
+- `InboundObservation.FromUnpackResult` now has three trust-source states. A covering verified
+  snapshot supplies all six positional members, all three key bindings, and addressing. A
+  verified snapshot whose message content has diverged supplies none of them: the four flags are
+  `false`, both kids and all three bindings are null, and addressing is `NotEvaluated`. Only a
+  never-snapshotted synthetic message preserves the caller's six positional members for
+  compatibility; caller-supplied bindings and addressing are never preserved.
 
 ## [1.3.0] - 2026-06-22
 
@@ -2025,7 +2023,8 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.0.0...v1.1.0
