@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.Quickstart</RootNamespace>
+    <AssemblyName>DidComm.Samples.Quickstart</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet Quickstart — the README's ≤25-line first program (FR-DX-05): two did:peer identities, in-memory secrets, an authcrypt round-trip, and the unpack metadata. Kept as a compiled project so the README snippet cannot drift from code that builds.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>
