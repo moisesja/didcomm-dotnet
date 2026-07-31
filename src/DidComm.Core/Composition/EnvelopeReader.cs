@@ -279,10 +279,10 @@ internal static class EnvelopeReader
                         senderKid,
                         signerKid,
                         recipientKid,
+                        recipientAddressing,
                         senderBinding,
                         signerBinding,
-                        recipientBinding,
-                        recipientAddressing);
+                        recipientBinding);
 
                     return new UnpackResult(
                         Message: message,

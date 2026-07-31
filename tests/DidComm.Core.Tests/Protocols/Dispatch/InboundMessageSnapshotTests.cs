@@ -32,7 +32,8 @@ public sealed class InboundMessageSnapshotTests
         InboundMessageSnapshot.RegisterVerified(
             message, PlaintextJson,
             encrypted: false, authenticated: false, nonRepudiation: false, anonymousSender: false,
-            senderKid: null, signerKid: null, recipientKid: null);
+            senderKid: null, signerKid: null, recipientKid: null,
+            recipientAddressing: RecipientAddressing.NotEvaluated);
         InboundMessageSnapshot.TryGetFor(message, out var snapshot).Should().BeTrue();
         return snapshot;
     }
@@ -65,15 +66,6 @@ public sealed class InboundMessageSnapshotTests
 
         ByteCountField.GetValue(snapshot).Should().Be(first, "the first read must cache the computed size");
         snapshot.Utf8ByteCount.Should().Be(first);
-    }
-
-    [Fact]
-    public void RegisterVerified_DefaultsRecipientAddressingToNotEvaluated()
-    {
-        var snapshot = RegisteredSnapshot();
-
-        snapshot.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated,
-            "a registration that never evaluated addressing must record the safe default (#61)");
     }
 
     [Fact]

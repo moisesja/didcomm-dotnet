@@ -6,8 +6,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
-> Additive — new public API, no wire change, no breaking change (ApiCompat / package validation
-> clean against 1.3.0). Closes **#59**, **#61**.
+> Additive — new public API, no wire change, binary/API compatible (ApiCompat / package validation
+> clean against 1.3.0). Record value-equality semantics extend to the new members — see the
+> upgrader notes below. Closes **#59**, **#61**.
 
 ### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
 
@@ -76,20 +77,38 @@ same snapshot backstop #56 built for the key bindings.
   positional constructor — binary compatible): observers receive the outcome on every dispatch
   path — handled, `NoHandler`, ack-loop drop, and handler failure — so an application that does
   its addressing policy in an `IProtocolObserver` actually sees the warning.
-- **Unlaunderable, and never desynced from content:** the observation value is populated
-  exclusively from the verified-at-unpack snapshot, never from the caller-supplied result — a
-  synthetic `UnpackResult` claiming `Addressed` (or a fallback snapshot built for one) reads
-  `NotEvaluated`. Observer delivery materializes the message and the outcome from the same
+- **Unforgeable at construction, never desynced by the library:** the observation value is
+  populated exclusively from the verified-at-unpack snapshot, never from the caller-supplied
+  result — a synthetic `UnpackResult` claiming `Addressed` (or a fallback snapshot built for one)
+  reads `NotEvaluated`. Observer delivery materializes the message and the outcome from the same
   snapshot, so an in-place edit after unpack cannot hand an observer a (content, outcome) pair
   the unpack never produced; `InboundObservation.FromUnpackResult` over content that diverged
   from the verified snapshot reads `NotEvaluated`. The facade property remains the weaker,
-  `with`-clonable view; the observation is the snapshot-backed channel.
+  `with`-clonable view; the observation is the snapshot-backed channel. **Scope:**
+  `InboundObservation` is itself a record, so a consumer's `with`-clone copies the stored value
+  onto whatever `Message` the clone carries — the guarantee covers observations as the library
+  constructs them, and a clone's value describes the message the observation was *built* from
+  (pinned by a test documenting the limitation).
 - **Trust metadata reads from the snapshot too:** when the verified snapshot still covers the
   content, `InboundObservation.FromUnpackResult` now sources `Encrypted` / `Authenticated` /
   `NonRepudiation` / `AnonymousSender` / `SenderKid` / `SignerKid` from it rather than from the
   caller's result. The addressing outcome (and the #56 bindings) are documented as safe to act on
   only together with those flags, and the result record's flags are rewritable by any `with`-clone
   — so a clone that upgrades `Authenticated` can no longer change how a genuine outcome is read.
+
+### Notes for upgraders
+
+- `RecipientAddressing` participates in record value equality: the synthesized `Equals` /
+  `GetHashCode` / `ToString` of `UnpackResult` (#59) and `InboundObservation` (#61) now cover the
+  new member. Two observations that agree on all seven positional members but differ on
+  `RecipientAddressing` — e.g. a library-produced observation carrying `NotAddressed` versus a
+  consumer-constructed one holding the default `NotEvaluated` — no longer compare equal, where
+  before this release they did. Binary and source compatibility are unaffected; code that
+  compared observations across that boundary should compare the members it means.
+- `InboundObservation.FromUnpackResult` now prefers the verified snapshot for the six
+  trust-metadata members (`Encrypted` / `Authenticated` / `NonRepudiation` / `AnonymousSender` /
+  `SenderKid` / `SignerKid`): a result whose flags or kids were rewritten via `with`-clone yields
+  an observation carrying the verified values whenever the snapshot still covers the content.
 
 ## [1.4.0] - 2026-07-26
 

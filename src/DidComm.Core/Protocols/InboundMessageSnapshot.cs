@@ -92,6 +92,9 @@ internal sealed class InboundMessageSnapshot
     internal RecipientAddressing RecipientAddressing { get; }
 
     /// <summary>Associate verified unpack output with its mutable public message by object identity.</summary>
+    /// <remarks><paramref name="recipientAddressing"/> is deliberately required, not defaulted: a
+    /// registration site that forgets it must fail to compile rather than silently record
+    /// <see cref="RecipientAddressing.NotEvaluated"/> and disable the FR-CONSIST-04 signal (#61).</remarks>
     internal static void RegisterVerified(
         Message message,
         string plaintextJson,
@@ -102,10 +105,10 @@ internal sealed class InboundMessageSnapshot
         string? senderKid,
         string? signerKid,
         string? recipientKid,
+        RecipientAddressing recipientAddressing,
         VerifiedKeyBinding? senderKeyBinding = null,
         VerifiedKeyBinding? signerKeyBinding = null,
-        VerifiedKeyBinding? recipientKeyBinding = null,
-        RecipientAddressing recipientAddressing = RecipientAddressing.NotEvaluated)
+        VerifiedKeyBinding? recipientKeyBinding = null)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(plaintextJson);

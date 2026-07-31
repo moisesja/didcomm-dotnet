@@ -40,7 +40,8 @@ public sealed class ObserverDeliveryTests
         InboundMessageSnapshot.RegisterVerified(
             message, plaintextJson,
             encrypted: false, authenticated: false, nonRepudiation: false, anonymousSender: false,
-            senderKid: null, signerKid: null, recipientKid: null);
+            senderKid: null, signerKid: null, recipientKid: null,
+            recipientAddressing: RecipientAddressing.NotEvaluated);
         InboundMessageSnapshot.TryGetFor(message, out var snapshot).Should().BeTrue();
         return snapshot;
     }

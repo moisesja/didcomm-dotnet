@@ -21,6 +21,17 @@ namespace DidComm.Protocols;
 /// act — this library's own <c>DiscoverFeaturesClient</c> injects the client. Omitting the facade
 /// from this payload keeps the observation surface minimal and read-only; it does not, and cannot,
 /// prevent host code from sending as the agent. See <see cref="IProtocolObserver"/>'s trust model.
+/// <para>
+/// <strong>Where the trust metadata comes from.</strong> Observations delivered to observers are
+/// materialized entirely from the immutable verified unpack snapshot.
+/// <see cref="FromUnpackResult(UnpackResult)"/> likewise sources the six trust-metadata members
+/// (<see cref="Encrypted"/> through <see cref="SignerKid"/>), the key bindings, and
+/// <see cref="RecipientAddressing"/> from that snapshot whenever it still covers the supplied
+/// result's message content — the caller's result supplies those values only when no snapshot
+/// covers the content (a synthetic or content-diverged result). A record <c>with</c>-clone copies
+/// every member verbatim, so a clone's values describe the message the observation was built
+/// from, not a <see cref="Message"/> substituted afterwards.
+/// </para>
 /// </remarks>
 /// <param name="Message">A deep clone of the unpacked inbound message. Mutating it affects only this observation.</param>
 /// <param name="Encrypted">Whether the envelope had an encryption layer (mirrors <see cref="UnpackResult.Encrypted"/>).</param>
@@ -73,7 +84,11 @@ public sealed record InboundObservation(
     /// <summary>
     /// Build an observation from an unpack result, deep-cloning the message (serialize →
     /// deserialize through the DIDComm JSON options, so extension headers and attachments
-    /// survive intact) so the observer can never reach the pipeline's live instance.
+    /// survive intact) so the observer can never reach the pipeline's live instance. When the
+    /// verified unpack snapshot still covers the result's message content, the observation's
+    /// trust metadata — the six positional members, the key bindings, and
+    /// <see cref="RecipientAddressing"/> — is sourced from the snapshot; the supplied result's
+    /// values apply only when no snapshot covers the content (#61).
     /// </summary>
     /// <param name="received">The unpack result for the inbound message.</param>
     public static InboundObservation FromUnpackResult(UnpackResult received)

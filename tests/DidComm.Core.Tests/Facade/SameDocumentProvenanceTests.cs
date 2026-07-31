@@ -648,7 +648,84 @@ public sealed class SameDocumentProvenanceTests
     }
 
     [Fact]
-    public async Task Observation_FromForgedFlagsOnVerifiedResult_ReadsTrustMetadataFromSnapshot()
+    public async Task Observation_WithClone_KeepsTheValueOfTheMessageItWasBuiltFrom()
+    {
+        // Documented limitation, pinned deliberately: InboundObservation is a record, so a
+        // consumer's with-clone copies RecipientAddressing — like every member — onto whatever
+        // Message the clone carries. The library's pairing guarantee covers observations it
+        // constructs; a clone's value describes the message the observation was BUILT from, and
+        // consumers must not read a transplanted observation's value as describing its current
+        // Message. If this test starts failing, the record shape changed — update the scope
+        // language in the PRD FR-CONSIST-04 row and the CHANGELOG alongside.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        var observation = InboundObservation.FromUnpackResult(result);
+        observation.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+
+        var transplanted = observation with { Message = NewMessage() };
+
+        transplanted.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed,
+            "a record clone preserves the stored value regardless of the transplanted Message");
+    }
+
+    [Fact]
+    public void RecipientAddressing_ParticipatesInObservationValueEquality()
+    {
+        // Upgrader-visible semantics (see CHANGELOG): the record's synthesized Equals/GetHashCode
+        // now cover RecipientAddressing, so a library observation carrying a real outcome no
+        // longer equals a consumer-constructed observation that agrees on all seven positional
+        // members but holds the default NotEvaluated.
+        var msg = NewMessage();
+        var baseline = new InboundObservation(msg, Encrypted: false, Authenticated: false,
+            NonRepudiation: false, AnonymousSender: false, SenderKid: null, SignerKid: null);
+        var carrying = baseline with { RecipientAddressing = RecipientAddressing.NotAddressed };
+
+        carrying.Should().NotBe(baseline);
+        (baseline with { RecipientAddressing = RecipientAddressing.NotAddressed }).Should().Be(carrying,
+            "equality remains structural over the full member set");
+    }
+
+    [Fact]
+    public async Task Observation_FromForgedFlagsOnVerifiedAuthcryptResult_ReadsTrustMetadataFromSnapshot()
+    {
+        // Authcrypt counterpart of the signed-path test below: together they pin all six
+        // trust-metadata members. This one covers Encrypted, AnonymousSender, and SenderKid.
+        var aliceKa = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
+        var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKaKid);
+        var bobDoc = Doc(Bob, Ka(bobKa.PublicJwk));
+        var packed = await PackAuthcrypt(aliceKa, bobDoc);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Ka(aliceKa.PublicJwk)));
+        resolver.SetSequence(Bob, bobDoc);
+        var recipient = Client(resolver, bobKa.PrivateJwk);
+        var result = await recipient.UnpackAsync(packed);
+
+        var forged = result with
+        {
+            Encrypted = false,
+            AnonymousSender = true,
+            SenderKid = "did:example:mallory#ka",
+        };
+
+        var observation = InboundObservation.FromUnpackResult(forged);
+
+        observation.Encrypted.Should().BeTrue("the unpack decrypted this content; a clone cannot unsay it");
+        observation.AnonymousSender.Should().BeFalse("authcrypt named its sender; a clone cannot anonymize it");
+        observation.SenderKid.Should().Be(AliceKaKid, "a clone cannot reattribute the authenticated sender key");
+    }
+
+    [Fact]
+    public async Task Observation_FromForgedFlagsOnVerifiedSignedResult_ReadsTrustMetadataFromSnapshot()
     {
         // UnpackResult is a record, so a with-clone can rewrite the flags an application is told
         // to interpret the addressing outcome (and the bindings) with. When the verified snapshot
