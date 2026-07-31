@@ -27,6 +27,17 @@ public sealed class DiscoverFeaturesClientTests
 
     private static readonly FeatureQuery ProtocolWildcard = new() { FeatureType = "protocol", Match = "https://didcomm.org/*" };
 
+    /// <summary>
+    /// Budget for "wait until the other side got there" synchronization only — never for a timeout
+    /// this suite is asserting. Generous by design (#66): it is paid only on the failure path, and
+    /// the waits below depend on thread-pool scheduling — the requester continuation runs
+    /// asynchronously by construction (that is the property under test). On a constrained CI runner
+    /// a parallel test collection can saturate the pool, and new threads are injected roughly one
+    /// per 500 ms, so a tight budget here fails as a flake rather than as a real defect. Client
+    /// deadline arguments stay short: those are behavior under test.
+    /// </summary>
+    private static readonly TimeSpan SyncTimeout = TimeSpan.FromSeconds(30);
+
     /// <summary>Client over a send delegate that records the outgoing queries message.</summary>
     private static DiscoverFeaturesClient Client(out TaskCompletionSource<(Message Message, SendOptions Options)> sent)
     {
@@ -104,7 +115,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, options) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, options) = await sent.Task.WaitAsync(SyncTimeout);
 
         query.Type.Should().Be(DiscoverFeaturesApi.QueriesType);
         options.Recipients.Should().Equal(Bob);
@@ -136,7 +147,7 @@ public sealed class DiscoverFeaturesClientTests
             observers: null, correlators: new IInboundCorrelator[] { client });
 
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         var disclose = DiscoverFeaturesApi.CreateDisclose(from: Bob, to: Alice, thid: query.Id,
             disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "https://didcomm.org/empty/1.0" });
@@ -164,7 +175,7 @@ public sealed class DiscoverFeaturesClientTests
             observers: null, correlators: new IInboundCorrelator[] { client });
 
         var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
         var inbound = Authcrypt(DiscoverFeaturesApi.CreateDisclose(Bob, Alice, query.Id,
             new FeatureDisclosure { FeatureType = "protocol", Id = "original" }));
 
@@ -186,7 +197,7 @@ public sealed class DiscoverFeaturesClientTests
             observers: null, correlators: new IInboundCorrelator[] { client });
 
         var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
         var forged = DiscoverFeaturesApi.CreateDisclose(Mallory, Alice, query.Id,
             new FeatureDisclosure { FeatureType = "protocol", Id = "forged" });
 
@@ -270,7 +281,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         // A forged anoncrypt/plaintext disclose that guessed the query id must be ignored…
         await Feed(client, Disclose(query.Id, authenticated: false, disclosures: Forged()));
@@ -286,7 +297,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id, from: Mallory, disclosures: Forged()));
         task.IsCompleted.Should().BeFalse("even an authenticated third party must not answer for the queried responder");
@@ -300,7 +311,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id, to: Mallory, disclosures: Forged()));
         task.IsCompleted.Should().BeFalse("a response for another local identity cannot answer Alice's query");
@@ -314,7 +325,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id, recipientKid: $"{Mallory}#key-1", disclosures: Forged()));
         task.IsCompleted.Should().BeFalse("message.to alone is insufficient in a multi-DID secret store; the decrypting recipient must be Alice");
@@ -331,7 +342,7 @@ public sealed class DiscoverFeaturesClientTests
         // reports authenticated but carries neither must not complete the waiter.
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id, senderKid: null, signerKid: null, disclosures: Forged()));
         task.IsCompleted.Should().BeFalse("an authenticated-but-keyless envelope must not complete a pending query");
@@ -347,7 +358,7 @@ public sealed class DiscoverFeaturesClientTests
         // envelope — the F4 key-id gate accepts a SignerKid too.
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id, senderKid: null, signerKid: "did:peer:bob#sig-1",
             disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "signed-ok" }));
@@ -360,7 +371,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id, senderKid: $"{Mallory}#key-1", disclosures: Forged()));
         task.IsCompleted.Should().BeFalse("a Bob plaintext cannot be authenticated by Mallory's authcrypt key");
@@ -429,13 +440,26 @@ public sealed class DiscoverFeaturesClientTests
                 releaseParser.Wait();
                 return DiscoverFeaturesApi.ReadDisclosures(snapshot.DeserializeMessage());
             });
-        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // The client deadline is incidental here (this test is about WHERE parsing runs, not about
+        // the timeout), so it must outlast the synchronization waits below — otherwise a slow
+        // scheduler cancels the query before the assertions and the test fails for the wrong
+        // reason (#66).
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, SyncTimeout);
+        var query = await sent.Task.WaitAsync(SyncTimeout);
         var snapshot = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit()));
 
-        var correlate = Task.Run(() => ((IInboundCorrelator)client).OnInbound(snapshot));
-        await parserStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await correlate.WaitAsync(TimeSpan.FromSeconds(5));
+        // Its own thread, not the pool (#66): the correlator call is synchronous and the
+        // continuation it releases parks on releaseParser.Wait(), so this work is exactly what the
+        // pool schedules worst under contention. One fewer scheduling hop to starve; the remaining
+        // one — the requester continuation — is the behavior under test and is covered by
+        // SyncTimeout.
+        var correlate = Task.Factory.StartNew(
+            () => ((IInboundCorrelator)client).OnInbound(snapshot),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        await parserStarted.Task.WaitAsync(SyncTimeout);
+        await correlate.WaitAsync(SyncTimeout);
         queryTask.IsCompleted.Should().BeFalse("the requester continuation is blocked in its parser, not the receive correlator");
 
         releaseParser.Set();
@@ -479,7 +503,7 @@ public sealed class DiscoverFeaturesClientTests
         });
         thread.Start();
 
-        var disclosures = await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var disclosures = await completed.Task.WaitAsync(SyncTimeout);
         thread.Join(TimeSpan.FromSeconds(5)).Should().BeTrue();
         disclosures.Should().ContainSingle(d => d.Id == "legit");
         parserThread.Should().NotBe(callerThread,
@@ -499,7 +523,7 @@ public sealed class DiscoverFeaturesClientTests
                 return DiscoverFeaturesApi.ReadDisclosures(snapshot.DeserializeMessage());
             });
         var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(SyncTimeout);
         var correlator = (IInboundCorrelator)client;
 
         correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id,
@@ -519,7 +543,7 @@ public sealed class DiscoverFeaturesClientTests
         var client = new DiscoverFeaturesClient(
             (message, _, _) => { sent.TrySetResult(message); return Task.CompletedTask; }, logger);
         var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(SyncTimeout);
         var forged = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, authenticated: false, disclosures: Forged()));
         var correlator = (IInboundCorrelator)client;
 
@@ -537,7 +561,7 @@ public sealed class DiscoverFeaturesClientTests
         var client = Client(out var sent);
         using var cts = new CancellationTokenSource();
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(30), ct: cts.Token);
-        await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await sent.Task.WaitAsync(SyncTimeout);
 
         cts.Cancel();
 
@@ -564,7 +588,7 @@ public sealed class DiscoverFeaturesClientTests
             using var cts = new CancellationTokenSource();
             var queryTask = client.QueryFeaturesAsync(
                 Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(30), ct: cts.Token);
-            var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var query = await sent.Task.WaitAsync(SyncTimeout);
             var response = InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit()));
             using var start = new ManualResetEventSlim();
 
@@ -579,11 +603,11 @@ public sealed class DiscoverFeaturesClientTests
                 cts.Cancel();
             });
             start.Set();
-            await Task.WhenAll(complete, cancel).WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.WhenAll(complete, cancel).WaitAsync(SyncTimeout);
 
             try
             {
-                (await queryTask.WaitAsync(TimeSpan.FromSeconds(5))).Should()
+                (await queryTask.WaitAsync(SyncTimeout)).Should()
                     .ContainSingle(disclosure => disclosure.Id == "legit");
                 Volatile.Read(ref parses).Should().Be(1);
             }
@@ -600,7 +624,7 @@ public sealed class DiscoverFeaturesClientTests
     {
         var client = Client(out var sent);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
 
         await Feed(client, Disclose(query.Id));
 

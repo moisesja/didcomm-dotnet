@@ -225,7 +225,11 @@ public sealed class SnapshotRegistrationTests
     [Fact]
     public async Task Concurrent_identical_unpacks_each_register_exactly_once()
     {
-        const int concurrency = 64;
+        // Deliberately modest (#66): the invariant is "every concurrent unpack registers exactly
+        // once", which does not get truer with more threads — but xUnit runs test collections in
+        // parallel, so a large Task.Run burst here starves the thread pool on a 2-core CI runner
+        // and times out unrelated tests that wait on a pool-scheduled continuation.
+        const int concurrency = 16;
         var marker = NewMarker();
         var aliceAuth = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
         var resolver = Resolver(Doc(Alice, Auth(aliceAuth.PublicJwk)));
