@@ -849,7 +849,8 @@ public sealed class SameDocumentProvenanceTests
     public async Task Observation_FromForgedFlagsOnVerifiedAuthcryptResult_ReadsTrustMetadataFromSnapshot()
     {
         // Authcrypt counterpart of the signed-path test below: together they pin all six
-        // trust-metadata members. This one covers Encrypted, AnonymousSender, and SenderKid.
+        // trust-metadata members. This one covers Encrypted, AnonymousSender, and SenderKid,
+        // plus the positive recipient-binding carry-through in the covering state.
         var aliceKa = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
         var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKaKid);
         var bobDoc = Doc(Bob, Ka(bobKa.PublicJwk));
@@ -875,6 +876,9 @@ public sealed class SameDocumentProvenanceTests
         observation.AnonymousSender.Should().BeFalse("authcrypt named its sender; a clone cannot anonymize it");
         observation.SenderKid.Should().Be(AliceKaKid, "a clone cannot reattribute the authenticated sender key");
         observation.SignerKid.Should().BeNull("a caller claim cannot replace a verified null signer key");
+        observation.RecipientKeyBinding.Should().NotBeNull(
+            "a covering snapshot carries the recipient evidence onto the observation");
+        observation.RecipientKeyBinding!.PublicKeyThumbprint.Should().Be(result.RecipientKeyBinding!.PublicKeyThumbprint);
     }
 
     [Fact]

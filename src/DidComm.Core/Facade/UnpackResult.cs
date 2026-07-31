@@ -99,10 +99,13 @@ public sealed record UnpackResult(
     /// message, or an in-place edit of <c>Message.To</c> afterwards, leaves this value describing
     /// the original. Like the <see cref="SenderKeyBinding"/> family it has a snapshot backstop
     /// (#61): the verified inbound snapshot holds an immutable copy mirrored onto
-    /// <c>InboundObservation.RecipientAddressing</c>, where a synthetic result reads
-    /// <see cref="RecipientAddressing.NotEvaluated"/> and observer delivery pairs the outcome
-    /// with the verified plaintext itself — so observers read the stronger channel, and a
-    /// pipeline that rewrites addressing should trust the observation copy over this property.
+    /// <c>InboundObservation.RecipientAddressing</c>. Observer delivery pairs that copy with the
+    /// verified plaintext itself, and <c>InboundObservation.FromUnpackResult</c> reads it only
+    /// while the snapshot still covers the message content — content that diverged after unpack
+    /// fails closed to <see cref="RecipientAddressing.NotEvaluated"/> (together with the trust
+    /// flags), and a never-verified synthetic result reads <c>NotEvaluated</c> whatever it
+    /// claims. Observers therefore read the stronger channel, and a pipeline that rewrites
+    /// addressing should trust the observation copy over this property.
     /// </summary>
     public RecipientAddressing RecipientAddressing { get; internal init; }
 }
