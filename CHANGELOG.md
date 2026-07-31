@@ -40,6 +40,33 @@ knob caps the runtime's CPU heuristics while real cores stay available. The chan
 the stack trace and existing precedent rather than validated against a live repro; if it recurs, the
 next step is a genuinely constrained runner rather than a larger timeout.
 
+### Added — `samples/01-Quickstart`, and a README that matches reality (FR-DX-05)
+
+The README advertised `0.1.0-preview.1` as unpublished and told readers to build from source — four
+releases after that stopped being true — while contradicting itself on Phase 6 status in three
+places and describing `DidComm.Protocols.*` packages that were designed away rather than deferred.
+It also lacked the quickstart FR-DX-05 requires. Corrected end to end:
+
+- **New `samples/01-Quickstart`** (§14.3 sample 01): two `did:peer:2` identities, an authcrypt
+  round-trip, and the unpack metadata, in 25 lines. The README snippet is this project's `RunAsync`
+  body verbatim, and an interop smoke test runs it on every build — so the snippet cannot drift from
+  code that compiles, which is how the rest of the README rotted.
+- **Facts corrected:** install instructions (no `--prerelease`, no "build from source"), the NuGet
+  badge (stable, not prerelease), NetDid 1.3.0 → 3.0.0, and `did:web` resolution scope — `did:key`
+  and `did:peer` are wired by default; other net-did methods plug into `UseNetDidResolver(b => …)`.
+- **Test counts removed** rather than re-pinned. The same number was stale in three places with
+  three different values; the README now points at CI instead.
+- **Phase 6 stated honestly:** protocols, OOB, threading, i18n, and the release pipeline are done;
+  the live interop harness (FR-IX-03..06/08), samples 03–10 and cookbook tasks A–J/L/Y/Z (FR-DX-04),
+  the public-API coverage gate (FR-DX-01/09), and the NFR-04/07 observability and benchmark work are
+  not. The cookbook's coverage is given as 15 of 28 §14.2 tasks with the gaps named.
+- **API section refreshed:** `IDidKeyBindingService` is shown as the path the unpack pipeline
+  actually takes since 1.4.0 (`IsKeyAuthorizedAsync` is no longer called there), alongside
+  `IProtocolObserver`, `UnpackResult.RecipientAddressing`, `DidCommOptions.OwnIdentifiers`, and
+  `MapDidCommOobEndpoint`.
+- **Broken link fixed:** the Code of Conduct section linked a `CODE_OF_CONDUCT.md` that does not
+  exist in this repository; it now links the Contributor Covenant itself.
+
 ### Changed — package validation baseline moved to 1.4.0
 
 `PackageValidationBaselineVersion` now points at 1.4.0, the previous published release, so each pack
