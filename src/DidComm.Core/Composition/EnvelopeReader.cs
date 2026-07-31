@@ -279,6 +279,7 @@ internal static class EnvelopeReader
                         senderKid,
                         signerKid,
                         recipientKid,
+                        recipientAddressing,
                         senderBinding,
                         signerBinding,
                         recipientBinding);

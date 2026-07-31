@@ -8,9 +8,11 @@ using DidComm.Messages;
 namespace DidComm.Protocols;
 
 /// <summary>
-/// Immutable, library-internal snapshot of a successfully unpacked inbound plaintext and the trust
-/// metadata established while unpacking it. The snapshot deliberately contains no reference to the
-/// mutable <see cref="Message"/> used as its weak-table key.
+/// Immutable, library-internal snapshot of inbound plaintext and metadata. Normal unpack creates a
+/// verified snapshot whose trust fields were established while unpacking; the public dispatcher's
+/// synthetic compatibility path can create a fallback snapshot whose positional fields are caller
+/// claims and whose bindings/addressing are neutral. The snapshot deliberately contains no reference
+/// to the mutable <see cref="Message"/> used as a verified snapshot's weak-table key.
 /// </summary>
 internal sealed class InboundMessageSnapshot
 {
@@ -32,7 +34,8 @@ internal sealed class InboundMessageSnapshot
         string? recipientKid,
         VerifiedKeyBinding? senderKeyBinding,
         VerifiedKeyBinding? signerKeyBinding,
-        VerifiedKeyBinding? recipientKeyBinding)
+        VerifiedKeyBinding? recipientKeyBinding,
+        RecipientAddressing recipientAddressing)
     {
         PlaintextJson = plaintextJson;
         Id = id;
@@ -50,6 +53,7 @@ internal sealed class InboundMessageSnapshot
         SenderKeyBinding = senderKeyBinding;
         SignerKeyBinding = signerKeyBinding;
         RecipientKeyBinding = recipientKeyBinding;
+        RecipientAddressing = recipientAddressing;
     }
 
     private int _utf8ByteCount = -1;
@@ -87,8 +91,12 @@ internal sealed class InboundMessageSnapshot
     internal VerifiedKeyBinding? SenderKeyBinding { get; }
     internal VerifiedKeyBinding? SignerKeyBinding { get; }
     internal VerifiedKeyBinding? RecipientKeyBinding { get; }
+    internal RecipientAddressing RecipientAddressing { get; }
 
     /// <summary>Associate verified unpack output with its mutable public message by object identity.</summary>
+    /// <remarks><paramref name="recipientAddressing"/> is deliberately required, not defaulted: a
+    /// registration site that forgets it must fail to compile rather than silently record
+    /// <see cref="RecipientAddressing.NotEvaluated"/> and disable the FR-CONSIST-04 signal (#61).</remarks>
     internal static void RegisterVerified(
         Message message,
         string plaintextJson,
@@ -99,6 +107,7 @@ internal sealed class InboundMessageSnapshot
         string? senderKid,
         string? signerKid,
         string? recipientKid,
+        RecipientAddressing recipientAddressing,
         VerifiedKeyBinding? senderKeyBinding = null,
         VerifiedKeyBinding? signerKeyBinding = null,
         VerifiedKeyBinding? recipientKeyBinding = null)
@@ -122,7 +131,8 @@ internal sealed class InboundMessageSnapshot
             recipientKid,
             senderKeyBinding,
             signerKeyBinding,
-            recipientKeyBinding));
+            recipientKeyBinding,
+            recipientAddressing));
     }
 
     /// <summary>Look up the verified snapshot associated with an unpacked message.</summary>
@@ -164,10 +174,14 @@ internal sealed class InboundMessageSnapshot
             // Deliberately no key bindings (#56): this synthetic path never saw the packed bytes,
             // and the caller-supplied result's message may have diverged from whatever unpack (if
             // any) produced its binding evidence. Strong provenance is only attached when the
-            // verified-at-unpack snapshot itself carries it.
+            // verified-at-unpack snapshot itself carries it. The result's claimed
+            // RecipientAddressing is refused for the same reason (#61): no unpack evaluated this
+            // message's 'to', so a hand-built result cannot launder an Addressed/NotAddressed
+            // outcome into observers.
             senderKeyBinding: null,
             signerKeyBinding: null,
-            recipientKeyBinding: null);
+            recipientKeyBinding: null,
+            recipientAddressing: RecipientAddressing.NotEvaluated);
     }
 
     /// <summary>Create an independent mutable message instance from the immutable plaintext.</summary>

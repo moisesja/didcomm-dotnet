@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Facade;
+using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.ProblemReport;
@@ -108,8 +110,23 @@ public sealed class ProtocolDispatcherObserverTests
     private static ProtocolDispatcher Dispatcher(ProtocolHandlerRegistry registry, params IProtocolObserver[] observers)
         => new(registry, new InMemoryThreadStateStore(), logger: null, traceOptions: null, observers: observers);
 
+    /// <summary>Register a verified snapshot for <paramref name="msg"/> carrying an FR-CONSIST-04
+    /// outcome, as EnvelopeReader would after a real unpack (#61).</summary>
+    private static void RegisterVerifiedSnapshot(Message msg, RecipientAddressing recipientAddressing) =>
+        InboundMessageSnapshot.RegisterVerified(
+            msg,
+            JsonSerializer.Serialize(msg, DidCommJson.Default),
+            encrypted: false,
+            authenticated: false,
+            nonRepudiation: false,
+            anonymousSender: false,
+            senderKid: null,
+            signerKid: null,
+            recipientKid: null,
+            recipientAddressing: recipientAddressing);
+
     [Fact]
-    public async Task Observer_is_notified_after_a_handled_dispatch_with_a_faithful_clone()
+    public async Task Synthetic_dispatch_observer_preserves_only_positional_claims_on_a_faithful_clone()
     {
         var reg = new ProtocolHandlerRegistry();
         var handler = new CapturingHandler { ReplyToReturn = new MessageBuilder().WithType("https://didcomm.org/test/1.0/reply").Build() };
@@ -120,7 +137,16 @@ public sealed class ProtocolDispatcherObserverTests
         var msg = Msg("https://didcomm.org/test/1.0/m");
         msg.Body = new JsonObject { ["k"] = "v" };
 
-        var outcome = await dispatcher.DispatchAsync(Unpack(msg, authenticated: true), client: null, new DidCommOptions());
+        var synthetic = Unpack(msg, authenticated: true) with
+        {
+            NonRepudiation = true,
+            AnonymousSender = true,
+            SenderKid = "did:example:alice#ka",
+            SignerKid = "did:example:alice#sign",
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+
+        var outcome = await dispatcher.DispatchAsync(synthetic, client: null, new DidCommOptions());
         await dispatcher.FlushObserversAsync(Flush);
 
         outcome.Result.Should().Be(DispatchResult.ReplyProduced);
@@ -130,7 +156,17 @@ public sealed class ProtocolDispatcherObserverTests
         seen.Message.Body.Should().NotBeSameAs(msg.Body);
         seen.Message.Id.Should().Be(msg.Id);
         seen.Message.Body!["k"]!.GetValue<string>().Should().Be("v");
-        seen.Authenticated.Should().BeTrue("envelope-auth metadata must flow through for trust decisions");
+        seen.Encrypted.Should().BeTrue();
+        seen.Authenticated.Should().BeTrue();
+        seen.NonRepudiation.Should().BeTrue();
+        seen.AnonymousSender.Should().BeTrue();
+        seen.SenderKid.Should().Be("did:example:alice#ka");
+        seen.SignerKid.Should().Be("did:example:alice#sign");
+        seen.SenderKeyBinding.Should().BeNull();
+        seen.SignerKeyBinding.Should().BeNull();
+        seen.RecipientKeyBinding.Should().BeNull();
+        seen.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated,
+            "synthetic positional values are caller claims, not verified trust evidence");
     }
 
     private sealed class ThrowingHandler : IProtocolHandler
@@ -156,6 +192,8 @@ public sealed class ProtocolDispatcherObserverTests
 
         await dispatcher.FlushObserversAsync(Flush);
         observer.Observations.Should().HaveCount(1, "the observer sees the inbound regardless of handler outcome");
+        observer.Observations[0].RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated,
+            "a synthetic result without a verified snapshot carries no addressing outcome (#61)");
     }
 
     [Fact]
@@ -169,6 +207,8 @@ public sealed class ProtocolDispatcherObserverTests
 
         outcome.Result.Should().Be(DispatchResult.NoHandler);
         observer.Observations.Should().HaveCount(1, "an initiator with no handler for a PIURI must still observe its traffic");
+        observer.Observations[0].RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated,
+            "a synthetic result without a verified snapshot carries no addressing outcome (#61)");
     }
 
     [Fact]
@@ -186,6 +226,95 @@ public sealed class ProtocolDispatcherObserverTests
 
         outcome.Result.Should().Be(DispatchResult.DroppedAsAckLoop);
         observer.Observations.Should().HaveCount(1);
+        observer.Observations[0].RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated,
+            "a synthetic result without a verified snapshot carries no addressing outcome (#61)");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #61 acceptance: on every observer-only outcome path — NoHandler, ack-loop drop, handler
+    // failure — the observation mirrors the verified snapshot's FR-CONSIST-04 outcome, so an
+    // application doing its addressing policy in an observer actually sees the warning.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Observer_sees_the_verified_snapshots_recipient_addressing_on_NoHandler()
+    {
+        var observer = new RecordingObserver();
+        await using var dispatcher = Dispatcher(new ProtocolHandlerRegistry(), observer);
+
+        var msg = Msg("https://didcomm.org/x/1.0/msg");
+        RegisterVerifiedSnapshot(msg, RecipientAddressing.NotAddressed);
+
+        var outcome = await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions());
+        await dispatcher.FlushObserversAsync(Flush);
+
+        outcome.Result.Should().Be(DispatchResult.NoHandler);
+        observer.Observations.Should().HaveCount(1);
+        observer.Observations[0].RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+    }
+
+    [Fact]
+    public async Task Observer_sees_the_verified_snapshots_recipient_addressing_on_ack_loop_drop()
+    {
+        var observer = new RecordingObserver();
+        await using var dispatcher = Dispatcher(new ProtocolHandlerRegistry(), observer);
+
+        var msg = Msg("https://didcomm.org/empty/1.0/empty");
+        msg.Ack = new[] { "prior-msg" };
+        msg.PleaseAck = new[] { "" };
+        RegisterVerifiedSnapshot(msg, RecipientAddressing.NotAddressed);
+
+        var outcome = await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions());
+        await dispatcher.FlushObserversAsync(Flush);
+
+        outcome.Result.Should().Be(DispatchResult.DroppedAsAckLoop);
+        observer.Observations.Should().HaveCount(1);
+        observer.Observations[0].RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+    }
+
+    [Fact]
+    public async Task Mutation_before_dispatch_cannot_desync_the_observers_content_from_its_addressing()
+    {
+        // The dispatcher path materializes BOTH the message clone and the addressing outcome from
+        // the immutable verified snapshot. An in-place edit between unpack and dispatch therefore
+        // changes nothing the observer sees: it gets the verified original content paired with the
+        // outcome computed for exactly that content — never the mutated content, and never a
+        // (content, outcome) pair the unpack didn't produce (#61).
+        var observer = new RecordingObserver();
+        await using var dispatcher = Dispatcher(new ProtocolHandlerRegistry(), observer);
+
+        var msg = Msg("https://didcomm.org/x/1.0/msg");
+        RegisterVerifiedSnapshot(msg, RecipientAddressing.NotAddressed);
+
+        msg.To = new[] { "did:example:attacker-inserted" };
+        msg.Body = new JsonObject { ["content"] = "attacker-substituted" };
+
+        await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions());
+        await dispatcher.FlushObserversAsync(Flush);
+
+        observer.Observations.Should().HaveCount(1);
+        var seen = observer.Observations[0];
+        seen.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+        seen.Message.To.Should().Equal(new[] { "did:peer:bob" }, "the observer reads the verified original, not the mutation");
+        seen.Message.Body.Should().BeNull("the mutated body must not reach the observer");
+    }
+
+    [Fact]
+    public async Task Observer_sees_the_verified_snapshots_recipient_addressing_when_the_handler_throws()
+    {
+        var reg = new ProtocolHandlerRegistry();
+        reg.Register(new ThrowingHandler());
+        var observer = new RecordingObserver();
+        await using var dispatcher = Dispatcher(reg, observer);
+
+        var msg = Msg("https://didcomm.org/test/1.0/m");
+        RegisterVerifiedSnapshot(msg, RecipientAddressing.NotAddressed);
+
+        var act = async () => await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions());
+        await act.Should().ThrowAsync<InvalidOperationException>();
+
+        await dispatcher.FlushObserversAsync(Flush);
+        observer.Observations.Should().HaveCount(1);
+        observer.Observations[0].RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
     }
 
     [Fact]

@@ -851,3 +851,52 @@ Format per entry:
   assert that per-result; and where you need a specific interleaving, drive it with a rendezvous
   (TaskCompletionSource / arrival counter) rather than hoping the scheduler produces it. Assert the
   overlap actually happened (max observed concurrency), or the test can silently degrade to sequential.
+
+## L-045 — A guarantee narrowed in one artifact is still overclaimed in every other; align them all in the same change.
+
+- **Lesson:** The #61 adversarial review showed the observation guarantee was weaker than claimed
+  (record `with`-transplant; dispatcher path pairs rather than resets). I narrowed the XML doc but
+  shipped the PRD MUST, the CHANGELOG "Unlaunderable" heading, and the PR body still claiming the
+  absolute invariant — and claimed six trust fields snapshot-sourced with a test pinning only three.
+  PR #62's review (points 1–3) caught all of it: the reviewer reads code docs, PRD, CHANGELOG,
+  samples, and PR body as ONE contract, and any disagreement among them is a defect by itself.
+- **Why:** A claim doesn't live where the fix landed; it lives everywhere it was ever written. Fixing
+  the site the finding pointed at leaves the normative documents contradicting the code docs — worse
+  than the original overclaim, because now the artifacts disagree with each other.
+- **How to apply:** After narrowing (or strengthening) any guarantee, grep the claim's key words
+  across `src/` XML docs, `docs/`, `CHANGELOG.md`, `samples/`, and the PR body, and restate every
+  hit. A claim of "all N members/paths/fields" requires a test that pins all N — count them. Adding
+  a member to a public record is a value-equality semantics change: write the upgrader note (the
+  1.4.0 `VerifiedKeyBinding` note is the template), and say "binary/API compatible", never "no
+  breaking change". See [[L-042]].
+
+## L-046 — Debt your diff introduces is this PR's debt: fix it or justify it here, never file it as "pre-existing".
+
+- **Lesson:** I introduced the optional `recipientAddressing = NotEvaluated` parameter in PR #62,
+  then listed its fail-quiet default in follow-up issue #63 labeled "pre-existing" alongside two
+  genuinely pre-existing items. The review called the misclassification out; the real fix (make the
+  parameter required so a forgotten registration site fails to compile) was a five-line change that
+  belonged in the PR from the start — and a test I'd added ("defaults to NotEvaluated") was actively
+  institutionalizing the failure mode.
+- **Why:** The repo's tracking discipline (issue #61 itself exists because findings are recorded
+  accurately) only works if provenance labels are true. Mislabeling PR-created debt as pre-existing
+  both dodges accountability and defers a failure mode the compiler could have eliminated now.
+- **How to apply:** Before filing a follow-up issue from a review of your own PR, check each item
+  against `git diff main`: if the diff created the surface, fix it in the PR or state in the PR why
+  the failure mode is accepted. Reserve "pre-existing" for what predates the branch. For
+  acceptance-critical values, prefer a required parameter over a defaulted one — the safe-direction
+  default is still a silent loss of signal. See [[L-038]].
+
+## L-047 — A direct PR review request is the execution approval; do not ask twice.
+
+- **Lesson:** When the user explicitly asks to review or re-check a pull request, that request
+  authorizes the normal review workflow: inspect the current revision, run proportionate validation,
+  and publish the requested review disposition. Write the required task plan for traceability, but do
+  not stop for a redundant second approval before doing the review.
+- **Why:** After explicitly asking to re-check PR #62, the user was forced through an unnecessary
+  approval gate even though no source implementation or unrelated external action was proposed. That
+  added friction without reducing risk.
+- **How to apply:** Treat “review this PR,” “re-check the PR,” and equivalent explicit requests as
+  approval of the PR-review plan and its ordinary GitHub review/comment write. Ask only when scope is
+  genuinely ambiguous or a materially different action is needed, such as editing the branch,
+  merging, closing issues, or changing repository settings.

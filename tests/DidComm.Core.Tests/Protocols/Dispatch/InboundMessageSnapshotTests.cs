@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Protocols;
 using FluentAssertions;
@@ -31,7 +32,8 @@ public sealed class InboundMessageSnapshotTests
         InboundMessageSnapshot.RegisterVerified(
             message, PlaintextJson,
             encrypted: false, authenticated: false, nonRepudiation: false, anonymousSender: false,
-            senderKid: null, signerKid: null, recipientKid: null);
+            senderKid: null, signerKid: null, recipientKid: null,
+            recipientAddressing: RecipientAddressing.NotEvaluated);
         InboundMessageSnapshot.TryGetFor(message, out var snapshot).Should().BeTrue();
         return snapshot;
     }
@@ -64,5 +66,33 @@ public sealed class InboundMessageSnapshotTests
 
         ByteCountField.GetValue(snapshot).Should().Be(first, "the first read must cache the computed size");
         snapshot.Utf8ByteCount.Should().Be(first);
+    }
+
+    [Fact]
+    public void CreateFallback_ReportsNotEvaluatedEvenWhenTheResultClaimsAddressed()
+    {
+        // The synthetic path never evaluated 'to', so the result's claimed outcome is refused —
+        // same rule as the #56 key bindings.
+        var synthetic = new UnpackResult(
+            Message: new Message { Id = "m1", Type = "https://didcomm.org/x/1.0/m" },
+            Stack: Array.Empty<DidComm.Jose.EnvelopeKind>(),
+            Encrypted: false,
+            Authenticated: false,
+            NonRepudiation: false,
+            AnonymousSender: false,
+            ContentEncryption: null,
+            KeyWrap: null,
+            SignatureAlgorithm: null,
+            SignerKid: null,
+            SenderKid: null,
+            RecipientKid: null,
+            AllRecipientKids: Array.Empty<string>(),
+            FromPrior: null)
+        {
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+
+        InboundMessageSnapshot.CreateFallback(synthetic).RecipientAddressing.Should().Be(
+            RecipientAddressing.NotEvaluated);
     }
 }

@@ -4,6 +4,7 @@ using DidComm.Facade;
 using DidComm.Jose;
 using DidComm.Jose.Signing;
 using DidComm.Messages;
+using DidComm.Protocols;
 using FluentAssertions;
 using NetCrypto;
 using Xunit;
@@ -177,5 +178,26 @@ public sealed class RecipientAddressingTests
             senderLookup: null, signerLookup: null, _crypto);
 
         unpacked.RecipientAddressing.Should().Be(RecipientAddressing.Addressed);
+    }
+
+    [Fact]
+    public async Task Verified_snapshot_carries_the_recipient_addressing_outcome()
+    {
+        // #61 — the reader records the outcome on the immutable verified snapshot at
+        // registration, so observers (which read the snapshot, not the result) see it too.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
+        var packed = await PackSignedAsync(
+            BuildMessage(from: "did:example:alice", to: "did:example:carol"), signer);
+
+        var unpacked = EnvelopeReaderTestRunner.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
+            _crypto,
+            ownDidSubjects: Own("did:example:bob"));
+
+        InboundMessageSnapshot.TryGetFor(unpacked.Message, out var snapshot).Should().BeTrue();
+        snapshot.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed,
+            "the snapshot must mirror the outcome the reader computed for this unpack");
     }
 }

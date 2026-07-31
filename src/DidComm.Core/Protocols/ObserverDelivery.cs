@@ -10,8 +10,9 @@ namespace DidComm.Protocols;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>Admission before materialization.</strong> The unpack boundary preserves the exact verified
-/// plaintext once as an immutable <see cref="InboundMessageSnapshot"/>. Enqueue reserves one
+/// <strong>Admission before materialization.</strong> The normal unpack boundary preserves the exact
+/// verified plaintext once as an immutable <see cref="InboundMessageSnapshot"/>; the public
+/// dispatcher's synthetic compatibility path may instead enqueue a fallback snapshot. Enqueue reserves one
 /// outstanding item and its exact UTF-8 byte count before writing a snapshot reference. The pump
 /// deserializes an independent <see cref="InboundObservation"/> only for accepted work, so a full
 /// queue cannot force repeated full-message clones on the receive path.

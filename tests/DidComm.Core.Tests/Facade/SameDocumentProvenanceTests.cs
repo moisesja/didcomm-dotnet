@@ -1,6 +1,8 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Exceptions;
 using DidComm.Facade;
+using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Resolution;
@@ -27,6 +29,7 @@ public sealed class SameDocumentProvenanceTests
 {
     private const string Alice = "did:example:alice";
     private const string Bob = "did:example:bob";
+    private const string Carol = "did:example:carol";
     private const string AliceAuthKid = "did:example:alice#auth-1";
     private const string AliceKaKid = "did:example:alice#ka-1";
     private const string BobKaKid = "did:example:bob#ka-1";
@@ -538,7 +541,7 @@ public sealed class SameDocumentProvenanceTests
     }
 
     [Fact]
-    public async Task Observation_FromMutatedVerifiedMessage_DropsBindings()
+    public async Task Observation_FromMutatedVerifiedMessage_NeutralizesAllTrustMetadata()
     {
         // Message is mutable and the verified snapshot is keyed by object identity, so an in-place
         // edit keeps that identity: without a content check, a caller could rewrite a verified
@@ -553,21 +556,368 @@ public sealed class SameDocumentProvenanceTests
 
         InboundObservation.FromUnpackResult(result).SignerKeyBinding.Should().NotBeNull();
 
-        // Mutate the verified message in place — same object, different content.
-        result.Message.Body = JsonNode.Parse("""{"content":"attacker-substituted"}""")!.AsObject();
+        // Poison every caller-controlled trust member, then mutate the verified message in place:
+        // same object identity, different content. Divergence must fail closed rather than turn
+        // this verified result into the synthetic compatibility path.
+        var poisoned = result with
+        {
+            Encrypted = true,
+            Authenticated = true,
+            NonRepudiation = true,
+            AnonymousSender = true,
+            SenderKid = "did:example:mallory#ka",
+            SignerKid = "did:example:mallory#sign",
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+        poisoned.Message.Body = JsonNode.Parse("""{"content":"attacker-substituted"}""")!.AsObject();
 
-        var afterMutation = InboundObservation.FromUnpackResult(result);
+        var afterMutation = InboundObservation.FromUnpackResult(poisoned);
 
+        afterMutation.Encrypted.Should().BeFalse();
+        afterMutation.Authenticated.Should().BeFalse();
+        afterMutation.NonRepudiation.Should().BeFalse();
+        afterMutation.AnonymousSender.Should().BeFalse();
+        afterMutation.SenderKid.Should().BeNull();
+        afterMutation.SignerKid.Should().BeNull();
         afterMutation.SignerKeyBinding.Should().BeNull("the evidence does not cover mutated content");
         afterMutation.SenderKeyBinding.Should().BeNull();
         afterMutation.RecipientKeyBinding.Should().BeNull();
+        afterMutation.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
     }
 
     [Fact]
-    public void Observation_FromSyntheticResult_CarriesNoBindings()
+    public void Observation_FromDivergedSnapshot_NeutralizesEveryNonDefaultMetadataMember()
+    {
+        // Register an intentionally all-nondefault structural sentinel so every neutralization
+        // assertion below proves a real transition. The tuple is deliberately denser than a legal
+        // envelope combination; direct registration keeps the regression focused on the snapshot
+        // boundary rather than JOSE composition rules.
+        var message = NewMessage();
+        var senderKey = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
+        var signerKey = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var recipientKey = TestKeyMaterial.Generate(KeyType.X25519, BobKaKid);
+        var senderBinding = new VerifiedKeyBinding(
+            new ResolvedKeyBinding(
+                AliceKaKid,
+                Alice,
+                Alice,
+                VerificationRelationship.KeyAgreement,
+                senderKey.PublicJwk),
+            Alice);
+        var signerBinding = new VerifiedKeyBinding(
+            new ResolvedKeyBinding(
+                AliceAuthKid,
+                Alice,
+                Alice,
+                VerificationRelationship.Authentication,
+                signerKey.PublicJwk),
+            Alice);
+        var recipientBinding = new VerifiedKeyBinding(
+            new ResolvedKeyBinding(
+                BobKaKid,
+                Bob,
+                Bob,
+                VerificationRelationship.KeyAgreement,
+                recipientKey.PublicJwk),
+            Bob);
+
+        InboundMessageSnapshot.RegisterVerified(
+            message,
+            JsonSerializer.Serialize(message, DidCommJson.Default),
+            encrypted: true,
+            authenticated: true,
+            nonRepudiation: true,
+            anonymousSender: true,
+            senderKid: AliceKaKid,
+            signerKid: AliceAuthKid,
+            recipientKid: BobKaKid,
+            recipientAddressing: RecipientAddressing.Addressed,
+            senderKeyBinding: senderBinding,
+            signerKeyBinding: signerBinding,
+            recipientKeyBinding: recipientBinding);
+
+        var received = new UnpackResult(
+            Message: message,
+            Stack: new[]
+            {
+                Jose.EnvelopeKind.Encrypted,
+                Jose.EnvelopeKind.Signed,
+                Jose.EnvelopeKind.Plaintext,
+            },
+            Encrypted: true,
+            Authenticated: true,
+            NonRepudiation: true,
+            AnonymousSender: true,
+            ContentEncryption: "A256CBC-HS512",
+            KeyWrap: "ECDH-1PU+A256KW",
+            SignatureAlgorithm: "EdDSA",
+            SignerKid: AliceAuthKid,
+            SenderKid: AliceKaKid,
+            RecipientKid: BobKaKid,
+            AllRecipientKids: new[] { BobKaKid },
+            FromPrior: null)
+        {
+            SenderKeyBinding = senderBinding,
+            SignerKeyBinding = signerBinding,
+            RecipientKeyBinding = recipientBinding,
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+
+        message.Body = JsonNode.Parse("""{"content":"diverged"}""")!.AsObject();
+
+        var observation = InboundObservation.FromUnpackResult(received);
+
+        observation.Encrypted.Should().BeFalse();
+        observation.Authenticated.Should().BeFalse();
+        observation.NonRepudiation.Should().BeFalse();
+        observation.AnonymousSender.Should().BeFalse();
+        observation.SenderKid.Should().BeNull();
+        observation.SignerKid.Should().BeNull();
+        observation.SenderKeyBinding.Should().BeNull();
+        observation.SignerKeyBinding.Should().BeNull();
+        observation.RecipientKeyBinding.Should().BeNull();
+        observation.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
+    }
+
+    [Fact]
+    public void Observation_FromSyntheticResult_PreservesOnlyPositionalTrustMetadata()
     {
         // A consumer-assembled UnpackResult over a message the pipeline never verified must not
         // yield strong provenance — flags alone are not evidence.
+        var synthetic = new UnpackResult(
+            Message: NewMessage(),
+            Stack: new[] { Jose.EnvelopeKind.Signed, Jose.EnvelopeKind.Plaintext },
+            Encrypted: true,
+            Authenticated: true,
+            NonRepudiation: true,
+            AnonymousSender: true,
+            ContentEncryption: null,
+            KeyWrap: null,
+            SignatureAlgorithm: "EdDSA",
+            SignerKid: AliceAuthKid,
+            SenderKid: AliceKaKid,
+            RecipientKid: null,
+            AllRecipientKids: Array.Empty<string>(),
+            FromPrior: null)
+        {
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
+
+        var observation = InboundObservation.FromUnpackResult(synthetic);
+        var fallback = InboundMessageSnapshot.CreateFallback(synthetic);
+
+        observation.Encrypted.Should().BeTrue();
+        observation.Authenticated.Should().BeTrue();
+        observation.NonRepudiation.Should().BeTrue();
+        observation.AnonymousSender.Should().BeTrue();
+        observation.SenderKid.Should().Be(AliceKaKid);
+        observation.SignerKid.Should().Be(AliceAuthKid);
+        observation.SignerKeyBinding.Should().BeNull();
+        observation.SenderKeyBinding.Should().BeNull();
+        observation.RecipientKeyBinding.Should().BeNull();
+        observation.RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
+        fallback.SignerKeyBinding.Should().BeNull();
+        fallback.SenderKeyBinding.Should().BeNull();
+        fallback.RecipientKeyBinding.Should().BeNull();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Acceptance (#61): the FR-CONSIST-04 addressing outcome rides the same snapshot backstop
+    // as the bindings — mirrored onto observations and reset when verified content diverges.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Observation_FromRealUnpack_CarriesRecipientAddressing()
+    {
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        // Carol unpacks a message addressed to bob only — the FR-CONSIST-04 warning case.
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        result.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+        InboundObservation.FromUnpackResult(result).RecipientAddressing.Should().Be(
+            RecipientAddressing.NotAddressed,
+            "observer-only applications must see the addressing warning (#61)");
+    }
+
+    [Fact]
+    public async Task Observation_FromMutatedVerifiedMessage_ResetsRecipientAddressingToNotEvaluated()
+    {
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        // Load-bearing precondition: the value is non-default before mutation, so the reset below
+        // is a real transition and not the unconfigured default.
+        InboundObservation.FromUnpackResult(result).RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+
+        // Mutate the verified message in place — same object identity, different content.
+        result.Message.Body = JsonNode.Parse("""{"content":"attacker-substituted"}""")!.AsObject();
+
+        InboundObservation.FromUnpackResult(result).RecipientAddressing.Should().Be(
+            RecipientAddressing.NotEvaluated,
+            "an addressing outcome does not cover content the unpack never evaluated");
+    }
+
+    [Fact]
+    public async Task Observation_WithClone_KeepsTheValueOfTheMessageItWasBuiltFrom()
+    {
+        // Documented limitation, pinned deliberately: InboundObservation is a record, so a
+        // consumer's with-clone copies RecipientAddressing — like every member — onto whatever
+        // Message the clone carries. The library's pairing guarantee covers observations it
+        // constructs; a clone's value describes the message the observation was BUILT from, and
+        // consumers must not read a transplanted observation's value as describing its current
+        // Message. If this test starts failing, the record shape changed — update the scope
+        // language in the PRD FR-CONSIST-04 row and the CHANGELOG alongside.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        var observation = InboundObservation.FromUnpackResult(result);
+        observation.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+
+        var messageAddressedToCarol = NewMessage();
+        messageAddressedToCarol.To = new[] { Carol };
+        var transplanted = observation with { Message = messageAddressedToCarol };
+
+        transplanted.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed,
+            "a record clone preserves the stored value even though the transplanted Message " +
+            "would recompute as Addressed for Carol");
+    }
+
+    [Fact]
+    public async Task Observation_DirectMessageMutation_KeepsTheValueOfTheMessageItWasBuiltFrom()
+    {
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions { OwnIdentifiers = new[] { Carol } });
+        var result = await recipient.UnpackAsync(packed);
+
+        var observation = InboundObservation.FromUnpackResult(result);
+        observation.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed);
+
+        observation.Message.To = new[] { Carol };
+
+        observation.RecipientAddressing.Should().Be(RecipientAddressing.NotAddressed,
+            "direct mutation does not recompute the value; it still describes the built-from message");
+    }
+
+    [Fact]
+    public void RecipientAddressing_ParticipatesInObservationValueEquality()
+    {
+        // Upgrader-visible semantics (see CHANGELOG): the record's synthesized Equals/GetHashCode
+        // now cover RecipientAddressing, so a library observation carrying a real outcome no
+        // longer equals a consumer-constructed observation that agrees on all seven positional
+        // members but holds the default NotEvaluated.
+        var msg = NewMessage();
+        var baseline = new InboundObservation(msg, Encrypted: false, Authenticated: false,
+            NonRepudiation: false, AnonymousSender: false, SenderKid: null, SignerKid: null);
+        var carrying = baseline with { RecipientAddressing = RecipientAddressing.NotAddressed };
+
+        carrying.Should().NotBe(baseline);
+        (baseline with { RecipientAddressing = RecipientAddressing.NotAddressed }).Should().Be(carrying,
+            "equality remains structural over the full member set");
+    }
+
+    [Fact]
+    public async Task Observation_FromForgedFlagsOnVerifiedAuthcryptResult_ReadsTrustMetadataFromSnapshot()
+    {
+        // Authcrypt counterpart of the signed-path test below: together they pin all six
+        // trust-metadata members. This one covers Encrypted, AnonymousSender, and SenderKid,
+        // plus the positive recipient-binding carry-through in the covering state.
+        var aliceKa = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
+        var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKaKid);
+        var bobDoc = Doc(Bob, Ka(bobKa.PublicJwk));
+        var packed = await PackAuthcrypt(aliceKa, bobDoc);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Ka(aliceKa.PublicJwk)));
+        resolver.SetSequence(Bob, bobDoc);
+        var recipient = Client(resolver, bobKa.PrivateJwk);
+        var result = await recipient.UnpackAsync(packed);
+
+        var forged = result with
+        {
+            Encrypted = false,
+            AnonymousSender = true,
+            SenderKid = "did:example:mallory#ka",
+            SignerKid = "did:example:mallory#sign",
+        };
+
+        var observation = InboundObservation.FromUnpackResult(forged);
+
+        observation.Encrypted.Should().BeTrue("the unpack decrypted this content; a clone cannot unsay it");
+        observation.AnonymousSender.Should().BeFalse("authcrypt named its sender; a clone cannot anonymize it");
+        observation.SenderKid.Should().Be(AliceKaKid, "a clone cannot reattribute the authenticated sender key");
+        observation.SignerKid.Should().BeNull("a caller claim cannot replace a verified null signer key");
+        observation.RecipientKeyBinding.Should().NotBeNull(
+            "a covering snapshot carries the recipient evidence onto the observation");
+        observation.RecipientKeyBinding!.PublicKeyThumbprint.Should().Be(result.RecipientKeyBinding!.PublicKeyThumbprint);
+    }
+
+    [Fact]
+    public async Task Observation_FromForgedFlagsOnVerifiedSignedResult_ReadsTrustMetadataFromSnapshot()
+    {
+        // UnpackResult is a record, so a with-clone can rewrite the flags an application is told
+        // to interpret the addressing outcome (and the bindings) with. When the verified snapshot
+        // still covers the content, the observation's trust metadata must come from the snapshot,
+        // not the caller's result — a rewritten flag or kid must not survive.
+        var keyA = TestKeyMaterial.Generate(KeyType.Ed25519, AliceAuthKid);
+        var packed = await PackSigned(keyA);
+
+        var resolver = new VersionedResolver();
+        resolver.SetSequence(Alice, Doc(Alice, Auth(keyA.PublicJwk)));
+        var recipient = Client(resolver);
+        var result = await recipient.UnpackAsync(packed);
+
+        var forged = result with
+        {
+            Authenticated = false,
+            NonRepudiation = false,
+            SenderKid = "did:example:mallory#ka",
+            SignerKid = "did:example:mallory#k",
+        };
+
+        var observation = InboundObservation.FromUnpackResult(forged);
+
+        observation.Authenticated.Should().BeTrue("the unpack authenticated this content; a clone cannot unsay it");
+        observation.NonRepudiation.Should().BeTrue();
+        observation.SenderKid.Should().BeNull("a caller claim cannot replace a verified null sender key");
+        observation.SignerKid.Should().Be(AliceAuthKid, "a clone cannot reattribute the verified signature");
+        observation.SignerKeyBinding.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Observation_FromSyntheticResult_CannotLaunderRecipientAddressing()
+    {
+        // A consumer-assembled result claiming Addressed must not propagate the claim: the value
+        // is sourced only from the verified-at-unpack snapshot, which a synthetic result lacks.
         var synthetic = new UnpackResult(
             Message: NewMessage(),
             Stack: new[] { Jose.EnvelopeKind.Signed, Jose.EnvelopeKind.Plaintext },
@@ -582,17 +932,13 @@ public sealed class SameDocumentProvenanceTests
             SenderKid: null,
             RecipientKid: null,
             AllRecipientKids: Array.Empty<string>(),
-            FromPrior: null);
+            FromPrior: null)
+        {
+            RecipientAddressing = RecipientAddressing.Addressed,
+        };
 
-        var observation = InboundObservation.FromUnpackResult(synthetic);
-        var fallback = InboundMessageSnapshot.CreateFallback(synthetic);
-
-        observation.SignerKeyBinding.Should().BeNull();
-        observation.SenderKeyBinding.Should().BeNull();
-        observation.RecipientKeyBinding.Should().BeNull();
-        fallback.SignerKeyBinding.Should().BeNull();
-        fallback.SenderKeyBinding.Should().BeNull();
-        fallback.RecipientKeyBinding.Should().BeNull();
+        InboundObservation.FromUnpackResult(synthetic).RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
+        InboundMessageSnapshot.CreateFallback(synthetic).RecipientAddressing.Should().Be(RecipientAddressing.NotEvaluated);
     }
 
     // ---------------------------------------------------------------------------------------

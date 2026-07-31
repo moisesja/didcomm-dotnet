@@ -6,8 +6,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
-> Additive — new public API, no wire change, no breaking change (ApiCompat / package validation
-> clean against 1.3.0). Closes **#59**.
+> Additive — new public API, no wire change, binary/API compatible (ApiCompat / package validation
+> clean against 1.3.0). Record value-equality semantics extend to the new members — see the
+> upgrader notes below. Closes **#59**, **#61**.
 
 ### Added — FR-CONSIST-04 wired: the "recipient not named in `to`" warning is now surfaced (#59)
 
@@ -65,9 +66,56 @@ against the implementation that lacks it (verified by injecting the defect):
   construction with `ArgumentException` rather than being skipped silently on every message, which
   would leave the warning permanently dead with no signal to the operator.
 
-Known limitation: the outcome is not mirrored onto `InboundMessageSnapshot` / `InboundObservation`,
-so observer-only applications cannot read it and the value goes stale if a caller rewrites
-`Message.To` or clones the result onto another message — tracked in **#61**.
+### Added — FR-CONSIST-04 outcome mirrored onto the verified snapshot and `InboundObservation` (#61)
+
+The wiring above originally left the outcome on the facade `UnpackResult` only, so observer-only
+applications could not read it, and the value went stale if a caller rewrote `Message.To` or
+`with`-cloned the result onto another message. Resolved before release: the outcome now rides the
+same snapshot backstop #56 built for the key bindings.
+
+- **New `InboundObservation.RecipientAddressing`** (public-get/internal-init, additive over the
+  positional constructor — binary compatible): observers receive the outcome on every dispatch
+  path — handled, `NoHandler`, ack-loop drop, and handler failure — so an application that does
+  its addressing policy in an `IProtocolObserver` actually sees the warning.
+- **Three explicit trust-source states:** `InboundObservation.FromUnpackResult` no longer treats
+  verified-content divergence like a synthetic result.
+  - When the verified snapshot still covers the current message content, all observation metadata
+    comes from it: the six positional trust members (`Encrypted` / `Authenticated` /
+    `NonRepudiation` / `AnonymousSender` / `SenderKid` / `SignerKid`), all three #56 key bindings,
+    and `RecipientAddressing`. Verified null kids and bindings remain null; they never fall back to
+    caller claims.
+  - When a verified snapshot exists for the message instance but its content has diverged, the
+    observation fails closed: all four flags are `false`, both kids and all three bindings are
+    null, and addressing is `NotEvaluated`. No caller-supplied trust value survives.
+  - Only a message that was never associated with a verified snapshot takes the synthetic
+    compatibility path. It preserves the caller's six positional members, but all three bindings
+    remain null and addressing remains `NotEvaluated`, whatever the synthetic result claims.
+- **Never desynced on the verified-snapshot path:** normal observer delivery for a real unpack
+  materializes the message and all metadata from the same verified snapshot, so an in-place edit
+  after unpack cannot hand an observer a (content, metadata) pair the unpack never produced.
+  The public dispatcher also accepts caller-created synthetic results; that fallback preserves
+  only the six positional caller claims and is not cryptographic evidence. **Scope:**
+  `InboundObservation` is itself a record. A consumer's `with`-clone copies the stored values onto
+  whatever `Message` the clone carries, and direct mutation changes the mutable message without
+  recomputing metadata. The pairing guarantee therefore covers observations as the library
+  constructs them; after either consumer action, stored values still describe the message the
+  observation was *built* from (pinned by a test documenting the clone limitation).
+
+### Notes for upgraders
+
+- `RecipientAddressing` participates in record value equality: the synthesized `Equals` /
+  `GetHashCode` / `ToString` of `UnpackResult` (#59) and `InboundObservation` (#61) now cover the
+  new member. Two observations that agree on all seven positional members but differ on
+  `RecipientAddressing` — e.g. a library-produced observation carrying `NotAddressed` versus a
+  consumer-constructed one holding the default `NotEvaluated` — no longer compare equal, where
+  before this release they did. Binary and source compatibility are unaffected; code that
+  compared observations across that boundary should compare the members it means.
+- `InboundObservation.FromUnpackResult` now has three trust-source states. A covering verified
+  snapshot supplies all six positional members, all three key bindings, and addressing. A
+  verified snapshot whose message content has diverged supplies none of them: the four flags are
+  `false`, both kids and all three bindings are null, and addressing is `NotEvaluated`. Only a
+  never-snapshotted synthetic message preserves the caller's six positional members for
+  compatibility; caller-supplied bindings and addressing are never preserved.
 
 ## [1.4.0] - 2026-07-26
 
