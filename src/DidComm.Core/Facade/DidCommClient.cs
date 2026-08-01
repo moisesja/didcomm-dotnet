@@ -1,6 +1,7 @@
 using System.Collections.Frozen;
 using DidComm.Composition;
 using DidComm.Consistency;
+using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
@@ -180,9 +181,22 @@ public sealed partial class DidCommClient
     public Task<string> PackPlaintextAsync(Message message, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
-        RejectFromPriorOnUnprotectedEnvelope(message, "PackPlaintextAsync");
-        RejectUnsupportedDidsOnMessage(message);
-        return Task.FromResult(EnvelopeWriter.PackPlaintext(message));
+        // NFR-05: zero-cost when unobserved — StartActivity returns null with no listener and
+        // every tag write below is null-guarded.
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.PackPlaintextActivity);
+        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+        try
+        {
+            RejectFromPriorOnUnprotectedEnvelope(message, "PackPlaintextAsync");
+            RejectUnsupportedDidsOnMessage(message);
+            return Task.FromResult(EnvelopeWriter.PackPlaintext(message));
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            LogPackFailed(_logger, "plaintext", ex.GetType().Name);
+            throw;
+        }
     }
 
     /// <summary>
@@ -207,19 +221,31 @@ public sealed partial class DidCommClient
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrEmpty(signFrom);
-        RejectFromPriorOnUnprotectedEnvelope(message, "PackSignedAsync");
-        _keyService.RejectUnsupportedMethod(signFrom);
-        RejectUnsupportedDidsOnMessage(message);
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.PackSignedActivity);
+        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+        try
+        {
+            RejectFromPriorOnUnprotectedEnvelope(message, "PackSignedAsync");
+            _keyService.RejectUnsupportedMethod(signFrom);
+            RejectUnsupportedDidsOnMessage(message);
 
-        // FR-SIG-05 (SHOULD): warn — don't refuse — when a STANDALONE signed message lacks 'to'.
-        // The signed-inside-encrypted path never reaches this method (its inner 'to' is FR-SIG-06's
-        // MUST, enforced by the envelope layer), so this warning fires only for standalone packs.
-        if (message.To is not { Count: > 0 })
-            LogStandaloneSignedMissingTo(_logger, message.Id);
+            // FR-SIG-05 (SHOULD): warn — don't refuse — when a STANDALONE signed message lacks 'to'.
+            // The signed-inside-encrypted path never reaches this method (its inner 'to' is FR-SIG-06's
+            // MUST, enforced by the envelope layer), so this warning fires only for standalone packs.
+            if (message.To is not { Count: > 0 })
+                LogStandaloneSignedMissingTo(_logger, message.Id);
 
-        var signer = await PickSignerAsync(signFrom, ct).ConfigureAwait(false);
-        var parameters = new PackSignedParameters(message, new[] { signer });
-        return await EnvelopeWriter.PackSignedAsync(parameters, ct).ConfigureAwait(false);
+            var signer = await PickSignerAsync(signFrom, ct).ConfigureAwait(false);
+            var parameters = new PackSignedParameters(message, new[] { signer });
+            return await EnvelopeWriter.PackSignedAsync(parameters, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            if (ex is not OperationCanceledException)
+                LogPackFailed(_logger, "signed", ex.GetType().Name);
+            throw;
+        }
     }
 
     /// <summary>
@@ -238,6 +264,33 @@ public sealed partial class DidCommClient
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(options);
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.PackEncryptedActivity);
+        if (activity is not null)
+        {
+            // NFR-04: header-level metadata only — type URI, JOSE identifiers, a count. Never
+            // the recipient DIDs, the body, or key material.
+            activity.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+            activity.SetTag(DidCommDiagnostics.AlgTag, options.From is not null ? JoseAlgorithms.Ecdh1PuA256Kw : JoseAlgorithms.EcdhEsA256Kw);
+            activity.SetTag(DidCommDiagnostics.EncTag, EncTagValue(options.Enc));
+            activity.SetTag(DidCommDiagnostics.RecipientsTag, options.Recipients?.Count ?? 0);
+        }
+        try
+        {
+            return await PackEncryptedCoreAsync(message, options, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            if (ex is not OperationCanceledException)
+                LogPackFailed(_logger, "encrypted", ex.GetType().Name);
+            throw;
+        }
+    }
+
+    // The un-instrumented body of PackEncryptedAsync; the public wrapper above owns the span,
+    // failure log, and argument null checks.
+    private async Task<PackEncryptedResult> PackEncryptedCoreAsync(Message message, PackEncryptedOptions options, CancellationToken ct)
+    {
         if (options.Recipients is null || options.Recipients.Count == 0)
             throw new ArgumentException("At least one recipient DID is required.", nameof(options));
 
@@ -370,6 +423,33 @@ public sealed partial class DidCommClient
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(options);
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.SendActivity);
+        if (activity is not null)
+        {
+            activity.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+            activity.SetTag(DidCommDiagnostics.RecipientsTag, options.Recipients?.Count ?? 0);
+        }
+        try
+        {
+            var result = await SendCoreAsync(message, options, ct).ConfigureAwait(false);
+            // The scheme is only known once routing resolved an endpoint; a bounded vocabulary
+            // (https/wss/...), never the endpoint host or path (NFR-04).
+            activity?.SetTag(DidCommDiagnostics.TransportSchemeTag, result.EndpointUsed.Scheme);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            if (ex is not OperationCanceledException)
+                LogSendFailed(_logger, ex.GetType().Name);
+            throw;
+        }
+    }
+
+    // The un-instrumented body of SendAsync; the public wrapper above owns the span, failure
+    // log, and argument null checks. The nested PackEncryptedAsync call keeps its own child span.
+    private async Task<SendResult> SendCoreAsync(Message message, SendOptions options, CancellationToken ct)
+    {
         if (options.Recipients is null || options.Recipients.Count == 0)
             throw new ArgumentException("At least one recipient DID is required.", nameof(options));
         if (_transportRouter is null)
@@ -447,6 +527,36 @@ public sealed partial class DidCommClient
     public async Task<UnpackResult> UnpackAsync(string packed, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.UnpackActivity);
+        try
+        {
+            var result = await UnpackCoreAsync(packed, ct).ConfigureAwait(false);
+            if (activity is not null)
+            {
+                // Tags are only knowable after the envelope is opened; all header-level (NFR-04).
+                activity.SetTag(DidCommDiagnostics.MessageTypeTag, result.Message.Type);
+                if (result.KeyWrap is not null)
+                    activity.SetTag(DidCommDiagnostics.AlgTag, result.KeyWrap);
+                if (result.ContentEncryption is not null)
+                    activity.SetTag(DidCommDiagnostics.EncTag, result.ContentEncryption);
+                if (result.AllRecipientKids is { Count: > 0 } kids)
+                    activity.SetTag(DidCommDiagnostics.RecipientsTag, kids.Count);
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            if (ex is not OperationCanceledException)
+                LogUnpackFailed(_logger, ex.GetType().Name);
+            throw;
+        }
+    }
+
+    // The un-instrumented body of UnpackAsync; the public wrapper above owns the span and
+    // failure log.
+    private async Task<UnpackResult> UnpackCoreAsync(string packed, CancellationToken ct)
+    {
         if (Encoding.UTF8.GetByteCount(packed) > _options.MaxReceiveBytes)
         {
             throw new MalformedMessageException(
@@ -616,6 +726,49 @@ public sealed partial class DidCommClient
         Level = LogLevel.Warning,
         Message = "Standalone signed message '{MessageId}' has no 'to' header. DIDComm v2.1 SHOULD include 'to' on standalone signed messages (FR-SIG-05) to limit surreptitious forwarding.")]
     private static partial void LogStandaloneSignedMissingTo(ILogger logger, string messageId);
+
+    /// <summary>
+    /// Pack-failure breadcrumb (NFR-06). Debug level: the exception itself propagates to the
+    /// caller (FR-API-07 taxonomy) and the span already records error status, so this exists
+    /// for log-only hosts. Only the envelope form and exception <em>type</em> name are logged —
+    /// exception messages can embed header contents and are excluded (NFR-04).
+    /// </summary>
+    [LoggerMessage(
+        EventId = 2,
+        Level = LogLevel.Debug,
+        Message = "Pack ({Form}) failed with {ErrorType}.")]
+    private static partial void LogPackFailed(ILogger logger, string form, string errorType);
+
+    /// <summary>Unpack-failure breadcrumb (NFR-06); same redaction rules as <see cref="LogPackFailed"/>.</summary>
+    [LoggerMessage(
+        EventId = 3,
+        Level = LogLevel.Debug,
+        Message = "Unpack failed with {ErrorType}.")]
+    private static partial void LogUnpackFailed(ILogger logger, string errorType);
+
+    /// <summary>
+    /// Send-failure breadcrumb (NFR-06). Warning level — a send failure is operationally
+    /// actionable (network / endpoint / routing) in a way pack/unpack faults are not. The
+    /// endpoint itself is NOT logged: it can come from a DID document and identify a peer.
+    /// </summary>
+    [LoggerMessage(
+        EventId = 4,
+        Level = LogLevel.Warning,
+        Message = "Send failed with {ErrorType}.")]
+    private static partial void LogSendFailed(ILogger logger, string errorType);
+
+    /// <summary>
+    /// The JOSE identifier for a content-encryption choice, for span tags only. Unlike
+    /// <see cref="MapContentEncryption"/> this never throws — a forbidden combination must
+    /// still tag the span before the core path rejects it.
+    /// </summary>
+    private static string EncTagValue(ContentEncryptionAlgorithm enc) => enc switch
+    {
+        ContentEncryptionAlgorithm.A256CbcHs512 => JoseAlgorithms.A256CbcHs512,
+        ContentEncryptionAlgorithm.A256Gcm => JoseAlgorithms.A256Gcm,
+        ContentEncryptionAlgorithm.XC20P => JoseAlgorithms.XC20P,
+        _ => enc.ToString(),
+    };
 
     private static string MapContentEncryption(ContentEncryptionAlgorithm enc, bool isAuthcrypt) => enc switch
     {

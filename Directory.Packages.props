@@ -55,10 +55,6 @@
          Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no
          extra Microsoft.Extensions.Http.Polly / .Resilience wrapper needed. -->
     <PackageVersion Include="Polly" Version="8.7.0" />
-    <!-- OpenTelemetry (observability — NFR-04). Keep this on the current line: 1.10.0 carried
-         GHSA-8785-wc3w-h8q6 and GHSA-g94r-2vxg-569j, so an old pin here is a supply-chain
-         liability rather than a stability win. -->
-    <PackageVersion Include="OpenTelemetry.Api" Version="1.17.0" />
     <!-- Source Link -->
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
     <!-- Testing. Held deliberately, not by neglect: newer majors exist for every entry here

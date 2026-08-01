@@ -1,5 +1,6 @@
 using DidComm.Consistency;
 using DidComm.Crypto.KeyAgreement;
+using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using NetDid.Core;
 using NetDid.Core.Model;
@@ -226,6 +227,33 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
     /// resolved).
     /// </remarks>
     private async Task<DidDocument> ResolveDocumentAsync(string did, CancellationToken ct)
+    {
+        // NFR-05 resolve span. The tag carries the DID *method* only (e.g. "peer") — a full DID
+        // is a pseudonymous subject identifier and stays out of telemetry (NFR-04). Zero-cost
+        // when nothing listens (StartActivity returns null).
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.ResolveActivity);
+        activity?.SetTag(DidCommDiagnostics.DidMethodTag, DidMethodName(did));
+        try
+        {
+            return await ResolveDocumentCoreAsync(did, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            throw;
+        }
+    }
+
+    /// <summary>The method segment of <paramref name="did"/> ("did:peer:..." → "peer"), or "unknown".</summary>
+    private static string DidMethodName(string did)
+    {
+        if (!did.StartsWith("did:", StringComparison.Ordinal))
+            return "unknown";
+        var end = did.IndexOf(':', 4);
+        return end > 4 ? did[4..end] : "unknown";
+    }
+
+    private async Task<DidDocument> ResolveDocumentCoreAsync(string did, CancellationToken ct)
     {
         var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
         if (result.DidDocument is null)
