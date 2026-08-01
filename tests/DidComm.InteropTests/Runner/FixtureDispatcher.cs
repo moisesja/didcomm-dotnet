@@ -13,6 +13,22 @@ namespace DidComm.InteropTests.Runner;
 /// <c>noop</c>, <c>unpack</c>, and <c>verify</c> — the FR-IX-01 / FR-IX-03 inbound gate.
 /// Outbound (pack-*) variants land in Phase 6 alongside the live cross-impl harness.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <strong>Negative fixtures (Phase 6):</strong> when <c>expected.outcome</c> is <c>error</c>,
+/// the unpack/verify MUST throw. A non-null <c>expected.error_code</c> names the expected
+/// didcomm-dotnet exception by simple type name (e.g. <c>MalformedMessageException</c>); a base
+/// type name such as <c>DidCommException</c> matches any derived error — see the
+/// <c>error_code</c> description in <c>fixtures/schema/didcomm-fixture.v1.schema.json</c>.
+/// </para>
+/// <para>
+/// <strong>Outbound self-verification (FR-IX-06):</strong> <c>direction: outbound</c> +
+/// <c>operation: unpack</c> manifests are the vectors didcomm-dotnet publishes (via
+/// <c>tools/FixtureGen</c>) for foreign implementations to consume. This runner unpacks them
+/// with the same Appendix-A registry as inbound fixtures, so every published vector is
+/// self-verified on each run and cannot bit-rot silently.
+/// </para>
+/// </remarks>
 internal static class FixtureDispatcher
 {
     private static readonly JoseCryptoProvider _crypto = new();
@@ -47,6 +63,12 @@ internal static class FixtureDispatcher
 
     private static void ExecuteUnpack(FixtureManifest manifest, string manifestPath)
     {
+        if (manifest.Expected.Outcome == "error")
+        {
+            ExecuteExpectedError(manifest, manifestPath);
+            return;
+        }
+
         var packed = LoadPackedInput(manifest, manifestPath);
         var registry = _registry.Value;
 
@@ -57,15 +79,18 @@ internal static class FixtureDispatcher
             registry.SignerKeys,
             _crypto);
 
-        if (manifest.Expected.Outcome != "success")
-            throw new InvalidOperationException($"Manifest expected error '{manifest.Expected.ErrorCode}' but unpack succeeded.");
-
         AssertMetadata(manifest.Expected.Metadata, result);
         AssertPlaintextMatches(manifest, manifestPath, result.Message);
     }
 
     private static void ExecuteVerify(FixtureManifest manifest, string manifestPath)
     {
+        if (manifest.Expected.Outcome == "error")
+        {
+            ExecuteExpectedError(manifest, manifestPath);
+            return;
+        }
+
         var packed = LoadPackedInput(manifest, manifestPath);
         var registry = _registry.Value;
 
@@ -83,6 +108,55 @@ internal static class FixtureDispatcher
         AssertMetadata(manifest.Expected.Metadata, result);
 
         AssertPlaintextMatches(manifest, manifestPath, result.Message);
+    }
+
+    /// <summary>
+    /// Negative-fixture path: the unpack MUST throw. When <c>expected.error_code</c> is
+    /// non-null it names the expected exception by simple type name; the thrown exception's
+    /// full inheritance chain is matched, so a fixture may pin the concrete type
+    /// (<c>CryptoException</c>) or any base (<c>DidCommException</c>).
+    /// </summary>
+    private static void ExecuteExpectedError(FixtureManifest manifest, string manifestPath)
+    {
+        var packed = LoadPackedInput(manifest, manifestPath);
+        var registry = _registry.Value;
+
+        Exception? thrown = null;
+        try
+        {
+            EnvelopeReaderTestRunner.Unpack(
+                packed,
+                registry.AsSecretsResolver(),
+                registry.SenderKeys,
+                registry.SignerKeys,
+                _crypto);
+        }
+        catch (Exception ex)
+        {
+            thrown = ex;
+        }
+
+        thrown.Should().NotBeNull(
+            $"fixture '{manifest.Id}' expects outcome=error" +
+            (manifest.Expected.ErrorCode is null ? "" : $" ({manifest.Expected.ErrorCode})") +
+            " but the operation succeeded — the library accepted invalid input");
+
+        if (manifest.Expected.ErrorCode is { } expectedCode)
+        {
+            ExceptionTypeNames(thrown!).Should().Contain(
+                expectedCode,
+                $"fixture '{manifest.Id}' pins the failure to '{expectedCode}' but the library threw " +
+                $"{thrown!.GetType().Name}: {thrown.Message}");
+        }
+    }
+
+    /// <summary>Simple type names of <paramref name="exception"/> and every base type up to (and including) <see cref="Exception"/>.</summary>
+    private static IReadOnlyList<string> ExceptionTypeNames(Exception exception)
+    {
+        var names = new List<string>();
+        for (var type = exception.GetType(); type is not null && typeof(Exception).IsAssignableFrom(type); type = type.BaseType)
+            names.Add(type.Name);
+        return names;
     }
 
     private static string LoadPackedInput(FixtureManifest manifest, string manifestPath)

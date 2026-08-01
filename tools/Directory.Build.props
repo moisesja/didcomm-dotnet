@@ -1,0 +1,8 @@
+<Project>
+  <Import Project="../Directory.Build.props" />
+  <!-- See tests/Directory.Build.props: alias `Jwk` to the DataProofsDotnet.Jose type the DidComm
+       public surface now uses. -->
+  <ItemGroup>
+    <Using Include="DataProofsDotnet.Jose.Jwk" Alias="Jwk" />
+  </ItemGroup>
+</Project>

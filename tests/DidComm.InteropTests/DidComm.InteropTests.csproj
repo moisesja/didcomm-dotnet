@@ -36,10 +36,10 @@
   </ItemGroup>
 
   <!--
-    Phase 0: fixtures live inline under ./fixtures so the data-driven runner has
-    something to enumerate (FR-IX-02). Before Phase 2 closes (FR-IX-01 gate),
-    move fixtures into the standalone didcomm-dotnet-fixtures repo and wire it
-    in as a git submodule per PRD §13.3. See ./fixtures/README.md.
+    ./fixtures is the didcomm-dotnet-fixtures git submodule (PRD §13.3):
+    https://github.com/moisesja/didcomm-dotnet-fixtures. Initialize submodules
+    after cloning (git submodule update with the init flag); the data-driven
+    runner (FR-IX-02) enumerates fixtures/manifest/**/*.json.
   -->
   <ItemGroup>
     <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
