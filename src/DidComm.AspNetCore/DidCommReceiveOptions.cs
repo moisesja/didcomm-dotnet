@@ -30,6 +30,30 @@ public sealed class DidCommReceiveOptions
     public bool AllowSameSocketReplies { get; set; }
 
     /// <summary>
+    /// Opt in to minimal STOMP 1.2 framing on the <c>MapDidCommWebSocket</c> endpoints
+    /// (FR-TRN-12). OFF by default — each WebSocket message is then one bare packed envelope
+    /// (FR-TRN-09), unchanged. When enabled, the endpoint answers a client
+    /// <c>CONNECT</c>(accept-version incl. 1.2) with <c>CONNECTED</c>(version:1.2,
+    /// heart-beat:0,0), accepts one packed DIDComm message per <c>SEND</c> frame body
+    /// (validating <c>content-type</c> against <see cref="AcceptedMediaTypes"/> — the WebSocket
+    /// analog of the HTTP 415 gate) and closes normally on <c>DISCONNECT</c>. Malformed or
+    /// out-of-order STOMP frames close the connection with 1002 (protocol error); the
+    /// <c>MaxReceiveBytes</c> cap still closes with 1009 before any decoding (FR-API-06). No
+    /// broker semantics — subscriptions, acks, receipts, and heart-beats are not supported.
+    /// Pair with <c>WebSocketTransportOptions.UseStomp</c> on the sending side. In STOMP mode
+    /// <see cref="AllowSameSocketReplies"/> is ignored (no frame is emitted): a compliant
+    /// server-to-client push needs MESSAGE frames and subscriptions — broker semantics outside
+    /// this minimal subset — so replies travel out of band per FR-TRN-10.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// builder.Services.AddOptions&lt;DidCommReceiveOptions&gt;().Configure(o => o.UseStomp = true);
+    /// app.MapDidCommWebSocket("/ws/didcomm");
+    /// </code>
+    /// </example>
+    public bool UseStomp { get; set; }
+
+    /// <summary>
     /// Minimum wall-clock time the HTTP receive endpoint takes before returning the uniform
     /// <c>400</c> rejection. The handler times itself from entry and, before answering 400, waits
     /// out the remainder of this floor so the response time no longer reveals how far envelope

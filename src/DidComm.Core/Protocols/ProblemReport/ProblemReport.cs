@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 using DidComm.Messages;
+// GlobalUsings pulls in System.Threading, whose ThreadState would shadow ours (L-014 family).
+using ThreadState = DidComm.Threading.ThreadState;
 
 namespace DidComm.Protocols.ProblemReport;
 
@@ -32,6 +34,19 @@ public static class ProblemReport
     /// error count crosses <see cref="ProblemReportOptions.CascadeThreshold"/> (FR-PROTO-10).
     /// </summary>
     public const string MaxErrorsExceededCode = "e.p.req.max-errors-exceeded";
+
+    /// <summary>
+    /// Warning code for "no acceptable language is available" (FR-I18N-04): sorter <c>w</c>
+    /// (the protocol may continue, e.g. in a fallback language) + the spec's
+    /// <c>msg.bad-lang</c> tail.
+    /// </summary>
+    public const string BadLangWarningCode = "w.msg.bad-lang";
+
+    /// <summary>
+    /// Error code for "no acceptable language is available" (FR-I18N-04): sorter <c>e</c> —
+    /// the sender considers the interaction dead without a shared language.
+    /// </summary>
+    public const string BadLangErrorCode = "e.msg.bad-lang";
 
     /// <summary>
     /// Build a Report Problem 2.0 message.
@@ -121,6 +136,108 @@ public static class ProblemReport
         // we emit `e.<original-scope>.<descriptor>`.
         var newCode = $"e.{originalCode.Scope}.{escalatedDescriptor}";
         return Create(from, to, newCode, pthid, comment, args);
+    }
+
+    /// <summary>
+    /// Build a <c>bad-lang</c> Report Problem 2.0 message (FR-I18N-04): the peer asked for
+    /// languages this agent cannot produce, so no acceptable language is available. The comment
+    /// names the languages that WERE available (via <c>{1}</c> interpolation, FR-PROTO-07) so
+    /// the peer can pick one or end the interaction.
+    /// </summary>
+    /// <param name="from">Sender DID.</param>
+    /// <param name="to">Recipient DID — the peer whose <c>accept-lang</c> could not be honored.</param>
+    /// <param name="pthid">REQUIRED parent-thread id — the <c>thid</c> of the thread whose language preference failed.</param>
+    /// <param name="availableLangs">The IANA language codes this agent CAN produce; surfaced in the comment args. May be empty (no human-readable strings available at all).</param>
+    /// <param name="fatal"><c>false</c> (default) emits the warning form <see cref="BadLangWarningCode"/> (<c>w.msg.bad-lang</c> — the protocol may continue in a fallback language); <c>true</c> emits <see cref="BadLangErrorCode"/> (<c>e.msg.bad-lang</c>).</param>
+    /// <param name="escalateTo">Optional URI to escalate to (e.g. <c>mailto:support@example.com</c>).</param>
+    /// <example>
+    /// <code>
+    /// var report = ProblemReport.CreateBadLang(
+    ///     from: "did:example:bob", to: "did:example:alice",
+    ///     pthid: inbound.Thid ?? inbound.Id,
+    ///     availableLangs: new[] { "en", "es" });
+    /// // report body: { "code": "w.msg.bad-lang", "comment": "...{1}...", "args": ["en, es"] }
+    /// </code>
+    /// </example>
+    public static Message CreateBadLang(
+        string from,
+        string to,
+        string pthid,
+        IReadOnlyList<string> availableLangs,
+        bool fatal = false,
+        string? escalateTo = null)
+    {
+        ArgumentNullException.ThrowIfNull(availableLangs);
+        var offered = availableLangs.Count > 0 ? string.Join(", ", availableLangs) : "none";
+        return Create(
+            from,
+            to,
+            fatal ? BadLangErrorCode : BadLangWarningCode,
+            pthid,
+            comment: "No acceptable language is available on this thread; languages available here: {1}.",
+            args: new[] { offered },
+            escalateTo: escalateTo);
+    }
+
+    /// <summary>
+    /// Convenience seam over the FR-I18N-02 thread state: compare the peer's recorded
+    /// <see cref="ThreadState.AcceptLang"/> preference against the languages this agent can
+    /// produce and, when NONE is acceptable, build the <c>bad-lang</c> report for that thread
+    /// (<c>pthid</c> = <see cref="ThreadState.Thid"/>). Returns <c>null</c> when no report is
+    /// warranted — the thread declared no preference, or at least one preference is satisfiable.
+    /// </summary>
+    /// <remarks>
+    /// Matching is deliberately minimal (this is a MAY-level convenience, not a BCP 47
+    /// negotiator): a preference is satisfied by an available language when the two tags are
+    /// equal ignoring case, or when their primary subtags match (so <c>en-US</c> is satisfied
+    /// by <c>en</c> or <c>en-GB</c>).
+    /// </remarks>
+    /// <param name="from">Sender DID.</param>
+    /// <param name="to">Recipient DID — the peer that declared the unsatisfiable preference.</param>
+    /// <param name="thread">The thread whose <c>accept-lang</c> state to check (FR-I18N-02).</param>
+    /// <param name="availableLangs">The IANA language codes this agent CAN produce.</param>
+    /// <param name="fatal"><c>false</c> for <c>w.msg.bad-lang</c>; <c>true</c> for <c>e.msg.bad-lang</c>.</param>
+    public static Message? CreateBadLangForThread(
+        string from,
+        string to,
+        ThreadState thread,
+        IReadOnlyList<string> availableLangs,
+        bool fatal = false)
+    {
+        ArgumentNullException.ThrowIfNull(thread);
+        ArgumentNullException.ThrowIfNull(availableLangs);
+        if (thread.AcceptLang is not { Count: > 0 } preferences)
+            return null; // no preference declared on this thread — nothing to fail
+        if (AnyLanguageAcceptable(preferences, availableLangs))
+            return null;
+        return CreateBadLang(from, to, thread.Thid, availableLangs, fatal);
+    }
+
+    /// <summary>True when any preferred tag is satisfied by any available tag (exact or primary-subtag match, case-insensitive).</summary>
+    private static bool AnyLanguageAcceptable(IReadOnlyList<string> preferences, IReadOnlyList<string> available)
+    {
+        foreach (var preferred in preferences)
+        {
+            if (string.IsNullOrWhiteSpace(preferred))
+                continue;
+            foreach (var offered in available)
+            {
+                if (string.IsNullOrWhiteSpace(offered))
+                    continue;
+                if (string.Equals(preferred, offered, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (PrimarySubtag(preferred).Equals(PrimarySubtag(offered), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The BCP 47 primary language subtag — the tag up to the first <c>-</c>.</summary>
+    private static ReadOnlySpan<char> PrimarySubtag(string tag)
+    {
+        var dash = tag.IndexOf('-', StringComparison.Ordinal);
+        return dash < 0 ? tag.AsSpan() : tag.AsSpan(0, dash);
     }
 
     /// <summary>Read <c>body.code</c>; returns <c>null</c> when the message has no body or no code field, or when the value is not a JSON string.</summary>

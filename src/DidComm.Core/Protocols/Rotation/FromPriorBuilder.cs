@@ -18,7 +18,7 @@ namespace DidComm.Protocols.Rotation;
 public static class FromPriorBuilder
 {
     /// <summary>Build a from_prior JWT from validated claims using the signer's private JWK.</summary>
-    /// <param name="claims">Sub / Iss / Iat triple.</param>
+    /// <param name="claims">Sub / Iss / Iat triple (null <c>Sub</c> emits the FR-ROT-06 termination form).</param>
     /// <param name="signerPrivateJwk">Private JWK; <c>Kid</c> MUST identify a key authorized under <paramref name="claims"/>.Iss <c>authentication</c>.</param>
     /// <param name="ct">Cancellation token.</param>
     public static Task<string> BuildAsync(FromPriorClaims claims, Jwk signerPrivateJwk, CancellationToken ct = default)
@@ -36,7 +36,7 @@ public static class FromPriorBuilder
     /// scalar never leaves custody. The signer's <c>kid</c> MUST identify a key authorized under
     /// <paramref name="claims"/>.Iss <c>authentication</c>.
     /// </summary>
-    /// <param name="claims">Sub / Iss / Iat triple.</param>
+    /// <param name="claims">Sub / Iss / Iat triple (null <c>Sub</c> emits the FR-ROT-06 termination form).</param>
     /// <param name="signer">JWS signer handle whose <c>kid</c> identifies the prior DID's signing key.</param>
     /// <param name="ct">Cancellation token.</param>
     public static async Task<string> BuildAsync(FromPriorClaims claims, DpSig.JwsSigner signer, CancellationToken ct = default)
@@ -47,14 +47,16 @@ public static class FromPriorBuilder
         // Claims in lexicographic key order (exp, iat, iss, nbf, sub) so identical inputs produce
         // byte-identical payloads across runs. exp/nbf are emitted only when present (RFC 7519
         // §4.1.4/§4.1.5) — a from_prior without them is non-expiring, so callers SHOULD set Exp to
-        // bound replay (FR-ROT-05); the lifetime overload below does that in one call. Built via
-        // JsonObject (insertion-ordered) rather than interpolation so values are JSON-escaped.
+        // bound replay (FR-ROT-05); the lifetime overload below does that in one call. sub is
+        // OMITTED (not null-valued) when absent — that is the relationship-termination wire form
+        // (FR-ROT-06). Built via JsonObject (insertion-ordered) rather than interpolation so values
+        // are JSON-escaped.
         var claimsObj = new JsonObject();
         if (claims.Exp is long exp) claimsObj["exp"] = exp;
         claimsObj["iat"] = claims.Iat;
         claimsObj["iss"] = claims.Iss;
         if (claims.Nbf is long nbf) claimsObj["nbf"] = nbf;
-        claimsObj["sub"] = claims.Sub;
+        if (claims.Sub is not null) claimsObj["sub"] = claims.Sub;
         var claimsJson = claimsObj.ToJsonString();
 
         // Compact JWS with typ=JWT. DataProofs builds the {alg,kid,typ} protected header from the
@@ -96,6 +98,46 @@ public static class FromPriorBuilder
     {
         ArgumentNullException.ThrowIfNull(claims);
         return BuildAsync(BoundedClaims(claims, lifetime), signer, ct);
+    }
+
+    /// <summary>
+    /// Build a relationship-<b>termination</b> from_prior JWT (FR-ROT-06): the JWT omits
+    /// <c>sub</c>, announcing that the prior DID ends the relationship with no successor
+    /// identity. The carrying message MUST be sent without <c>from</c> — the unpack pipeline
+    /// rejects the termination form on a message that names a sender.
+    /// </summary>
+    /// <param name="priorDid">The prior DID (<c>iss</c>) terminating the relationship.</param>
+    /// <param name="iat">Issued-at, UTC epoch seconds.</param>
+    /// <param name="signerPrivateJwk">Private JWK; <c>Kid</c> MUST identify a key authorized under <paramref name="priorDid"/>'s <c>authentication</c>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <example>
+    /// <code>
+    /// var jwt = await FromPriorBuilder.BuildTerminationAsync(
+    ///     "did:example:prior", DateTimeOffset.UtcNow.ToUnixTimeSeconds(), priorAuthPrivateJwk);
+    /// var goodbye = new MessageBuilder().WithType(type).WithTo(peerDid).WithFromPrior(jwt).Build();
+    /// // Note: no WithFrom(...) — the termination form rides on a message without 'from'.
+    /// </code>
+    /// </example>
+    public static Task<string> BuildTerminationAsync(string priorDid, long iat, Jwk signerPrivateJwk, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(priorDid);
+        return BuildAsync(FromPriorClaims.ForTermination(priorDid, iat), signerPrivateJwk, ct);
+    }
+
+    /// <summary>
+    /// Build a relationship-termination from_prior JWT (FR-ROT-06) signed by an
+    /// opaque-or-extractable JWS signer handle (FR-SEC-06). As
+    /// <see cref="BuildTerminationAsync(string, long, Jwk, CancellationToken)"/>, but the prior
+    /// DID's signing scalar never leaves custody.
+    /// </summary>
+    /// <param name="priorDid">The prior DID (<c>iss</c>) terminating the relationship.</param>
+    /// <param name="iat">Issued-at, UTC epoch seconds.</param>
+    /// <param name="signer">JWS signer handle whose <c>kid</c> identifies the prior DID's signing key.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public static Task<string> BuildTerminationAsync(string priorDid, long iat, DpSig.JwsSigner signer, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(priorDid);
+        return BuildAsync(FromPriorClaims.ForTermination(priorDid, iat), signer, ct);
     }
 
     private static FromPriorClaims BoundedClaims(FromPriorClaims claims, TimeSpan lifetime)

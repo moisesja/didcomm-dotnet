@@ -370,6 +370,84 @@ public sealed class FromPriorRotationTests
         await act.Should().ThrowAsync<ConsistencyException>().Where(e => e.Message.Contains("not yet valid"));
     }
 
+    // ---- FR-ROT-06: relationship termination — from_prior omits 'sub', message sent without 'from'. ----
+
+    [Fact]
+    public async Task DidCommClient_SurfacesTerminationFromPrior_OnFromlessEncryptedMessage()
+    {
+        // The termination form has no post-rotation identity to authcrypt as, so it rides on an
+        // anoncrypt envelope without 'from'; its authorization is the JWT's own signature by the
+        // prior DID's authentication key. Acceptance bar: "Termination form parses."
+        var jwt = await FromPriorBuilder.BuildTerminationAsync(PriorDid, iat: 1700000000, SignerPrivateJwk());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"goodbye":"true"}""")!.AsObject())
+            .Build();
+
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
+        // No From → anoncrypt; the message itself carries no 'from' either (FR-ROT-06).
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }))).Message;
+
+        var unpacked = await client.UnpackAsync(packed);
+
+        unpacked.Message.From.Should().BeNull();
+        unpacked.FromPrior.Should().NotBeNull();
+        unpacked.FromPrior!.IsTermination.Should().BeTrue();
+        unpacked.FromPrior.Sub.Should().BeNull();
+        unpacked.FromPrior.Iss.Should().Be(PriorDid);
+    }
+
+    [Fact]
+    public async Task DidCommClient_RejectsTerminationFromPrior_WhenMessageCarriesFrom()
+    {
+        // Absent sub + present from is invalid: the JWT claims "no successor identity" while the
+        // message names a sender. Rejected even on a fully authenticated envelope.
+        var jwt = await FromPriorBuilder.BuildTerminationAsync(PriorDid, iat: 1700000000, SignerPrivateJwk());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }, From: "did:example:alice"))).Message;
+
+        var act = async () => await client.UnpackAsync(packed);
+
+        await act.Should().ThrowAsync<ConsistencyException>().Where(e => e.Message.Contains("FR-ROT-06"));
+    }
+
+    [Fact]
+    public async Task DidCommClient_RejectsRotationFromPrior_OnFromlessMessage()
+    {
+        // Converse presence violation end-to-end: a rotation-shaped JWT (sub present) on a message
+        // without 'from' was previously ignored silently; it is now rejected (FR-ROT-02).
+        var jwt = await FromPriorBuilder.BuildAsync(SampleClaims(), SignerPrivateJwk());
+
+        var message = new MessageBuilder()
+            .WithType("http://example.com/protocols/lets_do_lunch/1.0/proposal")
+            .WithTo("did:example:bob")
+            .WithFromPrior(jwt)
+            .WithBody(JsonNode.Parse("""{"a":"b"}""")!.AsObject())
+            .Build();
+
+        var client = new DidCommClient(Actors.Value.AsSecretsResolver(), NewKeyService(), new DidCommOptions());
+        var packed = (await client.PackEncryptedAsync(message,
+            new PackEncryptedOptions(Recipients: new[] { "did:example:bob" }))).Message;
+
+        var act = async () => await client.UnpackAsync(packed);
+
+        await act.Should().ThrowAsync<ConsistencyException>().Where(e => e.Message.Contains("FR-ROT-02"));
+    }
+
     [Fact]
     public async Task Validator_RejectsCritHeader_FrRot26()
     {

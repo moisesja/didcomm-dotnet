@@ -56,9 +56,11 @@ public sealed class Message
     /// <summary>
     /// DID-rotation header (FR-ROT-01): a JWT signed by a key authorized in the <em>prior</em>
     /// DID's <c>authentication</c> relationship. When present, the inner <see cref="From"/> is
-    /// the new DID and the JWT's <c>iss</c> claim is the prior DID. Per FR-ROT-03, a message
-    /// carrying <c>from_prior</c> MUST be sent encrypted; the facade enforces that at pack
-    /// time. The validated claims are surfaced on the unpack-side metadata.
+    /// the new DID and the JWT's <c>iss</c> claim is the prior DID. A JWT that omits <c>sub</c>
+    /// is the relationship-termination form (FR-ROT-06) and rides on a message without
+    /// <see cref="From"/>. Per FR-ROT-03, a message carrying <c>from_prior</c> MUST be sent
+    /// encrypted; the facade enforces that at pack time. The validated claims are surfaced on
+    /// the unpack-side metadata.
     /// </summary>
     [JsonPropertyName("from_prior")]
     public string? FromPrior { get; set; }

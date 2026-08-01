@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
 using DidComm.Transports;
+using DidComm.Transports.Stomp;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -17,6 +18,9 @@ namespace DidComm.Transports.WebSocket;
 /// packed DIDComm envelope as exactly one WebSocket binary message (FR-TRN-09); the receiver
 /// MUST reassemble fragmented frames before processing. Connections are pooled by endpoint and
 /// reconnect with exponential backoff (1s / 30s / 0.5 jitter — DD-05) on send failures.
+/// Optionally wraps each envelope in minimal STOMP 1.2 framing when
+/// <see cref="WebSocketTransportOptions.UseStomp"/> is enabled (FR-TRN-12); plain framing is
+/// the default and is byte-for-byte unchanged.
 /// </summary>
 public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposable
 {
@@ -116,6 +120,13 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         var key = PoolKey(request.Endpoint);
         var attempt = 0;
 
+        // FR-TRN-12 (opt-in): wrap the packed envelope in one STOMP SEND frame — destination +
+        // content-type (the request's DIDComm media type, application/didcomm-encrypted+json on
+        // the SendAsync path) + codec-computed content-length, one packed message per SEND body.
+        // Built once; identical on every reconnect attempt. Default OFF: the payload bytes go on
+        // the wire untouched, exactly as before.
+        var payload = _options.UseStomp ? BuildStompSendPayload(request) : request.Payload;
+
         try
         {
             await _reconnectPipeline.ExecuteAsync(async token =>
@@ -132,7 +143,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                     // FR-TRN-09: one logical WebSocket message per packed envelope. We always send
                     // the full buffer with EndOfMessage = true; receivers MUST loop until they see
                     // EndOfMessage to handle fragmentation at the wire layer.
-                    await socket.SendAsync(request.Payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
+                    await socket.SendAsync(payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -208,6 +219,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 connectCts.CancelAfter(_options.ConnectTimeout);
                 await connect(socket, endpoint, connectCts.Token).ConfigureAwait(false);
+                // FR-TRN-12: the STOMP session handshake is part of establishing the connection —
+                // once per socket (a pooled socket is already CONNECTED; a reconnect re-runs this
+                // path and re-handshakes), under the same connect timeout budget.
+                if (_options.UseStomp)
+                    await StompConnectAsync(socket, endpoint, connectCts.Token).ConfigureAwait(false);
             }
             catch
             {
@@ -239,6 +255,90 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
         throw new InvalidOperationException(
             "Default Connect supports ClientWebSocket only. Provide WebSocketTransportOptions.Connect for custom socket types (used by tests against TestServer).");
+    }
+
+    /// <summary>Wrap the packed envelope in one STOMP SEND frame (FR-TRN-12).</summary>
+    private ReadOnlyMemory<byte> BuildStompSendPayload(TransportRequest request)
+    {
+        var destination = _options.StompDestination ?? request.Endpoint.AbsolutePath;
+        var frame = new StompFrame(
+            "SEND",
+            new[]
+            {
+                KeyValuePair.Create("destination", destination),
+                KeyValuePair.Create("content-type", request.MediaType),
+            },
+            request.Payload);
+        return StompFrameCodec.Encode(frame);
+    }
+
+    /// <summary>
+    /// FR-TRN-12 session handshake: CONNECT (accept-version:1.2, host, heart-beat:0,0) and await
+    /// the server's CONNECTED. No receipts / subscriptions / heart-beats are negotiated. Any
+    /// non-CONNECTED answer (an ERROR frame, malformed bytes, or a close) is a transport failure.
+    /// </summary>
+    private async Task StompConnectAsync(System.Net.WebSockets.WebSocket socket, Uri endpoint, CancellationToken ct)
+    {
+        var connectFrame = new StompFrame(
+            "CONNECT",
+            new[]
+            {
+                KeyValuePair.Create("accept-version", "1.2"),
+                KeyValuePair.Create("host", endpoint.Host),
+                KeyValuePair.Create("heart-beat", "0,0"),
+            },
+            ReadOnlyMemory<byte>.Empty);
+        await socket.SendAsync(StompFrameCodec.Encode(connectFrame), WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
+
+        // The CONNECTED answer is a small control frame; 16 KiB is generous headroom.
+        var answer = await ReceiveOneMessageAsync(socket, maxBytes: 16 * 1024, endpoint, ct).ConfigureAwait(false);
+        StompFrame frame;
+        try
+        {
+            frame = StompFrameCodec.Decode(answer);
+        }
+        catch (MalformedMessageException ex)
+        {
+            throw new TransportException(
+                $"STOMP handshake with '{endpoint}' failed: the server's answer is not a valid STOMP frame (FR-TRN-12).",
+                ex, httpStatusCode: null, scheme: endpoint.Scheme);
+        }
+        if (!string.Equals(frame.Command, "CONNECTED", StringComparison.Ordinal))
+        {
+            throw new TransportException(
+                $"STOMP handshake with '{endpoint}' failed: expected CONNECTED, got '{frame.Command}' (FR-TRN-12).",
+                httpStatusCode: null,
+                scheme: endpoint.Scheme);
+        }
+    }
+
+    /// <summary>Reassemble one logical WebSocket message (FR-TRN-09 fragmentation rule), capped at <paramref name="maxBytes"/>.</summary>
+    private static async Task<byte[]> ReceiveOneMessageAsync(
+        System.Net.WebSockets.WebSocket socket, int maxBytes, Uri endpoint, CancellationToken ct)
+    {
+        var buffer = new byte[4096];
+        using var ms = new MemoryStream();
+        while (true)
+        {
+            var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                throw new TransportException(
+                    $"STOMP handshake with '{endpoint}' failed: the server closed the connection before answering (FR-TRN-12).",
+                    httpStatusCode: null,
+                    scheme: endpoint.Scheme);
+            }
+            ms.Write(buffer, 0, result.Count);
+            if (ms.Length > maxBytes)
+            {
+                throw new TransportException(
+                    $"STOMP handshake with '{endpoint}' failed: the answer exceeds {maxBytes} bytes (FR-TRN-12).",
+                    httpStatusCode: null,
+                    scheme: endpoint.Scheme);
+            }
+            if (result.EndOfMessage)
+                return ms.ToArray();
+        }
     }
 
     private void RaiseLifecycle(WebSocketLifecycleEventKind kind, Uri endpoint, Exception? exception = null)
@@ -290,7 +390,17 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             try
             {
                 if (socket.State == WebSocketState.Open)
+                {
+                    // FR-TRN-12: end the STOMP session politely before the WebSocket close. Best
+                    // effort — no RECEIPT is requested (receipts are out of the minimal subset).
+                    if (_options.UseStomp)
+                    {
+                        var disconnect = StompFrameCodec.Encode(new StompFrame(
+                            "DISCONNECT", Array.Empty<KeyValuePair<string, string>>(), ReadOnlyMemory<byte>.Empty));
+                        await socket.SendAsync(disconnect, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
+                    }
                     await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", CancellationToken.None).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {

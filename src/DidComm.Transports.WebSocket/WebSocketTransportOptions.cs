@@ -40,6 +40,31 @@ public sealed class WebSocketTransportOptions
     public Func<System.Net.WebSockets.WebSocket, Uri, CancellationToken, Task>? Connect { get; set; }
 
     /// <summary>
+    /// Opt in to minimal STOMP 1.2 framing over the WebSocket (FR-TRN-12). OFF by default —
+    /// the transport then sends each packed envelope as a bare binary WebSocket message
+    /// (FR-TRN-09), unchanged. When enabled, each new connection performs a
+    /// <c>CONNECT</c>(accept-version:1.2, heart-beat:0,0) → <c>CONNECTED</c> handshake, every
+    /// envelope rides in one <c>SEND</c> frame with <c>destination</c>,
+    /// <c>content-type: application/didcomm-encrypted+json</c> and <c>content-length</c>
+    /// (one packed message per SEND body), and disposal sends <c>DISCONNECT</c>. No broker
+    /// semantics — no subscriptions, acks, receipts, or heart-beats. The receive side must
+    /// enable the matching <c>DidCommReceiveOptions.UseStomp</c>.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// builder.UseWebSocketTransport(o => { o.UseStomp = true; o.StompDestination = "/didcomm"; });
+    /// </code>
+    /// </example>
+    public bool UseStomp { get; set; }
+
+    /// <summary>
+    /// The STOMP <c>destination</c> header value for <c>SEND</c> frames when
+    /// <see cref="UseStomp"/> is enabled. <c>null</c> (the default) uses the target endpoint
+    /// URI's absolute path.
+    /// </summary>
+    public string? StompDestination { get; set; }
+
+    /// <summary>
     /// SSRF-defense policy applied before the default connect path opens a socket. Skipped when a
     /// custom <see cref="Connect"/> delegate is supplied (the host then owns connection vetting — used
     /// by tests against an in-process TestServer).

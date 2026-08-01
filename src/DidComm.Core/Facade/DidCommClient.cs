@@ -9,6 +9,8 @@ using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using DpEnc = DataProofsDotnet.Jose.Encryption;
 using DpSig = DataProofsDotnet.Jose.Signing;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
@@ -21,7 +23,7 @@ namespace DidComm.Facade;
 /// and delegates the JOSE composition to the internal envelope layer. Thread-safe (NFR-03) —
 /// register as a singleton.
 /// </summary>
-public sealed class DidCommClient
+public sealed partial class DidCommClient
 {
     private readonly ISecretsResolver _secrets;
     private readonly IDidKeyService _keyService;
@@ -29,6 +31,9 @@ public sealed class DidCommClient
     private readonly ITransportRouter? _transportRouter;
     private readonly DidCommOptions _options;
     private readonly JoseCryptoProvider _cryptoProvider;
+    // Structured diagnostics (NFR-04). Defaults to NullLogger so every pre-existing construction
+    // path keeps compiling and behaving identically; AddDidComm wires the host's logger in DI.
+    private readonly ILogger<DidCommClient> _logger;
     // Resolves a kid to an opaque-or-extractable JWS signer / ECDH handle (FR-SEC-06). The opaque
     // path is selected when the registered ISecretsResolver also implements IOpaqueKeyResolver (or
     // one is registered separately), so non-extractable (HSM/KMS/keystore) keys never surface 'd'.
@@ -44,6 +49,29 @@ public sealed class DidCommClient
     /// <param name="options">Process-wide options (FR-API-05/06 knobs).</param>
     public DidCommClient(ISecretsResolver secrets, IDidKeyService keyService, DidCommOptions options)
         : this(secrets, keyService, serviceResolver: null, transportRouter: null, options, new JoseCryptoProvider()) { }
+
+    /// <summary>
+    /// Initialize the facade with a structured logger for the SHOULD-level advisories the client
+    /// emits (currently the FR-SIG-05 warning when a standalone signed message lacks <c>to</c>).
+    /// A new overload rather than an optional parameter so apps compiled against earlier releases
+    /// still bind to the existing constructors unchanged. DI consumers get the logger wired
+    /// automatically by <c>AddDidComm</c>.
+    /// </summary>
+    /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
+    /// <param name="keyService">DID resolution + verification-method extraction (FR-DID-01..05).</param>
+    /// <param name="options">Process-wide options (FR-API-05/06 knobs).</param>
+    /// <param name="logger">Structured logger; pass <see cref="NullLogger{T}.Instance"/> to silence advisories.</param>
+    /// <example>
+    /// <code>
+    /// using var factory = LoggerFactory.Create(b => b.AddConsole());
+    /// var client = new DidCommClient(secrets, keyService, options, factory.CreateLogger&lt;DidCommClient&gt;());
+    /// </code>
+    /// </example>
+    public DidCommClient(ISecretsResolver secrets, IDidKeyService keyService, DidCommOptions options, ILogger<DidCommClient> logger)
+        : this(secrets, keyService, serviceResolver: null, transportRouter: null, options, new JoseCryptoProvider(), opaqueKeys: null, logger)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+    }
 
     /// <summary>Initialize the facade with the Phase 4 routing surface enabled.</summary>
     /// <param name="secrets">Consumer-supplied private-key resolver (FR-SEC-01).</param>
@@ -78,7 +106,7 @@ public sealed class DidCommClient
         ArgumentNullException.ThrowIfNull(transportRouter);
     }
 
-    /// <summary>Initialize the facade with a custom crypto provider (and optional opaque key resolver); used by tests and DI.</summary>
+    /// <summary>Initialize the facade with a custom crypto provider (and optional opaque key resolver / logger); used by tests and DI.</summary>
     internal DidCommClient(
         ISecretsResolver secrets,
         IDidKeyService keyService,
@@ -86,7 +114,8 @@ public sealed class DidCommClient
         ITransportRouter? transportRouter,
         DidCommOptions options,
         JoseCryptoProvider cryptoProvider,
-        IOpaqueKeyResolver? opaqueKeys = null)
+        IOpaqueKeyResolver? opaqueKeys = null,
+        ILogger<DidCommClient>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(secrets);
         ArgumentNullException.ThrowIfNull(keyService);
@@ -98,6 +127,7 @@ public sealed class DidCommClient
         _transportRouter = transportRouter;
         _options = options;
         _cryptoProvider = cryptoProvider;
+        _logger = logger ?? NullLogger<DidCommClient>.Instance;
         // Prefer an explicitly-registered IOpaqueKeyResolver; otherwise auto-detect when the secrets
         // resolver itself implements it (the common case — e.g. a keystore-backed resolver). Either
         // way the extractable path is preserved when no opaque capability is present (FR-SEC-06).
@@ -162,7 +192,15 @@ public sealed class DidCommClient
     /// is held by the registered <see cref="ISecretsResolver"/> a
     /// <see cref="SecretNotFoundException"/> is thrown.
     /// </summary>
-    /// <param name="message">The plaintext message.</param>
+    /// <remarks>
+    /// Per FR-SIG-05, a standalone signed message SHOULD contain a <c>to</c> header — a signed
+    /// envelope names no recipient of its own, so without <c>to</c> anyone holding it can
+    /// surreptitiously forward it to an unintended audience. This method still packs a
+    /// <c>to</c>-less message (SHOULD, not MUST) but emits a structured warning through the
+    /// configured logger. Contrast FR-SIG-06: for sign-then-encrypt the inner <c>to</c> is a
+    /// MUST and is enforced, not warned.
+    /// </remarks>
+    /// <param name="message">The plaintext message. SHOULD carry a non-empty <c>to</c> (FR-SIG-05).</param>
     /// <param name="signFrom">The signer DID (no fragment).</param>
     /// <param name="ct">Cancellation token.</param>
     public async Task<string> PackSignedAsync(Message message, string signFrom, CancellationToken ct = default)
@@ -172,6 +210,12 @@ public sealed class DidCommClient
         RejectFromPriorOnUnprotectedEnvelope(message, "PackSignedAsync");
         _keyService.RejectUnsupportedMethod(signFrom);
         RejectUnsupportedDidsOnMessage(message);
+
+        // FR-SIG-05 (SHOULD): warn — don't refuse — when a STANDALONE signed message lacks 'to'.
+        // The signed-inside-encrypted path never reaches this method (its inner 'to' is FR-SIG-06's
+        // MUST, enforced by the envelope layer), so this warning fires only for standalone packs.
+        if (message.To is not { Count: > 0 })
+            LogStandaloneSignedMissingTo(_logger, message.Id);
 
         var signer = await PickSignerAsync(signFrom, ct).ConfigureAwait(false);
         var parameters = new PackSignedParameters(message, new[] { signer });
@@ -453,7 +497,7 @@ public sealed class DidCommClient
         }
 
         FromPriorClaims? fromPrior = null;
-        if (message.FromPrior is not null && message.From is not null)
+        if (message.FromPrior is not null)
         {
             // FR-ROT-03 — from_prior MUST arrive inside an encrypt layer.
             if (!internalResult.Encrypted)
@@ -465,13 +509,18 @@ public sealed class DidCommClient
             // 'from' is only cryptographically authenticated when the envelope authenticates the sender
             // (authcrypt skid or an inner signature). On a plain anoncrypt envelope 'from' is attacker-
             // settable, so a captured rotation JWT could be replayed under a spoofed sender. Require the
-            // carrying envelope to actually authenticate the sender.
-            if (!internalResult.Authenticated)
+            // carrying envelope to actually authenticate the sender. The relationship-termination form
+            // (FR-ROT-06) rides WITHOUT 'from' — there is no post-rotation identity to bind, and its
+            // authorization is the JWT's own signature by the prior DID's authentication key (verified
+            // below), so the envelope-authentication requirement does not apply to it.
+            if (message.From is not null && !internalResult.Authenticated)
             {
                 throw new ConsistencyException(
                     "Message carries 'from_prior' but the sender is not authenticated (anoncrypt). A rotation " +
                     "assertion MUST ride on an authcrypt or signed envelope (FR-ROT-03). Drop.");
             }
+            // With 'from' absent this validates the termination form: the JWT MUST omit 'sub'
+            // (FR-ROT-06), and a rotation-shaped JWT on a from-less message is rejected inside.
             var validated = await FromPriorValidator.ValidateAsync(
                 message.FromPrior, message.From, _keyService, _cryptoProvider, ct).ConfigureAwait(false);
             ValidateFromPriorFreshness(validated);
@@ -555,6 +604,18 @@ public sealed class DidCommClient
                 $"from_prior JWT is not yet valid (nbf={nbf} epoch seconds); current clock {nowSeconds} with skew={skewSeconds}s.");
         }
     }
+
+    /// <summary>
+    /// FR-SIG-05 advisory (compile-time generated via <see cref="LoggerMessageAttribute"/> —
+    /// the logging pattern this repo is standardizing on): a standalone signed message SHOULD
+    /// carry <c>to</c>; without it, anyone holding the envelope can forward it to an audience
+    /// the signer never addressed.
+    /// </summary>
+    [LoggerMessage(
+        EventId = 1,
+        Level = LogLevel.Warning,
+        Message = "Standalone signed message '{MessageId}' has no 'to' header. DIDComm v2.1 SHOULD include 'to' on standalone signed messages (FR-SIG-05) to limit surreptitious forwarding.")]
+    private static partial void LogStandaloneSignedMissingTo(ILogger logger, string messageId);
 
     private static string MapContentEncryption(ContentEncryptionAlgorithm enc, bool isAuthcrypt) => enc switch
     {
