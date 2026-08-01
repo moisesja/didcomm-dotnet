@@ -13,6 +13,9 @@ namespace DidComm.Exceptions;
 /// header on the inner plaintext, mediator routing targets) before any envelope work is done,
 /// so callers can react without leaking partial state.
 /// </remarks>
+/// <example>
+/// The deliberate <c>did:web</c> rejection is shown in <c>samples/09-NetDidIntegration</c> and <c>samples/02-Cookbook</c> (section AA).
+/// </example>
 public sealed class UnsupportedDidMethodException : DidCommException
 {
     /// <summary>The DID method name (e.g. <c>"web"</c>).</summary>

@@ -35,6 +35,9 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// </para>
 /// <para>Thread-safe; intended as a singleton (registered by <c>AddBuiltInProtocols()</c>).</para>
 /// </remarks>
+/// <example>
+/// The initiator round-trip runs in <c>samples/02-Cookbook</c> (section T) and <c>samples/05-WebSocketChat</c>.
+/// </example>
 public sealed class DiscoverFeaturesClient : IInboundCorrelator
 {
     private const long RejectedLogEvery = 1000;

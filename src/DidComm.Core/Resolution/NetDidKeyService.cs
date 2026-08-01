@@ -30,6 +30,9 @@ namespace DidComm.Resolution;
 /// decrypt (NetCrypto 1.1.0 guarantees the on-curve check in <c>JwkConverter.ExtractPublicKey</c>).
 /// </para>
 /// </remarks>
+/// <example>
+/// Constructed over net-did resolvers in <c>samples/09-NetDidIntegration</c> and <c>samples/02-Cookbook</c> (section AA).
+/// </example>
 public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
 {
     private readonly IDidResolver _resolver;

@@ -10,6 +10,9 @@ namespace DidComm.Transports;
 /// <param name="Packed">The pack-stage output (envelope + service endpoint + fallbacks).</param>
 /// <param name="Transport">The transport-level outcome (accepted + HTTP status when applicable).</param>
 /// <param name="EndpointUsed">The URI actually used for delivery — either the resolved service endpoint or the caller-supplied override.</param>
+/// <example>
+/// Inspected in <c>samples/02-Cookbook</c> (section P).
+/// </example>
 public sealed record SendResult(
     PackEncryptedResult Packed,
     TransportResult Transport,

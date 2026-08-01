@@ -24,6 +24,9 @@ namespace DidComm.Secrets;
 /// <see cref="Exceptions.SecretNotFoundException"/> via the facade.
 /// </para>
 /// </remarks>
+/// <example>
+/// A custom (mock-KMS) implementation is built in <c>samples/08-Extensibility</c> and <c>samples/02-Cookbook</c> (section Y).
+/// </example>
 public interface ISecretsResolver
 {
     /// <summary>

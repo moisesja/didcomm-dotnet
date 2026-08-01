@@ -7,6 +7,9 @@ namespace DidComm.Transports;
 /// hands off the packed envelope via <see cref="SendAsync"/>. Transports are delivery-only
 /// (FR-TRN-03) — they do not return protocol replies.
 /// </summary>
+/// <example>
+/// A custom in-memory transport is implemented in <c>samples/08-Extensibility</c> (and <c>samples/02-Cookbook</c> section Z).
+/// </example>
 public interface IDidCommTransport
 {
     /// <summary>

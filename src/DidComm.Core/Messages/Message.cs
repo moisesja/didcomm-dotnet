@@ -23,6 +23,9 @@ namespace DidComm.Messages;
 /// <see cref="Validate"/> and the consistency checks live in <c>DidComm.Consistency</c>.
 /// </para>
 /// </remarks>
+/// <example>
+/// Built and serialized in <c>samples/02-Cookbook</c> (section B) and exercised by every envelope sample; see <c>samples/03-EnvelopesAndMessages</c>.
+/// </example>
 public sealed class Message
 {
     /// <summary>

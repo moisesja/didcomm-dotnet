@@ -16,6 +16,9 @@ namespace DidComm.Transports.Http;
 /// (retry + circuit-breaker + timeout — FR-TRN-08) injected via
 /// <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/>.
 /// </summary>
+/// <example>
+/// Sends the packed envelope in <c>samples/04-MediatorAgent</c> and <c>samples/02-Cookbook</c> (section P).
+/// </example>
 public sealed class HttpDidCommTransport : IDidCommTransport
 {
     /// <summary>Named <see cref="IHttpClientFactory"/> client used by this transport.</summary>

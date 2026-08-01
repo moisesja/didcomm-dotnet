@@ -22,6 +22,9 @@ namespace DidComm.Transports.WebSocket;
 /// <see cref="WebSocketTransportOptions.UseStomp"/> is enabled (FR-TRN-12); plain framing is
 /// the default and is byte-for-byte unchanged.
 /// </summary>
+/// <example>
+/// Bidirectional chat with reconnect runs in <c>samples/05-WebSocketChat</c>; one-message-per-frame receive in <c>samples/02-Cookbook</c> (section R).
+/// </example>
 public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposable
 {
     private readonly WebSocketTransportOptions _options;

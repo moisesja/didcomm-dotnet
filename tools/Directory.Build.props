@@ -5,4 +5,9 @@
   <ItemGroup>
     <Using Include="DataProofsDotnet.Jose.Jwk" Alias="Jwk" />
   </ItemGroup>
+  <!-- CS1591 (missing XML doc) applies to the shipped packages only (NFR-02); this tree is
+       scaffolding, so re-suppress it here. -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
 </Project>

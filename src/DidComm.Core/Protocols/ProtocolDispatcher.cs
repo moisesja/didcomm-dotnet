@@ -24,6 +24,9 @@ namespace DidComm.Protocols;
 /// transport-agnostic also makes it directly testable from unit tests without spinning up an
 /// ASP.NET Core host.
 /// </remarks>
+/// <example>
+/// Driven by the receive endpoints in <c>samples/04-MediatorAgent</c> and the custom-handler section of <c>samples/02-Cookbook</c> (section X).
+/// </example>
 public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 {
     private readonly ProtocolHandlerRegistry _registry;

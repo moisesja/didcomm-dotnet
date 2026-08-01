@@ -12,6 +12,9 @@ namespace DidComm.Messages;
 /// When <see cref="Links"/> is set, <see cref="Hash"/> MUST also be set for integrity
 /// (FR-ATT-03).
 /// </summary>
+/// <example>
+/// Demonstrated in <c>samples/02-Cookbook</c> (section L) alongside <see cref="Attachment"/>.
+/// </example>
 public sealed class AttachmentData
 {
     /// <summary>Signature over the attachment payload (JWS, detached-content allowed; FR-ATT-05).</summary>

@@ -15,6 +15,9 @@ namespace DidComm.Transports;
 /// <param name="Enc">Content-encryption algorithm; defaults to A256CBC-HS512.</param>
 /// <param name="ProtectSender">When <c>true</c> with authcrypt, wraps the authcrypt envelope in an outer anoncrypt.</param>
 /// <param name="ServiceEndpointOverride">Optional explicit endpoint URI. When set, the facade skips forward wrapping and sends the inner envelope directly. When <c>null</c>, the facade packs with <c>Forward = true</c> and uses <c>PackEncryptedResult.ServiceEndpoint</c>.</param>
+/// <example>
+/// Used by <c>samples/02-Cookbook</c> (section P — send over a transport).
+/// </example>
 public sealed record SendOptions(
     IReadOnlyList<string> Recipients,
     string? From = null,

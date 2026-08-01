@@ -44,6 +44,9 @@ namespace DidComm.Facade;
 /// <param name="RecipientKid">The recipient kid whose private key actually decrypted the envelope.</param>
 /// <param name="AllRecipientKids">All recipient kids carried in the encrypt layer.</param>
 /// <param name="FromPrior">Validated <c>from_prior</c> rotation claims, when present (FR-ROT-04). Check <see cref="FromPriorClaims.IsTermination"/>: a claims set without <c>sub</c> is the relationship-termination form (FR-ROT-06), delivered on a message without <c>from</c>, not a rotation.</param>
+/// <example>
+/// Every member is printed and explained in <c>samples/02-Cookbook</c> (section K — unpack and inspect metadata).
+/// </example>
 public sealed record UnpackResult(
     Message Message,
     IReadOnlyList<EnvelopeKind> Stack,

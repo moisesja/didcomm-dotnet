@@ -15,6 +15,9 @@ namespace DidComm.Extensions.DependencyInjection;
 /// <see cref="DidCommClient"/> singleton plus its dependencies (FR-API-08). The configuration
 /// callback uses <see cref="DidCommBuilder"/>.
 /// </summary>
+/// <example>
+/// The full builder pipeline is configured in <c>samples/02-Cookbook</c> (section A — dependency-injection setup).
+/// </example>
 public static class DidCommServiceCollectionExtensions
 {
     /// <summary>

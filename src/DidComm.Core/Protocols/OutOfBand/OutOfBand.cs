@@ -37,6 +37,9 @@ namespace DidComm.Protocols.OutOfBand;
 /// </para>
 /// <para>Maps to PRD §14.2 task <strong>V</strong>.</para>
 /// </remarks>
+/// <example>
+/// Invitation build → URL/QR encode → decode → reply correlation runs in <c>samples/06-OutOfBand</c> and <c>samples/02-Cookbook</c> (section V).
+/// </example>
 public static class OutOfBand
 {
     /// <summary>Protocol identifier URI for Out-of-Band 2.0.</summary>

@@ -24,6 +24,9 @@ namespace DidComm.Resolution;
 /// service raise the operation-specific failure themselves.
 /// </para>
 /// </remarks>
+/// <example>
+/// Resolved routing in action: <c>samples/02-Cookbook</c> (section O) and <c>samples/04-MediatorAgent</c>.
+/// </example>
 public interface IServiceEndpointResolver
 {
     /// <summary>

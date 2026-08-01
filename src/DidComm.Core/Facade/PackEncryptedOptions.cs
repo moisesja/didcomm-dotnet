@@ -11,6 +11,9 @@ namespace DidComm.Facade;
 /// <param name="Enc">Content-encryption algorithm; defaults to A256CBC-HS512 (the authcrypt-safe choice and the FR-ENC-05 floor).</param>
 /// <param name="ProtectSender">When <c>true</c> with authcrypt, wraps the authcrypt envelope in an outer anoncrypt to hide <c>skid</c> from mediators (<c>anoncrypt(authcrypt(...))</c>).</param>
 /// <param name="Forward">When <c>true</c>, the facade resolves the recipient's <c>DIDCommMessaging</c> service entry, applies reverse-order <c>forward</c> wrapping per FR-ROUTE-02, and surfaces the transport URI on the result. Phase 4 supports forwarding for **single-recipient** packs only — multi-recipient <c>Forward = true</c> throws <see cref="InvalidOperationException"/>.</param>
+/// <example>
+/// Every shape — anoncrypt, authcrypt, sign-then-encrypt, protect-sender, explicit enc, multi-recipient — is packed in <c>samples/02-Cookbook</c> (sections E–J).
+/// </example>
 public sealed record PackEncryptedOptions(
     IReadOnlyList<string> Recipients,
     string? From = null,

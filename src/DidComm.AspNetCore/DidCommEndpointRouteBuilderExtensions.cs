@@ -27,6 +27,9 @@ namespace DidComm.AspNetCore;
 /// Minimal-API extensions for receiving DIDComm v2.1 envelopes over ASP.NET Core (PRD §9.2/§9.3,
 /// FR-TRN-07/09/10, FR-API-06).
 /// </summary>
+/// <example>
+/// HTTP receive with 415/413 handling runs in <c>samples/02-Cookbook</c> (section Q) and <c>samples/04-MediatorAgent</c>.
+/// </example>
 public static class DidCommEndpointRouteBuilderExtensions
 {
     /// <summary>

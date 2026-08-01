@@ -9,6 +9,9 @@ namespace DidComm.Protocols.TrustPing;
 /// <c>sicpa-dlab/didcomm-python</c>: <c>response_requested</c> default <c>true</c>; the
 /// reply's <c>thid</c> = the ping's <c>id</c>.
 /// </summary>
+/// <example>
+/// Ping/response liveness runs in <c>samples/02-Cookbook</c> (section S) and <c>samples/05-WebSocketChat</c>.
+/// </example>
 public static class TrustPing
 {
     /// <summary>Protocol identifier URI for Trust Ping 2.0.</summary>

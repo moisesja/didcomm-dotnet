@@ -24,6 +24,9 @@ namespace DidComm.Facade;
 /// and delegates the JOSE composition to the internal envelope layer. Thread-safe (NFR-03) —
 /// register as a singleton.
 /// </summary>
+/// <example>
+/// The 25-line authcrypt round-trip in <c>samples/01-Quickstart</c> is the fastest introduction; <c>samples/02-Cookbook</c> demonstrates every facade operation task by task.
+/// </example>
 public sealed partial class DidCommClient
 {
     private readonly ISecretsResolver _secrets;

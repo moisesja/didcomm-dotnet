@@ -9,6 +9,9 @@ namespace DidComm.Protocols.TrustPing;
 /// <c>response_requested</c> body member is <c>true</c> (the default); replies with
 /// <c>null</c> when the sender explicitly opted out.
 /// </summary>
+/// <example>
+/// Registered in <c>samples/02-Cookbook</c> (section S) and <c>samples/05-WebSocketChat</c>.
+/// </example>
 public sealed class TrustPingHandler : IProtocolHandler
 {
     /// <inheritdoc />
