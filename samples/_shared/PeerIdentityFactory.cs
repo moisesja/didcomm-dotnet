@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DidComm.Jose;
 using NetCrypto;
 using NetDid.Core;
@@ -13,6 +14,19 @@ namespace DidComm.Samples.Shared;
 /// <param name="Did">The newly-minted <c>did:peer:2</c>.</param>
 /// <param name="Privates">Private JWKs for every verification method in the DID Doc. Each <c>Kid</c> is an absolute DID URL.</param>
 public sealed record PeerIdentity(string Did, IReadOnlyList<Jwk> Privates);
+
+/// <summary>
+/// A <c>DIDCommMessaging</c> service to embed in a minted <c>did:peer:2</c> — how a DID
+/// advertises where (and via whom) it can be reached. Encoded in the conformant object form:
+/// <c>{"uri": …, "routingKeys": […], "accept": […]}</c> inside <c>serviceEndpoint</c>.
+/// </summary>
+/// <param name="EndpointUriOrDid">A transport URI (e.g. <c>https://host/didcomm</c>) — or a mediator's DID, which senders expand into the mediator's own endpoint plus an implicit routing key (FR-ROUTE-04).</param>
+/// <param name="RoutingKeys">OPTIONAL routing-key DID URLs (mediator <c>keyAgreement</c> kids). Senders forward-wrap once per key, outermost first (FR-ROUTE-02).</param>
+/// <param name="Accept">OPTIONAL accepted DIDComm profiles, e.g. <c>["didcomm/v2"]</c>.</param>
+public sealed record DidCommServiceSpec(
+    string EndpointUriOrDid,
+    IReadOnlyList<string>? RoutingKeys = null,
+    IReadOnlyList<string>? Accept = null);
 
 /// <summary>
 /// Creates a fresh test identity end-to-end: generates two key pairs (one for encryption,
@@ -31,10 +45,12 @@ public static class PeerIdentityFactory
     /// <param name="manager">net-did's DID manager. Resolve it from the same DI container <c>AddDidComm(b =&gt; b.UseNetDidResolver())</c> populated.</param>
     /// <param name="keyGenerator">A key generator (NetCrypto). Same DI container.</param>
     /// <param name="cryptoProvider">A crypto provider (NetCrypto). Same DI container.</param>
+    /// <param name="service">OPTIONAL <c>DIDCommMessaging</c> service to embed in the DID — set it when the identity must be reachable (its inbox URL, or a mediator route). Omitted, the DID carries keys only.</param>
     public static async Task<PeerIdentity> CreateAsync(
         IDidManager manager,
         IKeyGenerator keyGenerator,
-        ICryptoProvider cryptoProvider)
+        ICryptoProvider cryptoProvider,
+        DidCommServiceSpec? service = null)
     {
         ArgumentNullException.ThrowIfNull(manager);
         ArgumentNullException.ThrowIfNull(keyGenerator);
@@ -54,6 +70,7 @@ public static class PeerIdentityFactory
                 new PeerKeyPurpose(kxSigner, PeerPurpose.KeyAgreement),
                 new PeerKeyPurpose(authSigner, PeerPurpose.Authentication),
             },
+            Services = service is null ? null : new[] { BuildDidCommService(service) },
         };
 
         var result = await manager.CreateAsync(options).ConfigureAwait(false);
@@ -67,6 +84,32 @@ public static class PeerIdentityFactory
         };
 
         return new PeerIdentity(didValue, privates);
+    }
+
+    /// <summary>
+    /// Build the DID-Core service entry for a <see cref="DidCommServiceSpec"/>: type
+    /// <c>DIDCommMessaging</c> with the object-form <c>serviceEndpoint</c> the DIDComm v2.1
+    /// spec defines (<c>uri</c> + optional <c>routingKeys</c>/<c>accept</c>). did:peer:2
+    /// base64url-encodes the whole block into the DID string, so the service resolves offline
+    /// like everything else about the DID.
+    /// </summary>
+    private static Service BuildDidCommService(DidCommServiceSpec spec)
+    {
+        var endpoint = new Dictionary<string, JsonElement>
+        {
+            ["uri"] = JsonSerializer.SerializeToElement(spec.EndpointUriOrDid),
+        };
+        if (spec.RoutingKeys is { Count: > 0 })
+            endpoint["routingKeys"] = JsonSerializer.SerializeToElement(spec.RoutingKeys);
+        if (spec.Accept is { Count: > 0 })
+            endpoint["accept"] = JsonSerializer.SerializeToElement(spec.Accept);
+
+        return new Service
+        {
+            Id = "#didcomm",
+            Type = "DIDCommMessaging",
+            ServiceEndpoint = ServiceEndpointValue.FromMap(endpoint),
+        };
     }
 
     private static Jwk BuildPrivateJwk(KeyPair keyPair, string did, DidDocument doc)

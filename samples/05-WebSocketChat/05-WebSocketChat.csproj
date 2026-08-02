@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.WebSocketChat</RootNamespace>
+    <AssemblyName>DidComm.Samples.WebSocketChat</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet over WebSocket — two agents exchanging trust-ping liveness, a discover-features handshake, a scripted bidirectional chat via a custom IProtocolHandler, and a reconnect-after-drop demonstration with the transport's lifecycle events and exponential backoff (PRD §14.3 sample 05, tasks R/S plus T).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.AspNetCore\DidComm.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>
