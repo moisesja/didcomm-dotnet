@@ -88,7 +88,14 @@ public static class Program
             })
             // The SSRF guard (see section 4) also pins the HTTP transport's connections at TCP
             // connect time. This process deliberately talks to loopback, so allow it here too.
-            .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")));
+            .Configure(o =>
+            {
+                o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1");
+                // DD-10: some in-the-wild DID documents still write serviceEndpoint as a bare
+                // string instead of the spec's object form. Accepting that is a receive-side
+                // tolerance you must opt into — this mediator keeps the spec-conformant stance.
+                o.AllowBareStringServiceEndpoint = false;
+            }));
 
         // The mediator's inbox: MapDidCommEndpoint validates the content type (415), caps the
         // body (413), unpacks the envelope with the mediator's keys, and hands the result to
@@ -106,12 +113,32 @@ public static class Program
             // mediator; hand the decrypted forward back to ForwardProcessor (in packed
             // plaintext form) so it applies the Routing 2.0 rules: reject non-forwards, drop
             // please_ack (FR-ROUTE-07), and surface the next hop + the onward payload.
-            var processor = new ForwardProcessor(mediatorClient, keyService, new ForwardProcessorOptions());
+            // Pre-screen with TryParse: "is this a Routing 2.0 forward at all?" — false for any
+            // other message type, so a mediator can branch before doing forward-specific work.
+            if (ForwardMessage.TryParse(unpacked.Message, out var forwardNext, out var forwardPayloads))
+                narrator.Step($"[mediator] verified forward — next={Trunc(StripFragment(forwardNext), 48)}, payloads={forwardPayloads.Count}.");
+
+            // The processor's options pick the relay transformation: PassThrough relays the inner
+            // JWE untouched (the default); ReanoncryptToNext re-wraps it (FR-ROUTE-06); and
+            // ExtraRecipientRoutingKeys adds out-of-band wraps (FR-ROUTE-05). The last two are
+            // mutually exclusive — Validate() enforces that pairing rule.
+            var forwardOptions = new ForwardProcessorOptions(
+                Mode: RewrapMode.PassThrough,
+                ExtraRecipientRoutingKeys: null);
+            forwardOptions.Validate();
+            narrator.Value("[mediator] rewrap mode", forwardOptions.Mode);
+            narrator.Value("[mediator] extra routing wraps", forwardOptions.ExtraRecipientRoutingKeys?.Count ?? 0);
+
+            var processor = new ForwardProcessor(mediatorClient, keyService, forwardOptions);
             var forwardPlain = await mediatorClient.PackPlaintextAsync(unpacked.Message, ct);
             var processed = await processor.ProcessAsync(forwardPlain, ct);
 
             var nextHop = StripFragment(processed.NextHop);
             narrator.Step($"[mediator] forward unwrapped — next hop {Trunc(nextHop, 56)}, onward payload {processed.OnwardPacked.Length} bytes.");
+            // Forwards may carry scheduling hints: an expires_time after which relaying is
+            // pointless, and a delay_milli the sender asked the mediator to hold for.
+            narrator.Value("[mediator] expires_time", processed.ExpiresTime?.ToString() ?? "<none>");
+            narrator.Value("[mediator] requested delay", processed.Delay?.ToString() ?? "<none>");
 
             if (!deliveryRoutes.TryGetValue(nextHop, out var inbox))
             {
@@ -225,6 +252,15 @@ public static class Program
                 var routedAlice = BuildAliceClient(aliceSecrets, allowLoopback: true);
                 await using (routedAlice.Provider)
                 {
+                    // What Alice's resolver reads out of Bob's DID before any bytes move: the
+                    // DIDCommMessaging service — endpoint URI, the routing keys to wrap for,
+                    // and the accepted profiles. This record IS the route.
+                    var serviceInfo = (await routedAlice.Provider
+                        .GetRequiredService<IServiceEndpointResolver>()
+                        .ResolveAsync(bob.Did)).Single();
+                    narrator.Value("Bob's service endpoint (from his DID)", serviceInfo.Uri);
+                    narrator.Value("Bob's routingKeys to wrap for", serviceInfo.RoutingKeys.Count);
+
                     // One call does all of it: resolve Bob's DIDCommMessaging service, wrap a
                     // Routing 2.0 forward for the mediator's routing key (FR-ROUTE-02), pick
                     // the HTTP transport by URI scheme (FR-TRN-01), and POST to the mediator.
@@ -234,6 +270,18 @@ public static class Program
 
                     narrator.Value("Endpoint used (the mediator, from Bob's DID)", sent.EndpointUsed);
                     narrator.Value("Transport HTTP status", sent.Transport.HttpStatusCode);
+
+                    // What SendAsync assembled under the hood is one factory call when you need
+                    // to wrap by hand (a custom extra hop, tests): a forward names the mediator
+                    // hop, the onward party, and carries the packed envelope as its attachment.
+                    var manualForward = ForwardMessage.Create(
+                        mediator: mediator.Did,
+                        next: bob.Did,
+                        packedPayloads: new[] { sent.Packed.Message },
+                        idGenerator: UuidV4MessageIdGenerator.Instance,
+                        expiresTimeEpochSeconds: DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds());
+                    narrator.Value("Hand-built forward type", manualForward.Type);
+                    narrator.Value("Hand-built forward next", Trunc(manualForward.Body?["next"]?.GetValue<string>(), 48));
 
                     await AwaitOrFailAsync(relayed.Task, "mediator relay");
                     var delivered = await AwaitOrFailAsync(bobReceived.Task, "delivery to Bob");

@@ -38,9 +38,21 @@ public static class Section_F_PackAuthcrypt
             .Build();
 
         ctx.Narrator.Step("PackEncryptedAsync with From set ⇒ authcrypt (ECDH-1PU key agreement).");
-        var packed = await ctx.Client.PackEncryptedAsync(message, new PackEncryptedOptions(
+        var options = new PackEncryptedOptions(
             Recipients: new[] { ctx.Bob.Did },
-            From: ctx.Alice.Did));
+            From: ctx.Alice.Did);
+
+        // The options record reads back exactly what you asked for — worth logging next to the
+        // pack call, since the unset members show the defaults you accepted: A256CBC-HS512
+        // content encryption, no inner signature, no anoncrypt wrap, no mediator forwarding.
+        ctx.Narrator.Value("Options.Recipients", string.Join(", ", options.Recipients));
+        ctx.Narrator.Value("Options.From", options.From);
+        ctx.Narrator.Value("Options.SignFrom (null ⇒ no inner signature)", options.SignFrom);
+        ctx.Narrator.Value("Options.Enc (default cipher)", options.Enc);
+        ctx.Narrator.Value("Options.ProtectSender (anoncrypt wrap?)", options.ProtectSender);
+        ctx.Narrator.Value("Options.Forward (wrap for mediators?)", options.Forward);
+
+        var packed = await ctx.Client.PackEncryptedAsync(message, options);
 
         var unpacked = await ctx.Client.UnpackAsync(packed.Message);
         ctx.Narrator.Value("Encrypted", unpacked.Encrypted);

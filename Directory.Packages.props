@@ -69,6 +69,10 @@
     <PackageVersion Include="FluentAssertions" Version="7.0.0" />
     <PackageVersion Include="NSubstitute" Version="5.3.0" />
     <PackageVersion Include="coverlet.collector" Version="6.0.3" />
+    <!-- IL/metadata reader for the FR-DX-01 public-API demonstration gate: the coverage test walks
+         every sample assembly's metadata (member refs, type refs, signatures) to prove each public
+         member of the shipped packages is exercised by a sample. Test-only; never shipped. -->
+    <PackageVersion Include="Mono.Cecil" Version="0.11.6" />
     <!-- Benchmarks (NFR-07) -->
     <PackageVersion Include="BenchmarkDotNet" Version="0.14.0" />
   </ItemGroup>

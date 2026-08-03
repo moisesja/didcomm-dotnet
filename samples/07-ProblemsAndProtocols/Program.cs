@@ -113,7 +113,7 @@ public static class Program
         BadLang(narrator, alice.Did, bob.Did);
         await EmptyAckAsync(narrator, client, dispatcher, options, alice.Did, bob.Did);
         await LetsDoLunchAsync(narrator, client, dispatcher, options, alice.Did, bob.Did);
-        await ObserverAsync(narrator, sp.GetRequiredService<ProblemReportAuditObserver>());
+        await ObserverAsync(narrator, sp.GetRequiredService<ProblemReportAuditObserver>(), client, alice.Did, bob.Did);
         await DiscoverGoalCodeAsync(narrator, client, dispatcher, options, alice.Did, bob.Did);
         Tracing(narrator, sp.GetRequiredService<TraceOptions>(), alice.Did, bob.Did);
     }
@@ -398,9 +398,19 @@ public static class Program
 
     // ── 8. Watching traffic without owning it ───────────────────────────────────────────
 
-    private static async Task ObserverAsync(Narrator narrator, ProblemReportAuditObserver observer)
+    private static async Task ObserverAsync(
+        Narrator narrator, ProblemReportAuditObserver observer, DidCommClient client, string aliceDid, string bobDid)
     {
         narrator.Section("8", "A read-only observer on report-problem traffic (FR-PROTO-12)");
+
+        // A fresh report round-tripped through pack/unpack — used further down to show how an
+        // observer is unit-tested without a live agent.
+        var syntheticReport = ProblemReportApi.Create(
+            from: aliceDid, to: bobDid, code: "w.m.xfer.slow", pthid: "observer-test-thread",
+            comment: "Offline observer test.");
+        var syntheticPacked = (await client.PackEncryptedAsync(syntheticReport, new PackEncryptedOptions(
+            Recipients: new[] { bobDid }, From: aliceDid))).Message;
+        var syntheticReceive = await client.UnpackAsync(syntheticPacked);
 
         // The built-in ProblemReportHandler OWNS the report-problem protocol (it ran the
         // cascade guard in section 4). This observer registered via AddProtocolObserver<T>()
@@ -413,6 +423,29 @@ public static class Program
         narrator.Value("Observed problem-report count", observer.Observed.Count);
         narrator.Value("Observed codes (distinct)", string.Join(", ", observer.Observed.Select(o => o.Code).Distinct()));
         narrator.Value("Every observation was authenticated", observer.Observed.All(o => o.Authenticated));
+
+        // The observation carries the same verified envelope facts an UnpackResult does — a
+        // read-only snapshot, so an audit trail can log security posture per message without
+        // being able to touch dispatch.
+        var last = observer.Last!;
+        narrator.Value("Observation.Encrypted / NonRepudiation / AnonymousSender",
+            $"{last.Encrypted} / {last.NonRepudiation} / {last.AnonymousSender}");
+        narrator.Value("Observation.SenderKid present", last.SenderKid is not null);
+        narrator.Value("Observation.SignerKid (null — reports were not inner-signed)", last.SignerKid);
+        narrator.Value("Observation.RecipientAddressing", last.RecipientAddressing);
+        narrator.Value("Observation.SenderKeyBinding present", last.SenderKeyBinding is not null);
+        narrator.Value("Observation.SignerKeyBinding / RecipientKeyBinding",
+            $"{last.SignerKeyBinding is not null} / {last.RecipientKeyBinding is not null}");
+
+        // For unit-testing an observer no live agent is needed: FromUnpackResult converts any
+        // UnpackResult into the observation your observer would receive. Note what it does NOT
+        // vouch for: addressing reads NotEvaluated — only the library's own dispatch pipeline
+        // can assert that verdict (#61).
+        var synthetic = InboundObservation.FromUnpackResult(syntheticReceive);
+        await observer.OnMessageReceivedAsync(synthetic, CancellationToken.None);
+        narrator.Value("Synthetic observation recorded", observer.Observed.Count);
+        narrator.Value("Synthetic RecipientAddressing (never forged)", synthetic.RecipientAddressing);
+
         narrator.Note("The handler still handled; the observer only watched. That is the whole contract.");
     }
 
@@ -474,6 +507,16 @@ public static class Program
         var honored = TraceObserver.ShouldReport(traced, configured, out var reportUri);
         narrator.Value("ShouldReport (opted in, allowlisted)", honored);
         narrator.Value("Report URI", reportUri);
+
+        // What would actually be POSTed: BuildReportBody assembles the trace-report — thread
+        // ids and a timestamp; routing details only when the operator opts into those too.
+        // Validate() enforces the same enabled-requires-allowlist rule EnableTracing applied.
+        var reportOptions = new TraceOptions { Enabled = true, IncludeRoutingDetails = true };
+        reportOptions.AllowedReportingUris.Add("https://trace.example/didcomm-reports");
+        reportOptions.Validate();
+        narrator.Value("IncludeRoutingDetails opted in", reportOptions.IncludeRoutingDetails);
+        var reportBody = TraceObserver.BuildReportBody(traced, reportOptions);
+        narrator.Value("Trace report body", reportBody.ToJsonString());
 
         // A report_uri OFF the allowlist is silently dropped even though tracing is enabled.
         traced.AdditionalHeaders[TraceApi.HeaderName] = JsonSerializer.SerializeToElement(
@@ -556,9 +599,13 @@ public sealed class ProblemReportAuditObserver : IProtocolObserver
     /// <summary>Everything observed so far, in arrival order.</summary>
     public IReadOnlyList<(string Code, bool Authenticated)> Observed => _observed.ToArray();
 
+    /// <summary>The most recent full observation — section 8 prints its whole surface.</summary>
+    public InboundObservation? Last { get; private set; }
+
     /// <inheritdoc />
     public Task OnMessageReceivedAsync(InboundObservation observation, CancellationToken ct)
     {
+        Last = observation;
         _observed.Enqueue((ProblemReportApi.ReadCode(observation.Message) ?? "<none>", observation.Authenticated));
         _arrived.Release();
         return Task.CompletedTask;

@@ -14,6 +14,7 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="FluentAssertions" />
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Mono.Cecil" />
   </ItemGroup>
 
   <ItemGroup>
@@ -51,6 +52,12 @@
   -->
   <ItemGroup>
     <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- FR-DX-01: the justified exceptions to the public-API demonstration gate; read at run time
+       by PublicApiCoverageTests. -->
+  <ItemGroup>
+    <None Include="DxCoverage\coverage-allowlist.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

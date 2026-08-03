@@ -1,8 +1,10 @@
 using System.IO;
+using System.Text;
 using DidComm.Exceptions;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Samples.Shared;
 using DidComm.Transports;
+using DidComm.Transports.Stomp;
 using DidComm.Transports.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -162,6 +164,38 @@ public static class Program
             await alice.SendChatAsync(bob.Identity.Did, "Welcome back?");
             await alice.Chat.NextLineAsync("Bob's post-reconnect reply");
             narrator.Note("Same-port restart is the deterministic stand-in for any transient drop — the recovery path (backoff, redial, resume) is identical.");
+
+            // ── 6. STOMP framing ─────────────────────────────────────────────────────────
+            narrator.Section("6", "STOMP 1.2 framing (FR-TRN-12) — the wire dialect behind UseStomp");
+
+            // Some WebSocket infrastructure (message brokers, ActiveMQ/RabbitMQ gateways) speaks
+            // STOMP rather than raw binary frames. Both ends opt in through options — the
+            // sending transport via UseStomp + the destination header it should address, the
+            // ASP.NET Core endpoint via DidCommReceiveOptions.UseStomp — and each envelope then
+            // rides as one SEND frame. The codec those paths share is public, one call each way.
+            var stompOptions = new WebSocketTransportOptions
+            {
+                UseStomp = true,
+                StompDestination = "/queue/didcomm",
+            };
+            narrator.Value("Client opts in via", $"UseStomp={stompOptions.UseStomp}, destination={stompOptions.StompDestination}");
+
+            var sendFrame = new StompFrame(
+                "SEND",
+                new[]
+                {
+                    KeyValuePair.Create("destination", stompOptions.StompDestination!),
+                    KeyValuePair.Create("content-type", "application/didcomm-encrypted+json"),
+                },
+                Encoding.UTF8.GetBytes("""{"protected":"…a packed envelope would ride here…"}"""));
+            var stompWire = StompFrameCodec.Encode(sendFrame);
+            narrator.Value("Encoded SEND frame", $"{stompWire.Length} bytes on the wire");
+
+            var decodedFrame = StompFrameCodec.Decode(stompWire);
+            narrator.Value("Decoded command", decodedFrame.Command);
+            narrator.Value("Decoded header count", decodedFrame.Headers.Count);
+            narrator.Value("destination header", decodedFrame.TryGetHeader("destination", out var stompDest) ? stompDest : "?");
+            narrator.Value("Body round-trips", Encoding.UTF8.GetString(decodedFrame.Body.Span).Length > 0);
         }
         finally
         {

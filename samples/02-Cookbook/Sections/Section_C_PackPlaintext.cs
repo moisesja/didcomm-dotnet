@@ -46,6 +46,15 @@ public static class Section_C_PackPlaintext
         ctx.Narrator.Value("Authenticated", unpacked.Authenticated);      // 'from' is just a claim
         ctx.Narrator.Value("NonRepudiation", unpacked.NonRepudiation);    // nothing was signed
 
+        // Transports label DIDComm payloads with a media type. Peers may send it with parameters
+        // or stray casing, so compare through MediaTypes: Normalize strips parameters/whitespace
+        // and lowercases, and Matches does the tolerant comparison against a canonical constant
+        // in one call. (FR-TRN-04)
+        ctx.Narrator.Step("Recognize the media type tolerantly with MediaTypes.Normalize / Matches.");
+        var received = "Application/DIDComm-Plain+JSON; charset=utf-8";
+        ctx.Narrator.Value("Normalize(received)", MediaTypes.Normalize(received));
+        ctx.Narrator.Value("Matches(received, Plaintext)", MediaTypes.Matches(received, MediaTypes.Plaintext));
+
         ctx.Narrator.Note("Plaintext is for debugging and inspection only: no confidentiality, no authenticity, no integrity. Send authcrypt (section F) in production.");
     }
 }

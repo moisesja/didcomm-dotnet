@@ -74,6 +74,36 @@ public static class Section_B_BuildAMessage
             .Build();
         ctx.Narrator.Value("Reply.Thid == first.Id", string.Equals(reply.Thid, message.Id, StringComparison.Ordinal));
 
+        // The id comes from a pluggable generator. The default is UUID v4 (the spec's
+        // recommendation); pass your own IMessageIdGenerator when ids must come from elsewhere —
+        // e.g. a store-and-forward queue that assigns them — or pin a single id with WithId
+        // (the deterministic-replay / idempotency-key case). (FR-MSG-13)
+        ctx.Narrator.Step("Control the message id: the builder's generator seam, or an explicit WithId.");
+        IMessageIdGenerator generator = UuidV4MessageIdGenerator.Instance;   // the shared default instance
+        ctx.Narrator.Value("Generator.NewId() sample", generator.NewId());
+        var generated = new MessageBuilder(new UuidV4MessageIdGenerator())   // or your own generator
+            .WithType("https://didcomm.org/basicmessage/2.0/message")
+            .Build();
+        ctx.Narrator.Value("Id from injected generator", generated.Id);
+        var pinned = new MessageBuilder()
+            .WithId("00000000-0000-4000-8000-00000000cafe")
+            .WithType("https://didcomm.org/basicmessage/2.0/message")
+            .Build();
+        ctx.Narrator.Value("Id pinned via WithId", pinned.Id);
+
+        // Message is also a plain mutable model — what JSON deserialization hands you. A message
+        // assembled by hand (or off the wire) hasn't been through Build(), so run Validate()
+        // yourself before trusting it; it throws MalformedMessageException on a §4 violation.
+        ctx.Narrator.Step("Validate a hand-assembled message: new Message() + Validate().");
+        var handAssembled = new Message
+        {
+            Id = generator.NewId(),
+            Type = "https://didcomm.org/basicmessage/2.0/message",
+            Body = new JsonObject { ["content"] = "assembled without the builder" },
+        };
+        handAssembled.Validate();                                            // throws if the §4 rules don't hold
+        ctx.Narrator.Value("Hand-assembled message validates", true);
+
         ctx.Narrator.Note("Build() validates the message structurally — a successful Build() guarantees the §4 rules hold.");
         return Task.CompletedTask;
     }

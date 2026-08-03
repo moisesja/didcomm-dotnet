@@ -76,6 +76,9 @@ public static class Program
         narrator.Value("Goal", invitation.Goal);
         narrator.Value("GoalCode", invitation.GoalCode);
         narrator.Value("Accept", string.Join(",", invitation.Accept));
+        // Invitations can also carry attachments — e.g. the first protocol message itself, so
+        // the scanner can start work before answering. A bare connect carries none.
+        narrator.Value("Attachments", invitation.Attachments?.Count ?? 0);
 
         // Alice remembers which invitation ids she has issued. This — plain application
         // state — is the correlation surface for replies; the IOobInvitationStore further
@@ -116,7 +119,9 @@ public static class Program
         // Long invitations make dense, hard-to-scan QR codes. The short form stores the full
         // plaintext under an opaque id and serves it on an HTTP GET from the INVITER's own
         // host — the spec forbids public URL shorteners (they would learn every connection).
-        var store = new InMemoryOobInvitationStore();
+        // Hold the store by its contract — IOobInvitationStore is the seam a database-backed
+        // implementation replaces; the in-memory one is the offline stand-in.
+        IOobInvitationStore store = new InMemoryOobInvitationStore();
         var oobId = Guid.NewGuid().ToString("D");
         store.Store(oobId, await aliceClient.PackPlaintextAsync(invitation.Message));
 
@@ -149,6 +154,13 @@ public static class Program
             await oobApp.DisposeAsync();
         }
 
+        // The store contract is three calls, all shown now: hosting used Store, the endpoint's
+        // GET used Retrieve, and Remove is how the inviter revokes a printed QR code — after
+        // it, dereferencing the same _oobid finds nothing.
+        narrator.Value("Store.Retrieve(oobId) still present", store.Retrieve(oobId) is not null);
+        store.Remove(oobId);
+        narrator.Value("After Remove — Retrieve misses", store.Retrieve(oobId) is null);
+
         // ── 5. Respond, and correlate via pthid ──────────────────────────────────────────
         narrator.Section("5", "Bob responds; Alice correlates via pthid (FR-OOB-03/05)");
 
@@ -178,7 +190,10 @@ public static class Program
         var correlated = received.Message.Pthid is { } pthid && pendingInvitations.TryGetValue(pthid, out _);
         narrator.Value("Correlated to a pending invitation", correlated);
         narrator.Value("Responder (authenticated)", Trunc(received.Message.From, 64));
-        narrator.Value("web_redirect", OutOfBandApi.ReadWebRedirect(received.Message)?.RedirectUrl);
+        // A web_redirect pairs a status with the URL — only "OK" outcomes should be followed.
+        var redirect = OutOfBandApi.ReadWebRedirect(received.Message);
+        narrator.Value("web_redirect.Status", redirect?.Status);
+        narrator.Value("web_redirect", redirect?.RedirectUrl);
         narrator.Note("The invitation bootstrapped everything: Bob learned Alice's DID from a QR code, and Alice knows exactly which QR code this authenticated stranger scanned.");
     }
 

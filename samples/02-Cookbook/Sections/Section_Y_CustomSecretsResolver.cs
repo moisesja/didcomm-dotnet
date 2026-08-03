@@ -1,14 +1,18 @@
 using System.Text.Json.Nodes;
 using DidComm.Adapters.NetDid;
+using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.Protocols.Rotation;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using NetCrypto;
 using NetDid.Core;
 using NetDid.Core.Model;
 using NetDid.Method.Peer;
+using DpSig = DataProofsDotnet.Jose.Signing;
 
 namespace DidComm.Samples.Cookbook.Sections;
 
@@ -56,7 +60,10 @@ public static class Section_Y_CustomSecretsResolver
         foreach (var jwk in ctx.Alice.Privates) mockKms.Store(jwk);
         foreach (var jwk in ctx.Bob.Privates) mockKms.Store(jwk);
 
-        var kmsClient = new DidCommClient(mockKms, keyService, new DidCommOptions());
+        // Hand-assembled clients can also take an ILogger<DidCommClient> to surface the same
+        // structured diagnostics the DI-built client emits (redacted per NFR-04).
+        var kmsClient = new DidCommClient(mockKms, keyService, new DidCommOptions(),
+            NullLogger<DidCommClient>.Instance);
         var viaKms = await kmsClient.PackEncryptedAsync(
             NewMessage(ctx.Alice.Did, ctx.Bob.Did, "Keys served by the mock KMS."),
             new PackEncryptedOptions(Recipients: new[] { ctx.Bob.Did }, From: ctx.Alice.Did));
@@ -92,6 +99,48 @@ public static class Section_Y_CustomSecretsResolver
         ctx.Narrator.Value("Keystore round-trip Authenticated", bobView.Authenticated);
         ctx.Narrator.Value("Keystore round-trip NonRepudiation", bobView.NonRepudiation);
         ctx.Narrator.Value("SenderKid is the keystore identity", bobView.SenderKid?.StartsWith(vault.Did, StringComparison.Ordinal));
+
+        // A resolver that cannot serve a kid the PACK side needs is an error, and it has a name:
+        // SecretNotFoundException, carrying the exact kid that was missing — the string to hand
+        // your KMS operator.
+        ctx.Narrator.Step("Pack with a key the resolver does not hold ⇒ SecretNotFoundException.");
+        var emptyKms = new MockKmsSecretsResolver();   // nothing stored
+        var brokenClient = new DidCommClient(emptyKms, keyService, new DidCommOptions());
+        try
+        {
+            _ = await brokenClient.PackEncryptedAsync(
+                NewMessage(ctx.Alice.Did, ctx.Bob.Did, "This cannot be packed."),
+                new PackEncryptedOptions(Recipients: new[] { ctx.Bob.Did }, From: ctx.Alice.Did));
+            ctx.Narrator.Note("UNEXPECTED — the empty KMS packed a message.");
+        }
+        catch (SecretNotFoundException ex)
+        {
+            ctx.Narrator.Value("SecretNotFoundException.Kid (the key your KMS must serve)", Truncate(ex.Kid));
+        }
+
+        // Beyond FindAsync, the bridge also implements the opaque-key surface (IOpaqueKeyResolver):
+        // it hands out operation handles instead of key bytes. ResolveKeyAgreementAsync returns the
+        // ECDH handle the facade decrypts with; ResolveSignerAsync returns a JWS signer handle you
+        // can use directly wherever the library accepts one — here, signing Section N's rotation
+        // JWTs without the authentication key ever leaving the store.
+        ctx.Narrator.Step("Opaque handles: ECDH + JWS signing without extracting a private key.");
+        var ecdhHandle = await bridge.ResolveKeyAgreementAsync(vault.KeyAgreementKid);
+        ctx.Narrator.Value("ResolveKeyAgreementAsync handle held", ecdhHandle is not null);
+        var rawSigner = await bridge.ResolveSignerAsync(vault.SigningKid)
+            ?? throw new InvalidOperationException("The keystore should hold the signing kid.");
+        // A JwsSigner is just "an opaque signing operation + the kid it acts as".
+        var signerHandle = new DpSig.JwsSigner(rawSigner, vault.SigningKid);
+        var rotationClaims = new FromPriorClaims(
+            Sub: ctx.Alice2.Did, Iss: vault.Did, Iat: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var viaHandle = await FromPriorBuilder.BuildAsync(rotationClaims, signerHandle);
+        // The lifetime overload stamps exp = iat + lifetime in the same call (FR-ROT-05)...
+        var bounded = await FromPriorBuilder.BuildAsync(rotationClaims, signerHandle, TimeSpan.FromMinutes(10));
+        // ...and the termination form ("this DID retires, nothing replaces it") signs the same way.
+        var farewell = await FromPriorBuilder.BuildTerminationAsync(
+            vault.Did, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), signerHandle);
+        ctx.Narrator.Value("Rotation JWT via keystore handle", viaHandle.Length > 0);
+        ctx.Narrator.Value("Replay-bounded JWT via keystore handle", bounded.Length > 0);
+        ctx.Narrator.Value("Termination JWT via keystore handle", farewell.Length > 0);
 
         ctx.Narrator.Note("Write a resolver when your KMS speaks its own API; use NetDidKeyStoreSecretsResolver when keys already live in a NetCrypto IKeyStore — either way the library holds no keys (DD-02).");
     }

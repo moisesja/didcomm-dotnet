@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Exceptions;
 using DidComm.Facade;
@@ -42,14 +43,38 @@ public static class Section_L_Attachments
         };
 
         // Shape 2 — inline base64: arbitrary bytes, base64url-encoded per the JOSE family.
+        // This one also carries the optional descriptive headers — a human-readable description,
+        // the filename to save under, a format hint for when the media type alone is ambiguous,
+        // and the last-modified time of the original file (FR-ATT-02).
         var logoBytes = Encoding.UTF8.GetBytes("pretend-this-is-a-png");
         var logo = new Attachment
         {
             Id = "logo",
+            Description = "The ACME logo, as discussed",
+            Filename = "acme-logo.png",
             MediaType = "image/png",
+            Format = "https://example.org/formats/logo-v1",
+            LastModifiedTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             ByteCount = logoBytes.Length,
             Data = new AttachmentData { Base64 = Base64UrlEncode(logoBytes) },
         };
+
+        // Vendor-specific extras the spec doesn't define ride in AdditionalData — on the
+        // attachment and on its data object alike — and survive the wire untouched, like the
+        // message-level AdditionalHeaders of section B.
+        logo.AdditionalData = new Dictionary<string, JsonElement>
+        {
+            ["x-acme-asset-id"] = JsonSerializer.SerializeToElement("logo-2026"),
+        };
+        logo.Data.AdditionalData = new Dictionary<string, JsonElement>
+        {
+            ["x-acme-render-hint"] = JsonSerializer.SerializeToElement("dark-background"),
+        };
+
+        // Attachments assembled outside the builder validate on demand, exactly like messages:
+        // Validate() (on the attachment and on its data) throws if the shape rules don't hold.
+        logo.Validate();
+        logo.Data.Validate();
 
         // Shape 3 — linked with hash: the content stays at a URL and the message pins its
         // digest, so the recipient verifies whatever it later fetches. The hash here is a real
@@ -86,6 +111,15 @@ public static class Section_L_Attachments
         ctx.Narrator.Value("Attachments.Count", received.Count);
         ctx.Narrator.Value("report (inline json)", received[0].Data.Json?.ToJsonString());
         ctx.Narrator.Value("logo (base64, decoded)", Encoding.UTF8.GetString(Base64UrlDecode(received[1].Data.Base64!)));
+        ctx.Narrator.Value("logo.Description", received[1].Description);
+        ctx.Narrator.Value("logo.Filename", received[1].Filename);
+        ctx.Narrator.Value("logo.Format", received[1].Format);
+        ctx.Narrator.Value("logo.LastModifiedTime", received[1].LastModifiedTime);
+        ctx.Narrator.Value("logo x-acme-asset-id", received[1].AdditionalData?["x-acme-asset-id"]);
+        ctx.Narrator.Value("logo x-acme-render-hint", received[1].Data.AdditionalData?["x-acme-render-hint"]);
+        // The Jws slot is where a detached signature over the attachment content would ride
+        // (signed attachments, FR-ATT-04); these attachments are unsigned, so it is null.
+        ctx.Narrator.Value("logo.Data.Jws (unsigned ⇒ null)", received[1].Data.Jws);
         ctx.Narrator.Value("video (link)", received[2].Data.Links![0]);
         ctx.Narrator.Value("video (hash)", received[2].Data.Hash);
 

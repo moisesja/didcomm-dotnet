@@ -79,5 +79,18 @@ public static class Section_M_ThreadingAndAcks
         ctx.Narrator.Step("Demonstrate the FR-THR-04 loop guard: pure-ACK that also asks for an ACK.");
         ctx.Narrator.Value("IsSafeToSend (loop-trap)", AckLoopGuard.IsSafeToSend(brokenLoop));
         ctx.Narrator.Note("The handler in Phase 6.2 refuses to send when IsSafeToSend is false.");
+
+        // Server side, per-thread bookkeeping lives in a thread-state store. The in-memory one is
+        // bounded — pick a capacity that fits your traffic; the oldest thread is evicted when it
+        // fills — and each ThreadState carries the ACK/problem-report counters the protocol
+        // handlers maintain. Remove forgets a thread once the interaction is over.
+        ctx.Narrator.Step("Track the thread server-side: a bounded store and its per-thread state.");
+        IThreadStateStore store = new InMemoryThreadStateStore(maxEntries: 1024);
+        var state = store.GetOrCreate(bobReceives.Message.Id);              // keyed by thid
+        state.AckRequested = AckLoopGuard.RequestsAck(bobReceives.Message); // remember Alice asked
+        ctx.Narrator.Value("ThreadState.AckRequested", state.AckRequested);
+        ctx.Narrator.Value("ThreadState.ErrorCount (no problem reports yet)", state.ErrorCount);
+        ctx.Narrator.Value("ThreadState.MaxErrorsNoticeSent", state.MaxErrorsNoticeSent);
+        ctx.Narrator.Value("Store.Remove once the interaction ends", store.Remove(bobReceives.Message.Id));
     }
 }

@@ -69,6 +69,9 @@ public static class Section_Z_CustomTransport
         ctx.Narrator.Value("EndpointUsed", sent.EndpointUsed);
         ctx.Narrator.Value("Transport.Accepted", sent.Transport.Accepted);
         ctx.Narrator.Value("Queue depth", transport.Delivered.Count);
+        // The TransportRequest your transport receives is endpoint + payload + media type — the
+        // endpoint is the exact URI the router matched your scheme against.
+        ctx.Narrator.Value("Delivered endpoint", transport.Delivered[0].Endpoint);
         ctx.Narrator.Value("Delivered media type", transport.Delivered[0].MediaType);
 
         // The bytes the transport carried are a normal packed envelope — Bob unpacks them

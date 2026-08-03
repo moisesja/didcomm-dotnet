@@ -89,6 +89,70 @@ public static class Program
         await AttachmentsAsync(narrator, client, alice, bob);
         await ThreadingAndAcksAsync(narrator, client, alice, bob);
         await RotationAsync(narrator, client, alice, alice2, bob);
+        ExceptionTaxonomy(narrator);
+    }
+
+    // ── the exception taxonomy ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every failure this library throws derives from one base type, so a single
+    /// <c>catch (DidCommException)</c> is the complete safety net around any pack, unpack, or
+    /// send. This section constructs one of each subtype the way the library itself does, so
+    /// you can see which failure carries which evidence — the same objects your catch blocks
+    /// will receive (FR-API-07: fault taxonomy).
+    /// </summary>
+    private static void ExceptionTaxonomy(Narrator n)
+    {
+        n.Section("EXC", "The exception taxonomy (what each failure carries)");
+
+        // The base type: catch this to handle "anything DIDComm went wrong". All three standard
+        // constructor shapes exist for your own subclassing needs.
+        var bare = new DidCommException();
+        var plain = new DidCommException("Something DIDComm went wrong.");
+        var wrapped = new DidCommException("Wrapped a lower-level fault.", new TimeoutException());
+        n.Value("DidCommException (base of everything)", $"{plain.Message} / inner={wrapped.InnerException?.GetType().Name} / default message present={bare.Message.Length > 0}");
+
+        // Envelope shape/structure faults: the bytes aren't a valid DIDComm message.
+        n.Value("MalformedMessageException", new MalformedMessageException("Not a JWM/JWS/JWE.").Message);
+        n.Value("  …wrapping a parser fault", new MalformedMessageException("Bad JSON.", new FormatException()).InnerException?.GetType().Name);
+
+        // Cryptographic faults: a layer failed to decrypt/verify (tag mismatch, wrong key, …).
+        n.Value("CryptoException", new CryptoException("AEAD tag mismatch.").Message);
+        n.Value("  …wrapping a primitive fault", new CryptoException("ECDH failed.", new InvalidOperationException()).InnerException?.GetType().Name);
+
+        // Message-layer authorization faults: valid crypto, but the identities don't line up
+        // (skid not authorized by 'from', recipient key not in 'to', …) — FR-CONSIST-*.
+        n.Value("ConsistencyException", new ConsistencyException("skid is not a keyAgreement key of 'from'.").Message);
+        n.Value("  …wrapping evidence", new ConsistencyException("Rotation JWT invalid.", new CryptoException("Bad signature.")).InnerException?.GetType().Name);
+
+        // Resolution faults name the DID that failed and why — both surfaced as properties.
+        var resolution = new DidResolutionException("did:peer:2.Ez…", "Malformed numalgo-2 key segment.");
+        n.Value("DidResolutionException.Did", resolution.Did);
+        n.Value("DidResolutionException.Reason", resolution.Reason);
+        n.Value("  …wrapping resolver I/O", new DidResolutionException("did:webvh:example", "Log fetch failed.", new IOException()).InnerException?.GetType().Name);
+
+        // The deliberate refusal (DD-08): did:web anchors trust in DNS + web PKI, so the library
+        // rejects it everywhere, naming the method, the DID, and the security reason.
+        var refused = new UnsupportedDidMethodException("web", "did:web:example.com", "did:web is refused by design: DNS/PKI takeover enables silent key substitution (DD-08).");
+        n.Value("UnsupportedDidMethodException.Reason", refused.Reason);
+
+        // Key-custody faults name the kid your secrets resolver could not serve.
+        n.Value("SecretNotFoundException.Kid", new SecretNotFoundException("did:peer:2…#key-1").Kid);
+
+        // Protocol faults: a message violates its protocol's rules (bad MTURI, missing body field…).
+        n.Value("ProtocolException", new ProtocolException("forward message lacks 'next'.").Message);
+        n.Value("  …wrapping the parse", new ProtocolException("Invalid MTURI.", new FormatException()).InnerException?.GetType().Name);
+
+        // Transport faults carry the HTTP status (when one exists) and the URI scheme, so retry
+        // policy can branch on them; all four constructor shapes are shown.
+        var refusedByPeer = new TransportException("Peer answered 429.", httpStatusCode: 429, scheme: "https");
+        n.Value("TransportException.HttpStatusCode", refusedByPeer.HttpStatusCode);
+        n.Value("TransportException.Scheme", refusedByPeer.Scheme);
+        n.Value("  …status+scheme with inner", new TransportException("TLS handshake failed.", new IOException(), httpStatusCode: null, scheme: "wss").Scheme);
+        n.Value("  …message only", new TransportException("No transport for scheme 'memq'.").Message);
+        n.Value("  …message with inner", new TransportException("Socket closed mid-frame.", new IOException()).InnerException?.GetType().Name);
+
+        n.Note("One catch (DidCommException) is the complete safety net; the subtypes exist so your handling can branch on what actually failed.");
     }
 
     // ── C ────────────────────────────────────────────────────────────────────────────────

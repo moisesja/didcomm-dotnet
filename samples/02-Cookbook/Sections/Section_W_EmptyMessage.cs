@@ -1,5 +1,6 @@
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.Protocols.Empty;
 using DidComm.Threading;
 
 namespace DidComm.Samples.Cookbook.Sections;
@@ -48,6 +49,13 @@ public static class Section_W_EmptyMessage
             Recipients: new[] { ctx.Alice.Did }, From: ctx.Bob.Did))).Message;
         var alice = await ctx.Client.UnpackAsync(packed);
         ctx.Narrator.Value("Alice unpacks ack[]", string.Join(",", alice.Message.Ack ?? new List<string>()));
+
+        // On the receiving side the registered EmptyHandler consumes these silently (no reply —
+        // replying to an ACK would restart the very loop the guard exists to stop). It is a plain
+        // class; hold one directly when you route messages yourself.
+        var handler = new EmptyHandler();
+        ctx.Narrator.Value("EmptyHandler serves", handler.ProtocolUri);
+
         ctx.Narrator.Note("Empty 1.0 + ack[] is the canonical wire shape for an ACK-only message (FR-PROTO-06).");
     }
 }

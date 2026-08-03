@@ -72,6 +72,7 @@ public static class Program
         var didPeer2 = await SectionThreeAcrossMethodsAsync(narrator, manager, keyGen, crypto, secrets, client, didKey);
         await SectionFourClockAsync(narrator, sp, client, didKey, didPeer2);
         await SectionFiveDidWebAsync(narrator, keyService, client, didKey, didPeer2);
+        await SectionSixAdapterAsync(narrator, sp, didKey, didPeer2);
     }
 
     // ── 1. did:key — one Ed25519 key, two capabilities ──────────────────────────────────
@@ -283,6 +284,75 @@ public static class Program
             body = new { content = "greetings from DNS-anchored trust" },
         });
         await Refuses(narrator, "Unpack — plaintext from did:web", () => client.UnpackAsync(didWebPlaintext));
+    }
+
+    // ── 6. Under the adapter's hood ─────────────────────────────────────────────────────
+
+    private static async Task SectionSixAdapterAsync(
+        Narrator narrator, ServiceProvider sp, string didKey, string didPeer2)
+    {
+        narrator.Section("6", "Under the hood: NetDidKeyService, key bindings, and the route record");
+
+        // UseNetDidResolver() registered exactly this adapter over net-did's IDidResolver —
+        // construct it yourself when assembling a client without DI (DD-01). Hold it by its
+        // contract: IDidKeyService is the seam a custom resolver implementation replaces.
+        var resolver = sp.GetRequiredService<IDidResolver>();
+        var adapter = new NetDidKeyService(resolver);
+        IDidKeyService keyService = adapter;
+
+        // The authorization question the unpack pipeline asks on every envelope: is this kid
+        // genuinely authorized by this DID under this relationship? Resolver-backed — not
+        // string prefix matching (FR-CONSIST-06).
+        var kaKeys = await keyService.GetVerificationMethodsAsync(didPeer2, VerificationRelationship.KeyAgreement);
+        var kid = kaKeys[0].Kid ?? throw new InvalidOperationException("Resolved keyAgreement JWK has no kid.");
+        narrator.Value("IsKeyAuthorizedAsync(own DID, kid)",
+            await keyService.IsKeyAuthorizedAsync(didPeer2, kid, VerificationRelationship.KeyAgreement));
+        narrator.Value("IsKeyAuthorizedAsync(a DIFFERENT DID, kid)",
+            await keyService.IsKeyAuthorizedAsync(didKey, kid, VerificationRelationship.KeyAgreement));
+
+        // The stronger answer — a key binding: key material, controller, and relationship read
+        // from ONE resolution, so no check can straddle two document versions (FR-CONSIST-07).
+        // The adapter exposes it through IDidKeyBindingService; a custom IDidKeyService opts
+        // into the same contract by implementing this interface.
+        IDidKeyBindingService bindings = adapter;
+        var binding = await bindings.ResolveKeyBindingAsync(kid, VerificationRelationship.KeyAgreement)
+            ?? throw new InvalidOperationException("The adapter should bind its own resolved kid.");
+        narrator.Value("Binding.Kid", Trunc(binding.Kid, 64));
+        narrator.Value("Binding.Did", Trunc(binding.Did, 64));
+        narrator.Value("Binding.Controller (null ⇒ method declares none)", binding.Controller);
+        narrator.Value("Binding.Relationship", binding.Relationship);
+        narrator.Value("Binding.PublicJwk.Crv", binding.PublicJwk.Crv);
+        narrator.Value("Binding.PublicKeyThumbprint", Trunc(binding.PublicKeyThumbprint, 32));
+
+        // A custom binding service returns exactly this record — the constructor's contract is
+        // that all five facts came from a single read of a single document version.
+        var custom = new ResolvedKeyBinding(binding.Kid, binding.Did, binding.Controller, binding.Relationship, binding.PublicJwk);
+        narrator.Value("Hand-built binding mirrors the adapter's", custom.Kid == binding.Kid && custom.Did == binding.Did);
+
+        // RejectUnsupportedMethod is the guard every entry point calls — the section-5 refusals
+        // all funnel through it. Its exception carries the security rationale.
+        try
+        {
+            keyService.RejectUnsupportedMethod("did:web:example.com");
+            narrator.Value("RejectUnsupportedMethod(did:web)", "UNEXPECTED — accepted");
+        }
+        catch (UnsupportedDidMethodException ex)
+        {
+            narrator.Value("RejectUnsupportedMethod(did:web) reason", Trunc(ex.Reason, 88));
+        }
+
+        // The service-endpoint side of the same adapter family: NetDidServiceEndpointResolver
+        // reads DIDCommMessaging entries (sample 04 drives it end to end), and the send
+        // pipeline expands them into a ResolvedRoute — transport URI, routing-key JWKs to wrap
+        // for, and fallback URIs. Construct the record yourself when faking routes in tests.
+        var endpointResolver = new NetDidServiceEndpointResolver(resolver, keyService, new DidCommOptions());
+        var services = await endpointResolver.ResolveAsync(didPeer2);
+        narrator.Value("DIDCommMessaging entries on the did:peer:2", services.Count);
+        var fakeRoute = new ResolvedRoute(
+            TransportUri: "https://mediator.example/didcomm",
+            RoutingKeyJwks: kaKeys,
+            FallbackUris: new[] { "wss://mediator.example/ws" });
+        narrator.Value("Fake route", $"{fakeRoute.TransportUri} (+{fakeRoute.FallbackUris.Count} fallback, {fakeRoute.RoutingKeyJwks.Count} routing key)");
     }
 
     /// <summary>
