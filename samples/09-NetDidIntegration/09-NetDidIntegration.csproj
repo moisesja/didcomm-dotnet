@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.NetDidIntegration</RootNamespace>
+    <AssemblyName>DidComm.Samples.NetDidIntegration</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet × net-did — mint did:key and did:peer (numalgo 0 and 2) identities, wire UseNetDidResolver, message across DID-method boundaries, watch an Ed25519 did:key derive an X25519 keyAgreement key, drive the FR-API-05 expires_time check with an injected clock, and see the deliberate did:web rejection (UnsupportedDidMethodException) at every entry point (PRD §14.3 sample 09, task AA, FR-DID-01/05/06, FR-API-05, DD-08).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+    <PackageReference Include="NetDid.Method.Key" />
+    <PackageReference Include="NetDid.Method.Peer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>

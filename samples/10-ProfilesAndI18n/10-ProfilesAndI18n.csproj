@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.ProfilesAndI18n</RootNamespace>
+    <AssemblyName>DidComm.Samples.ProfilesAndI18n</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet profiles and i18n — accept-based profile selection over an OOB invitation and a DID document's service accept array (Profiles + ProfileNegotiator), the mismatch path with a problem-report, the spec's chess example with lang / accept-lang headers, the FR-I18N-02 thread-scoped language preference honored on a follow-up and isolated from concurrent threads (IThreadStateStore), and the w.msg.bad-lang report when no acceptable language exists (PRD §14.3 sample 10, task BB, FR-PROF-01/02, FR-I18N-01..04).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>

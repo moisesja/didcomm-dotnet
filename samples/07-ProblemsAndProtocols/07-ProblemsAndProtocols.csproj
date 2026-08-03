@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.ProblemsAndProtocols</RootNamespace>
+    <AssemblyName>DidComm.Samples.ProblemsAndProtocols</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet problems-and-protocols tour — the Report Problem 2.0 taxonomy (sorter/scope/descriptor, prefix matching), building and reading problem-reports with {n} comment interpolation, warning→error escalation, the per-thread cascade guard, bad-lang reports, the Empty 1.0 header-only ACK, a custom lets_do_lunch IProtocolHandler, a read-only IProtocolObserver, a custom Discover Features goal-code provider, and the opt-in Trace 2.0 posture (PRD §14.3 sample 07, tasks U/W/X, FR-PROTO-03/06/07/08/09/10/11/12).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>

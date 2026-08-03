@@ -36,6 +36,10 @@
     <ProjectReference Include="..\..\samples\04-MediatorAgent\04-MediatorAgent.csproj" />
     <ProjectReference Include="..\..\samples\05-WebSocketChat\05-WebSocketChat.csproj" />
     <ProjectReference Include="..\..\samples\06-OutOfBand\06-OutOfBand.csproj" />
+    <ProjectReference Include="..\..\samples\07-ProblemsAndProtocols\07-ProblemsAndProtocols.csproj" />
+    <ProjectReference Include="..\..\samples\08-Extensibility\08-Extensibility.csproj" />
+    <ProjectReference Include="..\..\samples\09-NetDidIntegration\09-NetDidIntegration.csproj" />
+    <ProjectReference Include="..\..\samples\10-ProfilesAndI18n\10-ProfilesAndI18n.csproj" />
     <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />
   </ItemGroup>
 

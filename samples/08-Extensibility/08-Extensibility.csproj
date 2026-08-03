@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.Extensibility</RootNamespace>
+    <AssemblyName>DidComm.Samples.Extensibility</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet extension points end-to-end — a custom ISecretsResolver modeling a mock KMS whose keys sign and derive without ever surfacing private material (IOpaqueKeyResolver), the net-did IKeyStore→ISecretsResolver bridge (NetDidKeyStoreSecretsResolver) including the kidToAlias mapping, and a custom IDidCommTransport registered through DI (PRD §14.3 sample 08, tasks Y/Z, FR-SEC-01/04/06, FR-TRN-01).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+    <PackageReference Include="NetDid.Method.Peer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Adapters.NetDid\DidComm.Adapters.NetDid.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>
