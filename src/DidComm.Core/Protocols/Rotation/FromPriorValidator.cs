@@ -113,10 +113,24 @@ public static class FromPriorValidator
                     ?? throw new ProtocolException("from_prior JWT 'sub' is null (omit it entirely for termination, FR-ROT-06).");
             }
             var iat = claimsDoc.RootElement.GetProperty("iat").GetInt64();
-            long? exp = claimsDoc.RootElement.TryGetProperty("exp", out var expEl) && expEl.ValueKind == JsonValueKind.Number
-                ? expEl.GetInt64() : null;
-            long? nbf = claimsDoc.RootElement.TryGetProperty("nbf", out var nbfEl) && nbfEl.ValueKind == JsonValueKind.Number
-                ? nbfEl.GetInt64() : null;
+            // exp/nbf, when present, MUST be numeric (RFC 7519 NumericDate). A present-but-wrong-kind
+            // value (e.g. "exp": "1700000000") must NOT be silently dropped: that would fail OPEN —
+            // the issuer bounded the token's replay window and a lenient read would erase the bound,
+            // turning a freshness-limited rotation JWT into a non-expiring one (FR-ROT-05).
+            long? exp = null;
+            if (claimsDoc.RootElement.TryGetProperty("exp", out var expEl))
+            {
+                if (expEl.ValueKind != JsonValueKind.Number)
+                    throw new ProtocolException("from_prior JWT 'exp' is not a numeric date (RFC 7519 §4.1.4).");
+                exp = expEl.GetInt64();
+            }
+            long? nbf = null;
+            if (claimsDoc.RootElement.TryGetProperty("nbf", out var nbfEl))
+            {
+                if (nbfEl.ValueKind != JsonValueKind.Number)
+                    throw new ProtocolException("from_prior JWT 'nbf' is not a numeric date (RFC 7519 §4.1.5).");
+                nbf = nbfEl.GetInt64();
+            }
             claims = new FromPriorClaims(Sub: sub, Iss: iss, Iat: iat, Exp: exp, Nbf: nbf);
         }
         catch (Exception ex)

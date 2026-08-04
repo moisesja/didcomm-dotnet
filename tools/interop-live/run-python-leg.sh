@@ -29,7 +29,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
-WORK="${INTEROP_WORK:-$(mktemp -d -t didcomm-interop-python)}"
+WORK="${INTEROP_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/didcomm-interop-python.XXXXXX")}"
 mkdir -p "$WORK"
 echo "work dir: $WORK" >&2
 

@@ -186,6 +186,37 @@ public sealed class WebSocketTransportBehaviorTests
             "the permissive core policy was inherited, so localhost is not SSRF-blocked");
     }
 
+    [Fact]
+    public async Task Concurrent_sends_to_one_endpoint_are_serialized_and_all_succeed()
+    {
+        // A WebSocket allows only ONE outstanding SendAsync. Before the per-endpoint send gate,
+        // two concurrent SendAsync calls raced on the pooled socket: the loser threw
+        // InvalidOperationException, its recovery path disposed the HEALTHY socket out from under
+        // the winner (whose in-flight send then died with an unretried ObjectDisposedException),
+        // and with no retry budget both calls failed on a perfectly good connection. The strict
+        // fake below enforces the real single-outstanding-send rule, so any regression to
+        // overlapping sends fails this test deterministically.
+        var socket = new StrictSingleSenderWebSocket();
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 0, // no retry — a collision would surface, not be papered over
+            WebSocketFactory = () => socket,
+            Connect = (_, _, _) => Task.CompletedTask,
+        });
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        var sends = Enumerable.Range(0, 8)
+            .Select(_ => Task.Run(() => transport.SendAsync(NewRequest(), default)))
+            .ToArray();
+
+        var results = await Task.WhenAll(sends);
+
+        results.Should().OnlyContain(r => r.Accepted);
+        socket.CompletedSends.Should().Be(8, "every envelope must reach the wire exactly once");
+        socket.Disposed.Should().BeFalse("no healthy socket may be torn down by a concurrent send");
+    }
+
     private static TransportRequest NewRequest() =>
         new(new Uri("ws://agents.r.us/socket"), new byte[] { 1, 2, 3 }, "application/didcomm-encrypted+json");
 
@@ -216,5 +247,52 @@ public sealed class WebSocketTransportBehaviorTests
         public override void Dispose() => Disposed = true;
         public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken) => throw new NotSupportedException();
         public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A fake that enforces the real <see cref="WebSocket"/> contract the transport must respect:
+    /// at most one outstanding <see cref="SendAsync"/> (a second concurrent call throws
+    /// <see cref="InvalidOperationException"/>, as ManagedWebSocket does), and any send after
+    /// <see cref="Dispose"/> throws <see cref="ObjectDisposedException"/>. Each send yields to the
+    /// thread pool so a racing caller has a real window to collide in.
+    /// </summary>
+    private sealed class StrictSingleSenderWebSocket : System.Net.WebSockets.WebSocket
+    {
+        private int _sendsInFlight;
+        private int _completedSends;
+
+        public bool Disposed { get; private set; }
+        public int CompletedSends => Volatile.Read(ref _completedSends);
+
+        public override WebSocketCloseStatus? CloseStatus => null;
+        public override string? CloseStatusDescription => null;
+        public override WebSocketState State => Disposed ? WebSocketState.Closed : WebSocketState.Open;
+        public override string? SubProtocol => null;
+
+        public override void Abort() { }
+        public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) => Task.CompletedTask;
+        public override Task CloseOutputAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) => Task.CompletedTask;
+        public override void Dispose() => Disposed = true;
+        public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public override async Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken)
+        {
+            ObjectDisposedException.ThrowIf(Disposed, this);
+            if (Interlocked.Increment(ref _sendsInFlight) != 1)
+            {
+                Interlocked.Decrement(ref _sendsInFlight);
+                throw new InvalidOperationException("There is already one outstanding 'SendAsync' call for this WebSocket instance.");
+            }
+            try
+            {
+                await Task.Yield(); // give a racing second sender a real collision window
+                ObjectDisposedException.ThrowIf(Disposed, this);
+                Interlocked.Increment(ref _completedSends);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _sendsInFlight);
+            }
+        }
     }
 }

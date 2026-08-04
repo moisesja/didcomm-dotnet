@@ -16,7 +16,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-export INTEROP_SUMMARY_DIR="${INTEROP_SUMMARY_DIR:-$(mktemp -d -t didcomm-interop-summary)}"
+export INTEROP_SUMMARY_DIR="${INTEROP_SUMMARY_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/didcomm-interop-summary.XXXXXX")}"
 mkdir -p "$INTEROP_SUMMARY_DIR"
 
 # Build the didcomm-dotnet side once; both legs reuse it.

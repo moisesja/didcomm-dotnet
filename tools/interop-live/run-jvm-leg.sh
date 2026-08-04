@@ -28,7 +28,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-WORK="${INTEROP_WORK:-$(mktemp -d -t didcomm-interop-jvm)}"
+WORK="${INTEROP_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/didcomm-interop-jvm.XXXXXX")}"
 mkdir -p "$WORK"
 echo "work dir: $WORK" >&2
 

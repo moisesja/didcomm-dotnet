@@ -99,6 +99,22 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   member of the six shipped packages must carry XML docs (the surface was already at 100% —
   this pins it). tests/samples/tools/benchmarks re-suppress locally.
 
+### Fixed — QA pass over the close-out branch
+
+- STOMP encoder now rejects NUL in header names/values — STOMP 1.2 has no NUL escape, so such
+  a frame truncates for NUL-scanning parsers (FR-TRN-12).
+- `from_prior` with a present-but-non-numeric `exp`/`nbf` is now rejected as malformed instead
+  of silently ignored — the old behavior erased the issuer's FR-ROT-05 replay bound.
+- The WebSocket transport serializes concurrent sends per endpoint: a colliding second send
+  previously killed the healthy pooled socket and surfaced an unretried `TransportException`
+  (FR-TRN-09/11). Sends to different endpoints remain parallel.
+- Bad-lang matching is no longer satisfied by two empty primary subtags (hostile/garbage
+  `accept-lang` tags could suppress the FR-I18N-04 report).
+- interop-live scripts use GNU-compatible `mktemp` (they were BSD-only, which would have
+  broken the nightly job's first run on ubuntu-latest).
+- Un-ignored `DxCoverage/coverage-allowlist.json` (a Coverlet ignore pattern swallowed it) —
+  without it the FR-DX-01 gate errors on any fresh clone.
+
 ### Known PRD drift (PRD is the target; flagged, not silently patched)
 
 - §14.2-Y shows `UseSecretsResolver(sp => ...)` — no factory overload exists.

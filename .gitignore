@@ -145,6 +145,8 @@ _TeamCity*
 coverage*.json
 coverage*.xml
 coverage*.info
+# ...but the FR-DX-01 gate's allowlist is source data, not a coverage report — keep it tracked.
+!tests/DidComm.InteropTests/DxCoverage/coverage-allowlist.json
 
 # Visual Studio code coverage results
 *.coverage

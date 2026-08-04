@@ -295,4 +295,28 @@ public sealed class StompFrameCodecTests
 
         act.Should().Throw<ArgumentException>();
     }
+
+    [Theory]
+    [InlineData("SEND")]    // escaped family — STOMP 1.2 defines no escape for NUL
+    [InlineData("CONNECT")] // unescaped family — NUL is just as unrepresentable
+    public void Encode_RejectsHeaderValueWithNul(string command)
+    {
+        // A raw NUL in the head section truncates the frame for any NUL-scanning parser (our own
+        // Decode rejects it as malformed) — Encode must refuse rather than emit unparseable wire.
+        var frame = new StompFrame(command, new[] { KeyValuePair.Create("host", "a\0b") }, ReadOnlyMemory<byte>.Empty);
+
+        var act = () => StompFrameCodec.Encode(frame);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*NUL*");
+    }
+
+    [Fact]
+    public void Encode_RejectsHeaderNameWithNul()
+    {
+        var frame = new StompFrame("SEND", new[] { KeyValuePair.Create("na\0me", "v") }, ReadOnlyMemory<byte>.Empty);
+
+        var act = () => StompFrameCodec.Encode(frame);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*NUL*");
+    }
 }

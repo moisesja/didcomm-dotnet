@@ -114,6 +114,30 @@ public sealed class BadLangReportTests
     }
 
     [Fact]
+    public void ForThread_leading_dash_tags_do_not_match_on_empty_primary_subtag()
+    {
+        // Malformed tags with a leading '-' have an EMPTY primary subtag. Two empties must not
+        // satisfy each other — that would silently suppress the report whenever both sides carry
+        // garbage tags (the peer's accept-lang is remote input).
+        var thread = new ThreadState("t") { AcceptLang = new[] { "-fonipa" } };
+
+        var report = ProblemReportApi.CreateBadLangForThread(
+            Bob, Alice, thread, availableLangs: new[] { "-x-private" });
+
+        report.Should().NotBeNull("an empty primary subtag never satisfies a preference");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
+    }
+
+    [Fact]
+    public void ForThread_whitespace_and_empty_tags_are_ignored_not_matched()
+    {
+        var thread = new ThreadState("t") { AcceptLang = new[] { "", "  ", "fr" } };
+
+        ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "", "en" })
+            .Should().NotBeNull("blank tags on either side are skipped, and fr∉{en}");
+    }
+
+    [Fact]
     public void ForThread_fatal_variant_flows_through()
     {
         var thread = new ThreadState("t") { AcceptLang = new[] { "fr" } };

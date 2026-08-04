@@ -226,7 +226,11 @@ public static class ProblemReport
                     continue;
                 if (string.Equals(preferred, offered, StringComparison.OrdinalIgnoreCase))
                     return true;
-                if (PrimarySubtag(preferred).Equals(PrimarySubtag(offered), StringComparison.OrdinalIgnoreCase))
+                // A malformed tag with a leading '-' (e.g. "-fonipa") has an EMPTY primary subtag;
+                // two empties must not satisfy each other — that would silently suppress the report
+                // whenever both sides carry garbage tags. Only a real primary subtag can match.
+                var preferredPrimary = PrimarySubtag(preferred);
+                if (!preferredPrimary.IsEmpty && preferredPrimary.Equals(PrimarySubtag(offered), StringComparison.OrdinalIgnoreCase))
                     return true;
             }
         }

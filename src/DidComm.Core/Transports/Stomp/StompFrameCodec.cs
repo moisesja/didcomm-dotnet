@@ -196,6 +196,12 @@ public static class StompFrameCodec
     {
         foreach (var ch in token)
         {
+            // NUL has no escape sequence in ANY frame (STOMP 1.2 defines only \r \n \c \\), and a
+            // raw NUL in the head section truncates the frame for any NUL-scanning parser — our own
+            // Decode rejects it. Unrepresentable → refuse at encode time rather than emit a frame
+            // no compliant peer can read.
+            if (ch == '\0')
+                throw new ArgumentException("STOMP headers cannot carry a NUL octet (no escape sequence exists for it).");
             if (!escaped)
             {
                 // CONNECT/CONNECTED headers have no escape mechanism, so these octets are
