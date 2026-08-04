@@ -1,0 +1,18 @@
+# Pinned counterpart stack for the python leg of the live interop harness (FR-IX-04/05).
+# didcomm is sicpa-dlab/didcomm-python (the reference implementation the PRD names in S13.2);
+# everything below it is its transitive closure, frozen so the nightly run is reproducible.
+# Validated on CPython 3.9 (macOS arm64 + ubuntu-latest x86_64).
+didcomm==0.3.2
+Authlib==1.6.12
+attrs==22.2.0
+base58==2.1.1
+cffi==2.0.0
+cryptography==45.0.7
+inflection==0.5.1
+packaging==23.2
+pycparser==2.23
+pycryptodomex==3.23.0
+pydantic==1.9.2
+pydid==0.3.11
+typing_extensions==4.0.1
+varint==1.0.2

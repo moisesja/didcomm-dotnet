@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>InteropCli</RootNamespace>
+    <AssemblyName>InteropCli</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>Live cross-implementation interop CLI (FR-IX-04/05): mints did:peer:2 identities via net-did, and packs/unpacks DIDComm v2 envelopes with the real DidCommClient + NetDidKeyService so shell harnesses (tools/interop-live) can round-trip messages against the SICPA reference implementations. Usage: dotnet run --project tools/InteropCli -- mint|pack|unpack [options]</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+    <PackageReference Include="NetDid.Method.Peer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+  </ItemGroup>
+
+</Project>
