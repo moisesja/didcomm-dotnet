@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Benchmarks</RootNamespace>
+    <AssemblyName>DidComm.Benchmarks</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <!-- BenchmarkDotNet requires optimized code; the suite is meaningless in Debug. -->
+    <Optimize>true</Optimize>
+    <Description>BenchmarkDotNet suite for the NFR-07 performance targets: anoncrypt/authcrypt pack, unpack, and did:key resolution. Never shipped; run locally with dotnet run -c Release.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+    <PackageReference Include="NetDid.Core" />
+    <PackageReference Include="NetDid.Method.Key" />
+    <PackageReference Include="NetDid.Extensions.DependencyInjection" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\samples\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>

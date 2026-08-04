@@ -1,0 +1,21 @@
+<Project>
+  <Import Project="../Directory.Build.props" />
+  <!-- Same Jwk alias the tests/samples trees use: the DidComm public surface speaks
+       DataProofsDotnet.Jose.Jwk. -->
+  <ItemGroup>
+    <Using Include="DataProofsDotnet.Jose.Jwk" Alias="Jwk" />
+  </ItemGroup>
+  <!-- CS1591 (missing XML doc) applies to the shipped packages only (NFR-02); this tree is
+       scaffolding, so re-suppress it here. Package validation must also be forced off for the
+       WHOLE tree: BenchmarkDotNet generates throwaway csproj files under bin/ whose
+       ImportDirectoryBuildProps=false comes too late to stop this file's import, and the root
+       props' baseline-validation block would make NuGet look for a package named after the
+       generated project (NU1101). Overriding here (after the root import) wins by evaluation
+       order and covers the generated projects too. -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <IsPackable>false</IsPackable>
+    <EnablePackageValidation>false</EnablePackageValidation>
+    <PackageValidationBaselineVersion></PackageValidationBaselineVersion>
+  </PropertyGroup>
+</Project>

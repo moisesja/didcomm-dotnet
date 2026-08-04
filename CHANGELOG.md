@@ -6,6 +6,107 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+> The Phase 6 close-out: every PRD requirement that was still open is addressed on one branch.
+> Phases 0–5 were already complete; this entry closes the interop, samples/DX, observability,
+> and straggler-FR gaps identified in the 2026-08-01 PRD conformance sweep.
+
+### Added — standalone fixture repo, cross-implementation harvest, published vectors (FR-IX-03/06/07/09, §13.3)
+
+- Fixtures moved out of the test tree into the standalone
+  [didcomm-dotnet-fixtures](https://github.com/moisesja/didcomm-dotnet-fixtures) repository,
+  consumed as a git submodule at `tests/DidComm.InteropTests/fixtures` (the overdue Phase 0
+  migration; PRD §13.3). CI and release checkouts init submodules.
+- 68 fixture manifests: the spec-v2.1 baseline plus static inbound vectors harvested from
+  `sicpa-dlab/didcomm-rust`, `didcomm-python`, and `didcomm-jvm` (commit-pinned `source_ref`s,
+  byte-verbatim envelopes) — all pass (FR-IX-03).
+- The runner gained the `expected.outcome=error` path, unlocking 13 negative vectors
+  (off-curve `epk`, damaged JWE parts, tampered JWS); every one fails with the library's typed
+  exceptions — no raw exception leaks (FR-API-07 held).
+- `tools/FixtureGen` publishes our own `source: didcomm-dotnet` vector set (16 compositions),
+  self-verified by the runner against bit-rot (FR-IX-06). Credo-TS scaffold (non-gating,
+  FR-IX-07) and the `interop-a-thon-<date>` convention (FR-IX-09) documented.
+
+### Added — live cross-implementation harness (FR-IX-04/05/08)
+
+- `tools/InteropCli` (mint/pack/unpack over the real facade + net-did `did:peer`) driven by
+  `tools/interop-live`: version-frozen Python (`didcomm==0.3.2`) and JVM
+  (`org.didcommx:didcomm:0.3.2`, SHA-256-pinned jars) legs round-tripping every supported
+  §13.5 composition both directions. Proven locally: 30/36 matrix cells pass as genuine
+  unshimmed cross-library round-trips.
+- `.github/workflows/interop-live.yml`: nightly + on-release + manual, with a per-cell summary
+  artifact; offline interop continues to gate every PR (FR-IX-08).
+- Conformance findings from the live runs, documented in `tools/interop-live/README.md`:
+  (a) both reference libs reject Flattened JWS despite the spec requiring both forms be
+  processable — counterpart gap, harness re-serializes losslessly and loudly; (b) a REAL
+  didcomm-dotnet defect — `kid` duplicated into protected AND unprotected JWS headers violates
+  RFC 7515 §7.2 disjointness (root cause upstream in `DataProofsDotnet.Jose` `JwsBuilder`),
+  so didcomm-jvm cannot verify our signed envelopes until fixed upstream.
+
+### Added — straggler FRs (FR-ROT-06, FR-I18N-04, FR-SIG-05, FR-TRN-12)
+
+- `from_prior` relationship termination: a JWT that omits `sub`, valid only on a `from`-less
+  message, surfaced via `FromPriorClaims.IsTermination` (FR-ROT-06). Stricter side effect:
+  a rotation-shaped `from_prior` on a `from`-less message was previously ignored; it is now
+  validated and rejected (pinned by test).
+- `w.msg.bad-lang` / `e.msg.bad-lang` problem-report factories, including the
+  `ThreadState`-aware seam honoring FR-I18N-02 preferences (FR-I18N-04).
+- `PackSignedAsync` warns (LoggerMessage source-gen) when a standalone signed message lacks
+  `to` (FR-SIG-05); DI now passes `ILogger<DidCommClient>` through.
+- Minimal opt-in STOMP 1.2 subset over WebSocket — CONNECT/CONNECTED/SEND/DISCONNECT with
+  `content-type: application/didcomm-encrypted+json`, strict escaping/content-length codec,
+  off by default on both send and receive sides (FR-TRN-12).
+
+### Added — observability (NFR-04/05/06)
+
+- `DidCommDiagnostics` exposes the `didcomm-dotnet` `ActivitySource`; spans for pack
+  (plaintext/signed/encrypted), unpack, send, resolve, and handle carry header-level
+  attributes only (type URI, JOSE alg/enc ids, recipient count, DID method name, dispatch
+  outcome, transport scheme, exception *type* name). Zero-cost when unobserved; the unused
+  `OpenTelemetry.Api` package reference was dropped — consumers wire their own SDK.
+- LoggerMessage source-gen breadcrumbs for pack/unpack/send failures (type names only).
+- NFR-04 redaction audit test: captures every span and log line across all instrumented flows
+  and proves no private scalar or body/attachment sentinel leaks; positive span assertions
+  keep it from passing vacuously.
+
+### Added — the complete sample set and the DX gate (FR-DX-01..09, §14.2–§14.4)
+
+- The Cookbook now implements all 28 §14.2 task letters (13 new sections: DI setup, message
+  building, every envelope posture, explicit content encryption, multi-recipient, attachments,
+  custom secrets resolver + the net-did `IKeyStore` bridge, custom transport) (FR-DX-04).
+- Samples 03–10 built (§14.3): EnvelopesAndMessages, MediatorAgent (Routing 2.0 over loopback
+  HTTP with DID-published routingKeys), WebSocketChat (ping/discover-features/chat/reconnect),
+  OutOfBand (URL round-trip + pthid correlation), ProblemsAndProtocols (taxonomy, escalation,
+  cascade guard, custom handler, observer seam, tracing default-off), Extensibility (opaque
+  mock KMS, `kidToAlias` bridge, custom transport), NetDidIntegration (did:key/did:peer
+  minting, Ed25519→X25519 derivation, did:web rejection from six entry points),
+  ProfilesAndI18n (accept negotiation, thread-scoped accept-lang, wire-delivered bad-lang).
+  Every sample: README + in-process CI smoke test (FR-DX-02/03).
+- **The FR-DX-01 gate**: a Mono.Cecil coverage test enumerates the six shipped assemblies'
+  public surface (585 members) against every sample assembly's full metadata —
+  **0 undemonstrated members**, with documented structural exemptions and a 12-entry justified
+  allowlist. The §14.4 matrix is asserted as data (FR-DX-09); a drift check pins the README
+  quickstart to `samples/01-Quickstart` (FR-DX-06). `<example>` tags on 42 major public types
+  point at their demonstrating sample (FR-DX-08).
+
+### Added — benchmarks (NFR-07)
+
+- `benchmarks/DidComm.Benchmarks` (BenchmarkDotNet): anoncrypt/authcrypt pack (1 recipient),
+  unpack, did:key resolve; results vs the NFR-07 targets recorded in the project README.
+
+### Changed — XML docs enforced (NFR-02)
+
+- `Directory.Build.props` no longer suppresses CS1591: with warnings-as-errors, every public
+  member of the six shipped packages must carry XML docs (the surface was already at 100% —
+  this pins it). tests/samples/tools/benchmarks re-suppress locally.
+
+### Known PRD drift (PRD is the target; flagged, not silently patched)
+
+- §14.2-Y shows `UseSecretsResolver(sp => ...)` — no factory overload exists.
+- §14.2-Z names `UseTransport<T>()` — the real surface is per-transport extensions plus
+  `b.Services.AddSingleton<IDidCommTransport, T>()`.
+- §14.4 names illustrative members (`DidComm` facade, `Secret`, `Pack*Params`) that map to
+  the real API (`DidCommClient`, `Jwk`, `Pack*Options`) — mapping documented in the gate test.
+
 ## [1.4.1] - 2026-07-31
 
 > Test-only. No shipped code changed — the six packages are functionally identical to 1.4.0, and
