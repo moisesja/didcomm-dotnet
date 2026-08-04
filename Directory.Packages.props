@@ -12,12 +12,15 @@
          did:webvh — not a break. The public-API deltas 2.x code compiles against are additive
          (VerificationMethod.AdditionalProperties, DidResolutionResult.InvalidOptions,
          NetDidBuilder.AddDidEthr()). It also forces NetCrypto 1.4.0 and DataProofsDotnet.Core
-         1.1.1, both of which the pins below match, so the direct and transitive graphs agree. -->
-    <PackageVersion Include="NetDid.Core" Version="3.0.0" />
-    <PackageVersion Include="NetDid.Method.Key" Version="3.0.0" />
-    <PackageVersion Include="NetDid.Method.Peer" Version="3.0.0" />
-    <PackageVersion Include="NetDid.Method.WebVh" Version="3.0.0" />
-    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="3.0.0" />
+         1.1.1, both of which the pins below match, so the direct and transitive graphs agree.
+         3.1.0 is an additive minor over 3.0.0: it still depends on NetCrypto 1.4.0 (the pin below)
+         and on Microsoft.Extensions.* 10.0.8, below the 10.0.10 pins here, so no transitive
+         downgrade — the direct and transitive graphs stay in agreement. -->
+    <PackageVersion Include="NetDid.Core" Version="3.1.0" />
+    <PackageVersion Include="NetDid.Method.Key" Version="3.1.0" />
+    <PackageVersion Include="NetDid.Method.Peer" Version="3.1.0" />
+    <PackageVersion Include="NetDid.Method.WebVh" Version="3.1.0" />
+    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="3.1.0" />
     <!-- NetCrypto: the crypto substrate (arrives transitively via DataProofsDotnet.Jose). DidComm
          references it directly in exactly one place — JwsSignerFactory adapts a private signer JWK
          into a NetCrypto ISigner, because DataProofs' JWS layer signs through ISigner, not raw key
@@ -55,8 +58,10 @@
          Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no
          extra Microsoft.Extensions.Http.Polly / .Resilience wrapper needed. -->
     <PackageVersion Include="Polly" Version="8.7.0" />
-    <!-- Source Link -->
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+    <!-- Source Link. Build-only (PrivateAssets="All"), never shipped. The standalone
+         Microsoft.SourceLink.GitHub versioning tracks the SDK band, so 10.0.x is the line that
+         pairs with the net10.0 SDK this repo builds on — 8.0.0 was the .NET 8-era pin. -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.301" />
     <!-- Testing. Held deliberately, not by neglect: newer majors exist for every entry here
          (Test.Sdk 18, xunit.runner.visualstudio 3, NSubstitute 6, coverlet 10). FluentAssertions
          is the one to be explicit about — 8.x relicensed under Xceed (free for OSS, paid for

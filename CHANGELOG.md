@@ -115,6 +115,18 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 - Un-ignored `DxCoverage/coverage-allowlist.json` (a Coverlet ignore pattern swallowed it) —
   without it the FR-DX-01 gate errors on any fresh clone.
 
+### Changed — dependency refresh
+
+- **NetDid 3.0.0 → 3.1.0** (all five packages). An additive minor: it still depends on
+  NetCrypto 1.4.0 and on Microsoft.Extensions.* 10.0.8 (below the 10.0.10 pins here), so the
+  direct and transitive graphs stay in agreement — no downgrade, no source change.
+- **Microsoft.SourceLink.GitHub 8.0.0 → 10.0.301** — build-only (`PrivateAssets="All"`, never
+  shipped); the 10.0.x line is the one that tracks the net10.0 SDK this repo builds on.
+- The test stack (Test.Sdk, xunit.runner.visualstudio, NSubstitute, coverlet, FluentAssertions)
+  stays pinned on purpose — FluentAssertions in particular is held at 7.0.0 to avoid the 8.x
+  Xceed relicensing (paid for commercial use). DataProofsDotnet.Jose (1.1.1) and NetCrypto
+  (1.4.0) are already latest.
+
 ### Known PRD drift (PRD is the target; flagged, not silently patched)
 
 - §14.2-Y shows `UseSecretsResolver(sp => ...)` — no factory overload exists.
