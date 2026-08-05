@@ -37,6 +37,26 @@ public sealed class ForwardMessageTests
     }
 
     [Fact]
+    public void Create_gives_every_forward_attachment_a_unique_id()
+    {
+        // Attachment 'id' is optional in the spec and the routing-2.0 example omits it, but
+        // didcomm-jvm's Attachment.parse hard-requires it and rejects the whole forward with
+        // 'The header "id" is missing' — so a mediator hop through a JVM agent fails without it.
+        // Emitting an id costs nothing, is what didcomm-jvm and didcomm-python both emit, and is
+        // what makes our onion routable by them (FR-ROUTE-01, FR-ATT-01).
+        var msg = ForwardMessage.Create(
+            mediator: "did:example:mediator",
+            next: "did:foo:1234abcd",
+            packedPayloads: new[] { SamplePackedJwe, SamplePackedJwe });
+
+        msg.Attachments.Should().HaveCount(2);
+        var ids = msg.Attachments!.Select(a => a.Id).ToList();
+        ids.Should().OnlyContain(id => !string.IsNullOrEmpty(id));
+        ids.Should().OnlyHaveUniqueItems(
+            "an attachment id identifies one attachment within the message");
+    }
+
+    [Fact]
     public void Create_assigns_a_new_id_via_the_default_generator()
     {
         var msg = ForwardMessage.Create("did:example:m", "did:example:n", new[] { SamplePackedJwe });

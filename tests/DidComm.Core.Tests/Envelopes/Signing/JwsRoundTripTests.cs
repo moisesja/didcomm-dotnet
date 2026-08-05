@@ -89,7 +89,7 @@ public sealed class JwsRoundTripTests
     }
 
     [Fact]
-    public async Task Single_signer_emits_flattened_form()
+    public async Task Single_signer_emits_general_form()
     {
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var msg = new MessageBuilder()
@@ -100,9 +100,76 @@ public sealed class JwsRoundTripTests
         var packed = await EnvelopeWriter.PackSignedAsync(
             new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
 
-        // Flattened JSON: top-level "signature" + "protected", no "signatures" array.
-        packed.Should().Contain("\"signature\":");
-        packed.Should().NotContain("\"signatures\":");
+        // We emit General JSON (a "signatures" array) even for one signer, because that is the only
+        // shape the ecosystem actually reads: every signed vector in the DIDComm v2.1 spec is General
+        // (fixtures/packed/spec/test-signed-didcomm-message-alice-key-*.json have exactly the two
+        // top-level members 'payload' and 'signatures'), and both SICPA reference implementations
+        // (didcomm-jvm, didcomm-rust) parse only General. FR-SIG-02 permits either form on emit, so
+        // this is a free interop win — but the "accept both on receive" half of FR-SIG-02 still binds,
+        // which is what Flattened_jws_is_accepted_on_receive covers.
+        using var doc = System.Text.Json.JsonDocument.Parse(packed);
+        doc.RootElement.EnumerateObject().Select(p => p.Name)
+            .Should().BeEquivalentTo(new[] { "payload", "signatures" });
+
+        var signatures = doc.RootElement.GetProperty("signatures").EnumerateArray().ToList();
+        signatures.Should().ContainSingle("one signer produces exactly one signatures entry");
+        signatures[0].TryGetProperty("protected", out _).Should().BeTrue();
+        signatures[0].TryGetProperty("header", out _).Should().BeTrue();
+        signatures[0].TryGetProperty("signature", out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Flattened_jws_is_accepted_on_receive()
+    {
+        // FR-SIG-02's receive half: we MAY emit either form, but we MUST accept both. Nothing else in
+        // the suite pins this any more — while we emitted Flattened, every signed round trip covered it
+        // incidentally; now that we emit General, and every packed fixture on disk is General too, this
+        // is the only Flattened verify path under test. A peer that emits Flattened (which RFC 7515 §7.2
+        // and the DIDComm spec both permit) must still be readable.
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#key-1");
+        var msg = new MessageBuilder()
+            .WithType("https://didcomm.org/empty/1.0/empty")
+            .WithFrom("did:example:alice")
+            .WithTo("did:example:bob")
+            .Build();
+
+        var general = await EnvelopeWriter.PackSignedAsync(
+            new PackSignedParameters(msg, new[] { signer.PrivateJwk.ToJwsSigner() }));
+
+        var flattened = ToFlattened(general);
+
+        // Sanity: the re-serialization really did produce the Flattened shape, so a pass below is
+        // evidence about Flattened and not about the General input sneaking through unchanged.
+        using (var check = System.Text.Json.JsonDocument.Parse(flattened))
+        {
+            check.RootElement.TryGetProperty("signatures", out _).Should().BeFalse();
+            check.RootElement.TryGetProperty("signature", out _).Should().BeTrue();
+        }
+
+        var result = Unpack(flattened, kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null);
+
+        result.SignerKid.Should().Be("did:example:alice#key-1");
+        result.SignatureAlgorithm.Should().Be("EdDSA");
+        result.Message.Id.Should().Be(msg.Id);
+        result.Message.From.Should().Be("did:example:alice");
+    }
+
+    /// <summary>
+    /// Re-serialize a single-signer General JWS into the RFC 7515 §7.2.2 Flattened form: the sole
+    /// <c>signatures</c> entry's members are hoisted to the root and the array is dropped. The signing
+    /// input (protected header + payload) is untouched, so the signature stays valid — only the JSON
+    /// serialization changes, which is exactly the variation a receiver has to tolerate.
+    /// </summary>
+    private static string ToFlattened(string generalJws)
+    {
+        var root = System.Text.Json.Nodes.JsonNode.Parse(generalJws)!.AsObject();
+        var entry = root["signatures"]!.AsArray()[0]!.AsObject();
+
+        var flat = new System.Text.Json.Nodes.JsonObject { ["payload"] = root["payload"]!.DeepClone() };
+        foreach (var member in entry)
+            flat[member.Key] = member.Value?.DeepClone();
+
+        return flat.ToJsonString();
     }
 
     [Fact]
@@ -203,7 +270,7 @@ public sealed class JwsRoundTripTests
         act.Should().Throw<CryptoException>().WithMessage("*signer kid*");
     }
 
-    /// <summary>Build a flattened JWS whose signer has no <c>kid</c> in either header (verifies, but
+    /// <summary>Build a signed JWS whose signer has no <c>kid</c> in either header (verifies, but
     /// surfaces no signer identity) — exercising the EnvelopeReader fail-closed guard.</summary>
     private static async Task<string> BuildKidlessSignedJws(TestKeyMaterial signer)
     {

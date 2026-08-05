@@ -41,7 +41,7 @@
          reachable pre-verification and both the upstream root cause of didcomm-dotnet#58. The
          EnvelopeReader JWS boundary guard added for #58 stays regardless of this pin: it defends
          the whole untyped-fault class (FR-API-07), not that one input. -->
-    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.1.1" />
+    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.3.0" />
     <!-- ASP.NET Core (transports). Test/sample-only; 10.0.10 is the GA servicing line — the
          previous pin was a .NET 10 preview build left over from pre-GA scaffolding. -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.10" />

@@ -473,7 +473,7 @@ public sealed class EnvelopeReaderTests
     [Fact]
     public async Task Non_string_unprotected_kid_stays_inside_the_typed_exception_hierarchy()
     {
-        // Issue #58, the reported repro. A remote, unauthenticated peer sends a flattened JWS whose
+        // Issue #58, the reported repro. A remote, unauthenticated peer sends a JWS whose per-signature
         // unprotected 'header.kid' is a JSON number. The read happens while the parser enumerates raw
         // signatures — before any signature is checked — so no key material and no prior relationship
         // are needed to reach it. FR-API-07 promises every unpack failure is a DidCommException, which
@@ -483,11 +483,26 @@ public sealed class EnvelopeReaderTests
         // rejects the non-string kid as MalformedJoseException, so the existing handler satisfies this.
         // Under 1.1.0 it escaped as a raw InvalidOperationException. Either way the assertion is the
         // same, which is the point — it holds no matter which layer does the rejecting.
+        //
+        // The hostile member has to be planted where the parser actually reads it, and that moved: up to
+        // DataProofsDotnet.Jose 1.2.1 a single signer serialized Flattened, so the unprotected header was
+        // the ROOT "header" member; from 1.3.0 it serializes General, so it is signatures[0].header. A
+        // root-level "header" on a General JWS is just an unread stray property, which would leave this
+        // test asserting nothing — the sibling assertion below keeps that from going unnoticed.
         var signer = TestKeyMaterial.Generate(KeyType.Ed25519, "did:example:alice#k");
         var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(EmptyMessage(), new[] { signer.PrivateJwk.ToJwsSigner() }));
 
+        // Guard against a silently vacuous test: without the mutation this exact input unpacks cleanly,
+        // so the throw asserted below is caused by the hostile kid and by nothing else.
+        var benign = EnvelopeReaderTestRunner.Unpack(packed,
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            senderLookup: null,
+            signerLookup: kid => kid == signer.PublicJwk.Kid ? signer.PublicJwk : null,
+            _crypto);
+        benign.SignerKid.Should().Be(signer.PublicJwk.Kid);
+
         var hostile = System.Text.Json.Nodes.JsonNode.Parse(packed)!.AsObject();
-        hostile["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
+        hostile["signatures"]!.AsArray()[0]!["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
 
         Action act = () => EnvelopeReaderTestRunner.Unpack(hostile.ToJsonString(),
             new DictionarySecretsLookup(Array.Empty<Jwk>()),
