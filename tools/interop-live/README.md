@@ -1,20 +1,21 @@
 # Live cross-implementation interop harness
 
 The live half of the PRD §13.6 interop gate: prove, in an automated job, that didcomm-dotnet
-and the SICPA reference implementations can exchange packed messages over `did:peer:2` —
-**outbound** (didcomm-dotnet packs, they unpack; FR-IX-04, MUST) and **inbound** (they pack,
-didcomm-dotnet unpacks; FR-IX-05, SHOULD). The offline (static fixture) half gates every PR in
-`ci.yml`; this harness runs nightly, on release, and on demand
+and the SICPA reference implementations can exchange packed messages — **outbound**
+(didcomm-dotnet packs, they unpack; FR-IX-04, MUST), **inbound** (they pack, didcomm-dotnet
+unpacks; FR-IX-05, SHOULD), and **published vectors** (they verify our `source: didcomm-dotnet`
+fixture set; FR-IX-06, MUST). The offline (static fixture) half gates every PR in `ci.yml`;
+this harness runs nightly, on release, and on demand
 (`.github/workflows/interop-live.yml`, FR-IX-08).
 
 ## What runs
 
 | Piece | Role |
 |---|---|
-| `tools/InteropCli` | The didcomm-dotnet side: `mint` / `pack` / `unpack` over the **real** `DidCommClient` + `UseNetDidResolver()` wiring (net-did composite resolver, did:key + did:peer). |
+| `tools/InteropCli` | The didcomm-dotnet side: `mint` / `pack` / `unpack` / `unwrap-forward` over the **real** `DidCommClient` + `UseNetDidResolver()` wiring (net-did composite resolver, did:key + did:peer). |
 | `python/interop_peer.py` | The didcomm-python side: same CLI shape, driving `didcomm==0.3.2` (sicpa-dlab/didcomm-python) directly. Pins in `python/requirements.txt`. |
 | `jvm/src/InteropPeer.java` | The didcomm-jvm side: same CLI shape, driving `org.didcommx:didcomm:0.3.2` — plain `javac`/`java`, jars pinned by version + SHA-256 in `jvm/fetch-deps.sh` (no Gradle/Maven). |
-| `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint both identities, run the matrix below in both directions, print/emit a per-cell PASS/FAIL/N-A table, exit nonzero on any FAIL. |
+| `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit nonzero on any FAIL. |
 | `run-all.sh` | Both legs + a combined `summary.md` (the CI artifact). |
 
 Every cell round-trips a fresh C.1-style payload and asserts (a) the recovered plaintext
@@ -33,68 +34,179 @@ sicpa-dlab/didcomm-jvm release) — with thin, pinned drivers that do exactly wh
 CLIs did: pack/unpack over peer DIDs. The PRD's intent (live proof against the SICPA
 reference family, both directions) is met; only the wrapper differs.
 
-`did:peer:2` handling in both drivers is implemented against the current did:peer spec
-(decode `.Ez`/`.Vz` multibase(multicodec) segments; name keys `#key-N` in order of
-appearance — the numbering net-did emits) instead of the 2022-era `peerdid` packages, so kids
-agree byte-for-byte across all three implementations. Service (`.S`) segments are ignored:
-the harness runs direct, without mediators (`forward=false` everywhere).
+`did:peer:2` and `did:key` handling in both drivers is implemented against the current specs
+(decode `.Ez`/`.Vz` multibase(multicodec) segments; name keys `#key-N` in order of appearance,
+`.S` service segments consuming no number — the numbering net-did emits) instead of the
+2022-era `peerdid` packages, so kids agree byte-for-byte across all three implementations.
 
-## Matrix and current results (validated locally 2026-08-03, macOS arm64)
+## Matrix dimensions covered
 
-Both legs, both directions. Signing is EdDSA (the only curve pair a two-key did:peer:2
-carries); key agreement is X25519; authcrypt content encryption is A256CBC-HS512 (the only
-authcrypt `enc` either counterpart supports — same FR-ENC-09 profile didcomm-dotnet defaults
-to).
+The §13.5 conformance matrix, as exercised live:
 
-| composition | enc | dotnet→python | python→dotnet | dotnet→jvm | jvm→dotnet |
-|---|---|---|---|---|---|
-| plaintext | — | PASS | PASS | PASS | PASS |
-| signed (EdDSA) | — | PASS¹ | PASS | **N-A²** | PASS |
-| anoncrypt | A256CBC-HS512 | PASS | PASS | PASS | PASS |
-| anoncrypt | A256GCM | PASS | PASS | PASS | PASS |
-| anoncrypt | XC20P | PASS | PASS | PASS | PASS |
-| authcrypt | A256CBC-HS512 | PASS | PASS | PASS | PASS |
-| anoncrypt(sign EdDSA) | A256CBC-HS512 | **N-A¹** | PASS | **N-A²** | PASS |
-| anoncrypt(sign EdDSA) | XC20P | **N-A¹** | PASS | **N-A²** | PASS |
-| anoncrypt(authcrypt) | A256CBC-HS512 | PASS | PASS | PASS | PASS |
+| Dimension | Live coverage |
+|---|---|
+| Envelope composition | plaintext · signed · anoncrypt · authcrypt · anoncrypt(sign) · anoncrypt(authcrypt) |
+| Key-agreement curve | X25519 · P-256 (P-384/P-521 are offline-fixture-only — see the `n/a` notes) |
+| Content encryption | A256CBC-HS512 · A256GCM · XC20P |
+| Signing alg | EdDSA · ES256 · ES256K |
+| Recipients | single · 3 (mixed `did:peer:2` + `did:key`, mixed key types) |
+| Routing | direct · 1 mediator · 2 mediators (real `forward` onion, both directions) |
+| DID method | `did:peer:2` · `did:key` |
+| Direction | inbound · outbound · published-vector verification (FR-IX-06) |
 
-¹ ² — see the two findings below. All other 30 cells are genuine, unshimmed cross-library
-round-trips.
+## Current results — python leg (executed 2026-08-05, macOS arm64, CPython 3.9.6)
 
-### Known counterpart deviations (¹ — didcomm-python/jvm are the nonconformant side)
+`didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0` ↔ `didcomm-python 0.3.2`.
+**Executed 55 · passed 55 · failed 0 · declared n/a 1.**
 
-The DIDComm v2.1 spec (§Message Signing) says: *"Either the General or Flattened form of a
-JWS is valid. **Message recipients MUST be able to process both forms.** Message senders using
-signed messages MAY use either form. Flattened form is sufficient."* didcomm-dotnet emits
-Flattened (PRD FR-SIG-02, deliberately); **both** SICPA counterparts only parse General —
-didcomm-python's `validate_jws` requires a `signatures` array, and didcomm-jvm's envelope
-detector falls through to plaintext-JWM parsing.
+| composition | enc | routing | dotnet→python | python→dotnet |
+|---|---|---|---|---|
+| plaintext | — | direct | PASS | PASS |
+| signed EdDSA | — | direct | PASS | PASS |
+| signed ES256 | — | direct | PASS | PASS |
+| signed ES256K | — | direct | PASS | **N-A¹** |
+| anoncrypt X25519 | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt X25519 | A256GCM | direct | PASS | PASS |
+| anoncrypt X25519 | XC20P | direct | PASS | PASS |
+| anoncrypt P-256 | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt P-256 | A256GCM | direct | PASS | PASS |
+| authcrypt X25519 | A256CBC-HS512 | direct | PASS | PASS |
+| authcrypt P-256 | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt(sign) | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt(sign) | XC20P | direct | PASS | PASS |
+| anoncrypt(authcrypt) | A256CBC-HS512 | direct | PASS | PASS |
+| authcrypt 3-rcpt | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
+| authcrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
+| signed did:key | — | direct | PASS | PASS |
+| authcrypt | A256CBC-HS512 | 1 mediator | PASS | PASS |
+| authcrypt | A256CBC-HS512 | 2 mediators | PASS | PASS |
 
-- For **standalone signed** envelopes the python driver applies a lossless RFC 7515
-  re-serialization (Flattened → General; payload, protected header, and signature bytes are
-  byte-identical) before handing the message to didcomm-python — all verification is still
-  didcomm-python's. The cell is reported PASS with that shim on record (¹).
-- For **anoncrypt(sign)** the inner JWS sits inside the ciphertext where no wire-level
-  normalization can reach it, so the outbound cell is **N-A** against didcomm-python (¹).
+FR-IX-06 (didcomm-python verifying the 16 published `source: didcomm-dotnet` vectors):
+**16 / 16 PASS**, each handed to didcomm-python byte-for-byte as published — no reshaping at
+the driver boundary, so a green row means an external implementation really can read the file
+this repo ships.
 
-### Known didcomm-dotnet defect (² — ours; fix belongs upstream in dataproofs-dotnet)
+Every cell above is an unshimmed cross-library round-trip. The driver's former
+Flattened→General re-serialization has been **removed** (see ² below), so the counterpart sees
+exactly the bytes didcomm-dotnet emits.
 
-didcomm-dotnet's signed envelopes carry `kid` in **both** the protected header and the
-per-signature unprotected header. RFC 7515 §7.2 requires those header-parameter sets to be
-disjoint; nimbus-jose-jwt (inside didcomm-jvm) enforces this and rejects the envelope
-(`"The parameters in the JWS protected header and the unprotected header must be disjoint"`).
-didcomm-jvm *additionally* requires the kid in the unprotected per-signature header, so no
-lossless post-sign transform exists (moving kid out of the protected header would invalidate
-the signature). Net effect: **didcomm-jvm cannot verify any didcomm-dotnet signed envelope
-today** — outbound `signed` and `anoncrypt(sign)` are N-A against the JVM (²).
+## Current results — jvm leg (executed 2026-08-05, macOS arm64, JDK 25.0.2)
 
-The duplication originates in `DataProofsDotnet.Jose` 1.1.1's `JwsBuilder` (it stamps `kid`
-into the protected header it signs *and* renders the unprotected `{"kid": …}` carrier), i.e.
-in the dependency repo, not in didcomm-dotnet's own code. The conformant shape — used by the
-spec's own C.2 vectors and accepted by python, jvm, and nimbus alike — is `kid` **only** in
-the unprotected per-signature header (protected: `alg` + `typ`). Once dataproofs-dotnet ships
-that, the four N-A cells above are expected to flip to PASS with no harness changes (the
-python shim simply stops firing for the inner-JWS case too).
+`didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0` ↔ `didcomm-jvm 0.3.2`.
+**Executed 54 · passed 53 · failed 1 · declared n/a 2.**
+
+| composition | enc | routing | dotnet→jvm | jvm→dotnet |
+|---|---|---|---|---|
+| plaintext | — | direct | PASS | PASS |
+| signed EdDSA | — | direct | PASS | PASS |
+| signed ES256 | — | direct | PASS | PASS |
+| signed ES256K | — | direct | **N-A³** | **N-A³** |
+| anoncrypt X25519 | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt X25519 | A256GCM | direct | PASS | PASS |
+| anoncrypt X25519 | XC20P | direct | PASS | PASS |
+| anoncrypt P-256 | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt P-256 | A256GCM | direct | PASS | PASS |
+| authcrypt X25519 | A256CBC-HS512 | direct | PASS | PASS |
+| authcrypt P-256 | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt(sign) | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt(sign) | XC20P | direct | PASS | PASS |
+| anoncrypt(authcrypt) | A256CBC-HS512 | direct | PASS | PASS |
+| authcrypt 3-rcpt | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
+| authcrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
+| signed did:key | — | direct | PASS | PASS |
+| authcrypt | A256CBC-HS512 | 1 mediator | PASS | PASS |
+| authcrypt | A256CBC-HS512 | 2 mediators | PASS | PASS |
+
+FR-IX-06 (didcomm-jvm verifying the 16 published `source: didcomm-dotnet` vectors):
+**15 / 16 PASS**, each handed over byte-for-byte as published. The single failure is
+`signed-es256k`, for the JDK curve gap in ³ — and it is the **only** reason `run-jvm-leg.sh`
+exits nonzero today. Unlike the matrix, the vector loop has no `n/a` mechanism, so a
+counterpart-JRE limitation currently reads as a red leg. Worth a decision before the nightly
+is trusted as a signal.
+
+Two didcomm-jvm API limits shape the table rather than appearing as failures. It packs to a
+single recipient **DID** (`PackEncryptedParams.to` is a `String`), so the 3-recipient cell
+addresses one DID carrying three `keyAgreement` keys inbound, and three distinct DIDs outbound
+(didcomm-dotnet packs, didcomm-jvm unpacks); the driver rejects a multi-DID `--to` with an
+explicit message rather than silently addressing only the first. Forward onions are built and
+peeled with didcomm-jvm's own `Routing.wrapInForward` / `unpackForward`, `routingKeys[0]`
+outermost — verified hop by hop in both directions.
+
+### ¹ Declared `n/a` — inbound ES256K, high-S signatures (ours, crypto-dotnet#23)
+
+didcomm-python emits secp256k1 signatures with a high-S scalar in roughly half of runs. **RFC
+8812 imposes no low-S requirement, so those signatures are perfectly valid and didcomm-python
+is not at fault.** didcomm-dotnet is the strict side: `NBitcoin.Secp256k1` inherits
+libsecp256k1's anti-malleability policy in `DefaultCryptoProvider.VerifySecp256k1`, so any
+high-S signature fails verification. Reproduced over 8 consecutive runs with exact
+correlation — every high-S signature rejected, every low-S one accepted — and confirmed
+independently by malleating S to n−S on a NetCrypto 1.4.0 signature, which then verifies
+`False`.
+
+Filed as **crypto-dotnet#23**. The reverse direction (didcomm-dotnet signs ES256K →
+didcomm-python verifies) passes, because we always emit low-S.
+
+### ² Resolved — JWS serialization and `kid` placement (dataproofs-dotnet#17, #25)
+
+Kept as history because the harness's shape was argued over, and because it is the clearest
+worked example of *why* an `n/a` must name a falsifiable cause:
+
+- **Through 1.1.1**, signed envelopes carried `kid` in **both** the protected and the
+  per-signature unprotected header. RFC 7515 §7.2 requires those sets to be disjoint;
+  nimbus-jose-jwt (inside didcomm-jvm) enforces it and rejected the envelope outright. Filed
+  as **dataproofs-dotnet#17**.
+- **1.2.0/1.2.1 fixed the disjointness violation** but moved `kid` to the **protected header
+  only** — the opposite of what the spec's Appendix C.2 vectors and both SICPA libraries
+  expect. Outbound `signed` then failed against *both* counterparts: didcomm-jvm with
+  `MalformedMessageException: JWS Unprotected Per-Signature header must be present`
+  (`Unpack.kt:63`), and didcomm-python with `MalformedMessageError: INVALID_MESSAGE`, because
+  `core/validation.py:15-16` requires `signatures[0].header.kid` and `core/sign.py:43` reads
+  it unconditionally, never consulting the protected header. Those cells were run red rather
+  than reclassified `n/a` — the defect was ours, not a counterpart limitation.
+- **1.3.0 (dataproofs-dotnet#25) resolves both.** `kid` is now emitted in the per-signature
+  **unprotected** header (`protected = {alg, typ}`), matching the vendored spec vectors, and
+  General JSON serialization is emitted at **every** signer count.
+
+Two consequences, both verified by execution rather than inference:
+
+1. The old **General-only parsing** `n/a` for outbound `anoncrypt(sign)` is retired. Its stated
+   cause — an inner *Flattened* JWS sealed inside the ciphertext, unreachable by any
+   wire-level shim — no longer exists, and the cell now runs and passes.
+2. The drivers' **Flattened→General shim is deleted**. It never fired once across a full run
+   on 1.3.0, so it was dead code; leaving it would have silently absorbed a regression back to
+   Flattened and reported a green cell for an envelope the counterpart could not actually
+   read. The full leg was re-run after deletion and stayed 55/55 (python) / 53 passed with the
+   same single ES256K vector red (jvm).
+
+### ³ Declared `n/a` — ES256K on the JVM leg, secp256k1 absent from the JDK
+
+Not a DIDComm-level limitation and not ours: **JDK 16 removed secp256k1 from SunEC**, and
+didcomm-jvm 0.3.2 bundles no BouncyCastle, so the counterpart stack cannot do secp256k1 at all
+on any JDK ≥ 16 (reproduced on 25). EdDSA and ES256 are unaffected — this is curve
+availability in the JRE, nothing about the ES256K envelope format. Both directions are
+declared, each reproduced verbatim:
+
+- **jvm signs** — `UnsupportedAlgorithm: The algorithm Unsupported signature algorithm is not
+  supported` (`JWS.kt:58`), caused by `java.security.SignatureException: Curve not supported:
+  java.security.spec.ECParameterSpec@..`.
+- **jvm verifies** — the same missing curve makes nimbus's `ECDSAVerifier` **catch** that
+  `SignatureException` and return `false` instead of throwing, so didcomm-jvm reports a
+  perfectly valid signature as `MalformedMessageException: Invalid signature` (`JWS.kt:81`).
+  A silent false negative that is indistinguishable from tampering — worth knowing before
+  anyone debugs an ES256K cell here.
+
+The fault is demonstrably not in our bytes: the **vendored spec vector**
+`packed/spec/test-signed-didcomm-message-alice-key-3.json` fails identically, while its
+key-1 (EdDSA) and key-2 (ES256) siblings verify clean through the same code path. Isolation
+probes confirmed the chain end to end — `ECKey.parse` and `toECPublicKey()` both *succeed* for
+secp256k1 (nimbus carries its own domain parameters), and the failure appears only when the
+JCA `Signature` object is driven.
+
+This also gates the `signed-es256k` published vector in FR-IX-06, which is why the jvm leg
+exits nonzero. Running it on a JDK ≤ 15, or adding BouncyCastle to `jvm/fetch-deps.sh`, would
+close it — both are counterpart-stack changes, not didcomm-dotnet changes.
 
 ## Pinned versions
 
@@ -114,14 +226,14 @@ bash tools/interop-live/run-jvm-leg.sh
 
 Prereqs: .NET 10 SDK, `python3` (3.9+ for the pinned stack), a JDK (17+), `curl`. Each leg
 prints its table, keeps its scratch dir for debugging (path on stderr), and honors
-`INTEROP_SUMMARY_DIR` to also emit the markdown summaries CI uploads.
+`INTEROP_SUMMARY_DIR` to also emit the markdown summaries CI uploads. Each summary ends with
+an executed / passed / failed / declared-n-a tally, so a reader can tell coverage from silence.
 
-## CI cadence and what is deferred to the nightly
+## CI cadence
 
 `interop-live.yml` runs on `schedule` (nightly 03:17 UTC), `workflow_dispatch`, and
 `release: published`; it uploads `summary.md` + per-leg tables as the `live-interop-summary`
-artifact and fails on any FAIL cell. Everything in the results table above was validated
-locally (macOS arm64, CPython 3.9.6, Java 25); the first nightly additionally proves the same
-matrix on ubuntu-latest with CPython 3.9 and Temurin 17 — the pinned stacks are
-platform-independent pure wheels/jars, so no divergence is expected, but that run is the
-remaining unproven claim.
+artifact and fails on any FAIL cell. The python-leg results above were executed locally on
+macOS arm64 / CPython 3.9.6; the nightly additionally proves the same matrix on
+ubuntu-latest with CPython 3.9 and Temurin 17 — the pinned stacks are platform-independent
+pure wheels/jars, so no divergence is expected, but that run is the remaining unproven claim.
