@@ -96,12 +96,133 @@ public sealed class BadLangReportTests
     }
 
     [Fact]
-    public void ForThread_returns_null_on_primary_subtag_match()
+    public void ForThread_builds_report_for_sibling_region_subtags()
     {
+        // This test previously asserted the OPPOSITE (null): the old matcher treated any two
+        // tags with the same primary subtag as interchangeable, which pinned a bug — en-US and
+        // en-GB are sibling tags, and neither is a prefix of the other, so under RFC 4647
+        // directional matching the preference is NOT satisfiable and a report must be emitted.
         var thread = new ThreadState("t") { AcceptLang = new[] { "en-US" } };
 
+        var report = ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "en-GB" });
+
+        report.Should().NotBeNull("en-US and en-GB are siblings — neither extends the other");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
+    }
+
+    [Fact]
+    public void ForThread_builds_report_for_sibling_script_subtags()
+    {
+        // sr-Cyrl and sr-Latn share a primary subtag but different scripts; a reader of one
+        // often cannot read the other, so this must NOT count as satisfiable.
+        var thread = new ThreadState("t") { AcceptLang = new[] { "sr-Cyrl" } };
+
+        var report = ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "sr-Latn" });
+
+        report.Should().NotBeNull("sr-Cyrl is not satisfied by sr-Latn — sibling scripts");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
+    }
+
+    [Fact]
+    public void ForThread_builds_report_for_traditional_vs_simplified_chinese()
+    {
+        var thread = new ThreadState("t") { AcceptLang = new[] { "zh-Hant" } };
+
+        var report = ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "zh-Hans" });
+
+        report.Should().NotBeNull("zh-Hant is not satisfied by zh-Hans — sibling scripts");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
+    }
+
+    [Fact]
+    public void ForThread_returns_null_when_bare_range_matches_more_specific_tag()
+    {
+        // RFC 4647 basic filtering: the range "en" matches any tag it prefixes at a subtag
+        // boundary, so an agent offering en-GB satisfies a preference for plain "en".
+        var thread = new ThreadState("t") { AcceptLang = new[] { "en" } };
+
         ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "en-GB" })
-            .Should().BeNull("en-US and en-GB share the primary subtag 'en'");
+            .Should().BeNull("the range 'en' matches the more specific tag 'en-GB'");
+    }
+
+    [Fact]
+    public void ForThread_returns_null_when_bare_tag_satisfies_more_specific_range()
+    {
+        // Lookup-style truncation: a preference for en-US falls back to bare "en" when that is
+        // what the agent offers (same direction the ProfilesAndI18n sample's selector uses).
+        var thread = new ThreadState("t") { AcceptLang = new[] { "en-US" } };
+
+        ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "en" })
+            .Should().BeNull("a preference for en-US truncates to the offered bare 'en'");
+    }
+
+    [Fact]
+    public void ForThread_returns_null_when_broad_request_is_served_by_a_specific_catalog_entry()
+    {
+        // The emitter contract (FR-I18N-02, "when a matching language is available"): whatever the
+        // matcher calls satisfiable, the reply selector must be able to actually produce. This is
+        // the basic-filtering direction — a catalog that only holds region-tagged entries still
+        // satisfies a bare range, so we stay silent AND the selector must answer in en-GB.
+        var thread = new ThreadState("t") { AcceptLang = new[] { "en" } };
+
+        ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "fr", "en-GB" })
+            .Should().BeNull("the range 'en' is matched by the catalog entry 'en-GB'");
+    }
+
+    [Fact]
+    public void ForThread_returns_null_when_peer_accepts_any_language()
+    {
+        // RFC 4647 §2.1: the range "*" means "any language is acceptable". Reporting bad-lang at a
+        // peer who told us they will take anything is a spurious report.
+        var thread = new ThreadState("t") { AcceptLang = new[] { "*" } };
+
+        ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "en" })
+            .Should().BeNull("'*' accepts any available language");
+    }
+
+    [Fact]
+    public void ForThread_returns_null_when_wildcard_follows_an_unsatisfiable_preference()
+    {
+        // Preference order does not matter for satisfiability: fr is unavailable, but the trailing
+        // "*" still says "anything works".
+        var thread = new ThreadState("t") { AcceptLang = new[] { "fr", "*" } };
+
+        ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "en" })
+            .Should().BeNull("the wildcard entry accepts the available 'en'");
+    }
+
+    [Theory]
+    [InlineData((object)new string[0])]
+    [InlineData((object)new[] { "", "   " })]
+    [InlineData((object)new[] { "-en" })]
+    public void ForThread_builds_report_for_wildcard_when_nothing_is_available(string[] availableLangs)
+    {
+        // "*" accepts anything — but only if there IS something. With no usable language to emit,
+        // the report is still warranted.
+        var thread = new ThreadState("t") { AcceptLang = new[] { "*" } };
+
+        var report = ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, availableLangs);
+
+        report.Should().NotBeNull("'*' cannot be satisfied by an empty catalog");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
+    }
+
+    [Theory]
+    // Identical garbage on both sides must not short-circuit through the equality path...
+    [InlineData("-en", "-en")]
+    [InlineData("-", "-")]
+    // ...and neither may a tag whose empty subtag sits at the end or in the middle.
+    [InlineData("en-", "en")]
+    [InlineData("en--GB", "en")]
+    [InlineData("en", "en-")]
+    public void ForThread_malformed_tags_with_an_empty_subtag_never_match(string preferred, string offered)
+    {
+        var thread = new ThreadState("t") { AcceptLang = new[] { preferred } };
+
+        var report = ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { offered });
+
+        report.Should().NotBeNull($"'{preferred}' carries an empty subtag and cannot satisfy or be satisfied by '{offered}'");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
     }
 
     [Fact]

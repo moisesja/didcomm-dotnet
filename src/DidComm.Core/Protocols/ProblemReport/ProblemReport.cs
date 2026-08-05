@@ -187,10 +187,31 @@ public static class ProblemReport
     /// warranted — the thread declared no preference, or at least one preference is satisfiable.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Matching is deliberately minimal (this is a MAY-level convenience, not a BCP 47
-    /// negotiator): a preference is satisfied by an available language when the two tags are
-    /// equal ignoring case, or when their primary subtags match (so <c>en-US</c> is satisfied
-    /// by <c>en</c> or <c>en-GB</c>).
+    /// negotiator): a preference is satisfied by an available language when the tags are equal
+    /// ignoring case, or when one tag extends the other at a subtag boundary, RFC 4647-style —
+    /// basic filtering (the range <c>en</c> matches the tag <c>en-GB</c>) plus lookup-style
+    /// truncation (a preference for <c>en-US</c> is satisfied by bare <c>en</c>). Sibling tags
+    /// never match: <c>en-US</c> is NOT satisfied by <c>en-GB</c>, nor <c>sr-Cyrl</c> by
+    /// <c>sr-Latn</c>. A preference of exactly <c>*</c> — RFC 4647 §2.1's "any language is
+    /// acceptable" — is satisfied by any available tag.
+    /// </para>
+    /// <para>
+    /// A wildcard used as a SUBTAG (RFC 4647 §2.2 extended ranges such as <c>en-*</c> or
+    /// <c>*-CH</c>) is deliberately NOT interpreted: extended filtering is a real matching
+    /// algorithm, and half-implementing it here would be worse than not offering it. Such a
+    /// range is treated as ordinary text, so <c>en-*</c> behaves like any other tag extending
+    /// <c>en</c>. Callers needing extended filtering should do their own matching and call
+    /// <see cref="CreateBadLang"/> directly.
+    /// </para>
+    /// <para>
+    /// Whatever this method calls satisfiable, the caller's reply selector must be able to
+    /// actually emit (FR-I18N-02 honors a preference "when a matching language is available"),
+    /// so a selector that only truncates (<c>fr-CA</c> → <c>fr</c>) is too narrow: it must also
+    /// serve a broad request from a more specific catalog entry (<c>en</c> → <c>en-GB</c>). The
+    /// reference selector in the <c>ProfilesAndI18n</c> sample does both.
+    /// </para>
     /// </remarks>
     /// <param name="from">Sender DID.</param>
     /// <param name="to">Recipient DID — the peer that declared the unsatisfiable preference.</param>
@@ -213,36 +234,66 @@ public static class ProblemReport
         return CreateBadLang(from, to, thread.Thid, availableLangs, fatal);
     }
 
-    /// <summary>True when any preferred tag is satisfied by any available tag (exact or primary-subtag match, case-insensitive).</summary>
+    /// <summary>RFC 4647 §2.1: the language range that accepts any language.</summary>
+    private const string WildcardRange = "*";
+
+    /// <summary>
+    /// True when any preferred tag is satisfied by any available tag: the <c>*</c> wildcard, an
+    /// exact match, or a directional RFC 4647-style prefix match at a subtag boundary
+    /// (case-insensitive, pure string ops — the peer's <c>accept-lang</c> is untrusted remote
+    /// input, so no <c>CultureInfo</c>/ICU, whose behavior is platform-dependent).
+    /// </summary>
     private static bool AnyLanguageAcceptable(IReadOnlyList<string> preferences, IReadOnlyList<string> available)
     {
         foreach (var preferred in preferences)
         {
-            if (string.IsNullOrWhiteSpace(preferred))
+            // Unusable tags are dropped BEFORE any comparison, the equality check included:
+            // otherwise identical garbage on both sides ("-en" vs "-en") would match itself and
+            // silently suppress the report.
+            if (!IsUsableTag(preferred))
                 continue;
+            var acceptsAnything = string.Equals(preferred, WildcardRange, StringComparison.Ordinal);
             foreach (var offered in available)
             {
-                if (string.IsNullOrWhiteSpace(offered))
+                if (!IsUsableTag(offered))
                     continue;
+                // RFC 4647 §2.1: a range of "*" is satisfied by whatever we happen to have — but
+                // it still needs SOMETHING, hence the check inside the available-tags loop.
+                if (acceptsAnything)
+                    return true;
                 if (string.Equals(preferred, offered, StringComparison.OrdinalIgnoreCase))
                     return true;
-                // A malformed tag with a leading '-' (e.g. "-fonipa") has an EMPTY primary subtag;
-                // two empties must not satisfy each other — that would silently suppress the report
-                // whenever both sides carry garbage tags. Only a real primary subtag can match.
-                var preferredPrimary = PrimarySubtag(preferred);
-                if (!preferredPrimary.IsEmpty && preferredPrimary.Equals(PrimarySubtag(offered), StringComparison.OrdinalIgnoreCase))
+                // Directional prefix matching at subtag boundaries (RFC 4647 style):
+                //  - basic filtering: the range "en" matches the tag "en-GB";
+                //  - lookup truncation: a preference for "en-US" is satisfied by bare "en".
+                // Siblings (en-US vs en-GB, sr-Cyrl vs sr-Latn) never match — neither extends
+                // the other, so treating them as interchangeable would wrongly suppress the
+                // bad-lang report.
+                if (ExtendsAtSubtagBoundary(offered, prefix: preferred) ||
+                    ExtendsAtSubtagBoundary(preferred, prefix: offered))
                     return true;
             }
         }
         return false;
     }
 
-    /// <summary>The BCP 47 primary language subtag — the tag up to the first <c>-</c>.</summary>
-    private static ReadOnlySpan<char> PrimarySubtag(string tag)
-    {
-        var dash = tag.IndexOf('-', StringComparison.Ordinal);
-        return dash < 0 ? tag.AsSpan() : tag.AsSpan(0, dash);
-    }
+    /// <summary>
+    /// True when <paramref name="tag"/> is worth comparing at all: non-blank, and with no EMPTY
+    /// subtag — a leading <c>-</c> ("-fonipa"), a trailing <c>-</c> ("en-") or a doubled <c>-</c>
+    /// ("en--GB") makes it malformed under BCP 47. Such a tag matches nothing, not even an
+    /// identical copy of itself: garbage on both sides must not suppress the bad-lang report.
+    /// </summary>
+    private static bool IsUsableTag(string tag)
+        => !string.IsNullOrWhiteSpace(tag)
+           && tag[0] != '-'
+           && tag[^1] != '-'
+           && !tag.Contains("--", StringComparison.Ordinal);
+
+    /// <summary>True when <paramref name="tag"/> starts with <paramref name="prefix"/> followed by a <c>-</c> (case-insensitive) — i.e. extends it at a subtag boundary.</summary>
+    private static bool ExtendsAtSubtagBoundary(string tag, string prefix)
+        => tag.Length > prefix.Length
+           && tag[prefix.Length] == '-'
+           && tag.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Read <c>body.code</c>; returns <c>null</c> when the message has no body or no code field, or when the value is not a JSON string.</summary>
     /// <param name="message">A message of type <see cref="MessageType"/>.</param>

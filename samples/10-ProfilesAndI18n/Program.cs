@@ -321,20 +321,35 @@ public static class Program
     }
 
     /// <summary>
-    /// The first preferred tag Bob's catalog satisfies (exact or primary-subtag match, so
-    /// <c>fr-CA</c> is served by <c>fr</c>); the default language when the thread has no
-    /// usable preference.
+    /// The first preferred tag Bob's catalog satisfies; the default language when the thread has
+    /// no usable preference. This selector must be able to produce whatever
+    /// <c>ProblemReport.CreateBadLangForThread</c> considers satisfiable — if it were narrower,
+    /// Bob would stay silent (no <c>bad-lang</c> report) and then answer in the wrong language.
+    /// So it matches in both directions a language range can match: a request narrower than the
+    /// catalog (<c>fr-CA</c> served by <c>fr</c>) and a request broader than it (<c>en</c>
+    /// served by <c>en-GB</c>).
     /// </summary>
     private static string PickLanguage(ThreadState? thread)
     {
         foreach (var preferred in thread?.AcceptLang ?? Array.Empty<string>())
         {
+            if (string.IsNullOrWhiteSpace(preferred))
+                continue;
+            // Exactly what was asked for.
             if (BobsCatalog.ContainsKey(preferred))
                 return preferred.ToLowerInvariant();
+            // Drop the region/script and retry: "fr-CA" is close enough to be served by "fr".
             var dash = preferred.IndexOf('-', StringComparison.Ordinal);
             var primary = dash < 0 ? preferred : preferred[..dash];
-            if (BobsCatalog.ContainsKey(primary))
+            if (primary.Length > 0 && BobsCatalog.ContainsKey(primary))
                 return primary.ToLowerInvariant();
+            // The other direction: a broad request ("en") is served by any more specific entry
+            // ("en-GB"). A peer asking for "*" (any language) lands on the default below.
+            foreach (var entry in BobsCatalog.Keys)
+                if (entry.Length > preferred.Length
+                    && entry[preferred.Length] == '-'
+                    && entry.StartsWith(preferred, StringComparison.OrdinalIgnoreCase))
+                    return entry.ToLowerInvariant();
         }
         return BobsDefaultLang;
     }
