@@ -115,6 +115,92 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 - Un-ignored `DxCoverage/coverage-allowlist.json` (a Coverlet ignore pattern swallowed it) —
   without it the FR-DX-01 gate errors on any fresh clone.
 
+### Fixed — the blocking review on #69 (six findings, every one reproduced before it was touched)
+
+Verification confirmed all six review findings against the branch as reviewed, and each fix is held
+by a regression test written red-first — the test fails against the code it replaces.
+
+- **The STOMP client accepted a CONNECTED frame at any version.** It offered `accept-version: 1.2`
+  and then took whatever the server answered, so a peer speaking a different STOMP version was
+  treated as a successful handshake. `WebSocketDidCommTransport` now requires `version: 1.2` on
+  CONNECTED — first-wins, per STOMP 1.2's rule for repeated headers — and fails with
+  `TransportException` otherwise, mirroring the check `StompServerSession` already performed on the
+  server side.
+- **The reconnect budget did not cover STOMP handshake failures.** Handshake failures surface as
+  `TransportException`, which the Polly retry predicate excluded, so a transport configured with
+  `MaxReconnectAttempts > 0` still made exactly one attempt — the setting silently did nothing on
+  the one failure class STOMP adds. `TransportException` is now retryable; scheme refusal and the
+  SSRF guard throw before the pipeline is entered, so those are still never retried. One handshake
+  failure stays deliberately fatal: a protocol version mismatch cannot become true on a retry, so it
+  fails immediately, with a message saying no reconnect was attempted. The outer rethrow was removed
+  so every retryable failure surfaces in one consistent exhausted-budget shape rather than two shapes
+  depending on where the attempt gave up.
+- **`DisposeAsync` could hang, throw, or leak** — a cluster of defects an adversarial pass found in
+  this branch's own first-cut dispose changes. Dispose waited on the peer's close frame, so a peer
+  that never answered hung teardown forever (the shutdown writes are now bounded and use
+  `CloseOutputAsync` instead of waiting for the peer to close back). A concurrent second
+  `DisposeAsync` threw `ObjectDisposedException` and skipped teardown entirely, leaking the pooled
+  HTTP handler (disposal is now idempotent behind an `Interlocked` latch). A send still in its
+  connect phase escaped the drain and could republish a socket into an already-cleared pool (the
+  drain now covers connect gates as well as pool entries, with a seal the connector re-reads after
+  publishing). The drain budget was smaller than the hold it was meant to cover, so teardown could
+  kill a healthy in-flight send (it is now `ConnectTimeout + SendTimeout`, and endpoints drain
+  concurrently rather than one after another). And a negative or infinite `SendTimeout` could hang
+  or abort teardown outright. Separately, lifecycle handlers are no longer invoked while the send
+  gate is held — a handler that sent to the same endpoint deadlocked against the gate its own
+  notification was holding.
+- **`bad-lang` matching treated script variants as interchangeable.** Any shared primary subtag
+  counted as a match, so `sr-Cyrl` satisfied a request for `sr-Latn` and `zh-Hant` satisfied
+  `zh-Hans` — not interchangeable to a reader — and the report the peer was owed was suppressed.
+  `ProblemReport` now matches directionally, RFC 4647-style: a tag matches when it is equal to the
+  other or extends it at a subtag boundary, with no culture-sensitive comparison anywhere, since
+  `accept-lang` is untrusted remote input. Two related corrections ride along: an `accept-lang` of
+  `*` (RFC 4647's "any language") is honored instead of producing a spurious report, and a malformed
+  tag with an empty subtag matches nothing at all — not even a byte-identical copy of itself. The
+  reference sample's language selector was widened to the same rule, so core and sample agree on
+  what "available" means.
+- **Forward attachments now carry an `id`.** Attachment `id` is optional in the spec, and the
+  routing-2.0 example omits it — but didcomm-jvm's `Attachment.parse` rejects an attachment without
+  one, which made our forward onion unroutable through a JVM mediator. Both reference
+  implementations emit one, and `ForwardMessage` now does too. Found by the live interop harness,
+  and confirmed fixed against didcomm-jvm.
+- **`DataProofsDotnet.Jose` 1.1.1 → 1.2.1 — the duplicated JWS `kid`.** Up to 1.1.1 the signer's
+  `kid` was written into *both* the protected and the unprotected per-signature header, violating
+  RFC 7515 §7.2's requirement that the two be disjoint; nimbus — and therefore didcomm-jvm — rejects
+  such a JWS outright. Filed and fixed upstream as dataproofs-dotnet#17; a regression test here
+  asserts the per-signature header parameter sets are disjoint, so the shape cannot return through a
+  future dependency move. The published vector set was regenerated as a consequence, since its
+  signed envelopes carry that header. **Signed cross-implementation round-trips still do not work** —
+  `kid` placement is still being finalized upstream, tracked in dataproofs-dotnet#25.
+
+### Changed — the public-API coverage gate now measures execution, not reference
+
+The gate as first built counts *metadata references* from the sample assemblies, and it propagated a
+single referenced interface member onto every shipped implementation of that interface — so
+"demonstrated" could mean no more than that a type appeared in a local variable's signature. That
+proves presence in sample source, not that a line of the member ever ran.
+
+- A second gate instruments the shipped assemblies with Mono.Cecil, re-runs all ten samples and the
+  28 cookbook sections in-process against the instrumented copies, and intersects the real execution
+  hits with the public surface: **572 of 585 members are proven executed**, the remaining 13 have no
+  executable code at all (enum members, const holders), and the execution allowlist is empty —
+  nothing is waved through.
+- The reference gate is kept as a cheap first check — it catches "not referenced anywhere" for the
+  price of a metadata walk — and is renamed to say what it actually measures
+  (`EveryPublicMember_IsReferencedByASampleAssembly`).
+- Two members the reference gate passed while nothing ever executed them — the HTTP and WebSocket
+  transports' `Scheme` property — are now genuinely exercised by the Cookbook rather than being
+  waved through on a reference.
+
+### Changed — a wider live interop matrix
+
+`tools/interop-live` now drives 20 compositions, up from 9, in both directions against the
+version-frozen didcomm-python and didcomm-jvm legs, and additionally verifies the published vector
+set from outside this codebase. The added cells cover P-256 key agreement, ES256 and ES256K signing,
+`did:key` peers, multi-recipient envelopes, and forward routing through one and through two
+mediators. This is breadth of coverage, not a conformance statement: what each run establishes, and
+which counterpart gaps remain open, is recorded in `tools/interop-live/README.md`.
+
 ### Changed — dependency refresh
 
 - **NetDid 3.0.0 → 3.1.0** (all five packages). An additive minor: it still depends on
@@ -124,8 +210,8 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   shipped); the 10.0.x line is the one that tracks the net10.0 SDK this repo builds on.
 - The test stack (Test.Sdk, xunit.runner.visualstudio, NSubstitute, coverlet, FluentAssertions)
   stays pinned on purpose — FluentAssertions in particular is held at 7.0.0 to avoid the 8.x
-  Xceed relicensing (paid for commercial use). DataProofsDotnet.Jose (1.1.1) and NetCrypto
-  (1.4.0) are already latest.
+  Xceed relicensing (paid for commercial use). NetCrypto (1.4.0) is already latest;
+  DataProofsDotnet.Jose moved 1.1.1 → 1.2.1 for the RFC 7515 §7.2 fix described above.
 
 ### Known PRD drift (PRD is the target; flagged, not silently patched)
 

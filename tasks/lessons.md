@@ -895,7 +895,9 @@ Format per entry:
   not stop for a redundant second approval before doing the review.
 - **Why:** After explicitly asking to re-check PR #62, the user was forced through an unnecessary
   approval gate even though no source implementation or unrelated external action was proposed. That
-  added friction without reducing risk.
+  added friction without reducing risk. The same mistake recurred on 2026-08-04 after an explicit
+  request to review the newly opened PR, confirming that the initial user command itself must be
+  treated as the approval checkpoint.
 - **How to apply:** Treat “review this PR,” “re-check the PR,” and equivalent explicit requests as
   approval of the PR-review plan and its ordinary GitHub review/comment write. Ask only when scope is
   genuinely ambiguous or a materially different action is needed, such as editing the branch,
