@@ -68,6 +68,9 @@ public static class Section_R_ReceiveWebSocket
         var secrets = ctx.ServiceProvider.GetRequiredService<ISecretsResolver>();
         var keyService = ctx.ServiceProvider.GetRequiredService<IDidKeyService>();
         var serviceResolver = ctx.ServiceProvider.GetRequiredService<IServiceEndpointResolver>();
+        // The transport's canonical scheme is wss; the router matches endpoints against
+        // CanHandle, which here also accepts plain ws because AllowedSchemes above says so.
+        ctx.Narrator.Value("Transport.Scheme (canonical)", transport.Scheme);
         var router = new TransportRouter(new IDidCommTransport[] { transport });
         var aliceSender = new DidCommClient(secrets, keyService, serviceResolver, router, new DidCommOptions());
 

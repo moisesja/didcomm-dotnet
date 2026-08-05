@@ -59,6 +59,10 @@ public static class Section_P_SendOverTransport
         var transport = new HttpDidCommTransport(
             transportSp.GetRequiredService<IHttpClientFactory>(),
             Options.Create(httpOptions));
+        // Every transport names the canonical URI scheme it speaks; the router matches a
+        // recipient's endpoint against CanHandle, which here also accepts plain http because
+        // AllowedSchemes above says so.
+        ctx.Narrator.Value("Transport.Scheme (canonical)", transport.Scheme);
         var router = new TransportRouter(new IDidCommTransport[] { transport });
 
         // Every outbound transport also carries an SSRF policy: a DID document's serviceEndpoint

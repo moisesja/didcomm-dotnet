@@ -54,10 +54,12 @@
     <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- FR-DX-01: the justified exceptions to the public-API demonstration gate; read at run time
-       by PublicApiCoverageTests. -->
+  <!-- FR-DX-01: the justified exceptions to the two public-API gates — coverage-allowlist.json for
+       the static reference gate (PublicApiCoverageTests), execution-allowlist.json for the runtime
+       execution gate (PublicApiExecutionTests). Read at run time. -->
   <ItemGroup>
     <None Include="DxCoverage\coverage-allowlist.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="DxCoverage\execution-allowlist.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

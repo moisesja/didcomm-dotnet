@@ -8,11 +8,16 @@ using Xunit.Abstractions;
 namespace DidComm.InteropTests.DxCoverage;
 
 /// <summary>
-/// The FR-DX-01 developer-experience gate: every public type and member of the six shipped
-/// packages must be exercised by at least one sample under <c>samples/</c>, and the §14.4
-/// API → sample coverage matrix must hold (FR-DX-09).
+/// The static half of the FR-DX-01 developer-experience gate: every public type and member of the
+/// six shipped packages must be <b>referenced from compiled sample metadata/IL</b> under
+/// <c>samples/</c>, and the §14.4 API → sample coverage matrix must hold (FR-DX-09). This gate is
+/// cheap and catches "not even referenced"; it deliberately does NOT claim runtime execution — a
+/// metadata reference (a local-variable type, an interface implementation) proves presence in
+/// sample source, not that the member ran. The execution half of FR-DX-01 lives in
+/// <see cref="PublicApiExecutionTests"/>, which re-runs every sample against probe-instrumented
+/// assemblies and asserts genuine execution.
 ///
-/// <para><b>How coverage is measured.</b> The shipped assemblies' public surface (public types;
+/// <para><b>How reference coverage is measured.</b> The shipped assemblies' public surface (public types;
 /// public/protected methods, constructors, properties, events, fields) is enumerated with
 /// Mono.Cecil, and every sample assembly's complete IL + metadata is walked for references into
 /// them — type refs, member refs, generic arguments, attributes, base types, signatures,
@@ -43,11 +48,13 @@ public sealed class PublicApiCoverageTests
     public PublicApiCoverageTests(ITestOutputHelper output) => _output = output;
 
     /// <summary>
-    /// FR-DX-01: the report must list 0 undemonstrated public members. On failure, every gap is
-    /// printed assembly-qualified and sorted — the actionable list of members needing a sample.
+    /// FR-DX-01 (static half): the report must list 0 public members lacking a compiled sample
+    /// metadata/IL reference. On failure, every gap is printed assembly-qualified and sorted — the
+    /// actionable list of members needing a sample. Runtime execution is asserted separately by
+    /// <see cref="PublicApiExecutionTests.EveryExecutableMember_IsExecutedByASampleRun"/>.
     /// </summary>
     [Fact]
-    public void EveryPublicMember_IsDemonstratedByASample()
+    public void EveryPublicMember_IsReferencedByASampleAssembly()
     {
         var coverage = CoverageComputation.Instance;
         var allowlist = LoadAllowlist();
@@ -74,12 +81,12 @@ public sealed class PublicApiCoverageTests
         _output.WriteLine($"Structurally exempt         : {StructuralExemptions}");
         var e = coverage.Exemptions;
         _output.WriteLine($"  enum members/consts={e.EnumMembersAndConsts}, compiler-generated/record plumbing={e.CompilerGeneratedAndRecordPlumbing}, obsolete={e.Obsolete}, accessors={e.AccessorsCountedThroughOwner}, object-overrides={e.ObjectOverrides}");
-        _output.WriteLine($"Undemonstrated              : {gaps.Count}");
+        _output.WriteLine($"Unreferenced                : {gaps.Count}");
 
         if (gaps.Count > 0)
         {
             var report = new StringBuilder();
-            report.AppendLine($"{gaps.Count} public member(s) are not demonstrated by any sample (FR-DX-01).");
+            report.AppendLine($"{gaps.Count} public member(s) are not referenced by any sample assembly (FR-DX-01, static half).");
             report.AppendLine("Add a demonstration to the closest-fit sample, or (last resort) a justified allowlist entry:");
             foreach (var gap in gaps)
                 report.AppendLine($"  [{gap.Kind}] {gap.Id}");
