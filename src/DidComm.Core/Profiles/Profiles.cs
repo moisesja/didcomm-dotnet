@@ -5,6 +5,9 @@ namespace DidComm.Profiles;
 /// plaintext / routing choices advertised in a service endpoint's <c>accept</c> array and
 /// negotiated by <see cref="ProfileNegotiator"/> (FR-PROF-01).
 /// </summary>
+/// <example>
+/// Referenced by the negotiation demo in <c>samples/10-ProfilesAndI18n</c>.
+/// </example>
 public static class Profiles
 {
     /// <summary>The DIDComm Messaging v2 profile — the only one this library emits.</summary>

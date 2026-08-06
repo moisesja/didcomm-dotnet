@@ -6,8 +6,10 @@
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <DidCommVersion>1.4.1</DidCommVersion>
+    <!-- NFR-02: the public surface of every shipped package is 100% XML-documented, enforced by
+         CS1591 + warnings-as-errors. Test/sample/tool projects re-suppress 1591 in their own
+         Directory.Build.props — the doc mandate is for the shipped API, not scaffolding. -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <NoWarn>$(NoWarn);1591</NoWarn>
     <Deterministic>true</Deterministic>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>

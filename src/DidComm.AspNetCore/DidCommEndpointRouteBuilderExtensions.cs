@@ -27,6 +27,9 @@ namespace DidComm.AspNetCore;
 /// Minimal-API extensions for receiving DIDComm v2.1 envelopes over ASP.NET Core (PRD §9.2/§9.3,
 /// FR-TRN-07/09/10, FR-API-06).
 /// </summary>
+/// <example>
+/// HTTP receive with 415/413 handling runs in <c>samples/02-Cookbook</c> (section Q) and <c>samples/04-MediatorAgent</c>.
+/// </example>
 public static class DidCommEndpointRouteBuilderExtensions
 {
     /// <summary>
@@ -259,6 +262,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// processing) and dispatches each to <paramref name="onReceive"/>. One-way per FR-TRN-10:
     /// the server does NOT send protocol replies back on the same socket. Oversize messages
     /// (per <see cref="DidCommOptions.MaxReceiveBytes"/>, FR-API-06) trigger a 1009 close.
+    /// With <see cref="DidCommReceiveOptions.UseStomp"/> the endpoint instead speaks the
+    /// minimal STOMP 1.2 subset (FR-TRN-12): CONNECT→CONNECTED, one packed envelope per SEND
+    /// frame body, DISCONNECT to close.
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -283,10 +289,12 @@ public static class DidCommEndpointRouteBuilderExtensions
             using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
             var client = httpContext.RequestServices.GetRequiredService<DidCommClient>();
             var coreOptions = httpContext.RequestServices.GetRequiredService<IOptions<DidCommOptions>>().Value;
+            var receiveOptions = httpContext.RequestServices.GetService<IOptions<DidCommReceiveOptions>>()?.Value
+                                 ?? new DidCommReceiveOptions();
             var loggerFactory = httpContext.RequestServices.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket");
 
-            await ReceiveLoopAsync(socket, client, coreOptions, onReceive, logger, httpContext.RequestAborted).ConfigureAwait(false);
+            await ReceiveLoopAsync(socket, client, coreOptions, receiveOptions, onReceive, logger, httpContext.RequestAborted).ConfigureAwait(false);
         });
     }
 
@@ -342,6 +350,9 @@ public static class DidCommEndpointRouteBuilderExtensions
         CancellationToken ct)
     {
         var maxBytes = coreOptions.MaxReceiveBytes;
+        // FR-TRN-12: opt-in STOMP session for this connection. The MaxReceiveBytes 1009 close
+        // below still applies to the whole (framed) message BEFORE any STOMP decoding.
+        var stomp = receiveOptions.UseStomp ? new StompServerSession() : null;
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
         try
         {
@@ -369,7 +380,21 @@ public static class DidCommEndpointRouteBuilderExtensions
                 }
                 while (!result.EndOfMessage);
 
-                var packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                string packed;
+                if (stomp is not null)
+                {
+                    var (envelope, closeConnection) = await stomp.ProcessAsync(
+                        socket, ms.ToArray(), receiveOptions.AcceptedMediaTypes, logger, ct).ConfigureAwait(false);
+                    if (closeConnection)
+                        return;
+                    if (envelope is null)
+                        continue; // control frame handled, or an unacceptable SEND discarded
+                    packed = envelope;
+                }
+                else
+                {
+                    packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                }
 
                 // #35: the recipient-kid timing side-channel that the HTTP receive path pads against
                 // (see DelayToRejectionFloorAsync) does NOT apply here — a failed unpack is logged and
@@ -430,7 +455,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                 }
 
                 var delivered = false;
-                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: not null } && receiveOptions.AllowSameSocketReplies)
+                // FR-TRN-12: same-socket replies are suppressed in STOMP mode — pushing a bare
+                // binary reply into a peer's STOMP session would corrupt its frame parser, and a
+                // spec-shaped push needs MESSAGE frames + subscriptions (broker semantics that are
+                // deliberately outside the minimal subset). Deliver replies out of band instead.
+                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: not null } && receiveOptions.AllowSameSocketReplies && stomp is null)
                 {
                     delivered = await TrySendReplyOnSocketAsync(socket, client, unpacked, outcome.Reply, logger, ct).ConfigureAwait(false);
                 }
@@ -673,11 +702,15 @@ public static class DidCommEndpointRouteBuilderExtensions
         System.Net.WebSockets.WebSocket socket,
         DidCommClient client,
         DidCommOptions coreOptions,
+        DidCommReceiveOptions receiveOptions,
         Func<UnpackResult, CancellationToken, Task> onReceive,
         ILogger? logger,
         CancellationToken ct)
     {
         var maxBytes = coreOptions.MaxReceiveBytes;
+        // FR-TRN-12: opt-in STOMP session — same posture as the dispatcher-backed loop (L-043:
+        // both receive loops must speak the same framing).
+        var stomp = receiveOptions.UseStomp ? new StompServerSession() : null;
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
         try
         {
@@ -706,8 +739,24 @@ public static class DidCommEndpointRouteBuilderExtensions
                 }
                 while (!result.EndOfMessage);
 
-                // FR-TRN-09: the reassembled bytes are exactly one packed envelope.
-                var packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                // FR-TRN-09: the reassembled bytes are exactly one packed envelope — or, in the
+                // opt-in STOMP mode (FR-TRN-12), exactly one STOMP frame whose SEND body is one
+                // packed envelope.
+                string packed;
+                if (stomp is not null)
+                {
+                    var (envelope, closeConnection) = await stomp.ProcessAsync(
+                        socket, ms.ToArray(), receiveOptions.AcceptedMediaTypes, logger, ct).ConfigureAwait(false);
+                    if (closeConnection)
+                        return;
+                    if (envelope is null)
+                        continue; // control frame handled, or an unacceptable SEND discarded
+                    packed = envelope;
+                }
+                else
+                {
+                    packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                }
 
                 // #35: no constant-time pad here (unlike the HTTP 400 path) — a failed unpack is logged
                 // and discarded with nothing written back, so there is no per-message response a peer can
@@ -759,7 +808,9 @@ public static class DidCommEndpointRouteBuilderExtensions
         }
     }
 
-    private static bool MatchesMediaType(string contentType, IReadOnlyList<string> accepted)
+    // Internal (not private) so the FR-TRN-12 StompServerSession applies the same accepted-media-type
+    // gate to a SEND frame's content-type that the HTTP path applies to the Content-Type header.
+    internal static bool MatchesMediaType(string contentType, IReadOnlyList<string> accepted)
     {
         // ContentType can include parameters (e.g. "; charset=utf-8") — strip and compare the
         // base media type only. A malformed header throws FormatException; treat that as "no

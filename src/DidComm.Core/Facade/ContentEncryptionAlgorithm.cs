@@ -6,6 +6,9 @@ namespace DidComm.Facade;
 /// algorithm set; FR-ENC-09 forbids GCM/XC20P for authcrypt (1PU) — the facade enforces that
 /// at pack time.
 /// </summary>
+/// <example>
+/// Chosen explicitly in <c>samples/02-Cookbook</c> (section I) and swept across all values in <c>samples/03-EnvelopesAndMessages</c>.
+/// </example>
 public enum ContentEncryptionAlgorithm
 {
     /// <summary>AES-256-CBC with HMAC-SHA-512 (RFC 7518 §5.2.5). Mandatory for authcrypt; valid for anoncrypt.</summary>

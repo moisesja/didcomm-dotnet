@@ -14,6 +14,7 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="FluentAssertions" />
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Mono.Cecil" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,17 +33,33 @@
     <ProjectReference Include="..\..\src\DidComm.Adapters.NetDid\DidComm.Adapters.NetDid.csproj" />
     <ProjectReference Include="..\..\samples\01-Quickstart\01-Quickstart.csproj" />
     <ProjectReference Include="..\..\samples\02-Cookbook\02-Cookbook.csproj" />
+    <ProjectReference Include="..\..\samples\03-EnvelopesAndMessages\03-EnvelopesAndMessages.csproj" />
+    <ProjectReference Include="..\..\samples\04-MediatorAgent\04-MediatorAgent.csproj" />
+    <ProjectReference Include="..\..\samples\05-WebSocketChat\05-WebSocketChat.csproj" />
+    <ProjectReference Include="..\..\samples\06-OutOfBand\06-OutOfBand.csproj" />
+    <ProjectReference Include="..\..\samples\07-ProblemsAndProtocols\07-ProblemsAndProtocols.csproj" />
+    <ProjectReference Include="..\..\samples\08-Extensibility\08-Extensibility.csproj" />
+    <ProjectReference Include="..\..\samples\09-NetDidIntegration\09-NetDidIntegration.csproj" />
+    <ProjectReference Include="..\..\samples\10-ProfilesAndI18n\10-ProfilesAndI18n.csproj" />
     <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />
   </ItemGroup>
 
   <!--
-    Phase 0: fixtures live inline under ./fixtures so the data-driven runner has
-    something to enumerate (FR-IX-02). Before Phase 2 closes (FR-IX-01 gate),
-    move fixtures into the standalone didcomm-dotnet-fixtures repo and wire it
-    in as a git submodule per PRD §13.3. See ./fixtures/README.md.
+    ./fixtures is the didcomm-dotnet-fixtures git submodule (PRD §13.3):
+    https://github.com/moisesja/didcomm-dotnet-fixtures. Initialize submodules
+    after cloning (git submodule update with the init flag); the data-driven
+    runner (FR-IX-02) enumerates fixtures/manifest/**/*.json.
   -->
   <ItemGroup>
     <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- FR-DX-01: the justified exceptions to the two public-API gates — coverage-allowlist.json for
+       the static reference gate (PublicApiCoverageTests), execution-allowlist.json for the runtime
+       execution gate (PublicApiExecutionTests). Read at run time. -->
+  <ItemGroup>
+    <None Include="DxCoverage\coverage-allowlist.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="DxCoverage\execution-allowlist.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

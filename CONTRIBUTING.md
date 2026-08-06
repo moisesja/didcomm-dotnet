@@ -21,16 +21,15 @@ If you find an apparent contradiction between the PRD and the spec, raise it as 
 ## Getting started
 
 ```bash
-git clone https://github.com/moisesja/didcomm-dotnet.git
+# --recurse-submodules pulls the didcomm-dotnet-fixtures interop suite (PRD §13.3);
+# after a plain clone, run `git submodule update --init` instead.
+git clone --recurse-submodules https://github.com/moisesja/didcomm-dotnet.git
 cd didcomm-dotnet
 
-# Once Phase 0 lands:
 dotnet restore
 dotnet build
 dotnet test
 ```
-
-> **Project status note.** As of this writing the repository contains only the PRD and scaffolding. The first runnable code lands at the end of Phase 0 (see PRD §12). If you're picking up a phase, the **Kickoff prompt** at the end of each phase is the canonical brief.
 
 ## Code style
 

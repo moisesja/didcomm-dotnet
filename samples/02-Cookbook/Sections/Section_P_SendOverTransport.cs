@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using DidComm.AspNetCore;
+using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Resolution;
@@ -37,21 +38,57 @@ public static class Section_P_SendOverTransport
 
         // The transport router needs an IDidCommTransport. Build the HTTPS transport
         // configured against TestServer's primary message handler and allow the http scheme
-        // (TestServer publishes http://localhost as its base address).
-        var transportServices = new ServiceCollection();
-        transportServices.AddOptions<HttpTransportOptions>().Configure(opts =>
+        // (TestServer publishes http://localhost as its base address). The options object is the
+        // whole delivery policy in one place: schemes, timeout, the retry/circuit-breaker knobs
+        // (FR-TRN-08/11), how many redirect hops to follow, and the SSRF policy below.
+        var httpOptions = new HttpTransportOptions
         {
-            opts.AllowedSchemes = new[] { "http", "https" };
-            opts.MaxRetryAttempts = 0;
-            opts.RequestTimeout = TimeSpan.FromSeconds(5);
-        });
+            AllowedSchemes = new[] { "http", "https" },
+            MaxRetryAttempts = 0,                             // in-process peer: fail fast
+            RequestTimeout = TimeSpan.FromSeconds(5),
+            RetryBaseDelay = TimeSpan.FromMilliseconds(200),  // exponential backoff base (when retries are on)
+            CircuitBreakerFailureThreshold = 5,               // open the breaker after 5 straight failures...
+            CircuitBreakerOpenDuration = TimeSpan.FromSeconds(30), // ...and probe again after 30 s
+            MaxRedirectHops = 2,                              // 301/302/307/308 follow-cap (FR-TRN-07)
+            OutboundEndpointPolicy = new OutboundEndpointPolicy(), // the default SSRF stance, made visible
+        };
+        var transportServices = new ServiceCollection();
         transportServices.AddHttpClient(HttpDidCommTransport.HttpClientName)
             .ConfigurePrimaryHttpMessageHandler(_ => bobServer.CreateHandler());
         await using var transportSp = transportServices.BuildServiceProvider();
         var transport = new HttpDidCommTransport(
             transportSp.GetRequiredService<IHttpClientFactory>(),
-            transportSp.GetRequiredService<IOptions<HttpTransportOptions>>());
+            Options.Create(httpOptions));
+        // Every transport names the canonical URI scheme it speaks; the router matches a
+        // recipient's endpoint against CanHandle, which here also accepts plain http because
+        // AllowedSchemes above says so.
+        ctx.Narrator.Value("Transport.Scheme (canonical)", transport.Scheme);
         var router = new TransportRouter(new IDidCommTransport[] { transport });
+
+        // Every outbound transport also carries an SSRF policy: a DID document's serviceEndpoint
+        // is attacker-controlled text, so before bytes move, private/loopback/metadata addresses
+        // are refused (on by default; allowlist trusted internal hosts instead of turning it off).
+        ctx.Narrator.Step("The outbound SSRF guard: policy defaults, the address test, a refused endpoint.");
+        var policy = httpOptions.OutboundEndpointPolicy!;
+        ctx.Narrator.Value("Policy.BlockPrivateNetworks (default)", policy.BlockPrivateNetworks);
+        ctx.Narrator.Value("Policy.ResolveDnsNames (default)", policy.ResolveDnsNames);
+        var guard = new OutboundEndpointGuard(new OutboundEndpointPolicy());
+        ctx.Narrator.Value("IsPrivateOrReserved(10.0.0.1)",
+            OutboundEndpointGuard.IsPrivateOrReserved(System.Net.IPAddress.Parse("10.0.0.1")));
+        try
+        {
+            guard.Validate(new Uri("https://169.254.169.254/latest/meta-data")); // the classic cloud-metadata SSRF target
+            ctx.Narrator.Note("UNEXPECTED: the metadata endpoint was not refused.");
+        }
+        catch (TransportException ex)
+        {
+            ctx.Narrator.Value("Refused endpoint scheme (from the exception)", ex.Scheme);
+            ctx.Narrator.Value("HttpStatusCode (null — refused before any request)", ex.HttpStatusCode);
+        }
+        // ConnectAsync is the same classification applied at socket-connect time — the HTTP
+        // transport installs it as its dialer, which is what defeats DNS rebinding.
+        Func<System.Net.DnsEndPoint, CancellationToken, ValueTask<System.Net.Sockets.Socket>> guardedDialer = guard.ConnectAsync;
+        ctx.Narrator.Value("Guarded dialer wired", guardedDialer is not null);
 
         var secrets = ctx.ServiceProvider.GetRequiredService<ISecretsResolver>();
         var keyService = ctx.ServiceProvider.GetRequiredService<IDidKeyService>();
@@ -67,14 +104,28 @@ public static class Section_P_SendOverTransport
             .Build();
 
         var endpoint = new Uri(new Uri(bobServer.BaseAddress.ToString()), "/didcomm");
-        var sendResult = await aliceSender.SendAsync(message, new SendOptions(
+        var sendOptions = new SendOptions(
             Recipients: new[] { ctx.Bob.Did },
             From: ctx.Alice.Did,
-            ServiceEndpointOverride: endpoint));
+            ServiceEndpointOverride: endpoint);
+
+        // SendOptions mirrors PackEncryptedOptions (recipients, sender, optional inner signature,
+        // cipher, sender protection) plus the delivery-only extras — read it back like any record.
+        ctx.Narrator.Value("SendOptions.Recipients", string.Join(", ", sendOptions.Recipients));
+        ctx.Narrator.Value("SendOptions.From", sendOptions.From);
+        ctx.Narrator.Value("SendOptions.SignFrom (null ⇒ no inner signature)", sendOptions.SignFrom);
+        ctx.Narrator.Value("SendOptions.Enc (default cipher)", sendOptions.Enc);
+        ctx.Narrator.Value("SendOptions.ProtectSender", sendOptions.ProtectSender);
+        ctx.Narrator.Value("SendOptions.ServiceEndpointOverride", sendOptions.ServiceEndpointOverride);
+
+        var sendResult = await aliceSender.SendAsync(message, sendOptions);
 
         ctx.Narrator.Value("TransportEndpoint", sendResult.EndpointUsed);
         ctx.Narrator.Value("HttpStatusCode", sendResult.Transport.HttpStatusCode);
         ctx.Narrator.Value("Accepted", sendResult.Transport.Accepted);
+        // The result also hands back the exact envelope that went over the wire — log or persist
+        // it for retry/audit without packing twice.
+        ctx.Narrator.Value("Packed envelope bytes", sendResult.Packed.Message.Length);
 
         // Bob's receiver collected the unpacked message — confirm the original payload made it.
         var bobMessage = received.Single();

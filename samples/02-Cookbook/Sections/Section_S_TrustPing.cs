@@ -55,6 +55,15 @@ public static class Section_S_TrustPing
         ctx.Narrator.Value("Reply.Thid == ping.Id", outcome.Reply?.Thid == ping.Id);
         ctx.Narrator.Value("Reply.From / To", $"{outcome.Reply?.From} → {string.Join(",", outcome.Reply?.To ?? new List<string>())}");
 
+        // The handler is a plain class, not dispatcher magic. Construct one directly when you
+        // embed the protocol in your own pipeline instead of the dispatcher's — and
+        // CreateResponse is the same reply the handler just built, available as a one-liner
+        // for hand-rolled responders.
+        var standalone = new DidComm.Protocols.TrustPing.TrustPingHandler();
+        ctx.Narrator.Value("Standalone handler serves", standalone.ProtocolUri);
+        var manualReply = TrustPingApi.CreateResponse(unpacked.Message);
+        ctx.Narrator.Value("Manual CreateResponse.Thid == ping.Id", manualReply.Thid == ping.Id);
+
         // Round-trip the reply back to Alice so the section ends with a fully closed loop.
         var packedReply = (await ctx.Client.PackEncryptedAsync(outcome.Reply!, new PackEncryptedOptions(
             Recipients: new[] { ctx.Alice.Did }, From: ctx.Bob.Did))).Message;

@@ -9,6 +9,9 @@ namespace DidComm.Transports.WebSocket;
 /// Wires <see cref="WebSocketDidCommTransport"/> into the DI graph from the
 /// <see cref="DidCommBuilder"/> chain (Phase 5 / FR-TRN-09..11).
 /// </summary>
+/// <example>
+/// Registered in <c>samples/05-WebSocketChat</c> and <c>samples/02-Cookbook</c> (section R).
+/// </example>
 public static class WebSocketDidCommBuilderExtensions
 {
     /// <summary>

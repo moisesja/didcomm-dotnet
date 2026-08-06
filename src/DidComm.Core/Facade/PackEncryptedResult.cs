@@ -20,6 +20,9 @@ namespace DidComm.Facade;
 /// <param name="Message">The packed envelope (JWE / JWS / plaintext JSON, depending on composition). Hand this to a transport.</param>
 /// <param name="ServiceEndpoint">The transport URI to send <see cref="Message"/> to. Non-<c>null</c> when the facade resolved a route (i.e. <c>Forward = true</c>); <c>null</c> otherwise.</param>
 /// <param name="FallbackServiceEndpoints">Additional candidate URIs in preference order (FR-ROUTE-08 failover input for Phase 5 transports). Empty for non-forwarded packs and for forwarded packs whose recipient publishes only one endpoint.</param>
+/// <example>
+/// Inspected in <c>samples/02-Cookbook</c> (sections O and P — routing surfaces the endpoint on this result).
+/// </example>
 public sealed record PackEncryptedResult(
     string Message,
     string? ServiceEndpoint,

@@ -58,7 +58,8 @@ public static class ForwardMessage
         if (packedPayloads.Count == 0)
             throw new ArgumentException("A forward message MUST carry at least one packed payload (FR-ROUTE-01).", nameof(packedPayloads));
 
-        var builder = new MessageBuilder(idGenerator ?? UuidV4MessageIdGenerator.Instance)
+        var ids = idGenerator ?? UuidV4MessageIdGenerator.Instance;
+        var builder = new MessageBuilder(ids)
             .WithType(ForwardConstants.ForwardTypeUri)
             .WithTo(mediator)
             .WithBody(new JsonObject { ["next"] = next });
@@ -73,6 +74,11 @@ public static class ForwardMessage
 
             builder.WithAttachment(new Attachment
             {
+                // The spec leaves attachment 'id' optional and its routing example omits it, but
+                // didcomm-jvm's Attachment.parse rejects an attachment without one — so a forward
+                // that skips it is unroutable through a JVM mediator. Both reference
+                // implementations emit an id, and it costs a single identifier to stay routable.
+                Id = ids.NewId(),
                 MediaType = ForwardConstants.PayloadMediaType,
                 Data = new AttachmentData
                 {

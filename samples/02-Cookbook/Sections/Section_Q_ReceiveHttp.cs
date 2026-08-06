@@ -6,8 +6,14 @@ using System.Text.Json.Nodes;
 using DidComm.AspNetCore;
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.Protocols;
+using DidComm.Protocols.TrustPing;
 using DidComm.Resolution;
 using DidComm.Secrets;
+using DidComm.Threading;
+
+// L-014: alias the static TrustPing API class so the namespace import doesn't shadow it.
+using TrustPingApi = DidComm.Protocols.TrustPing.TrustPing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -85,6 +91,23 @@ public static class Section_Q_ReceiveHttp
             using var response = await http.SendAsync(oversize);
             ctx.Narrator.Value("Status", (int)response.StatusCode);
         }
+
+        // The pattern-only overload skips the inline callback entirely: each received message is
+        // dispatched straight to the registered protocol handlers (the inbox below registered
+        // Trust Ping). Post a ping at it and the dispatcher answers server-side.
+        ctx.Narrator.Step("Registry-aware endpoint: MapDidCommEndpoint(pattern) dispatches to handlers.");
+        var ping = TrustPingApi.CreatePing(from: ctx.Alice.Did, to: ctx.Bob.Did);
+        var packedPing = await aliceClient.PackEncryptedAsync(ping,
+            new PackEncryptedOptions(Recipients: new[] { ctx.Bob.Did }, From: ctx.Alice.Did));
+        using (var pingRequest = new HttpRequestMessage(HttpMethod.Post, "/didcomm-dispatch")
+               {
+                   Content = new StringContent(packedPing.Message),
+               })
+        {
+            pingRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/didcomm-encrypted+json");
+            using var response = await http.SendAsync(pingRequest);
+            ctx.Narrator.Value("Dispatched ping status", (int)response.StatusCode);
+        }
     }
 
     private static async Task<TestServer> BuildBobInboxAsync(
@@ -108,6 +131,14 @@ public static class Section_Q_ReceiveHttp
             sp.GetRequiredService<IServiceEndpointResolver>(),
             sp.GetRequiredService<IOptions<DidCommOptions>>().Value));
 
+        // For the pattern-only endpoint: the handlers the dispatcher will consult. This inbox
+        // answers Trust Ping and nothing else.
+        var registry = new ProtocolHandlerRegistry();
+        registry.Register(new TrustPingHandler());
+        builder.Services.AddSingleton(registry);
+        builder.Services.AddSingleton<IThreadStateStore>(new InMemoryThreadStateStore());
+        builder.Services.AddSingleton<ProtocolDispatcher>();
+
         var app = builder.Build();
         app.UseRouting();
         app.MapDidCommEndpoint("/didcomm", async (unpacked, ct) =>
@@ -115,6 +146,8 @@ public static class Section_Q_ReceiveHttp
             received.Add(unpacked);
             await Task.CompletedTask;
         });
+        // The registry-aware sibling: no callback — unpack, then dispatch to registered handlers.
+        app.MapDidCommEndpoint("/didcomm-dispatch");
         await app.StartAsync();
         return app.GetTestServer();
     }

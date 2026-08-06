@@ -1,6 +1,9 @@
 namespace DidComm.Protocols.Empty;
 
 /// <summary>Empty 1.0 protocol identifiers (FR-PROTO-06) — header-only messages used as ACKs.</summary>
+/// <example>
+/// Header-only transmission demonstrated in <c>samples/02-Cookbook</c> (section W).
+/// </example>
 public static class EmptyProtocol
 {
     /// <summary>Protocol identifier URI for Empty 1.0.</summary>

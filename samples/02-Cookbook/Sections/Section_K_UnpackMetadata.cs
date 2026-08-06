@@ -106,8 +106,23 @@ public static class Section_K_UnpackMetadata
         // Non-null means the controller rule really ran against the 'from' this message asserts.
         // Null would mean the envelope authenticated a key but claimed no identity to check it against.
         ctx.Narrator.Value("SignerKeyBinding.AuthorizedForDid", signerBinding?.AuthorizedForDid);
+        ctx.Narrator.Value("SignerKeyBinding.Kid",             signerBinding?.Kid);          // the exact verification method that verified
+        ctx.Narrator.Value("SignerKeyBinding.Relationship",    signerBinding?.Relationship); // which DID-document relationship authorized it
         ctx.Narrator.Value("SenderKeyBinding.KeyThumbprint",    result.SenderKeyBinding?.PublicKeyThumbprint);
         ctx.Narrator.Value("RecipientKeyBinding.KeyThumbprint", result.RecipientKeyBinding?.PublicKeyThumbprint);
+
+        // Bindings are values: two compare equal exactly when they attest the same key evidence
+        // (kid, DID, controller, relationship, thumbprint). So a binding you persisted earlier
+        // compares equal to one from a later unpack of the same envelope — that's how you pin a
+        // peer's key across messages — while the signing key and the encryption key of this very
+        // message compare different, because they are different keys of the same DID.
+        ctx.Narrator.Step("Compare key bindings by value.");
+        var again = await ctx.Client.UnpackAsync(packed);
+        ctx.Narrator.Value("Same envelope ⇒ equal signer binding",  again.SignerKeyBinding == result.SignerKeyBinding);
+        ctx.Narrator.Value("Signing key ≠ encryption key",          result.SignerKeyBinding != result.SenderKeyBinding);
+        ctx.Narrator.Value("Equals(binding) agrees",                signerBinding?.Equals(again.SignerKeyBinding));
+        ctx.Narrator.Value("Equals(object) agrees",                 signerBinding?.Equals((object?)again.SignerKeyBinding));
+        ctx.Narrator.Value("Equal bindings hash alike",             signerBinding?.GetHashCode() == again.SignerKeyBinding?.GetHashCode());
 
         ctx.Narrator.Note("Three flags are true at once because three layers stack: the outer JWE gives Encrypted+Authenticated, the inner JWS adds NonRepudiation.");
         ctx.Narrator.Note("Check the *KeyBinding properties, not just the flags, when a message's identity decides an authorization.");

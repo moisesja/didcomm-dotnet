@@ -6,6 +6,9 @@ namespace DidComm.Facade;
 /// Process-wide configuration knobs for <c>DidCommClient</c>. Registered as a singleton via
 /// <c>AddDidComm(...).Configure(...)</c>.
 /// </summary>
+/// <example>
+/// Configured in <c>samples/02-Cookbook</c> (section A — dependency-injection setup).
+/// </example>
 public sealed class DidCommOptions
 {
     /// <summary>

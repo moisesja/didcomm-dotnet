@@ -29,6 +29,9 @@ namespace DidComm.Protocols.Routing;
 /// transport sends the result to <see cref="ForwardProcessingResult.NextHop"/> as usual.
 /// </para>
 /// </remarks>
+/// <example>
+/// The mediator role — unwrap a forward, emit the onward payload — runs in <c>samples/04-MediatorAgent</c> and <c>samples/02-Cookbook</c> (section O).
+/// </example>
 public sealed class ForwardProcessor
 {
     private readonly DidCommClient _client;

@@ -33,6 +33,9 @@ namespace DidComm.Adapters.NetDid;
 /// Stores that key differently can pass a <c>kidToAlias</c> mapping to the constructor.
 /// </para>
 /// </remarks>
+/// <example>
+/// The net-did IKeyStore bridge is wired in <c>samples/08-Extensibility</c> and <c>samples/02-Cookbook</c> (section Y).
+/// </example>
 public sealed class NetDidKeyStoreSecretsResolver : ISecretsResolver, IOpaqueKeyResolver
 {
     private readonly IKeyStore _keyStore;

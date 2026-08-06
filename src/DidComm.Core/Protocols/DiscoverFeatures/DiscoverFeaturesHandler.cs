@@ -24,6 +24,9 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// </list>
 /// </para>
 /// </remarks>
+/// <example>
+/// Registered and queried in <c>samples/02-Cookbook</c> (section T) and <c>samples/05-WebSocketChat</c>.
+/// </example>
 public sealed class DiscoverFeaturesHandler : IProtocolHandler
 {
     private readonly IReadOnlyList<IFeatureProvider> _providers;

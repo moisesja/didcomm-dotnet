@@ -33,6 +33,9 @@ namespace DidComm.Protocols;
 /// constraint, not an identity-binding policy.
 /// </para>
 /// </remarks>
+/// <example>
+/// A custom <c>lets_do_lunch</c> handler is built in <c>samples/07-ProblemsAndProtocols</c> and <c>samples/02-Cookbook</c> (section X).
+/// </example>
 public interface IProtocolHandler
 {
     /// <summary>

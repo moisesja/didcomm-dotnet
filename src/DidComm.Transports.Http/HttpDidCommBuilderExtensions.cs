@@ -12,6 +12,9 @@ namespace DidComm.Transports.Http;
 /// Wires <see cref="HttpDidCommTransport"/> into the DI graph from the
 /// <see cref="DidCommBuilder"/> chain (Phase 5 / FR-TRN-01).
 /// </summary>
+/// <example>
+/// Registered in <c>samples/02-Cookbook</c> (section A) and used end-to-end in <c>samples/04-MediatorAgent</c>.
+/// </example>
 public static class HttpDidCommBuilderExtensions
 {
     /// <summary>

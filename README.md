@@ -3,7 +3,7 @@
 [![NuGet](https://img.shields.io/nuget/v/DidComm.Core.svg)](https://www.nuget.org/packages/DidComm.Core)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Status](https://img.shields.io/badge/phase%206-in%20progress-yellow.svg)](#roadmap)
+[![Status](https://img.shields.io/badge/phases%200--6-complete-brightgreen.svg)](#roadmap)
 [![Spec](https://img.shields.io/badge/spec-DIDComm%20v2.1-informational.svg)](https://identity.foundation/didcomm-messaging/spec/v2.1)
 
 A .NET 10 implementation of **DIDComm Messaging v2.1** — the [DIF](https://identity.foundation/) protocol for confidential, integrity-protected, optionally non-repudiable messaging between parties identified by Decentralized Identifiers (DIDs).
@@ -70,8 +70,8 @@ The 24 lines above are the body of [`samples/01-Quickstart`](samples/01-Quicksta
 
 ## Project status
 
-**Phases 0–5 complete; Phase 6 in progress.** The library has a public Pack / Unpack / Send
-surface (`DidCommClient`), DID resolution via [NetDid 3.0.0](https://github.com/moisesja/net-did),
+**Phases 0–6 complete.** The library has a public Pack / Unpack / Send
+surface (`DidCommClient`), DID resolution via [NetDid 3.1.0](https://github.com/moisesja/net-did),
 a consumer-supplied `ISecretsResolver` contract, the three protective envelope
 shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
 consistency including same-document key provenance, DID rotation via `from_prior`,
@@ -82,9 +82,11 @@ Discover Features, Empty, Report Problem, Trace (off by default), and Out-of-Ban
 the NuGet release pipeline. The DIDComm v2.1 Appendix C inbound interop gate passes for every
 vendored vector.
 
-**What Phase 6 still owes** (see [Roadmap](#roadmap)): the live cross-implementation interop
-harness, the remaining sample applications and the public-API coverage gate, and the
-observability/benchmark NFRs.
+Phase 6 also landed the live cross-implementation interop harness, the full sample set with an
+execution-based public-API coverage gate, and the observability and benchmark NFRs — see
+[Roadmap](#roadmap) for the per-item status and
+[`tools/interop-live/README.md`](tools/interop-live/README.md) for what each interop run actually
+executes.
 
 Shipped highlights:
 
@@ -177,9 +179,12 @@ didcomm-dotnet implements the messaging layer of [DIDComm Messaging v2.1](https:
 > **`did:web` is explicitly NOT supported.** This is a deliberate security policy (DD-08), not a messaging-conformance gap. See PRD §1.1 and §15.
 
 The conformance gate is the spec's own Appendix C test vectors — which pass today — plus a live
-cross-implementation harness round-tripping against the SICPA reference implementations in Python,
-JVM, and Rust. **That live harness is not built yet** (FR-IX-03/04/05/06/08); every fixture in the
-suite is currently `source: spec-v2.1`.
+cross-implementation harness (FR-IX-03/04/05/06/08). The harness round-trips against SICPA's
+didcomm-python and didcomm-jvm in both directions and feeds our published vectors to each for
+external verification (`tools/interop-live`); didcomm-rust participates as harvested static
+vectors only, not a live leg. Fixtures come tagged by `source` — `spec-v2.1` for the Appendix C
+set, plus vectors harvested from the reference implementations and the `didcomm-dotnet` set this
+repo publishes.
 
 ## Package map
 
@@ -290,16 +295,25 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 | Sample | What it shows |
 |---|---|
 | [`samples/01-Quickstart`](samples/01-Quickstart/) | The quickstart above: two identities, authcrypt round-trip, unpack metadata |
-| [`samples/02-Cookbook`](samples/02-Cookbook/) | One narrated section per API task — run `dotnet run --project samples/02-Cookbook` |
+| [`samples/02-Cookbook`](samples/02-Cookbook/) | One narrated section per API task (all 28 PRD §14.2 letters) — run `dotnet run --project samples/02-Cookbook` |
+| [`samples/03-EnvelopesAndMessages`](samples/03-EnvelopesAndMessages/) | Every envelope composition and content-encryption alg, multi-recipient, attachments, threading + ACKs, DID rotation |
+| [`samples/04-MediatorAgent`](samples/04-MediatorAgent/) | ASP.NET Core mediator + Routing 2.0 relay; Alice→Mediator→Bob over HTTP with DID-published routingKeys |
+| [`samples/05-WebSocketChat`](samples/05-WebSocketChat/) | Two agents over WebSocket: trust-ping, discover-features, chat, reconnect after drop |
+| [`samples/06-OutOfBand`](samples/06-OutOfBand/) | OOB invitation → URL/QR → decode → `pthid`-correlated response |
+| [`samples/07-ProblemsAndProtocols`](samples/07-ProblemsAndProtocols/) | Problem-report taxonomy, escalation, cascade guard, empty-ACK, custom `lets_do_lunch` handler |
+| [`samples/08-Extensibility`](samples/08-Extensibility/) | Custom (mock-KMS) secrets resolver, the net-did `IKeyStore` bridge, custom transport |
+| [`samples/09-NetDidIntegration`](samples/09-NetDidIntegration/) | did:key / did:peer minting, Ed25519→X25519 derivation, the deliberate `did:web` rejection |
+| [`samples/10-ProfilesAndI18n`](samples/10-ProfilesAndI18n/) | `accept` profile negotiation and `lang`/`accept-lang` (the spec's chess example) |
 
-The Cookbook currently covers **15 of the 28** PRD §14.2 tasks: K (unpack metadata), M (threading &
-ACKs), N (rotation), O (routing via a mediator), P (send over a transport), Q (receive over HTTP),
-R (receive over WebSocket), S (Trust Ping), T (Discover Features), U (Report Problem), V (Out-of-Band
-invitation), W (Empty message), X (custom handler), AA (net-did + `did:web` rejection), and BB
-(profiles & i18n). Still to be written: A–J and L (DI setup, the message builder, each pack form,
-content-encryption choice, multi-recipient, attachments), Y (custom KMS resolver), and Z (custom
-transport). The remaining sample applications of PRD §14.3 (03–10) and the FR-DX-01 public-API
-coverage gate are also outstanding.
+Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-01 coverage gate
+(`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
+packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
+six shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
+intersects real execution hits with the public surface. Currently **572 of 585 members are proven
+to execute**; the remaining 13 have no executable code at all (enums, const holders, one static
+readonly field) and are itemized in the test output. The execution gate's allowlist is empty; a
+cheaper metadata-reference gate runs alongside it as a first check and carries 12 justified
+entries for members no sample references directly.
 
 ## Specifications
 
@@ -324,7 +338,7 @@ didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PR
 | **3** | Pack/Unpack facade, NetDid integration, secrets, DID rotation | ✅ Complete |
 | **4** | Routing & mediation (Forward protocol, mediator-as-DID-endpoint, rewrapping) | ✅ Complete |
 | **5** | Transports (HTTPS + ASP.NET Core receive, WebSocket) | ✅ Complete |
-| **6** | Protocols, cross-message concerns, live interop, samples, release | 🟡 In progress |
+| **6** | Protocols, cross-message concerns, live interop, samples, release | ✅ Complete |
 
 Phase 6, in detail:
 
@@ -332,12 +346,13 @@ Phase 6, in detail:
 |---|---|
 | Built-in protocols, OOB 2.0, threading/ACKs, profiles & i18n | ✅ Done |
 | NuGet release pipeline (tag-driven, gated) | ✅ Done |
-| Live interop harness — round-trip against the SICPA Python/JVM CLIs, publish our own vectors, nightly job (FR-IX-03..06, FR-IX-08) | ❌ Not started |
-| Sample applications 03–10 and cookbook tasks A–J/L/Y/Z (FR-DX-04, §14.3) | ❌ Not started |
-| Public-API coverage gate + §14.4 matrix (FR-DX-01, FR-DX-09) | ❌ Not started |
-| OpenTelemetry spans with redaction (NFR-04) and the BenchmarkDotNet suite (NFR-07) | ❌ Not started — `OpenTelemetry.Api` is referenced but no instrumentation exists yet |
+| Fixture submodule + harvested vectors + published `didcomm-dotnet` vectors (FR-IX-03/06) | ✅ Done — [didcomm-dotnet-fixtures](https://github.com/moisesja/didcomm-dotnet-fixtures) |
+| Live interop harness — both directions vs didcomm-python and didcomm-jvm over `did:peer`, nightly job (FR-IX-04/05/08) | ✅ Done — `tools/interop-live` |
+| Sample applications 03–10 and cookbook tasks A–J/L/Y/Z (FR-DX-04, §14.3) | ✅ Done |
+| Public-API coverage gate + §14.4 matrix (FR-DX-01, FR-DX-09) | ✅ Done — 572/585 members proven to execute; 13 have no executable code |
+| ActivitySource spans with redaction audit (NFR-04/05) and the BenchmarkDotNet suite (NFR-07) | ✅ Done |
 
-The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, cross-implementation interop matrix passes (both inbound static vectors and live round-trip against SICPA Python/JVM/Rust), every public API member demonstrated by a runnable sample, and the README quickstart works unmodified.
+The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, the cross-implementation interop matrix passes — inbound static vectors harvested from SICPA Python, JVM and Rust, plus **live** round-trips against didcomm-python and didcomm-jvm (didcomm-rust is static-vector only; there is no live Rust leg) — every public API member exercised by a runnable sample, and the README quickstart works unmodified. Cells a counterpart genuinely cannot run are declared `n/a` with a falsifiable cause and are listed in [`tools/interop-live/README.md`](tools/interop-live/README.md); an `n/a` that stops being true is deleted, not renewed.
 
 ## Repository layout
 
@@ -357,7 +372,14 @@ didcomm-dotnet/
 ├── samples/
 │   ├── _shared/                                   # Narrator + PeerIdentityFactory (did:peer:2 via NetDid)
 │   ├── 01-Quickstart/                             # the README quickstart, compiled and CI-verified
-│   └── 02-Cookbook/                               # one narrated section per PRD §14.2 API task
+│   ├── 02-Cookbook/                               # one narrated section per PRD §14.2 API task (A–BB)
+│   └── 03…10                                      # the §14.3 sample applications (see the Samples table)
+├── tools/
+│   ├── FixtureGen/                                # emits the published `source: didcomm-dotnet` vectors (FR-IX-06)
+│   ├── InteropCli/                                # mint/pack/unpack CLI for the live harness
+│   └── interop-live/                              # cross-impl harness vs didcomm-python / didcomm-jvm (FR-IX-04/05)
+├── benchmarks/
+│   └── DidComm.Benchmarks/                        # NFR-07 BenchmarkDotNet suite (results in its README)
 ├── docs/
 │   └── didcomm-dotnet_PRD.md                      # normative product requirements
 ├── tasks/                                         # phased todo files + lessons.md
@@ -366,10 +388,11 @@ didcomm-dotnet/
 └── DidComm.sln
 ```
 
-> The Phase 2 fixtures submodule migration (planned at PRD §13.3) is still
-> pending — Appendix A / B / C vectors currently live inline under
-> `tests/DidComm.InteropTests/fixtures/`. They'll move to a dedicated
-> `didcomm-dotnet-fixtures` repo before Phase 6 closes.
+> Interop fixtures (Appendix A/B/C, harvested didcomm-rust/-python/-jvm vectors, our own
+> published set) live in the standalone
+> [`didcomm-dotnet-fixtures`](https://github.com/moisesja/didcomm-dotnet-fixtures) repository,
+> wired in as a git submodule at `tests/DidComm.InteropTests/fixtures` (PRD §13.3). Clone with
+> `--recurse-submodules`, or run `git submodule update --init` after a plain clone.
 
 ## Contributing
 

@@ -29,6 +29,9 @@ namespace DidComm.Protocols.ProblemReport;
 /// <param name="Sorter">Single-character severity sorter — <c>e</c> or <c>w</c>.</param>
 /// <param name="Scope">Scope token — <c>p</c> / <c>m</c> / state-name.</param>
 /// <param name="Descriptor">Dot-joined descriptor tail (e.g. <c>xfer.cant-use-endpoint</c>).</param>
+/// <example>
+/// The taxonomy (sorter/scope/descriptor, prefix matching) is explored in <c>samples/07-ProblemsAndProtocols</c> and <c>samples/02-Cookbook</c> (section U).
+/// </example>
 public sealed record ProblemCode(string Sorter, string Scope, string Descriptor)
 {
     /// <summary>The full code string (<see cref="Sorter"/>.<see cref="Scope"/>.<see cref="Descriptor"/>).</summary>

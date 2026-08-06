@@ -8,6 +8,9 @@ namespace DidComm.Protocols.Empty;
 /// returns <c>null</c> — by spec there is nothing more to say once an empty is received — and
 /// merely presents the protocol as "supported" to the registry / Discover Features (6.2b).
 /// </summary>
+/// <example>
+/// Registered in <c>samples/02-Cookbook</c> (section W).
+/// </example>
 public sealed class EmptyHandler : IProtocolHandler
 {
     /// <inheritdoc />

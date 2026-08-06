@@ -38,7 +38,18 @@ public static class Program
         ctx.Narrator.Step($"Minted bob   = {Truncate(ctx.Bob.Did)}");
         ctx.Narrator.Step($"Minted alice2 (rotation target) = {Truncate(ctx.Alice2.Did)}");
 
+        await Section_A_DependencyInjection.RunAsync(ctx);
+        await Section_B_BuildAMessage.RunAsync(ctx);
+        await Section_C_PackPlaintext.RunAsync(ctx);
+        await Section_D_PackSigned.RunAsync(ctx);
+        await Section_E_PackAnoncrypt.RunAsync(ctx);
+        await Section_F_PackAuthcrypt.RunAsync(ctx);
+        await Section_G_SignThenEncrypt.RunAsync(ctx);
+        await Section_H_ProtectSender.RunAsync(ctx);
+        await Section_I_ContentEncryption.RunAsync(ctx);
+        await Section_J_MultiRecipient.RunAsync(ctx);
         await Section_K_UnpackMetadata.RunAsync(ctx);
+        await Section_L_Attachments.RunAsync(ctx);
         await Section_M_ThreadingAndAcks.RunAsync(ctx);
         await Section_N_FromPriorRotation.RunAsync(ctx);
         await Section_O_RoutingViaMediator.RunAsync(ctx);
@@ -51,6 +62,8 @@ public static class Program
         await Section_V_OutOfBandInvitation.RunAsync(ctx);
         await Section_W_EmptyMessage.RunAsync(ctx);
         await Section_X_CustomHandler.RunAsync(ctx);
+        await Section_Y_CustomSecretsResolver.RunAsync(ctx);
+        await Section_Z_CustomTransport.RunAsync(ctx);
         await Section_AA_NetDidAndDidWebRejection.RunAsync(ctx);
         await Section_BB_ProfilesAndI18n.RunAsync(ctx);
     }

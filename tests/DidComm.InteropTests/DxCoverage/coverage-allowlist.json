@@ -1,0 +1,53 @@
+{
+  "$comment": "FR-DX-01 allowlist: public members that are genuinely demonstrated by the samples but invisible in compiled IL/metadata, or that cannot appear there at all. Every entry needs a one-line reason; prefer closing a gap with a real sample demonstration over adding an entry. The gate fails on stale entries (member gone, or now demonstrated).",
+  "entries": [
+    {
+      "member": "DidComm.Core!DidComm.Diagnostics.DidCommDiagnostics",
+      "reason": "Static holder whose only public member is the ActivitySourceName const; const use IL-inlines the literal, so no sample reference to the type can ever appear in metadata."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Profiles.Profiles",
+      "reason": "Const-only profile-identifier holder; sample 10 uses Profiles.DidCommV2 et al., but consts IL-inline so the type leaves no metadata reference."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Empty.EmptyProtocol",
+      "reason": "Const-only protocol-URI holder; the cookbook's Empty sections use its MessageType/ProtocolUri consts, which IL-inline."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardConstants",
+      "reason": "Const-only routing-URI holder; sample 04 uses ForwardConstants.PayloadMediaType, which IL-inlines."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Trace.Trace",
+      "reason": "Const-only trace-protocol holder; sample 07 uses Trace.HeaderName/ReportUriField, which IL-inline."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Facade.PackEncryptedResult::.ctor(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>)",
+      "reason": "Library-constructed result record; samples read every property but honest sample code never fabricates a pack result. Public only because it is the record's primary constructor."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Facade.UnpackResult::.ctor(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Jose.EnvelopeKind>,System.Boolean,System.Boolean,System.Boolean,System.Boolean,System.String,System.String,System.String,System.String,System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Protocols.Rotation.FromPriorClaims)",
+      "reason": "Library-constructed result record (14-arg primary ctor); a sample constructing one would fabricate verification evidence. Arguably could be non-public, but records require a public primary ctor for their value semantics."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.SendResult::.ctor(DidComm.Facade.PackEncryptedResult,DidComm.Transports.TransportResult,System.Uri)",
+      "reason": "Library-constructed result record; SendAsync is the only honest producer, and samples read every property."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardProcessingResult::.ctor(System.String,System.Byte[],System.Nullable`1<System.Int64>,System.Nullable`1<System.TimeSpan>)",
+      "reason": "Library-constructed result record; ForwardProcessor.ProcessAsync is the only honest producer (sample 04 reads every property)."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.DispatchOutcome::.ctor(DidComm.Protocols.DispatchResult,DidComm.Messages.Message,DidComm.Protocols.IProtocolHandler)",
+      "reason": "Library-constructed dispatch result; samples read Result/Reply/Handler but fabricating an outcome in a sample would be dishonest. Candidate for internal ctor in a future major."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.InboundObservation::.ctor(DidComm.Messages.Message,System.Boolean,System.Boolean,System.Boolean,System.Boolean,System.String,System.String)",
+      "reason": "FromUnpackResult is the supported construction path (demonstrated in sample 07); the positional ctor exists as the record's primary ctor and deliberately cannot assert RecipientAddressing (#61)."
+    },
+    {
+      "member": "DidComm.Transports.WebSocket!DidComm.Transports.WebSocket.WebSocketLifecycleEventArgs::.ctor(DidComm.Transports.WebSocket.WebSocketLifecycleEventKind,System.Uri,System.Exception)",
+      "reason": "Raised by the WebSocket transport; consumers subscribe and read (demonstrated in the cookbook and sample 05) — constructing the args in a sample would fake a lifecycle event."
+    }
+  ]
+}

@@ -11,6 +11,9 @@ namespace DidComm.Messages;
 /// present it MUST consist of unreserved URI characters because attachment ids compose URIs
 /// (FR-ATT-04).
 /// </summary>
+/// <example>
+/// Demonstrated in <c>samples/02-Cookbook</c> (section L — inline JSON, base64, and linked-with-hash attachments) and <c>samples/03-EnvelopesAndMessages</c>.
+/// </example>
 public sealed class Attachment
 {
     /// <summary>Attachment identifier (OPTIONAL); when present MUST be unreserved URI characters per FR-ATT-04.</summary>

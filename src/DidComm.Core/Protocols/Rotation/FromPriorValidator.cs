@@ -12,9 +12,11 @@ namespace DidComm.Protocols.Rotation;
 
 /// <summary>
 /// Verifies a DIDComm <c>from_prior</c> JWT against the prior DID's <c>authentication</c>
-/// relationship and extracts the claims (FR-ROT-01..02). Out-of-order pre-rotation rejection
-/// (FR-ROT-05) is the application's responsibility — the validator surfaces the iat / iss
-/// pair so a higher layer can compare against its known-active state.
+/// relationship and extracts the claims (FR-ROT-01..02). A JWT that omits <c>sub</c> is the
+/// relationship-termination form (FR-ROT-06) and is only valid on a message without
+/// <c>from</c>. Out-of-order pre-rotation rejection (FR-ROT-05) is the application's
+/// responsibility — the validator surfaces the iat / iss pair so a higher layer can compare
+/// against its known-active state.
 /// </summary>
 /// <remarks>
 /// When the supplied key service implements <see cref="IDidKeyBindingService"/>, authority and
@@ -26,33 +28,44 @@ public static class FromPriorValidator
 {
     /// <summary>Validate a from_prior JWT against <paramref name="currentSenderDid"/> and return its claims.</summary>
     /// <param name="jwt">Compact-serialized JWT.</param>
-    /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity).</param>
+    /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity), or <c>null</c> when the message carries no <c>from</c> — required for the relationship-termination form (FR-ROT-06), whose JWT omits <c>sub</c>.</param>
     /// <param name="keyService">DID resolver used to authorize the JWT signer key under <c>iss</c>.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ProtocolException">When the JWT is malformed.</exception>
-    /// <exception cref="ConsistencyException">When the signature is invalid, the kid is not authorized in the iss DID, or sub does not match <paramref name="currentSenderDid"/> (FR-ROT-02).</exception>
+    /// <exception cref="ConsistencyException">When the signature is invalid, the kid is not authorized in the iss DID, sub does not match <paramref name="currentSenderDid"/> (FR-ROT-02), or the sub/from presence combination is invalid (a termination JWT on a message with <c>from</c>, or a rotation JWT on a message without it — FR-ROT-06/FR-ROT-02).</exception>
+    /// <example>
+    /// <code>
+    /// // Rotation: sub == message.from (FR-ROT-02).
+    /// var rotation = await FromPriorValidator.ValidateAsync(jwt, message.From!, keyService);
+    /// // Termination: the JWT omits sub and the message has no from (FR-ROT-06).
+    /// var termination = await FromPriorValidator.ValidateAsync(jwt, currentSenderDid: null, keyService);
+    /// // termination.IsTermination == true
+    /// </code>
+    /// </example>
     public static Task<FromPriorClaims> ValidateAsync(
         string jwt,
-        string currentSenderDid,
+        string? currentSenderDid,
         IDidKeyService keyService,
         CancellationToken ct = default)
         => ValidateAsync(jwt, currentSenderDid, keyService, new JoseCryptoProvider(), ct);
 
     /// <summary>Test seam: validate with an explicit crypto provider.</summary>
     /// <param name="jwt">Compact-serialized JWT.</param>
-    /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity).</param>
+    /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity); <c>null</c> for the FR-ROT-06 termination form.</param>
     /// <param name="keyService">DID resolver used to authorize the JWT signer key under <c>iss</c>.</param>
     /// <param name="cryptoProvider">Crypto provider for signature verification.</param>
     /// <param name="ct">Cancellation token.</param>
     internal static async Task<FromPriorClaims> ValidateAsync(
         string jwt,
-        string currentSenderDid,
+        string? currentSenderDid,
         IDidKeyService keyService,
         JoseCryptoProvider cryptoProvider,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(jwt);
-        ArgumentException.ThrowIfNullOrEmpty(currentSenderDid);
+        // null means "the message has no 'from'" (FR-ROT-06 termination); empty is a caller bug.
+        if (currentSenderDid is not null)
+            ArgumentException.ThrowIfNullOrEmpty(currentSenderDid);
         ArgumentNullException.ThrowIfNull(keyService);
         ArgumentNullException.ThrowIfNull(cryptoProvider);
 
@@ -91,13 +104,33 @@ public static class FromPriorValidator
             using var claimsDoc = JsonDocument.Parse(claimsJson, DidCommJson.StrictDocument);
             var iss = claimsDoc.RootElement.GetProperty("iss").GetString()
                 ?? throw new ProtocolException("from_prior JWT 'iss' is missing or null.");
-            var sub = claimsDoc.RootElement.GetProperty("sub").GetString()
-                ?? throw new ProtocolException("from_prior JWT 'sub' is missing or null.");
+            // 'sub' ABSENT is the relationship-termination form (FR-ROT-06); an explicit JSON null
+            // is neither a rotation nor the omit-sub wire shape, so it stays malformed.
+            string? sub = null;
+            if (claimsDoc.RootElement.TryGetProperty("sub", out var subEl))
+            {
+                sub = subEl.GetString()
+                    ?? throw new ProtocolException("from_prior JWT 'sub' is null (omit it entirely for termination, FR-ROT-06).");
+            }
             var iat = claimsDoc.RootElement.GetProperty("iat").GetInt64();
-            long? exp = claimsDoc.RootElement.TryGetProperty("exp", out var expEl) && expEl.ValueKind == JsonValueKind.Number
-                ? expEl.GetInt64() : null;
-            long? nbf = claimsDoc.RootElement.TryGetProperty("nbf", out var nbfEl) && nbfEl.ValueKind == JsonValueKind.Number
-                ? nbfEl.GetInt64() : null;
+            // exp/nbf, when present, MUST be numeric (RFC 7519 NumericDate). A present-but-wrong-kind
+            // value (e.g. "exp": "1700000000") must NOT be silently dropped: that would fail OPEN —
+            // the issuer bounded the token's replay window and a lenient read would erase the bound,
+            // turning a freshness-limited rotation JWT into a non-expiring one (FR-ROT-05).
+            long? exp = null;
+            if (claimsDoc.RootElement.TryGetProperty("exp", out var expEl))
+            {
+                if (expEl.ValueKind != JsonValueKind.Number)
+                    throw new ProtocolException("from_prior JWT 'exp' is not a numeric date (RFC 7519 §4.1.4).");
+                exp = expEl.GetInt64();
+            }
+            long? nbf = null;
+            if (claimsDoc.RootElement.TryGetProperty("nbf", out var nbfEl))
+            {
+                if (nbfEl.ValueKind != JsonValueKind.Number)
+                    throw new ProtocolException("from_prior JWT 'nbf' is not a numeric date (RFC 7519 §4.1.5).");
+                nbf = nbfEl.GetInt64();
+            }
             claims = new FromPriorClaims(Sub: sub, Iss: iss, Iat: iat, Exp: exp, Nbf: nbf);
         }
         catch (Exception ex)
@@ -110,9 +143,26 @@ public static class FromPriorValidator
         if (string.IsNullOrEmpty(alg) || string.IsNullOrEmpty(kid))
             throw new ProtocolException("from_prior JWT header is missing 'alg' or 'kid'.");
 
-        // FR-ROT-02 — sub MUST equal the message 'from' DID.
-        if (!string.Equals(claims.Sub, currentSenderDid, StringComparison.Ordinal))
+        if (claims.Sub is null)
         {
+            // FR-ROT-06 — termination form: the JWT omits 'sub' and the carrying message MUST have
+            // no 'from'. A termination JWT on a message that names a sender is contradictory (it
+            // asserts both "no successor identity" and a concrete sender) and is rejected.
+            if (currentSenderDid is not null)
+            {
+                throw new ConsistencyException(
+                    $"from_prior omits 'sub' (relationship termination, FR-ROT-06) but the message carries 'from' ({currentSenderDid}). Drop.");
+            }
+        }
+        else if (currentSenderDid is null)
+        {
+            // A rotation JWT (sub present) on a message without 'from' has nothing to bind sub to.
+            throw new ConsistencyException(
+                $"from_prior 'sub' ({claims.Sub}) is present but the message has no 'from' to match (FR-ROT-02).");
+        }
+        else if (!string.Equals(claims.Sub, currentSenderDid, StringComparison.Ordinal))
+        {
+            // FR-ROT-02 — sub MUST equal the message 'from' DID.
             throw new ConsistencyException(
                 $"from_prior 'sub' ({claims.Sub}) does not match message 'from' ({currentSenderDid}) (FR-ROT-02).");
         }

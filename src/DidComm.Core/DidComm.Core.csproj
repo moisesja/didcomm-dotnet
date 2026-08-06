@@ -23,9 +23,11 @@
          NetCrypto ISigner — DataProofs' JWS layer signs through ISigner, not raw key bytes). -->
     <PackageReference Include="NetCrypto" />
 
-    <!-- Observability hooks (NFR-04/05/06). -->
+    <!-- Observability hooks (NFR-04/05/06). Spans come from the in-box
+         System.Diagnostics.ActivitySource (see Diagnostics/DidCommDiagnostics.cs) — the
+         library deliberately references no OpenTelemetry package; consumers wire their own
+         SDK/exporters and just AddSource("didcomm-dotnet"). -->
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
-    <PackageReference Include="OpenTelemetry.Api" />
 
     <!-- Source Link (NFR-08). -->
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />

@@ -4,6 +4,9 @@ namespace DidComm.Transports;
 /// Picks the right <see cref="IDidCommTransport"/> for a target URI (FR-TRN-01) and hands off
 /// the send. Registered as a singleton; injected into <see cref="Facade.DidCommClient"/>.
 /// </summary>
+/// <example>
+/// Exercised implicitly by <c>samples/02-Cookbook</c> (section P) — the facade routes by endpoint scheme.
+/// </example>
 public interface ITransportRouter
 {
     /// <summary>

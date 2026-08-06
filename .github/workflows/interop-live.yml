@@ -1,0 +1,61 @@
+# Live cross-implementation interop harness (PRD §13.6 FR-IX-04/05, cadence per FR-IX-08:
+# nightly + on release + on demand). Round-trips didcomm-dotnet ↔ SICPA didcomm-python and
+# didcomm-jvm over did:peer:2 in both directions via tools/interop-live/run-all.sh, uploads
+# the per-cell PASS/FAIL/N-A summary as an artifact, and fails on any FAIL cell.
+#
+# Offline interop (the static fixture suite) gates every PR in ci.yml — this workflow is the
+# live half only, kept off the PR path because it exercises third-party runtimes.
+name: Live interop
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # nightly, off-peak UTC
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  live-interop:
+    name: live round-trips (python + jvm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true # didcomm-dotnet-fixtures (PRD §13.3)
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Setup Python (python leg counterpart)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9' # the interpreter the pinned didcomm==0.3.2 stack is validated on
+
+      - name: Setup Java (jvm leg counterpart)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17' # didcomm-jvm 0.3.2 targets 8; validated on 17 (CI) and 25 (local)
+
+      - name: Run live interop harness
+        run: |
+          export INTEROP_SUMMARY_DIR="$RUNNER_TEMP/interop-summary"
+          set +e
+          bash tools/interop-live/run-all.sh
+          status=$?
+          cat "$INTEROP_SUMMARY_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          exit $status
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-interop-summary
+          path: ${{ runner.temp }}/interop-summary/
+          if-no-files-found: warn

@@ -38,6 +38,9 @@ public static class Section_U_ProblemReport
         ctx.Narrator.Value("Sorter / Scope / Descriptor", $"{parsed.Sorter} / {parsed.Scope} / {parsed.Descriptor}");
         ctx.Narrator.Value("IsError / IsProtocolScoped", $"{parsed.IsError} / {parsed.IsProtocolScoped}");
         ctx.Narrator.Value("StartsWith(\"e.p.xfer\")", parsed.StartsWith("e.p.xfer"));
+        // Codes also compose from their three taxonomy parts — the same record Parse produces.
+        var composed = new ProblemCode(Sorter: "w", Scope: "m", Descriptor: "xfer.slow");
+        ctx.Narrator.Value("Composed code", composed.Value);
 
         // 2. Build a problem-report with placeholder interpolation.
         var failingThread = "lunch-thread-1";
@@ -49,6 +52,10 @@ public static class Section_U_ProblemReport
             comment: "Could not deliver to {1} for {2}.",
             args: new[] { "https://agents.r.us/inbox", ctx.Bob.Did });
         ctx.Narrator.Step("Alice builds a problem-report with {n} interpolation.");
+        // The raw pieces are readable separately — the {n} template and the args it interpolates —
+        // for when you localize or log them rather than render the combined string.
+        ctx.Narrator.Value("Raw comment template", ProblemReportApi.ReadComment(report));
+        ctx.Narrator.Value("Args", string.Join(", ", ProblemReportApi.ReadArgs(report)));
         ctx.Narrator.Value("Interpolated comment", ProblemReportApi.RenderComment(report));
 
         // 3. Escalation helper — warnings → errors with preserved scope.
@@ -64,7 +71,13 @@ public static class Section_U_ProblemReport
         // 4. Cascade guard — drop the threshold to 2 so we see the trip in 3 messages.
         // We build a per-section dispatcher with a tighter ProblemReportOptions to keep the
         // demo from polluting the shared cookbook state.
-        var tightHandler = new ProblemReportHandler(Options.Create(new ProblemReportOptions { CascadeThreshold = 2 }));
+        // Options validate on demand (the handler also validates at construction), and the
+        // cascade budget lives in its own bounded store — pass one explicitly to share a single
+        // budget across handlers, or to size its entry cap for your host.
+        var tightOptions = new ProblemReportOptions { CascadeThreshold = 2 };
+        tightOptions.Validate();
+        var budget = new CascadeBudgetStore(maxEntries: 256);
+        var tightHandler = new ProblemReportHandler(Options.Create(tightOptions), budget);
         var localRegistry = new ProtocolHandlerRegistry();
         localRegistry.Register(tightHandler);
         var localStore = new InMemoryThreadStateStore();

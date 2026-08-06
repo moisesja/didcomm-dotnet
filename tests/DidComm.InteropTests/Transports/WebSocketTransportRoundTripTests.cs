@@ -217,6 +217,12 @@ public sealed class WebSocketTransportRoundTripTests
         // an untyped fault existing. It stays because the property it pins is the transport's, not the
         // contract's: the receive loop drops ANY failing message and keeps serving, independent of what
         // unpack throws — a socket may carry other peers' traffic, so one hostile frame must not end it.
+        //
+        // The non-string kid has to be planted where the JWS parser reads it, and that moved with
+        // DataProofsDotnet.Jose 1.3.0: a single signer now serializes General, so the unprotected header
+        // is signatures[0].header rather than the root "header" of the old Flattened form. Planted at the
+        // root it is an unread stray property and the frame verifies — which the final count assertion
+        // catches, since a delivered "hostile" frame makes it 3 rather than 2.
         var (server, received) = await BuildServerAsync();
 
         var actors = SpecActorRegistry.LoadDefault();
@@ -225,7 +231,7 @@ public sealed class WebSocketTransportRoundTripTests
 
         var signed = await aliceClient.PackSignedAsync(NewProposal(), "did:example:alice");
         var hostile = System.Text.Json.Nodes.JsonNode.Parse(signed)!.AsObject();
-        hostile["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
+        hostile["signatures"]!.AsArray()[0]!["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = 123 };
 
         var valid = await aliceClient.PackEncryptedAsync(NewProposal(), new PackEncryptedOptions(
             Recipients: new[] { "did:example:bob" },

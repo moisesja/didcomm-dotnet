@@ -14,6 +14,9 @@ namespace DidComm.Messages;
 /// <c>this</c> to allow chaining; <see cref="Build"/> runs <see cref="Message.Validate"/> so a
 /// successful <c>Build()</c> guarantees the returned message satisfies the §4 structural rules.
 /// </remarks>
+/// <example>
+/// Demonstrated in <c>samples/02-Cookbook</c> (section B — build a message).
+/// </example>
 public sealed class MessageBuilder
 {
     private readonly Message _message;

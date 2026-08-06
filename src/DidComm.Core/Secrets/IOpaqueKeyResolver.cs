@@ -40,6 +40,9 @@ namespace DidComm.Secrets;
 /// reject pad, issue #35). Implementations whose lookup latency is content-independent are unaffected.
 /// </para>
 /// </remarks>
+/// <example>
+/// Implemented by the mock KMS in <c>samples/08-Extensibility</c> — keys that sign/derive without ever surfacing private material.
+/// </example>
 public interface IOpaqueKeyResolver
 {
     /// <summary>

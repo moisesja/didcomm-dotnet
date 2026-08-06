@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.EnvelopesAndMessages</RootNamespace>
+    <AssemblyName>DidComm.Samples.EnvelopesAndMessages</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet envelope tour — every envelope composition (plaintext / signed / anoncrypt / authcrypt / sign-then-encrypt / protect-sender), each content-encryption algorithm, multi-recipient packing, attachments, threading + ACKs, and DID rotation via from_prior, printing each packed form and the unpacked metadata (PRD §14.3 sample 03, tasks C–N).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>

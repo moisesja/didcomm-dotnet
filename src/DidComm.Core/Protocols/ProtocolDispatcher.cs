@@ -1,3 +1,4 @@
+using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Protocols.Trace;
@@ -23,6 +24,9 @@ namespace DidComm.Protocols;
 /// transport-agnostic also makes it directly testable from unit tests without spinning up an
 /// ASP.NET Core host.
 /// </remarks>
+/// <example>
+/// Driven by the receive endpoints in <c>samples/04-MediatorAgent</c> and the custom-handler section of <c>samples/02-Cookbook</c> (section X).
+/// </example>
 public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 {
     private readonly ProtocolHandlerRegistry _registry;
@@ -120,6 +124,16 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(received);
         ArgumentNullException.ThrowIfNull(options);
 
+        // NFR-05 handle span: message type URI + dispatch outcome only (NFR-04) — never the
+        // body or a reply's contents. Zero-cost when nothing listens.
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.HandleActivity);
+        // Tag via a nullable local: a synthetic UnpackResult can carry a runtime-null Message
+        // (a fault the snapshot paths below null-check and handle), and touching
+        // received.Message with '?.' here would flip its flow state to maybe-null for the
+        // rest of the method without changing the runtime contract.
+        var messageForTag = (Message?)received.Message;
+        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, messageForTag?.Type);
+
         InboundMessageSnapshot? snapshot = null;
         if (_correlators.Length > 0 || _observers is not null)
         {
@@ -157,7 +171,14 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 
         try
         {
-            return await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+            var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+            activity?.SetTag(DidCommDiagnostics.DispatchResultTag, outcome.Result.ToString());
+            return outcome;
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            throw;
         }
         finally
         {

@@ -28,6 +28,9 @@ namespace DidComm.Resolution;
 /// <see cref="DidComm.Facade.DidCommClient.UnpackAsync"/> for the host support boundary.
 /// </para>
 /// </remarks>
+/// <example>
+/// Wired via net-did in <c>samples/09-NetDidIntegration</c> and <c>samples/02-Cookbook</c> (section AA).
+/// </example>
 public interface IDidKeyService
 {
     /// <summary>

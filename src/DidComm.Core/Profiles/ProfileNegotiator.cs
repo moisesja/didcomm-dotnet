@@ -6,6 +6,9 @@ namespace DidComm.Profiles;
 /// <see cref="Profiles.DidCommV2"/>, so negotiation reduces to: "is v2 (or its known
 /// aliases) in the peer's list?" (FR-PROF-01/02).
 /// </summary>
+/// <example>
+/// Accept-based profile selection runs in <c>samples/10-ProfilesAndI18n</c> and <c>samples/02-Cookbook</c> (section BB).
+/// </example>
 public static class ProfileNegotiator
 {
     private static readonly string[] SupportedProfiles =

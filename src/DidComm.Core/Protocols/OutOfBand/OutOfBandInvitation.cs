@@ -16,6 +16,9 @@ namespace DidComm.Protocols.OutOfBand;
 /// <see cref="OutOfBand.FromPlaintext"/>. The recipient's response correlates back to this
 /// invitation by setting its <c>pthid</c> to <see cref="Id"/> (FR-OOB-03).
 /// </remarks>
+/// <example>
+/// Built and decoded in <c>samples/06-OutOfBand</c> and <c>samples/02-Cookbook</c> (section V).
+/// </example>
 public sealed class OutOfBandInvitation
 {
     /// <summary>Wrap an already-built invitation message. Callers normally use the <see cref="OutOfBand"/> factories.</summary>

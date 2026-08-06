@@ -20,6 +20,9 @@ namespace DidComm.Extensions.DependencyInjection;
 /// <see cref="DidCommServiceCollectionExtensions.AddDidComm"/>; each method registers a piece
 /// of the facade graph and returns <c>this</c> so calls can chain.
 /// </summary>
+/// <example>
+/// Every builder method is exercised in <c>samples/02-Cookbook</c> (section A) and <c>samples/08-Extensibility</c>.
+/// </example>
 public sealed class DidCommBuilder
 {
     /// <summary>The underlying service collection — exposed so consumers can register supporting services without leaving the builder.</summary>

@@ -1,0 +1,4 @@
+{
+  "$comment": "FR-DX-01 execution allowlist: execution-measurable public members that legitimately cannot (or should not) run inside the in-process sample runs. Every entry needs a one-line reason; prefer making a sample genuinely invoke the member over adding an entry. The gate fails on stale entries (member gone, not measurable, or now executing).",
+  "entries": []
+}

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>FixtureGen</RootNamespace>
+    <AssemblyName>FixtureGen</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>FR-IX-06 fixture generator: packs the canonical Appendix C.1 payload from Alice to Bob across every composition/algorithm didcomm-dotnet supports (PRD §13.5) and emits source=didcomm-dotnet manifests + packed envelopes into a didcomm-dotnet-fixtures tree, so other ecosystems can test against this library. Usage: dotnet run --project tools/FixtureGen -- --fixtures &lt;fixtures-root&gt;</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+  </ItemGroup>
+
+</Project>
