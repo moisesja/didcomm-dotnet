@@ -56,15 +56,15 @@ The §13.5 conformance matrix, as exercised live:
 
 ## Current results — python leg (executed 2026-08-05, macOS arm64, CPython 3.9.6)
 
-`didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0` ↔ `didcomm-python 0.3.2`.
-**Executed 55 · passed 55 · failed 0 · declared n/a 1.**
+`didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0 + NetCrypto 1.5.0` ↔ `didcomm-python 0.3.2`.
+**Executed 56 · passed 56 · failed 0 · declared n/a 0.** Exit code 0.
 
 | composition | enc | routing | dotnet→python | python→dotnet |
 |---|---|---|---|---|
 | plaintext | — | direct | PASS | PASS |
 | signed EdDSA | — | direct | PASS | PASS |
 | signed ES256 | — | direct | PASS | PASS |
-| signed ES256K | — | direct | PASS | **N-A¹** |
+| signed ES256K | — | direct | PASS | PASS¹ |
 | anoncrypt X25519 | A256CBC-HS512 | direct | PASS | PASS |
 | anoncrypt X25519 | A256GCM | direct | PASS | PASS |
 | anoncrypt X25519 | XC20P | direct | PASS | PASS |
@@ -87,14 +87,15 @@ FR-IX-06 (didcomm-python verifying the 16 published `source: didcomm-dotnet` vec
 the driver boundary, so a green row means an external implementation really can read the file
 this repo ships.
 
-Every cell above is an unshimmed cross-library round-trip. The driver's former
-Flattened→General re-serialization has been **removed** (see ² below), so the counterpart sees
-exactly the bytes didcomm-dotnet emits.
+Every cell above is an unshimmed cross-library round-trip, and the leg declares **no `n/a`
+cells at all** — every §13.5 dimension this pair supports executes for real. The driver's
+former Flattened→General re-serialization has been **removed** (see ² below), so the
+counterpart sees exactly the bytes didcomm-dotnet emits.
 
 ## Current results — jvm leg (executed 2026-08-05, macOS arm64, JDK 25.0.2)
 
 `didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0` ↔ `didcomm-jvm 0.3.2`.
-**Executed 54 · passed 53 · failed 1 · declared n/a 2.**
+**Executed 53 · passed 53 · failed 0 · declared n/a 3.**
 
 | composition | enc | routing | dotnet→jvm | jvm→dotnet |
 |---|---|---|---|---|
@@ -120,11 +121,11 @@ exactly the bytes didcomm-dotnet emits.
 | authcrypt | A256CBC-HS512 | 2 mediators | PASS | PASS |
 
 FR-IX-06 (didcomm-jvm verifying the 16 published `source: didcomm-dotnet` vectors):
-**15 / 16 PASS**, each handed over byte-for-byte as published. The single failure is
-`signed-es256k`, for the JDK curve gap in ³ — and it is the **only** reason `run-jvm-leg.sh`
-exits nonzero today. Unlike the matrix, the vector loop has no `n/a` mechanism, so a
-counterpart-JRE limitation currently reads as a red leg. Worth a decision before the nightly
-is trusted as a signal.
+**15 / 15 runnable PASS**, each handed over byte-for-byte as published, with `signed-es256k`
+declared `n/a` for the JDK curve gap in ³. The vector loop has the same declared-`n/a`
+mechanism as the matrix (`vector_na_reason`), scoped to that one vector by exact name — any
+other vector failure still fails the leg, verified by corrupting a second vector's ciphertext
+and confirming exit 1.
 
 Two didcomm-jvm API limits shape the table rather than appearing as failures. It packs to a
 single recipient **DID** (`PackEncryptedParams.to` is a `String`), so the 3-recipient cell
@@ -134,19 +135,35 @@ explicit message rather than silently addressing only the first. Forward onions 
 peeled with didcomm-jvm's own `Routing.wrapInForward` / `unpackForward`, `routingKeys[0]`
 outermost — verified hop by hop in both directions.
 
-### ¹ Declared `n/a` — inbound ES256K, high-S signatures (ours, crypto-dotnet#23)
+### ¹ Resolved — inbound ES256K high-S signatures (crypto-dotnet#23, NetCrypto 1.5.0)
+
+Kept as history because this is the model case of an `n/a` that named a **falsifiable** cause
+and was then falsified by a fix rather than by argument.
 
 didcomm-python emits secp256k1 signatures with a high-S scalar in roughly half of runs. **RFC
-8812 imposes no low-S requirement, so those signatures are perfectly valid and didcomm-python
-is not at fault.** didcomm-dotnet is the strict side: `NBitcoin.Secp256k1` inherits
-libsecp256k1's anti-malleability policy in `DefaultCryptoProvider.VerifySecp256k1`, so any
-high-S signature fails verification. Reproduced over 8 consecutive runs with exact
-correlation — every high-S signature rejected, every low-S one accepted — and confirmed
-independently by malleating S to n−S on a NetCrypto 1.4.0 signature, which then verifies
-`False`.
+8812 imposes no low-S requirement, so those signatures are valid and didcomm-python was never
+at fault.** didcomm-dotnet was the strict side: `NBitcoin.Secp256k1` inherits libsecp256k1's
+anti-malleability policy, so `DefaultCryptoProvider.VerifySecp256k1` rejected every high-S
+signature. Originally reproduced over 8 consecutive runs with exact correlation (every high-S
+rejected, every low-S accepted), and confirmed independently by malleating S to n−S on a
+NetCrypto 1.4.0 signature, which then verified `False`.
 
-Filed as **crypto-dotnet#23**. The reverse direction (didcomm-dotnet signs ES256K →
-didcomm-python verifies) passes, because we always emit low-S.
+**NetCrypto 1.5.0 fixes it** (crypto-dotnet#23): `VerifySecp256k1` normalizes `(r, n−s)` to
+low-S before handing the signature to the NBitcoin backend. Re-measured on 1.5.0 over 20 runs,
+classifying each signature by S parity before verifying:
+
+| S parity | signatures produced | verified |
+|---|---|---|
+| high-S | 8 | **8** (was 0) |
+| low-S | 12 | 12 |
+
+The `n/a` is retired and the cell executes. A single green run would not have been evidence
+here — high-S occurs only ~50% of the time, so the parity split above is what actually
+demonstrates the fix.
+
+The JVM leg keeps its own, unrelated ES256K `n/a`: JDK 16 removed secp256k1 from SunEC and
+didcomm-jvm 0.3.2 bundles no BouncyCastle, so the counterpart stack cannot do the curve at all
+(didcomm-dotnet#71).
 
 ### ² Resolved — JWS serialization and `kid` placement (dataproofs-dotnet#17, #25)
 
@@ -204,9 +221,19 @@ probes confirmed the chain end to end — `ECKey.parse` and `toECPublicKey()` bo
 secp256k1 (nimbus carries its own domain parameters), and the failure appears only when the
 JCA `Signature` object is driven.
 
-This also gates the `signed-es256k` published vector in FR-IX-06, which is why the jvm leg
-exits nonzero. Running it on a JDK ≤ 15, or adding BouncyCastle to `jvm/fetch-deps.sh`, would
-close it — both are counterpart-stack changes, not didcomm-dotnet changes.
+This also gates the `signed-es256k` published vector in FR-IX-06, which carries the same
+declared `n/a` (`vector_na_reason` in `run-jvm-leg.sh`, matched on that exact name). Adding
+BouncyCastle to `jvm/fetch-deps.sh` was rejected deliberately: it would test against a
+*modified* didcomm-jvm rather than the real 0.3.2 a peer would run, trading a true negative
+for a comfortable green. Pinning the leg to a JDK ≤ 15 would hold the whole run hostage to an
+EOL runtime for one cell. Leaving it permanently red was rejected too — a red that can never
+go green trains readers to ignore the signal, and then a real regression arrives and nobody
+looks.
+
+**The n/a is falsifiable and must not outlive its cause.** If BouncyCastle is ever added, the
+counterpart fixes this, or the leg moves to a JDK that still carries secp256k1, this vector
+and both ES256K matrix cells MUST start passing — and these three `n/a` declarations must then
+be deleted. A green run with them still in place is a harness bug, not a pass.
 
 ## Pinned versions
 

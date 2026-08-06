@@ -748,10 +748,15 @@ An `n/a` is a **declaration, not a skip**: it MUST name the counterpart behaviou
 
 | Dimension / cell | Source | `n/a` reason (evidence) |
 |---|---|---|
-| inbound `signed` ES256K | didcomm-python | didcomm-python emits **RFC 8812-valid** secp256k1 signatures with a high-S scalar in ~50% of runs. RFC 8812 imposes no low-S requirement, so those signatures are conformant and didcomm-python is not at fault; **didcomm-dotnet is the strict side** — `NBitcoin.Secp256k1` inherits libsecp256k1's anti-malleability policy in `DefaultCryptoProvider.VerifySecp256k1` and rejects them. Ours by dependency, filed as **crypto-dotnet#23**. |
+| inbound `signed` ES256K | didcomm-jvm | JDK 16 removed secp256k1 from SunEC and didcomm-jvm 0.3.2 bundles no BouncyCastle, so the counterpart stack cannot perform the curve at all (validated on JDK 25). A JRE curve-availability gap, not an envelope-format issue — the vendored spec vector fails identically. Tracked at **didcomm-dotnet#71**. |
 | P-384 / P-521 key agreement (live) | didcomm-python, didcomm-jvm | Not reachable through a two-key `did:peer:2` live identity; covered instead by the offline `source: didcomm-dotnet` and `source: spec-v2.1` fixture vectors, which do exercise both curves. |
 
-An `n/a` is retired the moment its stated cause is gone — **by execution, not by inference**. Two entries were retired this way once `DataProofsDotnet.Jose` 1.3.0 shipped (`kid` in the unprotected per-signature header; General JSON serialization at every signer count): outbound `signed` and outbound `anoncrypt(sign)`. Both were re-run live against didcomm-python on 1.3.0 and pass, so the rows are gone rather than annotated — see `tools/interop-live/README.md` for the recorded run.
+An `n/a` is retired the moment its stated cause is gone — **by execution, not by inference**. Three entries have been retired this way, each because the cause it named turned out to be falsifiable and was then falsified:
+
+- outbound `signed` and outbound `anoncrypt(sign)` — `DataProofsDotnet.Jose` 1.3.0 moved `kid` to the unprotected per-signature header and emits General JSON serialization at every signer count (dataproofs-dotnet#17, #25).
+- inbound `signed` ES256K against didcomm-python — `NetCrypto` 1.5.0 normalizes `(r, n−s)` to low-S before verification (crypto-dotnet#23), so RFC 8812-valid high-S signatures now verify. Re-measured by S parity rather than by run count, since high-S occurs only ~50% of the time: 8/8 high-S and 12/12 low-S verified.
+
+All three were re-run live against didcomm-python and pass, so the rows are gone rather than annotated. The python leg now declares **no `n/a` cells**; see `tools/interop-live/README.md` for the recorded run.
 
 ### 13.6 Cross-implementation harness (interop FRs)
 

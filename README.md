@@ -70,7 +70,7 @@ The 24 lines above are the body of [`samples/01-Quickstart`](samples/01-Quicksta
 
 ## Project status
 
-**Phases 0–5 complete; Phase 6 in progress.** The library has a public Pack / Unpack / Send
+**Phases 0–6 complete.** The library has a public Pack / Unpack / Send
 surface (`DidCommClient`), DID resolution via [NetDid 3.0.0](https://github.com/moisesja/net-did),
 a consumer-supplied `ISecretsResolver` contract, the three protective envelope
 shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
@@ -82,9 +82,11 @@ Discover Features, Empty, Report Problem, Trace (off by default), and Out-of-Ban
 the NuGet release pipeline. The DIDComm v2.1 Appendix C inbound interop gate passes for every
 vendored vector.
 
-**What Phase 6 still owes** (see [Roadmap](#roadmap)): the live cross-implementation interop
-harness, the remaining sample applications and the public-API coverage gate, and the
-observability/benchmark NFRs.
+Phase 6 also landed the live cross-implementation interop harness, the full sample set with an
+execution-based public-API coverage gate, and the observability and benchmark NFRs — see
+[Roadmap](#roadmap) for the per-item status and
+[`tools/interop-live/README.md`](tools/interop-live/README.md) for what each interop run actually
+executes.
 
 Shipped highlights:
 
@@ -301,8 +303,13 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 | [`samples/10-ProfilesAndI18n`](samples/10-ProfilesAndI18n/) | `accept` profile negotiation and `lang`/`accept-lang` (the spec's chess example) |
 
 Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-01 coverage gate
-(`tests/DidComm.InteropTests/DxCoverage/`) fails the build if any public member of the shipped
-packages is not demonstrated by at least one sample — currently **0 undemonstrated members**.
+(`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
+packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
+six shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
+intersects real execution hits with the public surface. Currently **572 of 585 members are proven
+to execute**; the remaining 13 have no executable code at all (enums, const holders, one static
+readonly field) and are itemized in the test output. Nothing is allowlisted. A cheaper
+metadata-reference gate runs alongside it as a first check.
 
 ## Specifications
 
@@ -338,10 +345,10 @@ Phase 6, in detail:
 | Fixture submodule + harvested vectors + published `didcomm-dotnet` vectors (FR-IX-03/06) | ✅ Done — [didcomm-dotnet-fixtures](https://github.com/moisesja/didcomm-dotnet-fixtures) |
 | Live interop harness — both directions vs didcomm-python and didcomm-jvm over `did:peer`, nightly job (FR-IX-04/05/08) | ✅ Done — `tools/interop-live` |
 | Sample applications 03–10 and cookbook tasks A–J/L/Y/Z (FR-DX-04, §14.3) | ✅ Done |
-| Public-API coverage gate + §14.4 matrix (FR-DX-01, FR-DX-09) | ✅ Done — 0 undemonstrated members |
+| Public-API coverage gate + §14.4 matrix (FR-DX-01, FR-DX-09) | ✅ Done — 572/585 members proven to execute; 13 have no executable code |
 | ActivitySource spans with redaction audit (NFR-04/05) and the BenchmarkDotNet suite (NFR-07) | ✅ Done |
 
-The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, cross-implementation interop matrix passes (both inbound static vectors and live round-trip against SICPA Python/JVM/Rust), every public API member demonstrated by a runnable sample, and the README quickstart works unmodified.
+The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, the cross-implementation interop matrix passes — inbound static vectors harvested from SICPA Python, JVM and Rust, plus **live** round-trips against didcomm-python and didcomm-jvm (didcomm-rust is static-vector only; there is no live Rust leg) — every public API member exercised by a runnable sample, and the README quickstart works unmodified. Cells a counterpart genuinely cannot run are declared `n/a` with a falsifiable cause and are listed in [`tools/interop-live/README.md`](tools/interop-live/README.md); an `n/a` that stops being true is deleted, not renewed.
 
 ## Repository layout
 

@@ -203,9 +203,19 @@ which counterpart gaps remain open, is recorded in `tools/interop-live/README.md
 
 ### Changed — dependency refresh
 
+- **NetCrypto 1.4.0 → 1.5.0** — the secp256k1 verify path rejected high-S ECDSA signatures,
+  inheriting libsecp256k1's Bitcoin-oriented policy through NBitcoin.Secp256k1. RFC 8812 §3.2
+  defines an ES256K signature as `R‖S` and imposes no low-S rule, so didcomm-python's signatures
+  are conformant and were being reported as invalid — indistinguishable from tampering. Fixed
+  upstream (crypto-dotnet#23) rather than behind a local decorator, because the same rejection
+  affected every NetCrypto consumer. Retiring the interop `n/a` needed more than a green cell:
+  inbound ES256K failed only about half the time, since a low-S signature passes either way, so
+  it was retired by classifying 20 signatures by S parity before verifying — 8 of 8 high-S now
+  verify, against 0 of 8 on 1.4.0.
 - **NetDid 3.0.0 → 3.1.0** (all five packages). An additive minor: it still depends on
-  NetCrypto 1.4.0 and on Microsoft.Extensions.* 10.0.8 (below the 10.0.10 pins here), so the
-  direct and transitive graphs stay in agreement — no downgrade, no source change.
+  NetCrypto (now resolved to 1.5.0 by the pin above) and on Microsoft.Extensions.* 10.0.8 (below
+  the 10.0.10 pins here), so the direct and transitive graphs stay in agreement — no downgrade,
+  no source change.
 - **Microsoft.SourceLink.GitHub 8.0.0 → 10.0.301** — build-only (`PrivateAssets="All"`, never
   shipped); the 10.0.x line is the one that tracks the net10.0 SDK this repo builds on.
 - The test stack (Test.Sdk, xunit.runner.visualstudio, NSubstitute, coverlet, FluentAssertions)

@@ -119,20 +119,19 @@ CELLS=(
 na_reason() { # $1=direction $2=mode $3=ids → reason or empty
     local direction="$1" mode="$2" ids="$3"
 
-    # NOTE: outbound anoncrypt(sign) used to be N-A here — didcomm-python parses only the
-    # General JWS serialization, and the inner Flattened JWS didcomm-dotnet emitted sat inside
-    # the ciphertext where no wire-level shim could reach it. DataProofsDotnet.Jose 1.3.0 emits
-    # General at every signer count, so that cause is gone and the cell now runs (and passes).
-
-    # ES256K inbound: didcomm-python emits RFC 8812-valid signatures with a high-S scalar in
-    # roughly half of runs. RFC 8812 imposes NO low-S requirement, so those signatures are
-    # correct — didcomm-dotnet is the strict side: NBitcoin.Secp256k1 inherits libsecp256k1's
-    # anti-malleability policy in DefaultCryptoProvider.VerifySecp256k1, so it rejects any
-    # high-S signature. Ours by dependency, filed as crypto-dotnet#23; not a counterpart defect.
-    if [ "$direction" = "inbound" ] && [ "$ids" = "es256k" ]; then
-        echo "didcomm-dotnet cannot verify RFC 8812-valid high-S secp256k1 signatures (NBitcoin.Secp256k1 low-S policy in DefaultCryptoProvider.VerifySecp256k1, crypto-dotnet#23); didcomm-python emits high-S in ~50% of runs and is conformant in doing so"
-        return
-    fi
+    # This leg currently declares NO N-A cells: every §13.5 dimension the pair supports runs
+    # for real. Two entries lived here and were retired once their stated cause was falsified,
+    # which is the whole point of naming a falsifiable cause (see README.md):
+    #
+    #   outbound anoncrypt(sign) — didcomm-python parses only the General JWS serialization and
+    #     the inner Flattened JWS didcomm-dotnet emitted sat inside the ciphertext, unreachable
+    #     by any wire-level shim. DataProofsDotnet.Jose 1.3.0 emits General at every signer
+    #     count, so the cell now runs and passes.
+    #   inbound signed ES256K — didcomm-python emits RFC 8812-valid high-S secp256k1
+    #     signatures (~50% of runs) and didcomm-dotnet rejected them, inheriting libsecp256k1's
+    #     anti-malleability policy. NetCrypto 1.5.0 (crypto-dotnet#23) normalizes (r, n-s) to
+    #     low-S before verification, so the cell now runs and passes for both S parities.
+    :
 }
 
 # ── per-cell execution ────────────────────────────────────────────────────────────────────

@@ -247,9 +247,34 @@ run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=ro
 # A secrets + Appendix B DID documents vendored in the fixtures tree. This is the FR-IX-06
 # acceptance criterion ("a published fixture set decrypts/verifies with at least one external
 # impl") executed rather than asserted.
+
+# Declared n/a for a single published vector, on the same terms as the matrix's na_reason:
+# an exact name match, never a family or a wildcard, and a falsifiable stated cause.
+vector_na_reason() { # $1=vector basename → reason or empty
+    # The counterpart JRE cannot do secp256k1 AT ALL: JDK 16 removed it from SunEC and
+    # didcomm-jvm 0.3.2 ships no BouncyCastle. On verify, nimbus's ECDSAVerifier CATCHES the
+    # resulting "java.security.SignatureException: Curve not supported" and returns false
+    # instead of throwing, so didcomm-jvm reports a valid ES256K signature as
+    # "MalformedMessageException: Invalid signature" (JWS.kt:81).
+    #
+    # The CONTROL is what makes this falsifiable rather than a convenient excuse: the
+    # DIDComm-published spec vector packed/spec/test-signed-didcomm-message-alice-key-3.json
+    # — not our bytes — fails identically through the same code path, while its key-1 (EdDSA)
+    # and key-2 (ES256) siblings verify clean. If a BouncyCastle provider is ever added, the
+    # counterpart fixes this, or the leg moves to a JDK that still carries secp256k1, this
+    # vector MUST start passing and this n/a must be deleted. A green run with this n/a still
+    # in place is a bug in the harness, not a pass.
+    if [ "$1" = "signed-es256k" ]; then
+        echo "JDK 16 removed secp256k1 from SunEC and didcomm-jvm 0.3.2 ships no BouncyCastle, so nimbus swallows SignatureException: Curve not supported and reports a valid ES256K signature as invalid; control: the spec's own packed/spec/test-signed-didcomm-message-alice-key-3.json fails identically while its EdDSA/ES256 siblings verify clean"
+        return
+    fi
+}
+
 verify_vectors() {
     VECTOR_ROWS=()
     VECTOR_FAILURES=0
+    VECTOR_NA=0
+    VECTOR_NOTES=()
     local packed_dir="$FIXTURES/packed/didcomm-dotnet"
     if [ ! -d "$packed_dir" ]; then
         echo "no published vectors at $packed_dir (fixtures submodule not checked out?)" >&2
@@ -259,6 +284,13 @@ verify_vectors() {
     for vector in "$packed_dir"/*.json; do
         local name; name="$(basename "$vector" .json)"
         local log="$WORK/vector-$name.log"
+        local reason; reason="$(vector_na_reason "$name")"
+        if [ -n "$reason" ]; then
+            VECTOR_ROWS+=("$name|N-A*|$reason")
+            VECTOR_NA=$((VECTOR_NA + 1))
+            VECTOR_NOTES+=("vector $name: $reason")
+            continue
+        fi
         if "${PEER[@]}" verify-fixture --packed "$vector" \
                 --diddocs "$FIXTURES/diddocs/spec" \
                 --secrets "$FIXTURES/secrets/bob.json,$FIXTURES/secrets/alice.json" \
@@ -327,7 +359,11 @@ for row in "${VECTOR_ROWS[@]+"${VECTOR_ROWS[@]}"}"; do
     printf '%-28s %s\n' "$name" "$result"
 done
 FAILURES=$((FAILURES + VECTOR_FAILURES))
-EXECUTED=$((EXECUTED + ${#VECTOR_ROWS[@]}))
+# Declared-n/a vectors are counted as n/a, not as executed — same bookkeeping as the matrix,
+# so the tally never claims coverage the run did not actually have.
+EXECUTED=$((EXECUTED + ${#VECTOR_ROWS[@]} - VECTOR_NA))
+NA_COUNT=$((NA_COUNT + VECTOR_NA))
+if [ "${#VECTOR_NOTES[@]}" -gt 0 ]; then NOTES+=("${VECTOR_NOTES[@]}"); fi
 
 {
     echo
