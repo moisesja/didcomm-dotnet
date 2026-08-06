@@ -30,17 +30,20 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 - `tools/InteropCli` (mint/pack/unpack over the real facade + net-did `did:peer`) driven by
   `tools/interop-live`: version-frozen Python (`didcomm==0.3.2`) and JVM
-  (`org.didcommx:didcomm:0.3.2`, SHA-256-pinned jars) legs round-tripping every supported
-  §13.5 composition both directions. Proven locally: 30/36 matrix cells pass as genuine
-  unshimmed cross-library round-trips.
+  (`org.didcommx:didcomm:0.3.2`, SHA-256-pinned jars) legs round-tripping the §13.5 matrix in
+  both directions — 20 compositions each way, plus external verification of the published
+  vectors. Executed, unshimmed, and green: python 56/56 with no declared `n/a`; jvm 53/53 with
+  three declared `n/a` (all secp256k1, a JDK curve gap — see below).
 - `.github/workflows/interop-live.yml`: nightly + on-release + manual, with a per-cell summary
   artifact; offline interop continues to gate every PR (FR-IX-08).
-- Conformance findings from the live runs, documented in `tools/interop-live/README.md`:
-  (a) both reference libs reject Flattened JWS despite the spec requiring both forms be
-  processable — counterpart gap, harness re-serializes losslessly and loudly; (b) a REAL
-  didcomm-dotnet defect — `kid` duplicated into protected AND unprotected JWS headers violates
-  RFC 7515 §7.2 disjointness (root cause upstream in `DataProofsDotnet.Jose` `JwsBuilder`),
-  so didcomm-jvm cannot verify our signed envelopes until fixed upstream.
+- Conformance findings from the live runs, documented in `tools/interop-live/README.md`. The
+  harness earned its keep: it surfaced three didcomm-dotnet defects that no amount of
+  self-round-tripping would have — the JWS `kid` was duplicated across the protected and
+  unprotected headers (RFC 7515 §7.2; dataproofs-dotnet#17), then briefly placed protected-only
+  which is not the DIDComm shape (dataproofs-dotnet#25), and forward attachments carried no `id`
+  so didcomm-jvm could not route them. All three are fixed and those cells now execute and pass.
+  The one remaining `n/a` (ES256K against didcomm-jvm) is a JDK/nimbus curve gap, tracked at #71
+  with a falsification condition and a spec-vector control.
 
 ### Added — straggler FRs (FR-ROT-06, FR-I18N-04, FR-SIG-05, FR-TRN-12)
 
@@ -164,14 +167,19 @@ by a regression test written red-first — the test fails against the code it re
   one, which made our forward onion unroutable through a JVM mediator. Both reference
   implementations emit one, and `ForwardMessage` now does too. Found by the live interop harness,
   and confirmed fixed against didcomm-jvm.
-- **`DataProofsDotnet.Jose` 1.1.1 → 1.2.1 — the duplicated JWS `kid`.** Up to 1.1.1 the signer's
+- **`DataProofsDotnet.Jose` 1.1.1 → 1.3.0 — the JWS `kid` header shape.** Up to 1.1.1 the signer's
   `kid` was written into *both* the protected and the unprotected per-signature header, violating
   RFC 7515 §7.2's requirement that the two be disjoint; nimbus — and therefore didcomm-jvm — rejects
-  such a JWS outright. Filed and fixed upstream as dataproofs-dotnet#17; a regression test here
-  asserts the per-signature header parameter sets are disjoint, so the shape cannot return through a
-  future dependency move. The published vector set was regenerated as a consequence, since its
-  signed envelopes carry that header. **Signed cross-implementation round-trips still do not work** —
-  `kid` placement is still being finalized upstream, tracked in dataproofs-dotnet#25.
+  such a JWS outright. Filed and fixed upstream as dataproofs-dotnet#17. The first fix moved `kid`
+  to the protected header only, which is disjoint but *not* the DIDComm shape — Appendix C and both
+  SICPA implementations carry it in the unprotected per-signature header — so that briefly took
+  outbound signed interop from one working counterpart to none, and was corrected as
+  dataproofs-dotnet#25 (unprotected-only, shipped in **DataProofsDotnet.Jose 1.3.0**, which also
+  emits the General JWS serialization at every signer count). A regression test here asserts both
+  properties at once — sets disjoint *and* `kid` unprotected — and is red on both historical
+  shapes. The published vector set was regenerated on 1.3.0. **Signed cross-implementation
+  round-trips now work**: both legs verify them, and external verification under didcomm-jvm went
+  from 12/16 to 15/15 runnable vectors.
 
 ### Changed — the public-API coverage gate now measures execution, not reference
 
@@ -220,8 +228,9 @@ which counterpart gaps remain open, is recorded in `tools/interop-live/README.md
   shipped); the 10.0.x line is the one that tracks the net10.0 SDK this repo builds on.
 - The test stack (Test.Sdk, xunit.runner.visualstudio, NSubstitute, coverlet, FluentAssertions)
   stays pinned on purpose — FluentAssertions in particular is held at 7.0.0 to avoid the 8.x
-  Xceed relicensing (paid for commercial use). NetCrypto (1.4.0) is already latest;
-  DataProofsDotnet.Jose moved 1.1.1 → 1.2.1 for the RFC 7515 §7.2 fix described above.
+  Xceed relicensing (paid for commercial use). **DataProofsDotnet.Jose 1.1.1 → 1.3.0** carries the
+  JWS `kid` fixes described above (dataproofs-dotnet#17 then #25) and emits General JWS at every
+  signer count; **NetCrypto 1.4.0 → 1.5.0** is the high-S ES256K verify fix, both detailed above.
 
 ### Known PRD drift (PRD is the target; flagged, not silently patched)
 

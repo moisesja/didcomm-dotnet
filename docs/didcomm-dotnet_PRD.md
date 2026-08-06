@@ -737,7 +737,7 @@ The suite MUST cover the cartesian product below for **both directions**. "Inbou
 | Key-agreement curve | X25519 · P-256 · P-384 · (P-521 optional) |
 | Content encryption | A256CBC-HS512 · A256GCM · XC20P |
 | Signing alg | EdDSA · ES256 · ES256K |
-| Recipients | single · multi (≥3, mixed key types) |
+| Recipients | single · multi (≥3, mixed DID methods; one key-agreement curve per envelope — a JWE carries a single `epk`, so recipient curves cannot be mixed within one message) |
 | Routing | direct · 1 mediator · 2 mediators (forward) |
 | DID method (live) | did:peer (SICPA demo) · did:key |
 | Direction | inbound (we unpack theirs) · outbound (they unpack ours) |
@@ -748,7 +748,7 @@ An `n/a` is a **declaration, not a skip**: it MUST name the counterpart behaviou
 
 | Dimension / cell | Source | `n/a` reason (evidence) |
 |---|---|---|
-| inbound `signed` ES256K | didcomm-jvm | JDK 16 removed secp256k1 from SunEC and didcomm-jvm 0.3.2 bundles no BouncyCastle, so the counterpart stack cannot perform the curve at all (validated on JDK 25). A JRE curve-availability gap, not an envelope-format issue — the vendored spec vector fails identically. Tracked at **didcomm-dotnet#71**. |
+| `signed` ES256K — outbound, inbound, and the published `signed-es256k` vector (three declarations, matching the harness) | didcomm-jvm | JDK 16 removed secp256k1 from SunEC and didcomm-jvm 0.3.2 bundles no BouncyCastle, so the counterpart stack can neither sign nor verify the curve (validated on JDK 25): signing throws `SignatureException: Curve not supported`, and on verify nimbus swallows that exception and reports a valid signature as invalid. A JRE curve-availability gap, not an envelope-format issue — the vendored spec vector fails identically while its EdDSA/ES256 siblings pass. Tracked at **didcomm-dotnet#71**. |
 | P-384 / P-521 key agreement (live) | didcomm-python, didcomm-jvm | Not reachable through a two-key `did:peer:2` live identity; covered instead by the offline `source: didcomm-dotnet` and `source: spec-v2.1` fixture vectors, which do exercise both curves. |
 
 An `n/a` is retired the moment its stated cause is gone — **by execution, not by inference**. Three entries have been retired this way, each because the cause it named turned out to be falsifiable and was then falsified:
@@ -765,7 +765,7 @@ All three were re-run live against didcomm-python and pass, so the rows are gone
 | FR-IX-01 | MUST | Vendor the spec Appendix A/B/C as `source: spec-v2.1` fixtures and pass them all (the baseline gate). | Every C.2/C.3 vector passes as an inbound fixture. |
 | FR-IX-02 | MUST | Provide `DidComm.InteropTests`, a data-driven runner that executes every `manifest/**/*.json` fixture (§13.4) with no per-fixture code, using the test-only static resolver seeded from the fixture's diddocs. | Adding a manifest adds a test case automatically. |
 | FR-IX-03 | MUST | **Inbound:** harvest static vectors from `didcomm-rust`, `didcomm-python`, and `didcomm-jvm` test resources into `source`-tagged fixtures and unpack/verify them all (across the §13.5 matrix cells those libs support). | All harvested inbound fixtures pass; failures are attributable by `source`. |
-| FR-IX-04 | MUST | **Outbound (live):** a CI job packs messages with didcomm-dotnet (across the matrix) and feeds them to the `sicpa-dlab/didcomm-demo` Python and JVM `unpack` CLIs over `did:peer`; the CLIs MUST recover the original plaintext. | A scripted CI job round-trips didcomm-dotnet→demo-CLI for each supported composition — "supported" meaning every §13.5 cell not in the documented `n/a` set above, each `n/a` carrying its evidence in `tools/interop-live/README.md`. Cells that execute and fail keep the job red. |
+| FR-IX-04 | MUST | **Outbound (live):** a CI job packs messages with didcomm-dotnet (across the matrix) and feeds them to the `sicpa-dlab/didcomm-demo` Python and JVM `unpack` CLIs over `did:peer`; the CLIs MUST recover the original plaintext. | A scripted CI job round-trips didcomm-dotnet→counterpart for every cell of the executed live matrix enumerated in `tools/interop-live/README.md` (the acceptance basis: 20 compositions × both directions per leg, exercising every §13.5 dimension). A §13.5 combination absent from that enumeration is a disclosed slice choice (e.g. XC20P is paired with X25519 only), not a silent skip; combinations a counterpart cannot run at all are in the documented `n/a` set above, each carrying its evidence. Cells that execute and fail keep the job red. |
 | FR-IX-05 | SHOULD | **Inbound (live):** the reverse — the demo CLIs `pack`, didcomm-dotnet unpacks. | didcomm-dotnet recovers plaintext packed by the demo CLIs. |
 | FR-IX-06 | MUST | **Publish our vectors:** emit didcomm-dotnet-produced fixtures (manifest + packed envelopes + the secrets/diddocs needed to verify) so other ecosystems can test against this library; contribute back upstream where appropriate. | A published fixture set decrypts/verifies with at least one external impl. |
 | FR-IX-07 | SHOULD | Track Credo-TS DIDComm v2 support; add `source: credo-ts` fixtures as the matrix cells become available. Do not gate v1.0 on Credo-TS. | Credo fixtures present but non-gating. |

@@ -3,7 +3,7 @@
 [![NuGet](https://img.shields.io/nuget/v/DidComm.Core.svg)](https://www.nuget.org/packages/DidComm.Core)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Status](https://img.shields.io/badge/phase%206-in%20progress-yellow.svg)](#roadmap)
+[![Status](https://img.shields.io/badge/phases%200--6-complete-brightgreen.svg)](#roadmap)
 [![Spec](https://img.shields.io/badge/spec-DIDComm%20v2.1-informational.svg)](https://identity.foundation/didcomm-messaging/spec/v2.1)
 
 A .NET 10 implementation of **DIDComm Messaging v2.1** — the [DIF](https://identity.foundation/) protocol for confidential, integrity-protected, optionally non-repudiable messaging between parties identified by Decentralized Identifiers (DIDs).
@@ -71,7 +71,7 @@ The 24 lines above are the body of [`samples/01-Quickstart`](samples/01-Quicksta
 ## Project status
 
 **Phases 0–6 complete.** The library has a public Pack / Unpack / Send
-surface (`DidCommClient`), DID resolution via [NetDid 3.0.0](https://github.com/moisesja/net-did),
+surface (`DidCommClient`), DID resolution via [NetDid 3.1.0](https://github.com/moisesja/net-did),
 a consumer-supplied `ISecretsResolver` contract, the three protective envelope
 shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
 consistency including same-document key provenance, DID rotation via `from_prior`,
@@ -179,9 +179,12 @@ didcomm-dotnet implements the messaging layer of [DIDComm Messaging v2.1](https:
 > **`did:web` is explicitly NOT supported.** This is a deliberate security policy (DD-08), not a messaging-conformance gap. See PRD §1.1 and §15.
 
 The conformance gate is the spec's own Appendix C test vectors — which pass today — plus a live
-cross-implementation harness round-tripping against the SICPA reference implementations in Python,
-JVM, and Rust. **That live harness is not built yet** (FR-IX-03/04/05/06/08); every fixture in the
-suite is currently `source: spec-v2.1`.
+cross-implementation harness (FR-IX-03/04/05/06/08). The harness round-trips against SICPA's
+didcomm-python and didcomm-jvm in both directions and feeds our published vectors to each for
+external verification (`tools/interop-live`); didcomm-rust participates as harvested static
+vectors only, not a live leg. Fixtures come tagged by `source` — `spec-v2.1` for the Appendix C
+set, plus vectors harvested from the reference implementations and the `didcomm-dotnet` set this
+repo publishes.
 
 ## Package map
 
@@ -308,8 +311,9 @@ packages is not demonstrated. The gate measures **execution, not mention**: it i
 six shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
 intersects real execution hits with the public surface. Currently **572 of 585 members are proven
 to execute**; the remaining 13 have no executable code at all (enums, const holders, one static
-readonly field) and are itemized in the test output. Nothing is allowlisted. A cheaper
-metadata-reference gate runs alongside it as a first check.
+readonly field) and are itemized in the test output. The execution gate's allowlist is empty; a
+cheaper metadata-reference gate runs alongside it as a first check and carries 12 justified
+entries for members no sample references directly.
 
 ## Specifications
 

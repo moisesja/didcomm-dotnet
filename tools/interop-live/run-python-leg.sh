@@ -240,11 +240,27 @@ verify_vectors() {
     VECTOR_FAILURES=0
     local packed_dir="$FIXTURES/packed/didcomm-dotnet"
     if [ ! -d "$packed_dir" ]; then
-        echo "no published vectors at $packed_dir (fixtures submodule not checked out?)" >&2
+        # FR-IX-06 is a MUST. A missing vector directory means the fixtures submodule was
+        # not checked out (clone without --recurse-submodules, or a pin without that dir):
+        # the external-verification step cannot run, so the leg must FAIL loudly rather than
+        # pass with the check silently skipped and the tally quietly dropping ~16 cells.
+        echo "FR-IX-06 vectors absent at $packed_dir — fixtures submodule not checked out." >&2
+        echo "Run 'git submodule update --init' (CI/release checkouts use --recurse-submodules)." >&2
+        VECTOR_FAILURES=1
         return
     fi
 
-    for vector in "$packed_dir"/*.json; do
+    # A present-but-empty vector directory is the same failure in different clothes: the leg
+    # would go green having verified nothing. Refuse it explicitly (this also stops the
+    # unmatched glob from reaching verify-fixture as a literal '*.json' path).
+    local vectors=("$packed_dir"/*.json)
+    if [ ! -e "${vectors[0]}" ]; then
+        echo "FR-IX-06: no *.json vectors in $packed_dir — refusing to pass the leg without executing the MUST-level vector verification." >&2
+        VECTOR_FAILURES=1
+        return
+    fi
+
+    for vector in "${vectors[@]}"; do
         local name; name="$(basename "$vector" .json)"
         local log="$WORK/vector-$name.log"
         if "${PEER[@]}" verify-fixture --packed "$vector" \

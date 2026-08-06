@@ -15,7 +15,7 @@ this harness runs nightly, on release, and on demand
 | `tools/InteropCli` | The didcomm-dotnet side: `mint` / `pack` / `unpack` / `unwrap-forward` over the **real** `DidCommClient` + `UseNetDidResolver()` wiring (net-did composite resolver, did:key + did:peer). |
 | `python/interop_peer.py` | The didcomm-python side: same CLI shape, driving `didcomm==0.3.2` (sicpa-dlab/didcomm-python) directly. Pins in `python/requirements.txt`. |
 | `jvm/src/InteropPeer.java` | The didcomm-jvm side: same CLI shape, driving `org.didcommx:didcomm:0.3.2` — plain `javac`/`java`, jars pinned by version + SHA-256 in `jvm/fetch-deps.sh` (no Gradle/Maven). |
-| `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit nonzero on any FAIL. |
+| `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit nonzero on any FAIL. A missing or empty `packed/didcomm-dotnet/` vector set hard-fails the leg — FR-IX-06 is a MUST, so an uninitialized fixtures submodule turns the leg red instead of silently shrinking the tally. |
 | `run-all.sh` | Both legs + a combined `summary.md` (the CI artifact). |
 
 Every cell round-trips a fresh C.1-style payload and asserts (a) the recovered plaintext
@@ -49,10 +49,18 @@ The §13.5 conformance matrix, as exercised live:
 | Key-agreement curve | X25519 · P-256 (P-384/P-521 are offline-fixture-only — see the `n/a` notes) |
 | Content encryption | A256CBC-HS512 · A256GCM · XC20P |
 | Signing alg | EdDSA · ES256 · ES256K |
-| Recipients | single · 3 (mixed `did:peer:2` + `did:key`, mixed key types) |
+| Recipients | single · 3 (mixed DID **methods** — two `did:peer:2` + one `did:key`; all three key-agreement keys are X25519, necessarily, since a single JWE carries a single `epk`, so recipient curves cannot be mixed within one envelope) |
 | Routing | direct · 1 mediator · 2 mediators (real `forward` onion, both directions) |
 | DID method | `did:peer:2` · `did:key` |
 | Direction | inbound · outbound · published-vector verification (FR-IX-06) |
+
+The executed cell set is a **curated slice** of the §13.5 cross-product, not the full
+cartesian product: every dimension value above appears in at least one executed cell, but not
+every combination does (XC20P runs on X25519 only; ES256K appears only in `signed`
+compositions; the mediated cells are authcrypt). The per-cell enumeration is the results
+tables below, and that enumeration is the acceptance basis FR-IX-04 points at — a §13.5
+combination absent from those tables is a disclosed slice choice, not a silent skip, while a
+combination a counterpart cannot run at all is a declared `n/a` with evidence.
 
 ## Current results — python leg (executed 2026-08-05, macOS arm64, CPython 3.9.6)
 
