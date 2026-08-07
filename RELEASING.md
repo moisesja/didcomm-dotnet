@@ -7,8 +7,9 @@ which builds, tests, packs, and pushes every package. Publishing to NuGet is
 **irreversible** (packages can be unlisted but not deleted), so the workflow is
 gated behind a reviewer-approved environment — see step 2 below.
 
-> **Status:** No version has been published yet. The first release is planned as
-> `v0.1.0-preview.1` (a NuGet **prerelease** — consumers opt in with `--prerelease`).
+> **Status:** Published releases to date — `0.1.0-preview.1`, `1.0.0`, `1.1.0`, `1.2.0`,
+> `1.3.0`, `1.4.0`. The one-time setup below is done; cutting a release starts at
+> [Cutting a release](#cutting-a-release).
 
 ---
 
