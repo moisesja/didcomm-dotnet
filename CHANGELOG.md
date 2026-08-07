@@ -6,6 +6,19 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-06
+
+> Despite the patch number this release **adds public API** — `DidCommDiagnostics`,
+> `StompFrame` / `StompFrameCodec`, `FromPriorClaims.ForTermination` / `IsTermination`, an
+> expanded `ProblemReport`, and new `WebSocketTransportOptions` members. Nothing was removed:
+> package validation is clean against the 1.4.0 baseline. The one source-level caveat is
+> `FromPriorClaims.Sub`, widened from `string` to `string?` to carry FR-ROT-06's
+> relationship-termination form — call sites compiled with nullable reference types enabled may
+> now warn where they assign it to a non-nullable `string`.
+>
+> This entry supersedes the 1.4.1 section previously dated 2026-07-31: that version was prepared
+> but never tagged or published, so its content ships here.
+
 ### Fixed — WebSocket transport retry classification, from the #69 re-review (#72)
 
 - A plain `OperationCanceledException` — how a production `ClientWebSocket` surfaces a
@@ -283,19 +296,6 @@ which counterpart gaps remain open, is recorded in `tools/interop-live/README.md
   JWS `kid` fixes described above (dataproofs-dotnet#17 then #25) and emits General JWS at every
   signer count; **NetCrypto 1.4.0 → 1.5.0** is the high-S ES256K verify fix, both detailed above.
 
-### Known PRD drift (PRD is the target; flagged, not silently patched)
-
-- §14.2-Y shows `UseSecretsResolver(sp => ...)` — no factory overload exists.
-- §14.2-Z names `UseTransport<T>()` — the real surface is per-transport extensions plus
-  `b.Services.AddSingleton<IDidCommTransport, T>()`.
-- §14.4 names illustrative members (`DidComm` facade, `Secret`, `Pack*Params`) that map to
-  the real API (`DidCommClient`, `Jwk`, `Pack*Options`) — mapping documented in the gate test.
-
-## [1.4.1] - 2026-07-31
-
-> Test-only. No shipped code changed — the six packages are functionally identical to 1.4.0, and
-> package validation is clean against the 1.4.0 baseline. Closes **#66**.
-
 ### Fixed — flaky Discover Features correlator test under thread-pool contention (#66)
 
 `DiscoverFeaturesClientTests.Disclosure_parsing_runs_after_the_inline_correlator_returns` timed out
@@ -357,6 +357,14 @@ It also lacked the quickstart FR-DX-05 requires. Corrected end to end:
 `PackageValidationBaselineVersion` now points at 1.4.0, the previous published release, so each pack
 compares against what consumers actually have. Routine post-release bookkeeping (see the note in
 [`Directory.Build.props`](Directory.Build.props)).
+
+### Known PRD drift (PRD is the target; flagged, not silently patched)
+
+- §14.2-Y shows `UseSecretsResolver(sp => ...)` — no factory overload exists.
+- §14.2-Z names `UseTransport<T>()` — the real surface is per-transport extensions plus
+  `b.Services.AddSingleton<IDidCommTransport, T>()`.
+- §14.4 names illustrative members (`DidComm` facade, `Secret`, `Pack*Params`) that map to
+  the real API (`DidCommClient`, `Jwk`, `Pack*Options`) — mapping documented in the gate test.
 
 ## [1.4.0] - 2026-07-31
 
