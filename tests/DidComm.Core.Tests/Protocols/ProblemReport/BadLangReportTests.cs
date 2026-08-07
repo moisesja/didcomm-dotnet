@@ -157,6 +157,35 @@ public sealed class BadLangReportTests
     }
 
     [Fact]
+    public void ForThread_returns_null_when_deep_preference_truncates_to_intermediate_tag()
+    {
+        // Truncation happens at EVERY subtag boundary, not just down to the primary subtag:
+        // a preference for zh-Hant-TW is satisfied by an offered zh-Hant one level up. The
+        // ProfilesAndI18n sample's selector must mirror this depth — issue #73 pinned the
+        // two diverging exactly here (matcher silent, selector falling back to the default).
+        var thread = new ThreadState("t") { AcceptLang = new[] { "zh-Hant-TW" } };
+
+        ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "zh-Hant" })
+            .Should().BeNull("a preference for zh-Hant-TW truncates to the offered zh-Hant");
+    }
+
+    [Fact]
+    public void ForThread_builds_report_for_siblings_below_a_shared_intermediate_tag()
+    {
+        // Sharing the zh-Hant prefix does not make zh-Hant-TW and zh-Hant-HK interchangeable:
+        // neither extends the other, so directional matching refuses the pair at depth 2
+        // exactly as it refuses en-US vs en-GB at depth 1 — and a reply selector must not
+        // serve one for the other either (it may only broaden the request as sent, never a
+        // truncation of it).
+        var thread = new ThreadState("t") { AcceptLang = new[] { "zh-Hant-TW" } };
+
+        var report = ProblemReportApi.CreateBadLangForThread(Bob, Alice, thread, new[] { "zh-Hant-HK" });
+
+        report.Should().NotBeNull("zh-Hant-TW and zh-Hant-HK are siblings — neither extends the other");
+        ProblemReportApi.ReadCode(report!).Should().Be("w.msg.bad-lang");
+    }
+
+    [Fact]
     public void ForThread_returns_null_when_broad_request_is_served_by_a_specific_catalog_entry()
     {
         // The emitter contract (FR-I18N-02, "when a matching language is available"): whatever the

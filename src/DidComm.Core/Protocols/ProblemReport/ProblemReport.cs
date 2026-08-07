@@ -207,10 +207,14 @@ public static class ProblemReport
     /// </para>
     /// <para>
     /// Whatever this method calls satisfiable, the caller's reply selector must be able to
-    /// actually emit (FR-I18N-02 honors a preference "when a matching language is available"),
-    /// so a selector that only truncates (<c>fr-CA</c> → <c>fr</c>) is too narrow: it must also
-    /// serve a broad request from a more specific catalog entry (<c>en</c> → <c>en-GB</c>). The
-    /// reference selector in the <c>ProfilesAndI18n</c> sample does both.
+    /// actually emit (FR-I18N-02 honors a preference "when a matching language is available").
+    /// Matching here happens at EVERY subtag boundary, so a mirroring selector must truncate
+    /// one subtag at a time (<c>zh-Hant-TW</c> is served by a <c>zh-Hant</c> catalog entry,
+    /// not only by bare <c>zh</c>) AND serve a broad request from a more specific catalog
+    /// entry (<c>en</c> → <c>en-GB</c>) — while staying no broader than this matcher: the
+    /// broad direction applies to the request as sent, never to a truncation of it
+    /// (<c>zh-Hant-TW</c> must not be served a sibling <c>zh-Hant-HK</c> entry). The
+    /// reference selector in the <c>ProfilesAndI18n</c> sample does exactly this.
     /// </para>
     /// </remarks>
     /// <param name="from">Sender DID.</param>
