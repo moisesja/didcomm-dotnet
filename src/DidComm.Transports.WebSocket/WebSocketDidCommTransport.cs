@@ -59,6 +59,16 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>Fires when the transport opens, closes, or fails to send (FR-TRN-11).</summary>
+    /// <remarks>
+    /// Handlers run synchronously on transport code paths — including from inside
+    /// <see cref="DisposeAsync"/> itself (the <c>Disconnected</c> events). A handler must
+    /// therefore never block on this transport's own teardown:
+    /// <c>DisposeAsync().GetAwaiter().GetResult()</c> from a handler deadlocks permanently,
+    /// because dispose completes only after the handler returns while the handler is waiting for
+    /// dispose to complete. Sending on the transport from a handler is safe (events are raised
+    /// outside the send gates); tearing the transport down from one is not — schedule that on
+    /// another context instead.
+    /// </remarks>
     public event EventHandler<WebSocketLifecycleEventArgs>? Lifecycle;
 
     /// <summary>Initialize the transport with bound options.</summary>
@@ -94,9 +104,20 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             {
                 ConnectCallback = async (context, ct) =>
                 {
-                    var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
-                    Stream stream = new NetworkStream(socket, ownsSocket: true);
-                    return stream;
+                    try
+                    {
+                        var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                        Stream stream = new NetworkStream(socket, ownsSocket: true);
+                        return stream;
+                    }
+                    catch (TransportException ex)
+                    {
+                        // The guard's refusal is deterministic — every retry re-resolves to the
+                        // same blocked addresses — but ClientWebSocket wraps anything thrown here
+                        // in a retriable WebSocketException. Mark the refusal at its throw site so
+                        // ConnectPinnedAsync can reclassify it as fatal (issue #72).
+                        throw new GuardRefusalException(ex);
+                    }
                 },
             })
             : null;
@@ -259,14 +280,25 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             // Caller-initiated cancellation is not a transport failure — let it propagate as-is.
             throw;
         }
-        catch (FatalHandshakeException ex)
+        catch (ObjectDisposedException)
         {
-            // Permanently fatal (see FatalHandshakeException): retrying would burn the whole
-            // reconnect budget — every attempt a full connect holding this endpoint's send gate,
-            // head-of-line-blocking every other sender — on a peer that can never succeed. Say so
-            // instead of claiming an exhausted budget, and hand back the classified cause.
+            // A send that passed the entry check but lost the race to DisposeAsync observes the
+            // flag inside the gate (or hits the pool seal) and throws this. It is a lifecycle
+            // fact, not a connectivity failure — wrapping it in the budget-exhausted
+            // TransportException below would tell a reconnect story about a transport that was
+            // simply shut down.
+            throw;
+        }
+        catch (FatalSendException ex)
+        {
+            // Permanently fatal (see FatalSendException): retrying would burn the whole reconnect
+            // budget — every attempt a full connect holding this endpoint's send gate,
+            // head-of-line-blocking every other sender — on a failure that can never succeed. Say
+            // so instead of claiming an exhausted budget, and hand back the classified cause.
+            // `attempt` names the attempt the fatal classification arrived on: transient failures
+            // may legitimately have consumed earlier attempts.
             throw new TransportException(
-                $"WebSocket send to '{request.Endpoint}' failed: the peer's STOMP handshake is permanently incompatible, so no reconnect was attempted.",
+                $"WebSocket send to '{request.Endpoint}' failed on attempt {attempt}: {ex.Reason} — permanently fatal, so the remaining reconnect budget was not spent.",
                 ex.InnerException!,
                 httpStatusCode: null,
                 scheme: request.Endpoint.Scheme);
@@ -368,11 +400,42 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             // can only reach a guard-vetted IP. _pinnedInvoker is non-null whenever this default path
             // is in use (no custom Connect delegate overriding it).
             return _pinnedInvoker is not null
-                ? cws.ConnectAsync(endpoint, _pinnedInvoker, ct)
+                ? ConnectPinnedAsync(cws, endpoint, ct)
                 : cws.ConnectAsync(endpoint, ct);
         }
         throw new InvalidOperationException(
             "Default Connect supports ClientWebSocket only. Provide WebSocketTransportOptions.Connect for custom socket types (used by tests against TestServer).");
+    }
+
+    /// <summary>
+    /// Connect through the SSRF-pinning invoker and reclassify the guard's refusal as fatal.
+    /// <see cref="ClientWebSocket"/> wraps every ConnectCallback failure in a retriable
+    /// <see cref="WebSocketException"/> (via <see cref="HttpRequestException"/>), so without this
+    /// unwrap an endpoint that resolves only to private addresses would burn the whole exponential
+    /// backoff budget while holding the endpoint's send gate — the refusal is deterministic and
+    /// must fail the send on the attempt it arrives (issue #72). Every other connect failure keeps
+    /// its shape and classification.
+    /// </summary>
+    /// <param name="socket">The socket to connect.</param>
+    /// <param name="endpoint">Endpoint to connect to.</param>
+    /// <param name="ct">Cancels the connect.</param>
+    private async Task ConnectPinnedAsync(ClientWebSocket socket, Uri endpoint, CancellationToken ct)
+    {
+        try
+        {
+            await socket.ConnectAsync(endpoint, _pinnedInvoker!, ct).ConfigureAwait(false);
+        }
+        catch (WebSocketException ex)
+        {
+            for (var inner = ex.InnerException; inner is not null; inner = inner.InnerException)
+            {
+                if (inner is GuardRefusalException refusal)
+                    throw new FatalSendException(
+                        refusal.Cause,
+                        "every address the endpoint resolves to is private or reserved (SSRF defense)");
+            }
+            throw;
+        }
     }
 
     /// <summary>Wrap the packed envelope in one STOMP SEND frame (FR-TRN-12).</summary>
@@ -438,11 +501,13 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         {
             // Permanently fatal, unlike the failures above: a server that states a version it will
             // speak is not having a bad moment, and reconnecting can only produce the same answer.
-            // FatalHandshakeException keeps it out of the retry budget (see SendAsync).
-            throw new FatalHandshakeException(new TransportException(
-                $"STOMP handshake with '{endpoint}' failed: expected version 1.2, got '{version ?? "(absent)"}' (FR-TRN-12).",
-                httpStatusCode: null,
-                scheme: endpoint.Scheme));
+            // FatalSendException keeps it out of the retry budget (see SendAsync).
+            throw new FatalSendException(
+                new TransportException(
+                    $"STOMP handshake with '{endpoint}' failed: expected version 1.2, got '{version ?? "(absent)"}' (FR-TRN-12).",
+                    httpStatusCode: null,
+                    scheme: endpoint.Scheme),
+                "the peer's STOMP handshake is permanently incompatible");
         }
     }
 
@@ -489,8 +554,12 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
     }
 
+    // Scheme + authority + path + query: the query is part of the WebSocket handshake URL and
+    // routinely carries routing/auth material, so endpoints differing only in query must not
+    // share a socket whose handshake used the other's URL (issue #72). Fragments never reach
+    // the wire and stay out of the key.
     private static string PoolKey(Uri endpoint) =>
-        $"{endpoint.Scheme.ToLowerInvariant()}://{endpoint.Authority}{endpoint.AbsolutePath}";
+        $"{endpoint.Scheme.ToLowerInvariant()}://{endpoint.Authority}{endpoint.PathAndQuery}";
 
     private ResiliencePipeline BuildReconnectPipeline(WebSocketTransportOptions options)
     {
@@ -504,24 +573,31 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 // TransportException covers the TRANSIENT STOMP handshake failures (FR-TRN-12) —
                 // a peer that closed mid-handshake may well answer the next attempt, so failing to
                 // establish the session is a connection failure like any other and must consume the
-                // same reconnect budget. A permanently fatal handshake (the peer named a STOMP
-                // version we do not speak) arrives as FatalHandshakeException, which is absent from
-                // this list precisely so it is never retried. Invariant: the two non-retryable
-                // TransportException sources — the scheme refusal and the SSRF guard in SendAsync —
-                // are thrown BEFORE the pipeline executes, so a pre-pipeline refusal is never
-                // retried here either.
+                // same reconnect budget. Permanently fatal failures — the peer named a STOMP
+                // version we do not speak, or the connect-time SSRF guard refused every address the
+                // endpoint resolves to — arrive as FatalSendException, which is absent from this
+                // list precisely so they are never retried. Invariant: the two non-retryable
+                // TransportException sources — the scheme refusal and the pre-send SSRF check in
+                // SendAsync — are thrown BEFORE the pipeline executes, so a pre-pipeline refusal is
+                // never retried here either.
+                // OperationCanceledException splits on WHO cancelled, mirroring the catch-filter in
+                // SendAsync: the caller's token means the caller gave up — fatal, propagate — while
+                // any other OCE is a per-attempt connect/send timeout firing on a half-dead
+                // connection. A production ClientWebSocket surfaces that timeout as the PLAIN base
+                // type (not the TaskCanceledException subclass Task.Delay-based fakes throw), so
+                // matching the base type here is what makes a real half-dead connection retryable.
                 // The !_disposed guard stops all retrying once DisposeAsync has begun: a disposed
                 // transport must never reconnect (and ObjectDisposedException derives from
                 // InvalidOperationException, so without the guard a post-dispose failure would
                 // burn the whole backoff budget before surfacing).
                 ShouldHandle = args => new ValueTask<bool>(
                     !_disposed
-                    && args.Outcome.Exception
-                        is WebSocketException
-                        or TimeoutException
-                        or TaskCanceledException
-                        or InvalidOperationException
-                        or TransportException),
+                    && args.Outcome.Exception switch
+                    {
+                        OperationCanceledException => !args.Context.CancellationToken.IsCancellationRequested,
+                        WebSocketException or TimeoutException or InvalidOperationException or TransportException => true,
+                        _ => false,
+                    }),
                 MaxRetryAttempts = options.MaxReconnectAttempts,
                 BackoffType = DelayBackoffType.Exponential,
                 Delay = options.ReconnectBaseDelay,
@@ -692,15 +768,41 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     }
 
     /// <summary>
-    /// A handshake failure that no reconnect can fix. Deliberately NOT a
-    /// <see cref="TransportException"/>: the retry predicate handles that type, and this one must
-    /// never be retried. The classified failure travels as <see cref="Exception.InnerException"/>
-    /// and is what the caller finally sees.
+    /// A send failure that no reconnect can fix — the peer named a STOMP version we do not speak,
+    /// or the connect-time SSRF guard refused every address the endpoint resolves to. Deliberately
+    /// NOT a <see cref="TransportException"/>: the retry predicate handles that type, and this one
+    /// must never be retried. The classified failure travels as
+    /// <see cref="Exception.InnerException"/> and is what the caller finally sees;
+    /// <see cref="Reason"/> is the one-clause explanation the wrapping message leads with.
     /// </summary>
-    private sealed class FatalHandshakeException : Exception
+    private sealed class FatalSendException : Exception
     {
         /// <summary>Wrap the classified, permanently fatal failure.</summary>
         /// <param name="cause">The failure to hand back to the caller.</param>
-        public FatalHandshakeException(TransportException cause) : base(cause.Message, cause) { }
+        /// <param name="reason">One clause naming why no reconnect can help.</param>
+        public FatalSendException(TransportException cause, string reason) : base(cause.Message, cause)
+            => Reason = reason;
+
+        /// <summary>One clause naming why no reconnect can help.</summary>
+        public string Reason { get; }
+    }
+
+    /// <summary>
+    /// Marks the connect-time SSRF refusal at its throw site, inside the
+    /// <c>SocketsHttpHandler.ConnectCallback</c>. The callback's failures reach the retry
+    /// predicate wrapped in a retriable <see cref="WebSocketException"/>, so the marker is what
+    /// lets <see cref="ConnectPinnedAsync"/> find the refusal in the wrap chain and reclassify it
+    /// as <see cref="FatalSendException"/> (issue #72). Everything else the callback can throw —
+    /// DNS and socket errors are genuinely transient — passes through unmarked.
+    /// </summary>
+    private sealed class GuardRefusalException : Exception
+    {
+        /// <summary>Wrap the guard's refusal.</summary>
+        /// <param name="cause">The guard's classified refusal.</param>
+        public GuardRefusalException(TransportException cause) : base(cause.Message, cause)
+            => Cause = cause;
+
+        /// <summary>The guard's classified refusal, preserved for the caller.</summary>
+        public TransportException Cause { get; }
     }
 }
