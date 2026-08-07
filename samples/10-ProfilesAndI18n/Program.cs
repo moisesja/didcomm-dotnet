@@ -41,6 +41,7 @@ public static class Program
     {
         ["en"] = "Checkmate. Well played.",
         ["fr"] = "Échec et mat. Bien joué.",
+        ["zh-Hant"] = "將死。好棋。",
     };
 
     /// <summary>Bob's default language when a thread has no recorded preference.</summary>
@@ -83,6 +84,7 @@ public static class Program
         ProfileMismatch(narrator, alice.Did, bob.Did);
         var chessThid = await ChessOpeningAsync(narrator, aliceClient, bobClient, bobSp, alice, bob);
         await ThreadScopedPreferenceAsync(narrator, aliceClient, bobClient, bobSp, alice, bob, chessThid);
+        await DeepTruncationAsync(narrator, aliceClient, bobClient, bobSp, alice, bob);
         await BadLangAsync(narrator, aliceClient, bobClient, bobSp, alice, bob);
     }
 
@@ -254,17 +256,61 @@ public static class Program
         narrator.Value("Chess preference did not leak", defaultView.Message.Lang == BobsDefaultLang);
     }
 
-    // ── 6. No acceptable language: w.msg.bad-lang ───────────────────────────────────────
+    // ── 6. A deeper request: truncation at every subtag boundary ────────────────────────
+
+    private static async Task DeepTruncationAsync(
+        Narrator narrator, DidCommClient aliceClient, DidCommClient bobClient, ServiceProvider bobSp,
+        PeerIdentity alice, PeerIdentity bob)
+    {
+        narrator.Section("6", "A deeper request — truncation at every subtag boundary (FR-I18N-02)");
+
+        // Alice asks for Taiwanese Traditional Chinese. Bob's catalog holds the broader
+        // zh-Hant — no zh-Hant-TW entry — so the request is served by dropping ONE subtag,
+        // not by collapsing all the way down to "zh". The reply selector and the bad-lang
+        // matcher must agree at this depth: the matcher calls zh-Hant-TW satisfiable (so no
+        // report is warranted), which means Bob must actually answer in zh-Hant rather than
+        // silently falling back to English.
+        var deep = new MessageBuilder()
+            .WithType("https://didcomm.org/basicmessage/2.0/message")
+            .WithFrom(alice.Did)
+            .WithTo(bob.Did)
+            .WithLang("zh-Hant-TW")
+            .WithAcceptLang("zh-Hant-TW")
+            .WithBody(JsonNode.Parse("""{"comment":"將軍。"}""")!.AsObject())
+            .Build();
+        narrator.Step("Alice asks for zh-Hant-TW; Bob's catalog holds zh-Hant.");
+        var bobView = await bobClient.UnpackAsync((await aliceClient.PackEncryptedAsync(deep,
+            new PackEncryptedOptions(Recipients: new[] { bob.Did }, From: alice.Did))).Message);
+
+        var store = bobSp.GetRequiredService<IThreadStateStore>();
+        var thid = bobView.Message.Thid ?? bobView.Message.Id;
+        var thread = store.GetOrCreate(thid);
+        thread.AcceptLang = bobView.Message.AcceptLang?.ToArray();
+
+        // The matcher's verdict first: satisfiable, so no bad-lang report on this thread…
+        var report = ProblemReportApi.CreateBadLangForThread(
+            from: bob.Did, to: alice.Did, thread: thread, availableLangs: BobsCatalog.Keys.ToArray());
+        narrator.Value("Bad-lang report warranted", report is not null);
+
+        // …and the reply serves the zh-Hant entry, one truncation step from the request.
+        var reply = BobReplies(store, thid, bob.Did, alice.Did);
+        var aliceView = await aliceClient.UnpackAsync((await bobClient.PackEncryptedAsync(reply,
+            new PackEncryptedOptions(Recipients: new[] { alice.Did }, From: bob.Did))).Message);
+        narrator.Value("Reply to zh-Hant-TW — lang", aliceView.Message.Lang);
+        narrator.Value("Reply comment", aliceView.Message.Body?["comment"]?.GetValue<string>());
+    }
+
+    // ── 7. No acceptable language: w.msg.bad-lang ───────────────────────────────────────
 
     private static async Task BadLangAsync(
         Narrator narrator, DidCommClient aliceClient, DidCommClient bobClient, ServiceProvider bobSp,
         PeerIdentity alice, PeerIdentity bob)
     {
-        narrator.Section("6", "No acceptable language — the bad-lang report (FR-I18N-04)");
+        narrator.Section("7", "No acceptable language — the bad-lang report (FR-I18N-04)");
 
-        // Alice (on yet another thread) insists on Japanese only. Bob's catalog is en/fr, so
-        // no preference is satisfiable — and the thread-aware factory turns exactly that state
-        // into a w.msg.bad-lang report naming what Bob CAN produce.
+        // Alice (on yet another thread) insists on Japanese only. Nothing in Bob's catalog
+        // (en, fr, zh-Hant) satisfies that preference — and the thread-aware factory turns
+        // exactly that state into a w.msg.bad-lang report naming what Bob CAN produce.
         var demanding = new MessageBuilder()
             .WithType("https://didcomm.org/basicmessage/2.0/message")
             .WithFrom(alice.Did)
@@ -273,7 +319,7 @@ public static class Program
             .WithAcceptLang("ja")
             .WithBody(JsonNode.Parse("""{"comment":"日本語でお願いします。"}""")!.AsObject())
             .Build();
-        narrator.Step("Alice demands accept-lang = [ja]; Bob speaks en and fr.");
+        narrator.Step("Alice demands accept-lang = [ja]; Bob speaks en, fr, and zh-Hant.");
         var bobView = await bobClient.UnpackAsync((await aliceClient.PackEncryptedAsync(demanding,
             new PackEncryptedOptions(Recipients: new[] { bob.Did }, From: alice.Did))).Message);
 
@@ -325,26 +371,39 @@ public static class Program
     /// no usable preference. This selector must be able to produce whatever
     /// <c>ProblemReport.CreateBadLangForThread</c> considers satisfiable — if it were narrower,
     /// Bob would stay silent (no <c>bad-lang</c> report) and then answer in the wrong language.
-    /// So it matches in both directions a language range can match: a request narrower than the
-    /// catalog (<c>fr-CA</c> served by <c>fr</c>) and a request broader than it (<c>en</c>
-    /// served by <c>en-GB</c>).
+    /// So it matches in both directions a language range can match, at every subtag boundary: a
+    /// request narrower than the catalog (<c>fr-CA</c> served by <c>fr</c>, <c>zh-Hant-TW</c>
+    /// served by <c>zh-Hant</c>) and a request broader than it (<c>en</c> served by
+    /// <c>en-GB</c>). And it must be no BROADER than the matcher either — see the sibling note
+    /// on the last step below.
     /// </summary>
     private static string PickLanguage(ThreadState? thread)
     {
         foreach (var preferred in thread?.AcceptLang ?? Array.Empty<string>())
         {
-            if (string.IsNullOrWhiteSpace(preferred))
+            // Same rule the matcher applies: a tag with an empty subtag ("-en", "en-",
+            // "en--GB") is malformed and matches nothing. Serving a language for a tag the
+            // matcher already reported as unsatisfiable would put the two out of agreement.
+            if (string.IsNullOrWhiteSpace(preferred)
+                || preferred[0] == '-'
+                || preferred[^1] == '-'
+                || preferred.Contains("--", StringComparison.Ordinal))
                 continue;
             // Exactly what was asked for.
             if (BobsCatalog.ContainsKey(preferred))
                 return preferred.ToLowerInvariant();
-            // Drop the region/script and retry: "fr-CA" is close enough to be served by "fr".
-            var dash = preferred.IndexOf('-', StringComparison.Ordinal);
-            var primary = dash < 0 ? preferred : preferred[..dash];
-            if (primary.Length > 0 && BobsCatalog.ContainsKey(primary))
-                return primary.ToLowerInvariant();
+            // Drop one subtag at a time from the right and retry, most specific first:
+            // "zh-Hant-TW" is served by "zh-Hant" before it would fall back to "zh".
+            for (var dash = preferred.LastIndexOf('-'); dash > 0; dash = preferred.LastIndexOf('-', dash - 1))
+            {
+                var truncated = preferred[..dash];
+                if (BobsCatalog.ContainsKey(truncated))
+                    return truncated.ToLowerInvariant();
+            }
             // The other direction: a broad request ("en") is served by any more specific entry
-            // ("en-GB"). A peer asking for "*" (any language) lands on the default below.
+            // ("en-GB"). Only the request AS SENT may match this way — never a truncation of
+            // it, which would serve a sibling (zh-Hant-TW must not land on a zh-Hant-HK
+            // entry). A peer asking for "*" (any language) lands on the default below.
             foreach (var entry in BobsCatalog.Keys)
                 if (entry.Length > preferred.Length
                     && entry[preferred.Length] == '-'

@@ -49,9 +49,16 @@ public sealed class ProfilesAndI18nSmokeTests
         transcript.Should().Contain("Concurrent-thread reply lang = en");
         transcript.Should().Contain("Chess preference did not leak = True");
 
+        // Issue #73: the selector truncates at every subtag boundary, exactly as deep as the
+        // bad-lang matcher matches — zh-Hant-TW is served by the zh-Hant catalog entry (and
+        // no report is warranted), not silently answered in the default language.
+        transcript.Should().Contain("Bad-lang report warranted = False");
+        transcript.Should().Contain("Reply to zh-Hant-TW — lang = zh-hant");
+        transcript.Should().Contain("Reply comment = 將死。好棋。");
+
         // FR-I18N-04: unsatisfiable accept-lang produced w.msg.bad-lang on the failing thread.
         transcript.Should().Contain("Report code = w.msg.bad-lang");
         transcript.Should().Contain("Report pthid == failing thid = True");
-        transcript.Should().Contain("languages available here: en, fr.");
+        transcript.Should().Contain("languages available here: en, fr, zh-Hant.");
     }
 }

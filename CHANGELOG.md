@@ -208,6 +208,30 @@ by a regression test written red-first — the test fails against the code it re
   round-trips now work**: both legs verify them, and external verification under didcomm-jvm went
   from 12/16 to 15/15 runnable vectors.
 
+### Fixed — sample selector and core matcher agree at every truncation depth (#73)
+
+The #69 re-review found the two sides of the bad-lang contract diverging one truncation level
+deeper than the case that review fixed: the core matcher satisfies a preference at **any** subtag
+boundary (`zh-Hant-TW` is served by an offered `zh-Hant`), but the reference sample's language
+selector truncated only to the *primary* subtag (`zh-Hant-TW` → `zh`), so against a catalog
+holding `zh-Hant` the matcher stayed silent — no report owed — while the sample answered in its
+default language. Reproduced red-first: the new sample beat showed `Bad-lang report warranted =
+False` next to a reply in `en`.
+
+- The sample selector (`samples/10-ProfilesAndI18n`) now truncates one subtag at a time from the
+  right, most specific first — and stays no *broader* than the matcher: the broad direction (a
+  bare `en` request served by an `en-GB` entry) applies to the request as sent, never to a
+  truncation of it, which would have served a sibling (`zh-Hant-TW` handed a `zh-Hant-HK` entry)
+  the matcher rightly reports as unsatisfiable. It also skips malformed tags (`en-`, `-en`,
+  `en--GB`) under the matcher's own rule, closing the reverse disagreement where a spurious
+  report shipped alongside a served reply.
+- Bob's catalog gained `zh-Hant` and the sample a depth-2 beat, so the smoke test pins the
+  agreement end-to-end; core-side tests pin `zh-Hant-TW` vs `{zh-Hant}` (satisfiable, no report)
+  and `zh-Hant-TW` vs `{zh-Hant-HK}` (siblings below a shared prefix — report owed).
+- The `CreateBadLangForThread` doc-comment no longer overstates the old selector: it now spells
+  out what a mirroring selector must do — truncate at *every* boundary, serve the broad
+  direction, and never broaden a truncation.
+
 ### Changed — the public-API coverage gate now measures execution, not reference
 
 The gate as first built counts *metadata references* from the sample assemblies, and it propagated a
