@@ -623,6 +623,224 @@ public sealed class WebSocketTransportBehaviorTests
         inner!.Accepted.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task Plain_OperationCanceledException_from_a_half_dead_connection_is_retried()
+    {
+        // Issue #72(a): a production ClientWebSocket surfaces a send/connect timeout as a PLAIN
+        // OperationCanceledException, not the TaskCanceledException subclass Task.Delay-based
+        // fakes throw. The reconnect predicate must retry the base type — a half-dead connection
+        // is a connection failure like any other. Only CALLER cancellation is fatal.
+        var connects = 0;
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 2,
+            ReconnectBaseDelay = TimeSpan.FromMilliseconds(1),
+            WebSocketFactory = () => new TrackingWebSocket(),
+            Connect = (_, _, _) => Interlocked.Increment(ref connects) == 1
+                ? Task.FromException(new OperationCanceledException("timeout on a half-dead connection"))
+                : Task.CompletedTask,
+        });
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        var result = await transport.SendAsync(NewRequest(), default);
+
+        result.Accepted.Should().BeTrue();
+        connects.Should().Be(2,
+            "a non-caller OperationCanceledException is a connection failure and must consume the reconnect budget");
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_connect_is_not_retried()
+    {
+        // The flip side of retrying plain OperationCanceledException: when it is the CALLER's
+        // token that cancelled, the send must propagate immediately instead of burning the
+        // exponential backoff budget first.
+        var connects = 0;
+        using var cts = new CancellationTokenSource();
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 3,
+            ReconnectBaseDelay = TimeSpan.FromMilliseconds(1),
+            WebSocketFactory = () => new TrackingWebSocket(),
+            Connect = (_, _, ct) =>
+            {
+                Interlocked.Increment(ref connects);
+                cts.Cancel();
+                return Task.FromCanceled(ct);
+            },
+        });
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        await ((Func<Task>)(() => transport.SendAsync(NewRequest(), cts.Token)))
+            .Should().ThrowAsync<OperationCanceledException>();
+        connects.Should().Be(1, "caller cancellation must propagate as-is, not consume the reconnect budget");
+    }
+
+    [Fact]
+    public async Task Connect_time_ssrf_refusal_fails_fast_instead_of_burning_the_reconnect_budget()
+    {
+        // Issue #72(b): the guard's connect-time refusal throws inside SocketsHttpHandler's
+        // ConnectCallback, where ClientWebSocket wraps it as a retriable WebSocketException. The
+        // refusal is deterministic — every retry re-resolves to the same blocked addresses — so it
+        // must fail the send on attempt 1 instead of holding the endpoint's send gate through the
+        // whole exponential backoff.
+        var factoryCalls = 0;
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws", "wss" },
+            MaxReconnectAttempts = 3,
+            ReconnectBaseDelay = TimeSpan.FromSeconds(2), // a regression to retrying stalls visibly
+            OutboundEndpointPolicy = new OutboundEndpointPolicy { ResolveDnsNames = false },
+            WebSocketFactory = () => { factoryCalls++; return new ClientWebSocket(); },
+        });
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        // 'localhost' passes the pre-send Validate (a no-op for DNS names with ResolveDnsNames =
+        // false) and is refused by the connect-time pin; port 9 is never dialed.
+        var request = new TransportRequest(
+            new Uri("ws://localhost:9/socket"), new byte[] { 1 }, "application/didcomm-encrypted+json");
+
+        var ex = (await ((Func<Task>)(() => transport.SendAsync(request, default)))
+            .Should().ThrowAsync<TransportException>()).Which;
+
+        factoryCalls.Should().Be(1, "an SSRF refusal can never succeed, so no reconnect may be attempted");
+        ex.Message.Should().NotContain("exhausting the reconnect budget");
+        ex.InnerException.Should().BeOfType<TransportException>()
+            .Which.Message.Should().Contain("private or reserved");
+    }
+
+    [Fact]
+    public async Task A_send_that_loses_the_race_to_dispose_surfaces_ObjectDisposedException_not_a_budget_error()
+    {
+        // Issue #72 nit: a send that passes the entry check, queues on the send gate behind an
+        // in-flight send, and then observes _disposed inside the gate used to surface as the
+        // misleading "exhausted the reconnect budget" TransportException. The lifecycle fact must
+        // surface as ObjectDisposedException — whichever interleaving wins the gate.
+        var connectEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseConnect = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstConnect = 1;
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 2,
+            ReconnectBaseDelay = TimeSpan.FromMilliseconds(1),
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            SendTimeout = TimeSpan.FromSeconds(5),
+            WebSocketFactory = () => new TrackingWebSocket(),
+            Connect = async (_, _, _) =>
+            {
+                if (Interlocked.Exchange(ref firstConnect, 0) == 1)
+                {
+                    connectEntered.TrySetResult();
+                    await releaseConnect.Task.ConfigureAwait(false);
+                }
+            },
+        });
+        var transport = new WebSocketDidCommTransport(options);
+
+        var sendA = Task.Run(() => transport.SendAsync(NewRequest(), default));
+        (await Task.WhenAny(connectEntered.Task, Task.Delay(TimeSpan.FromSeconds(5))))
+            .Should().Be(connectEntered.Task, "send A must hold the gate inside its connect");
+
+        var sendB = Task.Run(() => transport.SendAsync(NewRequest(), default));
+        await Task.Delay(100); // let B pass the entry check and queue on the send gate
+        var dispose = transport.DisposeAsync().AsTask();
+        releaseConnect.TrySetResult();
+
+        (await sendA).Accepted.Should().BeTrue("the in-flight send is drained, not aborted");
+        await ((Func<Task>)(() => sendB)).Should().ThrowAsync<ObjectDisposedException>(
+            "losing the race to dispose is a lifecycle fact, not a reconnect-budget failure");
+        await dispose;
+    }
+
+    [Fact]
+    public async Task Fatal_failure_on_a_reconnect_attempt_reports_the_real_attempt_number()
+    {
+        // Issue #72 nit: the fatal-path message claimed "no reconnect was attempted" even when
+        // transient failures had legitimately consumed earlier attempts and the fatal
+        // classification arrived on attempt 2+.
+        var attempt = 0;
+        var options = StompOptions(
+            () => new ScriptedStompPeerWebSocket(new StompFrame(
+                "CONNECTED", new[] { KeyValuePair.Create("version", "1.1") }, ReadOnlyMemory<byte>.Empty)),
+            maxReconnectAttempts: 3);
+        options.Value.Connect = (_, _, _) => ++attempt == 1
+            ? Task.FromException(new WebSocketException("transient"))
+            : Task.CompletedTask;
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        var ex = (await ((Func<Task>)(() => transport.SendAsync(NewRequest(), default)))
+            .Should().ThrowAsync<TransportException>()).Which;
+
+        ex.Message.Should().Contain("attempt 2",
+            "the transient failure consumed attempt 1; the fatal handshake arrived on attempt 2");
+        ex.Message.Should().NotContain("no reconnect was attempted");
+    }
+
+    [Fact]
+    public async Task DisposeAsync_drains_multiple_wedged_endpoints_concurrently_not_serially()
+    {
+        // #69 adversarial fix 5 (test added by issue #72): the drain iterates endpoints
+        // concurrently, so N wedged endpoints cost ~1× DrainBudget, not N×. Three sends ignore
+        // cancellation and never return, each holding its endpoint's gate past the whole budget.
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 0,
+            ConnectTimeout = TimeSpan.FromMilliseconds(400),
+            SendTimeout = TimeSpan.FromMilliseconds(400),
+            WebSocketFactory = () => new TrackingWebSocket(),
+            Connect = (_, _, _) => new TaskCompletionSource().Task, // ignores cancellation: wedged forever
+        });
+        var transport = new WebSocketDidCommTransport(options);
+        var wedged = new[] { "/a", "/b", "/c" }
+            .Select(path => Task.Run(() => transport.SendAsync(
+                new TransportRequest(new Uri($"ws://agents.r.us{path}"), new byte[] { 1 }, "application/didcomm-encrypted+json"),
+                default)))
+            .ToArray();
+        await Task.Delay(200); // all three sends are inside their connects, holding their gates
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await transport.DisposeAsync();
+        sw.Stop();
+
+        // DrainBudget = ConnectTimeout + SendTimeout = 0.8 s per endpoint. A serial drain costs
+        // ≥ 2.4 s for three wedged endpoints; a concurrent one ~0.8 s. The bound leaves CI headroom
+        // while staying well under the serial floor.
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(2),
+            "N wedged endpoints must drain concurrently (~1× budget), not serially (N× budget)");
+        GC.KeepAlive(wedged); // the wedged sends never complete; dispose abandons them by design
+    }
+
+    [Fact]
+    public async Task Endpoints_differing_only_in_query_string_do_not_share_a_socket()
+    {
+        // Issue #72 nit: the query is part of the WebSocket handshake URL and routinely carries
+        // routing/auth material, so two endpoints differing only in query must not reuse a socket
+        // whose handshake used the other's URL.
+        var factoryCalls = 0;
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 0,
+            WebSocketFactory = () => { factoryCalls++; return new TrackingWebSocket(); },
+            Connect = (_, _, _) => Task.CompletedTask,
+        });
+        await using var transport = new WebSocketDidCommTransport(options);
+
+        static TransportRequest For(string query) => new(
+            new Uri($"ws://agents.r.us/socket?recipient={query}"), new byte[] { 1 }, "application/didcomm-encrypted+json");
+
+        await transport.SendAsync(For("alice"), default);
+        await transport.SendAsync(For("bob"), default);
+        await transport.SendAsync(For("alice"), default);
+
+        factoryCalls.Should().Be(2,
+            "distinct queries get distinct sockets; an identical query reuses its pooled socket");
+    }
+
     private static TransportRequest NewRequest() =>
         new(new Uri("ws://agents.r.us/socket"), new byte[] { 1, 2, 3 }, "application/didcomm-encrypted+json");
 

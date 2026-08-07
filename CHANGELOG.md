@@ -6,6 +6,33 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — WebSocket transport retry classification, from the #69 re-review (#72)
+
+- A plain `OperationCanceledException` — how a production `ClientWebSocket` surfaces a
+  send/connect timeout on a half-dead connection — is now retried like the
+  `TaskCanceledException` subclass always was. Caller cancellation stays fatal: the reconnect
+  predicate now splits on *whose* token cancelled, mirroring the existing catch-filter
+  (FR-TRN-11).
+- The connect-time SSRF refusal (an endpoint resolving only to private/reserved addresses) now
+  fails the send on the attempt it arrives instead of burning the full exponential backoff
+  budget (~31 s at defaults) while holding the endpoint's send gate. The guard's refusal is
+  marked at its throw site and reclassified as permanently fatal — the same non-retryable lane
+  the STOMP version mismatch already used. Transient connect failures (DNS, socket errors) keep
+  their retry classification.
+- A send that passes the entry check but loses the race to `DisposeAsync` now surfaces
+  `ObjectDisposedException` instead of a misleading "exhausted the reconnect budget"
+  `TransportException`.
+- The permanently-fatal failure message now reports the attempt it arrived on instead of
+  claiming "no reconnect was attempted" even on attempt 2+.
+- Connection pooling now keys on the full path + query: two endpoints differing only in query
+  no longer share a socket whose handshake used the other sender's URL (pre-existing on `main`,
+  flagged in the #69 re-review).
+- The `Lifecycle` event documents its no-blocking-teardown contract: a handler that blocks on
+  `DisposeAsync().GetAwaiter().GetResult()` deadlocks permanently.
+- New regression coverage for all of the above, plus the previously untested concurrent
+  multi-endpoint dispose drain (#69 adversarial fix 5): N wedged endpoints cost ~1× the drain
+  budget, not N×.
+
 > The Phase 6 close-out: every PRD requirement that was still open is addressed on one branch.
 > Phases 0–5 were already complete; this entry closes the interop, samples/DX, observability,
 > and straggler-FR gaps identified in the 2026-08-01 PRD conformance sweep.
