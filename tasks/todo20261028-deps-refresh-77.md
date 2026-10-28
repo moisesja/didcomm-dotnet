@@ -41,6 +41,10 @@ After every bump, `--vulnerable` reports nothing. `--deprecated` reports only xu
 Each one has a recommendation. D1 and D2 need your answer; D3 to D5 go ahead as recommended
 unless you say otherwise.
 
+**Approved 2026-10-28:** D1 (a) AwesomeAssertions, D2 1.5.0, D3 to D5 as recommended. The
+user asked for NetDid and DataProofs at their latest on NuGet; that is still NetDid.* 4.0.0 and
+DataProofsDotnet.Jose 1.5.0 (re-checked on approval).
+
 - **D1. Assertion library.** FluentAssertions 8 is published under the Xceed license, which
   requires a paid license for commercial use.
   - **(a) AwesomeAssertions 9.6.0 (recommended).** The Apache-2.0 community fork, and net-did's
@@ -89,16 +93,16 @@ unless you say otherwise.
 ## Steps
 
 - [x] 1. Branch `chore/deps-refresh-77` off `main`.
-- [ ] 2. **Pins.** Apply the matrix. Rewrite the comments in `Directory.Packages.props` to match:
+- [x] 2. **Pins.** Apply the matrix. Rewrite the comments in `Directory.Packages.props` to match:
       the NetDid 4.0.0 rationale and the stricter-input note, NetCrypto 1.7.1 (1.6/1.7 add only
       key-store APIs that didcomm does not use), DataProofs 1.5.0 (1.5.0 changes only RDFC/BBS,
       which didcomm does not use; 1.4.0's JOSE input strictness is covered in step 5). Replace the
       "held deliberately" testing comment with the new rationale.
-- [ ] 3. **Assertion swap (D1a).** `Directory.Packages.props`, the two test `.csproj` files, the
+- [x] 3. **Assertion swap (D1a).** `Directory.Packages.props`, the two test `.csproj` files, the
       112 `using FluentAssertions;` lines, `BeGreaterOrEqualTo` → `BeGreaterThanOrEqualTo` (the
       only API that no longer compiles), and the FluentAssertions mention in
       `MessageJsonTests.cs:44`.
-- [ ] 4. **Find assertions that now accept more.** A green suite does not prove every assertion
+- [x] 4. **Find assertions that now accept more.** A green suite does not prove every assertion
       is as strict as before: since FluentAssertions 8, `OnlyContain` passes on an empty
       collection (net-did found exactly this in its #144). A QA agent diffs the FluentAssertions
       7 → AwesomeAssertions 9 semantics of every assertion verb the suite uses. That is 7
@@ -106,7 +110,7 @@ unless you say otherwise.
       Where a test could now pass vacuously, add the missing precondition at that site.
       `RedactionAuditTests.cs:68` is the clearest case: its own message says the audit "is
       meaningless without real material". Add one guard test proving a vacuous input now fails.
-- [ ] 5. **Input that the new floors reject, pinned at didcomm's boundary.** Both `EnvelopeReader`
+- [x] 5. **Input that the new floors reject, pinned at didcomm's boundary.** Both `EnvelopeReader`
       branches already end in a catch-all guard (FR-API-07), so no new upstream exception type
       can leak out untyped. Regression tests record what changes for didcomm callers:
       - a JWE or JWS protected header with an unpaired-surrogate escape in an extension member
@@ -118,21 +122,21 @@ unless you say otherwise.
         enforced upstream too.
       If either test shows something other than this, stop and re-plan; do not adjust the test
       to fit.
-- [ ] 6. **Package validation + version.** In `Directory.Build.props`, move
+- [x] 6. **Package validation + version.** In `Directory.Build.props`, move
       `PackageValidationBaselineVersion` 1.4.0 → 1.4.1 (1.4.1 is on NuGet and tagged) and
       `DidCommVersion` 1.4.1 → 1.5.0 (the local-build default only; the tag sets the released
       version).
-- [ ] 7. **Docs.** README.md:74 (NetDid 3.1.0 → 4.0.0); PRD §3 diagram line 164 ("NetDid
+- [x] 7. **Docs.** README.md:74 (NetDid 3.1.0 → 4.0.0); PRD §3 diagram line 164 ("NetDid
       3.0.x" → "4.0.x") and §13 test-tooling row line 645 (FluentAssertions → AwesomeAssertions);
       CONTRIBUTING.md:51. There is no `codebase-architecture.md` in the repo, so nothing to sync
       there.
-- [ ] 8. **CHANGELOG `[Unreleased]`.**
+- [x] 8. **CHANGELOG `[Unreleased]`.**
       - *Security*: the SourceLink advisory.
       - *Changed — dependency refresh*: a table of the new minimum versions consumers get.
       - *Inherited input changes*: NetDid 4.0.0's stricter DID, DID URL, did:peer:2 and JWK
         validation, and the JOSE unpaired-surrogate narrowing.
       - *Test stack*: what moved and why it is no longer held.
-- [ ] 9. **Verify, as CI runs it:** `restore`; `build -c Release /warnaserror`; full `test` with
+- [x] 9. **Verify, as CI runs it:** `restore`; `build -c Release /warnaserror`; full `test` with
       the fixtures submodule, `--logger trx` and `--collect "XPlat Code Coverage"`; `pack` (package
       validation against 1.4.1); `dotnet list package --vulnerable / --deprecated --include-transitive`;
       benchmarks `--job dry`. Test counts must be at least 799 + 279, plus the new tests.
@@ -154,3 +158,29 @@ unless you say otherwise.
   in **crypto-dotnet**, not here. `Castle.Core` comes through NSubstitute; Roslyn and Perfolizer
   come through BenchmarkDotNet. Pinning them here would override upstream's tested graph.
 - Prereleases (Microsoft.Extensions 11.0.0-rc, BenchmarkDotNet 0.16.0-preview): stable only.
+
+## Review
+
+**Results (HEAD 5dd465d, clean `bin`/`obj`):** restore, `build -c Release /warnaserror` (0 warnings),
+and `test` with trx and coverage all pass: Core **805** (799 + 5 boundary + 1 guard), Interop
+**279**. `pack` is clean, with package validation against 1.4.1 and the nuspecs showing the new
+floors. `--vulnerable` reports nothing. `--deprecated` reports only xunit 2.x (D3). Benchmarks
+`--job dry` run all 4 from a clean checkout. Inside the repo folder, BenchmarkDotNet trips on
+extra project copies in the old `.claude/worktrees/*` checkouts, which is unrelated to this change.
+
+**Things that weren't known when planning:**
+- `dotnet restore` of `main` (a0ed554) **fails today**: NuGet audit raises `NU1902` for
+  Microsoft.Build.Tasks.Git 10.0.301, and `TreatWarningsAsErrors` makes it an error. Every new CI
+  run on `main` is red until this lands. This is recorded under CHANGELOG *Security*.
+- Step 4: only `OnlyContain` and `AllSatisfy` got looser (they pass on an empty collection; FA 8
+  #2350 / #2321). Of the 8 call sites, one could pass vacuously:
+  `SnapshotRegistrationTests.AssertOneRegistrationPerResult`. It now has a non-empty guard and a
+  guard test. `RedactionAuditTests:68`, which the plan flagged, scans a fixed 5-element array,
+  so it is not vacuous.
+- Step 5: the old vs new run proves the surrogate-escape narrowing is real. Both tests fail on
+  the 1.4.1 dependency set and pass on the new one. The small-order X25519 case is *not* a
+  narrowing: didcomm already raised the same uniform `CryptoException`, and only
+  `InnerException` changed. The pin comment and the CHANGELOG were corrected to say so.
+- NetDid 4.0.0's `ParseDidUrl` still returns `null` rather than throwing. A stricter grammar
+  therefore only widens the set of values the DID-subject checks treat as unparseable. It opens
+  no new exception path.
