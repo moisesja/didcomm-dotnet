@@ -94,7 +94,12 @@ DataProofsDotnet 1.4.0 the parser rejects it itself, so only `InnerException` di
 - **FluentAssertions 7.0.0 → AwesomeAssertions 9.6.0**, the Apache-2.0 community fork.
   FluentAssertions 8 and later are under the Xceed license, which needs a paid license for
   commercial use. net-did made the same move in 4.0.0. The swap was mechanical: one renamed API
-  (`BeGreaterOrEqualTo` → `BeGreaterThanOrEqualTo`).
+  (`BeGreaterOrEqualTo` → `BeGreaterThanOrEqualTo`). A green suite does not prove every
+  assertion is still as strict, so every assertion API the suite binds was checked against the
+  release notes and an FA 7 vs AA 9 probe. Only `OnlyContain` and `AllSatisfy` got looser: they
+  now pass on an empty collection. Of their 8 call sites, one could then pass with nothing to
+  check, the shared `AssertOneRegistrationPerResult` helper. It now requires a non-empty result
+  set, and `AssertOneRegistrationPerResult_rejects_an_empty_result_set` pins that.
 - `Microsoft.NET.Test.Sdk` 17.12.0 → 18.11.0, `xunit.runner.visualstudio` 2.8.2 → 4.0.1,
   `NSubstitute` 5.3.0 → 6.2.0, `coverlet.collector` 6.0.3 → 10.1.0, `BenchmarkDotNet` 0.14.0 →
   0.15.8, `Microsoft.AspNetCore.TestHost` 10.0.10 → 10.0.14.
