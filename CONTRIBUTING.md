@@ -48,7 +48,7 @@ Your editor should pick these up automatically.
 
 ## Testing conventions
 
-Tests use **xUnit** with **FluentAssertions** for assertions and **NSubstitute** for mocking, matching the conventions in the sibling [NetDid](https://github.com/moisesja/net-did) project.
+Tests use **xUnit** with **AwesomeAssertions** for assertions and **NSubstitute** for mocking, matching the conventions in the sibling [NetDid](https://github.com/moisesja/net-did) project. AwesomeAssertions is the Apache-2.0 fork of FluentAssertions. Its API is the same, with `using AwesomeAssertions;` in place of `using FluentAssertions;`. Don't add FluentAssertions 8 or later: it is under a commercial license (#77).
 
 ### Naming
 

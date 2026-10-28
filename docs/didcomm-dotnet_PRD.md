@@ -161,7 +161,7 @@ The library is "done" for v1.0 when every `MUST` requirement in this document is
         └───────┬───────────────┴──────────┬───────────┘
                 │                           │
    ┌────────────▼────────────┐  ┌───────────▼──────────────────────┐
-   │ net-did (NetDid 3.0.x): │  │ DataProofsDotnet.Jose:            │
+   │ net-did (NetDid 4.0.x): │  │ DataProofsDotnet.Jose:            │
    │ resolution only —       │  │ JWE (anon/auth) + JWS build/parse │
    │ key · peer · webvh ·    │  │            │                      │
    │ ethr (→ net-cid)        │  │            ▼                      │
@@ -642,7 +642,7 @@ Interoperability is the whole point of a DIDComm library: a message this library
 | Known-answer (crypto) | RFC 7518/7748 KATs for the Concat KDF, ECDH, AES-KW, AES-CBC-HMAC, AES-GCM, XC20P. |
 | **Spec vectors (authoritative baseline)** | Appendix A (secrets) + B (DID Docs) + C (vectors) vendored verbatim. Decrypt every C.3 vector; verify every C.2 signature; for deterministic algs, re-encrypt and compare structurally. Primary gate for Phase 2. |
 | **Cross-implementation interop** | The fixture suite + live harness in §13.2–§13.6. **Gating, not stretch.** |
-| Unit | ≥ 90% line coverage of `DidComm.Core`; XUnit + FluentAssertions + NSubstitute. |
+| Unit | ≥ 90% line coverage of `DidComm.Core`; XUnit + AwesomeAssertions + NSubstitute. |
 | Property-based | Round-trip invariants (pack∘unpack = identity for every legal composition) via FsCheck. |
 | Integration | ASP.NET Core TestServer (HTTP), in-memory socket (WS), full Alice↔Mediator↔Bob route. |
 | Negative/security | Off-curve `epk` (FR-ENC-03), consistency violations (FR-CONSIST), unauthorized signer kid (FR-SIG-03), expired/oversized messages, ACK loops, `did:web` rejection (FR-DID-06). |
