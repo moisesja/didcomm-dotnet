@@ -1,7 +1,7 @@
 using System.Text.Json;
 using DidComm.Messages;
 using DidComm.Protocols.Trace;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // L-014.

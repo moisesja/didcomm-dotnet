@@ -4,7 +4,7 @@ using System.Net.Http.Headers;
 using DidComm.Exceptions;
 using DidComm.Transports;
 using DidComm.Transports.Http;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Xunit;

@@ -7,7 +7,7 @@ using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Protocols.Routing;

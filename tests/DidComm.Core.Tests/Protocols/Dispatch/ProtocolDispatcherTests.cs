@@ -4,7 +4,7 @@ using DidComm.Protocols;
 using DidComm.Protocols.Empty;
 using DidComm.Protocols.TrustPing;
 using DidComm.Threading;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // L-014: alias the TrustPing static API class to dodge namespace shadowing.

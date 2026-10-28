@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using DidComm.Messages;
 using DidComm.Threading;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Threading;

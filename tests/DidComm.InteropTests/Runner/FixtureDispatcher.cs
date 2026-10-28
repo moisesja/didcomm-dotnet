@@ -3,7 +3,7 @@ using DidComm.Composition;
 using DidComm.InteropTests.Resolution;
 using DidComm.Jose;
 using DidComm.Messages;
-using FluentAssertions;
+using AwesomeAssertions;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 
 namespace DidComm.InteropTests.Runner;

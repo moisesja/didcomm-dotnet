@@ -2,7 +2,7 @@ using DidComm.Facade;
 using DidComm.InteropTests.Resolution;
 using DidComm.Messages;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.InteropTests.Facade;

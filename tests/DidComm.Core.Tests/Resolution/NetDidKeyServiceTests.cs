@@ -1,6 +1,6 @@
 using DidComm.Exceptions;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.IdentityModel.Tokens;
 using NetDid.Core;
 using NetDid.Core.Model;

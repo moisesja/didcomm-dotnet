@@ -3,7 +3,7 @@ using DidComm.Facade;
 using DidComm.Jose;
 using DidComm.Resolution;
 using DidComm.Secrets;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 

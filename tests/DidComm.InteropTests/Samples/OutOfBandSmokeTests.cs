@@ -1,5 +1,5 @@
 using System.IO;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 using OobProgram = DidComm.Samples.OutOfBand.Program;
 

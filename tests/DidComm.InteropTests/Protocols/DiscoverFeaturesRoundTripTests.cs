@@ -11,7 +11,7 @@ using DidComm.Secrets;
 using DidComm.TestSupport;
 using DidComm.Transports;
 using DidComm.Transports.Http;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;

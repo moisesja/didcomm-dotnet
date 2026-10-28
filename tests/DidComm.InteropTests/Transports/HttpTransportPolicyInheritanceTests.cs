@@ -4,7 +4,7 @@ using DidComm.Facade;
 using DidComm.TestSupport;
 using DidComm.Transports;
 using DidComm.Transports.Http;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 

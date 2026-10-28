@@ -4,7 +4,7 @@ using DidComm.Jose;
 using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Secrets;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Facade;

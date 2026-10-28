@@ -5,7 +5,7 @@ using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Transports;

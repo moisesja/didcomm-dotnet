@@ -1,6 +1,6 @@
 using DidComm.Facade;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetDid.Core.Model;
 using NetDid.Core.Serialization;
 using Xunit;

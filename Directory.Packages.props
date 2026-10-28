@@ -15,24 +15,37 @@
          1.1.1, both of which the pins below match, so the direct and transitive graphs agree.
          3.1.0 is an additive minor over 3.0.0: it depends on NetCrypto 1.4.0, and the pin below
          raises that to 1.5.0 (a forward move, no downgrade), and on Microsoft.Extensions.* 10.0.8,
-         below the 10.0.10 pins here — the direct and transitive graphs stay in agreement. -->
-    <PackageVersion Include="NetDid.Core" Version="3.1.0" />
-    <PackageVersion Include="NetDid.Method.Key" Version="3.1.0" />
-    <PackageVersion Include="NetDid.Method.Peer" Version="3.1.0" />
-    <PackageVersion Include="NetDid.Method.WebVh" Version="3.1.0" />
-    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="3.1.0" />
+         below the 10.0.10 pins here — the direct and transitive graphs stay in agreement.
+         4.0.0 needs no source change from 3.1.0. Its one wire break is the witnessed did:webvh
+         witness-file format, which didcomm never reads or writes. What does reach didcomm is
+         stricter input validation: DIDs and DID URLs with raw whitespace, control characters or
+         malformed percent-escapes, JWKs without `kty`, and malformed did:peer:2 service blocks are
+         now rejected at resolution instead of accepted. 4.0.0 forces NetCrypto 1.7.1,
+         Microsoft.Extensions.{Caching.Memory, Logging.Abstractions} 10.0.14 and, through
+         NetDid.Method.WebVh, DataProofsDotnet.Core 1.4.0. The pins below match or exceed each,
+         so there is no NU1605 downgrade. -->
+    <PackageVersion Include="NetDid.Core" Version="4.0.0" />
+    <PackageVersion Include="NetDid.Method.Key" Version="4.0.0" />
+    <PackageVersion Include="NetDid.Method.Peer" Version="4.0.0" />
+    <PackageVersion Include="NetDid.Method.WebVh" Version="4.0.0" />
+    <PackageVersion Include="NetDid.Extensions.DependencyInjection" Version="4.0.0" />
     <!-- NetCrypto: the crypto substrate (arrives transitively via DataProofsDotnet.Jose). DidComm
-         references it directly in exactly one place — JwsSignerFactory adapts a private signer JWK
-         into a NetCrypto ISigner, because DataProofs' JWS layer signs through ISigner, not raw key
-         bytes. Everything else (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK) is DataProofs.
+         references it directly for its signer and key-store types: JwsSignerFactory adapts a
+         private signer JWK into a NetCrypto ISigner (DataProofs' JWS layer signs through ISigner,
+         not raw key bytes), and the opaque-key seams (IOpaqueKeyResolver, FromPriorBuilder, the
+         NetDid adapter's key-store resolver) take an IKeyStore. Everything else (JWE/JWS
+         build+parse, ECDH, AEAD, key wrap, JWK) is DataProofs.
          1.5.0 is load-bearing here: its secp256k1 verify path normalizes (r, n-s) to low-S so
          RFC 8812-valid high-S ES256K signatures verify (crypto-dotnet#23) — that is what makes
          inbound ES256K from didcomm-python pass in the live harness. The intervening 1.3.0/1.4.0
          additions (EC point decompression, IRecoverableDigestSigner for EVM flows) are unused by
          didcomm; the new IKeyStore member ships as a throwing default interface implementation, so
-         external key stores stay source- and binary-compatible. net-did 3.x depends transitively
-         on 1.4.0; pinning 1.5.0 directly is a forward move both graphs agree on (no NU1605). -->
-    <PackageVersion Include="NetCrypto" Version="1.5.0" />
+         external key stores stay source- and binary-compatible.
+         1.7.1 is what NetDid 4.0.0 and DataProofsDotnet 1.5.0 both depend on. 1.6.0 adds
+         ICapableKeyStore as a derived interface (IKeyStore itself gains no member), and 1.7.x
+         publishes TransferableKeyMaterial's consumption API. Both are additive and didcomm uses
+         neither, so external IKeyStore implementations stay source- and binary-compatible. -->
+    <PackageVersion Include="NetCrypto" Version="1.7.1" />
     <!-- JOSE composition + crypto substrate (JWE/JWS build+parse, ECDH, AEAD, key wrap, JWK).
          Brings NetCrypto transitively; didcomm carries no envelope crypto of its own. 1.1.0 added
          the async IEcdhKey ECDH seam + JweParser.PeekRecipients/ParseAsync (dataproofs-dotnet#13)
@@ -42,45 +55,60 @@
          non-string unprotected 'kid', and parsed the top-level JSON without wrapping — both
          reachable pre-verification and both the upstream root cause of didcomm-dotnet#58. The
          EnvelopeReader JWS boundary guard added for #58 stays regardless of this pin: it defends
-         the whole untyped-fault class (FR-API-07), not that one input. -->
-    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.3.0" />
-    <!-- ASP.NET Core (transports). Test/sample-only; 10.0.10 is the GA servicing line — the
-         previous pin was a .NET 10 preview build left over from pre-GA scaffolding. -->
-    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.10" />
+         the whole untyped-fault class (FR-API-07), not that one input.
+         1.4.0 checks every JSON text it parses on receipt before reading it. A JWS or JWE whose
+         protected header or JSON serialization carries an unpaired-surrogate escape (`\uD800`) or
+         ill-formed UTF-8 now fails as MalformedJoseException, even in a member nothing reads.
+         Before, that was accepted. A small-order X25519 `epk` or 1PU sender key now fails as the
+         uniform JoseCryptoException instead of escaping as CryptographicException. Both land
+         inside EnvelopeReader's existing catches, so didcomm's exception contract is unchanged.
+         1.5.0 changes only RDFC canonicalization and bbs-2023, which didcomm does not use. -->
+    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.5.0" />
+    <!-- ASP.NET Core (transports). Test/sample-only; tracks the same 10.0.x servicing line as
+         Microsoft.Extensions below. -->
+    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.14" />
+    <!-- Microsoft.Extensions, one servicing line for all five. These are runtime minimums in the
+         published packages, and NetDid 4.0.0 already requires 10.0.14 for Caching.Memory and
+         Logging.Abstractions. -->
     <!-- Caching -->
-    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="10.0.14" />
     <!-- Logging -->
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
     <!-- Dependency Injection -->
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" />
-    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.14" />
     <!-- Resilience (retry + timeout + circuit-breaker) for the Phase 5 HTTPS + WebSocket
          transports. Polly v8 is the .NET-idiomatic policy library and the user-confirmed
          Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no
          extra Microsoft.Extensions.Http.Polly / .Resilience wrapper needed. -->
-    <PackageVersion Include="Polly" Version="8.7.0" />
+    <PackageVersion Include="Polly" Version="8.9.0" />
     <!-- Source Link. Build-only (PrivateAssets="All"), never shipped. The standalone
          Microsoft.SourceLink.GitHub versioning tracks the SDK band, so 10.0.x is the line that
-         pairs with the net10.0 SDK this repo builds on — 8.0.0 was the .NET 8-era pin. -->
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.301" />
-    <!-- Testing. Held deliberately, not by neglect: newer majors exist for every entry here
-         (Test.Sdk 18, xunit.runner.visualstudio 3, NSubstitute 6, coverlet 10). FluentAssertions
-         is the one to be explicit about — 8.x relicensed under Xceed (free for OSS, paid for
-         commercial use) and breaks API across the suite, so staying on 7.0.0 keeps this library's
-         test dependencies unencumbered for downstream contributors. Moving the test stack is its
-         own change with its own risk; it does not ride along with a dependency refresh. -->
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+         pairs with the net10.0 SDK this repo builds on — 8.0.0 was the .NET 8-era pin.
+         10.0.403 brings Microsoft.Build.Tasks.Git 10.0.403, which fixes GHSA-23fw-v26w-5fgq
+         (moderate, information disclosure) in the 10.0.301 it replaces. That task runs whenever
+         release.yml packs. 10.0.403 builds and packs on the 10.0.100 SDK that global.json
+         names, so the SDK floor does not move. -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.403" />
+    <!-- Testing (#77). Every entry is at its latest stable release. Two exceptions are deliberate:
+         - FluentAssertions is replaced by AwesomeAssertions, its Apache-2.0 community fork.
+           FluentAssertions 8 and later are under the Xceed license, which needs a paid license
+           for commercial use. That would encumber every downstream contributor's test
+           dependencies. net-did made the same move in 4.0.0.
+         - xunit stays on 2.9.3, the last v2 release (marked Legacy on NuGet). Moving to xUnit v3
+           is its own change. xunit.runner.visualstudio 4.x still runs v2 tests. -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageVersion Include="FluentAssertions" Version="7.0.0" />
-    <PackageVersion Include="NSubstitute" Version="5.3.0" />
-    <PackageVersion Include="coverlet.collector" Version="6.0.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
+    <PackageVersion Include="AwesomeAssertions" Version="9.6.0" />
+    <PackageVersion Include="NSubstitute" Version="6.2.0" />
+    <PackageVersion Include="coverlet.collector" Version="10.1.0" />
     <!-- IL/metadata reader for the FR-DX-01 public-API demonstration gate: the coverage test walks
          every sample assembly's metadata (member refs, type refs, signatures) to prove each public
          member of the shipped packages is exercised by a sample. Test-only; never shipped. -->
     <PackageVersion Include="Mono.Cecil" Version="0.11.6" />
     <!-- Benchmarks (NFR-07) -->
-    <PackageVersion Include="BenchmarkDotNet" Version="0.14.0" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
   </ItemGroup>
 </Project>

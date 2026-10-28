@@ -1,5 +1,5 @@
 using DidComm.Exceptions;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Exceptions;

@@ -7,7 +7,7 @@ using DidComm.Jose;
 using DidComm.Messages;
 using DidComm.Protocols.Rotation;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.InteropTests.Rotation;

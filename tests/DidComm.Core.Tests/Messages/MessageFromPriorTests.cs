@@ -1,7 +1,7 @@
 using System.Text.Json;
 using DidComm.Json;
 using DidComm.Messages;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Messages;

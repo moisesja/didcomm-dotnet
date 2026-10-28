@@ -11,7 +11,7 @@ using DidComm.Secrets;
 using DidComm.Tests.Envelopes;
 using DidComm.Threading;
 using DidComm.Transports;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using NetCrypto;

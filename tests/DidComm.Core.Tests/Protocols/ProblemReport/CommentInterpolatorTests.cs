@@ -1,5 +1,5 @@
 using DidComm.Protocols.ProblemReport;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Protocols.ProblemReport;

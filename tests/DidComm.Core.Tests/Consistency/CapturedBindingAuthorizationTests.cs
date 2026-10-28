@@ -1,7 +1,7 @@
 using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Consistency;

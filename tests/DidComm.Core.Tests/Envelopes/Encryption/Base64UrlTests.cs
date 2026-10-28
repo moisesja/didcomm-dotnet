@@ -1,6 +1,6 @@
 using System.Text;
 using DidComm.Jose;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Envelopes.Encryption;

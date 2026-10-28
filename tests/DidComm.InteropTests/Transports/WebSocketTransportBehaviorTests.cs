@@ -4,7 +4,7 @@ using DidComm.Facade;
 using DidComm.Transports;
 using DidComm.Transports.Stomp;
 using DidComm.Transports.WebSocket;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.Options;
 using Xunit;
 

@@ -6,7 +6,7 @@ using DidComm.Protocols.Empty;
 using DidComm.Protocols.TrustPing;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using NetCrypto;
 using NetDid.Core;

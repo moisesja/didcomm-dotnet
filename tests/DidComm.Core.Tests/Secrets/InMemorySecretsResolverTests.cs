@@ -1,6 +1,6 @@
 using DidComm.Jose;
 using DidComm.TestSupport;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Secrets;
