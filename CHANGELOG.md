@@ -14,6 +14,8 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 > escaped `UnpackAsync` before any authentication (FR-API-07). See *Fixed* below.
 > It also caps the length of every wire DID and key id before didcomm parses, resolves or looks
 > it up (FR-API-09, #80). That refuses some input 1.4.1 accepted; see *Security* below.
+> Encrypted packs now address every keyAgreement key of each recipient, as the spec says, not just
+> the first (FR-ENC-19, #81). That changes what goes on the wire; see *Changed (wire-visible)* below.
 
 ### Security
 
@@ -61,6 +63,68 @@ Pinned by `SurrogateEscapeBoundaryTests` (13 cases) and
 hostile case has a control with a well-formed escaped surrogate pair in the same position, which
 still unpacks. Before the fix, 9 of the 13 failed with a raw exception, and the 3
 extension-header value cases unpacked.
+
+### Changed (wire-visible) — encrypted packs address every keyAgreement key of each recipient (FR-ENC-19, #81)
+
+`PackEncryptedAsync` encrypted to only the **first** keyAgreement key on the chosen curve of each
+recipient DID. DIDComm v2.1 says "the default recipients of the envelope SHOULD include all the
+`keyAgreement` entries representing Bob. This allows Bob to decrypt his messages on any device he
+controls" (encryption §Key IDs). The spec's own Appendix C.3 vectors do that: their `apv` is the
+hash over all three of Bob's X25519 kids. didcomm-python 0.3.2 and didcomm-jvm 0.3.2 do it too. A
+recipient whose device held only its second or third key could not decrypt what didcomm-dotnet
+sent. The PRD has required this since the start (FR-ENC-19); its acceptance test exercised the
+envelope writer with the keys handed to it, never the facade's own choice.
+
+- **Every key on the curve.** For each recipient DID, the envelope now has one `recipients` entry
+  per keyAgreement key on the negotiated curve, in document order. The body is still encrypted
+  once. `SignFrom`, `ProtectSender`, `SendAsync` and the Discover Features client inherit this.
+  Curve negotiation is unchanged (X25519 > P-256 > P-384 > P-521, common to every recipient and,
+  for authcrypt, to a held sender key). Keys on other curves are skipped, and a Debug log records
+  how many (counts only).
+- **Pin one key.** A DID URL `did#fragment` in `Recipients` (or `SendOptions.Recipients`) now
+  addresses exactly that key, as didcomm-python and didcomm-jvm accept a DID URL `to`. The key
+  must be one of the DID's keyAgreement keys; otherwise `DidResolutionException`. Before, any DID
+  URL was refused as `DidResolutionException` ("not a syntactically valid DID"). A path, query or
+  parameters in the entry gives `ArgumentException`.
+- **Mediators.** A mediator DID used as a service `uri` now gets one forward layer addressed to
+  all of its keys on one curve (routing Example 1), not just its first. A `routingKeys` entry that
+  is a bare DID is accepted and wrapped the same way, as both peers do. Before, it was refused. A
+  mediator's `ReanoncryptToNext` rewrap uses the same selection.
+- **Hygiene.** Kids are deduped across the envelope, so `Recipients: [bob, bob]` no longer doubles
+  every entry. Keys without a kid are skipped; before, they escaped as an untyped DataProofs
+  exception. At most 64 keys per recipient DID are used, because the recipient's DID document
+  decides how many key agreements a pack runs.
+- **With #80.** Recipient kids over the FR-API-09 limits are still included; didcomm-dotnet
+  receivers skip them per entry. A recipient whose first key has such a kid now decrypts through
+  its other keys.
+
+- **Live harness.** Both legs gain three cells in both directions: anoncrypt and authcrypt to a
+  3-key DID unpacked by a device holding only the third key, and an authcrypt `to` pinned to the
+  second key. Every cell checks the envelope's kids exactly before unpacking. The existing
+  "authcrypt 3-rcpt" cell could not catch this, because its unpacker held all three keys. Run
+  before the fix, the outbound cells failed on both legs (one entry instead of three, and the DID
+  URL `to` refused); the inbound cells passed, because python and JVM already do this. The python
+  leg now refuses to start on CPython outside 3.9–3.12, because didcomm-python's pydantic v1
+  fails to import on 3.13 and later; set `PYTHON`, for example `PYTHON=python3.12`.
+- **Messages.** Forward wrapping with several `Recipients` entries now says "every Recipients entry
+  must name the same DID" (pins of one DID are allowed). A mediator's rewrap refuses a next hop with
+  no key on a supported curve as `DidResolutionException`; before, it passed a mixed-curve list to
+  the writer.
+
+What you'll see: more `recipients` entries per envelope for multi-key recipients, so code that
+counts them or assumes `RecipientKid` is a DID's first key sees different values. No public API
+changes; package validation is clean against 1.4.1. Published vectors are not regenerated; they
+remain valid.
+
+Pinned by `SpecAllRecipientKeysTests`: the spec's Appendix A/B DIDs; every C.3 curve's `apv`
+matches, and a pin yields exactly that entry. Also `AllRecipientKeysTests`, `AllRecipientKeysRoutingTests`,
+`RecipientKeySelectionTests`, and changes to `MediatorEndpointExpanderTests` and
+`SenderForwardWrappingTests`. The spec-vector tests, the last-device test and the #80 interplay
+tests failed before the change.
+
+Not covered here: encryption §"A message being sent to multiple DIDs MUST be encrypted for each DID
+independently" (FR-ENC-04). `PackEncryptedAsync` still builds one envelope for every DID in
+`Recipients`. Meeting it changes the pack result's shape and needs its own API decision.
 
 ### Security — wire identifiers are length-capped before DID parsing (FR-API-09, #80)
 
@@ -169,11 +233,6 @@ python 56/56, and JVM 53/53 with the same three declared n/a cells as before.
 - **Kids that are never looked up.** In a multi-signature JWS the verifier tries signatures in
   order and stops at the first that verifies. A later signature's kid is never requested and never
   checked: `[valid, over-long]` unpacks.
-- **Recipients whose first key has an over-limit kid.** `PackEncryptedAsync` encrypts to one
-  keyAgreement key per recipient, the first on the chosen curve. If that key's kid exceeds the
-  limits, a didcomm-dotnet recipient treats it as not held and can't decrypt, even when it
-  publishes a usable key. Encrypting to every keyAgreement key, as the spec says, fixes this
-  (FR-ENC-19, #81).
 
 Pinned by `IdentifierLengthCapTests` (and its `Permutations` part), `IdentifierLimitsTests`,
 `FromPriorLengthCapTests`, `ForwardNextLengthCapTests`, `DidSubjectLengthBoundTests`, and additions
