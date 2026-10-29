@@ -270,9 +270,27 @@ public sealed partial class DidCommClient
     /// applies Routing Protocol 2.0 forward wrapping (FR-ROUTE-02) and surfaces the transport
     /// URI on <see cref="PackEncryptedResult.ServiceEndpoint"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>Which keys the envelope is encrypted to (FR-ENC-19).</strong> One curve is negotiated
+    /// for the whole envelope: the first of X25519, P-256, P-384 and P-521 that every
+    /// <see cref="PackEncryptedOptions.Recipients"/> entry has a key on and, for authcrypt, that the
+    /// sender holds a key on. Each DID entry then contributes every one of its <c>keyAgreement</c>
+    /// keys on that curve, in document order (at most 64 per DID), so the recipient can decrypt on any
+    /// device holding any of them. A DID URL entry (<c>did#fragment</c>) contributes exactly that
+    /// key, and because it is the entry's only candidate, its curve becomes the envelope's. Entries
+    /// are taken in order and each kid appears once. The signed inner layer
+    /// (<see cref="PackEncryptedOptions.SignFrom"/>) and the outer anoncrypt layer
+    /// (<see cref="PackEncryptedOptions.ProtectSender"/>) use the same recipient keys. Keys left out
+    /// for another curve or the cap are reported by a Debug log with counts only.
+    /// </para>
+    /// </remarks>
     /// <param name="message">The plaintext message.</param>
     /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional forward toggle.</param>
     /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentException">No recipient, or an entry that is empty, longer than 4096 characters (not quoted), or a DID URL with a path, query, parameters or an empty fragment.</exception>
+    /// <exception cref="DidResolutionException">A recipient DID has no keyAgreement key with a key id, or a pinned key is not one of its DID's keyAgreement keys.</exception>
+    /// <exception cref="InvalidOperationException">No curve is common to every entry (and the authcrypt sender); a forbidden content encryption for authcrypt; or <see cref="PackEncryptedOptions.Forward"/> with entries naming more than one DID or without an <see cref="IServiceEndpointResolver"/>.</exception>
     public async Task<PackEncryptedResult> PackEncryptedAsync(Message message, PackEncryptedOptions options, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -307,14 +325,23 @@ public sealed partial class DidCommClient
         if (options.Recipients is null || options.Recipients.Count == 0)
             throw new ArgumentException("At least one recipient DID is required.", nameof(options));
 
+        // Each entry is a DID, meaning all of its keys, or a DID URL pinning one key (FR-ENC-19).
+        // Split by a linear scan before anything is resolved, so a malformed entry fails fast and only
+        // bare DIDs ever reach the key service.
+        var entries = new RecipientEntry[options.Recipients.Count];
+        for (var i = 0; i < entries.Length; i++)
+            entries[i] = ParseRecipientEntry(options.Recipients[i], nameof(options));
+
         if (options.Forward)
         {
             // FR-ROUTE-02 (Phase 4): forward wrapping shape checks happen up front so the caller
             // gets a fast, deterministic error before any DID resolution / curve selection runs.
-            if (options.Recipients.Count != 1)
+            // The route and body.next belong to one DID, so every entry must name the same one;
+            // pinning keys of that DID is fine.
+            if (!AllNameOneDid(entries))
             {
                 throw new InvalidOperationException(
-                    "Phase 4 supports forward wrapping for single-recipient packs only. Drop Forward = true or call PackEncryptedAsync once per recipient.");
+                    "Forward wrapping supports single-recipient packs only: every Recipients entry must name the same DID. Drop Forward = true or call PackEncryptedAsync once per recipient.");
             }
             if (_serviceResolver is null)
             {
@@ -323,8 +350,8 @@ public sealed partial class DidCommClient
             }
         }
 
-        foreach (var did in options.Recipients)
-            _keyService.RejectUnsupportedMethod(did);
+        foreach (var entry in entries)
+            _keyService.RejectUnsupportedMethod(entry.Did);
         if (options.From is not null)
             _keyService.RejectUnsupportedMethod(options.From);
         if (options.SignFrom is not null)
@@ -333,14 +360,27 @@ public sealed partial class DidCommClient
 
         var encJoseAlg = MapContentEncryption(options.Enc, isAuthcrypt: options.From is not null);
 
-        var recipientPublics = new Dictionary<string, IReadOnlyList<Jwk>>(StringComparer.Ordinal);
-        foreach (var did in options.Recipients)
+        // Resolve each distinct DID once, keeping the keys an envelope can name: those with a kid,
+        // each kid once, in document order (FR-ENC-19).
+        var addressableByDid = new Dictionary<string, IReadOnlyList<Jwk>>(StringComparer.Ordinal);
+        foreach (var entry in entries)
         {
-            var keys = await _keyService.GetVerificationMethodsAsync(did, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+            if (addressableByDid.ContainsKey(entry.Did))
+                continue;
+            var keys = await _keyService.GetVerificationMethodsAsync(entry.Did, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
             if (keys.Count == 0)
-                throw new DidResolutionException(did, "no keyAgreement keys available");
-            recipientPublics[did] = keys;
+                throw new DidResolutionException(entry.Did, "no keyAgreement keys available");
+            var addressable = RecipientKeySelection.Addressable(keys);
+            if (addressable.Count == 0)
+                throw new DidResolutionException(entry.Did, $"none of its {keys.Count} keyAgreement keys has a key id");
+            addressableByDid[entry.Did] = addressable;
         }
+
+        // Each entry's candidates: every addressable key of a bare DID, or exactly the pinned one.
+        // Curve negotiation runs over these, so a pinned key decides the curve for everyone.
+        var entryKeys = new IReadOnlyList<Jwk>[entries.Length];
+        for (var i = 0; i < entries.Length; i++)
+            entryKeys[i] = CandidatesOf(entries[i], addressableByDid[entries[i].Did]);
 
         IReadOnlyList<Jwk> senderPublics = Array.Empty<Jwk>();
         var senderOverLimit = 0;
@@ -371,7 +411,7 @@ public sealed partial class DidCommClient
             }
         }
 
-        var chosenCurve = PickCommonCurve(recipientPublics.Values, senderPublics, requireSender: options.From is not null);
+        var chosenCurve = RecipientKeySelection.PickCommonCurve(entryKeys, senderPublics, requireSender: options.From is not null);
         if (chosenCurve is null)
         {
             throw new InvalidOperationException(
@@ -381,11 +421,7 @@ public sealed partial class DidCommClient
                     : ""));
         }
 
-        var chosenRecipients = new List<Jwk>(recipientPublics.Count);
-        foreach (var did in options.Recipients)
-        {
-            chosenRecipients.Add(recipientPublics[did].First(k => k.Crv == chosenCurve));
-        }
+        var chosenRecipients = SelectRecipientKeys(entries, entryKeys, chosenCurve);
 
         DpEnc.IEcdhKey? senderKey = null;
         string? skid = null;
@@ -421,19 +457,20 @@ public sealed partial class DidCommClient
             return new PackEncryptedResult(innerPacked, ServiceEndpoint: null, Array.Empty<string>());
 
         // FR-ROUTE-02 sender path: input-shape checks already validated up front. Resolve the
-        // (single) recipient's DIDCommMessaging service, expand any mediator-as-DID endpoint
-        // (FR-ROUTE-04), then wrap forward layers.
-        var recipientDid = options.Recipients[0];
+        // (single) recipient DID's DIDCommMessaging service, expand any mediator-as-DID endpoint
+        // (FR-ROUTE-04), then wrap forward layers. body.next is the bare DID even when the entries
+        // pinned keys of it.
+        var recipientDid = entries[0].Did;
         var candidates = await _serviceResolver!.ResolveAsync(recipientDid, ct).ConfigureAwait(false);
         var route = await MediatorEndpointExpander.ExpandAsync(candidates, _serviceResolver, _keyService, recipientDid, ct).ConfigureAwait(false);
 
-        if (route.RoutingKeyJwks.Count == 0)
+        if (route.Layers.Count == 0)
         {
             // No routing keys → direct delivery; surface the endpoint URI but skip wrapping.
             return new PackEncryptedResult(innerPacked, route.TransportUri, route.FallbackUris);
         }
 
-        var wrapped = await ForwardWrapper.WrapAsync(innerPacked, route.RoutingKeyJwks, recipientDid, _cryptoProvider, ct).ConfigureAwait(false);
+        var wrapped = await ForwardWrapper.WrapAsync(innerPacked, route.Layers, recipientDid, _cryptoProvider, ct).ConfigureAwait(false);
         return new PackEncryptedResult(wrapped, route.TransportUri, route.FallbackUris);
     }
 
@@ -821,6 +858,19 @@ public sealed partial class DidCommClient
     private static partial void LogSendFailed(ILogger logger, string errorType);
 
     /// <summary>
+    /// FR-ENC-19 breadcrumb: some of a recipient's keyAgreement keys were not encrypted to, because
+    /// they are on a curve other than the one every recipient (and an authcrypt sender) shares, or
+    /// because the DID publishes more than <see cref="RecipientKeySelection.MaxKeysPerDid"/>. A
+    /// device holding only such a key cannot decrypt the message. Debug level, and counts and the
+    /// curve name only: never a DID or kid (NFR-04).
+    /// </summary>
+    [LoggerMessage(
+        EventId = 5,
+        Level = LogLevel.Debug,
+        Message = "Encrypted to {RecipientKeyCount} recipient keys on {Curve}; left out {OffCurveCount} keyAgreement keys on other curves and {OverCapCount} over the limit of {MaxKeysPerDid} keys per recipient DID (FR-ENC-19).")]
+    private static partial void LogRecipientKeysSkipped(ILogger logger, int recipientKeyCount, string curve, int offCurveCount, int overCapCount, int maxKeysPerDid);
+
+    /// <summary>
     /// The JOSE identifier for a content-encryption choice, for span tags only. Unlike
     /// <see cref="MapContentEncryption"/> this never throws — a forbidden combination must
     /// still tag the span before the core path rejects it.
@@ -863,46 +913,116 @@ public sealed partial class DidCommClient
         };
     }
 
+    // One PackEncryptedOptions.Recipients entry: the DID it names and, for a DID URL, the key id it
+    // pins (the whole entry). A bare DID has no pin and stands for all of its keys.
+    private readonly record struct RecipientEntry(string Did, string? PinnedKid);
+
     /// <summary>
-    /// Pick the highest-preference curve that every recipient set contains (and, if authcrypt,
-    /// the sender set also contains). Preference order: X25519 → P-256 → P-384 → P-521.
-    /// Returns <c>null</c> when no common curve exists — the facade surfaces that as an
-    /// explicit failure rather than silently splitting envelopes (per-curve splitting lands in
-    /// a later iteration if real fixtures require it).
+    /// Split a <see cref="PackEncryptedOptions.Recipients"/> entry into its DID and, for a DID URL
+    /// with a fragment, the key id it pins (FR-ENC-19). A linear scan for the first DID URL
+    /// delimiter; no regular expression or DID parse runs here.
     /// </summary>
-    private static string? PickCommonCurve(
-        IEnumerable<IReadOnlyList<Jwk>> recipientSets,
-        IReadOnlyList<Jwk> senderKeys,
-        bool requireSender)
+    /// <remarks>
+    /// A pin names a key by its absolute key id, exactly as the recipient's DID document gives it,
+    /// so a path, query, parameters, an empty fragment or a relative reference are refused rather
+    /// than guessed at. An over-long entry is refused first and without quoting it (FR-API-09, #80).
+    /// </remarks>
+    /// <param name="entry">The entry as the caller wrote it.</param>
+    /// <param name="paramName">The caller's parameter name, for the exception.</param>
+    private static RecipientEntry ParseRecipientEntry(string? entry, string paramName)
     {
-        var preference = new[]
+        if (string.IsNullOrEmpty(entry))
+            throw new ArgumentException("Recipients contains a null or empty entry.", paramName);
+
+        if (entry.Length > IdentifierLimits.MaxKeyIdLength)
         {
-            JoseAlgorithms.CrvX25519,
-            JoseAlgorithms.CrvP256,
-            JoseAlgorithms.CrvP384,
-            JoseAlgorithms.CrvP521,
-        };
-
-        foreach (var crv in preference)
-        {
-            var allRecipientsCovered = true;
-            foreach (var set in recipientSets)
-            {
-                if (!set.Any(k => string.Equals(k.Crv, crv, StringComparison.Ordinal)))
-                {
-                    allRecipientsCovered = false;
-                    break;
-                }
-            }
-            if (!allRecipientsCovered)
-                continue;
-
-            if (requireSender && !senderKeys.Any(k => string.Equals(k.Crv, crv, StringComparison.Ordinal)))
-                continue;
-
-            return crv;
+            throw new ArgumentException(
+                $"Recipients contains an entry of {entry.Length} characters, which exceeds the maximum DID URL length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09).",
+                paramName);
         }
 
-        return null;
+        var didLength = IdentifierLimits.DidPartLength(entry);
+        if (didLength == entry.Length)
+            return new RecipientEntry(entry, PinnedKid: null);
+
+        if (didLength == 0 || entry[didLength] != '#' || didLength == entry.Length - 1)
+        {
+            throw new ArgumentException(
+                $"Recipients entry '{entry}' is neither a DID nor a DID URL of the form did#fragment. A DID URL pins one keyAgreement key by its absolute key id; a path, query, parameters, an empty fragment or a relative reference are not supported (FR-ENC-19).",
+                paramName);
+        }
+
+        return new RecipientEntry(entry[..didLength], PinnedKid: entry);
+    }
+
+    private static bool AllNameOneDid(RecipientEntry[] entries)
+    {
+        foreach (var entry in entries)
+        {
+            if (!string.Equals(entry.Did, entries[0].Did, StringComparison.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// An entry's candidate keys: every addressable key of a bare DID, or exactly the pinned key,
+    /// which must be one of the DID's keyAgreement keys.
+    /// </summary>
+    /// <param name="entry">The parsed entry.</param>
+    /// <param name="addressable">The entry DID's addressable keyAgreement keys.</param>
+    private static IReadOnlyList<Jwk> CandidatesOf(RecipientEntry entry, IReadOnlyList<Jwk> addressable)
+    {
+        if (entry.PinnedKid is null)
+            return addressable;
+
+        foreach (var key in addressable)
+        {
+            if (string.Equals(key.Kid, entry.PinnedKid, StringComparison.Ordinal))
+                return new[] { key };
+        }
+        throw new DidResolutionException(entry.Did, $"'{entry.PinnedKid}' is not one of its keyAgreement keys");
+    }
+
+    /// <summary>
+    /// The envelope's recipient keys (FR-ENC-19): for each entry in order, its candidates on the
+    /// negotiated curve in document order, at most <see cref="RecipientKeySelection.MaxKeysPerDid"/>
+    /// per bare DID, each kid once across the whole envelope (ordinal, first wins). A repeated bare
+    /// DID adds nothing. When a bare DID had keys left out for being on another curve or over the
+    /// cap, a Debug log says how many, with counts only (NFR-04).
+    /// </summary>
+    /// <param name="entries">The parsed recipient entries.</param>
+    /// <param name="entryKeys">Each entry's candidate keys, index-aligned with <paramref name="entries"/>.</param>
+    /// <param name="curve">The negotiated curve.</param>
+    private List<Jwk> SelectRecipientKeys(RecipientEntry[] entries, IReadOnlyList<Jwk>[] entryKeys, string curve)
+    {
+        var chosen = new List<Jwk>();
+        var seenKids = new HashSet<string>(StringComparer.Ordinal);
+        var seenBareDids = new HashSet<string>(StringComparer.Ordinal);
+        var offCurve = 0;
+        var overCap = 0;
+        for (var i = 0; i < entries.Length; i++)
+        {
+            var bare = entries[i].PinnedKid is null;
+            if (bare && !seenBareDids.Add(entries[i].Did))
+                continue;
+
+            var onCurve = RecipientKeySelection.OnCurve(entryKeys[i], curve, out var capped);
+            if (bare)
+            {
+                overCap += capped;
+                offCurve += entryKeys[i].Count - onCurve.Count - capped;
+            }
+
+            foreach (var key in onCurve)
+            {
+                if (seenKids.Add(key.Kid!))
+                    chosen.Add(key);
+            }
+        }
+
+        if (offCurve > 0 || overCap > 0)
+            LogRecipientKeysSkipped(_logger, chosen.Count, curve, offCurve, overCap, RecipientKeySelection.MaxKeysPerDid);
+        return chosen;
     }
 }

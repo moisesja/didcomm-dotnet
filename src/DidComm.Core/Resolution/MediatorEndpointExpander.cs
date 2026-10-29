@@ -1,15 +1,15 @@
+using DidComm.Composition;
+using DidComm.Consistency;
 using DidComm.Exceptions;
-using DidComm.Jose;
 
 namespace DidComm.Resolution;
 
 /// <summary>
 /// Takes a recipient DID's <see cref="DidCommServiceInfo"/> candidates, picks the preferred
-/// entry, expands a DID-as-endpoint reference (FR-ROUTE-04) into a transport URI plus the
-/// mediator's <c>keyAgreement</c> key prepended onto the routing-key list, and materialises
-/// every routing key into a public JWK. Result: a fully-resolved
-/// <see cref="ResolvedRoute"/> the sender wrapping algorithm can drive without further DID
-/// resolution.
+/// entry, expands a DID-as-endpoint reference (FR-ROUTE-04) into a transport URI plus a forward
+/// layer for the mediator prepended onto the recipient's routing keys, and materialises every
+/// layer's public JWKs. Result: a fully-resolved <see cref="ExpandedRoute"/> the sender wrapping
+/// algorithm can drive without further DID resolution.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -19,11 +19,12 @@ namespace DidComm.Resolution;
 /// <see cref="ConsistencyException"/> rather than recursing.
 /// </para>
 /// <para>
-/// When multiple mediator <c>keyAgreement</c> keys exist, only the FIRST is prepended. The
-/// spec text reads "the keyAgreement keys of the mediator are implicitly prepended"; the
-/// pragmatic interpretation matched by the major reference implementations is to pick the
-/// preferred key rather than emit one forward layer per mediator key. If interop fixtures
-/// later demand per-key layers we can revisit.
+/// A mediator named by its DID gets ONE forward layer, encrypted to all of its keyAgreement keys
+/// on one curve (FR-ENC-19; routing.md: "the keyAgreement keys of the mediator are implicitly
+/// prepended", and its Example 1 encrypts the forward to "the keyAgreement keys within the
+/// mediator DID Document"). That is what didcomm-python and didcomm-jvm do, and it lets the
+/// mediator unwrap on any device it runs. The same holds for a routing key given as a bare DID.
+/// A routing key given as a DID URL names exactly one key and gets a layer for that key alone.
 /// </para>
 /// </remarks>
 internal static class MediatorEndpointExpander
@@ -34,10 +35,10 @@ internal static class MediatorEndpointExpander
     /// </summary>
     /// <param name="candidates">DIDCommMessaging entries from the recipient's document, in preference order. The first is selected; subsequent ones become fallback URIs.</param>
     /// <param name="serviceResolver">Resolver used to dereference a mediator-as-DID-endpoint.</param>
-    /// <param name="keyService">Resolver used to materialise the mediator's <c>keyAgreement</c> and each routing-key DID URL into a public JWK.</param>
+    /// <param name="keyService">Resolver used to materialise the mediator's <c>keyAgreement</c> keys and each routing key into public JWKs.</param>
     /// <param name="recipientDid">The recipient DID — used in error messages and to flag a recursive endpoint loop.</param>
     /// <param name="ct">Cancellation token.</param>
-    public static async Task<ResolvedRoute> ExpandAsync(
+    public static async Task<ExpandedRoute> ExpandAsync(
         IReadOnlyList<DidCommServiceInfo> candidates,
         IServiceEndpointResolver serviceResolver,
         IDidKeyService keyService,
@@ -60,12 +61,12 @@ internal static class MediatorEndpointExpander
         var fallbackUris = candidates.Skip(1).Select(c => c.Uri).Where(uri => !LooksLikeDid(uri)).ToArray();
 
         string transportUri;
-        var combinedRoutingKeyKids = new List<string>();
+        var layers = new List<ForwardLayer>(primary.RoutingKeys.Count + 1);
 
         if (LooksLikeDid(primary.Uri))
         {
             // FR-ROUTE-04: mediator-as-DID-endpoint. Resolve the mediator's own service entry
-            // and prepend its first keyAgreement key.
+            // and prepend a layer addressed to its keyAgreement keys.
             var mediatorServices = await serviceResolver.ResolveAsync(primary.Uri, ct).ConfigureAwait(false);
             if (mediatorServices.Count == 0)
                 throw new DidResolutionException(primary.Uri, $"mediator-as-endpoint '{primary.Uri}' has no DIDCommMessaging service");
@@ -83,11 +84,9 @@ internal static class MediatorEndpointExpander
             if (mediatorKeys.Count == 0)
                 throw new DidResolutionException(primary.Uri, "mediator-as-endpoint has no keyAgreement keys to prepend");
 
-            var primaryKid = mediatorKeys[0].Kid
-                ?? throw new DidResolutionException(primary.Uri, "mediator-as-endpoint keyAgreement key has no kid");
-
-            combinedRoutingKeyKids.Add(primaryKid);
-            combinedRoutingKeyKids.AddRange(primary.RoutingKeys);
+            layers.Add(new ForwardLayer(
+                primary.Uri,
+                RecipientKeySelection.AllOnPreferredCurve(primary.Uri, mediatorKeys, "mediator-as-endpoint")));
             // Per FR-ROUTE-04 / spec §Using a DID as an endpoint: only the mediator's
             // *keyAgreement* keys are implicitly prepended — the mediator's own routingKeys
             // are intentionally ignored here because they only apply when the mediator is
@@ -96,36 +95,47 @@ internal static class MediatorEndpointExpander
         else
         {
             transportUri = primary.Uri;
-            combinedRoutingKeyKids.AddRange(primary.RoutingKeys);
         }
 
-        var routingKeyJwks = await ResolveRoutingKeyJwksAsync(combinedRoutingKeyKids, keyService, ct).ConfigureAwait(false);
+        foreach (var routingKey in primary.RoutingKeys)
+            layers.Add(await ResolveRoutingKeyLayerAsync(routingKey, keyService, ct).ConfigureAwait(false));
 
-        return new ResolvedRoute(transportUri, routingKeyJwks, fallbackUris);
+        return new ExpandedRoute(transportUri, layers, fallbackUris);
     }
 
-    private static async Task<IReadOnlyList<Jwk>> ResolveRoutingKeyJwksAsync(
-        IReadOnlyList<string> kids,
+    /// <summary>
+    /// The forward layer for one <c>routingKeys</c> entry. A DID URL with a fragment names one key,
+    /// which must be among its DID's keyAgreement keys. A bare DID stands for that mediator: every
+    /// keyAgreement key it publishes on one curve, as for a mediator-as-endpoint.
+    /// </summary>
+    /// <param name="reference">The routing-key entry as the recipient's document gives it.</param>
+    /// <param name="keyService">Resolver for the routing key's DID.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private static async Task<ForwardLayer> ResolveRoutingKeyLayerAsync(
+        string reference,
         IDidKeyService keyService,
         CancellationToken ct)
     {
-        if (kids.Count == 0)
-            return Array.Empty<Jwk>();
+        var hashIndex = reference.IndexOf('#');
+        if (hashIndex == 0)
+            throw new DidResolutionException(reference, "routing key reference is relative (fragment-only); a routing key must be a DID or a DID URL with a fragment");
 
-        var resolvedKeys = new List<Jwk>(kids.Count);
-        foreach (var kid in kids)
+        if (hashIndex > 0)
         {
-            var hashIndex = kid.IndexOf('#');
-            if (hashIndex <= 0)
-                throw new DidResolutionException(kid, "routing key reference is not a DID URL with a fragment (relative, fragment-only, or bare-DID references are not supported)");
-
-            var subjectDid = kid[..hashIndex];
+            var subjectDid = reference[..hashIndex];
             var subjectKeys = await keyService.GetVerificationMethodsAsync(subjectDid, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
-            var match = subjectKeys.FirstOrDefault(j => string.Equals(j.Kid, kid, StringComparison.Ordinal))
-                ?? throw new DidResolutionException(subjectDid, $"routing key '{kid}' is not declared in keyAgreement");
-            resolvedKeys.Add(match);
+            var match = subjectKeys.FirstOrDefault(j => string.Equals(j.Kid, reference, StringComparison.Ordinal))
+                ?? throw new DidResolutionException(subjectDid, $"routing key '{reference}' is not declared in keyAgreement");
+            return new ForwardLayer(subjectDid, new[] { match });
         }
-        return resolvedKeys;
+
+        if (!LooksLikeDid(reference) || IdentifierLimits.DidPartLength(reference) != reference.Length)
+            throw new DidResolutionException(reference, "routing key reference is neither a DID nor a DID URL with a fragment");
+
+        var keys = await keyService.GetVerificationMethodsAsync(reference, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+        if (keys.Count == 0)
+            throw new DidResolutionException(reference, "routing key DID has no keyAgreement keys");
+        return new ForwardLayer(reference, RecipientKeySelection.AllOnPreferredCurve(reference, keys, "routing key DID"));
     }
 
     private static bool LooksLikeDid(string uri) =>

@@ -9,9 +9,10 @@ namespace DidComm.TestSupport;
 /// <summary>
 /// Test-only bridge to the internal <see cref="EnvelopeWriter"/> for packing an authcrypt JWE
 /// addressed to <em>multiple recipient kids</em> at once (e.g. all three of Bob's Appendix-A
-/// X25519 keys, mirroring the spec C.3 multi-recipient vectors). The public facade encrypts to
-/// one keyAgreement key per recipient DID, so fixture generation (FR-IX-06) needs this seam to
-/// publish a multi-recipient vector without exposing envelope internals as public API.
+/// X25519 keys, mirroring the spec C.3 multi-recipient vectors). The public facade now encrypts to
+/// every keyAgreement key of each recipient DID on the negotiated curve (FR-ENC-19), which gives
+/// the same shape; this seam stays for fixture generation (FR-IX-06) and tests that need an exact,
+/// hand-picked recipient list, such as keys of several DIDs or an order the facade would not choose.
 /// </summary>
 public static class MultiRecipientPacker
 {

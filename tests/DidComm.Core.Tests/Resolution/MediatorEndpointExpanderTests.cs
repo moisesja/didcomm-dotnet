@@ -30,14 +30,18 @@ public sealed class MediatorEndpointExpanderTests
         var route = await MediatorEndpointExpander.ExpandAsync(candidates, svc, keys, Recipient);
 
         route.TransportUri.Should().Be("https://recipient.example/inbox");
-        route.RoutingKeyJwks.Should().ContainSingle().Which.Kid.Should().Be("did:example:bob#r-1");
+        var layer = route.Layers.Should().ContainSingle().Which;
+        layer.Did.Should().Be(Recipient);
+        layer.Recipients.Should().ContainSingle().Which.Kid.Should().Be("did:example:bob#r-1");
         route.FallbackUris.Should().BeEmpty();
         svc.ResolveCount.Should().Be(0, "mediator lookup must only fire when uri is a DID");
     }
 
     [Fact]
-    public async Task Did_endpoint_resolves_mediator_and_prepends_its_first_key_agreement_kid()
+    public async Task Did_endpoint_resolves_mediator_and_prepends_one_layer_to_all_its_key_agreement_keys()
     {
+        // FR-ROUTE-04 + FR-ENC-19: the mediator's keyAgreement keys are prepended as ONE forward
+        // layer encrypted to all of them, so the mediator can unwrap on any of its devices.
         var svc = new StubServiceResolver(
             (Mediator, new[] { Info("https://mediator.example/inbox") }));
         var keys = new StubKeyService(
@@ -52,9 +56,13 @@ public sealed class MediatorEndpointExpanderTests
         var route = await MediatorEndpointExpander.ExpandAsync(candidates, svc, keys, Recipient);
 
         route.TransportUri.Should().Be("https://mediator.example/inbox");
-        route.RoutingKeyJwks.Select(j => j.Kid).Should().Equal(
-            "did:example:mediator1#kx-1", // prepended mediator key (FR-ROUTE-04)
-            "did:example:bob#r-1");       // recipient's routing key
+        LayerKids(route).Should().BeEquivalentTo(
+            new[]
+            {
+                (Mediator, new[] { "did:example:mediator1#kx-1", "did:example:mediator1#kx-2" }), // prepended mediator layer
+                (Recipient, new[] { "did:example:bob#r-1" }),                                     // recipient's routing key
+            },
+            o => o.WithStrictOrdering());
     }
 
     [Fact]
@@ -89,9 +97,13 @@ public sealed class MediatorEndpointExpanderTests
 
         var route = await MediatorEndpointExpander.ExpandAsync(candidates, svc, keys, Recipient);
 
-        route.RoutingKeyJwks.Select(j => j.Kid).Should().Equal(
-            "did:example:mediator1#kx-1",   // mediator's first keyAgreement (outermost)
-            "did:example:bob#r-1");         // recipient's routing key
+        LayerKids(route).Should().BeEquivalentTo(
+            new[]
+            {
+                (Mediator, new[] { "did:example:mediator1#kx-1" }), // mediator's keyAgreement (outermost)
+                (Recipient, new[] { "did:example:bob#r-1" }),       // recipient's routing key
+            },
+            o => o.WithStrictOrdering());
     }
 
     [Fact]
@@ -155,17 +167,110 @@ public sealed class MediatorEndpointExpanderTests
     }
 
     [Fact]
-    public async Task Throws_when_routing_key_string_lacks_fragment()
+    public async Task Bare_DID_routing_key_wraps_one_layer_to_all_of_that_DIDs_keys()
     {
+        // A routingKeys entry that is a bare DID names the mediator itself, as didcomm-python and
+        // didcomm-jvm read it: one layer encrypted to all of its keyAgreement keys on one curve.
         var svc = new StubServiceResolver();
-        var keys = new StubKeyService();
+        var keys = new StubKeyService(
+            (Mediator, new[] { Jwk("did:example:mediator1#kx-1"), Jwk("did:example:mediator1#p-1", "P-256"), Jwk("did:example:mediator1#kx-2") }));
 
-        var act = () => MediatorEndpointExpander.ExpandAsync(
-            new[] { Info("https://r/", routing: new[] { "did:example:bob" }) },
+        var route = await MediatorEndpointExpander.ExpandAsync(
+            new[] { Info("https://r/", routing: new[] { Mediator }) },
             svc, keys, Recipient);
 
+        LayerKids(route).Should().BeEquivalentTo(
+            new[] { (Mediator, new[] { "did:example:mediator1#kx-1", "did:example:mediator1#kx-2" }) },
+            o => o.WithStrictOrdering());
+    }
+
+    [Theory]
+    [InlineData("did:example:mediator1/path")]
+    [InlineData("did:example:mediator1?service=x")]
+    [InlineData("did:example:mediator1;p=1")]
+    [InlineData("https://not-a-did.example/")]
+    public async Task Throws_when_a_routing_key_without_fragment_is_not_a_bare_DID(string reference)
+    {
+        var keys = new StubKeyService((Mediator, new[] { Jwk("did:example:mediator1#kx-1") }));
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(
+            new[] { Info("https://r/", routing: new[] { reference }) },
+            new StubServiceResolver(), keys, Recipient);
+
         (await act.Should().ThrowAsync<DidResolutionException>())
-            .Which.Message.Should().Contain("not a DID URL with a fragment");
+            .Which.Message.Should().Contain("neither a DID nor a DID URL with a fragment");
+    }
+
+    [Fact]
+    public async Task Throws_when_a_bare_DID_routing_key_has_no_keyAgreement_keys()
+    {
+        var act = () => MediatorEndpointExpander.ExpandAsync(
+            new[] { Info("https://r/", routing: new[] { Mediator }) },
+            new StubServiceResolver(), new StubKeyService(), Recipient);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .Which.Message.Should().Contain("routing key DID has no keyAgreement keys");
+    }
+
+    [Fact]
+    public async Task Mediator_layer_uses_the_preferred_curve_skips_kidless_keys_and_dedupes()
+    {
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var kidless = Jwk("unused");
+        kidless.Kid = null;
+        var keys = new StubKeyService(
+            (Mediator, new[]
+            {
+                Jwk("did:example:mediator1#p-1", "P-256"),
+                kidless,
+                Jwk("did:example:mediator1#kx-1"),
+                Jwk("did:example:mediator1#kx-1"),
+                Jwk("did:example:mediator1#kx-2"),
+            }));
+
+        var route = await MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator) }, svc, keys, Recipient);
+
+        LayerKids(route).Should().BeEquivalentTo(
+            new[] { (Mediator, new[] { "did:example:mediator1#kx-1", "did:example:mediator1#kx-2" }) },
+            o => o.WithStrictOrdering());
+    }
+
+    [Fact]
+    public async Task Mediator_layer_is_capped_at_64_keys_in_document_order()
+    {
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var mediatorKeys = Enumerable.Range(1, 65).Select(i => Jwk($"did:example:mediator1#kx-{i}")).ToArray();
+        var keys = new StubKeyService((Mediator, mediatorKeys));
+
+        var route = await MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator) }, svc, keys, Recipient);
+
+        route.Layers.Should().ContainSingle().Which.Recipients.Should().Equal(mediatorKeys.Take(64));
+    }
+
+    [Fact]
+    public async Task Throws_when_the_mediators_keys_all_lack_a_kid()
+    {
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var kidless = Jwk("unused");
+        kidless.Kid = null;
+        var keys = new StubKeyService((Mediator, new[] { kidless }));
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator) }, svc, keys, Recipient);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .Which.Message.Should().Contain("has no keyAgreement key with a key id");
+    }
+
+    [Fact]
+    public async Task Throws_when_the_mediator_has_no_key_on_a_supported_curve()
+    {
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var keys = new StubKeyService((Mediator, new[] { Jwk("did:example:mediator1#k1", "secp256k1") }));
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator) }, svc, keys, Recipient);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .Which.Message.Should().Contain("supported curve");
     }
 
     [Fact]
@@ -216,7 +321,11 @@ public sealed class MediatorEndpointExpanderTests
     private static DidCommServiceInfo Info(string uri, IReadOnlyList<string>? routing = null) =>
         new(uri, routing ?? Array.Empty<string>(), Array.Empty<string>());
 
-    private static Jwk Jwk(string kid) => new() { Kty = "OKP", Crv = "X25519", X = "stub", Kid = kid };
+    private static Jwk Jwk(string kid, string crv = "X25519") =>
+        new() { Kty = crv == "X25519" ? "OKP" : "EC", Crv = crv, X = "stub", Kid = kid };
+
+    private static (string Did, string[] Kids)[] LayerKids(ExpandedRoute route) =>
+        route.Layers.Select(l => (l.Did, l.Recipients.Select(k => k.Kid!).ToArray())).ToArray();
 
     private sealed class StubServiceResolver : IServiceEndpointResolver
     {
