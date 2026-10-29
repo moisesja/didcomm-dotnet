@@ -107,14 +107,14 @@ still needs a separate OK before posting.
 
 ## Steps
 
-- [ ] 0. Branch `feat/keyid-length-cap-80` off `main`.
-- [ ] 1. `IdentifierLimits`. `Message.cs` switches to it and reorders its length checks before
+- [x] 0. Branch `feat/keyid-length-cap-80` off `main`.
+- [x] 1. `IdentifierLimits`. `Message.cs` switches to it and reorders its length checks before
       the checks that echo the value.
-- [ ] 2. Backstops: `DidSubjectOf`, `RejectUnsupportedMethod`, `OwnIdentifiers` message.
-- [ ] 3. `EnvelopeReader`: lookup wrappers (signer, sender) and the recipient-kid check after peek.
-- [ ] 4. `FromPriorValidator`: `kid`/`iss`/`sub` caps and `<exception>` doc.
-- [ ] 5. `ForwardMessage.TryParse`: `next` cap and `<exception>` doc.
-- [ ] 6. Tests. Each position gets a hostile case at cap + 1 and at 1 MiB, plus a control at
+- [x] 2. Backstops: `DidSubjectOf`, `RejectUnsupportedMethod`, `OwnIdentifiers` message.
+- [x] 3. `EnvelopeReader`: lookup wrappers (signer, sender) and the recipient-kid check after peek.
+- [x] 4. `FromPriorValidator`: `kid`/`iss`/`sub` caps and `<exception>` doc.
+- [x] 5. `ForwardMessage.TryParse`: `next` cap and `<exception>` doc.
+- [x] 6. Tests. Each position gets a hostile case at cap + 1 and at 1 MiB, plus a control at
       exactly the cap that **fully unpacks**. Every hostile case asserts that the message does
       not contain the value, and that the over-long value never reached `IDidResolver.ResolveAsync`
       or `ISecretsResolver` (spy stubs). The entry point is `DidCommClient.UnpackAsync` with
@@ -133,7 +133,7 @@ still needs a separate OK before posting.
       - Forward `next` in pass-through and rewrap modes.
       - `DidSubjectOf` and `RejectUnsupportedMethod` at 4096 and 4097. A `from` of exactly 2048
         with its own kid is accepted, which pins D2's margin.
-- [ ] 7. Docs.
+- [x] 7. Docs.
       - PRD: a new row **FR-API-09 (MUST)** for wire identifier length bounds (both caps,
         positions, exception types). A note in the §4.3 comparison-primitive paragraph that
         `DidSubjectOf` treats input over the cap as not a DID.
@@ -141,17 +141,105 @@ still needs a separate OK before posting.
         CPU cost (D3).
       - `codebase-architecture.md` does not exist in the repo, although CLAUDE.md refers to it,
         so there is nothing to sync.
-- [ ] 8. Verify.
+- [x] 8. Verify.
       - `dotnet build -warnaserror`, Core tests, and Interop tests (fixtures submodule).
       - Before/after measurement of a 1 MiB-kid unpack (time and allocation), plus the D3
         residual.
       - The live harness python leg, if its pinned venv installs locally. Otherwise I'll ask
         before triggering `interop-live.yml` on the branch.
-- [ ] 9. QA agents (all permutations), then adversarial agents (CLAUDE.md §2). Fix what they
+- [x] 9. QA agents (all permutations), then adversarial agents (CLAUDE.md §2). Fix what they
       find, and re-run 8.
-- [ ] 10. Commit, push, and open a PR that closes #80. The body notes D1 and D2 against the
+- [x] 10. Commit, push, and open a PR that closes #80. The body notes D1 and D2 against the
       issue's "Done when".
+
+## Round 1: fixes from the adversarial review
+
+**Approved 2026-10-29:** R1–R4 as written, and drafting the F1–F3 issue texts for review (none
+posted without a separate OK).
+
+- [x] R1 recipient-kid filter, with tests
+- [x] R2 DID-part rule at every key-id site, with tests
+- [x] R3 own signer/sender key selection, with tests
+- [x] R4 docs, comment and near-maximum `from`/`to` tests
+- [x] CHANGELOG and PRD FR-API-09 updated for R1–R3
+- [x] Build, Core, Interop, live harness re-run; focused adversarial re-check of R1
+- [x] F1–F3 issue texts drafted in the scratchpad (F1 re-measured on `main`)
+
+Progress so far:
+- Steps 0–6 and 8 are done. Commits `3732e51` (fix) and `041656a` (QA tests).
+- Build clean. Core 959/959, Interop 283/283.
+- Live harness on the branch: python 56/56; JVM 53/53 with the same three declared n/a cells.
+- Measured on `main` → branch: a ~1 MB kid went from 54 ms to 0.7 ms, and 8 concurrent ones from
+  ~800 MiB to 23 MiB.
+- QA found no source defect. The adversarial agents found no bypass, no possession oracle (timing
+  gap under 1 µs, same as before) and no contract break.
+
+They did find these, introduced by this diff:
+
+- **R1 (medium): honest group traffic refused.** Check (c) refuses the whole JWE if *any*
+  recipient kid is over the limit. A group member who publishes a 4097-character kid in their own
+  DID document (DID Core sets no limit) makes every group message undeliverable to every other
+  member. Our own `PackEncryptedAsync` emits such envelopes without complaint.
+  **Fix:** treat an over-limit recipient kid as *not held*. Filter those kids out before
+  `FindPresentAsync` instead of refusing the envelope. The secrets resolver still never sees them,
+  and the result is the same for any receiver whatever keys it holds, so no oracle is added.
+  `AllRecipientKids` keeps reporting the envelope's kids verbatim, as it did before the diff.
+- **R2 (low): a kid's DID part can exceed 2048.** A 4096-character kid can carry a 4090-character
+  DID, and that DID reaches the resolver before FR-CONSIST-01/03 compare it with `from`. A bare-DID
+  `next` between 2049 and 4096 passes `TryParse`.
+  **Fix:** every wire key id must also have at most 2048 characters before its first `/`, `;`,
+  `?` or `#`. That makes D2's rationale ("a DID ≤ 2048 plus a fragment") an enforced rule. It is a
+  linear scan with no regex, applied at the same sites (signer kid, `skid`, `from_prior` `kid`,
+  `next`, and the recipient-kid filter in R1).
+- **R3 (low): our own pack emits kids our own receive refuses.** When a signer's or authcrypt
+  sender's own DID document has a key id over the limits, the message is refused by every
+  didcomm-dotnet receiver.
+  **Fix:** don't select an own signer or sender key whose kid exceeds the limits (the same idea as
+  L-007's filter-before-pick). If no other key is left, the existing "no usable key" error
+  applies. Recipients' kids are left alone; after R1, they no longer hurt other recipients.
+- **R4: overclaims, fixed in the docs and one comment.**
+  - "Removing any one guard fails at least two tests" → each of the two reorder guards fails one.
+  - "bound values from resolved documents" → it bounds the *parse cost*; the `controller` echo
+    predates the diff.
+  - "`DidCommOptions.OwnIdentifiers` refuses" → it's the `DidCommClient` constructor.
+  - The PRD says every position has a near-maximum test → add near-maximum `from`/`to` cases.
+  - EnvelopeReader's "after the same envelope-only work" → "not a new signal".
+
+**Found, predating the diff, not fixed here.** I'll draft issues and post them only with your OK.
+- **F1 (high), didcomm and DataProofs.** One JWS with ~2,100 signature entries over a 512 KiB
+  payload costs **~1.6 s CPU and ~3 GB allocation**, before authentication. DataProofs runs a full
+  verify per entry, and nothing caps the count. A variant does one DID resolution per signature,
+  which for did:webvh is a network fetch. The fix is a signature-count cap in didcomm; DataProofs
+  should also build the signing input once.
+- **F2 (medium), didcomm and DataProofs.** Unbounded wire values are quoted in full in exception
+  messages, and from there into transport logs and an OpenTelemetry tag: `id`, `type`, `thid`,
+  `pthid`, `ack`, `please_ack`, `from_prior` `alg`, `ForwardProcessor`'s `type`, a resolved
+  `controller`, and DataProofs' `apv`/`enc`/`alg`/`crv`.
+- **F3, NetDid.** The upstream regex guard. It is drafted in the scratchpad as
+  `netdid-issue-draft.md`.
 
 ## Review
 
-(filled in after implementation)
+- **Shipped:**
+  - Every wire DID is capped at 2048. Every wire key id is capped at 4096, with a DID part of at most
+    2048, checked before any NetDid parse, DID resolution or secrets lookup.
+  - Over-limit recipient kids are treated as not held.
+  - Own signer and sender keys over the limits are never selected, even when the secrets resolver
+    lists more kids than it was asked about.
+  - No refusal quotes the value.
+- **Verified:**
+  - `-warnaserror` clean; Core 1008/1008; Interop 283/283.
+  - Live harness: python 56/56 (with `PYTHON` pointed at 3.12; 3.14 breaks didcomm-python's
+    pydantic v1), JVM 53/53 with the same three n/a cells.
+  - Mutation: every guard, and every DID-part rule cut to a length test, fails at least one test.
+  - ~1 MB kid: 54 ms → 0.7 ms; 8 concurrent: ~800 MiB → 23 MiB.
+- **Reviews:**
+  - QA found no defects.
+  - Adversarial round 1 found R1–R4, all fixed.
+  - Adversarial round 2 found the superset-resolver gap and the curve error message, both fixed.
+    Its recipient-pick finding traced to FR-ENC-19 (pack uses one key per recipient), which is #81,
+    stacked on this branch.
+- **Follow-ups drafted, not posted:**
+  - the multi-signature JWS pre-auth amplification (didcomm and DataProofs);
+  - unbounded wire values in messages, logs and spans (didcomm and DataProofs);
+  - the NetDid regex length guard.

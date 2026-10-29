@@ -12,6 +12,8 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 > the 1.4.1 baseline. The new floors do reject some malformed input that 1.4.1 accepted. See
 > *Changed — input the new floors reject* below. This release also fixes an untyped fault that
 > escaped `UnpackAsync` before any authentication (FR-API-07). See *Fixed* below.
+> It also caps the length of every DID and key id a peer puts on the wire before didcomm parses
+> it (FR-API-09, #80). That refuses some input 1.4.1 accepted; see *Security* below.
 
 ### Security
 
@@ -59,6 +61,128 @@ Pinned by `SurrogateEscapeBoundaryTests` (13 cases) and
 hostile case has a control with a well-formed escaped surrogate pair in the same position, which
 still unpacks. Before the fix, 9 of the 13 failed with a raw exception, and the 3
 extension-header value cases unpacked.
+
+### Security — wire identifiers are length-capped before DID parsing (FR-API-09, #80)
+
+Key ids reached NetDid's DID-URL parser with no bound but `DidCommOptions.MaxReceiveBytes` (1 MiB
+by default). The parser's regular expressions backtrack. Their cost is linear, not catastrophic,
+but one maximum-size value is expensive. It is also reachable before any authentication. Measured
+on this branch's parent (Apple M3 Max, median of 15): one JWS carrying a ~1 MB kid with a long
+method-specific id took **54 ms** in `UnpackAsync`. Eight such envelopes unpacked concurrently
+allocated **about 800 MiB**, because each concurrent parse needs its own regex runner. A long
+fragment or path with a bad tail cost 14–20 ms and about 500 MiB for eight. The resulting error
+also copied the whole kid into the exception message, and from there into logs.
+
+Every identifier a peer controls now has a bound, checked before any DID parse, DID resolution or
+secrets lookup sees it. A key id has two: at most 4096 in all, and at most 2048 in its *DID part*,
+meaning everything before its first `/`, `;`, `?` or `#`.
+
+| Value | Limit (UTF-16 code units) | Over the limit |
+|---|---|---|
+| `from`, each `to` entry | 2048 (unchanged) | refused, `MalformedMessageException` |
+| JWS signer `kid`, protected or per-signature header, at any layer | 4096, DID part 2048 | refused, `MalformedMessageException` |
+| Authcrypt sender kid, from `skid` or decoded from `apu` | 4096, DID part 2048 | refused, `MalformedMessageException` |
+| `from_prior` header `kid` | 4096, DID part 2048 | refused, `ProtocolException` |
+| `from_prior` `iss`, `sub` | 2048 | refused, `ProtocolException` |
+| Forward `body.next` (`ForwardMessage.TryParse`) | 4096, DID part 2048 | refused, `MalformedMessageException` |
+| JWE `recipients[].header.kid`, each entry | 4096, DID part 2048 | **treated as not held**: skipped, not refused |
+
+- **Why 4096 for key ids.** A kid is a DID plus a `#fragment`. FR-CONSIST-01/03 require the
+  `skid` and the signer kid to share `from`'s DID subject, and `from` may be up to 2048. A single
+  2048 cap would have refused a legal sender whose DID is close to it. The issue proposed 2048;
+  the PR explains the change.
+- **Why a DID-part rule.** Without it, a 4096-character kid could carry a 4090-character DID, and
+  that DID would be resolved before FR-CONSIST-01/03 compare it with `from`. The rule makes the
+  extra 2048 a fragment allowance, not a larger DID bound. DID syntax allows none of the four
+  delimiters inside a DID, so the DID part is exact. Both checks are a length compare and one
+  linear scan, never a regular expression.
+- **Why recipient kids are skipped, not refused.** One group member can publish a long kid in their
+  own DID document; DID Core sets no limit. Refusing the envelope would let that member make every
+  group message undeliverable to everyone else, and `PackEncryptedAsync` builds such envelopes
+  without complaint. So an over-limit recipient kid is handled like a key this agent does not hold:
+  it never reaches the `ISecretsResolver`, the other entries are processed as before, and an
+  envelope with no usable entry left fails exactly as one not addressed to this agent.
+  `UnpackResult.AllRecipientKids` still reports every kid verbatim.
+- **Why `ProtocolException` for `from_prior`.** It is `FromPriorValidator`'s documented type for
+  a malformed JWT, and every other structural `from_prior` rejection already throws it. The issue
+  proposed `MalformedMessageException`.
+- **No value in any message.** The new errors name the field and the limit, not the value.
+  `Message.Validate` now checks `from`/`to` length before its fragment check, which quotes the
+  value.
+- **Backstops.** `DidSubjectOf` treats input over 4096 as not a DID, without parsing it.
+  `NetDidKeyService.RejectUnsupportedMethod`, the other place didcomm calls NetDid's parser,
+  refuses it as `DidResolutionException` naming only a 64-character prefix. Together they bound
+  the parse cost of values that come from resolved DID documents, such as a verification method
+  `controller`. They do not stop such a value being quoted: one consistency error still quotes a
+  resolved `controller` in full, as it did before this release.
+- **No new possession signal.** The recipient-kid filter reads only envelope content and runs
+  before any key lookup. Holding the key of a skipped kid changes nothing, and a receiver left
+  with no candidate takes the same decoy path as any stranger. The sender-kid refusal depends only
+  on the sender kid, and DataProofs reaches it on the held and decoy paths alike. A holder and a
+  stranger get the same exception and message; the tests pin this.
+- **Our own pack stays inside the limits.** `PackSignedAsync`, and `PackEncryptedAsync` with
+  `SignFrom` or `From`, no longer select an own signing or authcrypt sender key whose kid exceeds
+  the limits, because every didcomm-dotnet receiver would refuse the result. If no other held key
+  is left, they throw `SecretNotFoundException`, as before. Its message now says how many keys
+  were skipped for their length, and so does the "no common keyAgreement curve" error when the
+  skipped key was the sender's only one on a shared curve. Only kids the agent asked the
+  `ISecretsResolver` about are used, so a resolver that lists everything it holds cannot bring a
+  skipped key back. Recipient kids are packed unchanged.
+
+After the fix, the ~1 MB kid envelope is refused in **0.7 ms**, which is the cost of parsing its
+JSON, and eight concurrent ones allocate **23 MiB**. The error message is 80 characters.
+
+#### Changed — input now refused
+
+A signer, sender or `from_prior` key id over the limits, a `from_prior` `iss` or `sub` over 2048,
+or a forward `next` over the limits was accepted by 1.4.1 (or failed later as a different type) and
+is now refused as shown above. A multi-signature JWS is refused if the verifier reaches an
+over-limit kid before a signature that verifies: `[over-long, valid]` is refused, even though the
+second signature would have verified. A recipient whose only keyAgreement kids exceed the limits
+can no longer receive with didcomm-dotnet, because its kids are treated as not held. Two public
+members change with it. The `DidCommClient` constructor refuses a `DidCommOptions.OwnIdentifiers`
+entry over 4096 (`ArgumentException`). `NetDidKeyService.RejectUnsupportedMethod` refuses a value
+over 4096 as `DidResolutionException`. On pack, own signer and sender keys whose kid exceeds the
+limits are skipped, as described above.
+
+Real identifiers are far shorter. The longest key id in the interop fixtures is 45 characters. The
+live harness's longest is about 565: a did:peer:2 whose service segment routes through two
+mediators and carries both mediators' kids. Both legs of the live harness pass on this branch:
+python 56/56, and JVM 53/53 with the same three declared n/a cells as before.
+
+#### What the bound does not cover
+
+- **Cost per envelope.** The bound is per value. It does not limit how many identifiers an envelope
+  carries. A maximum-size envelope with 360 `to` entries of about 2048 characters each still costs
+  about 30 ms of parsing over a same-size control, and about 45–50 MiB of extra allocation per
+  envelope under 8-way concurrency. This predates the release and is unchanged by it.
+  `MaxReceiveBytes` and a rate limiter in front of the receive endpoint remain the controls.
+- **NetDid's own parsing.** NetDid parses the documents it resolves. didcomm cannot bound that.
+  A fix in net-did itself (non-backtracking patterns, or a length guard in its parser) would cover
+  this and the per-envelope cost above.
+- **Kids that are never looked up.** In a multi-signature JWS the verifier tries signatures in
+  order and stops at the first that verifies. A later signature's kid is never requested and never
+  checked: `[valid, over-long]` unpacks.
+- **Recipients whose first key has an over-limit kid.** `PackEncryptedAsync` encrypts to one
+  keyAgreement key per recipient, the first on the chosen curve. If that key's kid exceeds the
+  limits, a didcomm-dotnet recipient treats it as not held and can't decrypt, even when it
+  publishes a usable key. Encrypting to every keyAgreement key, as the spec says, fixes this
+  (FR-ENC-19, #81).
+
+Pinned by `IdentifierLengthCapTests` (and its `Permutations` part), `IdentifierLimitsTests`,
+`FromPriorLengthCapTests`, `ForwardNextLengthCapTests`, `DidSubjectLengthBoundTests`, and additions
+to `MessageValidationTests`, `NetDidKeyServiceTests`, `AspNetCoreReceiveRoundTripTests` and
+`WebSocketTransportRoundTripTests`. Each hostile case has an at-limit control that unpacks or
+validates. Every refused position is also tried with a value as long as a maximum-size envelope
+allows (500,000 to 1,000,000 characters). Each asserts that the value is not in the message, and
+that the over-long value never reached the DID resolver or the secrets resolver. The recipient
+tests build a real group message through `PackEncryptedAsync` with one member's long kid: the other
+members unpack it, the long kid never reaches their `ISecretsResolver`, and a stranger's failure is
+unchanged. The tests also cover a legacy `IDidKeyService` without binding support, and they show
+that the ASP.NET Core endpoint's 400 and both WebSocket receive loops handle a refusal unchanged.
+`DidCommClient`'s failure log and span record only the exception type. The transports' logs carry
+the refusal message, which never contains the value. Removing any one guard, or cutting a key-id
+check down to its length test alone, fails at least one test.
 
 ### Changed — new dependency floors (#77)
 
