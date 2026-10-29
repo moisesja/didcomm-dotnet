@@ -952,3 +952,16 @@ Format per entry:
   because the site returns 403 to WebFetch). When a PRD row is marked done, check that its
   acceptance test exercises the facade's own choice and not a lower layer handed the answer. Then
   recommend the spec behavior, with the interop evidence from didcomm-python and didcomm-jvm.
+
+## L-051 — Judge a regression against `main`, not against the previous commit of the same branch.
+
+- **Lesson:** When a review finding says "X no longer works", compare with the base the PR merges
+  into. A behavior the branch broke in an earlier commit and then "kept broken" is still a
+  regression. Run the scenario on `main` before classifying a finding as "not a regression".
+- **Why:** In #80, both the engineer and the adversarial round noted that a key published under an
+  over-limit alias kid listed first failed to decrypt, and called it "no regression" because the
+  branch's previous commit refused that envelope too. `main` delivered it. The #82 review caught
+  it as blocking.
+- **How to apply:** Every "not a regression" verdict in a report or PR names the `main` result
+  (run it in the `main` worktree, or check out `main` in a scratch worktree). Brief adversarial
+  agents to compare with `main`, not with the branch's earlier state.

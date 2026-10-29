@@ -90,6 +90,16 @@ envelope writer with the keys handed to it, never the facade's own choice.
   all of its keys on one curve (routing Example 1), not just its first. A `routingKeys` entry that
   is a bare DID is accepted and wrapped the same way, as both peers do. Before, it was refused. A
   mediator's `ReanoncryptToNext` rewrap uses the same selection.
+- **Only the recipient's own keys.** A DID document can list a keyAgreement key whose kid names
+  another DID. Such keys are skipped: only kids whose DID part is the recipient DID are used. Before
+  this, Bob's document could list a fake `did:…:alice#a1`. With `Recipients: [bob, alice]` it
+  would then shadow Alice's real key under the envelope-wide dedup, and she could not decrypt. Our
+  receivers already refuse such entries (FR-CONSIST-02).
+- **Forward layers are capped at 8**, counting a mediator-as-DID layer. The cap is checked before
+  any resolution, and each routing DID is resolved once. Each layer grows the envelope by about
+  4/3, and a peer's DID document chooses how many `routingKeys` it lists. 28 bare-DID routing keys
+  with 64 keys each built a 105 MB envelope. A routing-key reference or mediator DID over the
+  FR-API-09 limits is refused without being quoted.
 - **Hygiene.** Kids are deduped across the envelope, so `Recipients: [bob, bob]` no longer doubles
   every entry. Keys without a kid are skipped; before, they escaped as an untyped DataProofs
   exception. At most 64 keys per recipient DID are used, because the recipient's DID document
