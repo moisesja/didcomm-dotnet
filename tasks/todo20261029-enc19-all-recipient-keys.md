@@ -137,12 +137,12 @@ facade line.
       - Sample comments: cookbook Section J, samples/03, cookbook README row J.
       - The harness README.
       - CHANGELOG: "Changed (wire-visible)" section.
-- [ ] 8. Verify: `-warnaserror` build, Core and Interop tests, package validation against 1.4.1, the
+- [x] 8. Verify: `-warnaserror` build, Core and Interop tests, package validation against 1.4.1, the
       live harness (both legs; `PYTHON=python3.12`, since 3.14 breaks didcomm-python's pydantic v1),
       and the sample smoke tests.
-- [ ] 9. QA agents, then adversarial agents (CLAUDE.md §2). Focus: pack-side amplification, pin
+- [x] 9. QA agents, then adversarial agents (CLAUDE.md §2). Focus: pack-side amplification, pin
       handling, the receive-side oracle with multi-entry envelopes.
-- [ ] 10. Commit, push, PR (stacked on #80's branch; retarget to `main` after #80 merges).
+- [x] 10. Commit, push, PR (stacked on #80's branch; retarget to `main` after #80 merges).
 
 ## Risks
 
@@ -156,4 +156,29 @@ facade line.
 
 ## Review
 
-(filled in after implementation)
+- **Shipped, as D1–D10:**
+  - all keys on the negotiated curve;
+  - DID-URL pins;
+  - one mediator layer to all of the mediator's keys, and bare-DID routingKeys accepted;
+  - the rewrap uses the shared selector;
+  - dedupe, kidless skip, and the 64-key cap per bare DID;
+  - a Debug log with counts only.
+- **Added from the adversarial review:**
+  - only kids whose DID part is the resolved DID are used, so one DID's document can't shadow
+    another's key;
+  - a cap of 8 forward layers, checked before any resolution;
+  - each routing DID is resolved once;
+  - peer routing-key references are bounded before anything quotes them.
+- **Red first:**
+  - the six C.3 spec-vector tests, the last-device test and the #80 interplay tests failed before
+    the change;
+  - in both live legs, the three new outbound cells failed before the fix and the inbound cells
+    passed;
+  - with the own-kid filter disabled, 17 of the new tests fail.
+- **Known, not fixed:**
+  - Receive side: we try only the first held key, so a device holding only the later of two kids
+    that share key material fails the label check. Not a regression: on `main` that device got no
+    entry.
+  - FR-ENC-04 (one envelope per DID): the issue is drafted, and posting it was blocked by the
+    permission check.
+  - The recursive-mediator URI is still quoted unbounded.
