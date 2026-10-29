@@ -27,6 +27,11 @@ over did:peer:
                actors) with didcomm-python and diff the recovered plaintext.
   assert       compare an unpack output ({message, metadata}, from EITHER implementation)
                against the original payload + the metadata the mode/enc cell requires.
+  device-identity  write the identity ONE device of a multi-key DID holds: the same DID, only
+               the secret whose kid fragment is --keep (e.g. key-3). Reads any driver's
+               identity file, since the schema is shared.
+  assert-recipients  check that an encrypted envelope's per-recipient kids are EXACTLY --kids:
+               none missing, none extra, none repeated.
 
 did:peer:2 handling is implemented here against the did:peer spec rather than through the
 (2022-era) `peerdid` package: keys are decoded from the DID's .Ez/.Vz multibase(multicodec)
@@ -48,6 +53,7 @@ import os
 import sys
 import time
 import uuid
+from collections import Counter
 
 import base58
 from authlib.jose import ECKey, OKPKey
@@ -569,6 +575,59 @@ def cmd_assert(args):
         sys.exit(1)
 
 
+# --- multi-key recipients (FR-ENC-19): one device per keyAgreement key ---------------------
+
+
+def cmd_device_identity(args):
+    """
+    Write the identity file that ONE device of a multi-key DID holds: the same DID, but only
+    the secret whose kid is <did>#<--keep>. A multi-key cell unpacks with this file, so it
+    passes only if the packer encrypted to that particular key. The full identity holds every
+    key, so it decrypts whichever key the packer chose and cannot show that.
+    """
+    with open(args.identity, encoding="utf-8") as f:
+        identity = json.load(f)
+    did = identity["did"]
+    kid = f"{did}#{args.keep}"
+    kept = [jwk for jwk in identity["secrets"] if jwk.get("kid") == kid]
+    if len(kept) != 1:
+        raise ValueError(f"{args.identity} holds {len(kept)} secrets with kid {kid}, expected exactly 1")
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump({"did": did, "secrets": kept}, f, indent=2)
+        f.write("\n")
+    print(did)
+
+
+def envelope_recipient_kids(envelope: dict) -> list:
+    """Per-recipient kids of a JWE, in wire order (General JSON, or Flattened's single header)."""
+    if isinstance(envelope.get("recipients"), list):
+        return [(entry.get("header") or {}).get("kid") for entry in envelope["recipients"]]
+    if "encrypted_key" in envelope:
+        return [(envelope.get("header") or {}).get("kid")]
+    raise ValueError("not an encrypted envelope: no `recipients` array and no `encrypted_key`")
+
+
+def cmd_assert_recipients(args):
+    """
+    The envelope must be encrypted to EXACTLY the --kids set: no key missing, none extra,
+    none repeated. Multi-key cells run this on the wire envelope before the unpack, so a red
+    cell names the recipient kids the packer chose, not just the unpacker's "no secret".
+    """
+    with open(args.infile, encoding="utf-8") as f:
+        envelope = json.load(f)
+    actual = envelope_recipient_kids(envelope)
+    expected = args.kids.split(",")
+    if Counter(actual) != Counter(expected):
+        missing = sorted((Counter(expected) - Counter(actual)).elements())
+        unexpected = sorted(str(kid) for kid in (Counter(actual) - Counter(expected)).elements())
+        print(
+            f"ASSERT FAIL: envelope recipients: expected {len(expected)} kid(s), got {len(actual)}; "
+            f"missing {missing}; unexpected {unexpected}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def write_output(path, content: str):
     if path in (None, "-"):
         print(content)
@@ -635,6 +694,17 @@ def main():
     p.add_argument("--expected", required=True, help="the payload file the packer was given")
     p.add_argument("--unpacked", required=True, help="the {message, metadata} unpack output")
     p.set_defaults(func=cmd_assert)
+
+    p = sub.add_parser("device-identity")
+    p.add_argument("--identity", required=True, help="a multi-key identity file (any driver's)")
+    p.add_argument("--keep", required=True, help="kid fragment of the one secret to keep, e.g. key-3")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_device_identity)
+
+    p = sub.add_parser("assert-recipients")
+    p.add_argument("--in", dest="infile", required=True, help="the packed envelope")
+    p.add_argument("--kids", required=True, help="comma-separated kids the envelope must carry, exactly")
+    p.set_defaults(func=cmd_assert_recipients)
 
     args = parser.parse_args()
     try:

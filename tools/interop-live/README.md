@@ -15,13 +15,15 @@ this harness runs nightly, on release, and on demand
 | `tools/InteropCli` | The didcomm-dotnet side: `mint` / `pack` / `unpack` / `unwrap-forward` over the **real** `DidCommClient` + `UseNetDidResolver()` wiring (net-did composite resolver, did:key + did:peer). |
 | `python/interop_peer.py` | The didcomm-python side: same CLI shape, driving `didcomm==0.3.2` (sicpa-dlab/didcomm-python) directly. Pins in `python/requirements.txt`. |
 | `jvm/src/InteropPeer.java` | The didcomm-jvm side: same CLI shape, driving `org.didcommx:didcomm:0.3.2` — plain `javac`/`java`, jars pinned by version + SHA-256 in `jvm/fetch-deps.sh` (no Gradle/Maven). |
-| `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit nonzero on any FAIL. A missing or empty `packed/didcomm-dotnet/` vector set hard-fails the leg — FR-IX-06 is a MUST, so an uninitialized fixtures submodule turns the leg red instead of silently shrinking the tally. |
+| `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit 1 on any FAIL. A missing or empty `packed/didcomm-dotnet/` vector set hard-fails the leg — FR-IX-06 is a MUST, so an uninitialized fixtures submodule turns the leg red instead of silently shrinking the tally. The python leg exits 2 before running anything if its interpreter is outside CPython 3.9–3.12 (see Pinned versions). |
 | `run-all.sh` | Both legs + a combined `summary.md` (the CI artifact). |
 
 Every cell round-trips a fresh C.1-style payload and asserts (a) the recovered plaintext
 equals the original (`id`, `type`, `body`, `from`, `to`, `created_time`) and (b) the unpack
 metadata is exactly what the composition requires (flags, `enc`, `kw`, `sig_alg` — see
-`expected_metadata` in `python/interop_peer.py`, mirrored in `InteropPeer.java`).
+`expected_metadata` in `python/interop_peer.py`, mirrored in `InteropPeer.java`). The
+multi-key cells also assert (c) the exact set of recipient kids in the envelope (see
+[Multi-key recipients](#multi-key-recipients-fr-enc-19)).
 
 ### Counterpart choice (deviation from the PRD's first preference)
 
@@ -49,7 +51,7 @@ The §13.5 conformance matrix, as exercised live:
 | Key-agreement curve | X25519 · P-256 (P-384/P-521 are offline-fixture-only — see the `n/a` notes) |
 | Content encryption | A256CBC-HS512 · A256GCM · XC20P |
 | Signing alg | EdDSA · ES256 · ES256K |
-| Recipients | single · 3 (mixed DID **methods** — two `did:peer:2` + one `did:key`; all three key-agreement keys are X25519, necessarily, since a single JWE carries a single `epk`, so recipient curves cannot be mixed within one envelope) |
+| Recipients | single · 3 DIDs (mixed DID **methods** — two `did:peer:2` + one `did:key`; all three key-agreement keys are X25519, necessarily, since a single JWE carries a single `epk`, so recipient curves cannot be mixed within one envelope) · one DID with 3 `keyAgreement` keys (FR-ENC-19): addressed by bare DID, the envelope must carry all three kids and a device holding only the **last** key must decrypt (anoncrypt and authcrypt); addressed by the DID URL `<did>#key-2`, the envelope must carry that one kid and the key-2 device must decrypt (authcrypt) |
 | Routing | direct · 1 mediator · 2 mediators (real `forward` onion, both directions) |
 | DID method | `did:peer:2` · `did:key` |
 | Direction | inbound · outbound · published-vector verification (FR-IX-06) |
@@ -62,10 +64,69 @@ tables below, and that enumeration is the acceptance basis FR-IX-04 points at �
 combination absent from those tables is a disclosed slice choice, not a silent skip, while a
 combination a counterpart cannot run at all is a declared `n/a` with evidence.
 
-## Current results — python leg (executed 2026-08-05, macOS arm64, CPython 3.9.6)
+## Multi-key recipients (FR-ENC-19)
 
-`didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0 + NetCrypto 1.5.0` ↔ `didcomm-python 0.3.2`.
-**Executed 56 · passed 56 · failed 0 · declared n/a 0.** Exit code 0.
+DIDComm v2.1 says an encrypted message's default recipients SHOULD include every
+`keyAgreement` key of the recipient DID, so any of the recipient's devices can decrypt. A DID
+URL in `to` (`<did>#key-2`) pins one key instead. didcomm-python and didcomm-jvm 0.3.2 both
+encrypt to every key of the recipient's first key type, and both accept a DID URL `to`.
+
+The older `authcrypt 3-rcpt` cell can't show either behaviour. Its receiver holds all three
+secrets, so it decrypts whichever key the packer chose, and encrypting to the first key alone
+passes. That cell proves one envelope can address three DIDs (outbound) and that an envelope
+with several entries for one DID unpacks (inbound). Nothing more.
+
+Three cells close the gap. Each addresses the receiving side's 3-key DID (`multi`, keys
+`#key-1` to `#key-3`) and keeps the plaintext `to` as the bare DID:
+
+| cell | packer's `to` | the envelope must carry exactly | unpacked by the device holding only |
+|---|---|---|---|
+| anoncrypt 3-key last device | the bare DID | `#key-1`, `#key-2`, `#key-3` | `#key-3` |
+| authcrypt 3-key last device | the bare DID | `#key-1`, `#key-2`, `#key-3` | `#key-3` |
+| authcrypt kid-pinned | `<did>#key-2` | `#key-2` | `#key-2` |
+
+- **Devices.** Both peer drivers have a `device-identity` subcommand that writes a device's
+  identity file: the same DID, with one secret. The last-device cells use the last key because
+  a packer that encrypts to the first key only never reaches it.
+- **Wire check.** The `assert-recipients` subcommand checks the envelope's recipient kids
+  before the unpack: none missing, none extra, none repeated. The unpack still runs if that
+  check fails, so a red cell's log shows both the recipient set and the device's error.
+- **Native APIs.** Each side packs the DID URL through its own API: didcomm-python
+  `pack_encrypted(to=...)`, didcomm-jvm `new PackEncryptedParams.Builder(message, to)`, and
+  didcomm-dotnet a DID URL entry in `PackEncryptedOptions.Recipients`.
+- **Why authcrypt for the pin.** The sender's key then has to be chosen against the single
+  pinned key too.
+
+**Red first, then green.** These cells were added before the didcomm-dotnet fix (#81) and run
+on `feat/enc19-all-recipient-keys` at `d9ae685`, which doesn't have it. Results on both legs,
+before the fix:
+
+- **Inbound (the counterpart packs): all three PASS.** Both counterparts emitted `#key-1` to
+  `#key-3` for the bare DID and only `#key-2` for the DID URL. didcomm-dotnet unpacked each
+  envelope with the one-key device.
+- **Outbound last device (anoncrypt and authcrypt): FAIL.** The wire check reports
+  `ASSERT FAIL: envelope recipients: expected 3 kid(s), got 1; missing [<did>#key-2,
+  <did>#key-3]`. Then the key-3 device can't decrypt. didcomm-python reports
+  `DIDUrlNotFoundError: No secrets are found in secrets resolver for DID URLs:
+  ['<did>#key-1']`, and didcomm-jvm reports `SecretNotFoundException: The Secret
+  '<did>#key-1' not found`.
+- **Outbound kid-pinned: FAIL** before any envelope exists: `InteropCli:
+  DidResolutionException: DID resolution failed for '<did>#key-2': value is not a
+  syntactically valid DID.`
+
+These are FAIL, not `n/a`, because the defect is didcomm-dotnet's. To confirm the cells can
+go green, each counterpart stood in for didcomm-dotnet once and packed to its own 3-key DID.
+The cells' wire check, device unpack and plaintext assert then passed for all three cells on
+both legs, and the key-3 device could not open the pinned envelope. With the #81 fix, all three
+outbound cells pass on both legs (results below). A cell that goes red again means a regression.
+It is not a reason to declare the cell `n/a`.
+
+## Current results — python leg (executed 2026-10-29, macOS arm64, CPython 3.12.7)
+
+`didcomm-dotnet @ feat/enc19-all-recipient-keys, with the #81 fix (DataProofsDotnet.Jose 1.5.0 +
+NetCrypto 1.7.1)` ↔ `didcomm-python 0.3.2`.
+**Executed 62 · passed 62 · failed 0 · declared n/a 0.** Exit code 0. Before the fix, the three
+outbound FR-ENC-19 cells failed (see [Multi-key recipients](#multi-key-recipients-fr-enc-19)).
 
 | composition | enc | routing | dotnet→python | python→dotnet |
 |---|---|---|---|---|
@@ -84,6 +145,9 @@ combination a counterpart cannot run at all is a declared `n/a` with evidence.
 | anoncrypt(sign) | XC20P | direct | PASS | PASS |
 | anoncrypt(authcrypt) | A256CBC-HS512 | direct | PASS | PASS |
 | authcrypt 3-rcpt | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt 3-key last device | A256CBC-HS512 | direct | PASS (red before #81) | PASS |
+| authcrypt 3-key last device | A256CBC-HS512 | direct | PASS (red before #81) | PASS |
+| authcrypt kid-pinned | A256CBC-HS512 | direct | PASS (red before #81) | PASS |
 | anoncrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
 | authcrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
 | signed did:key | — | direct | PASS | PASS |
@@ -100,10 +164,12 @@ cells at all** — every §13.5 dimension this pair supports executes for real. 
 former Flattened→General re-serialization has been **removed** (see ² below), so the
 counterpart sees exactly the bytes didcomm-dotnet emits.
 
-## Current results — jvm leg (executed 2026-08-05, macOS arm64, JDK 25.0.2)
+## Current results — jvm leg (executed 2026-10-29, macOS arm64, JDK 25.0.2)
 
-`didcomm-dotnet @ DataProofsDotnet.Jose 1.3.0` ↔ `didcomm-jvm 0.3.2`.
-**Executed 53 · passed 53 · failed 0 · declared n/a 3.**
+`didcomm-dotnet @ feat/enc19-all-recipient-keys, with the #81 fix (DataProofsDotnet.Jose 1.5.0)`
+↔ `didcomm-jvm 0.3.2`.
+**Executed 59 · passed 59 · failed 0 · declared n/a 3.** Exit code 0. Before the fix, the same three
+outbound FR-ENC-19 cells failed as on the python leg.
 
 | composition | enc | routing | dotnet→jvm | jvm→dotnet |
 |---|---|---|---|---|
@@ -122,6 +188,9 @@ counterpart sees exactly the bytes didcomm-dotnet emits.
 | anoncrypt(sign) | XC20P | direct | PASS | PASS |
 | anoncrypt(authcrypt) | A256CBC-HS512 | direct | PASS | PASS |
 | authcrypt 3-rcpt | A256CBC-HS512 | direct | PASS | PASS |
+| anoncrypt 3-key last device | A256CBC-HS512 | direct | PASS (red before #81) | PASS |
+| authcrypt 3-key last device | A256CBC-HS512 | direct | PASS (red before #81) | PASS |
+| authcrypt kid-pinned | A256CBC-HS512 | direct | PASS (red before #81) | PASS |
 | anoncrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
 | authcrypt did:key | A256CBC-HS512 | direct | PASS | PASS |
 | signed did:key | — | direct | PASS | PASS |
@@ -139,7 +208,8 @@ Two didcomm-jvm API limits shape the table rather than appearing as failures. It
 single recipient **DID** (`PackEncryptedParams.to` is a `String`), so the 3-recipient cell
 addresses one DID carrying three `keyAgreement` keys inbound, and three distinct DIDs outbound
 (didcomm-dotnet packs, didcomm-jvm unpacks); the driver rejects a multi-DID `--to` with an
-explicit message rather than silently addressing only the first. Forward onions are built and
+explicit message rather than silently addressing only the first. That one `to` can also be a
+DID URL, which pins a single key; the inbound `kid-pinned` cell uses it. Forward onions are built and
 peeled with didcomm-jvm's own `Routing.wrapInForward` / `unpackForward`, `routingKeys[0]`
 outermost — verified hop by hop in both directions.
 
@@ -247,7 +317,7 @@ be deleted. A green run with them still in place is a harness bug, not a pass.
 
 | Stack | Pin |
 |---|---|
-| didcomm-python | `didcomm==0.3.2` + full transitive freeze in `python/requirements.txt`; CPython 3.9 |
+| didcomm-python | `didcomm==0.3.2` + full transitive freeze in `python/requirements.txt`; CPython 3.9 on CI. The stack imports only on CPython 3.9–3.12: its pydantic 1.9.2 (pydantic v1) breaks `import didcomm` on 3.13 (`TypeError: multiple bases have instance lay-out conflict`) and 3.14 (`ConfigError: unable to infer type for attribute "accept"`), and Authlib 1.6.12 needs 3.9+. The leg checks the interpreter first and exits 2 outside that range. |
 | didcomm-jvm | `org.didcommx:didcomm:0.3.2`, `tink:1.6.1`, `protobuf-java:3.14.0`, `gson:2.8.6`, `varint:1.0.0`, `kotlin-stdlib:1.9.24` — each SHA-256-pinned in `jvm/fetch-deps.sh`; Temurin 17 on CI (validated on 25 locally) |
 | didcomm-dotnet | whatever the checkout builds (`tools/InteropCli`, Release) |
 
@@ -259,7 +329,9 @@ bash tools/interop-live/run-python-leg.sh   # one leg
 bash tools/interop-live/run-jvm-leg.sh
 ```
 
-Prereqs: .NET 10 SDK, `python3` (3.9+ for the pinned stack), a JDK (17+), `curl`. Each leg
+Prereqs: .NET 10 SDK, CPython 3.9–3.12 as `python3` or named by `PYTHON` (e.g.
+`PYTHON=python3.12 bash tools/interop-live/run-python-leg.sh` when the default `python3` is
+newer), a JDK (17+), `curl`. Each leg
 prints its table, keeps its scratch dir for debugging (path on stderr), and honors
 `INTEROP_SUMMARY_DIR` to also emit the markdown summaries CI uploads. Each summary ends with
 an executed / passed / failed / declared-n-a tally, so a reader can tell coverage from silence.
@@ -269,6 +341,6 @@ an executed / passed / failed / declared-n-a tally, so a reader can tell coverag
 `interop-live.yml` runs on `schedule` (nightly 03:17 UTC), `workflow_dispatch`, and
 `release: published`; it uploads `summary.md` + per-leg tables as the `live-interop-summary`
 artifact and fails on any FAIL cell. The python-leg results above were executed locally on
-macOS arm64 / CPython 3.9.6; the nightly additionally proves the same matrix on
+macOS arm64 / CPython 3.12.7; the nightly additionally proves the same matrix on
 ubuntu-latest with CPython 3.9 and Temurin 17 — the pinned stacks are platform-independent
 pure wheels/jars, so no divergence is expected, but that run is the remaining unproven claim.

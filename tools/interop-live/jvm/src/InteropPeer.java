@@ -74,6 +74,11 @@ import org.didcommx.didcomm.secret.SecretResolverInMemory;
  *                   + Appendix B DID documents) and diff the recovered plaintext.
  *   assert          compare an unpack output ({message, metadata}, from EITHER implementation)
  *                   against the original payload + the metadata the mode/enc cell requires.
+ *   device-identity write the identity ONE device of a multi-key DID holds: the same DID, only
+ *                   the secret whose kid fragment is --keep (e.g. key-3). Reads any driver's
+ *                   identity file, since the schema is shared.
+ *   assert-recipients  check that an encrypted envelope's per-recipient kids are EXACTLY
+ *                   --kids: none missing, none extra, none repeated.
  *
  * See python/interop_peer.py for the authoritative semantics — the identity-file schema, kid
  * numbering, payload shape, normalized unpack output, and per-cell metadata expectations are
@@ -106,7 +111,8 @@ public final class InteropPeer {
         try {
             if (args.length == 0) {
                 System.err.println("usage: InteropPeer "
-                        + "mint|gen-message|pack|unpack|unwrap-forward|verify-fixture|assert [--opt value ...]");
+                        + "mint|gen-message|pack|unpack|unwrap-forward|verify-fixture|assert"
+                        + "|device-identity|assert-recipients [--opt value ...]");
                 System.exit(2);
             }
             Map<String, String> opts = parseOpts(args);
@@ -118,6 +124,8 @@ public final class InteropPeer {
                 case "unwrap-forward": unwrapForward(opts); break;
                 case "verify-fixture": verifyFixture(opts); break;
                 case "assert": doAssert(opts); break;
+                case "device-identity": deviceIdentity(opts); break;
+                case "assert-recipients": assertRecipients(opts); break;
                 default:
                     System.err.println("unknown subcommand: " + args[0]);
                     System.exit(2);
@@ -882,6 +890,81 @@ public final class InteropPeer {
 
         if (!failures.isEmpty()) {
             for (String failure : failures) System.err.println("ASSERT FAIL: " + failure);
+            System.exit(1);
+        }
+    }
+
+    // ── multi-key recipients (FR-ENC-19): one device per keyAgreement key ─────────────────
+
+    /**
+     * Write the identity file that ONE device of a multi-key DID holds: the same DID, but only
+     * the secret whose kid is &lt;did&gt;#&lt;--keep&gt;. A multi-key cell unpacks with this file, so it
+     * passes only if the packer encrypted to that particular key. The full identity holds every
+     * key, so it decrypts whichever key the packer chose and cannot show that.
+     */
+    private static void deviceIdentity(Map<String, String> opts) throws IOException {
+        String identityPath = require(opts, "identity");
+        JsonObject identity = readJson(identityPath);
+        String did = identity.get("did").getAsString();
+        String kid = did + "#" + require(opts, "keep");
+        JsonArray kept = new JsonArray();
+        for (JsonElement entry : identity.getAsJsonArray("secrets")) {
+            JsonObject jwk = entry.getAsJsonObject();
+            if (jwk.has("kid") && kid.equals(jwk.get("kid").getAsString())) kept.add(jwk);
+        }
+        if (kept.size() != 1)
+            throw new IllegalArgumentException(identityPath + " holds " + kept.size()
+                    + " secrets with kid " + kid + ", expected exactly 1");
+
+        JsonObject device = new JsonObject();
+        device.addProperty("did", did);
+        device.add("secrets", kept);
+        Files.write(Paths.get(require(opts, "out")),
+                (GSON.toJson(device) + "\n").getBytes(StandardCharsets.UTF_8));
+        System.out.println(did);
+    }
+
+    /** Per-recipient kids of a JWE, in wire order (General JSON, or Flattened's single header). */
+    private static List<String> envelopeRecipientKids(JsonObject envelope) {
+        List<String> kids = new ArrayList<>();
+        if (envelope.has("recipients") && envelope.get("recipients").isJsonArray()) {
+            for (JsonElement entry : envelope.getAsJsonArray("recipients"))
+                kids.add(headerKid(entry.getAsJsonObject().get("header")));
+        } else if (envelope.has("encrypted_key")) {
+            kids.add(headerKid(envelope.get("header")));
+        } else {
+            throw new IllegalArgumentException(
+                    "not an encrypted envelope: no `recipients` array and no `encrypted_key`");
+        }
+        return kids;
+    }
+
+    private static String headerKid(JsonElement header) {
+        if (header == null || !header.isJsonObject() || !header.getAsJsonObject().has("kid")) return null;
+        return header.getAsJsonObject().get("kid").getAsString();
+    }
+
+    /**
+     * The envelope must be encrypted to EXACTLY the --kids set: no key missing, none extra,
+     * none repeated. Multi-key cells run this on the wire envelope before the unpack, so a red
+     * cell names the recipient kids the packer chose, not just the unpacker's "no secret".
+     */
+    private static void assertRecipients(Map<String, String> opts) throws IOException {
+        List<String> actual = envelopeRecipientKids(readJson(require(opts, "in")));
+        List<String> expected = Arrays.asList(require(opts, "kids").split(","));
+        Map<String, Integer> surplus = new TreeMap<>(); // kid -> actual count minus expected count
+        for (String kid : actual) surplus.merge(String.valueOf(kid), 1, Integer::sum);
+        for (String kid : expected) surplus.merge(kid, -1, Integer::sum);
+
+        List<String> missing = new ArrayList<>();
+        List<String> unexpected = new ArrayList<>();
+        for (Map.Entry<String, Integer> entry : surplus.entrySet()) {
+            for (int i = 0; i < -entry.getValue(); i++) missing.add(entry.getKey());
+            for (int i = 0; i < entry.getValue(); i++) unexpected.add(entry.getKey());
+        }
+        if (!missing.isEmpty() || !unexpected.isEmpty()) {
+            System.err.println("ASSERT FAIL: envelope recipients: expected " + expected.size()
+                    + " kid(s), got " + actual.size() + "; missing " + missing + "; unexpected " + unexpected);
             System.exit(1);
         }
     }
