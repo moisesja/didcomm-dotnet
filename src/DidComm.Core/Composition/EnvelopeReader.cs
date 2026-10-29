@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
@@ -396,6 +397,7 @@ internal static class EnvelopeReader
                 {
                     DpEnc.JweParseResult jweResult;
                     string? decryptingKid;
+                    IReadOnlyList<string> envelopeKids;
                     try
                     {
                         // Discover the recipient kids without any private key, select the held one, and
@@ -404,6 +406,7 @@ internal static class EnvelopeReader
                         // (dataproofs #12) makes the ECDH/unwrap cost and the uniform failure identical
                         // to the held path, closing the held-vs-unheld recipient-enumeration oracle.
                         var peek = DpEnc.JweParser.PeekRecipients(current);
+                        envelopeKids = peek.RecipientKids;
 
                         // FR-API-09 (#80): a recipient kid over the identifier limits is treated as not
                         // held. It is dropped from the candidates before key selection, so the consumer's
@@ -417,9 +420,23 @@ internal static class EnvelopeReader
                         // UnpackResult.AllRecipientKids still reports the envelope's kids verbatim.
                         var candidateKids = RecipientKidsWithinLimits(peek.RecipientKids);
 
+                        // The parser scans entries in envelope order and reports the first one our KEK
+                        // opens, and FR-CONSIST-08 requires that to be the kid we selected. A dropped
+                        // entry can be an alias of a held key (same material, over-limit label); listed
+                        // first, the parser would open it and the label check would reject a message a
+                        // kept entry legitimately addresses to us. So when entries were dropped, the
+                        // parser gets a copy with the kept entries first, in their original order, and
+                        // the dropped ones after: its scan over kept entries is then exactly the
+                        // selection order. The recipients array is unprotected and apv commits to the
+                        // sorted kid list, so the copy is equally valid; it is built from envelope
+                        // content alone, before any key lookup.
+                        var parseInput = candidateKids.Count == 0 || ReferenceEquals(candidateKids, peek.RecipientKids)
+                            ? current
+                            : WithKeptRecipientsFirst(current);
+
                         var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, candidateKids, cryptoProvider, ct).ConfigureAwait(false);
                         decryptingKid = heldKid;
-                        jweResult = await DpEnc.JweParser.ParseAsync(current, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
+                        jweResult = await DpEnc.JweParser.ParseAsync(parseInput, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
                     {
@@ -487,7 +504,9 @@ internal static class EnvelopeReader
                     contentEnc = jweResult.ContentEncryption;
                     keyWrap = jweResult.Algorithm;
                     recipientKid = jweResult.RecipientKid;
-                    allRecipientKids = jweResult.AllRecipientKids;
+                    // From the peek of the envelope as received: the parser may have seen a reordered
+                    // copy (above), and AllRecipientKids reports the envelope's own order.
+                    allRecipientKids = envelopeKids;
 
                     if (isOutermostEncryptLayer)
                         anonymous = !jweResult.IsAuthenticated;
@@ -593,6 +612,38 @@ internal static class EnvelopeReader
     {
         if (kid is not null && !IdentifierLimits.IsWithinKeyIdLimits(kid))
             throw new MalformedMessageException(IdentifierLimits.KeyIdLimitMessage(field, kid));
+    }
+
+    /// <summary>
+    /// A copy of a General JSON JWE whose <c>recipients</c> entries are reordered: those whose kid
+    /// passes <see cref="IdentifierLimits.IsWithinKeyIdLimits"/> first, in their original order, then
+    /// the rest, in theirs (FR-API-09, #80; FR-CONSIST-08). Every other member is kept as is. The
+    /// <c>recipients</c> array is not integrity-protected and <c>apv</c> commits to the sorted kid
+    /// list, so the copy decrypts and validates exactly like the original. Called only after
+    /// <see cref="DpEnc.JweParser.PeekRecipients"/> accepted the structure.
+    /// </summary>
+    private static string WithKeptRecipientsFirst(string jwe)
+    {
+        // The structure was already accepted by EnvelopeDetector and PeekRecipients; anything else
+        // (no recipients array, such as the flattened form) is returned unchanged.
+        if (JsonNode.Parse(jwe) is not JsonObject root || root["recipients"] is not JsonArray recipients)
+            return jwe;
+
+        var kept = new List<JsonNode?>(recipients.Count);
+        var dropped = new List<JsonNode?>();
+        foreach (var entry in recipients)
+        {
+            var isKept = entry?["header"]?["kid"] is JsonValue kidValue
+                && kidValue.TryGetValue<string>(out var kid)
+                && IdentifierLimits.IsWithinKeyIdLimits(kid);
+            (isKept ? kept : dropped).Add(entry);
+        }
+        recipients.Clear();
+        foreach (var entry in kept)
+            recipients.Add(entry);
+        foreach (var entry in dropped)
+            recipients.Add(entry);
+        return root.ToJsonString();
     }
 
     /// <summary>

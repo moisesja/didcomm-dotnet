@@ -12,8 +12,8 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 > the 1.4.1 baseline. The new floors do reject some malformed input that 1.4.1 accepted. See
 > *Changed — input the new floors reject* below. This release also fixes an untyped fault that
 > escaped `UnpackAsync` before any authentication (FR-API-07). See *Fixed* below.
-> It also caps the length of every DID and key id a peer puts on the wire before didcomm parses
-> it (FR-API-09, #80). That refuses some input 1.4.1 accepted; see *Security* below.
+> It also caps the length of every wire DID and key id before didcomm parses, resolves or looks
+> it up (FR-API-09, #80). That refuses some input 1.4.1 accepted; see *Security* below.
 
 ### Security
 
@@ -74,13 +74,14 @@ fragment or path with a bad tail cost 14–20 ms and about 500 MiB for eight. Th
 also copied the whole kid into the exception message, and from there into logs.
 
 Every identifier a peer controls now has a bound, checked before any DID parse, DID resolution or
-secrets lookup sees it. A key id has two: at most 4096 in all, and at most 2048 in its *DID part*,
+secrets lookup sees it. A value that is never parsed, resolved or looked up is not checked; see
+*Kids that are never looked up* below. A key id has two: at most 4096 in all, and at most 2048 in its *DID part*,
 meaning everything before its first `/`, `;`, `?` or `#`.
 
 | Value | Limit (UTF-16 code units) | Over the limit |
 |---|---|---|
 | `from`, each `to` entry | 2048 (unchanged) | refused, `MalformedMessageException` |
-| JWS signer `kid`, protected or per-signature header, at any layer | 4096, DID part 2048 | refused, `MalformedMessageException` |
+| JWS signer `kid` the verifier looks up, protected or per-signature header, at any layer | 4096, DID part 2048 | refused, `MalformedMessageException` |
 | Authcrypt sender kid, from `skid` or decoded from `apu` | 4096, DID part 2048 | refused, `MalformedMessageException` |
 | `from_prior` header `kid` | 4096, DID part 2048 | refused, `ProtocolException` |
 | `from_prior` `iss`, `sub` | 2048 | refused, `ProtocolException` |
@@ -102,7 +103,12 @@ meaning everything before its first `/`, `;`, `?` or `#`.
   without complaint. So an over-limit recipient kid is handled like a key this agent does not hold:
   it never reaches the `ISecretsResolver`, the other entries are processed as before, and an
   envelope with no usable entry left fails exactly as one not addressed to this agent.
-  `UnpackResult.AllRecipientKids` still reports every kid verbatim.
+  `UnpackResult.AllRecipientKids` still reports every kid verbatim. A skipped entry can carry the
+  same key material as a kept one (an alias). The parser opens entries in envelope order and
+  FR-CONSIST-08 requires the entry it opens to be the one selected. So when entries are skipped,
+  the reader gives the parser a copy with the kept entries first, in their original order. The
+  `recipients` array is unprotected and `apv` hashes the sorted kids, so the copy is equally valid.
+  The label check itself is unchanged, and a label swap between kept entries is still refused.
 - **Why `ProtocolException` for `from_prior`.** It is `FromPriorValidator`'s documented type for
   a malformed JWT, and every other structural `from_prior` rejection already throws it. The issue
   proposed `MalformedMessageException`.
@@ -171,7 +177,8 @@ python 56/56, and JVM 53/53 with the same three declared n/a cells as before.
 
 Pinned by `IdentifierLengthCapTests` (and its `Permutations` part), `IdentifierLimitsTests`,
 `FromPriorLengthCapTests`, `ForwardNextLengthCapTests`, `DidSubjectLengthBoundTests`, and additions
-to `MessageValidationTests`, `NetDidKeyServiceTests`, `AspNetCoreReceiveRoundTripTests` and
+to `RecipientLabelBindingTests` (the alias case, both `FindPresentAsync` orders, and a label swap
+next to an over-limit entry), `MessageValidationTests`, `NetDidKeyServiceTests`, `AspNetCoreReceiveRoundTripTests` and
 `WebSocketTransportRoundTripTests`. Each hostile case has an at-limit control that unpacks or
 validates. Every refused position is also tried with a value as long as a maximum-size envelope
 allows (500,000 to 1,000,000 characters). Each asserts that the value is not in the message, and
