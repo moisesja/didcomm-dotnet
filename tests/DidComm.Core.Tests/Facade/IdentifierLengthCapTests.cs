@@ -37,7 +37,7 @@ namespace DidComm.Tests.Facade;
 /// path, the way an honest sender would.
 /// </para>
 /// </summary>
-public sealed class IdentifierLengthCapTests
+public sealed partial class IdentifierLengthCapTests
 {
     private const string Alice = "did:example:alice";
     private const string Bob = "did:example:bob";

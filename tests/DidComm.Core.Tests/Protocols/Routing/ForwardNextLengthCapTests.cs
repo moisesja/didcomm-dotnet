@@ -98,18 +98,83 @@ public sealed class ForwardNextLengthCapTests
         unwrapped.Message.Type.Should().Be(ForwardConstants.ForwardTypeUri);
     }
 
+    [Theory]
+    [InlineData(LengthCap.KeyIdCap + 1)]
+    [InlineData(700_000)]
+    public async Task ProcessAsync_refuses_next_over_the_cap_in_an_anoncrypted_forward(int length)
+    {
+        // The shape a sender really produces: the forward is anoncrypted to the mediator, and
+        // 'next' only appears once the mediator has decrypted it.
+        var (processor, packed, resolver) = await AnoncryptedMediatorFor(LengthCap.KidOfLength(NextDid, length), new ForwardProcessorOptions());
+
+        var failure = (await processor.Invoking(p => p.ProcessAsync(packed))
+            .Should().ThrowAsync<MalformedMessageException>()).Which;
+
+        failure.Message.Should().Contain("'next'").And.Contain("4096");
+        failure.ShouldNotQuoteTheValue();
+        resolver.Requested.Should().NotContain(NextDid, "the next hop is never resolved");
+        resolver.Requested.Should().NotContain(d => d.Length > LengthCap.DidCap);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_passes_next_at_exactly_the_cap_through_from_an_anoncrypted_forward()
+    {
+        var next = LengthCap.KidOfLength(NextDid, LengthCap.KeyIdCap);
+        var (processor, packed, _) = await AnoncryptedMediatorFor(next, new ForwardProcessorOptions());
+
+        var result = await processor.ProcessAsync(packed);
+
+        result.NextHop.Should().Be(next);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_refuses_next_over_the_cap_when_extra_routing_keys_are_configured()
+    {
+        // The third transformation: the mediator wraps the payload for pre-configured extra routing
+        // keys addressed to 'next'. TryParse runs first, so the bound holds here too.
+        var extraKey = TestKeyMaterial.Generate(KeyType.X25519, "did:example:extra#ka-1");
+        var resolver = new SpyDidResolver();
+        var (processor, packed) = await MediatorFor(
+            LengthCap.KidOfLength(NextDid, LengthCap.KeyIdCap + 1), RewrapMode.PassThrough, resolver,
+            extraRoutingKeys: new[] { extraKey.PublicJwk });
+
+        var failure = (await processor.Invoking(p => p.ProcessAsync(packed))
+            .Should().ThrowAsync<MalformedMessageException>()).Which;
+
+        failure.Message.Should().Contain("'next'");
+        failure.ShouldNotQuoteTheValue();
+        resolver.Requested.Should().BeEmpty();
+    }
+
+    /// <summary>A mediator holding its own key-agreement key, and a forward anoncrypted to it.</summary>
+    private static async Task<(ForwardProcessor Processor, string Packed, SpyDidResolver Resolver)> AnoncryptedMediatorFor(
+        string next, ForwardProcessorOptions options)
+    {
+        var mediatorKey = TestKeyMaterial.Generate(KeyType.X25519, Mediator + "#ka-1");
+        var nextKey = TestKeyMaterial.Generate(KeyType.X25519, NextDid + "#ka-1");
+        var resolver = new SpyDidResolver(
+            LengthCap.Doc(Mediator, keyAgreement: mediatorKey.PublicJwk),
+            LengthCap.Doc(NextDid, keyAgreement: nextKey.PublicJwk));
+        var keyService = new NetDidKeyService(resolver);
+        var mediator = new DidCommClient(new SpySecretsResolver(mediatorKey.PrivateJwk), keyService, new DidCommOptions());
+        var packed = (await mediator.PackEncryptedAsync(
+            ForwardMessage.Create(Mediator, next, new[] { InnerPayload }),
+            new PackEncryptedOptions(Recipients: new[] { Mediator }))).Message;
+        return (new ForwardProcessor(mediator, keyService, options), packed.ShouldFitTheReceiveLimit(), resolver);
+    }
+
     /// <summary>
     /// A mediator over <paramref name="resolver"/> and a plaintext forward to it. A plaintext forward
     /// keeps the test on the <c>next</c> check: the processor reads <c>next</c> the same way whatever
     /// envelope carried it.
     /// </summary>
     private static async Task<(ForwardProcessor Processor, string Packed)> MediatorFor(
-        string next, RewrapMode mode, SpyDidResolver resolver)
+        string next, RewrapMode mode, SpyDidResolver resolver, IReadOnlyList<Jwk>? extraRoutingKeys = null)
     {
         var keyService = new NetDidKeyService(resolver);
         var mediator = new DidCommClient(new SpySecretsResolver(), keyService, new DidCommOptions());
         var packed = await mediator.PackPlaintextAsync(ForwardMessage.Create(Mediator, next, new[] { InnerPayload }));
-        var processor = new ForwardProcessor(mediator, keyService, new ForwardProcessorOptions(Mode: mode));
+        var processor = new ForwardProcessor(mediator, keyService, new ForwardProcessorOptions(Mode: mode, ExtraRecipientRoutingKeys: extraRoutingKeys));
         return (processor, packed.ShouldFitTheReceiveLimit());
     }
 }

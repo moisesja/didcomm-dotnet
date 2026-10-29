@@ -344,7 +344,6 @@ public sealed class NetDidKeyServiceTests
             .Should().BeTrue();
     }
 
-    /// <summary>Hand-rolled resolver that returns pre-canned documents and counts invocations.</summary>
     // ---- Identifier length backstop (FR-API-09, #80) ----
 
     [Fact]
@@ -400,6 +399,7 @@ public sealed class NetDidKeyServiceTests
         resolver.ResolveCallCount.Should().Be(0);
     }
 
+    /// <summary>Hand-rolled resolver that returns pre-canned documents and counts invocations.</summary>
     private sealed class StubResolver : IDidResolver
     {
         private readonly Dictionary<string, DidDocument> _docs;
