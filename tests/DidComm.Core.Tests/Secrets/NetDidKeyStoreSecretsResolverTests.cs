@@ -1,7 +1,7 @@
 using DidComm.Adapters.NetDid;
 using DidComm.Protocols.Rotation;
 using DataProofsDotnet.Jose.Encryption;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetCrypto;
 using Xunit;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;

@@ -1,5 +1,5 @@
 using System.IO;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 using ProfilesProgram = DidComm.Samples.ProfilesAndI18n.Program;
 

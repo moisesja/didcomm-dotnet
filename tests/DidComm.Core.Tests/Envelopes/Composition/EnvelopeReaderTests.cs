@@ -5,7 +5,7 @@ using DidComm.Jose;
 using DidComm.Jose.Signing;
 using DidComm.Messages;
 using DidComm.Secrets;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetCrypto;
 using Xunit;
 using DpEnc = DataProofsDotnet.Jose.Encryption;

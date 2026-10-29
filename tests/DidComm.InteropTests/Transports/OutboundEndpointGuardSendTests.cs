@@ -5,7 +5,7 @@ using DidComm.InteropTests.Resolution;
 using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Transports;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetDid.Core.Model;
 using Xunit;
 

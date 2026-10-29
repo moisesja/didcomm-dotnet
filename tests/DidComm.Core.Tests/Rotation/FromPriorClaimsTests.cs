@@ -1,5 +1,5 @@
 using DidComm.Protocols.Rotation;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Rotation;

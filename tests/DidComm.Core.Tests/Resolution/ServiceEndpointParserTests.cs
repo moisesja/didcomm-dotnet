@@ -1,6 +1,6 @@
 using System.Text.Json;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetDid.Core.Model;
 using Xunit;
 

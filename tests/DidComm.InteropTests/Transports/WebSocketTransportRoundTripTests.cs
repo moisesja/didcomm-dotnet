@@ -11,7 +11,7 @@ using DidComm.Secrets;
 using DidComm.TestSupport;
 using DidComm.Transports;
 using DidComm.Transports.WebSocket;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -161,7 +161,7 @@ public sealed class WebSocketTransportRoundTripTests
             sent += take;
             chunks++;
         }
-        chunks.Should().BeGreaterOrEqualTo(3);
+        chunks.Should().BeGreaterThanOrEqualTo(3);
 
         // Wait for the server to reassemble + dispatch before closing, rather than guessing a sleep.
         await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(5));

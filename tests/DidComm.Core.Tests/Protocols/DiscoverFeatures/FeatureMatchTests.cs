@@ -1,5 +1,5 @@
 using DidComm.Protocols.DiscoverFeatures;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Protocols.DiscoverFeatures;

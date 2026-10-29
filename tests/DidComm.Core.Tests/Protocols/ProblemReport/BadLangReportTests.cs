@@ -1,5 +1,5 @@
 using DidComm.Protocols.ProblemReport;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // L-014: alias the static API class to dodge namespace shadowing; ThreadState likewise

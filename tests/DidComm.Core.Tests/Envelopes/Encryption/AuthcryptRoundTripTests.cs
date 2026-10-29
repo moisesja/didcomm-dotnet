@@ -2,7 +2,7 @@ using DidComm.Composition;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Messages;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetCrypto;
 using Xunit;
 using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;

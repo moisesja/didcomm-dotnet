@@ -71,7 +71,7 @@ The 24 lines above are the body of [`samples/01-Quickstart`](samples/01-Quicksta
 ## Project status
 
 **Phases 0–6 complete.** The library has a public Pack / Unpack / Send
-surface (`DidCommClient`), DID resolution via [NetDid 3.1.0](https://github.com/moisesja/net-did),
+surface (`DidCommClient`), DID resolution via [NetDid 4.0.0](https://github.com/moisesja/net-did),
 a consumer-supplied `ISecretsResolver` contract, the three protective envelope
 shapes (signed / anoncrypt / authcrypt) and their legal compositions, addressing
 consistency including same-document key provenance, DID rotation via `from_prior`,

@@ -7,7 +7,7 @@ using DidComm.Samples.Shared;
 using DidComm.TestSupport;
 using DidComm.Threading;
 using DidComm.Transports;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using NetCrypto;
 using NetDid.Core;

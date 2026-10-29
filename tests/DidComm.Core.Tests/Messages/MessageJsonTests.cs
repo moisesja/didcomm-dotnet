@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Json;
 using DidComm.Messages;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Messages;
@@ -41,8 +41,8 @@ public sealed class MessageJsonTests
         msg.Body!["messagespecificattribute"]!.GetValue<string>().Should().Be("and its value");
 
         // Re-serialize and re-parse: structurally identical. Compare canonical forms via the
-        // deterministic writer because JsonNode's Parent/Root pointers trip FluentAssertions'
-        // equivalence walker with a cyclic-reference complaint.
+        // deterministic writer because JsonNode's Parent/Root pointers trip the assertion
+        // library's equivalence walker with a cyclic-reference complaint.
         var roundTripped = JsonSerializer.Deserialize<Message>(
             JsonSerializer.Serialize(msg, DidCommJson.Default), DidCommJson.Default)!;
         roundTripped.Id.Should().Be(msg.Id);

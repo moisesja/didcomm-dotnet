@@ -10,7 +10,7 @@ using DidComm.Secrets;
 using DidComm.Transports;
 using DidComm.Transports.Stomp;
 using DidComm.Transports.WebSocket;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;

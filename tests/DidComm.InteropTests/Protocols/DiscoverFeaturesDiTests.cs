@@ -4,7 +4,7 @@ using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NetCrypto;

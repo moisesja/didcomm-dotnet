@@ -1,5 +1,5 @@
 using DidComm.Protocols.Trace;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Protocols.Trace;

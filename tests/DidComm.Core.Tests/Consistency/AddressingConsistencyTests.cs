@@ -2,7 +2,7 @@ using System.Collections;
 using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Consistency;

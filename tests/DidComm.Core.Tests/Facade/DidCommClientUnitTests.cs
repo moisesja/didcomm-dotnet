@@ -4,7 +4,7 @@ using DidComm.Jose;
 using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Secrets;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Facade;
@@ -130,6 +130,21 @@ public sealed class DidCommClientUnitTests
             new PackEncryptedOptions(Recipients: Array.Empty<string>()));
 
         await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task Unpack_RejectsUnpairedSurrogateMemberName_AsMalformed_FrApi07()
+    {
+        // A member name written as a lone-surrogate escape made the envelope detector's duplicate
+        // check throw a raw InvalidOperationException out of UnpackAsync (#77). It must surface as
+        // the typed malformed-message error at the public boundary.
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(NewMessage());
+        var hostile = "{\"" + @"\uD800" + "\":1," + packed[1..];
+
+        var act = async () => await client.UnpackAsync(hostile);
+
+        await act.Should().ThrowAsync<MalformedMessageException>();
     }
 
     [Fact]

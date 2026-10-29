@@ -6,6 +6,164 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+> Every dependency moves to its latest stable release (#77). The published packages now require
+> **NetDid 4.0.0, NetCrypto 1.7.1, DataProofsDotnet.Jose 1.5.0, Microsoft.Extensions 10.0.14 and
+> Polly 8.9.0**. didcomm's public API does not change, and package validation is clean against
+> the 1.4.1 baseline. The new floors do reject some malformed input that 1.4.1 accepted. See
+> *Changed — input the new floors reject* below. This release also fixes an untyped fault that
+> escaped `UnpackAsync` before any authentication (FR-API-07). See *Fixed* below.
+
+### Security
+
+- **Microsoft.SourceLink.GitHub 10.0.301 → 10.0.403.** 10.0.301 brought in
+  `Microsoft.Build.Tasks.Git` 10.0.301, which has a published advisory:
+  [GHSA-23fw-v26w-5fgq](https://github.com/advisories/GHSA-23fw-v26w-5fgq) (moderate,
+  information disclosure). SourceLink is build-only (`PrivateAssets="All"`) and never ships to
+  consumers, but the task runs whenever `release.yml` packs a release. Once the advisory was
+  published, `dotnet restore` of 1.4.1's sources started failing: `TreatWarningsAsErrors` turns
+  NuGet audit's `NU1902` into an error. So this bump also unblocks CI.
+  `dotnet list package --vulnerable --include-transitive` now reports nothing.
+
+### Fixed — an unpaired-surrogate escape no longer escapes `UnpackAsync` untyped (FR-API-07, #77)
+
+Every layer of an unpack is first classified by `EnvelopeDetector`, which parses the whole JSON
+text with duplicate-member detection. To compare names, System.Text.Json decodes every member
+name, and it reports one written as an unpaired-surrogate escape (`{"\uD800":1}`) as
+`InvalidOperationException`, not `JsonException`. The detector caught only `JsonException`. So
+that input left `UnpackAsync` as a raw `InvalidOperationException` at the plaintext, JWS and JWE
+layers alike, in any position: top level, `body`, or a per-recipient or per-signature header.
+That includes the plaintext inside an anoncrypt envelope, which anyone holding the recipient's
+public key can build. No key and no authentication were needed. The JOSE parser's own checks never
+saw this input, because the detector runs first. The shipped transports already contained it:
+HTTP answers every unpack failure with one opaque rejection, and the WebSocket receive loop
+discards the envelope and keeps the socket open. Direct callers of `UnpackAsync` got the raw
+exception. The fault predates this release; the #77 adversarial review found it.
+
+- **Member names.** The detector now maps the parse's `InvalidOperationException` to
+  `MalformedMessageException`. It does the same for the parse's `ArgumentException`, which a
+  caller's string that is not well-formed UTF-16 produces. Decoding wire bytes cannot produce
+  one, but the public API accepts any string.
+- **String values in a plaintext layer.** The parse does not decode values, so such a message
+  unpacked and the fault came later, wherever a value was read. Extension headers are kept as raw
+  `JsonElement` (`Message.AdditionalHeaders`) and decoded only when read. With Trace 2.0 enabled,
+  `TraceObserver` decodes `~trace.report_uri` on every inbound, so a peer could make dispatch throw.
+  `OutOfBand.ReadWebRedirect` decodes `web_redirect` the same way. The detector now checks every
+  string of a plaintext layer and refuses the message as `MalformedMessageException` if one does
+  not decode. Body values already failed that way, through deserialization. JWS and JWE layers are
+  not re-checked: DataProofsDotnet.Jose checks every string in them itself (since 1.4.0, below).
+- **`ForwardMessage.Create`** maps a payload with such a member name to its documented
+  `ArgumentException` ("Forward payload is not valid JSON"), instead of `InvalidOperationException`.
+
+Pinned by `SurrogateEscapeBoundaryTests` (13 cases) and
+`DidCommClientUnitTests.Unpack_RejectsUnpairedSurrogateMemberName_AsMalformed_FrApi07`. Each
+hostile case has a control with a well-formed escaped surrogate pair in the same position, which
+still unpacks. Before the fix, 9 of the 13 failed with a raw exception, and the 3
+extension-header value cases unpacked.
+
+### Changed — new dependency floors (#77)
+
+A runtime dependency's pin becomes the minimum version in the published nuspec, so consumers
+resolve at least these:
+
+| Dependency | Declared by | 1.4.1 | Now |
+|---|---|---|---|
+| `NetDid.Core` | `DidComm.Core`, `DidComm.Adapters.NetDid` | 3.1.0 | **4.0.0** |
+| `NetDid.Method.Key`, `NetDid.Method.Peer`, `NetDid.Extensions.DependencyInjection` | `DidComm.Extensions.DependencyInjection` | 3.1.0 | **4.0.0** |
+| `NetCrypto` | `DidComm.Core` | 1.5.0 | **1.7.1** |
+| `DataProofsDotnet.Jose` (brings `DataProofsDotnet.Core` 1.5.0) | `DidComm.Core` | 1.3.0 | **1.5.0** |
+| `Microsoft.Extensions.Logging.Abstractions` | `DidComm.Core`, `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | 10.0.10 | **10.0.14** |
+| `Microsoft.Extensions.DependencyInjection.Abstractions` | `DidComm.Extensions.DependencyInjection`, `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | 10.0.10 | **10.0.14** |
+| `Microsoft.Extensions.DependencyInjection` | `DidComm.Extensions.DependencyInjection` | 10.0.10 | **10.0.14** |
+| `Microsoft.Extensions.Http` | `DidComm.Transports.Http` | 10.0.10 | **10.0.14** |
+| `Polly` | `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | 8.7.0 | **8.9.0** |
+
+`DidComm.AspNetCore` declares no package dependencies of its own. It uses the
+`Microsoft.AspNetCore.App` shared framework and `DidComm.Core`.
+
+Upgrade notes:
+
+- **NetDid 4.0.0** needs no source change. Its major version is for the witnessed did:webvh
+  witness-file format, which didcomm never reads or writes. If your application references
+  NetDid packages directly, move them to 4.0.0 as well.
+- **DataProofsDotnet: move every package you reference together.** DataProofsDotnet.Core 1.4.0
+  changed `DataIntegrityProof.Type` and `AdditionalProperties` from `init` to `set`. That is
+  source-compatible but not binary-compatible. If your application references another
+  DataProofsDotnet package directly (for example `DataProofsDotnet.Legacy`), move it to 1.5.0 too.
+  Otherwise it fails at run time with `MissingMethodException`. didcomm itself sets neither member.
+- **NetCrypto 1.6.0 and 1.7.x are additive** (`ICapableKeyStore`, `TransferableKeyMaterial`).
+  `IKeyStore` gains no member, so your own `IKeyStore` implementations behind
+  `IOpaqueKeyResolver` stay source- and binary-compatible.
+- **Microsoft.Extensions 10.0.14** is a servicing release. NetDid 4.0.0 already requires 10.0.14
+  for `Caching.Memory` and `Logging.Abstractions`. The other three move with them to keep one
+  servicing line.
+
+### Changed — input the new floors reject
+
+didcomm's exception contract does not change: `UnpackAsync` still raises only didcomm's typed
+exceptions (FR-API-07). What changes is that some malformed input which 1.4.1 accepted is now
+refused:
+
+- **Unpaired-surrogate escapes and ill-formed UTF-8 in a string value of a received JWE or JWS**
+  (DataProofsDotnet 1.4.0). An escape such as `\uD800` is valid JSON grammar, but I-JSON forbids
+  it. DataProofs now checks every JSON text it parses on receipt, including members nothing reads.
+  An envelope with `"x":"\uD800"` in an unread member unpacked under 1.4.1. It now throws
+  `MalformedMessageException`, before any key work and whether or not the recipient key is held.
+  This is pinned by the two `Unpaired_surrogate_escape_*` tests in `JoseInputHardeningTests`, which
+  fail on the 1.4.1 dependency set. Member *names* never reach DataProofs; didcomm's own detector
+  rejects those first (see *Fixed* above).
+- **DIDs and DID URLs that break RFC 3986 / DID Core** (NetDid 4.0.0). This covers raw whitespace
+  or control characters, characters such as `<` `"` `{` `|` `\`, and malformed `%` escapes.
+  NetDid also now rejects JWKs without `kty`, and did:peer:2 service blocks that break DID Core
+  rules. A `from`, `to` or key id written that way no longer parses as a DID URL. Every check that
+  compares DID subjects (PRD §4.3) now treats it the way 1.4.1 already treated any value that
+  does not parse. A DID document that breaks these rules fails to resolve.
+
+Not a change, now pinned: a **small-order X25519 `epk` or ECDH-1PU sender key**, which yields the
+all-zero shared secret, was already refused as the uniform `CryptoException` ("JWE could not be
+decrypted."). The type and message are the same whether or not the recipient key is held. Under
+DataProofsDotnet 1.4.0 the parser rejects it itself, so only `InnerException` differs: it is now
+`JoseCryptoException`, where 1.4.1 had NetCrypto's `CryptographicException`. The three
+`Small_order_*` tests in `JoseInputHardeningTests` hold on both dependency sets.
+
+Two timing and misconfiguration notes from the #77 adversarial review, both measured:
+
+- **A small timing residual on keystore-backed keys.** With a key held in a NetCrypto `IKeyStore`
+  (through `NetDidKeyStoreSecretsResolver`), a small-order `epk` now costs the holder about 3 µs
+  more than a non-holder at the median. That gap was 0.7–1.8 µs on 1.4.1's dependencies. The
+  likely cause is one extra rethrow on the holder path, which NetCrypto 1.6.0 added in
+  `InMemoryKeyStore` (inferred, not instrumented). Exception type, message and inner type stay
+  identical. This is inside the timing caveat FR-SEC-06 already documents for keystore-held keys:
+  the backing store's own work is a signal this layer cannot mask. HTTP receives are covered by
+  the receive-rejection floor (#35).
+- **One misconfiguration oracle is closed.** A held X25519 key with a private `d` of the wrong
+  length used to fail as `MalformedMessageException`, where a non-holder got `CryptoException`.
+  Both now get the same uniform `CryptoException`.
+
+### Changed — test stack (#77)
+
+1.4.x held the test stack back on purpose. #77 moves it, and nothing in it ships to consumers:
+
+- **FluentAssertions 7.0.0 → AwesomeAssertions 9.6.0**, the Apache-2.0 community fork.
+  FluentAssertions 8 and later are under the Xceed license, which needs a paid license for
+  commercial use. net-did made the same move in 4.0.0. The swap was mechanical: one renamed API
+  (`BeGreaterOrEqualTo` → `BeGreaterThanOrEqualTo`). A green suite does not prove every
+  assertion is still as strict, so every assertion API the suite binds was checked against the
+  release notes and an FA 7 vs AA 9 probe. Only `OnlyContain` and `AllSatisfy` got looser: they
+  now pass on an empty collection. Of their 8 call sites, one could then pass with nothing to
+  check, the shared `AssertOneRegistrationPerResult` helper. It now requires a non-empty result
+  set, and `AssertOneRegistrationPerResult_rejects_an_empty_result_set` pins that.
+- `Microsoft.NET.Test.Sdk` 17.12.0 → 18.11.0, `xunit.runner.visualstudio` 2.8.2 → 4.0.1,
+  `NSubstitute` 5.3.0 → 6.2.0, `coverlet.collector` 6.0.3 → 10.1.0, `BenchmarkDotNet` 0.14.0 →
+  0.15.8, `Microsoft.AspNetCore.TestHost` 10.0.10 → 10.0.14.
+- **xunit stays on 2.9.3**, the last xUnit v2 release (marked *Legacy* on NuGet). Moving to xUnit v3
+  is a separate change. xunit.runner.visualstudio 4.x still runs v2 tests.
+- `global.json` stays at SDK 10.0.100 with `latestFeature` roll-forward. SourceLink 10.0.403
+  builds and packs on it, and CI already rolls forward to the newest SDK on the runner.
+
+### Changed — package validation baseline moved to 1.4.1
+
+`PackageValidationBaselineVersion` 1.4.0 → 1.4.1, now that 1.4.1 is published.
+
 ## [1.4.1] - 2026-08-06
 
 > Despite the patch number this release **adds public API** — `DidCommDiagnostics`,

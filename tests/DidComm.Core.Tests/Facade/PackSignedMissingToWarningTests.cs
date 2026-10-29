@@ -2,7 +2,7 @@ using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Tests.Envelopes;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using NetCrypto;

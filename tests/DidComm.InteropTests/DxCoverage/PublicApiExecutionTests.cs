@@ -1,7 +1,7 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 using Xunit.Abstractions;
 

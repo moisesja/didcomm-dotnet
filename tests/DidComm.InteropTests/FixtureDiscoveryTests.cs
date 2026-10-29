@@ -1,5 +1,5 @@
 using DidComm.InteropTests.Runner;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.InteropTests;

@@ -1,5 +1,5 @@
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.InteropTests.Resolution;

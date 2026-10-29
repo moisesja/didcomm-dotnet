@@ -5,7 +5,7 @@ using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Threading;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Xunit;
 

@@ -8,7 +8,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Resolution;
 using DidComm.Tests.Envelopes;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.IdentityModel.Tokens;
 using NetCrypto;
 using NetDid.Core;
@@ -242,6 +242,17 @@ public sealed class SnapshotRegistrationTests
         AssertOneRegistrationPerResult(results, marker);
     }
 
+    [Fact]
+    public void AssertOneRegistrationPerResult_rejects_an_empty_result_set()
+    {
+        // Since FluentAssertions 8 (inherited by AwesomeAssertions), OnlyContain passes on an empty
+        // collection. The helper must still fail when handed no results, or a test whose unpacks
+        // silently produced nothing would read as "every unpack registered exactly once".
+        var assert = () => AssertOneRegistrationPerResult(Array.Empty<UnpackResult>(), NewMarker());
+
+        assert.Should().Throw<Xunit.Sdk.XunitException>().WithMessage("*not to be empty*");
+    }
+
     // ---------------------------------------------------------------------------------------
     // assertions
     // ---------------------------------------------------------------------------------------
@@ -268,6 +279,9 @@ public sealed class SnapshotRegistrationTests
 
     private static void AssertOneRegistrationPerResult(IReadOnlyCollection<UnpackResult> results, string marker)
     {
+        // Every check below also passes on an empty set (OnlyContain accepts an empty collection), so
+        // without this guard an audit over zero unpacks would report every registration as correct.
+        results.Should().NotBeEmpty("the registration audit proves nothing unless something was unpacked");
         results.Select(r => r.Message).Distinct(ReferenceEqualityComparer.Instance).Should().HaveCount(
             results.Count, "each unpack must deserialize its own Message — a shared/pooled instance would " +
                            "make the second registration a duplicate-key fault");

@@ -1,7 +1,7 @@
 using DidComm.AspNetCore;
 using DidComm.Facade;
 using DidComm.Messages;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.InteropTests.AspNetCore;

@@ -4,7 +4,7 @@ using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Threading;
 using DidComm.Transports;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Xunit;
 

@@ -1,6 +1,6 @@
 using System.IO;
 using DidComm.Samples.Cookbook;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.InteropTests.Samples;

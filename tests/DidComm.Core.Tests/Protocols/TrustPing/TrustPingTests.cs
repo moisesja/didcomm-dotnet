@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using DidComm.Messages;
 using DidComm.Protocols.TrustPing;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // Disambiguate the test namespace `DidComm.Tests.Protocols.TrustPing` from the static class

@@ -3,7 +3,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.TrustPing;
 using DidComm.Threading;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // L-014: alias the static API class.

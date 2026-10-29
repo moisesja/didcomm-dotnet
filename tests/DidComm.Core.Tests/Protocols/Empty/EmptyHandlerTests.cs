@@ -3,7 +3,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.Empty;
 using DidComm.Threading;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Protocols.Empty;

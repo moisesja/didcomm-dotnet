@@ -902,3 +902,35 @@ Format per entry:
   approval of the PR-review plan and its ordinary GitHub review/comment write. Ask only when scope is
   genuinely ambiguous or a materially different action is needed, such as editing the branch,
   merging, closing issues, or changing repository settings.
+
+## L-048 — An upstream parser's input check covers only the input that reaches it; test the claim at OUR boundary, per position.
+
+- **Lesson:** When a dependency bump narrows what an upstream parser accepts, don't write "didcomm
+  now rejects X anywhere" from the upstream changelog. Find every parse of the same bytes that runs
+  *before* the upstream one, and test the claim at didcomm's own boundary (`UnpackAsync`). Cover
+  each position separately: member name vs value, top level vs nested, outer layer vs decrypted inner
+  layer.
+- **Why:** #77 documented DataProofs 1.4.0's unpaired-surrogate check as covering surrogate escapes
+  "anywhere" in a JWE or JWS. The new tests used only a *value*. The adversarial review then showed
+  that a member *name* escape never reaches DataProofs: `EnvelopeDetector`'s own duplicate-checking
+  parse runs first, decodes every name, and threw a raw `InvalidOperationException` out of
+  `UnpackAsync` at every layer, before any authentication. The bug predated the branch. The
+  overclaim did not.
+- **How to apply:** Before documenting a narrowing or an "unchanged exception contract", list the
+  parses on the path in order (`grep JsonDocument.Parse|JsonNode.Parse|Deserialize`). Remember that
+  duplicate detection decodes names but not values. Write one hostile case plus a well-formed
+  control per position. Then look for every reader that decodes the accepted values later (the
+  `GetString()` calls on `AdditionalHeaders`). See [[L-043]] and [[L-045]].
+
+## L-049 — The Edit and Write tools decode `\uXXXX` in their parameters; write literal escapes through a script.
+
+- **Lesson:** A `😀` typed into an Edit or Write parameter lands in the file as the raw
+  character (😀), not as the six-character escape. A lone `\uD800` survives only because it cannot be
+  encoded. For any source line whose meaning depends on a literal backslash escape (test vectors,
+  hostile JSON), write it with a short Python script that builds the backslash explicitly, then
+  confirm the bytes (`xxd` or a `count(b'\\uD83D')`).
+- **Why:** In #77, the well-formed control in two test files silently became a raw emoji. Edit then
+  reported "no changes" when asked to replace it. The control still passed, but it was weaker than
+  its comment claimed.
+- **How to apply:** Whenever a test or source string must contain a literal `\u` escape, edit it with
+  a script, and check the bytes afterwards.

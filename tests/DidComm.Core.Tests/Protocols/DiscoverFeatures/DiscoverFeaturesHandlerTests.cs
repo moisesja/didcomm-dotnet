@@ -5,7 +5,7 @@ using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Protocols.Empty;
 using DidComm.Protocols.TrustPing;
 using DidComm.Threading;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // L-014.

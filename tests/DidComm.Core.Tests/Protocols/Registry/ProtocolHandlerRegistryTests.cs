@@ -1,6 +1,6 @@
 using DidComm.Messages;
 using DidComm.Protocols;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Protocols.Registry;

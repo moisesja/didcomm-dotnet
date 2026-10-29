@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using DidComm.Exceptions;
 using DidComm.Transports;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 namespace DidComm.Tests.Transports;

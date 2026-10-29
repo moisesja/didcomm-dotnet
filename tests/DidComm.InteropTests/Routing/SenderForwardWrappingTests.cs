@@ -3,7 +3,7 @@ using DidComm.InteropTests.Resolution;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using DidComm.Resolution;
-using FluentAssertions;
+using AwesomeAssertions;
 using NetDid.Core.Model;
 using NetDid.Core.Serialization;
 using Xunit;

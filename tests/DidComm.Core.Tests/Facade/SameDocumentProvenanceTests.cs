@@ -7,7 +7,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Resolution;
 using DidComm.Tests.Envelopes;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.IdentityModel.Tokens;
 using NetCrypto;
 using NetDid.Core;

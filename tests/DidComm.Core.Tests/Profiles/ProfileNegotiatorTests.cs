@@ -1,5 +1,5 @@
 using DidComm.Profiles;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 
 // Alias dodges the shadowing of the `DidComm.Profiles.Profiles` static class by the test

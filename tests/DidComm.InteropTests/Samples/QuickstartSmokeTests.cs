@@ -1,5 +1,5 @@
 using DidComm.Facade;
-using FluentAssertions;
+using AwesomeAssertions;
 using Xunit;
 using QuickstartProgram = DidComm.Samples.Quickstart.Program;
 
