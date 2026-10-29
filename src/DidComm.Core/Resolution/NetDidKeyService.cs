@@ -46,9 +46,26 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
     }
 
     /// <inheritdoc />
+    /// <exception cref="DidResolutionException">
+    /// When <paramref name="did"/> is not a syntactically valid DID, or is longer than 4096
+    /// characters (FR-API-09). In the second case the exception names only a short prefix of it.
+    /// </exception>
     public void RejectUnsupportedMethod(string did)
     {
         ArgumentException.ThrowIfNullOrEmpty(did);
+
+        // Backstop (FR-API-09, #80): ExtractMethod runs NetDid's DID regex, whose cost and
+        // allocation grow with the input. The receive path bounds wire identifiers before they get
+        // here; this bounds the parse for every other caller as well. DidResolutionException puts
+        // its DID in both the message and the public Did property, so it gets a short prefix of the
+        // value, never the value itself.
+        if (did.Length > IdentifierLimits.MaxKeyIdLength)
+        {
+            throw new DidResolutionException(
+                BoundedPrefix(did),
+                $"value exceeds the maximum identifier length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09)");
+        }
+
         var method = DidParser.ExtractMethod(did)
             ?? throw new DidResolutionException(did, "value is not a syntactically valid DID");
 
@@ -245,6 +262,18 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
             DidCommDiagnostics.RecordFailure(activity, ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// The first 64 characters of <paramref name="value"/> followed by an ellipsis, for naming an
+    /// over-long value in an exception without copying it. Stops one character short rather than
+    /// split a surrogate pair. Callers pass only values longer than the prefix.
+    /// </summary>
+    private static string BoundedPrefix(string value)
+    {
+        const int PrefixLength = 64;
+        var length = char.IsHighSurrogate(value[PrefixLength - 1]) ? PrefixLength - 1 : PrefixLength;
+        return string.Concat(value.AsSpan(0, length), "…");
     }
 
     /// <summary>The method segment of <paramref name="did"/> ("did:peer:..." → "peer"), or "unknown".</summary>

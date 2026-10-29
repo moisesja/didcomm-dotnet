@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using DidComm.Consistency;
 using DidComm.Exceptions;
 
 namespace DidComm.Messages;
@@ -143,7 +144,8 @@ public sealed class Message
     /// Enforces FR-MSG-02 (<c>id</c> required, unreserved chars), FR-MSG-05 (<c>type</c>
     /// required and a parseable MTURI), FR-MSG-06 (<c>typ</c> media-type acceptance is
     /// case-insensitive after FR-MSG-06 prefix normalization), FR-MSG-07/08
-    /// (<c>to</c>/<c>from</c> entries MUST NOT carry a fragment), FR-MSG-11
+    /// (<c>to</c>/<c>from</c> entries MUST NOT carry a fragment, and are at most
+    /// <c>IdentifierLimits.MaxDidLength</c> characters, FR-API-09), FR-MSG-11
     /// (<c>thid</c>/<c>pthid</c> same constraints as <c>id</c>), and FR-ATT-02/03/04
     /// (attachment validation, delegated to <see cref="Attachment.Validate"/>).
     /// </remarks>
@@ -176,12 +178,14 @@ public sealed class Message
             {
                 if (string.IsNullOrEmpty(to))
                     throw new MalformedMessageException("Message 'to' entries must not be empty (FR-MSG-07).");
+                // Length first (FR-API-09, #80): the fragment check below quotes the value, so an
+                // over-long entry must be refused before it can be copied into an exception message.
+                if (to.Length > IdentifierLimits.MaxDidLength)
+                    throw new MalformedMessageException(
+                        $"Message 'to' entry exceeds the maximum length of {IdentifierLimits.MaxDidLength} characters (FR-MSG-07).");
                 if (to.IndexOf('#') >= 0)
                     throw new MalformedMessageException(
                         $"Message 'to' entries MUST NOT contain a fragment (FR-MSG-07). Got: '{to}'.");
-                if (to.Length > MaxIdentifierLength)
-                    throw new MalformedMessageException(
-                        $"Message 'to' entry exceeds the maximum length of {MaxIdentifierLength} characters (FR-MSG-07).");
                 if (ContainsControlChar(to))
                     throw new MalformedMessageException("Message 'to' entries MUST NOT contain control characters (FR-MSG-07).");
             }
@@ -189,12 +193,13 @@ public sealed class Message
 
         if (From is not null)
         {
+            // Length first, for the same reason as 'to' above (FR-API-09, #80).
+            if (From.Length > IdentifierLimits.MaxDidLength)
+                throw new MalformedMessageException(
+                    $"Message 'from' exceeds the maximum length of {IdentifierLimits.MaxDidLength} characters (FR-MSG-08).");
             if (From.IndexOf('#') >= 0)
                 throw new MalformedMessageException(
                     $"Message 'from' MUST NOT contain a fragment (FR-MSG-08). Got: '{From}'.");
-            if (From.Length > MaxIdentifierLength)
-                throw new MalformedMessageException(
-                    $"Message 'from' exceeds the maximum length of {MaxIdentifierLength} characters (FR-MSG-08).");
             if (ContainsControlChar(From))
                 throw new MalformedMessageException("Message 'from' MUST NOT contain control characters (FR-MSG-08).");
         }
@@ -244,10 +249,6 @@ public sealed class Message
             }
         }
     }
-
-    // A generous upper bound on identity-header length. DIDs / DID-URLs are far shorter in practice,
-    // so this only rejects pathological multi-kilobyte values smuggled into from/to.
-    private const int MaxIdentifierLength = 2048;
 
     private static bool ContainsControlChar(string value)
     {

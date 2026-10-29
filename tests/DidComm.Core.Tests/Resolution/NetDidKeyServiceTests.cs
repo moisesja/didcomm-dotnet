@@ -1,5 +1,6 @@
 using DidComm.Exceptions;
 using DidComm.Resolution;
+using DidComm.Tests.Facade;
 using AwesomeAssertions;
 using Microsoft.IdentityModel.Tokens;
 using NetDid.Core;
@@ -344,6 +345,61 @@ public sealed class NetDidKeyServiceTests
     }
 
     /// <summary>Hand-rolled resolver that returns pre-canned documents and counts invocations.</summary>
+    // ---- Identifier length backstop (FR-API-09, #80) ----
+
+    [Fact]
+    public void RejectUnsupportedMethod_accepts_a_DID_of_exactly_the_key_id_cap()
+    {
+        var sut = new NetDidKeyService(new StubResolver());
+
+        sut.Invoking(s => s.RejectUnsupportedMethod(LengthCap.DidOfLength(LengthCap.KeyIdCap)))
+            .Should().NotThrow();
+    }
+
+    [Theory]
+    [InlineData(LengthCap.KeyIdCap + 1)]
+    [InlineData(1_000_000)]
+    public void RejectUnsupportedMethod_refuses_a_longer_value_naming_only_a_prefix(int length)
+    {
+        var sut = new NetDidKeyService(new StubResolver());
+        var did = LengthCap.DidOfLength(length);
+
+        var failure = sut.Invoking(s => s.RejectUnsupportedMethod(did))
+            .Should().Throw<DidResolutionException>().Which;
+
+        failure.Message.Should().Contain("4096");
+        failure.ShouldNotQuoteTheValue();
+        // The exception also exposes the DID as a property, so that must be bounded too.
+        failure.Did.Should().Be(did[..64] + "…");
+    }
+
+    [Fact]
+    public void RejectUnsupportedMethod_prefix_does_not_split_a_surrogate_pair()
+    {
+        // 63 characters, then a surrogate pair straddling the 64-character prefix boundary.
+        var did = "did:example:" + new string('a', 51) + "\U0001F600" + new string('a', LengthCap.KeyIdCap);
+        char.IsHighSurrogate(did[63]).Should().BeTrue();
+        var sut = new NetDidKeyService(new StubResolver());
+
+        var failure = sut.Invoking(s => s.RejectUnsupportedMethod(did))
+            .Should().Throw<DidResolutionException>().Which;
+
+        failure.Did.Should().Be(did[..63] + "…");
+    }
+
+    [Fact]
+    public async Task GetVerificationMethodsAsync_over_the_cap_is_refused_before_resolution()
+    {
+        var resolver = new StubResolver();
+        var sut = new NetDidKeyService(resolver);
+
+        var act = async () => await sut.GetVerificationMethodsAsync(
+            LengthCap.DidOfLength(LengthCap.KeyIdCap + 1), VerificationRelationship.KeyAgreement);
+
+        await act.Should().ThrowAsync<DidResolutionException>();
+        resolver.ResolveCallCount.Should().Be(0);
+    }
+
     private sealed class StubResolver : IDidResolver
     {
         private readonly Dictionary<string, DidDocument> _docs;

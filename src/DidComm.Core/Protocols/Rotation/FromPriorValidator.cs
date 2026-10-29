@@ -31,7 +31,7 @@ public static class FromPriorValidator
     /// <param name="currentSenderDid">The message <c>from</c> DID (the post-rotation identity), or <c>null</c> when the message carries no <c>from</c> — required for the relationship-termination form (FR-ROT-06), whose JWT omits <c>sub</c>.</param>
     /// <param name="keyService">DID resolver used to authorize the JWT signer key under <c>iss</c>.</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <exception cref="ProtocolException">When the JWT is malformed.</exception>
+    /// <exception cref="ProtocolException">When the JWT is malformed, including a header <c>kid</c> longer than 4096 characters or an <c>iss</c> or <c>sub</c> claim longer than 2048 (FR-API-09). Those errors never quote the value.</exception>
     /// <exception cref="ConsistencyException">When the signature is invalid, the kid is not authorized in the iss DID, sub does not match <paramref name="currentSenderDid"/> (FR-ROT-02), or the sub/from presence combination is invalid (a termination JWT on a message with <c>from</c>, or a rotation JWT on a message without it — FR-ROT-06/FR-ROT-02).</exception>
     /// <example>
     /// <code>
@@ -142,6 +142,28 @@ public static class FromPriorValidator
 
         if (string.IsNullOrEmpty(alg) || string.IsNullOrEmpty(kid))
             throw new ProtocolException("from_prior JWT header is missing 'alg' or 'kid'.");
+
+        // FR-API-09 (#80): bound the identifiers before anything below compares, parses or quotes
+        // them. 'kid' and 'iss' are DID-parsed before the signature is checked, and 'sub' is quoted in
+        // the presence and match errors. The termination form rides on plain anoncrypt, so a sender
+        // can reach this without authenticating. Capping 'sub' turns away no rotation that UnpackAsync
+        // would otherwise accept: 'sub' must equal the message 'from', which Message.Validate holds to
+        // the same bound. None of these messages quotes the value.
+        if (kid.Length > IdentifierLimits.MaxKeyIdLength)
+        {
+            throw new ProtocolException(
+                $"from_prior JWT header 'kid' exceeds the maximum length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09).");
+        }
+        if (claims.Iss.Length > IdentifierLimits.MaxDidLength)
+        {
+            throw new ProtocolException(
+                $"from_prior JWT 'iss' exceeds the maximum length of {IdentifierLimits.MaxDidLength} characters (FR-API-09).");
+        }
+        if (claims.Sub is { Length: > IdentifierLimits.MaxDidLength })
+        {
+            throw new ProtocolException(
+                $"from_prior JWT 'sub' exceeds the maximum length of {IdentifierLimits.MaxDidLength} characters (FR-API-09).");
+        }
 
         if (claims.Sub is null)
         {

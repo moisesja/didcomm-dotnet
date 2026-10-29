@@ -165,6 +165,16 @@ public sealed partial class DidCommClient
         var subjects = new HashSet<string>(StringComparer.Ordinal);
         foreach (var identifier in configured)
         {
+            // Checked first and without quoting the entry (FR-API-09, #80): DidSubjectOf treats an
+            // over-long value as "not a DID", and the error below would then copy all of it into the
+            // exception message.
+            if (identifier is { Length: > IdentifierLimits.MaxKeyIdLength })
+            {
+                throw new ArgumentException(
+                    $"DidCommOptions.OwnIdentifiers contains an entry of {identifier.Length} characters, which exceeds the maximum DID or DID URL length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09, FR-CONSIST-04).",
+                    nameof(configured));
+            }
+
             var subject = DidSubject.DidSubjectOf(identifier)
                 ?? throw new ArgumentException(
                     $"DidCommOptions.OwnIdentifiers contains '{identifier}', which is not a parseable DID or DID URL (FR-CONSIST-04).",
