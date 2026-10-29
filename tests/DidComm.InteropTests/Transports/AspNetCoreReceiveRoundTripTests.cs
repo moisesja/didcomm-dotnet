@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using DidComm.AspNetCore;
+using DidComm.Consistency;
 using DidComm.Facade;
 using DidComm.InteropTests.Resolution;
 using DidComm.Messages;
@@ -17,6 +18,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NetDid.Core;
 using NetDid.Core.Model;
@@ -246,6 +248,65 @@ public sealed class AspNetCoreReceiveRoundTripTests
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1)); // nowhere near the 2 s rejection floor
     }
 
+    [Fact]
+    public async Task Over_long_signer_kid_gets_the_same_opaque_400_as_any_rejection_and_stays_out_of_the_logs()
+    {
+        // FR-API-09 (#80) at the HTTP boundary: a signer key id one character over the bound is refused
+        // like any other bad envelope (bare 400, empty body), and the server-side log names the
+        // failure without copying the value.
+        var logs = new CapturingLoggerProvider();
+        var (server, received) = await BuildServerAsync(logs: logs);
+        var hostile = WithSignerKid(
+            await NewPackerClient().PackSignedAsync(NewProposal(), "did:example:alice"), OverLongKid("did:example:alice"));
+
+        var rejected = await PostEnvelopeAsync(server, hostile, "application/didcomm-signed+json");
+
+        rejected.Status.Should().Be(HttpStatusCode.BadRequest);
+        rejected.Body.Should().BeEmpty();
+        received.Should().BeEmpty();
+        logs.Entries.Should().Contain(e => e.Contains("rejecting inbound envelope (MalformedMessageException)") && e.Contains("JWS signer 'kid' exceeds the maximum length"),
+            "the logged rejection is the length refusal");
+        logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
+        (await PostEnvelopeAsync(server, "not even json")).Should().Be(rejected, "the response is the same as for any other rejection");
+    }
+
+    [Fact]
+    public async Task Envelope_also_naming_an_over_long_recipient_kid_is_delivered_and_the_kid_stays_out_of_the_logs()
+    {
+        // FR-API-09 (#80): an over-long recipient kid is treated as not held, not refused, so a group
+        // message that also names such a kid still reaches Bob. Packed for real (apv commits to both
+        // kids), with the other member's key generated here.
+        var logs = new CapturingLoggerProvider();
+        var (server, received) = await BuildServerAsync(logs: logs);
+        var bobPublic = SpecActorRegistry.LoadDefault().GetPublic("did:example:bob#key-x25519-1")
+            ?? throw new InvalidOperationException("Appendix A is missing Bob's X25519 key");
+        var longKid = OverLongKid("did:example:carol");
+        var pair = new NetCrypto.DefaultKeyGenerator().Generate(NetCrypto.KeyType.X25519);
+        var carolPublic = DataProofsDotnet.Jose.JwkConversion.ToPublicJwk(pair.KeyType, pair.PublicKey, longKid);
+        var packed = await DidComm.Composition.EnvelopeWriter.PackEncryptedAsync(
+            new DidComm.Composition.PackEncryptedParameters(
+                NewProposal(), new[] { bobPublic, carolPublic }, DataProofsDotnet.Jose.JoseAlgorithms.A256CbcHs512),
+            new DataProofsDotnet.Jose.JoseCryptoProvider());
+
+        var result = await PostEnvelopeAsync(server, packed);
+
+        result.Status.Should().Be(HttpStatusCode.Accepted);
+        received.Should().ContainSingle().Which.AllRecipientKids.Should().Contain(longKid);
+        logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
+    }
+
+    /// <summary>A key id under <paramref name="did"/> one character longer than the key-id bound.</summary>
+    private static string OverLongKid(string did)
+        => did + "#" + new string('k', IdentifierLimits.MaxKeyIdLength - did.Length);
+
+    /// <summary>Replace the per-signature (unprotected) kid of a single-signature JWS.</summary>
+    private static string WithSignerKid(string packedJws, string kid)
+    {
+        var jws = System.Text.Json.Nodes.JsonNode.Parse(packedJws)!.AsObject();
+        jws["signatures"]!.AsArray()[0]!["header"]!["kid"] = kid;
+        return jws.ToJsonString();
+    }
+
     private static DidCommClient NewPackerClient()
     {
         var actors = SpecActorRegistry.LoadDefault();
@@ -286,14 +347,15 @@ public sealed class AspNetCoreReceiveRoundTripTests
         return node.ToJsonString();
     }
 
-    private static async Task<(HttpStatusCode Status, string Body)> PostEnvelopeAsync(TestServer server, string body)
+    private static async Task<(HttpStatusCode Status, string Body)> PostEnvelopeAsync(
+        TestServer server, string body, string contentType = "application/didcomm-encrypted+json")
     {
         using var client = server.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Post, "/didcomm")
         {
             Content = new ByteArrayContent(Encoding.UTF8.GetBytes(body)),
         };
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/didcomm-encrypted+json");
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         using var response = await client.SendAsync(request);
         return (response.StatusCode, await response.Content.ReadAsStringAsync());
     }
@@ -347,7 +409,8 @@ public sealed class AspNetCoreReceiveRoundTripTests
         Action<DidCommOptions>? configureOptions = null,
         Func<UnpackResult, CancellationToken, Task>? onReceive = null,
         IDidResolver? resolverOverride = null,
-        TimeSpan? rejectionFloor = null)
+        TimeSpan? rejectionFloor = null,
+        ILoggerProvider? logs = null)
     {
         var received = new List<UnpackResult>();
         var actors = SpecActorRegistry.LoadDefault();
@@ -357,6 +420,8 @@ public sealed class AspNetCoreReceiveRoundTripTests
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        if (logs is not null)
+            builder.Logging.AddProvider(logs);
         builder.Services.AddSingleton<ISecretsResolver>(actors.AsSecretsResolver());
         builder.Services.AddSingleton<IDidKeyService>(keyService);
         builder.Services.AddSingleton<IServiceEndpointResolver>(serviceResolver);

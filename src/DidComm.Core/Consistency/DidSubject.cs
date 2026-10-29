@@ -17,12 +17,22 @@ internal static class DidSubject
 {
     /// <summary>
     /// Return the bare DID subject of <paramref name="value"/>, or <c>null</c> if the input
-    /// does not parse as a DID or DID URL.
+    /// does not parse as a DID or DID URL, or is longer than
+    /// <see cref="IdentifierLimits.MaxKeyIdLength"/> characters.
     /// </summary>
+    /// <remarks>
+    /// The length bound is a backstop (FR-API-09, #80). The receive path refuses over-long wire
+    /// identifiers before they get here, but this primitive also parses values taken from resolved
+    /// DID documents, such as a verification method's <c>id</c> or <c>controller</c>, and a
+    /// did:webvh document comes off the network. Declining to parse those keeps every NetDid DID URL
+    /// parse that didcomm itself requests bounded. Callers already treat <c>null</c> as "not a DID",
+    /// so an over-long value can never compare equal to a DID subject.
+    /// </remarks>
     /// <param name="value">A DID, DID URL, or any other string.</param>
     public static string? DidSubjectOf(string? value)
     {
         if (string.IsNullOrEmpty(value)) return null;
+        if (value.Length > IdentifierLimits.MaxKeyIdLength) return null;
         var parsed = DidParser.ParseDidUrl(value);
         return parsed?.Did.Value;
     }

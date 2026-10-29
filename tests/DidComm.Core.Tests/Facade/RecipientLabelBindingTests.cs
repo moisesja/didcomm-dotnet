@@ -202,6 +202,105 @@ public sealed class RecipientLabelBindingTests
         result.RecipientKeyBinding!.Kid.Should().Be(BobKid);
     }
 
+    // Kids one character over the FR-API-09 key-id limit (#80), so didcomm-dotnet receivers skip them.
+    private const string Dave = "did:example:dave";
+    private static readonly string LongAliasKid = AliasDid + "#" + new string('k', 4097 - AliasDid.Length - 1);
+    private static readonly string LongDaveKid = Dave + "#" + new string('k', 4097 - Dave.Length - 1);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SameKeyMaterialUnderAnOverLimitAliasListedFirst_StillUnpacks(bool reverseFindPresent)
+    {
+        // Bob's key is also published under an over-limit alias kid, listed first. The #80 filter
+        // skips the alias when selecting a key, but Bob's KEK opens the alias entry too, and the
+        // parser reports the first entry it opens. Without care that is the alias, and the label
+        // check rejects a message the kept entry legitimately addresses to Bob (#82 review).
+        var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var aliasPrivate = CloneJwk(bobKa.PrivateJwk, LongAliasKid);
+        var aliasPublic = CloneJwk(bobKa.PublicJwk, LongAliasKid);
+        var resolver = new StaticResolver(
+            (AliasDid, Doc(AliasDid, aliasPublic)),
+            (Bob, Doc(Bob, bobKa.PublicJwk)));
+
+        var sender = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+
+        var message = new MessageBuilder()
+            .WithType("https://example.com/protocols/test/1.0/ping")
+            .WithTo(AliasDid, Bob)
+            .WithBody(JsonNode.Parse("""{"v":1}""")!.AsObject())
+            .Build();
+
+        var packed = (await sender.PackEncryptedAsync(
+            message,
+            new PackEncryptedOptions(Recipients: new[] { AliasDid, Bob }))).Message;
+        JsonNode.Parse(packed)!["recipients"]![0]!["header"]!["kid"]!.GetValue<string>()
+            .Should().Be(LongAliasKid, "the scenario needs the over-limit alias entry first");
+
+        var secrets = new OrderedSecretsLookup(new[] { aliasPrivate, bobKa.PrivateJwk }, reverseFindPresent);
+        var bob = new DidCommClient(secrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var result = await bob.UnpackAsync(packed);
+
+        result.RecipientKid.Should().Be(BobKid);
+        result.RecipientKeyBinding!.Kid.Should().Be(BobKid);
+        result.AllRecipientKids.Should().Equal(new[] { LongAliasKid, BobKid }, "the envelope's own order is reported");
+    }
+
+    [Fact]
+    public async Task SwappedRecipientLabels_StillRejected_WhenAnOverLimitEntryIsPresent()
+    {
+        // An over-limit entry makes the reader hand the parser a reordered copy (kept entries
+        // first). That must not weaken the label check: swapping Bob's and Carol's labels is still
+        // rejected, identically for the holder and a stranger.
+        var bobKa = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var carolKa = TestKeyMaterial.Generate(KeyType.X25519, CarolKid);
+        var daveKa = TestKeyMaterial.Generate(KeyType.X25519, LongDaveKid);
+        var resolver = new StaticResolver(
+            (Dave, Doc(Dave, daveKa.PublicJwk)),
+            (Bob, Doc(Bob, bobKa.PublicJwk)),
+            (Carol, Doc(Carol, carolKa.PublicJwk)));
+
+        var sender = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+        var message = new MessageBuilder()
+            .WithType("https://example.com/protocols/test/1.0/ping")
+            .WithTo(Dave, Bob, Carol)
+            .WithBody(JsonNode.Parse("""{"v":1}""")!.AsObject())
+            .Build();
+        var packed = (await sender.PackEncryptedAsync(
+            message,
+            new PackEncryptedOptions(Recipients: new[] { Dave, Bob, Carol }))).Message;
+
+        var jwe = JsonNode.Parse(packed)!.AsObject();
+        var recipients = jwe["recipients"]!.AsArray();
+        recipients[0]!["header"]!["kid"]!.GetValue<string>().Should().Be(LongDaveKid);
+        recipients[1]!["header"]!["kid"] = CarolKid;
+        recipients[2]!["header"]!["kid"] = BobKid;
+        var swapped = jwe.ToJsonString();
+
+        var holder = new DidCommClient(
+            new DictionarySecretsLookup(new[] { bobKa.PrivateJwk }),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+        var stranger = new DidCommClient(
+            new DictionarySecretsLookup(Array.Empty<Jwk>()),
+            new NetDidKeyService(resolver),
+            new DidCommOptions());
+
+        var holderFailure = (await holder.Invoking(c => c.UnpackAsync(swapped)).Should().ThrowAsync<CryptoException>()).Which;
+        var strangerFailure = (await stranger.Invoking(c => c.UnpackAsync(swapped)).Should().ThrowAsync<CryptoException>()).Which;
+        holderFailure.Message.Should().Be(strangerFailure.Message);
+
+        // Control: the same envelope unswapped unpacks for Bob.
+        (await holder.UnpackAsync(packed)).RecipientKid.Should().Be(BobKid);
+    }
+
     private static Jwk CloneJwk(Jwk source, string kid) => new()
     {
         Kty = source.Kty,

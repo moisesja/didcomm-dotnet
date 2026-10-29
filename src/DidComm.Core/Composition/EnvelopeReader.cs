@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
@@ -98,6 +99,13 @@ internal static class EnvelopeReader
         ArgumentException.ThrowIfNullOrEmpty(packed);
         ArgumentNullException.ThrowIfNull(recipientKeys);
         ArgumentNullException.ThrowIfNull(cryptoProvider);
+
+        // FR-API-09 (#80): DataProofs reads the JWS signer kid and the authcrypt sender kid out of
+        // the envelope and passes them straight to these two lookups, so the lookups are the first
+        // point where didcomm sees those values, at every layer. Wrap both so a kid over either
+        // identifier limit is refused before the inner lookup can DID-parse or resolve it.
+        signerLookup = BoundSignerLookup(signerLookup);
+        senderLookup = senderLookup is null ? null : new BoundedSenderKeyLookup(senderLookup);
 
         var stack = new List<EnvelopeKind>();
         // Per-layer composition trace (outer→inner) carrying the authenticated/anonymous distinction
@@ -389,6 +397,7 @@ internal static class EnvelopeReader
                 {
                     DpEnc.JweParseResult jweResult;
                     string? decryptingKid;
+                    IReadOnlyList<string> envelopeKids;
                     try
                     {
                         // Discover the recipient kids without any private key, select the held one, and
@@ -397,9 +406,37 @@ internal static class EnvelopeReader
                         // (dataproofs #12) makes the ECDH/unwrap cost and the uniform failure identical
                         // to the held path, closing the held-vs-unheld recipient-enumeration oracle.
                         var peek = DpEnc.JweParser.PeekRecipients(current);
-                        var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        envelopeKids = peek.RecipientKids;
+
+                        // FR-API-09 (#80): a recipient kid over the identifier limits is treated as not
+                        // held. It is dropped from the candidates before key selection, so the consumer's
+                        // ISecretsResolver never sees it and no key can be selected for it; every other
+                        // entry is handled as before. Refusing the whole envelope instead would let one
+                        // group member whose own DID document publishes such a kid make every group
+                        // message undeliverable to all the others. The filter reads only envelope
+                        // content and runs before any key lookup, so holding the key of a dropped kid
+                        // changes nothing: the outcome is the one a receiver without that key gets, and
+                        // a receiver left with no candidate takes the decoy path like any stranger.
+                        // UnpackResult.AllRecipientKids still reports the envelope's kids verbatim.
+                        var candidateKids = RecipientKidsWithinLimits(peek.RecipientKids);
+
+                        // The parser scans entries in envelope order and reports the first one our KEK
+                        // opens, and FR-CONSIST-08 requires that to be the kid we selected. A dropped
+                        // entry can be an alias of a held key (same material, over-limit label); listed
+                        // first, the parser would open it and the label check would reject a message a
+                        // kept entry legitimately addresses to us. So when entries were dropped, the
+                        // parser gets a copy with the kept entries first, in their original order, and
+                        // the dropped ones after: its scan over kept entries is then exactly the
+                        // selection order. The recipients array is unprotected and apv commits to the
+                        // sorted kid list, so the copy is equally valid; it is built from envelope
+                        // content alone, before any key lookup.
+                        var parseInput = candidateKids.Count == 0 || ReferenceEquals(candidateKids, peek.RecipientKids)
+                            ? current
+                            : WithKeptRecipientsFirst(current);
+
+                        var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, candidateKids, cryptoProvider, ct).ConfigureAwait(false);
                         decryptingKid = heldKid;
-                        jweResult = await DpEnc.JweParser.ParseAsync(current, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
+                        jweResult = await DpEnc.JweParser.ParseAsync(parseInput, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
                     {
@@ -467,7 +504,9 @@ internal static class EnvelopeReader
                     contentEnc = jweResult.ContentEncryption;
                     keyWrap = jweResult.Algorithm;
                     recipientKid = jweResult.RecipientKid;
-                    allRecipientKids = jweResult.AllRecipientKids;
+                    // From the peek of the envelope as received: the parser may have seen a reordered
+                    // copy (above), and AllRecipientKids reports the envelope's own order.
+                    allRecipientKids = envelopeKids;
 
                     if (isOutermostEncryptLayer)
                         anonymous = !jweResult.IsAuthenticated;
@@ -521,7 +560,12 @@ internal static class EnvelopeReader
         JoseCryptoProvider cryptoProvider,
         CancellationToken ct)
     {
-        var heldKids = await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
+        // No candidate left (every kid was over the FR-API-09 limits): go straight to the decoy
+        // without asking the keystore. Which branch runs depends only on envelope content, so it
+        // says nothing about which keys this agent holds.
+        var heldKids = recipientKids.Count == 0
+            ? Array.Empty<string>()
+            : await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
         // Walk the ENVELOPE's order and keep the held ones, rather than trusting the order
         // FindPresentAsync returns (ISecretsResolver promises a subset, not an ordering). The parser
         // scans recipient entries in envelope order and reports the first one the KEK opens, so
@@ -551,6 +595,117 @@ internal static class EnvelopeReader
         finally
         {
             CryptographicOperations.ZeroMemory(scalar);
+        }
+    }
+
+    /// <summary>
+    /// Refuse a wire key id that fails <see cref="IdentifierLimits.IsWithinKeyIdLimits"/>: longer than
+    /// <see cref="IdentifierLimits.MaxKeyIdLength"/> in all, or with a DID part longer than
+    /// <see cref="IdentifierLimits.MaxDidLength"/> (FR-API-09, #80). The message names the field and
+    /// the broken limit but never quotes the value, so an over-long kid is not copied into the
+    /// exception, its logs or a problem report. A null kid passes; the callers' own checks handle it.
+    /// </summary>
+    /// <param name="kid">The key id read from the envelope.</param>
+    /// <param name="field">The field it came from, as named in the message (e.g. <c>JWS signer 'kid'</c>).</param>
+    /// <exception cref="MalformedMessageException">When <paramref name="kid"/> is over a limit.</exception>
+    private static void RejectKeyIdOverLimits(string? kid, string field)
+    {
+        if (kid is not null && !IdentifierLimits.IsWithinKeyIdLimits(kid))
+            throw new MalformedMessageException(IdentifierLimits.KeyIdLimitMessage(field, kid));
+    }
+
+    /// <summary>
+    /// A copy of a General JSON JWE whose <c>recipients</c> entries are reordered: those whose kid
+    /// passes <see cref="IdentifierLimits.IsWithinKeyIdLimits"/> first, in their original order, then
+    /// the rest, in theirs (FR-API-09, #80; FR-CONSIST-08). Every other member is kept as is. The
+    /// <c>recipients</c> array is not integrity-protected and <c>apv</c> commits to the sorted kid
+    /// list, so the copy decrypts and validates exactly like the original. Called only after
+    /// <see cref="DpEnc.JweParser.PeekRecipients"/> accepted the structure.
+    /// </summary>
+    private static string WithKeptRecipientsFirst(string jwe)
+    {
+        // The structure was already accepted by EnvelopeDetector and PeekRecipients; anything else
+        // (no recipients array, such as the flattened form) is returned unchanged.
+        if (JsonNode.Parse(jwe) is not JsonObject root || root["recipients"] is not JsonArray recipients)
+            return jwe;
+
+        var kept = new List<JsonNode?>(recipients.Count);
+        var dropped = new List<JsonNode?>();
+        foreach (var entry in recipients)
+        {
+            var isKept = entry?["header"]?["kid"] is JsonValue kidValue
+                && kidValue.TryGetValue<string>(out var kid)
+                && IdentifierLimits.IsWithinKeyIdLimits(kid);
+            (isKept ? kept : dropped).Add(entry);
+        }
+        recipients.Clear();
+        foreach (var entry in kept)
+            recipients.Add(entry);
+        foreach (var entry in dropped)
+            recipients.Add(entry);
+        return root.ToJsonString();
+    }
+
+    /// <summary>
+    /// The recipient kids that pass <see cref="IdentifierLimits.IsWithinKeyIdLimits"/>, in envelope
+    /// order (FR-API-09, #80); the list itself when every kid passes. Reads nothing but the kids.
+    /// </summary>
+    private static IReadOnlyList<string> RecipientKidsWithinLimits(IReadOnlyList<string> recipientKids)
+    {
+        foreach (var kid in recipientKids)
+        {
+            if (!IdentifierLimits.IsWithinKeyIdLimits(kid))
+                return recipientKids.Where(IdentifierLimits.IsWithinKeyIdLimits).ToArray();
+        }
+        return recipientKids;
+    }
+
+    /// <summary>
+    /// Wrap the JWS signer lookup so a kid over the limits is refused before the inner lookup runs
+    /// (FR-API-09, #80). DataProofs' <c>JwsParser</c> calls the lookup outside its own error
+    /// handling, so the <see cref="MalformedMessageException"/> reaches the Signed branch's catch
+    /// filters, which pass every <see cref="DidCommException"/> through unchanged. The kid may come
+    /// from the protected or the unprotected header; the lookup sees it either way.
+    /// </summary>
+    private static Func<string, Jwk?>? BoundSignerLookup(Func<string, Jwk?>? inner)
+    {
+        if (inner is null)
+            return null;
+        return kid =>
+        {
+            RejectKeyIdOverLimits(kid, "JWS signer 'kid'");
+            return inner(kid);
+        };
+    }
+
+    /// <summary>
+    /// Authcrypt sender-key lookup that refuses a kid over the limits before the wrapped lookup
+    /// resolves it (FR-API-09, #80).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The lookup, not the peeked <c>skid</c>, is the place to check. DataProofs' <c>ResolveSender</c>
+    /// calls <c>TryGet</c> with the <c>skid</c> when the protected header has one, and otherwise with
+    /// the kid it decodes from <c>apu</c>, which a check on <c>skid</c> alone would never see.
+    /// <c>ResolveSender</c> calls <c>TryGet</c> outside any catch, so the exception reaches the
+    /// Encrypted branch's filters, which let <see cref="MalformedMessageException"/> through.
+    /// </para>
+    /// <para>
+    /// The refusal is not a new recipient-possession signal. Whether it fires depends only on the
+    /// sender kid, which is envelope content, not on which recipient key (if any) this agent holds,
+    /// and <c>ResolveSender</c> reaches this lookup on the held path and the decoy path alike.
+    /// </para>
+    /// </remarks>
+    private sealed class BoundedSenderKeyLookup : IInternalSenderKeyLookup
+    {
+        private readonly IInternalSenderKeyLookup _inner;
+
+        public BoundedSenderKeyLookup(IInternalSenderKeyLookup inner) => _inner = inner;
+
+        public Jwk? TryGet(string skid)
+        {
+            RejectKeyIdOverLimits(skid, "JWE sender 'skid'");
+            return _inner.TryGet(skid);
         }
     }
 

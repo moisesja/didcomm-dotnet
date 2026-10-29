@@ -934,3 +934,21 @@ Format per entry:
   its comment claimed.
 - **How to apply:** Whenever a test or source string must contain a literal `\u` escape, edit it with
   a script, and check the bytes afterwards.
+
+## L-050 — When a finding traces to a gap between our code and the DIDComm spec, close the gap toward the spec; don't patch around it locally.
+
+- **Lesson:** Before proposing a local rule for which key, field or behavior to choose, read what the
+  spec says about that choice. If our code diverges from a spec MUST or SHOULD (or from the PRD row
+  that restates it), the fix is to do what the spec says. A local stopgap ("prefer the in-limit
+  key") or deferring the conformance fix to a later PR leaves peers and us disagreeing on the wire.
+  Interoperability outranks a smaller diff.
+- **Why:** In #80, a pack-side finding (pack chose a recipient's over-limit kid even when the same
+  DID had a usable key) traced to `PackEncryptedAsync` encrypting to only the first `keyAgreement`
+  key on the chosen curve. The v2.1 spec says the default recipients SHOULD include all of them, and
+  PRD FR-ENC-19 says the same. I first offered a stopgap, then a deferral. The user said: "do what
+  the spec says. I care about interoperability."
+- **How to apply:** For any selection or defaulting rule, quote the spec text first (the v2.1
+  source is in decentralized-identity/didcomm-messaging under `docs/spec-files-v2.1-snapshot/`,
+  because the site returns 403 to WebFetch). When a PRD row is marked done, check that its
+  acceptance test exercises the facade's own choice and not a lower layer handed the answer. Then
+  recommend the spec behavior, with the interop evidence from didcomm-python and didcomm-jvm.

@@ -165,6 +165,16 @@ public sealed partial class DidCommClient
         var subjects = new HashSet<string>(StringComparer.Ordinal);
         foreach (var identifier in configured)
         {
+            // Checked first and without quoting the entry (FR-API-09, #80): DidSubjectOf treats an
+            // over-long value as "not a DID", and the error below would then copy all of it into the
+            // exception message.
+            if (identifier is { Length: > IdentifierLimits.MaxKeyIdLength })
+            {
+                throw new ArgumentException(
+                    $"DidCommOptions.OwnIdentifiers contains an entry of {identifier.Length} characters, which exceeds the maximum DID or DID URL length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09, FR-CONSIST-04).",
+                    nameof(configured));
+            }
+
             var subject = DidSubject.DidSubjectOf(identifier)
                 ?? throw new ArgumentException(
                     $"DidCommOptions.OwnIdentifiers contains '{identifier}', which is not a parseable DID or DID URL (FR-CONSIST-04).",
@@ -333,6 +343,7 @@ public sealed partial class DidCommClient
         }
 
         IReadOnlyList<Jwk> senderPublics = Array.Empty<Jwk>();
+        var senderOverLimit = 0;
         if (options.From is not null)
         {
             var allSenderPubs = await _keyService.GetVerificationMethodsAsync(options.From, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
@@ -341,19 +352,33 @@ public sealed partial class DidCommClient
 
             // Filter to keys the agent actually holds the private half of — opaque (keystore) or
             // extractable. FindPresent answers held-ness without exposing key material (FR-SEC-06).
-            var senderKids = allSenderPubs.Where(k => k.Kid is not null).Select(k => k.Kid!).ToArray();
+            // Keys whose kid is over the FR-API-09 identifier limits are left out first (#80): every
+            // didcomm-dotnet receiver refuses such an skid, so emitting it would only produce an
+            // undeliverable message.
+            (var senderKids, senderOverLimit) = OwnKidsWithinLimits(allSenderPubs);
             var heldKids = await _keyOps.FindPresentAsync(senderKids, ct).ConfigureAwait(false);
+            // ISecretsResolver promises a subset of what it was asked. Keep only kids we asked about,
+            // so a resolver that lists everything it holds cannot bring back a key left out above.
             var heldKidSet = new HashSet<string>(heldKids, StringComparer.Ordinal);
+            heldKidSet.IntersectWith(senderKids);
             senderPublics = allSenderPubs.Where(k => k.Kid is not null && heldKidSet.Contains(k.Kid!)).ToArray();
             if (senderPublics.Count == 0)
-                throw new SecretNotFoundException($"{options.From} (no held authcrypt sender private key for any of {allSenderPubs.Count} keyAgreement keys)");
+            {
+                throw senderOverLimit == 0
+                    ? new SecretNotFoundException($"{options.From} (no held authcrypt sender private key for any of {allSenderPubs.Count} keyAgreement keys)")
+                    : new SecretNotFoundException(options.From,
+                        $"No usable authcrypt sender private key for '{options.From}': {senderOverLimit} of its {allSenderPubs.Count} keyAgreement keys have kids over the FR-API-09 identifier limits and were not considered, and no remaining key is held.");
+            }
         }
 
         var chosenCurve = PickCommonCurve(recipientPublics.Values, senderPublics, requireSender: options.From is not null);
         if (chosenCurve is null)
         {
             throw new InvalidOperationException(
-                "No common keyAgreement curve across recipients" + (options.From is not null ? " and sender." : "."));
+                "No common keyAgreement curve across recipients" + (options.From is not null ? " and sender." : ".")
+                + (senderOverLimit > 0
+                    ? $" {senderOverLimit} of the sender's keyAgreement keys were not considered because their kids are over the FR-API-09 identifier limits."
+                    : ""));
         }
 
         var chosenRecipients = new List<Jwk>(recipientPublics.Count);
@@ -669,14 +694,49 @@ public sealed partial class DidCommClient
         if (pubs.Count == 0)
             throw new DidResolutionException(signerDid, "no authentication keys available");
 
-        var presentKids = await _keyOps.FindPresentAsync(pubs.Where(k => k.Kid is not null).Select(k => k.Kid!), ct).ConfigureAwait(false);
-        if (presentKids.Count == 0)
-            throw new SecretNotFoundException($"{signerDid} (no authentication key held)");
+        // Keys whose kid is over the FR-API-09 identifier limits are left out before the keystore is
+        // asked (#80): every didcomm-dotnet receiver refuses such a signer kid, so signing with one
+        // would only produce an undeliverable message.
+        var (candidateKids, overLimit) = OwnKidsWithinLimits(pubs);
+        var presentKids = await _keyOps.FindPresentAsync(candidateKids, ct).ConfigureAwait(false);
+        // ISecretsResolver promises a subset of what it was asked. Take the resolver's first answer
+        // that we asked about, so a resolver that lists everything it holds cannot bring back a key
+        // left out above.
+        var candidates = new HashSet<string>(candidateKids, StringComparer.Ordinal);
+        var kid = presentKids.FirstOrDefault(candidates.Contains);
+        if (kid is null)
+        {
+            throw overLimit == 0
+                ? new SecretNotFoundException($"{signerDid} (no authentication key held)")
+                : new SecretNotFoundException(signerDid,
+                    $"No usable signing key for '{signerDid}': {overLimit} of its {pubs.Count} authentication keys have kids over the FR-API-09 identifier limits and were not considered, and no remaining key is held.");
+        }
 
-        var kid = presentKids[0];
         // Opaque (keystore) or extractable JWS signer for the chosen authentication key (FR-SEC-06).
         return await _keyOps.ResolveSignerAsync(kid, ct).ConfigureAwait(false)
             ?? throw new SecretNotFoundException(kid);
+    }
+
+    /// <summary>
+    /// The kids of this agent's own published keys that a receiver will accept, in document order,
+    /// and how many were left out for being over the FR-API-09 identifier limits (#80). Keys with no
+    /// kid are skipped, as before. Used for the signer and authcrypt-sender selection only; a
+    /// recipient's kids are the recipient's business and are packed unchanged.
+    /// </summary>
+    private static (string[] Kids, int OverLimit) OwnKidsWithinLimits(IReadOnlyList<Jwk> keys)
+    {
+        var kids = new List<string>(keys.Count);
+        var overLimit = 0;
+        foreach (var key in keys)
+        {
+            if (key.Kid is null)
+                continue;
+            if (IdentifierLimits.IsWithinKeyIdLimits(key.Kid))
+                kids.Add(key.Kid);
+            else
+                overLimit++;
+        }
+        return (kids.ToArray(), overLimit);
     }
 
     private void RejectUnsupportedDidsOnMessage(Message message)

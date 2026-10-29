@@ -1,5 +1,6 @@
 using DidComm.Exceptions;
 using DidComm.Messages;
+using DidComm.Tests.Facade;
 using AwesomeAssertions;
 using Xunit;
 
@@ -134,5 +135,56 @@ public sealed class MessageValidationTests
     public void Media_type_rejects_unrelated_value()
     {
         MediaTypes.Matches("application/json", MediaTypes.Plaintext).Should().BeFalse();
+    }
+
+    // ---- Identifier length bound (FR-API-09, #80) ----
+
+    [Theory]
+    [InlineData(LengthCap.DidCap, true)]
+    [InlineData(LengthCap.DidCap + 1, false)]
+    public void From_is_bounded_at_the_DID_cap(int length, bool accepted)
+    {
+        var msg = MinimalValid();
+        msg.From = LengthCap.DidOfLength(length);
+        Action act = msg.Validate;
+        if (accepted)
+            act.Should().NotThrow();
+        else
+            act.Should().Throw<MalformedMessageException>().WithMessage("*'from' exceeds the maximum length of 2048*");
+    }
+
+    [Theory]
+    [InlineData(LengthCap.DidCap, true)]
+    [InlineData(LengthCap.DidCap + 1, false)]
+    public void To_entry_is_bounded_at_the_DID_cap(int length, bool accepted)
+    {
+        var msg = MinimalValid();
+        msg.To = new[] { "did:example:bob", LengthCap.DidOfLength(length) };
+        Action act = msg.Validate;
+        if (accepted)
+            act.Should().NotThrow();
+        else
+            act.Should().Throw<MalformedMessageException>().WithMessage("*'to' entry exceeds the maximum length of 2048*");
+    }
+
+    [Fact]
+    public void Overlong_to_entry_with_a_fragment_is_refused_for_its_length_without_quoting_it()
+    {
+        // The fragment check quotes the value, so the length check has to run first.
+        var msg = MinimalValid();
+        msg.To = new[] { LengthCap.KidOfLength("did:example:bob", 1_000_000) };
+        Action act = msg.Validate;
+        var failure = act.Should().Throw<MalformedMessageException>().WithMessage("*maximum length*").Which;
+        failure.ShouldNotQuoteTheValue();
+    }
+
+    [Fact]
+    public void Overlong_from_with_a_fragment_is_refused_for_its_length_without_quoting_it()
+    {
+        var msg = MinimalValid();
+        msg.From = LengthCap.KidOfLength("did:example:alice", LengthCap.DidCap + 1);
+        Action act = msg.Validate;
+        var failure = act.Should().Throw<MalformedMessageException>().WithMessage("*maximum length*").Which;
+        failure.ShouldNotQuoteTheValue();
     }
 }

@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using DidComm.AspNetCore;
+using DidComm.Consistency;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.InteropTests.Resolution;
@@ -18,6 +19,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NetCrypto;
 using NetDid.Core;
@@ -258,6 +260,90 @@ public sealed class WebSocketTransportRoundTripTests
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
     }
 
+    [Fact]
+    public async Task Over_long_kid_is_dropped_and_the_socket_keeps_serving()
+    {
+        // FR-API-09 (#80) on the delegate receive loop: an envelope whose signer kid is one character
+        // over the bound costs its sender that message, not the connection, and the logged discard
+        // does not carry the value.
+        var logs = new CapturingLoggerProvider();
+        var (server, received) = await BuildServerAsync(logs: logs);
+
+        var actors = SpecActorRegistry.LoadDefault();
+        var aliceClient = new DidCommClient(actors.AsSecretsResolver(), new NetDidKeyService(LoadResolver()), new DidCommOptions());
+        var hostile = WithSignerKid(await aliceClient.PackSignedAsync(NewProposal(), "did:example:alice"), OverLongKid("did:example:alice"));
+        var valid = await aliceClient.PackEncryptedAsync(NewProposal(), new PackEncryptedOptions(
+            Recipients: new[] { "did:example:bob" },
+            From: "did:example:alice"));
+
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(hostile), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(valid.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+
+        await WaitUntilAsync(() => received.Count >= 1, TimeSpan.FromSeconds(10));
+
+        socket.State.Should().Be(WebSocketState.Open, "an over-long kid must not tear down the connection");
+        received.Should().HaveCount(1, "the hostile envelope is dropped, the valid one is still delivered");
+        logs.Entries.Should().Contain(e => e.Contains("discarding malformed envelope") && e.Contains("JWS signer 'kid' exceeds the maximum length"));
+        logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
+    [Fact]
+    public async Task Over_long_kid_is_dropped_by_the_registry_loop_and_the_socket_keeps_serving()
+    {
+        // L-043: the registry (dispatcher) overload has its own receive loop. Same property there: a
+        // hostile envelope ahead of a valid trust ping, on one socket, and the ping is still answered.
+        var aliceSecrets = new InMemorySecretsResolver();
+        var serverSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid, _) = await CreateThreePeersAsync(aliceSecrets, serverSecrets);
+        await using var serverApp = await BuildReplyingServerAsync(serverSecrets);
+        var server = serverApp.GetTestServer();
+        await using var aliceServices = BuildPeerServices(aliceSecrets);
+        var client = aliceServices.GetRequiredService<DidCommClient>();
+
+        var hostile = WithSignerKid(await client.PackSignedAsync(TrustPing.CreatePing(aliceDid, bobDid), aliceDid), OverLongKid(aliceDid));
+        var valid = await client.PackEncryptedAsync(TrustPing.CreatePing(aliceDid, bobDid), new PackEncryptedOptions(
+            Recipients: new[] { bobDid },
+            From: aliceDid,
+            Forward: false));
+
+        var wsClient = server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(hostile), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await socket.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(valid.Message), WebSocketMessageType.Binary, endOfMessage: true, default);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var buffer = new byte[64 * 1024];
+        var result = await socket.ReceiveAsync(buffer, timeout.Token);
+
+        result.MessageType.Should().Be(WebSocketMessageType.Binary, "the first frame back is the reply to the valid ping");
+        result.EndOfMessage.Should().BeTrue();
+        var reply = await client.UnpackAsync(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count));
+        reply.Message.Type.Should().Be(TrustPing.ResponseType);
+        socket.State.Should().Be(WebSocketState.Open);
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
+    /// <summary>A key id under <paramref name="did"/> one character longer than the key-id bound.</summary>
+    private static string OverLongKid(string did)
+        => did + "#" + new string('k', IdentifierLimits.MaxKeyIdLength - did.Length);
+
+    /// <summary>Replace the per-signature (unprotected) kid of a single-signature JWS.</summary>
+    private static string WithSignerKid(string packedJws, string kid)
+    {
+        var jws = System.Text.Json.Nodes.JsonNode.Parse(packedJws)!.AsObject();
+        jws["signatures"]!.AsArray()[0]!["header"]!["kid"] = kid;
+        return jws.ToJsonString();
+    }
+
     /// <summary>Rewrite the sole recipient entry's kid, leaving its <c>encrypted_key</c> in place.</summary>
     private static string RelabelSingleRecipient(string packedJwe, string replacementKid)
     {
@@ -335,7 +421,8 @@ public sealed class WebSocketTransportRoundTripTests
             await Task.Delay(10);
     }
 
-    private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(Action<DidCommOptions>? configureOptions = null)
+    private static async Task<(TestServer Server, List<UnpackResult> Received)> BuildServerAsync(
+        Action<DidCommOptions>? configureOptions = null, ILoggerProvider? logs = null)
     {
         var received = new List<UnpackResult>();
         var actors = SpecActorRegistry.LoadDefault();
@@ -345,6 +432,8 @@ public sealed class WebSocketTransportRoundTripTests
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        if (logs is not null)
+            builder.Logging.AddProvider(logs);
         builder.Services.AddSingleton<ISecretsResolver>(actors.AsSecretsResolver());
         builder.Services.AddSingleton<IDidKeyService>(keyService);
         builder.Services.AddSingleton<IServiceEndpointResolver>(serviceResolver);
