@@ -61,7 +61,9 @@ public static class Section_J_MultiRecipient
             Recipients: new[] { ctx.Bob.Did, carol.Did },
             From: ctx.Alice.Did));
 
-        // The envelope itself shows the fan-out: one 'recipients' entry per reader.
+        // The envelope itself shows the fan-out: one 'recipients' entry per reader key. Each reader
+        // gets an entry for every keyAgreement key they publish on the chosen curve, so any of their
+        // devices can decrypt. Here each reader publishes one such key.
         var wireRecipients = JsonNode.Parse(packed.Message)!["recipients"]!.AsArray();
         ctx.Narrator.Value("Recipients on the wire", wireRecipients.Count);
 

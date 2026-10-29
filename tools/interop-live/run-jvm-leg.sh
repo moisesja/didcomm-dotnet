@@ -13,12 +13,13 @@
 #   VECTORS  (FR-IX-06, MUST):  didcomm-jvm unpacks our PUBLISHED fixture set
 #
 # Matrix coverage (§13.5): envelope composition × content encryption × key-agreement curve
-# (X25519, P-256) × signing alg (EdDSA, ES256, ES256K) × recipients (single, 3) × routing
-# (direct, 1 mediator, 2 mediators) × DID method (did:peer:2, did:key).
+# (X25519, P-256) × signing alg (EdDSA, ES256, ES256K) × recipients (single, 3 DIDs, one DID
+# with 3 keyAgreement keys — every key by default or one pinned by DID URL, FR-ENC-19) ×
+# routing (direct, 1 mediator, 2 mediators) × DID method (did:peer:2, did:key).
 #
 # Every cell asserts the recovered plaintext equals the original payload AND that the unpack
 # metadata matches what the composition requires. Prints a per-cell PASS/FAIL/N-A table,
-# writes it to $INTEROP_SUMMARY_DIR/jvm-leg.md (when set), and exits nonzero on any FAIL.
+# writes it to $INTEROP_SUMMARY_DIR/jvm-leg.md (when set), and exits 1 on any FAIL.
 #
 # N-A cells are declared, not skipped silently — each carries an evidence-backed reason (see
 # README.md, "Known counterpart deviations"), and an N-A is retired as soon as its stated
@@ -64,17 +65,21 @@ fi
 # One identity pair per matrix axis. All three drivers mint the SAME identity-file schema
 # ({did, secrets: [private JWKs]}) and number did:peer:2 keys identically, so either side can
 # resolve the other's DID with no shared state beyond the DID string itself.
-mint_pair() { # $1=name, rest: shared mint flags
+id() { echo "$WORK/$1-$2.json"; }   # id <dotnet|jvm> <name>
+did_of() { cat "$WORK/$1-$2.did"; } # did_of <dotnet|jvm> <name> → the minted DID string
+
+mint_pair() { # $1=name, rest: shared mint flags. Every driver's mint prints the DID on stdout.
     local name="$1"; shift
-    "$INTEROP_CLI" mint --out "$WORK/dotnet-$name.json" "$@" >/dev/null
-    "${PEER[@]}" mint --out "$WORK/jvm-$name.json" "$@" >/dev/null
+    "$INTEROP_CLI" mint --out "$WORK/dotnet-$name.json" "$@" >"$WORK/dotnet-$name.did"
+    "${PEER[@]}" mint --out "$WORK/jvm-$name.json" "$@" >"$WORK/jvm-$name.did"
 }
 
+MULTI_KA_COUNT=3
 mint_pair base                                    # X25519 KA + Ed25519 signing (the default)
 mint_pair p256ka   --ka-crv P-256                 # P-256 key agreement
 mint_pair es256    --sig-crv P-256                # ES256 signing
 mint_pair es256k   --sig-crv secp256k1            # ES256K signing
-mint_pair multi    --ka-count 3                   # 3 keyAgreement keys on one DID
+mint_pair multi    --ka-count "$MULTI_KA_COUNT"   # 3 keyAgreement keys on one DID (#key-1..3)
 mint_pair keyx     --method key --key-crv X25519  # did:key, encryption
 mint_pair keyed    --method key --key-crv Ed25519 # did:key, signing
 mint_pair med1                                    # mediator 1 (both sides)
@@ -88,10 +93,26 @@ mint_pair med2                                    # mediator 2 (both sides)
 "${PEER[@]}" mint --out "$WORK/jvm-routed2.json" \
     --route "$WORK/jvm-med1.json,$WORK/jvm-med2.json" >/dev/null
 
-id() { echo "$WORK/$1-$2.json"; }   # id <dotnet|jvm> <name>
+# Devices of the 3-key DID (FR-ENC-19): the SAME DID, but each file holds ONE keyAgreement
+# secret, as a phone or laptop holding one of the DID's keys would. multi-keyN keeps #key-N.
+for side in dotnet jvm; do
+    for n in 2 3; do
+        "${PEER[@]}" device-identity --identity "$(id "$side" multi)" --keep "key-$n" \
+            --out "$(id "$side" "multi-key$n")" >/dev/null
+    done
+done
+
+# Every keyAgreement kid of a multi DID, comma-separated. Minting writes the keyAgreement
+# segments before the signing one, so the keyAgreement keys are #key-1..#key-MULTI_KA_COUNT.
+ka_kids() { # $1=DID
+    local kids="" n=1
+    while [ "$n" -le "$MULTI_KA_COUNT" ]; do kids="${kids:+$kids,}$1#key-$n"; n=$((n + 1)); done
+    echo "$kids"
+}
 
 # ── matrix cells ──────────────────────────────────────────────────────────────────────────
-# "<label>;<mode>;<enc>;<needs_from>;<ids>;<sig_alg>;<route>"  (identical shape to the python leg)
+# "<label>;<mode>;<enc>;<needs_from>;<ids>;<sig_alg>;<route>;<keys>"  (identical shape and
+# legend to the python leg; keys = "" | all:N | pin:N selects the FR-ENC-19 multi-key cells)
 CELLS=(
     "plaintext;plaintext;-;yes;base;EdDSA;"
     "signed EdDSA;signed;-;yes;base;EdDSA;"
@@ -108,6 +129,9 @@ CELLS=(
     "anoncrypt(sign);anoncrypt-sign;XC20P;yes;base;EdDSA;"
     "anoncrypt(authcrypt);anoncrypt-authcrypt;A256CBC-HS512;yes;base;EdDSA;"
     "authcrypt 3-rcpt;authcrypt;A256CBC-HS512;yes;multi;EdDSA;"
+    "anoncrypt 3-key last device;anoncrypt;A256CBC-HS512;no;multi;EdDSA;;all:3"
+    "authcrypt 3-key last device;authcrypt;A256CBC-HS512;yes;multi;EdDSA;;all:3"
+    "authcrypt kid-pinned;authcrypt;A256CBC-HS512;yes;multi;EdDSA;;pin:2"
     "anoncrypt did:key;anoncrypt;A256CBC-HS512;no;keyx;EdDSA;"
     "authcrypt did:key;authcrypt;A256CBC-HS512;yes;keyx;EdDSA;"
     "signed did:key;signed;-;yes;keyed;EdDSA;"
@@ -147,11 +171,11 @@ na_reason() { # $1=direction $2=mode $3=ids → reason or empty
 }
 
 # ── per-cell execution ────────────────────────────────────────────────────────────────────
-run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=route
-    local direction="$1" mode="$2" enc="$3" needs_from="$4" ids="$5" sig_alg="$6" route="$7"
+run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=route $8=keys
+    local direction="$1" mode="$2" enc="$3" needs_from="$4" ids="$5" sig_alg="$6" route="$7" keys="$8"
     local enc_arg="$enc"
     [ "$enc_arg" = "-" ] && enc_arg="A256CBC-HS512"
-    local tag="$direction-$mode-$enc_arg-$ids${route:+-r$route}"
+    local tag="$direction-$mode-$enc_arg-$ids${route:+-r$route}${keys:+-${keys/:/}}"
     local msg="$WORK/$tag.msg.json" env="$WORK/$tag.env.json" un="$WORK/$tag.unpacked.json"
     local log="$WORK/$tag.log"
 
@@ -161,9 +185,31 @@ run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=ro
 
     # Multi-recipient cells address three distinct DIDs; every other cell addresses one.
     local to_jvm="$jvm_id"
-    if [ "$ids" = "multi" ]; then
+    if [ "$ids" = "multi" ] && [ -z "$keys" ]; then
         to_jvm="$(id jvm multi),$(id jvm base),$(id jvm keyx)"
     fi
+
+    # Multi-key cells (keys = all:N | pin:N, see the CELLS legend in run-python-leg.sh): the
+    # receiving side's 3-key DID is addressed bare or as <did>#key-N, and the device holding
+    # only #key-N unpacks. pack_to and device_id stay empty for every other cell.
+    local pack_to="" device_id="" expect_kids=""
+    if [ -n "$keys" ]; then
+        local receiver=dotnet rcpt_did key_n="${keys#*:}"
+        [ "$direction" = "outbound" ] && receiver=jvm
+        rcpt_did="$(did_of "$receiver" "$ids")"
+        device_id="$(id "$receiver" "$ids-key$key_n")"
+        if [ "${keys%%:*}" = "pin" ]; then
+            pack_to="$rcpt_did#key-$key_n"
+            expect_kids="$pack_to"
+        else
+            pack_to="$rcpt_did"
+            expect_kids="$(ka_kids "$rcpt_did")"
+        fi
+    fi
+    # A failed wire check doesn't stop the unpack, so a red cell's log shows both which kids
+    # the packer chose and what the device made of them.
+    local wire_result=0
+
     # Outbound mediation targets the routed jvm DID (whose .S segment carries routingKeys);
     # inbound mediation has the jvm side wrap explicitly for the dotnet-side mediators.
     local route_arg=""
@@ -180,7 +226,7 @@ run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=ro
         local forward_args=()
         [ -n "$route" ] && forward_args=(--forward true)
         "${PEER[@]}" gen-message --to "$to_jvm" "${from_args[@]+"${from_args[@]}"}" --out "$msg" 2>>"$log" &&
-        "$INTEROP_CLI" pack --identity "$dotnet_id" --to "$to_jvm" --mode "$mode" \
+        "$INTEROP_CLI" pack --identity "$dotnet_id" --to "${pack_to:-$to_jvm}" --mode "$mode" \
             --enc "$enc_arg" --message "$msg" --out "$env" \
             "${forward_args[@]+"${forward_args[@]}"}" 2>>"$log" || result=1
 
@@ -197,8 +243,11 @@ run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=ro
             fi
         fi
 
+        if [ "$result" = 0 ] && [ -n "$expect_kids" ]; then
+            "${PEER[@]}" assert-recipients --in "$env" --kids "$expect_kids" 2>>"$log" || wire_result=1
+        fi
         if [ "$result" = 0 ]; then
-            local unpack_id="$jvm_id"
+            local unpack_id="${device_id:-$jvm_id}"
             [ -n "$route" ] && unpack_id="$(id jvm "routed$route")"
             "${PEER[@]}" unpack --identity "$unpack_id" --in "$env" --out "$un" 2>>"$log" &&
             "${PEER[@]}" assert --mode "$mode" --enc "$enc_arg" --sig-alg "$sig_alg" \
@@ -209,7 +258,7 @@ run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=ro
         local route_flag=()
         [ -n "$route" ] && route_flag=(--route "$route_arg")
         "${PEER[@]}" gen-message --to "$dotnet_id" "${from_args[@]+"${from_args[@]}"}" --out "$msg" 2>>"$log" &&
-        "${PEER[@]}" pack --identity "$jvm_id" --to "$dotnet_id" --mode "$mode" \
+        "${PEER[@]}" pack --identity "$jvm_id" --to "${pack_to:-$dotnet_id}" --mode "$mode" \
             --enc "$enc_arg" --message "$msg" --out "$env" \
             "${route_flag[@]+"${route_flag[@]}"}" 2>>"$log" || result=1
 
@@ -226,12 +275,16 @@ run_cell() { # $1=direction $2=mode $3=enc $4=needs_from $5=ids $6=sig_alg $7=ro
             fi
         fi
 
+        if [ "$result" = 0 ] && [ -n "$expect_kids" ]; then
+            "${PEER[@]}" assert-recipients --in "$env" --kids "$expect_kids" 2>>"$log" || wire_result=1
+        fi
         if [ "$result" = 0 ]; then
-            "$INTEROP_CLI" unpack --identity "$dotnet_id" --in "$env" --out "$un" 2>>"$log" &&
+            "$INTEROP_CLI" unpack --identity "${device_id:-$dotnet_id}" --in "$env" --out "$un" 2>>"$log" &&
             "${PEER[@]}" assert --mode "$mode" --enc "$enc_arg" --sig-alg "$sig_alg" \
                 --expected "$msg" --unpacked "$un" 2>>"$log" || result=1
         fi
     fi
+    [ "$wire_result" = 0 ] || result=1
 
     if [ "$result" = 0 ]; then
         CELL_RESULT="PASS"
@@ -335,7 +388,7 @@ EXECUTED=0
 NA_COUNT=0
 NOTES=()
 for cell in "${CELLS[@]}"; do
-    IFS=';' read -r label mode enc needs_from ids sig_alg route <<< "$cell"
+    IFS=';' read -r label mode enc needs_from ids sig_alg route keys <<< "$cell"
     row=()
     for direction in outbound inbound; do
         reason="$(na_reason "$direction" "$mode" "$ids")"
@@ -344,7 +397,7 @@ for cell in "${CELLS[@]}"; do
             NA_COUNT=$((NA_COUNT + 1))
             NOTES+=("$direction — $label: $reason")
         else
-            run_cell "$direction" "$mode" "$enc" "$needs_from" "$ids" "$sig_alg" "$route"
+            run_cell "$direction" "$mode" "$enc" "$needs_from" "$ids" "$sig_alg" "$route" "$keys"
             row+=("$CELL_RESULT")
             EXECUTED=$((EXECUTED + 1))
             [ "$CELL_RESULT" = "FAIL" ] && FAILURES=$((FAILURES + 1))
@@ -354,7 +407,7 @@ for cell in "${CELLS[@]}"; do
     [ -n "$route" ] && routing_label="$route mediator(s)"
     printf '| %s | %s | %s | %s | %s |\n' \
         "$label" "$enc" "$routing_label" "${row[0]}" "${row[1]}" >> "$SUMMARY"
-    printf '%-24s %-14s %-14s outbound=%-5s inbound=%s\n' \
+    printf '%-28s %-14s %-14s outbound=%-5s inbound=%s\n' \
         "$label" "$enc" "$routing_label" "${row[0]}" "${row[1]}"
 done
 

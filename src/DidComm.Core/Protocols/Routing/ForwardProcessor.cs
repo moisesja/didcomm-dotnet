@@ -184,10 +184,14 @@ public sealed class ForwardProcessor
         if (nextKeys.Count == 0)
             throw new DidResolutionException(nextDid, "rewrap target has no keyAgreement keys");
 
+        // Every keyAgreement key of the next hop on its preferred curve, the same selection a sender
+        // makes (FR-ENC-19): keys without a kid, or whose kid names another DID, are skipped, each
+        // kid once, at most RecipientKeySelection.MaxKeysPerDid. A target with no key on a supported curve is refused
+        // here rather than handed to the envelope writer as a mixed-curve list.
         var wrapped = await Composition.EnvelopeWriter.PackEncryptedAsync(
             new Composition.PackEncryptedParameters(
                 Message: freshForward,
-                Recipients: PickSameCurveKeys(nextKeys),
+                Recipients: Composition.RecipientKeySelection.AllOnPreferredCurve(nextDid, nextKeys, "rewrap target"),
                 ContentEncryption: JoseAlgorithms.A256CbcHs512),
             _cryptoProvider,
             ct).ConfigureAwait(false);
@@ -212,24 +216,6 @@ public sealed class ForwardProcessor
             cryptoProvider: _cryptoProvider,
             ct: ct).ConfigureAwait(false);
         return Encoding.UTF8.GetBytes(wrapped);
-    }
-
-    private static IReadOnlyList<Jwk> PickSameCurveKeys(IReadOnlyList<Jwk> keys)
-    {
-        // Match the preference order DidCommClient uses for plain anoncrypt: take all keys on
-        // the highest-preference curve present. For rewrap targets that publish a single
-        // curve this collapses to the full list.
-        var preference = new[]
-        {
-            JoseAlgorithms.CrvX25519, JoseAlgorithms.CrvP256,
-            JoseAlgorithms.CrvP384,  JoseAlgorithms.CrvP521,
-        };
-        foreach (var crv in preference)
-        {
-            var matches = keys.Where(k => string.Equals(k.Crv, crv, StringComparison.Ordinal)).ToArray();
-            if (matches.Length > 0) return matches;
-        }
-        return keys;
     }
 
     // Small adapter so the public ctor talks the public IDidKeyService contract while

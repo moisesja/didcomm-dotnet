@@ -81,7 +81,13 @@ internal static class IdentifierLimits
             ? $"{field} exceeds the maximum length of {MaxKeyIdLength} characters (FR-API-09)."
             : $"{field} has a DID part longer than the maximum of {MaxDidLength} characters (FR-API-09).";
 
-    private static int DidPartLength(string value)
+    /// <summary>
+    /// The length of the DID part of <paramref name="value"/>: the index of its first <c>/</c>,
+    /// <c>;</c>, <c>?</c> or <c>#</c>, or its whole length when none appears. One vectorized linear
+    /// scan, never a regular expression.
+    /// </summary>
+    /// <param name="value">A DID, a DID URL, or any other string.</param>
+    public static int DidPartLength(string value)
     {
         var end = value.AsSpan().IndexOfAny(DidPartTerminators);
         return end < 0 ? value.Length : end;

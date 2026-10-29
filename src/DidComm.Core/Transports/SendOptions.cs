@@ -9,7 +9,7 @@ namespace DidComm.Transports;
 /// the recipient's endpoint and want to skip DID resolution / forward wrapping, set
 /// <see cref="ServiceEndpointOverride"/>.
 /// </summary>
-/// <param name="Recipients">Recipient DIDs (no fragment). At least one entry required.</param>
+/// <param name="Recipients">At least one entry, as for <see cref="PackEncryptedOptions.Recipients"/>: a DID addresses all of its <c>keyAgreement</c> keys on the negotiated curve, and a DID URL <c>did#fragment</c> pins that one key. Unless <see cref="ServiceEndpointOverride"/> is set, every entry must name the same DID.</param>
 /// <param name="From">Sender DID for authcrypt (1PU). <c>null</c> selects anoncrypt (anonymous sender).</param>
 /// <param name="SignFrom">Signer DID for sign-then-encrypt composition. <c>null</c> packs without an inner JWS.</param>
 /// <param name="Enc">Content-encryption algorithm; defaults to A256CBC-HS512.</param>

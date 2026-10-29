@@ -43,6 +43,23 @@ public sealed class SenderForwardWrappingTests
     }
 
     [Fact]
+    public async Task BobWithRouting_innermost_envelope_addresses_all_three_of_Bobs_X25519_keys()
+    {
+        // FR-ENC-19 behind a mediator: the envelope the mediator relays to Bob is encrypted to every
+        // one of his X25519 keyAgreement keys, so any of his devices can open it.
+        var client = BuildClient();
+
+        var result = await client.PackEncryptedAsync(NewProposal(to: "did:example:bob"), new PackEncryptedOptions(
+            Recipients: new[] { "did:example:bob" },
+            Forward: true));
+
+        var outerForward = UnwrapForwardMessage(result.Message, recipientKid: "did:example:mediator1#key-x25519-1");
+        var inner = System.Text.Json.Nodes.JsonNode.Parse(outerForward.Attachments![0].Data.Json!.ToJsonString())!;
+        inner["recipients"]!.AsArray().Select(r => r!["header"]!["kid"]!.GetValue<string>()).Should().Equal(
+            "did:example:bob#key-x25519-1", "did:example:bob#key-x25519-2", "did:example:bob#key-x25519-3");
+    }
+
+    [Fact]
     public async Task Charlie_uses_mediator2_as_DID_endpoint_with_two_forward_layers()
     {
         var client = BuildClient();

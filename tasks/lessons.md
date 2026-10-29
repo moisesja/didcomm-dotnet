@@ -952,3 +952,29 @@ Format per entry:
   because the site returns 403 to WebFetch). When a PRD row is marked done, check that its
   acceptance test exercises the facade's own choice and not a lower layer handed the answer. Then
   recommend the spec behavior, with the interop evidence from didcomm-python and didcomm-jvm.
+
+## L-051 — Judge a regression against `main`, not against the previous commit of the same branch.
+
+- **Lesson:** When a review finding says "X no longer works", compare with the base the PR merges
+  into. A behavior the branch broke in an earlier commit and then "kept broken" is still a
+  regression. Run the scenario on `main` before classifying a finding as "not a regression".
+- **Why:** In #80, both the engineer and the adversarial round noted that a key published under an
+  over-limit alias kid listed first failed to decrypt, and called it "no regression" because the
+  branch's previous commit refused that envelope too. `main` delivered it. The #82 review caught
+  it as blocking.
+- **How to apply:** Every "not a regression" verdict in a report or PR names the `main` result
+  (run it in the `main` worktree, or check out `main` in a scratch worktree). Brief adversarial
+  agents to compare with `main`, not with the branch's earlier state.
+
+## L-052 — State a guarantee from the caller's viewpoint, not the component's.
+
+- **Lesson:** "Before any resolution" was true of `MediatorEndpointExpander` (it resolves nothing
+  before counting layers) and false of `PackEncryptedAsync` (the recipient's keys and service entry
+  are resolved before the expander runs, because the route lives in that entry). A guarantee that
+  holds for one component becomes an overclaim once the PRD, CHANGELOG or PR body restates it for the
+  public operation. The same goes for a contract stated in two shapes ("at most 64 per DID" in the
+  PRD, "pins exempt" in the XML docs): the gap between them is where the bug sat.
+- **Why:** The #83 review found both, and the ordering bug fell exactly through the contract gap.
+- **How to apply:** Before writing a guarantee into a normative doc, trace it end to end from the
+  public method and name what happens first. When an engineer's report states a contract, grep every
+  artifact that restates it and make them identical in substance. Prefer one sentence used verbatim.
