@@ -1,6 +1,7 @@
 using DidComm.Composition;
 using DidComm.Consistency;
 using DidComm.Exceptions;
+using DidComm.Jose;
 
 namespace DidComm.Resolution;
 
@@ -26,9 +27,25 @@ namespace DidComm.Resolution;
 /// mediator unwrap on any device it runs. The same holds for a routing key given as a bare DID.
 /// A routing key given as a DID URL names exactly one key and gets a layer for that key alone.
 /// </para>
+/// <para>
+/// The recipient's document, which a peer controls, decides how many layers there are and what the
+/// references say, so the expander bounds both before it resolves anything: at most
+/// <see cref="MaxForwardLayers"/> layers, and each routing-key reference (and a mediator DID) within
+/// the FR-API-09 identifier limits, refused without being quoted. Each distinct DID is resolved
+/// once per expansion.
+/// </para>
 /// </remarks>
 internal static class MediatorEndpointExpander
 {
+    /// <summary>
+    /// The most forward layers one route may need, the mediator-as-endpoint layer included. Each
+    /// layer is a new anoncrypt envelope carrying the whole envelope inside it as base64url, so the
+    /// message grows by about a third per layer, compounding, and a layer can address up to
+    /// <see cref="RecipientKeySelection.MaxKeysPerDid"/> keys. Real routes use one or two mediators;
+    /// 8 leaves room for longer chains and keeps the growth under about tenfold.
+    /// </summary>
+    internal const int MaxForwardLayers = 8;
+
     /// <summary>
     /// Expand the first candidate in <paramref name="candidates"/> into a fully-resolved
     /// route. Throws <see cref="DidResolutionException"/> when the candidate list is empty.
@@ -60,10 +77,30 @@ internal static class MediatorEndpointExpander
         // a DID where a transport URI is expected.
         var fallbackUris = candidates.Skip(1).Select(c => c.Uri).Where(uri => !LooksLikeDid(uri)).ToArray();
 
-        string transportUri;
-        var layers = new List<ForwardLayer>(primary.RoutingKeys.Count + 1);
+        // Bound the route before resolving anything in it: the layer count, then each reference's
+        // length. A refusal names counts only, never a reference from the peer's document.
+        var mediatorAsEndpoint = LooksLikeDid(primary.Uri);
+        var layerCount = primary.RoutingKeys.Count + (mediatorAsEndpoint ? 1 : 0);
+        if (layerCount > MaxForwardLayers)
+        {
+            throw new DidResolutionException(
+                recipientDid,
+                $"its DIDCommMessaging service needs {layerCount} forward layers ({primary.RoutingKeys.Count} routing keys{(mediatorAsEndpoint ? " and a mediator named as the endpoint" : "")}), more than the maximum of {MaxForwardLayers}");
+        }
+        if (mediatorAsEndpoint && !IdentifierLimits.IsWithinKeyIdLimits(primary.Uri))
+            throw new DidResolutionException(recipientDid, OverLimitReason("the mediator DID named as its endpoint", primary.Uri));
+        foreach (var routingKey in primary.RoutingKeys)
+        {
+            if (!IdentifierLimits.IsWithinKeyIdLimits(routingKey))
+                throw new DidResolutionException(recipientDid, OverLimitReason("a routing key reference", routingKey));
+        }
 
-        if (LooksLikeDid(primary.Uri))
+        string transportUri;
+        var layers = new List<ForwardLayer>(layerCount);
+        // Each distinct DID's keyAgreement keys, so a DID named by several layers is resolved once.
+        var keysByDid = new Dictionary<string, IReadOnlyList<Jwk>>(StringComparer.Ordinal);
+
+        if (mediatorAsEndpoint)
         {
             // FR-ROUTE-04: mediator-as-DID-endpoint. Resolve the mediator's own service entry
             // and prepend a layer addressed to its keyAgreement keys.
@@ -80,7 +117,7 @@ internal static class MediatorEndpointExpander
 
             transportUri = mediatorService.Uri;
 
-            var mediatorKeys = await keyService.GetVerificationMethodsAsync(primary.Uri, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+            var mediatorKeys = await KeysOfAsync(primary.Uri, keyService, keysByDid, ct).ConfigureAwait(false);
             if (mediatorKeys.Count == 0)
                 throw new DidResolutionException(primary.Uri, "mediator-as-endpoint has no keyAgreement keys to prepend");
 
@@ -98,7 +135,7 @@ internal static class MediatorEndpointExpander
         }
 
         foreach (var routingKey in primary.RoutingKeys)
-            layers.Add(await ResolveRoutingKeyLayerAsync(routingKey, keyService, ct).ConfigureAwait(false));
+            layers.Add(await ResolveRoutingKeyLayerAsync(routingKey, keyService, keysByDid, ct).ConfigureAwait(false));
 
         return new ExpandedRoute(transportUri, layers, fallbackUris);
     }
@@ -108,12 +145,14 @@ internal static class MediatorEndpointExpander
     /// which must be among its DID's keyAgreement keys. A bare DID stands for that mediator: every
     /// keyAgreement key it publishes on one curve, as for a mediator-as-endpoint.
     /// </summary>
-    /// <param name="reference">The routing-key entry as the recipient's document gives it.</param>
+    /// <param name="reference">The routing-key entry as the recipient's document gives it, within the FR-API-09 identifier limits.</param>
     /// <param name="keyService">Resolver for the routing key's DID.</param>
+    /// <param name="keysByDid">The keys already resolved in this expansion, by DID.</param>
     /// <param name="ct">Cancellation token.</param>
     private static async Task<ForwardLayer> ResolveRoutingKeyLayerAsync(
         string reference,
         IDidKeyService keyService,
+        Dictionary<string, IReadOnlyList<Jwk>> keysByDid,
         CancellationToken ct)
     {
         var hashIndex = reference.IndexOf('#');
@@ -123,7 +162,7 @@ internal static class MediatorEndpointExpander
         if (hashIndex > 0)
         {
             var subjectDid = reference[..hashIndex];
-            var subjectKeys = await keyService.GetVerificationMethodsAsync(subjectDid, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+            var subjectKeys = await KeysOfAsync(subjectDid, keyService, keysByDid, ct).ConfigureAwait(false);
             var match = subjectKeys.FirstOrDefault(j => string.Equals(j.Kid, reference, StringComparison.Ordinal))
                 ?? throw new DidResolutionException(subjectDid, $"routing key '{reference}' is not declared in keyAgreement");
             return new ForwardLayer(subjectDid, new[] { match });
@@ -132,11 +171,33 @@ internal static class MediatorEndpointExpander
         if (!LooksLikeDid(reference) || IdentifierLimits.DidPartLength(reference) != reference.Length)
             throw new DidResolutionException(reference, "routing key reference is neither a DID nor a DID URL with a fragment");
 
-        var keys = await keyService.GetVerificationMethodsAsync(reference, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+        var keys = await KeysOfAsync(reference, keyService, keysByDid, ct).ConfigureAwait(false);
         if (keys.Count == 0)
             throw new DidResolutionException(reference, "routing key DID has no keyAgreement keys");
         return new ForwardLayer(reference, RecipientKeySelection.AllOnPreferredCurve(reference, keys, "routing key DID"));
     }
+
+    // A DID's keyAgreement keys, resolved at most once per expansion.
+    private static async Task<IReadOnlyList<Jwk>> KeysOfAsync(
+        string did,
+        IDidKeyService keyService,
+        Dictionary<string, IReadOnlyList<Jwk>> keysByDid,
+        CancellationToken ct)
+    {
+        if (!keysByDid.TryGetValue(did, out var keys))
+        {
+            keys = await keyService.GetVerificationMethodsAsync(did, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
+            keysByDid[did] = keys;
+        }
+        return keys;
+    }
+
+    // The refusal for a reference over the FR-API-09 identifier limits: the bound it broke and the
+    // reference's length, never the reference.
+    private static string OverLimitReason(string what, string value)
+        => value.Length > IdentifierLimits.MaxKeyIdLength
+            ? $"{what} in its DIDCommMessaging service is {value.Length} characters long, over the maximum of {IdentifierLimits.MaxKeyIdLength} (FR-API-09); it is not quoted"
+            : $"{what} in its DIDCommMessaging service has a DID part longer than the maximum of {IdentifierLimits.MaxDidLength} characters (FR-API-09); it is not quoted";
 
     private static bool LooksLikeDid(string uri) =>
         !string.IsNullOrEmpty(uri) && uri.StartsWith("did:", StringComparison.Ordinal);

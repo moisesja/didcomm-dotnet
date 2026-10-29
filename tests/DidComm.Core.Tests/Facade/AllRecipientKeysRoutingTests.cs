@@ -123,6 +123,95 @@ public sealed class AllRecipientKeysRoutingTests
         (await act.Should().ThrowAsync<DidResolutionException>()).Which.Message.Should().Contain("supported curve");
     }
 
+    // ---- keys a document lists under another DID's kid ----
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_mediator_layer_leaves_out_keys_its_document_lists_under_another_DIDs_kid(bool mediatorAsEndpoint)
+    {
+        // The mediator's document lists Bob's real x1 first. A forward layer is for the mediator
+        // only, so Bob's kid is not in it, and the mediator still unwraps on either device.
+        var world = new World(mediatorAlsoLists: b => new[] { b[0].PublicJwk });
+        var services = mediatorAsEndpoint
+            ? new StubServiceResolver((Bob, new[] { Info(Mediator) }), (Mediator, new[] { Info(MediatorUri) }))
+            : new StubServiceResolver((Bob, new[] { Info(MediatorUri, routing: Mediator) }));
+
+        var result = await world.Sender(services).PackEncryptedAsync(Ping(), new PackEncryptedOptions(Recipients: new[] { Bob }, Forward: true));
+
+        RecipientKids(result.Message).Should().Equal(Kid(Mediator, "m1"), Kid(Mediator, "m2"));
+        foreach (var device in world.MediatorKeys)
+            await world.ShouldRelayToBob(result.Message, device);
+    }
+
+    [Fact]
+    public async Task Rewrap_leaves_out_keys_the_next_hops_document_lists_under_another_DIDs_kid()
+    {
+        var world = new World();
+        var services = new StubServiceResolver(
+            (Bob, new[] { Info(MediatorUri, routing: Mediator) }));
+        var packed = (await world.Sender(services).PackEncryptedAsync(Ping(), new PackEncryptedOptions(Recipients: new[] { Bob }, Forward: true))).Message;
+
+        // The mediator's view of Bob's document lists the mediator's own m1 first, under its kid.
+        var bobView = new StubKeyService((Bob, new[]
+        {
+            world.MediatorKeys[0].PublicJwk, world.BobKeys[0].PublicJwk, world.BobKeys[1].PublicJwk,
+        }));
+
+        var onward = await world.Processor(world.MediatorKeys[0], RewrapMode.ReanoncryptToNext, bobView).ProcessAsync(packed);
+
+        var rewrapped = Encoding.UTF8.GetString(onward.OnwardPacked);
+        RecipientKids(rewrapped).Should().Equal(Kid(Bob, "x1"), Kid(Bob, "x2"));
+        (await world.Receiver(world.BobKeys[1]).UnpackAsync(rewrapped)).RecipientKid.Should().Be(Kid(Bob, "x2"));
+    }
+
+    // ---- the forward-layer cap ----
+
+    [Fact]
+    public async Task Eight_forward_layers_pack_and_every_hop_relays_to_the_next()
+    {
+        // The mediator named as Bob's endpoint plus seven bare-DID routing keys: eight layers.
+        var hops = Enumerable.Range(0, 7)
+            .Select(i => TestKeyMaterial.Generate(KeyType.X25519, Kid($"did:example:hop{i}", "k")))
+            .ToArray();
+        var hopDids = Enumerable.Range(0, 7).Select(i => $"did:example:hop{i}").ToArray();
+        var world = new World(extraDocs: hops.Select((k, i) => LengthCap.DocWithKeys(hopDids[i], Array.Empty<Jwk>(), new[] { k.PublicJwk })));
+        var services = new StubServiceResolver(
+            (Bob, new[] { Info(Mediator, routing: hopDids) }),
+            (Mediator, new[] { Info(MediatorUri) }));
+
+        var result = await world.Sender(services).PackEncryptedAsync(Ping(), new PackEncryptedOptions(Recipients: new[] { Bob }, Forward: true));
+
+        result.ServiceEndpoint.Should().Be(MediatorUri);
+        var current = result.Message;
+        var devices = new[] { world.MediatorKeys[0] }.Concat(hops).ToArray();
+        var nextHops = hopDids.Append(Bob).ToArray();
+        for (var i = 0; i < devices.Length; i++)
+        {
+            var onward = await world.Processor(devices[i]).ProcessAsync(current);
+            onward.NextHop.Should().Be(nextHops[i]);
+            current = Encoding.UTF8.GetString(onward.OnwardPacked);
+        }
+        (await world.Receiver(world.BobKeys[2]).UnpackAsync(current)).RecipientKid.Should().Be(Kid(Bob, "x3"));
+    }
+
+    [Fact]
+    public async Task Nine_forward_layers_are_refused_without_resolving_any_routing_key_or_mediator()
+    {
+        var hopDids = Enumerable.Range(0, 8).Select(i => $"did:example:hop{i}").ToArray();
+        var world = new World();
+        var services = new StubServiceResolver(
+            (Bob, new[] { Info(Mediator, routing: hopDids) }),
+            (Mediator, new[] { Info(MediatorUri) }));
+
+        var act = () => world.Sender(services).PackEncryptedAsync(Ping(), new PackEncryptedOptions(Recipients: new[] { Bob }, Forward: true));
+
+        var thrown = (await act.Should().ThrowAsync<DidResolutionException>()).Which;
+        thrown.Message.Should().Contain("needs 9 forward layers").And.NotContain("did:example:hop");
+        world.ResolvedDids.Should().OnlyContain(d => d == Bob, "only the recipient's own keys were resolved, for the inner envelope");
+        services.Resolved.Should().Equal(Bob);
+    }
+
     private static string Kid(string did, string fragment) => did + "#" + fragment;
 
     private static DidCommServiceInfo Info(string uri, params string[] routing) =>
@@ -150,10 +239,23 @@ public sealed class AllRecipientKeysRoutingTests
 
         private readonly SpyDidResolver _resolver;
 
-        public World()
-            => _resolver = new SpyDidResolver(
-                LengthCap.DocWithKeys(Bob, Array.Empty<Jwk>(), BobKeys.Select(k => k.PublicJwk).ToArray()),
-                LengthCap.DocWithKeys(Mediator, Array.Empty<Jwk>(), MediatorKeys.Select(k => k.PublicJwk).ToArray()));
+        // mediatorAlsoLists: keys the mediator's document lists ahead of its own, given Bob's keys.
+        // extraDocs: more DID documents published through the same resolver.
+        public World(Func<TestKeyMaterial[], Jwk[]>? mediatorAlsoLists = null, IEnumerable<NetDid.Core.Model.DidDocument>? extraDocs = null)
+        {
+            var mediatorDoc = (mediatorAlsoLists?.Invoke(BobKeys) ?? Array.Empty<Jwk>())
+                .Concat(MediatorKeys.Select(k => k.PublicJwk))
+                .ToArray();
+            _resolver = new SpyDidResolver(
+                new[]
+                {
+                    LengthCap.DocWithKeys(Bob, Array.Empty<Jwk>(), BobKeys.Select(k => k.PublicJwk).ToArray()),
+                    LengthCap.DocWithKeys(Mediator, Array.Empty<Jwk>(), mediatorDoc),
+                }.Concat(extraDocs ?? Array.Empty<NetDid.Core.Model.DidDocument>()).ToArray());
+        }
+
+        // Every DID the shared resolver was asked for.
+        public IReadOnlyCollection<string> ResolvedDids => _resolver.Requested;
 
         public DidCommClient Sender(IServiceEndpointResolver services)
             => new(new SpySecretsResolver(), new NetDidKeyService(_resolver), services, new DidCommOptions());

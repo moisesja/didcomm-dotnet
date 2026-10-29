@@ -14,23 +14,25 @@ public sealed class RecipientKeySelectionTests
 {
     // ---- Addressable ----
 
+    private const string A = "did:example:a";
+
     [Fact]
     public void Addressable_keeps_document_order_and_drops_keys_without_a_kid()
     {
-        var keys = new[] { Key("a#1"), Key(null), Key("a#2"), Key(""), Key("a#3", "P-256") };
+        var keys = new[] { Key(A + "#1"), Key(null), Key(A + "#2"), Key(""), Key(A + "#3", "P-256") };
 
-        RecipientKeySelection.Addressable(keys).Select(k => k.Kid).Should().Equal("a#1", "a#2", "a#3");
+        RecipientKeySelection.Addressable(A, keys).Select(k => k.Kid).Should().Equal(A + "#1", A + "#2", A + "#3");
     }
 
     [Fact]
     public void Addressable_dedupes_by_kid_ordinally_and_the_first_wins()
     {
-        var first = Key("a#1");
-        var duplicate = Key("a#1", "P-256");
-        var differentCase = Key("a#K");
-        var keys = new[] { first, Key("a#k"), duplicate, differentCase };
+        var first = Key(A + "#1");
+        var duplicate = Key(A + "#1", "P-256");
+        var differentCase = Key(A + "#K");
+        var keys = new[] { first, Key(A + "#k"), duplicate, differentCase };
 
-        var addressable = RecipientKeySelection.Addressable(keys);
+        var addressable = RecipientKeySelection.Addressable(A, keys);
 
         addressable.Should().Equal(first, keys[1], differentCase);
     }
@@ -38,7 +40,31 @@ public sealed class RecipientKeySelectionTests
     [Fact]
     public void Addressable_keeps_keys_on_unsupported_curves_for_negotiation_to_ignore()
     {
-        RecipientKeySelection.Addressable(new[] { Key("a#1", "secp256k1") }).Should().ContainSingle();
+        RecipientKeySelection.Addressable(A, new[] { Key(A + "#1", "secp256k1") }).Should().ContainSingle();
+    }
+
+    [Theory]
+    [InlineData("did:example:b#1")]       // another DID
+    [InlineData("did:example:ab#1")]      // a DID that merely starts with this one
+    [InlineData("did:example:#1")]        // a prefix of this DID
+    [InlineData("did:example:A#1")]       // DIDs compare ordinally
+    [InlineData("#1")]                    // relative: names no DID at all
+    [InlineData("a#1")]                   // not a DID
+    public void Addressable_drops_a_key_whose_kid_names_another_DID(string foreignKid)
+    {
+        var own = Key(A + "#2");
+
+        RecipientKeySelection.Addressable(A, new[] { Key(foreignKid), own }).Should().Equal(own);
+    }
+
+    [Theory]
+    [InlineData(A + "#1")]
+    [InlineData(A + "?versionId=1#1")]
+    [InlineData(A + "/path#1")]
+    [InlineData(A + ";p=1#1")]
+    public void Addressable_keeps_a_kid_whose_DID_part_is_exactly_the_DID(string kid)
+    {
+        RecipientKeySelection.Addressable(A, new[] { Key(kid) }).Should().ContainSingle();
     }
 
     // ---- PickCommonCurve ----
@@ -113,31 +139,41 @@ public sealed class RecipientKeySelectionTests
 
     // ---- AllOnPreferredCurve ----
 
+    private const string M = "did:example:m";
+
     [Fact]
     public void AllOnPreferredCurve_takes_every_addressable_key_on_the_best_curve()
     {
-        var keys = new[] { Key("m#p", "P-256"), Key(null), Key("m#x1"), Key("m#x1"), Key("m#x2") };
+        var keys = new[] { Key(M + "#p", "P-256"), Key(null), Key(M + "#x1"), Key(M + "#x1"), Key("did:example:other#x"), Key(M + "#x2") };
 
-        RecipientKeySelection.AllOnPreferredCurve("did:example:m", keys, "mediator").Select(k => k.Kid)
-            .Should().Equal("m#x1", "m#x2");
+        RecipientKeySelection.AllOnPreferredCurve(M, keys, "mediator").Select(k => k.Kid)
+            .Should().Equal(M + "#x1", M + "#x2");
     }
 
     [Fact]
     public void AllOnPreferredCurve_refuses_a_DID_with_no_kid_and_one_with_no_supported_curve()
     {
-        var noKid = () => RecipientKeySelection.AllOnPreferredCurve("did:example:m", new[] { Key(null), Key("") }, "mediator");
-        var noCurve = () => RecipientKeySelection.AllOnPreferredCurve("did:example:m", new[] { Key("m#k", "secp256k1") }, "mediator");
+        var noKid = () => RecipientKeySelection.AllOnPreferredCurve(M, new[] { Key(null), Key("") }, "mediator");
+        var noCurve = () => RecipientKeySelection.AllOnPreferredCurve(M, new[] { Key(M + "#k", "secp256k1") }, "mediator");
 
-        noKid.Should().Throw<DidResolutionException>().Which.Message.Should().Contain("mediator has no keyAgreement key with a key id");
+        noKid.Should().Throw<DidResolutionException>().Which.Message.Should().Contain("mediator has no keyAgreement key with a key id of this DID");
         noCurve.Should().Throw<DidResolutionException>().Which.Message.Should().Contain("supported curve");
+    }
+
+    [Fact]
+    public void AllOnPreferredCurve_refuses_a_DID_whose_keys_all_name_another_DID()
+    {
+        var act = () => RecipientKeySelection.AllOnPreferredCurve(M, new[] { Key("did:example:other#k") }, "mediator");
+
+        act.Should().Throw<DidResolutionException>().Which.Message.Should().Contain("no keyAgreement key with a key id of this DID");
     }
 
     [Fact]
     public void AllOnPreferredCurve_is_capped()
     {
-        var keys = Enumerable.Range(0, 100).Select(i => Key($"m#{i}")).ToArray();
+        var keys = Enumerable.Range(0, 100).Select(i => Key($"{M}#{i}")).ToArray();
 
-        RecipientKeySelection.AllOnPreferredCurve("did:example:m", keys, "mediator").Should().HaveCount(RecipientKeySelection.MaxKeysPerDid);
+        RecipientKeySelection.AllOnPreferredCurve(M, keys, "mediator").Should().HaveCount(RecipientKeySelection.MaxKeysPerDid);
     }
 
     private static Jwk Key(string? kid, string crv = "X25519") =>

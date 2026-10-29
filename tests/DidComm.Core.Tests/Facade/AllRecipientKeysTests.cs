@@ -473,6 +473,78 @@ public sealed class AllRecipientKeysTests
         (await act.Should().ThrowAsync<DidResolutionException>()).Which.Did.Should().Be(Bob);
     }
 
+    // ---- T9b: a document cannot address keys under another DID's kid ----
+
+    [Fact]
+    public async Task A_co_recipient_publishing_another_recipients_kid_cannot_lock_that_recipient_out()
+    {
+        // Bob's document lists Alice's kid alice#a1 with key material of his own. The envelope holds
+        // each kid once, first wins, so if Bob's entry were taken, Alice's real a1 would be dropped
+        // and her a1 device could not decrypt.
+        var (resolver, alice, bob) = BobPublishesAlicesKid(fakeMaterial: true);
+
+        var packed = (await Sender(resolver).PackEncryptedAsync(
+            Ping(null, Bob, Alice), new PackEncryptedOptions(Recipients: new[] { Bob, Alice }))).Message;
+
+        RecipientKids(packed).Should().Equal(Kid(Bob, "b1"), Kid(Alice, "a1"), Kid(Alice, "a2"));
+        (await Receiver(resolver, alice[0]).UnpackAsync(packed)).RecipientKid.Should().Be(Kid(Alice, "a1"));
+        (await Receiver(resolver, alice[1]).UnpackAsync(packed)).RecipientKid.Should().Be(Kid(Alice, "a2"));
+        (await Receiver(resolver, bob).UnpackAsync(packed)).RecipientKid.Should().Be(Kid(Bob, "b1"));
+    }
+
+    [Fact]
+    public async Task A_pin_of_a_co_recipients_kid_is_that_recipients_real_key()
+    {
+        var (resolver, alice, _) = BobPublishesAlicesKid(fakeMaterial: true);
+
+        var packed = (await Sender(resolver).PackEncryptedAsync(
+            Ping(null, Bob, Alice), new PackEncryptedOptions(Recipients: new[] { Bob, Kid(Alice, "a1") }))).Message;
+
+        RecipientKids(packed).Should().Equal(Kid(Bob, "b1"), Kid(Alice, "a1"));
+        (await Receiver(resolver, alice[0]).UnpackAsync(packed)).RecipientKid.Should().Be(Kid(Alice, "a1"));
+    }
+
+    [Fact]
+    public async Task A_document_listing_another_DIDs_real_key_does_not_encrypt_to_that_DID()
+    {
+        // Bob's document lists Alice's real a1. A message for Bob alone must not be readable by her.
+        var (resolver, alice, bob) = BobPublishesAlicesKid(fakeMaterial: false);
+
+        var packed = (await Sender(resolver).PackEncryptedAsync(
+            Ping(null, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }))).Message;
+
+        RecipientKids(packed).Should().Equal(Kid(Bob, "b1"));
+        (await FailureOf(Receiver(resolver, alice[0]), packed)).Should().BeOfType<CryptoException>();
+        (await Receiver(resolver, bob).UnpackAsync(packed)).RecipientKid.Should().Be(Kid(Bob, "b1"));
+    }
+
+    [Fact]
+    public async Task A_DID_whose_keys_all_name_another_DID_is_a_resolution_failure()
+    {
+        var alien = TestKeyMaterial.Generate(KeyType.X25519, Kid(Alice, "a1"));
+        var keys = new StubKeyService((Bob, new[] { alien.PublicJwk }));
+
+        var act = () => new DidCommClient(new SpySecretsResolver(), keys, new DidCommOptions())
+            .PackEncryptedAsync(Ping(null, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }));
+
+        var thrown = (await act.Should().ThrowAsync<DidResolutionException>()).Which;
+        thrown.Did.Should().Be(Bob);
+        thrown.Message.Should().Contain("none of its 1 keyAgreement keys has a key id of this DID");
+    }
+
+    // Alice with a1 and a2; Bob with b1, whose document also lists alice#a1: with key material of
+    // his own (fakeMaterial), or Alice's real a1.
+    private static (SpyDidResolver Resolver, TestKeyMaterial[] Alice, TestKeyMaterial Bob) BobPublishesAlicesKid(bool fakeMaterial)
+    {
+        var alice = Keys(KeyType.X25519, Alice, "a1", "a2");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, Kid(Bob, "b1"));
+        var listed = fakeMaterial ? TestKeyMaterial.Generate(KeyType.X25519, Kid(Alice, "a1")).PublicJwk : alice[0].PublicJwk;
+        var resolver = new SpyDidResolver(
+            LengthCap.DocWithKeys(Bob, Array.Empty<Jwk>(), new[] { listed, bob.PublicJwk }),
+            LengthCap.DocWithKeys(Alice, Array.Empty<Jwk>(), Publics(alice)));
+        return (resolver, alice, bob);
+    }
+
     // ---- T10: the per-DID cap ----
 
     [Fact]

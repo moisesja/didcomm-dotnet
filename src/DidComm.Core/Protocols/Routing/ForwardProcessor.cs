@@ -185,8 +185,8 @@ public sealed class ForwardProcessor
             throw new DidResolutionException(nextDid, "rewrap target has no keyAgreement keys");
 
         // Every keyAgreement key of the next hop on its preferred curve, the same selection a sender
-        // makes (FR-ENC-19): keys without a kid are skipped, each kid once, at most
-        // RecipientKeySelection.MaxKeysPerDid. A target with no key on a supported curve is refused
+        // makes (FR-ENC-19): keys without a kid, or whose kid names another DID, are skipped, each
+        // kid once, at most RecipientKeySelection.MaxKeysPerDid. A target with no key on a supported curve is refused
         // here rather than handed to the envelope writer as a mixed-curve list.
         var wrapped = await Composition.EnvelopeWriter.PackEncryptedAsync(
             new Composition.PackEncryptedParameters(

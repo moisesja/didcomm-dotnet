@@ -318,6 +318,159 @@ public sealed class MediatorEndpointExpanderTests
         route.FallbackUris.Should().Equal("https://failover/");
     }
 
+    [Fact]
+    public async Task Mediator_and_bare_DID_routing_key_layers_leave_out_keys_whose_kid_names_another_DID()
+    {
+        // The mediator's document lists Bob's kid and another mediator's kid next to its own keys.
+        // A forward layer addressed to the mediator takes only the keys its own DID names.
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var keys = new StubKeyService(
+            (Mediator, new[]
+            {
+                Jwk("did:example:bob#r-1"),
+                Jwk("did:example:mediator1x#kx-1"),
+                Jwk("did:example:mediator1#kx-1"),
+                Jwk("did:example:mediator2#kx-1"),
+            }));
+
+        var asEndpoint = await MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator) }, svc, keys, Recipient);
+        var asRoutingKey = await MediatorEndpointExpander.ExpandAsync(new[] { Info("https://r/", routing: new[] { Mediator }) }, svc, keys, Recipient);
+
+        LayerKids(asEndpoint).Should().BeEquivalentTo(new[] { (Mediator, new[] { "did:example:mediator1#kx-1" }) }, o => o.WithStrictOrdering());
+        LayerKids(asRoutingKey).Should().BeEquivalentTo(new[] { (Mediator, new[] { "did:example:mediator1#kx-1" }) }, o => o.WithStrictOrdering());
+    }
+
+    [Fact]
+    public async Task A_mediator_whose_keys_all_name_another_DID_is_refused()
+    {
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var keys = new StubKeyService((Mediator, new[] { Jwk("did:example:bob#r-1") }));
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator) }, svc, keys, Recipient);
+
+        (await act.Should().ThrowAsync<DidResolutionException>())
+            .Which.Message.Should().Contain("has no keyAgreement key with a key id of this DID");
+    }
+
+    // ---- the forward-layer cap and per-expansion resolution ----
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Eight_forward_layers_are_expanded(bool mediatorAsEndpoint)
+    {
+        var routing = Hops(mediatorAsEndpoint ? 7 : 8);
+        var (svc, keys) = HopWorld(routing);
+
+        var route = await MediatorEndpointExpander.ExpandAsync(
+            new[] { Info(mediatorAsEndpoint ? Mediator : "https://r/", routing) }, svc, keys, Recipient);
+
+        MediatorEndpointExpander.MaxForwardLayers.Should().Be(8);
+        route.Layers.Should().HaveCount(8);
+    }
+
+    [Theory]
+    [InlineData(false, 9)]
+    [InlineData(true, 8)]
+    [InlineData(false, 1000)]
+    public async Task More_than_eight_forward_layers_are_refused_before_anything_is_resolved(bool mediatorAsEndpoint, int routingKeyCount)
+    {
+        var routing = Hops(routingKeyCount);
+        var (svc, keys) = HopWorld(routing);
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(
+            new[] { Info(mediatorAsEndpoint ? Mediator : "https://r/", routing) }, svc, keys, Recipient);
+
+        var thrown = (await act.Should().ThrowAsync<DidResolutionException>()).Which;
+        var layers = routingKeyCount + (mediatorAsEndpoint ? 1 : 0);
+        thrown.Did.Should().Be(Recipient);
+        thrown.Message.Should().Contain($"needs {layers} forward layers").And.Contain("more than the maximum of 8");
+        thrown.Message.Should().NotContain("did:example:hop", "the refusal names counts, not the peer's references");
+        keys.Requested.Should().BeEmpty();
+        svc.ResolveCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_DID_named_by_several_layers_is_resolved_once_per_expansion()
+    {
+        var svc = new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") }));
+        var keys = new StubKeyService(
+            (Mediator, new[] { Jwk("did:example:mediator1#kx-1"), Jwk("did:example:mediator1#kx-2") }),
+            (Recipient, new[] { Jwk("did:example:bob#r-1") }));
+        var routing = new[] { Mediator, "did:example:mediator1#kx-2", Mediator, "did:example:bob#r-1", "did:example:bob#r-1" };
+
+        var route = await MediatorEndpointExpander.ExpandAsync(new[] { Info(Mediator, routing) }, svc, keys, Recipient);
+
+        route.Layers.Should().HaveCount(6);
+        keys.Requested.Should().Equal(Mediator, Recipient);
+    }
+
+    // ---- references over the FR-API-09 identifier limits ----
+
+    [Theory]
+    [InlineData("did:example:m?", 200_000)]
+    [InlineData("did:example:m#", 200_000)]
+    [InlineData("#", 200_000)]
+    [InlineData("did:example:m", 200_000)]
+    [InlineData("did:example:", 4097)]
+    public async Task An_over_long_routing_key_reference_is_refused_without_quoting_it(string prefix, int length)
+    {
+        var reference = prefix + new string('q', length - prefix.Length);
+        var keys = new StubKeyService();
+        var svc = new StubServiceResolver();
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(
+            new[] { Info("https://r/", routing: new[] { "did:example:bob#r-1", reference }) }, svc, keys, Recipient);
+
+        var thrown = (await act.Should().ThrowAsync<DidResolutionException>()).Which;
+        thrown.Did.Should().Be(Recipient);
+        thrown.Message.Should().Contain("routing key reference").And.Contain($"{length} characters long").And.Contain("FR-API-09");
+        thrown.Message.Length.Should().BeLessThan(400);
+        thrown.Message.Should().NotContain(new string('q', 64));
+        keys.Requested.Should().BeEmpty("the limits are checked before any routing key is resolved");
+    }
+
+    [Theory]
+    [InlineData("#k")]
+    [InlineData("")]
+    public async Task A_routing_key_whose_DID_part_is_over_the_DID_limit_is_refused_without_quoting_it(string suffix)
+    {
+        var reference = "did:example:" + new string('q', 3000) + suffix;
+        var keys = new StubKeyService();
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(
+            new[] { Info("https://r/", routing: new[] { reference }) }, new StubServiceResolver(), keys, Recipient);
+
+        var thrown = (await act.Should().ThrowAsync<DidResolutionException>()).Which;
+        thrown.Message.Should().Contain("has a DID part longer than the maximum of 2048 characters");
+        thrown.Message.Should().NotContain(new string('q', 64));
+        keys.Requested.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_over_long_mediator_DID_endpoint_is_refused_without_quoting_it()
+    {
+        var mediator = "did:example:" + new string('q', 200_000);
+        var svc = new StubServiceResolver();
+        var keys = new StubKeyService();
+
+        var act = () => MediatorEndpointExpander.ExpandAsync(new[] { Info(mediator) }, svc, keys, Recipient);
+
+        var thrown = (await act.Should().ThrowAsync<DidResolutionException>()).Which;
+        thrown.Message.Should().Contain("mediator DID named as its endpoint").And.Contain("FR-API-09");
+        thrown.Message.Should().NotContain(new string('q', 64));
+        svc.ResolveCount.Should().Be(0);
+        keys.Requested.Should().BeEmpty();
+    }
+
+    // n distinct bare-DID routing keys, did:example:hop0 .. hop{n-1}.
+    private static string[] Hops(int n) => Enumerable.Range(0, n).Select(i => $"did:example:hop{i}").ToArray();
+
+    // A mediator and every hop in routing, each with one key.
+    private static (StubServiceResolver Services, StubKeyService Keys) HopWorld(IEnumerable<string> routing)
+        => (new StubServiceResolver((Mediator, new[] { Info("https://mediator.example/") })),
+            new StubKeyService(routing.Append(Mediator).Distinct().Select(d => (d, new[] { Jwk(d + "#k") })).ToArray()));
+
     private static DidCommServiceInfo Info(string uri, IReadOnlyList<string>? routing = null) =>
         new(uri, routing ?? Array.Empty<string>(), Array.Empty<string>());
 
@@ -348,6 +501,7 @@ public sealed class MediatorEndpointExpanderTests
     private sealed class StubKeyService : IDidKeyService
     {
         private readonly Dictionary<string, IReadOnlyList<Jwk>> _map;
+        private readonly List<string> _requested = new();
 
         public StubKeyService(params (string Did, Jwk[] Keys)[] entries)
         {
@@ -355,8 +509,14 @@ public sealed class MediatorEndpointExpanderTests
             foreach (var (did, keys) in entries) _map[did] = keys;
         }
 
+        // Every DID asked for, in call order.
+        public IReadOnlyList<string> Requested => _requested;
+
         public Task<IReadOnlyList<Jwk>> GetVerificationMethodsAsync(string did, VerificationRelationship relationship, CancellationToken ct = default)
-            => Task.FromResult(_map.TryGetValue(did, out var k) ? k : Array.Empty<Jwk>());
+        {
+            _requested.Add(did);
+            return Task.FromResult(_map.TryGetValue(did, out var k) ? k : Array.Empty<Jwk>());
+        }
 
         public Task<bool> IsKeyAuthorizedAsync(string did, string kid, VerificationRelationship relationship, CancellationToken ct = default)
             => Task.FromResult(_map.TryGetValue(did, out var k) && k.Any(j => j.Kid == kid));

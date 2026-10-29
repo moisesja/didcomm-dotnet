@@ -276,9 +276,10 @@ public sealed partial class DidCommClient
     /// for the whole envelope: the first of X25519, P-256, P-384 and P-521 that every
     /// <see cref="PackEncryptedOptions.Recipients"/> entry has a key on and, for authcrypt, that the
     /// sender holds a key on. Each DID entry then contributes every one of its <c>keyAgreement</c>
-    /// keys on that curve, in document order (at most 64 per DID), so the recipient can decrypt on any
-    /// device holding any of them. A DID URL entry (<c>did#fragment</c>) contributes exactly that
-    /// key, and because it is the entry's only candidate, its curve becomes the envelope's. Entries
+    /// keys on that curve whose key id names that DID, in document order and at most 64 for each
+    /// bare DID, so the recipient can decrypt on any device holding any of them. A DID URL entry
+    /// (<c>did#fragment</c>) contributes exactly that key, taken as given and not counted toward the
+    /// 64, and because it is the entry's only candidate, its curve becomes the envelope's. Entries
     /// are taken in order and each kid appears once. The signed inner layer
     /// (<see cref="PackEncryptedOptions.SignFrom"/>) and the outer anoncrypt layer
     /// (<see cref="PackEncryptedOptions.ProtectSender"/>) use the same recipient keys. Keys left out
@@ -289,7 +290,10 @@ public sealed partial class DidCommClient
     /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional forward toggle.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ArgumentException">No recipient, or an entry that is empty, longer than 4096 characters (not quoted), or a DID URL with a path, query, parameters or an empty fragment.</exception>
-    /// <exception cref="DidResolutionException">A recipient DID has no keyAgreement key with a key id, or a pinned key is not one of its DID's keyAgreement keys.</exception>
+    /// <exception cref="UnsupportedDidMethodException">A <see cref="PackEncryptedOptions.Recipients"/> entry, <see cref="PackEncryptedOptions.From"/>, <see cref="PackEncryptedOptions.SignFrom"/>, or the message's <c>from</c> or a <c>to</c> entry is a <c>did:web</c> DID (DD-08).</exception>
+    /// <exception cref="DidResolutionException">A DID does not resolve or is not a valid DID; a recipient DID has no keyAgreement key with a key id of that DID; a pinned key is not one of its DID's keyAgreement keys; the authcrypt sender has no keyAgreement keys or the signer no authentication keys. With <see cref="PackEncryptedOptions.Forward"/>, also: the recipient has no DIDCommMessaging service; its route needs more than 8 forward layers; or a mediator or routing key cannot be used (its DID does not resolve or has no DIDCommMessaging service, the reference is malformed or over the FR-API-09 identifier limits, a routing key is not declared in keyAgreement, or no key has a key id of that DID on a supported curve).</exception>
+    /// <exception cref="ConsistencyException">With <see cref="PackEncryptedOptions.Forward"/>, the mediator named as the recipient's endpoint publishes a DID as its own endpoint; recursive endpoint resolution is forbidden (FR-ROUTE-04).</exception>
+    /// <exception cref="SecretNotFoundException">The authcrypt sender holds the private key of none of its usable keyAgreement keys, or the signer of none of its authentication keys.</exception>
     /// <exception cref="InvalidOperationException">No curve is common to every entry (and the authcrypt sender); a forbidden content encryption for authcrypt; or <see cref="PackEncryptedOptions.Forward"/> with entries naming more than one DID or without an <see cref="IServiceEndpointResolver"/>.</exception>
     public async Task<PackEncryptedResult> PackEncryptedAsync(Message message, PackEncryptedOptions options, CancellationToken ct = default)
     {
@@ -360,8 +364,9 @@ public sealed partial class DidCommClient
 
         var encJoseAlg = MapContentEncryption(options.Enc, isAuthcrypt: options.From is not null);
 
-        // Resolve each distinct DID once, keeping the keys an envelope can name: those with a kid,
-        // each kid once, in document order (FR-ENC-19).
+        // Resolve each distinct DID once, keeping the keys an envelope can name: those whose kid is a
+        // key id of that DID, each kid once, in document order (FR-ENC-19). A key another DID's kid
+        // names is left out, so one recipient's document cannot take a co-recipient's kid.
         var addressableByDid = new Dictionary<string, IReadOnlyList<Jwk>>(StringComparer.Ordinal);
         foreach (var entry in entries)
         {
@@ -370,9 +375,9 @@ public sealed partial class DidCommClient
             var keys = await _keyService.GetVerificationMethodsAsync(entry.Did, VerificationRelationship.KeyAgreement, ct).ConfigureAwait(false);
             if (keys.Count == 0)
                 throw new DidResolutionException(entry.Did, "no keyAgreement keys available");
-            var addressable = RecipientKeySelection.Addressable(keys);
+            var addressable = RecipientKeySelection.Addressable(entry.Did, keys);
             if (addressable.Count == 0)
-                throw new DidResolutionException(entry.Did, $"none of its {keys.Count} keyAgreement keys has a key id");
+                throw new DidResolutionException(entry.Did, $"none of its {keys.Count} keyAgreement keys has a key id of this DID");
             addressableByDid[entry.Did] = addressable;
         }
 
