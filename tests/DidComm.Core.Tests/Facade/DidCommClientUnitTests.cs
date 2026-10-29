@@ -133,6 +133,21 @@ public sealed class DidCommClientUnitTests
     }
 
     [Fact]
+    public async Task Unpack_RejectsUnpairedSurrogateMemberName_AsMalformed_FrApi07()
+    {
+        // A member name written as a lone-surrogate escape made the envelope detector's duplicate
+        // check throw a raw InvalidOperationException out of UnpackAsync (#77). It must surface as
+        // the typed malformed-message error at the public boundary.
+        var client = NewClient();
+        var packed = await client.PackPlaintextAsync(NewMessage());
+        var hostile = "{\"" + @"\uD800" + "\":1," + packed[1..];
+
+        var act = async () => await client.UnpackAsync(hostile);
+
+        await act.Should().ThrowAsync<MalformedMessageException>();
+    }
+
+    [Fact]
     public async Task Unpack_RejectsOversizedInput_FrApi06()
     {
         var options = new DidCommOptions { MaxReceiveBytes = 16 };

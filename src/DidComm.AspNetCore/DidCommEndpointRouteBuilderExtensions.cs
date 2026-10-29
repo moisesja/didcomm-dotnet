@@ -423,9 +423,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // that may be carrying other peers' traffic — a one-envelope disconnect. That
                     // covers the typed rejections (consistency, DID resolution, did:web, missing
                     // secret, protocol) AND untyped faults that the unpack contract is not supposed
-                    // to emit but can: a malformed JOSE header member currently surfaces a raw
-                    // InvalidOperationException from the delegated parser, and a DID-resolution
-                    // timeout arrives as a TaskCanceledException with our token NOT cancelled. The
+                    // to emit but might: a parse fault nothing upstream has mapped yet, and a
+                    // DID-resolution timeout, which arrives as a TaskCanceledException with our token
+                    // NOT cancelled. The
                     // HTTP path already collapses every unpack failure into one opaque rejection for
                     // the same reason; this is the socket equivalent. A genuine shutdown (our token
                     // cancelled) still propagates and ends the loop.
@@ -782,10 +782,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // otherwise one hostile message disconnects a socket that may be carrying other
                     // peers' traffic. Covers the typed rejections (consistency, DID resolution,
                     // did:web, missing secret, protocol) and untyped faults the unpack contract is
-                    // not supposed to emit but can: a malformed JOSE header member currently
-                    // surfaces a raw InvalidOperationException from the delegated parser, and a
-                    // DID-resolution timeout arrives as TaskCanceledException with our token NOT
-                    // cancelled. A genuine shutdown (our token cancelled) still ends the loop.
+                    // not supposed to emit but might: a parse fault nothing upstream has mapped yet,
+                    // and a DID-resolution timeout, which arrives as TaskCanceledException with our
+                    // token NOT cancelled. A genuine shutdown (our token cancelled) still ends the loop.
                     logger?.LogWarning(ex, "MapDidCommWebSocket: discarding rejected envelope");
                     continue;
                 }

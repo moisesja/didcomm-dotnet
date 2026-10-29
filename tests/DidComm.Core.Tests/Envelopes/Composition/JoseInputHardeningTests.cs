@@ -19,9 +19,10 @@ namespace DidComm.Tests.Envelopes.Composition;
 /// in issue #77 moved DataProofsDotnet.Jose from 1.3.0 to 1.5.0. Its 1.4.0 release changed how the
 /// parser treats two inputs a remote peer can send without holding any key:
 /// <list type="bullet">
-///   <item>A JSON escape for a lone UTF-16 surrogate (<c>\uD800</c>) anywhere in a JWS or JWE. The
-///         parser used to accept one in a member it never read. It now rejects the whole envelope as
-///         malformed.</item>
+///   <item>A JSON escape for a lone UTF-16 surrogate (<c>\uD800</c>) in a string value anywhere in a
+///         JWS or JWE. The parser used to accept one in a member it never read. It now rejects the
+///         whole envelope as malformed. (The same escape in a member NAME never reaches this parser:
+///         didcomm's envelope detector rejects it first. See <see cref="SurrogateEscapeBoundaryTests"/>.)</item>
 ///   <item>An X25519 public key of small order, used as the ephemeral <c>epk</c> or as an authcrypt
 ///         sender key. Key agreement against it produces the all-zero shared secret, which the crypto
 ///         layer refuses. That refusal used to leave the parser as a raw
@@ -41,7 +42,7 @@ public sealed class JoseInputHardeningTests
     private const string UnpairedSurrogateEscape = @"\uD800";
 
     // A well-formed control for the escape above: a surrogate PAIR (U+1F600), escaped the same way.
-    private const string SurrogatePairEscape = @"😀";
+    private const string SurrogatePairEscape = @"\uD83D\uDE00";
 
     // The all-zero u-coordinate, a point of small order on Curve25519. X25519 against it gives the
     // all-zero shared secret whatever the private scalar, which RFC 7748 §6.1 lets a party reject. It

@@ -143,8 +143,11 @@ public static class ForwardMessage
             return JsonNode.Parse(packed, documentOptions: DidCommJson.StrictDocument)
                 ?? throw new ArgumentException("Forward payload parsed to a null JSON node.", nameof(packed));
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
+            // InvalidOperationException: duplicate detection decodes every member name, and
+            // System.Text.Json reports a name written as an unpaired-surrogate escape this way rather
+            // than as JsonException. It is still a payload that is not valid JSON.
             throw new ArgumentException(
                 "Forward payload is not valid JSON. Routing Protocol 2.0 expects packed DIDComm envelopes (JWE JSON Serialization) as attachment payloads.",
                 nameof(packed),
