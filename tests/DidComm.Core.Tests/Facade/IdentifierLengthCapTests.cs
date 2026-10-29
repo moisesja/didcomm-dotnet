@@ -101,38 +101,99 @@ public sealed partial class IdentifierLengthCapTests
         result.Message.From.Should().Be(Alice);
     }
 
-    // ---- JWE recipient kid ----
+    // ---- JWE recipient kid: over the limits means not held ----
 
     [Theory]
     [InlineData(LengthCap.KeyIdCap + 1)]
     [InlineData(1_000_000)]
-    public async Task Recipient_kid_over_the_cap_is_refused_before_key_selection_for_holder_and_stranger_alike(int length)
+    public async Task Group_message_naming_a_member_kid_over_the_cap_still_reaches_the_other_members(int length)
     {
-        // Carol's entry is the long one; Bob holds a key for the other. Packed for real, so apv
-        // commits to both kids and nothing but the length is wrong with the envelope.
+        // The real scenario: Carol's own DID document publishes an over-long kid (DID Core sets no
+        // limit), and an honest sender packs one message to Bob and Carol through the public API.
+        // Refusing the whole envelope would make every group message undeliverable to Bob because of
+        // Carol's document, so Carol's entry is treated as not held instead.
+        var carolKid = LengthCap.KidOfLength(Carol, length);
         var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
-        var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, length));
-        var packed = (await EnvelopeWriter.PackEncryptedAsync(
-            new PackEncryptedParameters(Ping(null, Bob, Carol), new[] { bob.PublicJwk, carol.PublicJwk }, JoseAlgorithms.A256CbcHs512),
-            Crypto)).ShouldFitTheReceiveLimit();
-
+        var carol = TestKeyMaterial.Generate(KeyType.X25519, carolKid);
         var resolver = new SpyDidResolver(
             LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk),
             LengthCap.Doc(Carol, keyAgreement: carol.PublicJwk));
-        var holderSecrets = new SpySecretsResolver(bob.PrivateJwk);
-        var strangerSecrets = new SpySecretsResolver();
+        var packed = (await Client(resolver).PackEncryptedAsync(
+            Ping(null, Bob, Carol), new PackEncryptedOptions(Recipients: new[] { Bob, Carol }))).Message.ShouldFitTheReceiveLimit();
+        var bobSecrets = new SpySecretsResolver(bob.PrivateJwk);
 
-        var holder = await RefusalOf(Receiver(holderSecrets, resolver), packed);
-        var stranger = await RefusalOf(Receiver(strangerSecrets, resolver), packed);
+        var result = await Receiver(bobSecrets, resolver).UnpackAsync(packed);
 
-        holder.Message.Should().Contain("JWE recipient 'kid'").And.Contain("4096");
-        stranger.Message.Should().Be(holder.Message,
-            "the check runs before key selection, so it must not tell a holder from a stranger");
-        holder.ShouldNotQuoteTheValue();
-        holderSecrets.Requested.Should().BeEmpty(
-            "the refusal comes before FindPresentAsync, so the keystore never sees the over-long kid");
-        strangerSecrets.Requested.Should().BeEmpty();
-        resolver.Requested.Should().BeEmpty();
+        result.RecipientKid.Should().Be(BobKid);
+        result.AllRecipientKids.Should().Equal(DpEnc.JweParser.PeekRecipients(packed).RecipientKids,
+            "AllRecipientKids reports the envelope's kids verbatim");
+        result.AllRecipientKids.Should().Contain(carolKid);
+        bobSecrets.Requested.Should().NotContain(carolKid, "an over-long recipient kid is never offered to the keystore");
+        resolver.Requested.Should().NotContain(d => d.Length > LengthCap.DidCap);
+
+        await PassedOverKidShouldChangeNothingForOthers(packed, carol);
+    }
+
+    [Fact]
+    public async Task Recipient_kid_whose_DID_part_is_over_the_DID_cap_is_passed_over()
+    {
+        // Under the 4096 total, but 2049 characters of DID before the fragment. That DID cannot appear
+        // in 'to' (the DID bound applies there), so the plaintext names Bob alone.
+        var longKid = LengthCap.KidWithDidPart(LengthCap.DidCap + 1, "#ka-1");
+        longKid.Length.Should().BeLessThan(LengthCap.KeyIdCap);
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var other = TestKeyMaterial.Generate(KeyType.X25519, longKid);
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(Ping(null, Bob), new[] { bob.PublicJwk, other.PublicJwk }, JoseAlgorithms.A256CbcHs512),
+            Crypto);
+        var resolver = new SpyDidResolver(LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var bobSecrets = new SpySecretsResolver(bob.PrivateJwk);
+
+        var result = await Receiver(bobSecrets, resolver).UnpackAsync(packed);
+
+        result.RecipientKid.Should().Be(BobKid);
+        result.AllRecipientKids.Should().Equal(BobKid, longKid);
+        bobSecrets.Requested.Should().NotContain(longKid);
+        resolver.Requested.Should().NotContain(d => d.Length > LengthCap.DidCap);
+
+        await PassedOverKidShouldChangeNothingForOthers(packed, other);
+    }
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Envelope_whose_only_recipient_kid_is_over_the_limits_fails_like_any_envelope_not_addressed_to_us(string shape)
+    {
+        var longKid = shape == "total"
+            ? LengthCap.KidOfLength(Carol, LengthCap.KeyIdCap + 1)
+            : LengthCap.KidWithDidPart(LengthCap.DidCap + 1, "#ka-1");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var carol = TestKeyMaterial.Generate(KeyType.X25519, longKid);
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(Ping(null, Bob), new[] { carol.PublicJwk }, JoseAlgorithms.A256CbcHs512), Crypto);
+        var baseline = await NotAddressedToUsFailure();
+
+        // The holder of the over-long kid's key, a holder of an unrelated key, and a stranger.
+        var spies = new[]
+        {
+            new SpySecretsResolver(carol.PrivateJwk),
+            new SpySecretsResolver(bob.PrivateJwk),
+            new SpySecretsResolver(),
+        };
+        foreach (var secrets in spies)
+        {
+            var failure = (await Receiver(secrets, new SpyDidResolver()).Invoking(c => c.UnpackAsync(packed))
+                .Should().ThrowAsync<CryptoException>()).Which;
+            failure.Message.Should().Be(baseline.Message, "the outcome must not depend on which keys are held");
+            failure.ShouldNotQuoteTheValue();
+        }
+
+        spies.Should().HaveCount(3);
+        spies.Should().AllSatisfy(s =>
+        {
+            s.Requested.Should().BeEmpty("no kid in this envelope is within the limits");
+            s.FindPresentCalls.Should().Be(0, "with no candidate left, the decoy runs without the keystore being called at all");
+        });
     }
 
     [Fact]
@@ -355,6 +416,221 @@ public sealed partial class IdentifierLengthCapTests
         (authcrypt ? result.SenderKid : result.SignerKid).Should().Be(kid);
     }
 
+    // ---- The DID part of a signer or sender kid ----
+
+    [Theory]
+    [InlineData("jws", "#key-1")]
+    [InlineData("jws", "")]
+    [InlineData("skid", "#key-1")]
+    [InlineData("skid", "")]
+    [InlineData("apu", "#key-1")]
+    [InlineData("apu", "")]
+    public async Task Signer_or_sender_kid_whose_DID_part_is_over_the_DID_cap_is_refused(string position, string suffix)
+    {
+        // Within the 4096 total, but 2049 characters before the first delimiter (an empty suffix
+        // leaves no delimiter at all). Without the rule, the lookup would resolve that DID before
+        // FR-CONSIST-01/03 compare it with 'from'. Its document publishes the kid, so it would succeed.
+        // A DID part of exactly 2048 is accepted: see Sender_whose_from_is_exactly_the_DID_cap_can_present_its_own_kid.
+        var kid = LengthCap.KidWithDidPart(LengthCap.DidCap + 1, suffix);
+        var longDid = kid[..(LengthCap.DidCap + 1)];
+        kid.Length.Should().BeLessThan(LengthCap.KeyIdCap);
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+
+        if (position == "jws")
+        {
+            var signer = TestKeyMaterial.Generate(KeyType.Ed25519, kid);
+            var signed = await PackSigned(Ping(Alice, Bob), signer.PrivateJwk, DpSig.JwsKidPlacement.Auto);
+            var resolver = new SpyDidResolver(LengthCap.Doc(longDid, authentication: signer.PublicJwk));
+
+            var failure = await RefusalOf(Receiver(new SpySecretsResolver(), resolver), signed);
+
+            failure.Message.Should().Contain("JWS signer 'kid' has a DID part longer than the maximum of 2048");
+            failure.ShouldNotQuoteTheValue();
+            resolver.Requested.Should().BeEmpty("the kid is refused before the signer lookup resolves its DID");
+            return;
+        }
+
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, kid);
+        var packed = position == "skid"
+            ? await EnvelopeWriter.PackEncryptedAsync(
+                new PackEncryptedParameters(
+                    Ping(Alice, Bob), new[] { bob.PublicJwk }, JoseAlgorithms.A256CbcHs512,
+                    SenderKey: alice.PrivateJwk.ToEcdhKey(Crypto), Skid: kid),
+                Crypto)
+            : AuthcryptWithApuOnly(Ping(Alice, Bob), bob.PublicJwk, alice.PrivateJwk, kid);
+
+        await SenderKidShouldBeRefusedAlike(packed, bob, alice,
+            expected: "JWE sender 'skid' has a DID part longer than the maximum of 2048", senderDid: longDid);
+    }
+
+    // ---- Our own signer and sender selection ----
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Signer_whose_first_key_is_over_the_limits_signs_with_the_next_one(string shape)
+    {
+        // Every didcomm-dotnet receiver refuses a signer kid over the limits, so picking it would
+        // produce an undeliverable message. It is left out before the keystore is asked.
+        var longKid = OwnKidOverTheLimits(shape);
+        var normalKid = Alice + "#auth-2";
+        var longKey = TestKeyMaterial.Generate(KeyType.Ed25519, longKid);
+        var normal = TestKeyMaterial.Generate(KeyType.Ed25519, normalKid);
+        var resolver = new SpyDidResolver(
+            LengthCap.DocWithKeys(Alice, new[] { longKey.PublicJwk, normal.PublicJwk }, Array.Empty<Jwk>()));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk, normal.PrivateJwk);
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var packed = await sender.PackSignedAsync(Ping(Alice, Bob), Alice);
+
+        aliceSecrets.Requested.Should().NotContain(longKid, "the over-long kid is never offered to the keystore");
+        var result = await Receiver(new SpySecretsResolver(), resolver).UnpackAsync(packed);
+        result.SignerKid.Should().Be(normalKid);
+    }
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Signer_whose_only_key_is_over_the_limits_is_told_why_there_is_no_usable_key(string shape)
+    {
+        var longKid = OwnKidOverTheLimits(shape);
+        var longKey = TestKeyMaterial.Generate(KeyType.Ed25519, longKid);
+        var resolver = new SpyDidResolver(LengthCap.Doc(Alice, authentication: longKey.PublicJwk));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk);
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var failure = (await sender.Invoking(c => c.PackSignedAsync(Ping(Alice, Bob), Alice))
+            .Should().ThrowAsync<SecretNotFoundException>()).Which;
+
+        failure.Message.Should().Contain("FR-API-09 identifier limits").And.Contain("1 of its 1 authentication keys")
+            .And.NotContain("returned null", "the keystore was never asked about the over-limit key");
+        failure.Kid.Should().Be(Alice);
+        failure.ShouldNotQuoteTheValue();
+        aliceSecrets.Requested.Should().NotContain(longKid);
+    }
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Authcrypt_sender_whose_first_key_is_over_the_limits_sends_with_the_next_one(string shape)
+    {
+        var longKid = OwnKidOverTheLimits(shape);
+        var normalKid = Alice + "#ka-2";
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var longKey = TestKeyMaterial.Generate(KeyType.X25519, longKid);
+        var normal = TestKeyMaterial.Generate(KeyType.X25519, normalKid);
+        var resolver = new SpyDidResolver(
+            LengthCap.DocWithKeys(Alice, Array.Empty<Jwk>(), new[] { longKey.PublicJwk, normal.PublicJwk }),
+            LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk, normal.PrivateJwk);
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var packed = (await sender.PackEncryptedAsync(
+            Ping(Alice, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }, From: Alice))).Message;
+
+        aliceSecrets.Requested.Should().NotContain(longKid, "the over-long kid is never offered to the keystore");
+        DpEnc.JweParser.PeekRecipients(packed).Skid.Should().Be(normalKid);
+        var result = await Receiver(new SpySecretsResolver(bob.PrivateJwk), resolver).UnpackAsync(packed);
+        result.SenderKid.Should().Be(normalKid);
+    }
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Authcrypt_sender_whose_only_key_is_over_the_limits_is_told_why_there_is_no_usable_key(string shape)
+    {
+        var longKid = OwnKidOverTheLimits(shape);
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var longKey = TestKeyMaterial.Generate(KeyType.X25519, longKid);
+        var resolver = new SpyDidResolver(
+            LengthCap.Doc(Alice, keyAgreement: longKey.PublicJwk),
+            LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk);
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var failure = (await sender.Invoking(c => c.PackEncryptedAsync(
+                Ping(Alice, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }, From: Alice)))
+            .Should().ThrowAsync<SecretNotFoundException>()).Which;
+
+        failure.Message.Should().Contain("FR-API-09 identifier limits").And.Contain("1 of its 1 keyAgreement keys")
+            .And.NotContain("returned null", "the keystore was never asked about the over-limit key");
+        failure.Kid.Should().Be(Alice);
+        failure.ShouldNotQuoteTheValue();
+        aliceSecrets.Requested.Should().NotContain(longKid);
+    }
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Signer_skips_an_over_limit_key_even_when_the_secrets_resolver_lists_more_than_it_was_asked(string shape)
+    {
+        // A resolver that answers FindPresentAsync with everything it holds breaks the subset
+        // contract. Its first answer is the over-limit key; the signer must still not pick it.
+        var longKid = OwnKidOverTheLimits(shape);
+        var normalKid = Alice + "#auth-2";
+        var longKey = TestKeyMaterial.Generate(KeyType.Ed25519, longKid);
+        var normal = TestKeyMaterial.Generate(KeyType.Ed25519, normalKid);
+        var resolver = new SpyDidResolver(
+            LengthCap.DocWithKeys(Alice, new[] { longKey.PublicJwk, normal.PublicJwk }, Array.Empty<Jwk>()));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk, normal.PrivateJwk) { ListsEverythingHeld = true };
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var packed = await sender.PackSignedAsync(Ping(Alice, Bob), Alice);
+
+        packed.Should().NotContain(longKid);
+        var result = await Receiver(new SpySecretsResolver(), resolver).UnpackAsync(packed);
+        result.SignerKid.Should().Be(normalKid);
+    }
+
+    [Theory]
+    [InlineData("total")]
+    [InlineData("did-part")]
+    public async Task Authcrypt_sender_skips_an_over_limit_key_even_when_the_secrets_resolver_lists_more_than_it_was_asked(string shape)
+    {
+        var longKid = OwnKidOverTheLimits(shape);
+        var normalKid = Alice + "#ka-2";
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var longKey = TestKeyMaterial.Generate(KeyType.X25519, longKid);
+        var normal = TestKeyMaterial.Generate(KeyType.X25519, normalKid);
+        var resolver = new SpyDidResolver(
+            LengthCap.DocWithKeys(Alice, Array.Empty<Jwk>(), new[] { longKey.PublicJwk, normal.PublicJwk }),
+            LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk, normal.PrivateJwk) { ListsEverythingHeld = true };
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var packed = (await sender.PackEncryptedAsync(
+            Ping(Alice, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }, From: Alice))).Message;
+
+        DpEnc.JweParser.PeekRecipients(packed).Skid.Should().Be(normalKid);
+        var result = await Receiver(new SpySecretsResolver(bob.PrivateJwk), resolver).UnpackAsync(packed);
+        result.SenderKid.Should().Be(normalKid);
+    }
+
+    [Fact]
+    public async Task No_common_curve_error_says_a_sender_key_was_skipped_for_its_length()
+    {
+        // Alice's only X25519 key is over the limits and Bob has only X25519, so the remaining P-256
+        // key shares no curve with him. The error should say why, not just that no curve matched.
+        var longKid = OwnKidOverTheLimits("total");
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var longKey = TestKeyMaterial.Generate(KeyType.X25519, longKid);
+        var p256 = TestKeyMaterial.Generate(KeyType.P256, Alice + "#p256");
+        var resolver = new SpyDidResolver(
+            LengthCap.DocWithKeys(Alice, Array.Empty<Jwk>(), new[] { longKey.PublicJwk, p256.PublicJwk }),
+            LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var aliceSecrets = new SpySecretsResolver(longKey.PrivateJwk, p256.PrivateJwk);
+        var sender = new DidCommClient(aliceSecrets, new NetDidKeyService(resolver), new DidCommOptions());
+
+        var failure = (await sender.Invoking(c => c.PackEncryptedAsync(
+                Ping(Alice, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }, From: Alice)))
+            .Should().ThrowAsync<InvalidOperationException>()).Which;
+
+        failure.Message.Should().StartWith("No common keyAgreement curve")
+            .And.Contain("1 of the sender's keyAgreement keys were not considered")
+            .And.Contain("FR-API-09");
+        failure.Message.Should().NotContain(longKid);
+    }
+
     // ---- DidCommOptions.OwnIdentifiers ----
 
     [Theory]
@@ -407,29 +683,75 @@ public sealed partial class IdentifierLengthCapTests
         => (await receiver.Invoking(c => c.UnpackAsync(packed)).Should().ThrowAsync<MalformedMessageException>()).Which;
 
     /// <summary>
-    /// The authcrypt-sender assertions, shared by the skid and apu-only forms. Alice's served document
-    /// publishes the long kid, so without the bound the sender lookup would parse it, resolve Alice
-    /// and decrypt. Holder and stranger must fail the same way: the refusal runs inside DataProofs'
+    /// The authcrypt-sender assertions, shared by the skid and apu-only forms. The sender DID's served
+    /// document (Alice's unless <paramref name="senderDid"/> says otherwise) publishes the long kid, so
+    /// without the bound the sender lookup would parse it, resolve that DID and decrypt. Holder and stranger must fail the same way: the refusal runs inside DataProofs'
     /// ResolveSender, which both the held and the decoy path reach.
     /// </summary>
-    private static async Task SenderKidShouldBeRefusedAlike(string packed, TestKeyMaterial bob, TestKeyMaterial alice)
+    private static async Task SenderKidShouldBeRefusedAlike(
+        string packed, TestKeyMaterial bob, TestKeyMaterial alice,
+        string expected = "JWE sender 'skid' exceeds the maximum length of 4096", string senderDid = Alice)
     {
         var resolver = new SpyDidResolver(
             LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk),
-            LengthCap.Doc(Alice, keyAgreement: alice.PublicJwk));
+            LengthCap.Doc(senderDid, keyAgreement: alice.PublicJwk));
         var holderSecrets = new SpySecretsResolver(bob.PrivateJwk);
         var strangerSecrets = new SpySecretsResolver();
 
         var holder = await RefusalOf(Receiver(holderSecrets, resolver), packed);
         var stranger = await RefusalOf(Receiver(strangerSecrets, resolver), packed);
 
-        holder.Message.Should().Contain("JWE sender 'skid'").And.Contain("4096");
+        holder.Message.Should().Contain(expected);
         stranger.Message.Should().Be(holder.Message, "a holder and a stranger must not be told apart");
         holder.ShouldNotQuoteTheValue();
         resolver.Requested.Should().BeEmpty("the sender kid is refused before the sender lookup resolves anything");
         holderSecrets.Requested.Should().NotContain(k => k.Length > LengthCap.KeyIdCap);
         strangerSecrets.Requested.Should().NotContain(k => k.Length > LengthCap.KeyIdCap);
     }
+
+    /// <summary>
+    /// A receiver holding only the key of a passed-over recipient kid, and a receiver holding nothing,
+    /// must both get exactly the failure of an envelope not addressed to them: holding that key changes
+    /// nothing, and neither keystore is asked about the kid.
+    /// </summary>
+    private static async Task PassedOverKidShouldChangeNothingForOthers(string packed, TestKeyMaterial passedOverKey)
+    {
+        var baseline = await NotAddressedToUsFailure();
+        var holderSecrets = new SpySecretsResolver(passedOverKey.PrivateJwk);
+        var strangerSecrets = new SpySecretsResolver();
+
+        foreach (var secrets in new[] { holderSecrets, strangerSecrets })
+        {
+            var failure = (await Receiver(secrets, new SpyDidResolver()).Invoking(c => c.UnpackAsync(packed))
+                .Should().ThrowAsync<CryptoException>()).Which;
+            failure.Message.Should().Be(baseline.Message, "holding the passed-over kid's key must not be observable");
+            failure.ShouldNotQuoteTheValue();
+        }
+        holderSecrets.Requested.Should().NotContain(passedOverKey.PrivateJwk.Kid);
+        strangerSecrets.Requested.Should().NotContain(passedOverKey.PrivateJwk.Kid);
+    }
+
+    /// <summary>What a stranger gets for an ordinary envelope addressed to someone else.</summary>
+    private static async Task<CryptoException> NotAddressedToUsFailure()
+    {
+        var dave = TestKeyMaterial.Generate(KeyType.X25519, "did:example:dave#ka-1");
+        var notForUs = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(Ping(null, "did:example:dave"), new[] { dave.PublicJwk }, JoseAlgorithms.A256CbcHs512),
+            Crypto);
+        return (await Receiver(new SpySecretsResolver(), new SpyDidResolver()).Invoking(c => c.UnpackAsync(notForUs))
+            .Should().ThrowAsync<CryptoException>()).Which;
+    }
+
+    /// <summary>
+    /// An own key id over the limits, as Alice's document might publish it: over 4096 in all
+    /// (<c>total</c>), or within 4096 with a 2049-character DID part (<c>did-part</c>).
+    /// </summary>
+    private static string OwnKidOverTheLimits(string shape) => shape switch
+    {
+        "total" => LengthCap.KidOfLength(Alice, LengthCap.KeyIdCap + 1),
+        "did-part" => LengthCap.KidWithDidPart(LengthCap.DidCap + 1, "#key-1"),
+        _ => throw new ArgumentOutOfRangeException(nameof(shape), shape, null),
+    };
 
     /// <summary>Sign with the kid in the header <paramref name="placement"/> selects; Auto is what the facade emits.</summary>
     private static Task<string> PackSigned(Message message, Jwk signerPrivateJwk, DpSig.JwsKidPlacement placement)

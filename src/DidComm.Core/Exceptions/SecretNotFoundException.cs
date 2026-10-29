@@ -19,4 +19,13 @@ public sealed class SecretNotFoundException : DidCommException
     {
         Kid = kid;
     }
+
+    /// <summary>Initialize with the missing kid and a message that says why no key was usable.</summary>
+    /// <param name="kid">The kid, or the DID, no usable private key was found for.</param>
+    /// <param name="message">The full error message.</param>
+    internal SecretNotFoundException(string kid, string message)
+        : base(message)
+    {
+        Kid = kid;
+    }
 }

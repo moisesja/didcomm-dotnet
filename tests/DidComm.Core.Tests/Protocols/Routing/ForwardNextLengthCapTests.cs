@@ -51,6 +51,67 @@ public sealed class ForwardNextLengthCapTests
     }
 
     [Theory]
+    // A bare DID: no delimiter, so all of it is DID part.
+    [InlineData(LengthCap.DidCap, "", true)]
+    [InlineData(LengthCap.DidCap + 1, "", false)]
+    // A DID URL naming a routing key.
+    [InlineData(LengthCap.DidCap, "#key-1", true)]
+    [InlineData(LengthCap.DidCap + 1, "#key-1", false)]
+    public void TryParse_holds_the_DID_part_of_next_to_the_DID_cap(int didPartLength, string suffix, bool accepted)
+    {
+        // Every case is within the 4096 total; only the DID part decides.
+        var next = LengthCap.KidWithDidPart(didPartLength, suffix);
+        next.Length.Should().BeLessThan(LengthCap.KeyIdCap);
+        var forward = ForwardMessage.Create(Mediator, next, new[] { InnerPayload });
+
+        Action act = () => ForwardMessage.TryParse(forward, out _, out _);
+
+        if (accepted)
+        {
+            act.Should().NotThrow();
+            ForwardMessage.TryParse(forward, out var parsed, out _).Should().BeTrue();
+            parsed.Should().Be(next);
+        }
+        else
+        {
+            var failure = act.Should().Throw<MalformedMessageException>().Which;
+            failure.Message.Should().Contain("'next' has a DID part longer than the maximum of 2048");
+            failure.ShouldNotQuoteTheValue();
+        }
+    }
+
+    [Theory]
+    [InlineData(RewrapMode.PassThrough)]
+    [InlineData(RewrapMode.ReanoncryptToNext)]
+    public async Task ProcessAsync_refuses_a_bare_DID_next_over_the_DID_cap_in_every_mode(RewrapMode mode)
+    {
+        // The next hop's document is served, so without the rule rewrap mode would resolve the
+        // 2049-character DID, and pass-through would hand it to the host to resolve.
+        var nextDid = LengthCap.DidOfLength(LengthCap.DidCap + 1);
+        var nextKey = TestKeyMaterial.Generate(KeyType.X25519, nextDid + "#ka-1");
+        var resolver = new SpyDidResolver(LengthCap.Doc(nextDid, keyAgreement: nextKey.PublicJwk));
+        var (processor, packed) = await MediatorFor(nextDid, mode, resolver);
+
+        var failure = (await processor.Invoking(p => p.ProcessAsync(packed))
+            .Should().ThrowAsync<MalformedMessageException>()).Which;
+
+        failure.Message.Should().Contain("'next' has a DID part longer than the maximum of 2048");
+        failure.ShouldNotQuoteTheValue();
+        resolver.Requested.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_passes_a_bare_DID_next_of_exactly_the_DID_cap_through_to_the_host()
+    {
+        var nextDid = LengthCap.DidOfLength(LengthCap.DidCap);
+        var (processor, packed) = await MediatorFor(nextDid, RewrapMode.PassThrough, new SpyDidResolver());
+
+        var result = await processor.ProcessAsync(packed);
+
+        result.NextHop.Should().Be(nextDid);
+    }
+
+    [Theory]
     [InlineData(LengthCap.KeyIdCap + 1, RewrapMode.PassThrough)]
     [InlineData(1_000_000, RewrapMode.PassThrough)]
     [InlineData(LengthCap.KeyIdCap + 1, RewrapMode.ReanoncryptToNext)]

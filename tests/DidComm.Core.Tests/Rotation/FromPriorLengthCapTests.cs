@@ -75,6 +75,34 @@ public sealed class FromPriorLengthCapTests
         validated.Iss.Should().Be(PriorDid);
     }
 
+    [Theory]
+    // A kid under a 2049-character iss: within the 4096 total, but its DID part is over the DID bound.
+    // That DID's document publishes the kid, so without the rule the termination would resolve the
+    // long DID and validate.
+    [InlineData("under-long-iss", true)]
+    [InlineData("under-long-iss", false)]
+    // A 2049-character kid with no delimiter at all: all of it is DID part.
+    [InlineData("no-delimiter", true)]
+    [InlineData("no-delimiter", false)]
+    public async Task Header_kid_whose_DID_part_is_over_the_DID_cap_is_refused(string shape, bool bindingService)
+    {
+        // A DID part of exactly 2048 is accepted: see Iss_at_exactly_the_cap_validates, whose kid is
+        // the 2048-character iss plus a fragment.
+        var iss = shape == "under-long-iss" ? LengthCap.DidOfLength(LengthCap.DidCap + 1) : PriorDid;
+        var kid = shape == "under-long-iss" ? iss + "#auth-1" : LengthCap.KidWithDidPart(LengthCap.DidCap + 1, suffix: "");
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, kid);
+        var jwt = await FromPriorBuilder.BuildTerminationAsync(iss, Iat, signer.PrivateJwk);
+        var resolver = new SpyDidResolver(LengthCap.Doc(
+            shape == "under-long-iss" ? iss : PriorDid, authentication: signer.PublicJwk));
+
+        var act = () => FromPriorValidator.ValidateAsync(jwt, currentSenderDid: null, KeyService(resolver, bindingService));
+
+        var failure = (await act.Should().ThrowAsync<ProtocolException>()).Which;
+        failure.Message.Should().Contain("'kid' has a DID part longer than the maximum of 2048");
+        failure.ShouldNotQuoteTheValue();
+        resolver.Requested.Should().BeEmpty("the kid is refused before any DID is resolved");
+    }
+
     // ---- iss, validator called directly ----
 
     [Theory]
@@ -256,20 +284,19 @@ public sealed class FromPriorLengthCapTests
     // ---- Helpers ----
 
     /// <summary>
-    /// A properly signed termination JWT whose <c>iss</c> is <paramref name="length"/> characters. When
-    /// a kid under that iss still fits the key-id bound, the kid sits under it and the long DID's
-    /// document publishes it, so without the iss bound the JWT would resolve that DID and validate.
-    /// At the near-maximum size such a kid would trip the kid bound first, so the kid stays short
-    /// there and the test still isolates the iss check.
+    /// A properly signed termination JWT whose <c>iss</c> is <paramref name="length"/> characters,
+    /// signed under the short <see cref="PriorKid"/>. A kid under the long iss would have a DID part
+    /// over the DID bound and trip the kid check first (see
+    /// <see cref="Header_kid_whose_DID_part_is_over_the_DID_cap_is_refused"/>), so the short kid is what
+    /// isolates the iss check. Without it, the legacy path would resolve the long iss, and the
+    /// binding path would DID-parse it and quote it.
     /// </summary>
     private static async Task<(string Jwt, DidDocument PriorDoc)> TerminationFromLongIss(int length)
     {
         var iss = LengthCap.DidOfLength(length);
-        var kidUnderIss = iss + "#auth-1";
-        var fits = kidUnderIss.Length <= LengthCap.KeyIdCap;
-        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, fits ? kidUnderIss : PriorKid);
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, PriorKid);
         var jwt = await FromPriorBuilder.BuildTerminationAsync(iss, Iat, signer.PrivateJwk);
-        return (jwt, LengthCap.Doc(fits ? iss : PriorDid, authentication: signer.PublicJwk));
+        return (jwt, LengthCap.Doc(PriorDid, authentication: signer.PublicJwk));
     }
 
     /// <summary>A termination message (no 'from') carrying <paramref name="jwt"/>, anoncrypted to Bob.</summary>

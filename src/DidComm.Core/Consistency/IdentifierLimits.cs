@@ -1,10 +1,13 @@
+using System.Buffers;
+
 namespace DidComm.Consistency;
 
 /// <summary>
 /// Upper bounds on the length of the DIDs and key ids a peer puts on the wire (FR-API-09, #80).
 /// The receive path checks each such value against its bound before didcomm hands it to a DID
 /// parser, a DID resolver or the consumer's <see cref="Secrets.ISecretsResolver"/>, and a refusal
-/// never quotes the value.
+/// never quotes the value. A JWE recipient kid over the limits is the one exception to refusal: it is
+/// treated as not held, so one group member's long kid cannot block delivery to the others.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -40,7 +43,47 @@ internal static class IdentifierLimits
     /// FR-CONSIST-01/03 require the authcrypt <c>skid</c> and the signer <c>kid</c> to have the same
     /// DID subject as <c>from</c>. With a single 2048 bound, a sender whose legal <c>from</c> is close
     /// to 2048 characters could never present its own key id. The headroom is cheap because parse
-    /// cost grows linearly with length.
+    /// cost grows linearly with length. The headroom is for the fragment only: a wire key id must
+    /// also pass the DID-part rule in <see cref="IsWithinKeyIdLimits"/>.
     /// </remarks>
     public const int MaxKeyIdLength = 4096;
+
+    // DID syntax allows none of these inside a DID (W3C DID Core §3.1: the method-specific id is
+    // idchar / ':' only), and each one starts the next DID URL component: path, the legacy ';'
+    // parameter, query, fragment. So everything before the first of them is exactly the DID part.
+    private static readonly SearchValues<char> DidPartTerminators = SearchValues.Create("/;?#");
+
+    /// <summary>
+    /// Whether a wire key id is within both FR-API-09 bounds (#80): at most
+    /// <see cref="MaxKeyIdLength"/> characters in all, and at most <see cref="MaxDidLength"/>
+    /// characters in its DID part, meaning everything before its first <c>/</c>, <c>;</c>, <c>?</c>
+    /// or <c>#</c> (the whole value when none appears).
+    /// </summary>
+    /// <remarks>
+    /// The DID-part rule is what makes the headroom in <see cref="MaxKeyIdLength"/> a fragment
+    /// allowance, not a larger DID bound. Without it a 4096-character kid could carry a 4090-character
+    /// DID, and that DID would be resolved before FR-CONSIST-01/03 compare it with <c>from</c>. The
+    /// check is one length comparison plus a vectorized linear scan, never a regular expression, and
+    /// the total length is tested first, so an over-long value is never scanned.
+    /// </remarks>
+    /// <param name="value">The key id as it arrived.</param>
+    public static bool IsWithinKeyIdLimits(string value)
+        => value.Length <= MaxKeyIdLength && DidPartLength(value) <= MaxDidLength;
+
+    /// <summary>
+    /// The refusal text for a key id that fails <see cref="IsWithinKeyIdLimits"/>. It names the field
+    /// and the bound that was broken, and never quotes the value.
+    /// </summary>
+    /// <param name="field">The field the key id came from, as the message should name it (e.g. <c>JWS signer 'kid'</c>).</param>
+    /// <param name="value">The refused key id; only its length is consulted.</param>
+    public static string KeyIdLimitMessage(string field, string value)
+        => value.Length > MaxKeyIdLength
+            ? $"{field} exceeds the maximum length of {MaxKeyIdLength} characters (FR-API-09)."
+            : $"{field} has a DID part longer than the maximum of {MaxDidLength} characters (FR-API-09).";
+
+    private static int DidPartLength(string value)
+    {
+        var end = value.AsSpan().IndexOfAny(DidPartTerminators);
+        return end < 0 ? value.Length : end;
+    }
 }

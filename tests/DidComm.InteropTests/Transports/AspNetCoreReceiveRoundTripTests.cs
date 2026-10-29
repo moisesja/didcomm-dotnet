@@ -248,32 +248,51 @@ public sealed class AspNetCoreReceiveRoundTripTests
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1)); // nowhere near the 2 s rejection floor
     }
 
-    [Theory]
-    [InlineData("signer-kid")]
-    [InlineData("recipient-kid")]
-    public async Task Over_long_kid_gets_the_same_opaque_400_as_any_rejection_and_stays_out_of_the_logs(string position)
+    [Fact]
+    public async Task Over_long_signer_kid_gets_the_same_opaque_400_as_any_rejection_and_stays_out_of_the_logs()
     {
-        // FR-API-09 (#80) at the HTTP boundary: a key id one character over the bound is refused
+        // FR-API-09 (#80) at the HTTP boundary: a signer key id one character over the bound is refused
         // like any other bad envelope (bare 400, empty body), and the server-side log names the
         // failure without copying the value.
         var logs = new CapturingLoggerProvider();
         var (server, received) = await BuildServerAsync(logs: logs);
-        var overLongKid = OverLongKid("did:example:alice");
-        var (hostile, contentType, field) = position == "signer-kid"
-            ? (WithSignerKid(await NewPackerClient().PackSignedAsync(NewProposal(), "did:example:alice"), overLongKid),
-                "application/didcomm-signed+json", "JWS signer 'kid'")
-            : (WithExtraRecipient(await PackAnoncryptForBobAsync(), overLongKid),
-                "application/didcomm-encrypted+json", "JWE recipient 'kid'");
+        var hostile = WithSignerKid(
+            await NewPackerClient().PackSignedAsync(NewProposal(), "did:example:alice"), OverLongKid("did:example:alice"));
 
-        var rejected = await PostEnvelopeAsync(server, hostile, contentType);
+        var rejected = await PostEnvelopeAsync(server, hostile, "application/didcomm-signed+json");
 
         rejected.Status.Should().Be(HttpStatusCode.BadRequest);
         rejected.Body.Should().BeEmpty();
         received.Should().BeEmpty();
-        logs.Entries.Should().Contain(e => e.Contains("rejecting inbound envelope (MalformedMessageException)") && e.Contains(field + " exceeds the maximum length"),
+        logs.Entries.Should().Contain(e => e.Contains("rejecting inbound envelope (MalformedMessageException)") && e.Contains("JWS signer 'kid' exceeds the maximum length"),
             "the logged rejection is the length refusal");
         logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
         (await PostEnvelopeAsync(server, "not even json")).Should().Be(rejected, "the response is the same as for any other rejection");
+    }
+
+    [Fact]
+    public async Task Envelope_also_naming_an_over_long_recipient_kid_is_delivered_and_the_kid_stays_out_of_the_logs()
+    {
+        // FR-API-09 (#80): an over-long recipient kid is treated as not held, not refused, so a group
+        // message that also names such a kid still reaches Bob. Packed for real (apv commits to both
+        // kids), with the other member's key generated here.
+        var logs = new CapturingLoggerProvider();
+        var (server, received) = await BuildServerAsync(logs: logs);
+        var bobPublic = SpecActorRegistry.LoadDefault().GetPublic("did:example:bob#key-x25519-1")
+            ?? throw new InvalidOperationException("Appendix A is missing Bob's X25519 key");
+        var longKid = OverLongKid("did:example:carol");
+        var pair = new NetCrypto.DefaultKeyGenerator().Generate(NetCrypto.KeyType.X25519);
+        var carolPublic = DataProofsDotnet.Jose.JwkConversion.ToPublicJwk(pair.KeyType, pair.PublicKey, longKid);
+        var packed = await DidComm.Composition.EnvelopeWriter.PackEncryptedAsync(
+            new DidComm.Composition.PackEncryptedParameters(
+                NewProposal(), new[] { bobPublic, carolPublic }, DataProofsDotnet.Jose.JoseAlgorithms.A256CbcHs512),
+            new DataProofsDotnet.Jose.JoseCryptoProvider());
+
+        var result = await PostEnvelopeAsync(server, packed);
+
+        result.Status.Should().Be(HttpStatusCode.Accepted);
+        received.Should().ContainSingle().Which.AllRecipientKids.Should().Contain(longKid);
+        logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
     }
 
     /// <summary>A key id under <paramref name="did"/> one character longer than the key-id bound.</summary>
@@ -286,19 +305,6 @@ public sealed class AspNetCoreReceiveRoundTripTests
         var jws = System.Text.Json.Nodes.JsonNode.Parse(packedJws)!.AsObject();
         jws["signatures"]!.AsArray()[0]!["header"]!["kid"] = kid;
         return jws.ToJsonString();
-    }
-
-    /// <summary>Append a recipient entry labelled <paramref name="kid"/>, reusing the first entry's wrapped key.</summary>
-    private static string WithExtraRecipient(string packedJwe, string kid)
-    {
-        var jwe = System.Text.Json.Nodes.JsonNode.Parse(packedJwe)!.AsObject();
-        var recipients = jwe["recipients"]!.AsArray();
-        recipients.Add(new System.Text.Json.Nodes.JsonObject
-        {
-            ["header"] = new System.Text.Json.Nodes.JsonObject { ["kid"] = kid },
-            ["encrypted_key"] = recipients[0]!["encrypted_key"]!.GetValue<string>(),
-        });
-        return jwe.ToJsonString();
     }
 
     private static DidCommClient NewPackerClient()

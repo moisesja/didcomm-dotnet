@@ -101,8 +101,8 @@ internal static class EnvelopeReader
 
         // FR-API-09 (#80): DataProofs reads the JWS signer kid and the authcrypt sender kid out of
         // the envelope and passes them straight to these two lookups, so the lookups are the first
-        // point where didcomm sees those values, at every layer. Wrap both so an over-long kid is
-        // refused before the inner lookup can DID-parse or resolve it.
+        // point where didcomm sees those values, at every layer. Wrap both so a kid over either
+        // identifier limit is refused before the inner lookup can DID-parse or resolve it.
         signerLookup = BoundSignerLookup(signerLookup);
         senderLookup = senderLookup is null ? null : new BoundedSenderKeyLookup(senderLookup);
 
@@ -405,16 +405,19 @@ internal static class EnvelopeReader
                         // to the held path, closing the held-vs-unheld recipient-enumeration oracle.
                         var peek = DpEnc.JweParser.PeekRecipients(current);
 
-                        // FR-API-09 (#80): refuse an over-long recipient kid before key selection.
-                        // A recipient kid we do not hold never reaches DID parsing or resolution, so
-                        // this is not about NetDid. It bounds what the consumer's ISecretsResolver
-                        // (FindPresentAsync, just below) and the public UnpackResult.AllRecipientKids
-                        // receive. The check reads only envelope content and runs before any key is
-                        // selected, so a holder and a stranger get the same refusal.
-                        foreach (var peekedKid in peek.RecipientKids)
-                            RejectOverlongKeyId(peekedKid, "JWE recipient 'kid'");
+                        // FR-API-09 (#80): a recipient kid over the identifier limits is treated as not
+                        // held. It is dropped from the candidates before key selection, so the consumer's
+                        // ISecretsResolver never sees it and no key can be selected for it; every other
+                        // entry is handled as before. Refusing the whole envelope instead would let one
+                        // group member whose own DID document publishes such a kid make every group
+                        // message undeliverable to all the others. The filter reads only envelope
+                        // content and runs before any key lookup, so holding the key of a dropped kid
+                        // changes nothing: the outcome is the one a receiver without that key gets, and
+                        // a receiver left with no candidate takes the decoy path like any stranger.
+                        // UnpackResult.AllRecipientKids still reports the envelope's kids verbatim.
+                        var candidateKids = RecipientKidsWithinLimits(peek.RecipientKids);
 
-                        var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, peek.RecipientKids, cryptoProvider, ct).ConfigureAwait(false);
+                        var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, candidateKids, cryptoProvider, ct).ConfigureAwait(false);
                         decryptingKid = heldKid;
                         jweResult = await DpEnc.JweParser.ParseAsync(current, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
@@ -538,7 +541,12 @@ internal static class EnvelopeReader
         JoseCryptoProvider cryptoProvider,
         CancellationToken ct)
     {
-        var heldKids = await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
+        // No candidate left (every kid was over the FR-API-09 limits): go straight to the decoy
+        // without asking the keystore. Which branch runs depends only on envelope content, so it
+        // says nothing about which keys this agent holds.
+        var heldKids = recipientKids.Count == 0
+            ? Array.Empty<string>()
+            : await recipientKeys.FindPresentAsync(recipientKids, ct).ConfigureAwait(false);
         // Walk the ENVELOPE's order and keep the held ones, rather than trusting the order
         // FindPresentAsync returns (ISecretsResolver promises a subset, not an ordering). The parser
         // scans recipient entries in envelope order and reports the first one the KEK opens, so
@@ -572,25 +580,37 @@ internal static class EnvelopeReader
     }
 
     /// <summary>
-    /// Refuse a wire key id longer than <see cref="IdentifierLimits.MaxKeyIdLength"/> (FR-API-09, #80).
-    /// The message names the field and the limit but never quotes the value, so an over-long kid is
-    /// not copied into the exception, its logs or a problem report. A null or empty kid passes; the
-    /// callers' own checks handle those.
+    /// Refuse a wire key id that fails <see cref="IdentifierLimits.IsWithinKeyIdLimits"/>: longer than
+    /// <see cref="IdentifierLimits.MaxKeyIdLength"/> in all, or with a DID part longer than
+    /// <see cref="IdentifierLimits.MaxDidLength"/> (FR-API-09, #80). The message names the field and
+    /// the broken limit but never quotes the value, so an over-long kid is not copied into the
+    /// exception, its logs or a problem report. A null kid passes; the callers' own checks handle it.
     /// </summary>
     /// <param name="kid">The key id read from the envelope.</param>
     /// <param name="field">The field it came from, as named in the message (e.g. <c>JWS signer 'kid'</c>).</param>
-    /// <exception cref="MalformedMessageException">When <paramref name="kid"/> is over the limit.</exception>
-    private static void RejectOverlongKeyId(string? kid, string field)
+    /// <exception cref="MalformedMessageException">When <paramref name="kid"/> is over a limit.</exception>
+    private static void RejectKeyIdOverLimits(string? kid, string field)
     {
-        if (kid is { Length: > IdentifierLimits.MaxKeyIdLength })
-        {
-            throw new MalformedMessageException(
-                $"{field} exceeds the maximum length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09, #80).");
-        }
+        if (kid is not null && !IdentifierLimits.IsWithinKeyIdLimits(kid))
+            throw new MalformedMessageException(IdentifierLimits.KeyIdLimitMessage(field, kid));
     }
 
     /// <summary>
-    /// Wrap the JWS signer lookup so a kid over the limit is refused before the inner lookup runs
+    /// The recipient kids that pass <see cref="IdentifierLimits.IsWithinKeyIdLimits"/>, in envelope
+    /// order (FR-API-09, #80); the list itself when every kid passes. Reads nothing but the kids.
+    /// </summary>
+    private static IReadOnlyList<string> RecipientKidsWithinLimits(IReadOnlyList<string> recipientKids)
+    {
+        foreach (var kid in recipientKids)
+        {
+            if (!IdentifierLimits.IsWithinKeyIdLimits(kid))
+                return recipientKids.Where(IdentifierLimits.IsWithinKeyIdLimits).ToArray();
+        }
+        return recipientKids;
+    }
+
+    /// <summary>
+    /// Wrap the JWS signer lookup so a kid over the limits is refused before the inner lookup runs
     /// (FR-API-09, #80). DataProofs' <c>JwsParser</c> calls the lookup outside its own error
     /// handling, so the <see cref="MalformedMessageException"/> reaches the Signed branch's catch
     /// filters, which pass every <see cref="DidCommException"/> through unchanged. The kid may come
@@ -602,13 +622,13 @@ internal static class EnvelopeReader
             return null;
         return kid =>
         {
-            RejectOverlongKeyId(kid, "JWS signer 'kid'");
+            RejectKeyIdOverLimits(kid, "JWS signer 'kid'");
             return inner(kid);
         };
     }
 
     /// <summary>
-    /// Authcrypt sender-key lookup that refuses a kid over the limit before the wrapped lookup
+    /// Authcrypt sender-key lookup that refuses a kid over the limits before the wrapped lookup
     /// resolves it (FR-API-09, #80).
     /// </summary>
     /// <remarks>
@@ -620,9 +640,9 @@ internal static class EnvelopeReader
     /// Encrypted branch's filters, which let <see cref="MalformedMessageException"/> through.
     /// </para>
     /// <para>
-    /// This does not add a recipient-possession signal. <c>ResolveSender</c> runs on the held path
-    /// and the decoy path alike, after the same envelope-only work, and the refusal depends only on
-    /// the sender kid's length.
+    /// The refusal is not a new recipient-possession signal. Whether it fires depends only on the
+    /// sender kid, which is envelope content, not on which recipient key (if any) this agent holds,
+    /// and <c>ResolveSender</c> reaches this lookup on the held path and the decoy path alike.
     /// </para>
     /// </remarks>
     private sealed class BoundedSenderKeyLookup : IInternalSenderKeyLookup
@@ -633,7 +653,7 @@ internal static class EnvelopeReader
 
         public Jwk? TryGet(string skid)
         {
-            RejectOverlongKeyId(skid, "JWE sender 'skid'");
+            RejectKeyIdOverLimits(skid, "JWE sender 'skid'");
             return _inner.TryGet(skid);
         }
     }

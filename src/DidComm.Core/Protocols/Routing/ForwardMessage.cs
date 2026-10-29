@@ -97,14 +97,14 @@ public static class ForwardMessage
     /// Returns <c>false</c> for non-forward messages so callers can branch without exceptions
     /// in their happy path. Throws <see cref="MalformedMessageException"/> when the message
     /// claims to be a forward but violates FR-ROUTE-01 (missing <c>next</c> or missing
-    /// attachments) or carries a <c>next</c> longer than 4096 characters (FR-API-09) — that is a
-    /// protocol violation, not a routing miss.
+    /// attachments) or carries a <c>next</c> over the identifier limits (FR-API-09: 4096 characters
+    /// in all, 2048 in its DID part) — that is a protocol violation, not a routing miss.
     /// </summary>
     /// <param name="message">A plaintext DIDComm message recovered from an unpack.</param>
     /// <param name="next">When this method returns <c>true</c>, the value of <c>body.next</c>.</param>
     /// <param name="payloads">When this method returns <c>true</c>, the ordered list of attached payloads.</param>
     /// <returns><c>true</c> when <paramref name="message"/> is a well-formed forward; <c>false</c> for any other message type.</returns>
-    /// <exception cref="MalformedMessageException">When the message's <c>type</c> is the forward MTURI but the structural rules are violated: <c>next</c> is missing, is not a string or is longer than 4096 characters (FR-API-09; the error does not quote it), or there are no attachments.</exception>
+    /// <exception cref="MalformedMessageException">When the message's <c>type</c> is the forward MTURI but the structural rules are violated: <c>next</c> is missing, is not a string, is longer than 4096 characters or has a DID part (everything before its first <c>/</c>, <c>;</c>, <c>?</c> or <c>#</c>) longer than 2048 (FR-API-09; the error does not quote it), or there are no attachments.</exception>
     public static bool TryParse(
         Message message,
         out string next,
@@ -132,10 +132,10 @@ public static class ForwardMessage
         // FR-API-09 (#80): 'next' goes to the mediator's transport layer unchanged as
         // ForwardProcessingResult.NextHop, the DID the host has to resolve to send the payload on. In
         // rewrap mode the processor also resolves its DID part itself. Bound it like any other key id
-        // ('next' may be a DID URL naming a routing key), and do not quote it.
-        if (nextValue.Length > IdentifierLimits.MaxKeyIdLength)
-            throw new MalformedMessageException(
-                $"Forward message 'next' exceeds the maximum length of {IdentifierLimits.MaxKeyIdLength} characters (FR-API-09).");
+        // ('next' may be a DID URL naming a routing key): its DID part to the DID bound as well, since
+        // that part is what gets resolved. Do not quote it.
+        if (!IdentifierLimits.IsWithinKeyIdLimits(nextValue))
+            throw new MalformedMessageException(IdentifierLimits.KeyIdLimitMessage("Forward message 'next'", nextValue));
 
         if (message.Attachments is null || message.Attachments.Count == 0)
             throw new MalformedMessageException(

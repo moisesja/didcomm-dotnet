@@ -37,7 +37,6 @@ public sealed partial class IdentifierLengthCapTests
     private const string AliceAuthKid = Alice + "#auth-1";
     private const string AliceKaKid = Alice + "#ka-1";
     private const string SignerField = "JWS signer 'kid'";
-    private const string RecipientField = "JWE recipient 'kid'";
     private const string SenderField = "JWE sender 'skid'";
     private const string LengthRefusal = "exceeds the maximum length";
 
@@ -50,42 +49,53 @@ public sealed partial class IdentifierLengthCapTests
     [InlineData(false, false)]
     [InlineData(true, true)]
     [InlineData(false, true)]
-    public async Task Recipient_kid_over_the_cap_is_refused_in_any_entry_and_whether_or_not_it_is_held(bool longFirst, bool longIsHeld)
+    public async Task Recipient_kid_over_the_cap_is_passed_over_in_any_entry_and_whether_or_not_it_is_held(bool longFirst, bool longIsHeld)
     {
-        // longIsHeld: the receiver holds the private key of the over-long entry itself, so key
-        // selection would pick it. It must still be refused before the keystore is asked.
+        // longIsHeld: the receiver holds the private key of the over-long entry and nothing else. That
+        // key is never offered or used, so the receiver fails exactly like a stranger. Otherwise the
+        // receiver holds Bob's key and the envelope unpacks through Bob's entry.
         var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
         var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, LengthCap.KeyIdCap + 1));
         var recipients = longFirst ? new[] { carol.PublicJwk, bob.PublicJwk } : new[] { bob.PublicJwk, carol.PublicJwk };
         var packed = await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(Ping(null, Bob, Carol), recipients, JoseAlgorithms.A256CbcHs512), Crypto);
         var peeked = DpEnc.JweParser.PeekRecipients(packed).RecipientKids;
-        (longFirst ? peeked[0] : peeked[^1]).Length.Should().Be(LengthCap.KeyIdCap + 1);
+        (longFirst ? peeked[0] : peeked[^1]).Should().Be(carol.PublicJwk.Kid);
 
         var resolver = new SpyDidResolver(
             LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk),
             LengthCap.Doc(Carol, keyAgreement: carol.PublicJwk));
-        var holderSecrets = new SpySecretsResolver(longIsHeld ? carol.PrivateJwk : bob.PrivateJwk);
+        var secrets = new SpySecretsResolver(longIsHeld ? carol.PrivateJwk : bob.PrivateJwk);
         var strangerSecrets = new SpySecretsResolver();
 
-        var holder = await RefusalOf(Receiver(holderSecrets, resolver), packed);
-        var stranger = await RefusalOf(Receiver(strangerSecrets, resolver), packed);
-
-        holder.Message.Should().Contain(RecipientField).And.Contain("4096");
-        stranger.Message.Should().Be(holder.Message, "the refusal must not tell a holder from a stranger");
-        holder.ShouldNotQuoteTheValue();
-        holderSecrets.Requested.Should().BeEmpty("the refusal comes before the keystore is asked about any kid");
-        strangerSecrets.Requested.Should().BeEmpty();
-        resolver.Requested.Should().BeEmpty();
+        if (longIsHeld)
+        {
+            var holder = (await Receiver(secrets, resolver).Invoking(c => c.UnpackAsync(packed))
+                .Should().ThrowAsync<CryptoException>()).Which;
+            var stranger = (await Receiver(strangerSecrets, resolver).Invoking(c => c.UnpackAsync(packed))
+                .Should().ThrowAsync<CryptoException>()).Which;
+            holder.Message.Should().Be(stranger.Message, "holding the passed-over kid's key must not be observable");
+            holder.ShouldNotQuoteTheValue();
+        }
+        else
+        {
+            var result = await Receiver(secrets, resolver).UnpackAsync(packed);
+            result.RecipientKid.Should().Be(BobKid);
+            result.AllRecipientKids.Should().Equal(peeked);
+        }
+        secrets.Requested.Should().NotContain(carol.PublicJwk.Kid, "the keystore is never asked about the over-long kid");
+        strangerSecrets.Requested.Should().NotContain(carol.PublicJwk.Kid);
+        resolver.Requested.Should().NotContain(d => d.Length > LengthCap.DidCap);
     }
 
     [Theory]
     [InlineData(LengthCap.KeyIdCap + 1)]
     // The inner JWE travels as base64url ciphertext of the outer one, so it grows by a third.
     [InlineData(600_000)]
-    public async Task Inner_recipient_kid_over_the_cap_under_anoncrypt_is_refused(int length)
+    public async Task Inner_recipient_kid_over_the_cap_under_anoncrypt_is_passed_over(int length)
     {
-        // The outer anoncrypt names only Bob, so the outer check passes; only the inner list is long.
+        // The outer anoncrypt names only Bob; only the inner list carries the long kid. Each layer
+        // filters its own list, and the inner layer still decrypts through Bob's entry.
         var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
         var alice = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
         var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, length));
@@ -98,12 +108,13 @@ public sealed partial class IdentifierLengthCapTests
             LengthCap.Doc(Carol, keyAgreement: carol.PublicJwk));
         var secrets = new SpySecretsResolver(bob.PrivateJwk);
 
-        var failure = await RefusalOf(Receiver(secrets, resolver), packed);
+        var result = await Receiver(secrets, resolver).UnpackAsync(packed);
 
-        failure.Message.Should().Contain(RecipientField).And.Contain("4096");
-        failure.ShouldNotQuoteTheValue();
-        resolver.Requested.Should().BeEmpty("the inner list is refused before the inner sender lookup resolves Alice");
-        secrets.Requested.Should().NotContain(k => k.Length > LengthCap.KeyIdCap);
+        result.AnonymousSender.Should().BeTrue();
+        result.SenderKid.Should().Be(AliceKaKid);
+        result.AllRecipientKids.Should().Equal(BobKid, carol.PublicJwk.Kid);
+        secrets.Requested.Should().NotContain(carol.PublicJwk.Kid);
+        resolver.Requested.Should().NotContain(d => d.Length > LengthCap.DidCap);
     }
 
     [Fact]
@@ -264,33 +275,48 @@ public sealed partial class IdentifierLengthCapTests
     }
 
     [Theory]
-    [InlineData("none", RecipientField)]
-    [InlineData("crit", RecipientField)]
-    [InlineData("apv", RecipientField)]
-    [InlineData("enc", RecipientField)]
-    [InlineData("alg", RecipientField)]
-    // The receive-size gate runs before anything is parsed, so it wins over the recipient check.
-    [InlineData("oversize", "MaxReceiveBytes")]
-    public async Task Recipient_kid_over_the_cap_with_another_defect_fails_identically_for_holder_and_stranger(
-        string defect, string expectedFragment)
+    [InlineData("none", typeof(CryptoException), "JWE could not be decrypted.")]
+    [InlineData("crit", typeof(MalformedMessageException), "('crit')")]
+    [InlineData("apv", typeof(CryptoException), "'apv' mismatch")]
+    [InlineData("enc", typeof(CryptoException), null)]
+    [InlineData("alg", typeof(CryptoException), null)]
+    // The receive-size gate runs before anything is parsed.
+    [InlineData("oversize", typeof(MalformedMessageException), "MaxReceiveBytes")]
+    public async Task Recipient_kid_over_the_cap_beside_another_defect_leaves_the_outcome_to_that_defect(
+        string defect, Type expectedType, string? expectedFragment)
     {
+        // The over-long entry is passed over, so whatever else is wrong decides the outcome, and it is
+        // the same for a stranger, for the holder of the passed-over kid's key and, where a defect
+        // stops Bob too, for Bob. None of them is asked about the long kid.
         var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
         var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, LengthCap.KeyIdCap + 1));
         var packed = WithJweDefect(await EnvelopeWriter.PackEncryptedAsync(
             new PackEncryptedParameters(Ping(null, Bob, Carol), new[] { bob.PublicJwk, carol.PublicJwk }, JoseAlgorithms.A256CbcHs512),
             Crypto), defect);
         var resolver = new SpyDidResolver(LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var receivers = new List<SpySecretsResolver> { new(), new(carol.PrivateJwk) };
+        if (defect != "none")
+            receivers.Add(new SpySecretsResolver(bob.PrivateJwk));
 
-        var outcomes = await HolderAndStrangerOutcomes(packed, bob, resolver);
+        var outcomes = new List<Exception>();
+        foreach (var secrets in receivers.Concat(receivers))
+        {
+            var outcome = await Record.ExceptionAsync(() => Receiver(secrets, resolver).UnpackAsync(packed));
+            outcome.Should().NotBeNull("every receiver in this test must fail");
+            outcomes.Add(outcome!);
+        }
 
-        outcomes[0].Should().BeOfType<MalformedMessageException>();
-        outcomes[0].Message.Should().Contain(expectedFragment);
+        outcomes[0].Should().BeOfType(expectedType);
+        if (expectedFragment is not null)
+            outcomes[0].Message.Should().Contain(expectedFragment);
         foreach (var outcome in outcomes)
         {
             outcome.GetType().Should().Be(outcomes[0].GetType());
-            outcome.Message.Should().Be(outcomes[0].Message, "holder and stranger, run twice each, must fail the same way");
+            outcome.Message.Should().Be(outcomes[0].Message, "every receiver, run twice, must fail the same way");
+            outcome.Message.Should().NotContain(LengthRefusal, "an over-long recipient kid is no longer a refusal");
             outcome.ShouldNotQuoteTheValue();
         }
+        receivers.Should().AllSatisfy(r => r.Requested.Should().NotContain(carol.PublicJwk.Kid));
         resolver.Requested.Should().BeEmpty();
     }
 
@@ -316,30 +342,44 @@ public sealed partial class IdentifierLengthCapTests
         result.AllRecipientKids.Should().Contain(carolKid, "the astral kid survives the round trip unchanged");
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Kid_of_astral_characters_one_unit_over_the_cap_is_refused_although_it_has_far_fewer_code_points(bool recipient)
+    [Fact]
+    public async Task Signer_kid_of_astral_characters_one_unit_over_the_cap_is_refused_although_it_has_far_fewer_code_points()
     {
         // 4097 UTF-16 code units but only about 2060 code points: a bound that counted code points
         // would accept it.
-        var kid = AstralKid(recipient ? Carol : Alice, LengthCap.KeyIdCap + 1);
+        var kid = AstralKid(Alice, LengthCap.KeyIdCap + 1);
         kid.Length.Should().Be(LengthCap.KeyIdCap + 1);
         kid.EnumerateRunes().Count().Should().BeLessThan(LengthCap.KeyIdCap);
         var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
-        var other = TestKeyMaterial.Generate(recipient ? KeyType.X25519 : KeyType.Ed25519, kid);
-        var packed = recipient
-            ? await EnvelopeWriter.PackEncryptedAsync(
-                new PackEncryptedParameters(Ping(null, Bob, Carol), new[] { bob.PublicJwk, other.PublicJwk }, JoseAlgorithms.A256CbcHs512),
-                Crypto)
-            : await PackSigned(Ping(Alice, Bob), other.PrivateJwk, DpSig.JwsKidPlacement.Auto);
+        var signer = TestKeyMaterial.Generate(KeyType.Ed25519, kid);
+        var packed = await PackSigned(Ping(Alice, Bob), signer.PrivateJwk, DpSig.JwsKidPlacement.Auto);
         var resolver = new SpyDidResolver(LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
 
         var failure = await RefusalOf(Receiver(new SpySecretsResolver(bob.PrivateJwk), resolver), packed);
 
-        failure.Message.Should().Contain(recipient ? RecipientField : SignerField);
+        failure.Message.Should().Contain(SignerField);
         failure.Message.Should().NotContain(Astral, "the refusal does not quote the kid");
         resolver.Requested.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Recipient_kid_of_astral_characters_one_unit_over_the_cap_is_passed_over_although_it_has_far_fewer_code_points()
+    {
+        var kid = AstralKid(Carol, LengthCap.KeyIdCap + 1);
+        kid.Length.Should().Be(LengthCap.KeyIdCap + 1);
+        kid.EnumerateRunes().Count().Should().BeLessThan(LengthCap.KeyIdCap);
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var carol = TestKeyMaterial.Generate(KeyType.X25519, kid);
+        var packed = await EnvelopeWriter.PackEncryptedAsync(
+            new PackEncryptedParameters(Ping(null, Bob, Carol), new[] { bob.PublicJwk, carol.PublicJwk }, JoseAlgorithms.A256CbcHs512),
+            Crypto);
+        var secrets = new SpySecretsResolver(bob.PrivateJwk);
+
+        var result = await Receiver(secrets, new SpyDidResolver(LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk))).UnpackAsync(packed);
+
+        result.RecipientKid.Should().Be(BobKid);
+        result.AllRecipientKids.Should().Contain(kid, "the astral kid is reported unchanged");
+        secrets.Requested.Should().NotContain(kid);
     }
 
     [Fact]
@@ -393,12 +433,10 @@ public sealed partial class IdentifierLengthCapTests
     [Theory]
     [InlineData("jws-unprotected")]
     [InlineData("jws-protected")]
-    [InlineData("recipient")]
     [InlineData("skid")]
     [InlineData("apu")]
     [InlineData("inner-signer")]
     [InlineData("inner-skid")]
-    [InlineData("inner-recipient")]
     public async Task Over_long_kid_is_refused_before_a_legacy_key_service_sees_anything(string position)
     {
         // A consumer's own IDidKeyService that is not an IDidKeyBindingService takes the legacy
@@ -413,6 +451,27 @@ public sealed partial class IdentifierLengthCapTests
         failure.Message.Should().Contain(hostile.Field).And.Contain("4096");
         failure.ShouldNotQuoteTheValue();
         legacy.Seen.Should().BeEmpty("the refusal comes before any legacy key-service call");
+    }
+
+    [Theory]
+    [InlineData("recipient")]
+    [InlineData("inner-recipient")]
+    public async Task Over_long_recipient_kid_never_reaches_a_legacy_key_service(string position)
+    {
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var alice = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
+        var (packed, longKid) = await PassedOverRecipientEnvelope(position, bob, alice);
+        var legacy = new RecordingLegacyKeyService(new SpyDidResolver(
+            LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk),
+            LengthCap.Doc(Alice, keyAgreement: alice.PublicJwk)));
+        var secrets = new SpySecretsResolver(bob.PrivateJwk);
+
+        var result = await new DidCommClient(secrets, legacy, new DidCommOptions()).UnpackAsync(packed);
+
+        result.AllRecipientKids.Should().Contain(longKid);
+        legacy.Seen.Should().NotBeEmpty("the legacy authorization checks really ran");
+        legacy.Seen.Should().NotContain(v => v.Contains(LengthCap.Run), "the long kid never reaches the legacy service");
+        secrets.Requested.Should().NotContain(longKid);
     }
 
     [Theory]
@@ -463,7 +522,7 @@ public sealed partial class IdentifierLengthCapTests
         await using var provider = services.BuildServiceProvider();
         var client = provider.GetRequiredService<DidCommClient>();
 
-        var positions = new[] { "jws-unprotected", "recipient", "skid", "inner-signer" };
+        var positions = new[] { "jws-unprotected", "jws-protected", "skid", "inner-signer" };
         foreach (var position in positions)
         {
             var hostile = await HostileEnvelope(position, bob);
@@ -471,6 +530,12 @@ public sealed partial class IdentifierLengthCapTests
             failure.Message.Should().Contain(hostile.Field);
             failure.ShouldNotQuoteTheValue();
         }
+
+        // An over-long recipient kid is passed over, not refused: the envelope unpacks through Bob's
+        // entry, and the long kid must stay out of the logs and spans on the success path too.
+        var (passedOver, longRecipientKid) = await PassedOverRecipientEnvelope(
+            "recipient", bob, TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid));
+        (await client.UnpackAsync(passedOver)).AllRecipientKids.Should().Contain(longRecipientKid);
 
         // Positive: the failure breadcrumb fired for each refusal, so the scan below is not vacuous.
         log.Entries.Count(e => e.Contains("Unpack failed with MalformedMessageException")).Should().Be(positions.Length);
@@ -517,7 +582,7 @@ public sealed partial class IdentifierLengthCapTests
             benign.Add(((await packer.PackEncryptedAsync(Ping(Alice, Bob), new PackEncryptedOptions(Recipients: new[] { Bob }, From: Alice))).Message, false));
         }
         var hostile = new List<Hostile>();
-        foreach (var position in new[] { "jws-unprotected", "jws-protected", "recipient", "skid", "apu", "inner-skid" })
+        foreach (var position in new[] { "jws-unprotected", "jws-protected", "inner-signer", "skid", "apu", "inner-skid" })
         {
             for (var i = 0; i < 3; i++)
                 hostile.Add(await HostileEnvelope(position, bob));
@@ -593,6 +658,49 @@ public sealed partial class IdentifierLengthCapTests
         }
     }
 
+    [Theory]
+    [InlineData("from", false)]
+    [InlineData("to", false)]
+    [InlineData("from", true)]
+    [InlineData("to", true)]
+    public async Task From_and_to_near_the_receive_limit_are_refused_without_quoting_or_resolving(string field, bool anoncrypt)
+    {
+        // As long as the default receive gate allows: one byte under it for a plaintext message, and as
+        // much as fits once anoncrypt's base64url ciphertext has grown the message by a third. Built by
+        // hand, because every pack path validates the message first and would refuse it there.
+        var limit = new DidCommOptions().MaxReceiveBytes;
+        string Plaintext(string value) => new JsonObject
+        {
+            ["id"] = "len-3",
+            ["typ"] = MediaTypes.Plaintext,
+            ["type"] = "https://example.com/protocols/test/1.0/ping",
+            ["from"] = field == "from" ? value : Alice,
+            ["to"] = field == "to" ? new JsonArray(Bob, value) : new JsonArray(Bob),
+            ["body"] = new JsonObject(),
+        }.ToJsonString();
+        var overhead = Plaintext(string.Empty).Length;
+        var length = anoncrypt ? (limit - 2048) / 4 * 3 - overhead : limit - 1 - overhead;
+        var bob = TestKeyMaterial.Generate(KeyType.X25519, BobKid);
+        var plaintext = Plaintext(LengthCap.DidOfLength(length));
+        var packed = anoncrypt
+            ? DpEnc.JweBuilder.BuildEcdhEsA256Kw(
+                Encoding.UTF8.GetBytes(plaintext), new[] { bob.PublicJwk }, JoseAlgorithms.A256CbcHs512, Crypto, MediaTypes.Encrypted)
+            : plaintext;
+        var size = Encoding.UTF8.GetByteCount(packed);
+        size.Should().BeLessThan(limit).And.BeGreaterThan(limit - 4096, "the value is as long as the receive gate allows");
+        if (!anoncrypt)
+            size.Should().Be(limit - 1);
+
+        var resolver = new SpyDidResolver(LengthCap.Doc(Bob, keyAgreement: bob.PublicJwk));
+        var secrets = new SpySecretsResolver(bob.PrivateJwk);
+        var failure = await RefusalOf(Receiver(secrets, resolver), packed);
+
+        failure.Message.Should().Contain($"'{field}'").And.Contain("maximum length of 2048");
+        failure.ShouldNotQuoteTheValue();
+        resolver.Requested.Should().BeEmpty("Message.Validate refuses it before the recipient binding resolves anything");
+        secrets.Requested.Should().NotContain(k => k.Contains(LengthCap.Run));
+    }
+
     [Fact]
     public async Task Failures_unrelated_to_length_keep_their_exception_types_and_messages()
     {
@@ -648,13 +756,6 @@ public sealed partial class IdentifierLengthCapTests
                 var placement = position == "jws-protected" ? DpSig.JwsKidPlacement.Protected : DpSig.JwsKidPlacement.Auto;
                 return new(position, await PackSigned(Ping(Alice, Bob), signer.PrivateJwk, placement), SignerField);
             }
-            case "recipient":
-            {
-                var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, length));
-                return new(position, await EnvelopeWriter.PackEncryptedAsync(
-                    new PackEncryptedParameters(Ping(null, Bob, Carol), new[] { bob.PublicJwk, carol.PublicJwk }, JoseAlgorithms.A256CbcHs512),
-                    Crypto), RecipientField);
-            }
             case "skid":
             case "inner-skid":
             {
@@ -680,15 +781,30 @@ public sealed partial class IdentifierLengthCapTests
                         Signers: new[] { signer.PrivateJwk.ToJwsSigner() }),
                     Crypto), SignerField);
             }
-            case "inner-recipient":
-            {
-                var alice = TestKeyMaterial.Generate(KeyType.X25519, AliceKaKid);
-                var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, length));
-                return new(position, await AnoncryptOfAuthcrypt(bob, alice, carol), RecipientField);
-            }
             default:
                 throw new ArgumentOutOfRangeException(nameof(position), position, null);
         }
+    }
+
+    /// <summary>
+    /// An envelope Bob can open whose recipient list also names a kid one character over the bound,
+    /// at <paramref name="position"/>: the outer list (<c>recipient</c>) or the inner list under an
+    /// anoncrypt (<c>inner-recipient</c>, authcrypted by <paramref name="alice"/>). Returns the long
+    /// kid too.
+    /// </summary>
+    private static async Task<(string Packed, string LongKid)> PassedOverRecipientEnvelope(
+        string position, TestKeyMaterial bob, TestKeyMaterial alice)
+    {
+        var carol = TestKeyMaterial.Generate(KeyType.X25519, LengthCap.KidOfLength(Carol, LengthCap.KeyIdCap + 1));
+        var packed = position switch
+        {
+            "recipient" => await EnvelopeWriter.PackEncryptedAsync(
+                new PackEncryptedParameters(Ping(null, Bob, Carol), new[] { bob.PublicJwk, carol.PublicJwk }, JoseAlgorithms.A256CbcHs512),
+                Crypto),
+            "inner-recipient" => await AnoncryptOfAuthcrypt(bob, alice, carol),
+            _ => throw new ArgumentOutOfRangeException(nameof(position), position, null),
+        };
+        return (packed, carol.PublicJwk.Kid!);
     }
 
     /// <summary>
