@@ -221,14 +221,18 @@ They did find these, introduced by this diff:
 ## Review
 
 - **Shipped:**
-  - Every wire DID is capped at 2048. Every wire key id is capped at 4096, with a DID part of at most
-    2048, checked before any NetDid parse, DID resolution or secrets lookup.
-  - Over-limit recipient kids are treated as not held.
+  - Wire DIDs (`from`, each `to`, `from_prior` `iss` and `sub`) are capped at 2048. Every key id
+    didcomm parses, resolves or looks up is capped at 4096, with a DID part of at most 2048, checked
+    before any NetDid parse, DID resolution or secrets lookup. A key id that is never looked up is
+    not checked: in a multi-signature JWS, `[valid, over-long]` unpacks.
+  - Over-limit recipient kids are treated as not held. When some are skipped, the parser scans the
+    kept entries first, so a skipped alias of a held key can't fail the FR-CONSIST-08 label check
+    (#82 review, `35ed5f5`).
   - Own signer and sender keys over the limits are never selected, even when the secrets resolver
     lists more kids than it was asked about.
   - No refusal quotes the value.
 - **Verified:**
-  - `-warnaserror` clean; Core 1008/1008; Interop 283/283.
+  - `-warnaserror` clean; Core 1011/1011; Interop 283/283.
   - Live harness: python 56/56 (with `PYTHON` pointed at 3.12; 3.14 breaks didcomm-python's
     pydantic v1), JVM 53/53 with the same three n/a cells.
   - Mutation: every guard, and every DID-part rule cut to a length test, fails at least one test.
@@ -239,6 +243,9 @@ They did find these, introduced by this diff:
   - Adversarial round 2 found the superset-resolver gap and the curve error message, both fixed.
     Its recipient-pick finding traced to FR-ENC-19 (pack uses one key per recipient), which is #81,
     stacked on this branch.
+  - The #82 review found the over-limit alias regression (fixed in `35ed5f5`) and overstated
+    signer-kid claims (narrowed in the CHANGELOG, PRD, PR body and this review). Its re-review
+    passed.
 - **Follow-ups drafted, not posted:**
   - the multi-signature JWS pre-auth amplification (didcomm and DataProofs);
   - unbounded wire values in messages, logs and spans (didcomm and DataProofs);
