@@ -140,14 +140,14 @@ DataProofsDotnet.Jose 1.5.0 (re-checked on approval).
       the fixtures submodule, `--logger trx` and `--collect "XPlat Code Coverage"`; `pack` (package
       validation against 1.4.1); `dotnet list package --vulnerable / --deprecated --include-transitive`;
       benchmarks `--job dry`. Test counts must be at least 799 + 279, plus the new tests.
-- [ ] 10. **Review.** One adversarial agent reviews only steps 4 and 5: did any assertion get
+- [x] 10. **Review.** One adversarial agent reviews only steps 4 and 5: did any assertion get
       looser, and does any new upstream exception path change the uniform-failure property?
       Low-severity findings are batched into this PR, not filed as follow-ups.
-- [ ] 11. **PR** from `chore/deps-refresh-77`, closing #77. Watch CI on ubuntu and windows.
+- [x] 11. **PR** from `chore/deps-refresh-77`, closing #77. Watch CI on ubuntu and windows.
 - [ ] 12. **Release (needs your go).** After merge: a release PR that renames `[Unreleased]` to
       `[1.5.0] - <date>` (RELEASING.md step 2, as in #76). Then the `v1.5.0` tag, which publishes
       to NuGet. I will not push the tag unless you say so.
-- [ ] 13. Update the memory note that says the test stack is held, and add a lesson if anything
+- [x] 13. Update the memory note that says the test stack is held, and add a lesson if anything
       in steps 4 and 5 surprises us.
 
 ## Out of scope (recorded here, per the issue's "or this issue records why not")
@@ -184,3 +184,28 @@ extra project copies in the old `.claude/worktrees/*` checkouts, which is unrela
 - NetDid 4.0.0's `ParseDidUrl` still returns `null` rather than throwing. A stricter grammar
   therefore only widens the set of values the DID-subject checks treat as unparseable. It opens
   no new exception path.
+
+**Adversarial review (step 10):**
+- **F1 (medium, predates the branch):** an unpaired-surrogate escape in a member *name* threw a raw
+  `InvalidOperationException` from `EnvelopeDetector`, at every layer and before any
+  authentication. String values of plaintext extension headers had the same problem, which shows
+  up later in `TraceObserver` and `OutOfBand.ReadWebRedirect`. **User decision 2026-10-28: fold the
+  fix into #78.** The detector now maps the parse's `InvalidOperationException` and
+  `ArgumentException` to `MalformedMessageException`. On a plaintext layer it also refuses any
+  string value that does not decode. `ForwardMessage.Create` maps the same input to its documented
+  `ArgumentException`. 14 tests pin this; before the fix, 9 of them failed with a raw exception and
+  3 unpacked.
+- **F2 (low, comes with NetCrypto 1.6+):** on keystore-backed keys, a small-order `epk` costs the
+  holder about 3 µs more. This falls inside the timing caveat FR-SEC-06 already documents, and HTTP
+  is covered by the #35 floor. Recorded in the CHANGELOG; no code change.
+- **F3 (low):** the surrogate-pair control was a raw emoji (see L-049), now fixed. The claim that the
+  tests "pin" the small-order case was reworded. Nothing in Core guards the decoy's *timing*; that
+  predates the branch, and timing assertions are flaky (L-044), so no test was added.
+- **F4 (info, positive):** a held key with a wrong-length `d` no longer fails differently from a
+  non-holder.
+- **NetDid 4.0.0 DID-URL regexes:** measured linear across 37 adversarial shapes up to 1 MiB.
+  The worst case per call (about 37 ms at 1 MiB) is no worse than 3.1.0's. One pre-existing item:
+  a 1 MiB kid allocates about 60–95 MB of regex backtracking stack. A length cap on kids before
+  `ParseDidUrl` would bound it. This is a follow-up candidate, not in this PR.
+
+Final: Core **819**, Interop **279**, 0 warnings, pack clean against 1.4.1.

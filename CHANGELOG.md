@@ -10,7 +10,8 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 > **NetDid 4.0.0, NetCrypto 1.7.1, DataProofsDotnet.Jose 1.5.0, Microsoft.Extensions 10.0.14 and
 > Polly 8.9.0**. didcomm's public API does not change, and package validation is clean against
 > the 1.4.1 baseline. The new floors do reject some malformed input that 1.4.1 accepted. See
-> *Changed — input the new floors reject* below.
+> *Changed — input the new floors reject* below. This release also fixes an untyped fault that
+> escaped `UnpackAsync` before any authentication (FR-API-07). See *Fixed* below.
 
 ### Security
 
@@ -22,6 +23,42 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   published, `dotnet restore` of 1.4.1's sources started failing: `TreatWarningsAsErrors` turns
   NuGet audit's `NU1902` into an error. So this bump also unblocks CI.
   `dotnet list package --vulnerable --include-transitive` now reports nothing.
+
+### Fixed — an unpaired-surrogate escape no longer escapes `UnpackAsync` untyped (FR-API-07, #77)
+
+Every layer of an unpack is first classified by `EnvelopeDetector`, which parses the whole JSON
+text with duplicate-member detection. To compare names, System.Text.Json decodes every member
+name, and it reports one written as an unpaired-surrogate escape (`{"\uD800":1}`) as
+`InvalidOperationException`, not `JsonException`. The detector caught only `JsonException`. So
+that input left `UnpackAsync` as a raw `InvalidOperationException` at the plaintext, JWS and JWE
+layers alike, in any position: top level, `body`, or a per-recipient or per-signature header.
+That includes the plaintext inside an anoncrypt envelope, which anyone holding the recipient's
+public key can build. No key and no authentication were needed. The JOSE parser's own checks never
+saw this input, because the detector runs first. The shipped transports already contained it:
+HTTP answers every unpack failure with one opaque rejection, and the WebSocket receive loop
+discards the envelope and keeps the socket open. Direct callers of `UnpackAsync` got the raw
+exception. The fault predates this release; the #77 adversarial review found it.
+
+- **Member names.** The detector now maps the parse's `InvalidOperationException` to
+  `MalformedMessageException`. It does the same for the parse's `ArgumentException`, which a
+  caller's string that is not well-formed UTF-16 produces. Decoding wire bytes cannot produce
+  one, but the public API accepts any string.
+- **String values in a plaintext layer.** The parse does not decode values, so such a message
+  unpacked and the fault came later, wherever a value was read. Extension headers are kept as raw
+  `JsonElement` (`Message.AdditionalHeaders`) and decoded only when read. With Trace 2.0 enabled,
+  `TraceObserver` decodes `~trace.report_uri` on every inbound, so a peer could make dispatch throw.
+  `OutOfBand.ReadWebRedirect` decodes `web_redirect` the same way. The detector now checks every
+  string of a plaintext layer and refuses the message as `MalformedMessageException` if one does
+  not decode. Body values already failed that way, through deserialization. JWS and JWE layers are
+  not re-checked: DataProofsDotnet.Jose checks every string in them itself (since 1.4.0, below).
+- **`ForwardMessage.Create`** maps a payload with such a member name to its documented
+  `ArgumentException` ("Forward payload is not valid JSON"), instead of `InvalidOperationException`.
+
+Pinned by `SurrogateEscapeBoundaryTests` (13 cases) and
+`DidCommClientUnitTests.Unpack_RejectsUnpairedSurrogateMemberName_AsMalformed_FrApi07`. Each
+hostile case has a control with a well-formed escaped surrogate pair in the same position, which
+still unpacks. Before the fix, 9 of the 13 failed with a raw exception, and the 3
+extension-header value cases unpacked.
 
 ### Changed — new dependency floors (#77)
 
@@ -66,13 +103,14 @@ didcomm's exception contract does not change: `UnpackAsync` still raises only di
 exceptions (FR-API-07). What changes is that some malformed input which 1.4.1 accepted is now
 refused:
 
-- **Unpaired-surrogate escapes and ill-formed UTF-8 in a received JWE or JWS** (DataProofsDotnet
-  1.4.0). An escape such as `\uD800` is valid JSON grammar, but I-JSON forbids it. DataProofs now
-  checks every JSON text it parses on receipt, including members nothing reads. An envelope with
-  `"x":"\uD800"` in an unread member unpacked under 1.4.1. It now throws
+- **Unpaired-surrogate escapes and ill-formed UTF-8 in a string value of a received JWE or JWS**
+  (DataProofsDotnet 1.4.0). An escape such as `\uD800` is valid JSON grammar, but I-JSON forbids
+  it. DataProofs now checks every JSON text it parses on receipt, including members nothing reads.
+  An envelope with `"x":"\uD800"` in an unread member unpacked under 1.4.1. It now throws
   `MalformedMessageException`, before any key work and whether or not the recipient key is held.
   This is pinned by the two `Unpaired_surrogate_escape_*` tests in `JoseInputHardeningTests`, which
-  fail on the 1.4.1 dependency set.
+  fail on the 1.4.1 dependency set. Member *names* never reach DataProofs; didcomm's own detector
+  rejects those first (see *Fixed* above).
 - **DIDs and DID URLs that break RFC 3986 / DID Core** (NetDid 4.0.0). This covers raw whitespace
   or control characters, characters such as `<` `"` `{` `|` `\`, and malformed `%` escapes.
   NetDid also now rejects JWKs without `kty`, and did:peer:2 service blocks that break DID Core
@@ -86,6 +124,20 @@ decrypted."). The type and message are the same whether or not the recipient key
 DataProofsDotnet 1.4.0 the parser rejects it itself, so only `InnerException` differs: it is now
 `JoseCryptoException`, where 1.4.1 had NetCrypto's `CryptographicException`. The three
 `Small_order_*` tests in `JoseInputHardeningTests` hold on both dependency sets.
+
+Two timing and misconfiguration notes from the #77 adversarial review, both measured:
+
+- **A small timing residual on keystore-backed keys.** With a key held in a NetCrypto `IKeyStore`
+  (through `NetDidKeyStoreSecretsResolver`), a small-order `epk` now costs the holder about 3 µs
+  more than a non-holder at the median. That gap was 0.7–1.8 µs on 1.4.1's dependencies. The
+  likely cause is one extra rethrow on the holder path, which NetCrypto 1.6.0 added in
+  `InMemoryKeyStore` (inferred, not instrumented). Exception type, message and inner type stay
+  identical. This is inside the timing caveat FR-SEC-06 already documents for keystore-held keys:
+  the backing store's own work is a signal this layer cannot mask. HTTP receives are covered by
+  the receive-rejection floor (#35).
+- **One misconfiguration oracle is closed.** A held X25519 key with a private `d` of the wrong
+  length used to fail as `MalformedMessageException`, where a non-holder got `CryptoException`.
+  Both now get the same uniform `CryptoException`.
 
 ### Changed — test stack (#77)
 

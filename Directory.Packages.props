@@ -58,13 +58,15 @@
          the whole untyped-fault class (FR-API-07), not that one input.
          1.4.0 checks every JSON text it parses on receipt before reading it. A JWS or JWE whose
          protected header or JSON serialization carries an unpaired-surrogate escape (`\uD800`) or
-         ill-formed UTF-8 now fails as MalformedJoseException, even in a member nothing reads.
-         Before, that was accepted. A small-order X25519 `epk` or ECDH-1PU sender key now fails
-         inside the parser as its uniform JoseCryptoException. Before, the parser let NetCrypto's
+         ill-formed UTF-8 in a string value now fails as MalformedJoseException, even in a member
+         nothing reads. Before, that was accepted. (Such an escape in a member NAME never gets this
+         far: didcomm's EnvelopeDetector rejects it first.) A small-order X25519 `epk` or
+         ECDH-1PU sender key now fails inside the parser as its uniform JoseCryptoException. Before, the parser let NetCrypto's
          CryptographicException out, and EnvelopeReader's JWE catch-all already mapped it to the
          same CryptoException, so for didcomm callers only InnerException changes. Both failures
          land in EnvelopeReader's typed catches, so the exception types UnpackAsync throws are
-         unchanged. Only the accepted input narrows (JoseInputHardeningTests pins both cases).
+         unchanged. Only the accepted input narrows. JoseInputHardeningTests covers both cases;
+         the surrogate tests fail on the 1.3.0 parser, the small-order ones hold on both.
          1.5.0 changes only RDFC canonicalization and bbs-2023, which didcomm does not use. -->
     <PackageVersion Include="DataProofsDotnet.Jose" Version="1.5.0" />
     <!-- ASP.NET Core (transports). Test/sample-only; tracks the same 10.0.x servicing line as
