@@ -8,7 +8,8 @@ which builds, tests, packs, and pushes every package. Publishing to NuGet is
 gated behind a reviewer-approved environment — see step 2 below.
 
 > **Status:** Published releases to date — `0.1.0-preview.1`, `1.0.0`, `1.1.0`, `1.2.0`,
-> `1.3.0`, `1.4.0`. The one-time setup below is done; cutting a release starts at
+> `1.3.0`, `1.4.0`, `1.4.1`. The one-time setup below is done (the `nuget-release` reviewer
+> gate was added 2026-10-29, before 1.5.0); cutting a release starts at
 > [Cutting a release](#cutting-a-release).
 
 ---
@@ -81,7 +82,7 @@ gh secret list --env nuget-release --repo moisesja/didcomm-dotnet   # verify (na
   minors; `1.0.0` is reserved for the spec-complete release (see the README).
 - **Tag-driven.** The package version comes from the **git tag**, not a file: a tag
   `vX.Y.Z` is stripped of its leading `v` and passed as `-p:DidCommVersion=X.Y.Z` to
-  build/pack. The `<DidCommVersion>0.1.0</DidCommVersion>` in
+  build/pack. The `<DidCommVersion>` in
   [`Directory.Build.props`](Directory.Build.props) is only the **local dev default**
   for non-tagged builds — you do not edit it to release.
 - **Prereleases.** A SemVer prerelease tag (e.g. `v0.1.0-preview.1`, `v0.2.0-rc.1`)

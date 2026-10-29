@@ -6,6 +6,8 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-29
+
 > Every dependency moves to its latest stable release (#77). The published packages now require
 > **NetDid 4.0.0, NetCrypto 1.7.1, DataProofsDotnet.Jose 1.5.0, Microsoft.Extensions 10.0.14 and
 > Polly 8.9.0**. didcomm's public API does not change, and package validation is clean against
@@ -2745,7 +2747,8 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.2.0...v1.3.0
