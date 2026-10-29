@@ -95,15 +95,19 @@ envelope writer with the keys handed to it, never the facade's own choice.
   this, Bob's document could list a fake `did:…:alice#a1`. With `Recipients: [bob, alice]` it
   would then shadow Alice's real key under the envelope-wide dedup, and she could not decrypt. Our
   receivers already refuse such entries (FR-CONSIST-02).
-- **Forward layers are capped at 8**, counting a mediator-as-DID layer. The cap is checked before
-  any resolution, and each routing DID is resolved once. Each layer grows the envelope by about
+- **Forward layers are capped at 8**, counting a mediator-as-DID layer. The cap is checked as soon
+  as the recipient's service entry is read, before any mediator or routing-key DID is resolved (the
+  recipient's own keys and service entry come first, since the route is in that entry), and each
+  routing DID is resolved once. Each layer grows the envelope by about
   4/3, and a peer's DID document chooses how many `routingKeys` it lists. 28 bare-DID routing keys
   with 64 keys each built a 105 MB envelope. A routing-key reference or mediator DID over the
   FR-API-09 limits is refused without being quoted.
 - **Hygiene.** Kids are deduped across the envelope, so `Recipients: [bob, bob]` no longer doubles
   every entry. Keys without a kid are skipped; before, they escaped as an untyped DataProofs
-  exception. At most 64 keys per recipient DID are used, because the recipient's DID document
-  decides how many key agreements a pack runs.
+  exception. A bare DID contributes at most 64 automatically selected keys, because the
+  recipient's DID document decides how many key agreements a pack runs; a key the caller pins by
+  DID URL is taken as given and never counts toward that allowance, whether the pin comes before
+  or after the bare DID.
 - **With #80.** Recipient kids over the FR-API-09 limits are still included; didcomm-dotnet
   receivers skip them per entry. A recipient whose first key has such a kid now decrypts through
   its other keys.

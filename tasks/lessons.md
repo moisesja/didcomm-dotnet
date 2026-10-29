@@ -965,3 +965,16 @@ Format per entry:
 - **How to apply:** Every "not a regression" verdict in a report or PR names the `main` result
   (run it in the `main` worktree, or check out `main` in a scratch worktree). Brief adversarial
   agents to compare with `main`, not with the branch's earlier state.
+
+## L-052 — State a guarantee from the caller's viewpoint, not the component's.
+
+- **Lesson:** "Before any resolution" was true of `MediatorEndpointExpander` (it resolves nothing
+  before counting layers) and false of `PackEncryptedAsync` (the recipient's keys and service entry
+  are resolved before the expander runs, because the route lives in that entry). A guarantee that
+  holds for one component becomes an overclaim once the PRD, CHANGELOG or PR body restates it for the
+  public operation. The same goes for a contract stated in two shapes ("at most 64 per DID" in the
+  PRD, "pins exempt" in the XML docs): the gap between them is where the bug sat.
+- **Why:** The #83 review found both, and the ordering bug fell exactly through the contract gap.
+- **How to apply:** Before writing a guarantee into a normative doc, trace it end to end from the
+  public method and name what happens first. When an engineer's report states a contract, grep every
+  artifact that restates it and make them identical in substance. Prefer one sentence used verbatim.

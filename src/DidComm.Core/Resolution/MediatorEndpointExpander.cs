@@ -29,7 +29,9 @@ namespace DidComm.Resolution;
 /// </para>
 /// <para>
 /// The recipient's document, which a peer controls, decides how many layers there are and what the
-/// references say, so the expander bounds both before it resolves anything: at most
+/// references say, so the expander bounds both before it resolves any mediator or routing-key DID
+/// (the recipient's own keys and service entry, which carries the route, are resolved by the caller
+/// before the expander runs): at most
 /// <see cref="MaxForwardLayers"/> layers, and each routing-key reference (and a mediator DID) within
 /// the FR-API-09 identifier limits, refused without being quoted. Each distinct DID is resolved
 /// once per expansion.

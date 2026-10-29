@@ -22,7 +22,8 @@ internal static class RecipientKeySelection
     /// <summary>
     /// The most keys taken from one DID's keyAgreement list for one envelope, in document order:
     /// for a bare DID in the recipients, a mediator named by its DID, a bare-DID routing key, or a
-    /// rewrap target. Keys the caller pins by DID URL are taken as given and are not counted. Each
+    /// rewrap target. Keys the caller pins by DID URL are taken as given and never count toward it,
+    /// whether the pin comes before or after the bare DID. Each
     /// key costs the sender one ECDH operation and the envelope one recipient entry, and the
     /// recipient's DID document, which a peer controls, sets how many there are. 64 is far above any
     /// real device count and still bounds that work.

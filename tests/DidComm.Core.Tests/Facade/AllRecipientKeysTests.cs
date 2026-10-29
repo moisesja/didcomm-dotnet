@@ -561,7 +561,7 @@ public sealed class AllRecipientKeysTests
 
         RecipientKids(packed).Should().Equal(bob.Take(64).Select(k => k.PublicJwk.Kid));
         var skipped = log.Entries.Should().ContainSingle(e => e.EventId == SkipEventId).Which;
-        skipped.Message.Should().Contain("1 over the limit of 64 keys per recipient DID");
+        skipped.Message.Should().Contain("1 over the allowance of 64 automatically selected keys per recipient DID");
         skipped.Message.Should().NotContain("did:");
     }
 
@@ -577,6 +577,59 @@ public sealed class AllRecipientKeysTests
             .PackEncryptedAsync(Ping(null, Bob), new PackEncryptedOptions(Recipients: new[] { Kid(Bob, "x65") }))).Message;
 
         RecipientKids(packed).Should().Equal(Kid(Bob, "x65"));
+    }
+
+    [Theory]
+    [InlineData("x1", true)]
+    [InlineData("x1", false)]
+    [InlineData("x65", true)]
+    [InlineData("x65", false)]
+    public async Task A_pinned_key_never_counts_toward_the_bare_DID_allowance_whichever_entry_comes_first(string pinnedFragment, bool pinFirst)
+    {
+        // 65 same-curve keys: 64 automatically selected plus the pin, whether the pin names a key the
+        // bare DID would have selected anyway (x1) or the one it would have left out (x65), and
+        // whether the pin comes before or after the bare DID. Before the #83 review fix, [pin x1, bob]
+        // gave only 64 keys: the bare entry was cut to 64 before the dedup dropped x1 again.
+        var bob = Enumerable.Range(1, 65)
+            .Select(i => TestKeyMaterial.Generate(KeyType.X25519, Kid(Bob, $"x{i}")))
+            .ToArray();
+        var keys = new StubKeyService((Bob, Publics(bob)));
+        var log = new CapturingLogger();
+        var pin = Kid(Bob, pinnedFragment);
+        var recipients = pinFirst ? new[] { pin, Bob } : new[] { Bob, pin };
+
+        var packed = (await new DidCommClient(new SpySecretsResolver(), keys, new DidCommOptions(), log)
+            .PackEncryptedAsync(Ping(null, Bob), new PackEncryptedOptions(Recipients: recipients))).Message;
+
+        var kids = RecipientKids(packed).ToList();
+        kids.Should().HaveCount(65).And.OnlyHaveUniqueItems();
+        kids.Should().BeEquivalentTo(bob.Select(k => k.PublicJwk.Kid), "every key is addressed: 64 automatically selected plus the pin");
+        if (pinFirst)
+            kids[0].Should().Be(pin, "entries are taken in order");
+        log.Entries.Should().NotContain(e => e.EventId == SkipEventId, "nothing was left out");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_allowance_counts_only_automatically_selected_keys_so_a_pin_does_not_push_another_key_out(bool pinFirst)
+    {
+        // 66 keys with x1 pinned: x1 is exempt, x2..x65 fill the allowance, and only x66 is left out,
+        // in either order. The log counts the one key that was really left out.
+        var bob = Enumerable.Range(1, 66)
+            .Select(i => TestKeyMaterial.Generate(KeyType.X25519, Kid(Bob, $"x{i}")))
+            .ToArray();
+        var keys = new StubKeyService((Bob, Publics(bob)));
+        var log = new CapturingLogger();
+        var pin = Kid(Bob, "x1");
+        var recipients = pinFirst ? new[] { pin, Bob } : new[] { Bob, pin };
+
+        var packed = (await new DidCommClient(new SpySecretsResolver(), keys, new DidCommOptions(), log)
+            .PackEncryptedAsync(Ping(null, Bob), new PackEncryptedOptions(Recipients: recipients))).Message;
+
+        RecipientKids(packed).Should().BeEquivalentTo(bob.Take(65).Select(k => k.PublicJwk.Kid));
+        var skipped = log.Entries.Should().ContainSingle(e => e.EventId == SkipEventId).Which;
+        skipped.Message.Should().Contain("1 over the allowance of 64 automatically selected keys per recipient DID");
     }
 
     // ---- helpers ----

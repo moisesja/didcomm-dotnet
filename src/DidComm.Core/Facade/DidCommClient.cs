@@ -276,11 +276,12 @@ public sealed partial class DidCommClient
     /// for the whole envelope: the first of X25519, P-256, P-384 and P-521 that every
     /// <see cref="PackEncryptedOptions.Recipients"/> entry has a key on and, for authcrypt, that the
     /// sender holds a key on. Each DID entry then contributes every one of its <c>keyAgreement</c>
-    /// keys on that curve whose key id names that DID, in document order and at most 64 for each
-    /// bare DID, so the recipient can decrypt on any device holding any of them. A DID URL entry
-    /// (<c>did#fragment</c>) contributes exactly that key, taken as given and not counted toward the
-    /// 64, and because it is the entry's only candidate, its curve becomes the envelope's. Entries
-    /// are taken in order and each kid appears once. The signed inner layer
+    /// keys on that curve whose key id names that DID, in document order, so the recipient can
+    /// decrypt on any device holding any of them: at most 64 automatically selected keys for each
+    /// bare DID. A DID URL entry (<c>did#fragment</c>) contributes exactly that key, taken as given;
+    /// a pinned key never counts toward a bare DID's 64, whether the pin comes before or after the
+    /// bare DID, and because it is the entry's only candidate, its curve becomes the envelope's.
+    /// Entries are taken in order and each kid appears once. The signed inner layer
     /// (<see cref="PackEncryptedOptions.SignFrom"/>) and the outer anoncrypt layer
     /// (<see cref="PackEncryptedOptions.ProtectSender"/>) use the same recipient keys. Keys left out
     /// for another curve or the cap are reported by a Debug log with counts only.
@@ -872,7 +873,7 @@ public sealed partial class DidCommClient
     [LoggerMessage(
         EventId = 5,
         Level = LogLevel.Debug,
-        Message = "Encrypted to {RecipientKeyCount} recipient keys on {Curve}; left out {OffCurveCount} keyAgreement keys on other curves and {OverCapCount} over the limit of {MaxKeysPerDid} keys per recipient DID (FR-ENC-19).")]
+        Message = "Encrypted to {RecipientKeyCount} recipient keys on {Curve}; left out {OffCurveCount} keyAgreement keys on other curves and {OverCapCount} over the allowance of {MaxKeysPerDid} automatically selected keys per recipient DID (FR-ENC-19).")]
     private static partial void LogRecipientKeysSkipped(ILogger logger, int recipientKeyCount, string curve, int offCurveCount, int overCapCount, int maxKeysPerDid);
 
     /// <summary>
@@ -991,16 +992,28 @@ public sealed partial class DidCommClient
 
     /// <summary>
     /// The envelope's recipient keys (FR-ENC-19): for each entry in order, its candidates on the
-    /// negotiated curve in document order, at most <see cref="RecipientKeySelection.MaxKeysPerDid"/>
-    /// per bare DID, each kid once across the whole envelope (ordinal, first wins). A repeated bare
-    /// DID adds nothing. When a bare DID had keys left out for being on another curve or over the
-    /// cap, a Debug log says how many, with counts only (NFR-04).
+    /// negotiated curve in document order, each kid once across the whole envelope. A bare DID
+    /// contributes at most <see cref="RecipientKeySelection.MaxKeysPerDid"/> automatically selected
+    /// keys; a key the caller pinned by DID URL anywhere in the list is taken as given and never
+    /// counts toward that allowance, so the set does not depend on whether the pin or the bare DID
+    /// comes first. A repeated bare DID adds nothing. When a bare DID had keys left out for being on
+    /// another curve or over the allowance, a Debug log says how many, with counts only (NFR-04).
     /// </summary>
     /// <param name="entries">The parsed recipient entries.</param>
     /// <param name="entryKeys">Each entry's candidate keys, index-aligned with <paramref name="entries"/>.</param>
     /// <param name="curve">The negotiated curve.</param>
     private List<Jwk> SelectRecipientKeys(RecipientEntry[] entries, IReadOnlyList<Jwk>[] entryKeys, string curve)
     {
+        // A pinned kid is exempt from the bare-DID allowance wherever the pin appears, so a bare
+        // entry that comes before the pin must know about it too. Otherwise the pin's key would use
+        // up one of the 64 and the set would depend on the caller's ordering (#83 review).
+        var pinnedKids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            if (entry.PinnedKid is not null)
+                pinnedKids.Add(entry.PinnedKid);
+        }
+
         var chosen = new List<Jwk>();
         var seenKids = new HashSet<string>(StringComparer.Ordinal);
         var seenBareDids = new HashSet<string>(StringComparer.Ordinal);
@@ -1012,17 +1025,27 @@ public sealed partial class DidCommClient
             if (bare && !seenBareDids.Add(entries[i].Did))
                 continue;
 
-            var onCurve = RecipientKeySelection.OnCurve(entryKeys[i], curve, out var capped);
-            if (bare)
+            var taken = 0;
+            foreach (var key in entryKeys[i])
             {
-                overCap += capped;
-                offCurve += entryKeys[i].Count - onCurve.Count - capped;
-            }
-
-            foreach (var key in onCurve)
-            {
-                if (seenKids.Add(key.Kid!))
-                    chosen.Add(key);
+                if (!string.Equals(key.Crv, curve, StringComparison.Ordinal))
+                {
+                    offCurve++;
+                    continue;
+                }
+                if (seenKids.Contains(key.Kid!))
+                    continue;
+                if (bare && !pinnedKids.Contains(key.Kid!))
+                {
+                    if (taken == RecipientKeySelection.MaxKeysPerDid)
+                    {
+                        overCap++;
+                        continue;
+                    }
+                    taken++;
+                }
+                seenKids.Add(key.Kid!);
+                chosen.Add(key);
             }
         }
 

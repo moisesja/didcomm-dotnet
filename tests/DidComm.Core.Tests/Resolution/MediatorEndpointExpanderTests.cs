@@ -373,7 +373,7 @@ public sealed class MediatorEndpointExpanderTests
     [InlineData(false, 9)]
     [InlineData(true, 8)]
     [InlineData(false, 1000)]
-    public async Task More_than_eight_forward_layers_are_refused_before_anything_is_resolved(bool mediatorAsEndpoint, int routingKeyCount)
+    public async Task More_than_eight_forward_layers_are_refused_before_any_routing_key_or_mediator_is_resolved(bool mediatorAsEndpoint, int routingKeyCount)
     {
         var routing = Hops(routingKeyCount);
         var (svc, keys) = HopWorld(routing);

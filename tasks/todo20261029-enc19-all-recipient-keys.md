@@ -154,6 +154,22 @@ facade line.
 - Mixing a bare DID and a pin for the same DID (bare + `#p256` forces P-256) is semantics neither
   peer can express. It's documented and tested.
 
+## Round 2: #83 review (2026-10-29)
+
+Three findings, all valid, all fixed in one round:
+
+- **`[pin, bare DID]` lost a key at the cap.** `OnCurve` cut the bare DID to 64 before the dedup
+  removed the already-pinned key, so `[bob#x1, bob]` with 65 keys gave 64 while `[bob, bob#x65]`
+  gave 65. Fixed: a kid pinned anywhere in `Recipients` is exempt from the bare DID's allowance,
+  whichever entry comes first. Tests cover both pin positions, a pin inside and outside the first
+  64, and the 66-key case where only the real leftover is logged.
+- **The cap's contract disagreed across artifacts.** Adopted one rule everywhere (PRD FR-ENC-19 and
+  DD-07, CHANGELOG, XML docs, the log text, the PR body): at most 64 automatically selected keys per
+  bare-DID entry; explicit pins are exempt.
+- **"Refused before any resolution" was false end to end.** The route is in the recipient's service
+  entry, so the recipient's own keys and service are resolved first. Narrowed everywhere to the
+  true guarantee: no mediator or routing-key DID is resolved for a route over the cap.
+
 ## Review
 
 - **Shipped, as D1–D10:**
@@ -166,7 +182,8 @@ facade line.
 - **Added from the adversarial review:**
   - only kids whose DID part is the resolved DID are used, so one DID's document can't shadow
     another's key;
-  - a cap of 8 forward layers, checked before any resolution;
+  - a cap of 8 forward layers, checked as soon as the recipient's service entry is read, before
+    any mediator or routing-key DID is resolved;
   - each routing DID is resolved once;
   - peer routing-key references are bounded before anything quotes them.
 - **Red first:**
