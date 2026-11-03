@@ -116,7 +116,7 @@ in `tasks/lessons.md` predates this work and stays out of the commit.
         and is built against `DataProofsDotnet.Core` 1.4.0. It runs unchanged on 2.0.0.
       ```
 
-- [ ] **Verify on the real branch:** restore, `build /warnaserror`, full test suite, `pack`. Expect
+- [x] **Verify on the real branch:** restore, `build /warnaserror`, full test suite, `pack`. Expect
       the counts above. Then open the PR.
 
 ## Deliberately not changing
@@ -148,4 +148,20 @@ zcap-dotnet.
 
 ## Review
 
-_(filled in after implementation)_
+Implemented as planned, in commit `c2c0ad8`.
+
+One departure: the final gates ran from a fresh clone of that commit, not from the working tree. The
+interop fixtures submodule is not initialized in the working tree, so a run there would not match
+CI. The clone had all 149 fixture files.
+
+| Gate on `c2c0ad8` | Result |
+|---|---|
+| `dotnet build /warnaserror` | 0 warnings, 0 errors |
+| `DidComm.Core.Tests` | 1121 passed, same as `main` |
+| `DidComm.InteropTests` | 290 passed, same as `main` |
+| `dotnet pack` (CI's gate, baseline 1.4.1) | 6 packages, no compatibility findings |
+| `DidComm.Core.nuspec` | declares `DataProofsDotnet.Jose` 2.0.0 |
+| Test `deps.json` | Jose 2.0.0, Core 2.0.0, `NetDid.Method.WebVh` 4.0.0 |
+
+The WebVh probe and the binding checks are recorded under Trial results. They ran against the same
+dependency graph and were not repeated.
