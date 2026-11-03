@@ -118,7 +118,7 @@ in the KDF input, matching the Appendix C.3 authcrypt vectors.
 
 Releases are tag-driven: pushing a `vMAJOR.MINOR.PATCH` tag packs and publishes the
 `DidComm.*` packages to NuGet.org. Maintainers cutting a release should follow the
-runbook in [RELEASING.md](RELEASING.md) — it covers the one-time `NUGET_API_KEY` secret
+runbook in [RELEASING.md](RELEASING.md) — it covers the one-time Trusted Publishing policy
 and reviewer-gated `nuget-release` environment, the versioning policy, the CHANGELOG
 step, and post-release verification.
 

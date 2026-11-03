@@ -9,8 +9,8 @@ gated behind a reviewer-approved environment — see step 2 below.
 
 > **Status:** Published releases to date — `0.1.0-preview.1`, `1.0.0`, `1.1.0`, `1.2.0`,
 > `1.3.0`, `1.4.0`, `1.4.1`, `1.5.0`. The one-time setup below is done (the `nuget-release` reviewer
-> gate was added 2026-10-29, before 1.5.0); cutting a release starts at
-> [Cutting a release](#cutting-a-release).
+> gate was added 2026-10-29, before 1.5.0, and Trusted Publishing replaced the stored API key on
+> 2026-11-02, before 1.5.1); cutting a release starts at [Cutting a release](#cutting-a-release).
 
 ---
 
@@ -37,18 +37,28 @@ Tests and samples set `IsPackable=false`, so they are never published.
 
 Do this once per repository (you need **admin** on `moisesja/didcomm-dotnet`).
 
-### 1. Create the NuGet API key
+### 1. Create the Trusted Publishing policy
 
-On [nuget.org → API Keys](https://www.nuget.org/account/apikeys), create a key:
+Publishing uses [NuGet Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing)
+(OIDC), so no API key is stored and none can expire. The `publish` job exchanges a GitHub OIDC token
+for an API key that lasts one hour.
 
-- **Scope:** *Push* → **"Push new packages and package versions"** (the `DidComm.*`
-  IDs do not exist on nuget.org yet, so the key must be allowed to create them).
-- **Glob pattern:** `DidComm.*` (covers all six IDs).
-- **Expiration:** nuget.org caps keys at 365 days — record the renewal date.
+On nuget.org, click your username → **Trusted Publishing** and add a policy (case-insensitive):
 
-> **First-publish note:** the first push auto-claims the `DidComm` ID prefix as long
-> as nobody else owns it. A `403` on push means the prefix/ID is already taken or the
-> key's scope/glob is wrong.
+| Field | Value |
+|---|---|
+| Policy owner | `moisesja` |
+| Repository Owner | `moisesja` |
+| Repository | `didcomm-dotnet` |
+| Workflow File | `release.yml` (file name only, no path) |
+| Environment | `nuget-release` |
+| Scope, if offered | new versions of existing packages, glob `DidComm.*` |
+
+Keep the environment set: it means a token is honored only from the environment that requires
+approval. A policy covers every package its owner has unless a scope narrows it.
+
+> A policy can start as *temporarily active* for 7 days, usually on private repositories. The first
+> successful publish makes it permanent.
 
 ### 2. Create the `nuget-release` GitHub Environment
 
@@ -61,18 +71,7 @@ approval** once that environment has protection rules.
 3. *(Optional)* Under **Deployment branches and tags**, restrict to the `v*` tag
    pattern so the environment can only be used by release tags.
 
-### 3. Add the `NUGET_API_KEY` secret (scoped to the environment)
-
-Add the key from step 1 as a secret named exactly **`NUGET_API_KEY`**, scoped to the
-`nuget-release` environment (Settings → Environments → `nuget-release` →
-**Environment secrets → Add secret**). A repository-level secret also works, but an
-environment-scoped secret can only be read by jobs that pass the environment gate.
-
-```bash
-# CLI alternative (paste at the hidden prompt — never use --body, it leaks to shell history):
-gh secret set NUGET_API_KEY --env nuget-release --repo moisesja/didcomm-dotnet
-gh secret list --env nuget-release --repo moisesja/didcomm-dotnet   # verify (names only)
-```
+No secret is needed.
 
 ---
 
@@ -107,10 +106,12 @@ gh secret list --env nuget-release --repo moisesja/didcomm-dotnet   # verify (na
    git tag v0.1.0-preview.1
    git push origin v0.1.0-preview.1
    ```
-4. **Approve the deployment.** The tag triggers the **Release** workflow; it pauses on
-   the `nuget-release` environment. Open the run (Actions tab or `gh run watch`) and
-   **approve** it. The job then builds → tests → `dotnet pack` → `dotnet nuget push`
-   (the `.snupkg` symbols ride along automatically; `--skip-duplicate` makes re-runs safe).
+4. **Approve the deployment.** The tag triggers the **Release** workflow. Its `pack` job
+   builds → tests → `dotnet pack`, then `publish` pauses on the `nuget-release` environment.
+   Open the run (Actions tab or `gh run watch`) and **approve** it. `publish` then logs in
+   through OIDC and runs `dotnet nuget push` (the `.snupkg` symbols ride along automatically;
+   `--skip-duplicate` makes re-runs safe). If `publish` fails, **Re-run failed jobs** repeats
+   it with the same packages. A failed login publishes nothing.
 
 ---
 

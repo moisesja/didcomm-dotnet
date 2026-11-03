@@ -4,8 +4,9 @@ name: Release
 # NuGet.org. Tag the release as `vMAJOR.MINOR.PATCH` (e.g. v0.1.0); the package version is
 # derived from the tag, overriding the dev-default DidCommVersion in Directory.Build.props.
 #
-# Prerequisite: add a repository secret named NUGET_API_KEY (a nuget.org API key scoped to push
-# the DidComm.* package ids). Without it the push step fails — build/test/pack still validate.
+# Publishing uses NuGet Trusted Publishing (OIDC), so no API key is stored. Prerequisite: a policy
+# on nuget.org for owner moisesja, repository didcomm-dotnet, workflow file release.yml and
+# environment nuget-release. Without it the login step fails and nothing is published.
 on:
   push:
     tags:
@@ -15,13 +16,9 @@ permissions:
   contents: read
 
 jobs:
-  pack-and-publish:
-    name: pack + publish to NuGet
+  pack:
+    name: build + test + pack
     runs-on: ubuntu-latest
-    # Gate the irreversible publish: add "Required reviewers" to the `nuget-release` environment
-    # (repo Settings > Environments) so each tag push waits for approval before this job runs.
-    # Until those rules exist this is a no-op. Scope the NUGET_API_KEY secret to this environment.
-    environment: nuget-release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,6 +54,38 @@ jobs:
           path: artifacts/*.*nupkg
           if-no-files-found: error
 
+  publish:
+    name: publish to NuGet
+    needs: pack
+    runs-on: ubuntu-latest
+    # Gate the irreversible publish: the `nuget-release` environment's required reviewers approve
+    # the tested packages before this job runs. The nuget.org policy names this environment, so a
+    # token from anywhere else is refused.
+    environment: nuget-release
+    # The only job that can request a NuGet key. It never checks out the repo, so no project or
+    # dependency code runs with this permission.
+    permissions:
+      id-token: write
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download packages artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nupkgs
+          path: artifacts
+
+      # Exchanges the GitHub OIDC token for a one-hour NuGet API key. Run immediately before the
+      # push so the key cannot expire first.
+      - name: NuGet login (OIDC → short-lived API key)
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: moisesja # nuget.org profile name (the public package owner), not an email
+
       - name: Push to NuGet.org
         # Pushes the .nupkg files; the matching .snupkg symbol packages ride along automatically.
-        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
