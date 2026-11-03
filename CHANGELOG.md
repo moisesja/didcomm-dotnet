@@ -22,6 +22,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   ([GHSA-6fxh-mc39-94vc](https://github.com/moisesja/dataproofs-dotnet/security/advisories/GHSA-6fxh-mc39-94vc))
   affects RDFC and bbs-2023 proofs, which didcomm does not use, so this is not a security update
   for didcomm.
+- **Releases publish through NuGet Trusted Publishing.** `release.yml` no longer reads a stored API
+  key, and a separate job holds the publishing permission, so release approval now comes after build
+  and test pass. This has no effect on the packages.
 
 Upgrade notes:
 
