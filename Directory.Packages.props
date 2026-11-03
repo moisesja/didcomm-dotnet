@@ -41,7 +41,7 @@
          additions (EC point decompression, IRecoverableDigestSigner for EVM flows) are unused by
          didcomm; the new IKeyStore member ships as a throwing default interface implementation, so
          external key stores stay source- and binary-compatible.
-         1.7.1 is what NetDid 4.0.0 and DataProofsDotnet 1.5.0 both depend on. 1.6.0 adds
+         1.7.1 is what NetDid 4.0.0 and DataProofsDotnet 2.0.0 both depend on. 1.6.0 adds
          ICapableKeyStore as a derived interface (IKeyStore itself gains no member), and 1.7.x
          publishes TransferableKeyMaterial's consumption API. Both are additive and didcomm uses
          neither, so external IKeyStore implementations stay source- and binary-compatible. -->
@@ -67,8 +67,13 @@
          land in EnvelopeReader's typed catches, so the exception types UnpackAsync throws are
          unchanged. Only the accepted input narrows. JoseInputHardeningTests covers both cases;
          the surrogate tests fail on the 1.3.0 parser, the small-order ones hold on both.
-         1.5.0 changes only RDFC canonicalization and bbs-2023, which didcomm does not use. -->
-    <PackageVersion Include="DataProofsDotnet.Jose" Version="1.5.0" />
+         1.5.0 changes only RDFC canonicalization and bbs-2023, which didcomm does not use.
+         2.0.0's breaking changes are in DataProofsDotnet.Rdfc and .Legacy, which are not in didcomm's
+         graph. Jose has no source change from 1.5.0, and Core only adds
+         ProofVerificationOptions.KnownContexts, which does nothing unless set. NetDid.Method.WebVh
+         4.0.0 (here through NetDid.Extensions.DependencyInjection) is compiled against Core 1.4.0 and
+         runs unchanged on 2.0.0: every member it imports still binds. -->
+    <PackageVersion Include="DataProofsDotnet.Jose" Version="2.0.0" />
     <!-- ASP.NET Core (transports). Test/sample-only; tracks the same 10.0.x servicing line as
          Microsoft.Extensions below. -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.14" />
