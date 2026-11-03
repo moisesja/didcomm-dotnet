@@ -6,6 +6,27 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`DataProofsDotnet.Jose` 1.5.0 → 2.0.0** (brings `DataProofsDotnet.Core` 2.0.0). didcomm's
+  public API and wire output do not change, and package validation is clean against 1.5.0.
+  `DataProofsDotnet.Jose` has no source change in this release, and `DataProofsDotnet.Core` only
+  adds an option that does nothing unless set. The advisory fixed in 2.0.0
+  ([GHSA-6fxh-mc39-94vc](https://github.com/moisesja/dataproofs-dotnet/security/advisories/GHSA-6fxh-mc39-94vc))
+  affects RDFC and bbs-2023 proofs, which didcomm does not use, so this is not a security update
+  for didcomm.
+
+Upgrade notes:
+
+- **DataProofsDotnet: move every package you reference together, then rebuild.** The 2.0.0 major
+  is in `DataProofsDotnet.Rdfc` and `DataProofsDotnet.Legacy`, which didcomm does not reference.
+  If your application does, this update does not move them for you. Moving them to 2.0.0 removes
+  constructors, so an assembly built against 1.x throws `MissingMethodException` until it is
+  rebuilt, and it changes signed bytes for some RDFC documents. Read upstream's 2.0.0 notes first.
+- **did:webvh.** `NetDid.Method.WebVh` 4.0.0 arrives through
+  `DidComm.Extensions.DependencyInjection` and is built against `DataProofsDotnet.Core` 1.4.0. It
+  runs unchanged on 2.0.0.
+
 ## [1.5.0] - 2026-10-29
 
 > Every dependency moves to its latest stable release (#77). The published packages now require
