@@ -8,7 +8,7 @@ which builds, tests, packs, and pushes every package. Publishing to NuGet is
 gated behind a reviewer-approved environment — see step 2 below.
 
 > **Status:** Published releases to date — `0.1.0-preview.1`, `1.0.0`, `1.1.0`, `1.2.0`,
-> `1.3.0`, `1.4.0`, `1.4.1`. The one-time setup below is done (the `nuget-release` reviewer
+> `1.3.0`, `1.4.0`, `1.4.1`, `1.5.0`. The one-time setup below is done (the `nuget-release` reviewer
 > gate was added 2026-10-29, before 1.5.0); cutting a release starts at
 > [Cutting a release](#cutting-a-release).
 

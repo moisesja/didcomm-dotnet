@@ -6,6 +6,13 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-02
+
+> Moves `DataProofsDotnet.Jose` to 2.0.0 (#85). This is a pin bump only: didcomm's public API,
+> behavior and wire output do not change. Despite the patch number, the dependency floor crosses a
+> major, so read the upgrade notes if your application references a DataProofsDotnet package
+> directly.
+
 ### Changed
 
 - **`DataProofsDotnet.Jose` 1.5.0 → 2.0.0** (brings `DataProofsDotnet.Core` 2.0.0). didcomm's
@@ -18,6 +25,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 Upgrade notes:
 
+- **A direct pin below 2.0.0 fails restore.** If your application references
+  `DataProofsDotnet.Core` or `DataProofsDotnet.Jose` directly at an older version, `dotnet restore`
+  fails with `NU1605` until you raise it to 2.0.0.
 - **DataProofsDotnet: move every package you reference together, then rebuild.** The 2.0.0 major
   is in `DataProofsDotnet.Rdfc` and `DataProofsDotnet.Legacy`, which didcomm does not reference.
   If your application does, this update does not move them for you. Moving them to 2.0.0 removes
@@ -2768,7 +2778,8 @@ Release` with TRX + cobertura coverage upload (NFR-08 scaffold).
   IEEE P1363 format), #63 (off-curve EC point rejection — invalid-curve
   defense), #64 (Concat KDF).
 
-[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/moisesja/didcomm-dotnet/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/moisesja/didcomm-dotnet/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/moisesja/didcomm-dotnet/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/moisesja/didcomm-dotnet/compare/v1.3.0...v1.4.0
