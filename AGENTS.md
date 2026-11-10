@@ -10,12 +10,14 @@ This file provides instructions for AI agents and human contributors working in 
 
 Three top-level docs carry the design context. Read them in this order:
 
-1. [`docs/didcomm-dotnet-prd.md`](docs/didcomm-dotnet-prd.md) — the engineering PRD / requirements spec. The target the implementation is measured against. The PRD aims to fulfill the desired functionality as specified in [`the DIF spec`](https://identity.foundation/didcomm-messaging/spec/v2.1/). If the PRD is incomplete, ask questions. After figuring out the answer, the PRD should be updated.
+1. [`docs/didcomm-dotnet_PRD.md`](docs/didcomm-dotnet_PRD.md) — the engineering PRD / requirements spec. The target the implementation is measured against. The PRD aims to fulfill the desired functionality as specified in [`the DIF spec`](https://identity.foundation/didcomm-messaging/spec/v2.1/). If the PRD is incomplete, ask questions. After figuring out the answer, the PRD should be updated.
+2. [`docs/codebase-architecture.md`](docs/codebase-architecture.md) — the map of what is actually built: package layout, inbound/outbound flows, and (once Phase 7 lands) the mediator pipeline.
+3. [`README.md`](README.md) — a thin router to the two above; no design or runbook content.
 
 Maintenance rules:
 
-- `codebase-architecture.md` must stay in sync with the code — when a service or flow changes, update it when changes in the code merit it.
-- The PRD is the target. When PRD and codebase-architecture.md disagree, the PRD is the target and codebase-architecture.md is the map of what is actually built — resolve by updating whichever is stale, not by picking a side.
+- `docs/codebase-architecture.md` must stay in sync with the code — when a service or flow changes, update it when changes in the code merit it.
+- The PRD is the target. When the PRD and `docs/codebase-architecture.md` disagree, the PRD is the target and `docs/codebase-architecture.md` is the map of what is actually built — resolve by updating whichever is stale, not by picking a side.
 - `README.md` is a thin router — don't add design or runbook content there. It points at the three docs above.
 
 ## Workflow Orchestration

@@ -6,6 +6,21 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Docs
+
+- **PRD: mediator-service requirements (#89, epic #88).** §2.1 gains the `DidComm.Mediator` scope
+  row and §2.2 drops coordinate-mediation from out-of-scope (persistent stores, shorten-url 1.0,
+  swarm 1.0 and DIDComm v1 pickup forms stay out); §3.1 lists the package. §8 adds
+  FR-ROUTE-09..11 (relay-time expiry, `delay_milli`, forward as a registered handler with silent
+  drop of unroutable forwards) and amends FR-ROUTE-06; new §8a Return-Route and Queue Transport
+  extension (FR-RR-01..08), §8b Coordinate Mediation 3.0 + 2.0 compat (FR-MED-01..10), §8c Message
+  Pickup 3.0 + 4.0 follow-up (FR-PICK-01..12); FR-TRN-03/10 now read "one-way unless the
+  return-route extension (§8a) is in effect"; §12 Phase 7 with issues #90–#100; §13.5 "Mediation"
+  dimension; §14.3 sample 11 and row 04 refresh; §14.4 Mediation row; DD-11..DD-14.
+- **Agent instructions.** `AGENTS.md` / `CLAUDE.md` now link the real PRD path
+  (`docs/didcomm-dotnet_PRD.md`) and the newly created `docs/codebase-architecture.md` (package map
+  + flows, with a Phase 7 mediator-pipeline placeholder).
+
 ## [1.5.1] - 2026-11-02
 
 > Moves `DataProofsDotnet.Jose` to 2.0.0 (#85). This is a pin bump only: didcomm's public API,
