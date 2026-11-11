@@ -21,8 +21,9 @@ public enum DispatchResult
 
 /// <summary>
 /// What the dispatcher decided about an inbound message. The transport layer reads this to
-/// decide whether to deliver a reply (HTTP receive only logs it per FR-TRN-10; WebSocket
-/// optionally sends it on the same socket when explicitly opted-in).
+/// decide whether to deliver a reply: through the inbound's return-route session when it has one
+/// (the HTTP <c>200</c> body, or a push on an opted-in WebSocket, PRD §8a); otherwise it only
+/// logs it (FR-TRN-10: replies travel out of band).
 /// </summary>
 /// <param name="Result">High-level outcome category.</param>
 /// <param name="Reply">The reply message the handler produced, when <see cref="Result"/> is <see cref="DispatchResult.ReplyProduced"/>.</param>

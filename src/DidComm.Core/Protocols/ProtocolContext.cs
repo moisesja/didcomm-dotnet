@@ -26,10 +26,11 @@ public sealed record ProtocolContext(
 {
     /// <summary>
     /// Completes once the transport has acknowledged the inbound message on the wire — for HTTP,
-    /// when the response (the 202) has been committed. A handler that defers work past the
-    /// acknowledgement (the mediator's <see cref="Routing.ForwardHandler"/>: nothing registration-
-    /// dependent may run before the 202 is in the sender's hands, FR-ROUTE-11) awaits it before
-    /// starting that work. <see cref="Task.CompletedTask"/> when the transport provides no such
+    /// when the response (the 202, or the 200 carrying a return-route reply) has been committed;
+    /// a forward never has a return-route session, so its response is always the 202. A handler
+    /// that defers work past the acknowledgement (the mediator's <see cref="Routing.ForwardHandler"/>:
+    /// nothing registration-dependent may run before the 202 is in the sender's hands,
+    /// FR-ROUTE-11) awaits it before starting that work. <see cref="Task.CompletedTask"/> when the transport provides no such
     /// ordering — dispatcher-only use (tests, samples, the WebSocket endpoints), where the handler
     /// proceeds immediately. A cancelled or faulted task means the inbound was never acknowledged
     /// (the client aborted, or the response turned into a rejection after the handler ran); a

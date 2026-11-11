@@ -20,11 +20,12 @@ namespace DidComm.Protocols;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The dispatcher does NOT itself send replies — that decision is the transport's, because
-/// HTTP receive is one-way per FR-TRN-10 (replies travel out of band) while WebSocket can
-/// optionally reply on the same socket when the operator opts in. Keeping the dispatcher
-/// transport-agnostic also makes it directly testable from unit tests without spinning up an
-/// ASP.NET Core host.
+/// The dispatcher does NOT itself send replies — that decision is the transport's. Receive is
+/// one-way by default (FR-TRN-10: replies travel out of band); only when the transport bound a
+/// return-route session to the inbound (PRD §8a, <see cref="ProtocolContext.Session"/>) does a
+/// reply go back on the same connection — as the HTTP <c>200</c> body, or as a push on a
+/// WebSocket whose operator enabled it. Keeping the dispatcher transport-agnostic also makes it
+/// directly testable from unit tests without spinning up an ASP.NET Core host.
 /// </para>
 /// <para>
 /// The dispatcher checks neither return-route eligibility nor FR-RR-08 replay: both are transport
