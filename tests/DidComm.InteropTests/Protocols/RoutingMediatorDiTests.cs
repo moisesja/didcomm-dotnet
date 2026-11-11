@@ -350,6 +350,110 @@ public sealed class RoutingMediatorDiTests
         sink.Results.Should().BeEmpty("a plaintext forward is never relayed (FR-ROUTE-11)");
     }
 
+    // ---- L-017 cycle guard (red-team probe 6) ---------------------------------------------
+
+    [Fact]
+    public async Task A_sink_that_resolves_the_dispatcher_from_IServiceProvider_at_call_time_relays_end_to_end()
+    {
+        // The documented DI rule: a sink that needs the dispatcher injects IServiceProvider and
+        // resolves it inside AcceptAsync — after the registry has been realized — so no cycle.
+        var secrets = new InMemorySecretsResolver();
+        var services = new ServiceCollection();
+        services.AddSingleton<IForwardSink, LazyDispatcherSink>(); // BEFORE AddDidComm / AddRoutingMediator
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(secrets);
+            b.AddBuiltInProtocols();
+            b.AddRoutingMediator();
+        });
+        using var sp = services.BuildServiceProvider();
+        var (alice, bob) = await TwoPeersAsync(sp, secrets);
+        var mediator = await NewPeerAsync(sp, secrets);
+
+        var client = sp.GetRequiredService<DidCommClient>();
+        var dispatcher = await Task.Run(() => sp.GetRequiredService<ProtocolDispatcher>()).WaitAsync(Timeout);
+        var options = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
+        var handler = sp.GetRequiredService<ForwardHandler>();
+        var sink = (LazyDispatcherSink)sp.GetRequiredService<IForwardSink>();
+        sp.GetRequiredService<InMemoryForwardRecipientRegistry>().Register(bob.Did);
+
+        var inner = (await client.PackEncryptedAsync(NewProposal(alice.Did, bob.Did), new PackEncryptedOptions(Recipients: new[] { bob.Did }, From: alice.Did))).Message;
+        var packed = (await client.PackEncryptedAsync(ForwardMessage.Create(mediator.Did, bob.Did, new[] { inner }), new PackEncryptedOptions(Recipients: new[] { mediator.Did }))).Message;
+        var outcome = await dispatcher.DispatchAsync(await client.UnpackAsync(packed), client, options);
+
+        outcome.Result.Should().Be(DispatchResult.NoReply);
+        await handler.FlushAsync(Timeout);
+        sink.Resolved.Should().ContainSingle().Which.Should().BeSameAs(dispatcher, "the sink saw the one dispatcher singleton");
+    }
+
+    [Theory]
+    [InlineData(typeof(RegistryTakingSink), nameof(ProtocolHandlerRegistry))]
+    [InlineData(typeof(DispatcherTakingSink), nameof(ProtocolDispatcher))]
+    [InlineData(typeof(HandlersTakingSink), "IEnumerable`1")]
+    [InlineData(typeof(ForwardHandlerTakingSink), nameof(ForwardHandler))]
+    public void AddRoutingMediator_refuses_a_sink_whose_constructor_closes_the_registry_cycle(Type sinkType, string parameterTypeName)
+    {
+        // Without the guard this registration builds fine and the first resolution of the
+        // dispatcher parks the resolving thread forever (observed on net10.0: the sink's
+        // constructor is never reached; the container blocks inside its own singleton realization).
+        var services = new ServiceCollection();
+        services.AddSingleton(typeof(IForwardSink), sinkType);
+
+        var act = () => services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.AddBuiltInProtocols();
+            b.AddRoutingMediator();
+        });
+
+        act.Should().Throw<InvalidOperationException>()
+            .Which.Message.Should().Contain(sinkType.FullName!).And.Contain(parameterTypeName).And.Contain("IServiceProvider");
+    }
+
+    [Fact]
+    public void AddRoutingMediator_refuses_a_recipient_registry_or_routing_key_provider_that_takes_the_dispatcher()
+    {
+        foreach (var (service, implementation) in new[]
+        {
+            (typeof(IForwardRecipientRegistry), typeof(DispatcherTakingRecipientRegistry)),
+            (typeof(IRecipientRoutingKeyProvider), typeof(DispatcherTakingRoutingKeyProvider)),
+        })
+        {
+            var services = new ServiceCollection();
+            services.AddSingleton(service, implementation);
+
+            var act = () => services.AddDidComm(b =>
+            {
+                b.UseNetDidResolver();
+                b.UseSecretsResolver(new InMemorySecretsResolver());
+                b.AddBuiltInProtocols();
+                b.AddRoutingMediator();
+            });
+
+            act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain(implementation.FullName!).And.Contain(service.Name);
+        }
+    }
+
+    [Fact]
+    public void AddRoutingMediator_accepts_a_factory_registered_sink_it_cannot_inspect_and_an_instance()
+    {
+        // The guard covers implementation types only; a factory or an instance registers as before.
+        var services = new ServiceCollection();
+        services.AddSingleton<IForwardSink>(_ => new CapturingSink());
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.AddBuiltInProtocols();
+            b.AddRoutingMediator();
+        });
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<IForwardSink>().Should().BeOfType<CapturingSink>();
+    }
+
     // ---- helpers -------------------------------------------------------------------------
 
     private static ServiceProvider BuildProvider(
@@ -408,5 +512,54 @@ public sealed class RoutingMediatorDiTests
             _contexts.Enqueue(context);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class LazyDispatcherSink : IForwardSink
+    {
+        private readonly IServiceProvider _services;
+        public LazyDispatcherSink(IServiceProvider services) => _services = services;
+        public ConcurrentQueue<ProtocolDispatcher> Resolved { get; } = new();
+
+        public Task AcceptAsync(ForwardProcessingResult result, ProtocolContext context, CancellationToken ct)
+        {
+            Resolved.Enqueue(_services.GetRequiredService<ProtocolDispatcher>());
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RegistryTakingSink : IForwardSink
+    {
+        public RegistryTakingSink(ProtocolHandlerRegistry registry) { }
+        public Task AcceptAsync(ForwardProcessingResult result, ProtocolContext context, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class DispatcherTakingSink : IForwardSink
+    {
+        public DispatcherTakingSink(ProtocolDispatcher dispatcher) { }
+        public Task AcceptAsync(ForwardProcessingResult result, ProtocolContext context, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class HandlersTakingSink : IForwardSink
+    {
+        public HandlersTakingSink(IEnumerable<IProtocolHandler> handlers) { }
+        public Task AcceptAsync(ForwardProcessingResult result, ProtocolContext context, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class ForwardHandlerTakingSink : IForwardSink
+    {
+        public ForwardHandlerTakingSink(ForwardHandler handler) { }
+        public Task AcceptAsync(ForwardProcessingResult result, ProtocolContext context, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class DispatcherTakingRecipientRegistry : IForwardRecipientRegistry
+    {
+        public DispatcherTakingRecipientRegistry(ProtocolDispatcher dispatcher) { }
+        public ValueTask<bool> IsRegisteredAsync(string recipientDid, CancellationToken ct) => ValueTask.FromResult(false);
+    }
+
+    private sealed class DispatcherTakingRoutingKeyProvider : IRecipientRoutingKeyProvider
+    {
+        public DispatcherTakingRoutingKeyProvider(ProtocolDispatcher dispatcher) { }
+        public ValueTask<IReadOnlyList<Jwk>> GetAsync(string recipientDid, CancellationToken ct) => ValueTask.FromResult<IReadOnlyList<Jwk>>(Array.Empty<Jwk>());
     }
 }

@@ -785,10 +785,10 @@ public sealed class ForwardHandlerTests
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────
 
-    private static Message Forward(string next, long? expires = null)
+    internal static Message Forward(string next, long? expires = null)
         => ForwardMessage.Create(Mediator, next, new[] { Inner }, expiresTimeEpochSeconds: expires);
 
-    private sealed class Harness : IAsyncDisposable
+    internal sealed class Harness : IAsyncDisposable
     {
         private readonly ProtocolDispatcher _dispatcher;
 
@@ -797,6 +797,8 @@ public sealed class ForwardHandlerTests
         public CapturingSink Sink { get; } = new();
         public CapturingLogger Logger { get; } = new();
         public CountingRegistry Registry { get; }
+        /// <summary>The directory behind <see cref="Registry"/>, holding <c>did:example:bob</c>.</summary>
+        public InMemoryForwardRecipientRegistry Recipients { get; }
         public ForwardHandler Handler { get; }
         public InMemoryThreadStateStore Threads { get; } = new();
 
@@ -805,16 +807,17 @@ public sealed class ForwardHandlerTests
             ForwardProcessorOptions? processorOptions = null,
             ILogger<ForwardHandler>? logger = null,
             int capacity = ForwardHandler.DefaultCapacity,
-            TimeSpan? shutdownGrace = null)
+            TimeSpan? shutdownGrace = null,
+            long byteBudget = ForwardHandler.DefaultByteBudget)
         {
             Options = new DidCommOptions { Clock = () => Now };
             configure?.Invoke(Options);
-            var inner = new InMemoryForwardRecipientRegistry();
-            inner.Register(Bob);
-            Registry = new CountingRegistry(inner);
+            Recipients = new InMemoryForwardRecipientRegistry();
+            Recipients.Register(Bob);
+            Registry = new CountingRegistry(Recipients);
             Handler = new ForwardHandler(
                 NewProcessor(processorOptions, didCommOptions: Options),
-                Sink, Registry, logger ?? Logger, capacity, shutdownGrace);
+                Sink, Registry, logger ?? Logger, capacity, shutdownGrace, byteBudget);
             var registry = new ProtocolHandlerRegistry();
             registry.Register(Handler);
             _dispatcher = new ProtocolDispatcher(registry, Threads);
@@ -834,7 +837,7 @@ public sealed class ForwardHandlerTests
         }
     }
 
-    private sealed class CapturingSink : IForwardSink
+    internal sealed class CapturingSink : IForwardSink
     {
         private int _count;
         public int Count => Volatile.Read(ref _count);
@@ -860,7 +863,7 @@ public sealed class ForwardHandlerTests
         }
     }
 
-    private sealed class CountingRegistry : IForwardRecipientRegistry
+    internal sealed class CountingRegistry : IForwardRecipientRegistry
     {
         private readonly IForwardRecipientRegistry _inner;
         private int _calls;
@@ -887,7 +890,7 @@ public sealed class ForwardHandlerTests
 
     internal sealed record LogEntry(LogLevel Level, IReadOnlyDictionary<string, object?> State, string Formatted, Exception? Exception);
 
-    private sealed class CapturingLogger : ILogger<ForwardHandler>
+    internal sealed class CapturingLogger : ILogger<ForwardHandler>
     {
         public ConcurrentQueue<LogEntry> Entries { get; } = new();
         public IEnumerable<LogEntry> Warnings => Entries.Where(e => e.Level == LogLevel.Warning);

@@ -151,7 +151,9 @@ public sealed class ForwardProcessor
     /// <param name="unpacked">The unpack outcome of the inbound envelope — envelope metadata included, so the FR-ROUTE-11 posture can be judged.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ConsistencyException">The message is not a <c>forward</c>; or the envelope was not encrypted (plaintext or signed-only); or it was not decrypted with a key this mediator holds (no <see cref="UnpackResult.RecipientKid"/>); or the forward carries more than one attachment or an attachment with no data (FR-ROUTE-05/11). None of these messages quote wire values.</exception>
-    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, or its attachment's <c>data.base64</c> is not base64.</exception>
+    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
+    /// <exception cref="DidResolutionException">Rewrap mode only: the next hop resolves to no usable <c>keyAgreement</c> key.</exception>
+    /// <exception cref="CryptoException">Rewrap mode or extra routing keys: the onward envelope could not be built.</exception>
     public async Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(unpacked);
@@ -193,7 +195,7 @@ public sealed class ForwardProcessor
 
         if (_options.Mode == RewrapMode.ReanoncryptToNext)
         {
-            var rewrapped = await RewrapToNextAsync(innerPayloadBytes, next, ct).ConfigureAwait(false);
+            var rewrapped = await ReEmbedAsync(() => RewrapToNextAsync(innerPayloadBytes, next, ct)).ConfigureAwait(false);
             return new ForwardProcessingResult(next, rewrapped, expiresTime, delay) { NotBefore = notBefore };
         }
 
@@ -206,11 +208,32 @@ public sealed class ForwardProcessor
             : await _routingKeys.GetAsync(subject, ct).ConfigureAwait(false);
         if (extra.Count > 0)
         {
-            var wrapped = await WrapForExtraKeysAsync(innerPayloadBytes, next, extra, ct).ConfigureAwait(false);
+            var wrapped = await ReEmbedAsync(() => WrapForExtraKeysAsync(innerPayloadBytes, next, extra, ct)).ConfigureAwait(false);
             return new ForwardProcessingResult(next, wrapped, expiresTime, delay) { NotBefore = notBefore };
         }
 
         return new ForwardProcessingResult(next, innerPayloadBytes, expiresTime, delay) { NotBefore = notBefore };
+    }
+
+    /// <summary>
+    /// Run a transformation that re-embeds the onward payload in a fresh forward. The forward
+    /// builder parses the payload as JSON and requires a non-empty <c>to</c>, and it reports both
+    /// as <see cref="ArgumentException"/> — the right type for its own callers, but here both inputs
+    /// came off the wire (the attachment bytes; <c>next</c> reduced to its DID part), so a peer's
+    /// violation surfaces as the documented malformed-input type and never as a raw argument fault.
+    /// </summary>
+    /// <param name="transform">The rewrap or extra-key wrap to run.</param>
+    private static async Task<byte[]> ReEmbedAsync(Func<Task<byte[]>> transform)
+    {
+        try
+        {
+            return await transform().ConfigureAwait(false);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new MalformedMessageException(
+                "Forward payload cannot be re-wrapped for the next hop: the attachment is not a JSON-serialized envelope, or 'next' has no DID part (FR-ROUTE-01).", ex);
+        }
     }
 
     private static byte[] ExtractAttachmentBytes(Messages.Attachment attachment)

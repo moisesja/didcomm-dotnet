@@ -173,7 +173,14 @@ public sealed class DidCommBuilder
     /// <see cref="ProtocolDispatcher"/> or <see cref="IFeatureProvider"/>. An <see cref="IForwardSink"/>
     /// implementation MUST keep it that way: never take the registry or the dispatcher in its
     /// constructor — inject <see cref="IServiceProvider"/> and resolve at call time — or the first
-    /// resolution of the registry deadlocks on itself.
+    /// resolution of the registry deadlocks on itself: the container cannot see the cycle (both
+    /// ends are factories) and parks the resolving thread forever, so the first inbound request
+    /// hangs and every later resolution of the registry with it. This method therefore refuses a
+    /// host-registered <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or
+    /// <see cref="IRecipientRoutingKeyProvider"/> whose implementation type takes the registry,
+    /// the dispatcher or a protocol handler in a public constructor. A collaborator registered
+    /// through a factory, or one that closes the cycle through a further dependency, cannot be
+    /// inspected and stays the host's responsibility.
     /// </para>
     /// <para>
     /// The container disposes the singleton <see cref="ForwardHandler"/> with the provider, which
@@ -182,10 +189,14 @@ public sealed class DidCommBuilder
     /// </remarks>
     /// <param name="options">Pass-through / rewrap / extra routing keys; <c>null</c> for the defaults (pass-through, no extras). A positional record, so an instance rather than a callback.</param>
     /// <exception cref="ArgumentException">When <paramref name="options"/> combines rewrap mode with extra routing keys (<see cref="ForwardProcessorOptions.Validate"/>).</exception>
+    /// <exception cref="InvalidOperationException">When a host-registered <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or <see cref="IRecipientRoutingKeyProvider"/> implementation type takes <see cref="ProtocolHandlerRegistry"/>, <see cref="ProtocolDispatcher"/> or an <see cref="IProtocolHandler"/> in a public constructor — the dependency cycle that would hang the first resolution.</exception>
     public DidCommBuilder AddRoutingMediator(ForwardProcessorOptions? options = null)
     {
         var resolved = options ?? new ForwardProcessorOptions();
         resolved.Validate(); // fail fast at registration, not on first dispatch inside the registry factory
+        RejectRegistryCycle(typeof(IForwardSink));
+        RejectRegistryCycle(typeof(IForwardRecipientRegistry));
+        RejectRegistryCycle(typeof(IRecipientRoutingKeyProvider));
         Services.TryAddSingleton(resolved);
         Services.TryAddSingleton<IRecipientRoutingKeyProvider>(sp =>
             new StaticRecipientRoutingKeyProvider(sp.GetRequiredService<ForwardProcessorOptions>().ExtraRecipientRoutingKeys));
@@ -199,6 +210,49 @@ public sealed class DidCommBuilder
             sp.GetRequiredService<IRecipientRoutingKeyProvider>(),
             sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DidCommOptions>>().Value));
         return AddProtocol<ForwardHandler>();
+    }
+
+    /// <summary>
+    /// Refuse a <see cref="ForwardHandler"/> collaborator whose public constructor would close the
+    /// L-017 cycle: the registry factory realizes <see cref="ForwardHandler"/>, which realizes the
+    /// collaborator, which would need the registry (or the dispatcher, which needs the registry; or
+    /// a handler, which the registry is realizing) — a hang the container never diagnoses.
+    /// </summary>
+    /// <param name="collaborator">The collaborator service type registered before <see cref="AddRoutingMediator"/>.</param>
+    private void RejectRegistryCycle(Type collaborator)
+    {
+        foreach (var descriptor in Services)
+        {
+            if (descriptor.ServiceType != collaborator || descriptor.IsKeyedService)
+                continue;
+            if (descriptor.ImplementationType is not { } implementation)
+                continue; // an instance cannot cycle; a factory cannot be inspected
+
+            foreach (var constructor in implementation.GetConstructors())
+            {
+                foreach (var parameter in constructor.GetParameters())
+                {
+                    if (!ClosesRegistryCycle(parameter.ParameterType))
+                        continue;
+                    throw new InvalidOperationException(
+                        $"{implementation.FullName}, registered as {collaborator.Name}, takes {parameter.ParameterType.Name} in a constructor. " +
+                        "ForwardHandler is built inside the ProtocolHandlerRegistry factory, so a collaborator that needs the registry, the " +
+                        "dispatcher or a protocol handler at construction closes a dependency cycle the container cannot detect, and the first " +
+                        "resolution hangs. Inject IServiceProvider and resolve it when AcceptAsync (or the lookup) runs instead.");
+                }
+            }
+        }
+    }
+
+    private static bool ClosesRegistryCycle(Type parameterType)
+    {
+        if (parameterType == typeof(ProtocolHandlerRegistry) || parameterType == typeof(ProtocolDispatcher))
+            return true;
+        if (typeof(IProtocolHandler).IsAssignableFrom(parameterType))
+            return true;
+        return parameterType.IsGenericType
+            && parameterType.GetGenericTypeDefinition() == typeof(IEnumerable<>)
+            && typeof(IProtocolHandler).IsAssignableFrom(parameterType.GetGenericArguments()[0]);
     }
 
     /// <summary>

@@ -34,8 +34,11 @@ namespace DidComm.Protocols.Routing;
 /// never holds a request. Detaching once here means every sink runs after the 202 on every
 /// transport instead of each sink detaching itself. The queued work runs on this handler's own
 /// shutdown token, never the request token: a client that aborts after the 202 must not cancel
-/// the relay. A saturated queue (<see cref="DefaultCapacity"/> outstanding) drops the newest
-/// forward with a rate-limited Warning — fail closed, never block the request.
+/// the relay. The queue is bounded twice — <see cref="DefaultCapacity"/> forwards queued or in
+/// flight, and <see cref="DefaultByteBudget"/> of their plaintext UTF-8 bytes, because each queued
+/// item pins the decoded message graph (attachment included) and the item cap alone would let a
+/// sender park 1024 × <c>MaxReceiveBytes</c> behind a slow sink. A forward that would exceed
+/// either bound is dropped with a rate-limited Warning — fail closed, never block the request.
 /// </para>
 /// <para>
 /// <strong>Expiry twice, on purpose.</strong> Inline, so an expired forward never costs a queue slot
@@ -56,6 +59,13 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     /// <summary>Default bound on forwards queued or in flight behind the 202.</summary>
     internal const int DefaultCapacity = 1024;
 
+    /// <summary>
+    /// Default bound on the plaintext UTF-8 bytes of the forwards queued or in flight (64 MiB): the
+    /// same exact-plaintext accounting <c>ObserverDelivery</c> uses, so the queue honours
+    /// <c>MaxReceiveBytes</c> in aggregate and not only per message (epic #88, D7).
+    /// </summary>
+    internal const long DefaultByteBudget = 64L * 1024 * 1024;
+
     private static readonly TimeSpan DefaultShutdownGrace = TimeSpan.FromSeconds(5);
     private const long DropLogEvery = 1000;
 
@@ -64,6 +74,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private readonly IForwardRecipientRegistry _registry;
     private readonly ILogger<ForwardHandler>? _logger;
     private readonly int _capacity;
+    private readonly long _byteBudget;
     private readonly TimeSpan _shutdownGrace;
     private readonly Channel<WorkItem> _channel;
     private readonly object _gate = new();
@@ -74,13 +85,15 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _pump;
     private int _outstandingItems;
+    private long _outstandingBytes;
     private long _dropped;
     private int _shutdownStarted;
     private int _discardedAtShutdown;
 
     // The dispatcher-built ProtocolContext (an immutable record) is everything the detached work
     // needs: the UnpackResult, the options/clock and the facade. The request token is NOT stored.
-    private sealed record WorkItem(ProtocolContext? Context, TaskCompletionSource? Barrier);
+    // Bytes is the plaintext UTF-8 charge the item holds against the byte budget until released.
+    private sealed record WorkItem(ProtocolContext? Context, int Bytes, TaskCompletionSource? Barrier);
 
     /// <summary>Create the handler with the default queue bound and shutdown grace.</summary>
     /// <param name="processor">The mediator's forward processor (pass-through / extra wraps / rewrap).</param>
@@ -94,26 +107,30 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         ILogger<ForwardHandler>? logger = null)
         : this(processor, sink, registry, logger, DefaultCapacity, shutdownGrace: null) { }
 
-    /// <summary>Test seam: a handler with an explicit queue bound and shutdown grace.</summary>
+    /// <summary>Test seam: a handler with explicit queue bounds and shutdown grace.</summary>
     /// <param name="processor">The mediator's forward processor.</param>
     /// <param name="sink">Where processed forwards go.</param>
     /// <param name="registry">The recipients this mediator relays for.</param>
     /// <param name="logger">Optional logger.</param>
     /// <param name="capacity">Maximum forwards queued or in flight; the newest is dropped beyond it.</param>
     /// <param name="shutdownGrace">How long <see cref="DisposeAsync"/> waits for the pump; <c>null</c> for 5 seconds.</param>
+    /// <param name="byteBudget">Maximum plaintext UTF-8 bytes queued or in flight; a forward that would exceed it is dropped.</param>
     internal ForwardHandler(
         ForwardProcessor processor,
         IForwardSink sink,
         IForwardRecipientRegistry registry,
         ILogger<ForwardHandler>? logger,
         int capacity,
-        TimeSpan? shutdownGrace)
+        TimeSpan? shutdownGrace,
+        long byteBudget = DefaultByteBudget)
     {
         ArgumentNullException.ThrowIfNull(processor);
         ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(registry);
         if (capacity < 1 || capacity == int.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(capacity));
+        if (byteBudget < 1)
+            throw new ArgumentOutOfRangeException(nameof(byteBudget));
 
         _shutdownGrace = shutdownGrace ?? DefaultShutdownGrace;
         if (_shutdownGrace <= TimeSpan.Zero && _shutdownGrace != Timeout.InfiniteTimeSpan)
@@ -124,6 +141,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         _registry = registry;
         _logger = logger;
         _capacity = capacity;
+        _byteBudget = byteBudget;
         _shutdownToken = _shutdown.Token; // capture before the pump can start
         // One extra physical slot is reserved for the serialized Flush barrier. Forward admission is
         // independently capped at `capacity`, including the in-flight item.
@@ -157,6 +175,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         ArgumentNullException.ThrowIfNull(context);
         ct.ThrowIfCancellationRequested();
 
+        int bytes;
         try
         {
             // (a) A forward at all, and well formed. Malformed (missing next/attachments, next over
@@ -199,6 +218,14 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 return null;
             }
 
+            // (e) Size the forward for the byte budget before the registration lookup, so the
+            //     work done inline is the same whether or not `next` is registered: the exact
+            //     plaintext length the unpack path preserved (no re-serialization); a host-built
+            //     synthetic result is serialized once. A sizing failure is a drop, never a throw.
+            bytes = InboundMessageSnapshot.TryGetFor(message, out var snapshot)
+                ? snapshot.Utf8ByteCount
+                : InboundMessageSnapshot.CreateFallback(context.Received).Utf8ByteCount;
+
             if (!await _registry.IsRegisteredAsync(subject, ct).ConfigureAwait(false))
             {
                 SafeLogWarning(null, "Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11).", message.Id);
@@ -221,11 +248,16 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         var accepted = false;
         lock (_gate)
         {
-            if (Volatile.Read(ref _shutdownStarted) == 0 && _outstandingItems < _capacity)
+            if (Volatile.Read(ref _shutdownStarted) == 0
+                && _outstandingItems < _capacity
+                && bytes <= _byteBudget - _outstandingBytes)
             {
-                accepted = _channel.Writer.TryWrite(new WorkItem(context, Barrier: null));
+                accepted = _channel.Writer.TryWrite(new WorkItem(context, bytes, Barrier: null));
                 if (accepted)
+                {
                     _outstandingItems++;
+                    _outstandingBytes += bytes;
+                }
             }
         }
 
@@ -252,7 +284,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 // cancelled token. Discard this one and stop; the finally drains the rest (fail closed).
                 if (shutdown.IsCancellationRequested)
                 {
-                    ReleaseSlot();
+                    ReleaseSlot(item.Bytes);
                     Interlocked.Increment(ref _discardedAtShutdown);
                     break;
                 }
@@ -263,7 +295,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 }
                 finally
                 {
-                    ReleaseSlot();
+                    ReleaseSlot(item.Bytes);
                 }
             }
         }
@@ -330,7 +362,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 ThrowIfShutdown();
                 // Admission is capped at _capacity while the channel has _capacity + 1 physical
                 // slots, and Flush calls are serialized. The barrier therefore fits.
-                if (!_channel.Writer.TryWrite(new WorkItem(Context: null, Barrier: barrier)))
+                if (!_channel.Writer.TryWrite(new WorkItem(Context: null, Bytes: 0, Barrier: barrier)))
                     throw new InvalidOperationException("Forward flush barrier could not be admitted despite its reserved channel slot.");
             }
 
@@ -349,6 +381,16 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         {
             lock (_gate)
                 return _outstandingItems;
+        }
+    }
+
+    /// <summary>Test/diagnostic seam: plaintext UTF-8 bytes charged against the byte budget right now.</summary>
+    internal long OutstandingBytes
+    {
+        get
+        {
+            lock (_gate)
+                return _outstandingBytes;
         }
     }
 
@@ -434,17 +476,20 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             }
 
             discarded++;
-            ReleaseSlot();
+            ReleaseSlot(item.Bytes);
         }
 
         if (discarded > 0)
             Interlocked.Add(ref _discardedAtShutdown, discarded);
     }
 
-    private void ReleaseSlot()
+    private void ReleaseSlot(int bytes)
     {
         lock (_gate)
+        {
             _outstandingItems--;
+            _outstandingBytes -= bytes;
+        }
     }
 
     private void Drop(string messageId)
@@ -455,9 +500,10 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
         SafeLogWarning(
             null,
-            "Forward {MessageId} dropped: handler queue saturated (capacity {Capacity}); fail closed. Total dropped: {Dropped}.",
+            "Forward {MessageId} dropped: handler queue saturated (capacity {Capacity} forwards, {ByteBudget} plaintext bytes); fail closed. Total dropped: {Dropped}.",
             messageId,
             _capacity,
+            _byteBudget,
             dropped);
     }
 
