@@ -616,7 +616,7 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <param name="Endpoint">The mapped endpoint's state (drop-log rate limiters).</param>
     /// <param name="Guard">The FR-RR-08 replay guard.</param>
     /// <param name="Registry">The session registry; <c>null</c> when this connection can never open a session.</param>
-    /// <param name="MaxPendingPushes">The writer queue depth for a session on this connection.</param>
+    /// <param name="MaxPendingPushes">The push bound (pushes being packed or queued) and writer queue depth for a session on this connection.</param>
     private sealed record WebSocketReturnRoute(
         InboundAdmissionEndpoint Endpoint,
         IInboundReplayGuard Guard,
@@ -838,8 +838,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             var mayClose = true;
             if (session is not null)
             {
-                // Unregister first (raises SessionClosed(Unregistered); a no-op when the registry
-                // already evicted it), then stop the writer, so a close never overlaps a send.
+                // Unregister first (its SessionClosed(Unregistered) is raised on the thread pool, so
+                // no subscriber delays this path; a no-op when the registry already evicted it), then
+                // stop the writer, so a close never overlaps a send.
                 try
                 {
                     returnRoute.Registry!.Unregister(session);

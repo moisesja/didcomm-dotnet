@@ -271,6 +271,166 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Ws_pushes_beyond_the_bound_answer_false_before_any_snapshot_or_key_resolution()
+    {
+        // PR #103 review (P2): capacity used to be checked only at TryWrite, after the snapshot and
+        // the awaited pack, so with the queue full every extra push still snapshotted, resolved keys
+        // and encrypted — and stayed pending on a slow resolver although there was no room for it
+        // (20 extra sends → 20 resolver calls, all false once resolution resumed). A push now
+        // reserves a slot before the snapshot; without one it answers false at once.
+        const int Producers = 20;
+        var socket = new FakeWebSocket { SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        using var connection = new CancellationTokenSource();
+        var session = NewWebSocketSession(socket, connection, maxPendingPushes: 2);
+        session.Start();
+
+        (await session.TrySendAsync(ToAlice("in-flight"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout); // the writer took it and is parked inside SendAsync
+        (await session.TrySendAsync(ToAlice("queued-1"), default)).Should().BeTrue();
+        (await session.TrySendAsync(ToAlice("queued-2"), default)).Should().BeTrue();
+
+        // From here key resolution parks on a gate and is counted: an extra push that reached the
+        // pack would show up as a call and would not complete while the gate is closed.
+        var callsBefore = _keys.Calls;
+        var resolverGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _keys.Gate = resolverGate;
+        var barrier = new AsyncBarrier(Producers, Timeout);
+        var extras = Enumerable.Range(0, Producers).Select(i => ToAlice("extra-" + i)).ToArray();
+        var sends = extras.Select(extra => Task.Run(async () =>
+        {
+            await barrier.ArriveAndWaitAsync();
+            return await session.TrySendAsync(extra, default);
+        })).ToArray();
+
+        bool[] results;
+        try
+        {
+            results = await Task.WhenAll(sends).WaitAsync(Timeout);
+        }
+        finally
+        {
+            // Unparks any extra push that did reach the resolver, so a failing run ends cleanly.
+            _keys.Gate = null;
+            resolverGate.TrySetResult();
+        }
+
+        barrier.Arrived.Should().Be(Producers, "every producer was released together (L-044)");
+        results.Should().HaveCount(Producers).And.OnlyContain(r => !r, "no push slot was free: two queued, one in the writer's send");
+        _keys.Calls.Should().Be(callsBefore, "no extra push reached key resolution (or the snapshot before it)");
+        socket.Frames.Should().BeEmpty("the writer was still parked in its first send while every extra push answered");
+        foreach (var extra in extras)
+            _logs.Entries.Should().ContainSingle(e => e.Contains(extra.Id, StringComparison.Ordinal) && e.Contains("no free push slot"));
+
+        // Nothing extra was queued: after the parked send and the two queued pushes, the next frame
+        // the FIFO writer writes is a sentinel pushed now.
+        socket.SendGate.SetResult();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => socket.Frames.Count == 3, Timeout)).Should().BeTrue();
+        (await session.TrySendAsync(ToAlice("sentinel"), default)).Should().BeTrue("the writer freed the slots as it dequeued");
+        (await ReturnRouteTestHost.WaitUntilAsync(() => socket.Frames.Count == 4, Timeout)).Should().BeTrue();
+        (await session.StopAsync()).Should().BeTrue();
+        (await FrameTypesAsync(socket)).Should().Equal(TestType("in-flight"), TestType("queued-1"), TestType("queued-2"), TestType("sentinel"));
+        NoLeaks();
+    }
+
+    [Fact]
+    public async Task Ws_a_refused_or_failed_push_releases_its_slot()
+    {
+        // MaxPendingPushes = 1 and the writer parked in a send: each push below holds the one slot
+        // while it is snapshotted and packed. An addressing refusal, a pack failure and a downgrade
+        // that lands during the pack must each give it back — the valid push after them is queued,
+        // and the bound still holds after that.
+        var socket = new FakeWebSocket { SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        using var connection = new CancellationTokenSource();
+        var session = NewWebSocketSession(socket, connection, maxPendingPushes: 1);
+        session.Start();
+        (await session.TrySendAsync(ToAlice("in-flight"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout);
+
+        (await session.TrySendAsync(Message(_serverDid, _carol.Did), default)).Should().BeFalse("wrong to");
+        _keys.FailNext = true;
+        (await session.TrySendAsync(ToAlice("pack-fails"), default)).Should().BeFalse("the pack failed");
+
+        // A downgrade applied while the pack is parked: the packed frame is refused after the pack.
+        var callsBefore = _keys.Calls;
+        var resolverGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _keys.Gate = resolverGate;
+        var downgraded = session.TrySendAsync(ToAlice("downgraded-during-pack"), default).AsTask();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => _keys.Calls > callsBefore, Timeout)).Should().BeTrue("the push is inside the pack");
+        session.ApplyHeader(ReturnRouteHeader.None);
+        _keys.Gate = null;
+        resolverGate.SetResult();
+        (await downgraded.WaitAsync(Timeout)).Should().BeFalse("the session was downgraded before the frame could be queued");
+        session.ApplyHeader(new ReturnRouteHeader(ReturnRouteMode.All, null));
+
+        (await session.TrySendAsync(ToAlice("accepted"), default)).Should().BeTrue("every failed push gave its slot back");
+        (await session.TrySendAsync(ToAlice("over-the-bound"), default)).Should().BeFalse("the one slot is now held by the queued push");
+
+        socket.SendGate.SetResult();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => socket.Frames.Count == 2, Timeout)).Should().BeTrue();
+        (await session.StopAsync()).Should().BeTrue();
+        (await FrameTypesAsync(socket)).Should().Equal(TestType("in-flight"), TestType("accepted"));
+        NoLeaks();
+    }
+
+    [Fact]
+    public async Task Ws_a_cancelled_push_releases_its_slot()
+    {
+        var socket = new FakeWebSocket { SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        using var connection = new CancellationTokenSource();
+        var session = NewWebSocketSession(socket, connection, maxPendingPushes: 1);
+        session.Start();
+        (await session.TrySendAsync(ToAlice("in-flight"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout);
+
+        var callsBefore = _keys.Calls;
+        var resolverGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _keys.Gate = resolverGate;
+        using var cts = new CancellationTokenSource();
+        var cancelled = session.TrySendAsync(ToAlice("cancelled"), cts.Token).AsTask();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => _keys.Calls > callsBefore, Timeout)).Should().BeTrue("the push holds the slot inside the pack");
+        (await session.TrySendAsync(ToAlice("while-held"), default).AsTask().WaitAsync(Timeout)).Should().BeFalse("the parked push holds the only slot");
+
+        await cts.CancelAsync();
+        var awaitCancelled = async () => await cancelled.WaitAsync(Timeout);
+        await awaitCancelled.Should().ThrowAsync<OperationCanceledException>("cancellation on the caller's token propagates");
+        _keys.Gate = null;
+        resolverGate.SetResult();
+
+        (await session.TrySendAsync(ToAlice("after"), default)).Should().BeTrue("the cancelled push released its slot");
+        socket.SendGate.SetResult();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => socket.Frames.Count == 2, Timeout)).Should().BeTrue();
+        (await session.StopAsync()).Should().BeTrue();
+        (await FrameTypesAsync(socket)).Should().Equal(TestType("in-flight"), TestType("after"));
+    }
+
+    [Fact]
+    public async Task Ws_the_writer_frees_a_slot_for_each_push_it_dequeues()
+    {
+        // The bound counts pushes being packed or queued; the frame inside the socket send is not
+        // counted. Each frame the writer takes off the queue frees one slot.
+        var socket = new FakeWebSocket { SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        using var connection = new CancellationTokenSource();
+        var session = NewWebSocketSession(socket, connection, maxPendingPushes: 1);
+        session.Start();
+
+        (await session.TrySendAsync(ToAlice("p1"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout);
+        (await session.TrySendAsync(ToAlice("p2"), default)).Should().BeTrue("taking p1 off the queue freed its slot");
+        (await session.TrySendAsync(ToAlice("p3"), default)).Should().BeFalse("p2 holds the only slot");
+
+        socket.SendGate.SetResult();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => socket.Frames.Count == 2, Timeout)).Should().BeTrue();
+        for (var i = 4; i <= 6; i++)
+        {
+            var frames = socket.Frames.Count;
+            (await session.TrySendAsync(ToAlice("p" + i), default)).Should().BeTrue("the drained writer frees a slot for push {0}", i);
+            (await ReturnRouteTestHost.WaitUntilAsync(() => socket.Frames.Count == frames + 1, Timeout)).Should().BeTrue();
+        }
+        (await session.StopAsync()).Should().BeTrue();
+        (await FrameTypesAsync(socket)).Should().Equal(TestType("p1"), TestType("p2"), TestType("p4"), TestType("p5"), TestType("p6"));
+    }
+
+    [Fact]
     public async Task Ws_eviction_discards_queued_pushes_sends_one_normal_close_and_arms_the_backstop()
     {
         var socket = new FakeWebSocket { SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
@@ -545,6 +705,15 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
         => new(socket, _client, _alice.Did, _serverDid, maxPendingPushes, connection, _logs.CreateLogger("test"), closeGrace ?? TimeSpan.FromSeconds(2));
 
     private static string TestType(string name) => "https://didcomm.org/test-rr/1.0/" + name;
+
+    /// <summary>The message types of the frames the fake socket received, in write order.</summary>
+    private async Task<IReadOnlyList<string>> FrameTypesAsync(FakeWebSocket socket)
+    {
+        var types = new List<string>();
+        foreach (var frame in socket.Frames)
+            types.Add((await _alice.Client.UnpackAsync(Encoding.UTF8.GetString(frame))).Message.Type);
+        return types;
+    }
 
     private Message ToAlice(string name) => Message(_serverDid, _alice.Did, name: name);
 

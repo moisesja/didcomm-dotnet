@@ -17,15 +17,20 @@ namespace DidComm.Transports.ReturnRoute;
 /// because the registry has no handle on sockets.
 /// </para>
 /// <para>
-/// Events are raised outside any lock, after the state change, each subscriber in its own
-/// <c>try</c>/<c>catch</c> (the exception type name is logged, never rethrown), so a subscriber can
-/// neither corrupt the registry nor affect the registrant. Events of one call are raised in the
-/// order documented on it, but events of concurrent calls are not ordered with respect to each
-/// other: under concurrent registrations for one peer a subscriber can see
-/// <see cref="SessionClosed"/> (<see cref="SessionCloseReason.Evicted"/>) for a session before that
-/// session's <see cref="SessionOpened"/>. Keep per-session state on
-/// <see cref="IReturnRouteSession.Closed"/> (a callback registered on an already-cancelled token
-/// runs at once), or confirm with <see cref="Find"/>, rather than on event order.
+/// Events never run on the caller's thread. <see cref="Register"/> and <see cref="Unregister"/>
+/// change the state and return without invoking any subscriber; the events of that call are raised
+/// afterwards on a thread-pool thread, in the order documented on the call, each subscriber in its
+/// own <c>try</c>/<c>catch</c> (the exception type name is logged, never rethrown). So a subscriber
+/// can neither corrupt the registry nor affect the registrant: one that blocks or never returns
+/// holds a pool thread and delays only the later notifications of the same call — never the
+/// registration, the eviction, the registrant's closing of an evicted session, or the
+/// notifications of another call. Events of different calls are not ordered with respect to each
+/// other: a subscriber can see <see cref="SessionClosed"/> for a session before that session's
+/// <see cref="SessionOpened"/>, and by the time an event arrives the registry may have changed
+/// again. Keep per-session state on <see cref="IReturnRouteSession.Closed"/> — the session's own,
+/// authoritative signal, cancelled when the session ends without waiting for any event (a callback
+/// registered on an already-cancelled token runs at once) — or confirm with <see cref="Find"/>,
+/// rather than on event order or timing.
 /// </para>
 /// <para>
 /// Dependency rule: an implementation must not take <c>ProtocolHandlerRegistry</c>,
@@ -41,17 +46,21 @@ public interface IReturnRouteSessionRegistry
 {
     /// <summary>
     /// Register <paramref name="session"/> under its <see cref="IReturnRouteSession.PeerDid"/>.
-    /// Never throws for a bound: the decision is in the result. Raises
-    /// <see cref="SessionClosed"/> with <see cref="SessionCloseReason.Evicted"/> for an evicted
-    /// session and then <see cref="SessionOpened"/> for this one.
+    /// Never throws for a bound: the decision is in the result. Returns without waiting for any
+    /// subscriber; when the session was registered, <see cref="SessionClosed"/> with
+    /// <see cref="SessionCloseReason.Evicted"/> for an evicted session and then
+    /// <see cref="SessionOpened"/> for this one are raised on a thread-pool thread, which may run
+    /// before or after this method returns.
     /// </summary>
     /// <param name="session">The session to register; its <see cref="IReturnRouteSession.PeerDid"/> must be a bare DID subject.</param>
     SessionRegistration Register(IReturnRouteSession session);
 
     /// <summary>
-    /// Forget <paramref name="session"/>. Returns <c>true</c> when it was registered, raising
-    /// <see cref="SessionClosed"/> with <see cref="SessionCloseReason.Unregistered"/>; <c>false</c>
-    /// (and no event) when it was not — including when the registry already evicted it.
+    /// Forget <paramref name="session"/>. Returns <c>true</c> when it was registered — then
+    /// <see cref="SessionClosed"/> with <see cref="SessionCloseReason.Unregistered"/> is raised on a
+    /// thread-pool thread, which may run before or after this method returns; this method never
+    /// waits for it — and <c>false</c> (and no event) when it was not, including when the registry
+    /// already evicted it.
     /// </summary>
     /// <param name="session">The session to forget.</param>
     bool Unregister(IReturnRouteSession session);
@@ -67,9 +76,15 @@ public interface IReturnRouteSessionRegistry
     /// <summary>The number of registered sessions.</summary>
     int Count { get; }
 
-    /// <summary>Raised after a session was registered; <see cref="ReturnRouteSessionEventArgs.Reason"/> is <see cref="SessionCloseReason.None"/>.</summary>
+    /// <summary>
+    /// Raised on a thread-pool thread, never the registering one, after a session was registered;
+    /// <see cref="ReturnRouteSessionEventArgs.Reason"/> is <see cref="SessionCloseReason.None"/>.
+    /// </summary>
     event EventHandler<ReturnRouteSessionEventArgs>? SessionOpened;
 
-    /// <summary>Raised after a session left the registry, with why.</summary>
+    /// <summary>
+    /// Raised on a thread-pool thread, never the one that removed the session, after a session left
+    /// the registry, with why. For an eviction the registrant may already have closed the session.
+    /// </summary>
     event EventHandler<ReturnRouteSessionEventArgs>? SessionClosed;
 }

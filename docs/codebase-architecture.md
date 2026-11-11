@@ -247,8 +247,9 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
 - Opened only when `AllowSameSocketReplies` is on, STOMP is off and the message is
   `SessionEligible`. `InboundAdmission.TryOpen` registers it — `RefusedTotalBound` or a throwing
   registry means the message is dispatched without a session — and `CloseEvicted` closes whatever
-  the per-peer bound evicted; the writer task starts once registered. Under STOMP no session ever
-  opens; one Information line per connection, at its first eligible message, says so.
+  the per-peer bound evicted, right after `Register` returns (no subscriber runs inside it); the
+  writer task starts once registered. Under STOMP no session ever opens; one Information line per
+  connection, at its first eligible message, says so.
 - The socket's (peer, local) pair is fixed by its first eligible message, even when the registry
   refused that session; only that pair may retry. The pair comparison always runs both ordinal
   compares (no early exit on an identity check).
@@ -257,9 +258,15 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
   malformed → `Mode = None`. No header → mode unchanged. A message from any other pair is
   dispatched with `Session = null` and never opens, re-binds or changes the session; a message
   that is not identity-eligible never touches it.
-- `TrySendAsync`: `false` without packing unless `Mode == All`; then snapshot, check, pack and
-  `TryWrite` to a bounded channel (`MaxPendingPushes`, one reader) — `false` when full, never
-  blocking the handler. The writer task is the only code that sends on or close-outputs the
+- `TrySendAsync`: `false` without packing unless `Mode == All`; then it reserves one of
+  `MaxPendingPushes` push slots (a lock-free decrement that never goes below zero) — `false` at
+  once when none is free, before any snapshot, key resolution or encryption; then snapshot, check,
+  pack and `TryWrite` to a bounded channel of the same depth (one reader, a second limit). Every
+  path that queues nothing gives the slot back (`try`/`finally`: refused addressing, failed
+  snapshot or pack, a downgrade or close during the pack, a refused write, cancellation); a queued
+  frame keeps it until the writer dequeues the frame, sent or discarded. So pushes reserved plus
+  frames queued never exceed `MaxPendingPushes`; the frame inside the socket send is not counted.
+  It never blocks the handler. The writer task is the only code that sends on or close-outputs the
   socket, and its "may I send?" check and the start of `SendAsync` share a lock with `ApplyHeader`
   and `RequestClose`, so nothing starts after a downgrade or a close was applied (a send already
   in flight completes).
@@ -271,12 +278,12 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
 - The receive loop keeps reading in `Open` and `CloseSent` — an evicted connection dispatches,
   without a session, what the peer sent before it saw the close — until the peer's close frame or
   the backstop. A closed session is never reopened on that socket.
-- Loop exit (`finally`): `Unregister` (raises `SessionClosed(Unregistered)`; a no-op after an
-  eviction), then `StopAsync` — waits up to the grace for the writer, then cancels a send stuck on
-  a peer that stopped reading and waits once more; a writer that still has not stopped means the
-  socket is aborted rather than closed — then the deferred close (`client closed`, or `1009` after
-  an oversized message), itself bounded by the grace and aborted on timeout. A close never
-  overlaps a send.
+- Loop exit (`finally`): `Unregister` (its `SessionClosed(Unregistered)` is raised on the thread
+  pool, so no subscriber delays this path; a no-op after an eviction), then `StopAsync` — waits up
+  to the grace for the writer, then cancels a send stuck on a peer that stopped reading and waits
+  once more; a writer that still has not stopped means the socket is aborted rather than closed —
+  then the deferred close (`client closed`, or `1009` after an oversized message), itself bounded
+  by the grace and aborted on timeout. A close never overlaps a send.
 
 Registry (`InMemoryReturnRouteSessionRegistry`):
 
@@ -288,9 +295,16 @@ Registry (`InMemoryReturnRouteSessionRegistry`):
   because replacing a peer's own session does not grow it, so a reconnecting peer is not locked
   out by a flood of other DIDs; otherwise the total at `MaxSessions` (default 4096) →
   `RefusedTotalBound`, nothing evicted; otherwise added.
-- Events after the lock: `SessionClosed(Evicted)` for an evicted session, then `SessionOpened`;
-  each subscriber in its own `try`/`catch`. Events of concurrent calls are not ordered with respect
-  to each other.
+- Events never run on the caller's thread. After the state change and outside the lock, a
+  `Register` / `Unregister` that changed something queues one work item
+  (`ThreadPool.UnsafeQueueUserWorkItem`, so no request `ExecutionContext` flows into subscribers;
+  the subscribers are captured when it is queued) and returns. The work item raises that call's
+  events in order — `SessionClosed(Evicted)` for an evicted session, then `SessionOpened` — each
+  subscriber in its own `try`/`catch` (type name logged). A subscriber that blocks holds one pool
+  thread and delays only its own call's later notifications — never the registration, the
+  endpoint's `CloseEvicted` and backstop, the receive loop's `finally` or another call's
+  notifications. Events of different calls are not ordered with respect to each other;
+  `IReturnRouteSession.Closed` is the authoritative per-session signal.
 - `Find(did)`: reduces a DID or DID URL to its subject and returns a snapshot, oldest first; empty
   for a non-DID. HTTP sessions never appear.
 

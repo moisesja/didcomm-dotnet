@@ -56,10 +56,13 @@ public interface IReturnRouteSession
     /// aborted; on a WebSocket, a socket that closes or is evicted. Returns <c>false</c>, and never throws
     /// (except <see cref="ArgumentNullException"/> and <see cref="OperationCanceledException"/> on
     /// <paramref name="ct"/>), when <see cref="Mode"/> is not <see cref="ReturnRouteMode.All"/>;
-    /// the session is closed; an HTTP session already holds a message; the WebSocket queue is
-    /// full; the message is not addressed to exactly <c>[</c><see cref="PeerDid"/><c>]</c> from
-    /// <see cref="LocalDid"/> (compared as DID subjects); or the snapshot or the pack failed (logged
-    /// by exception type name). The message is snapshotted before validation and packing, so a
+    /// the session is closed; an HTTP session already holds a message; a WebSocket session has no
+    /// free push slot (<see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> pushes are already
+    /// being packed or queued — checked before the snapshot, so such a call costs no snapshot, key
+    /// resolution or encryption); the message is not addressed to exactly
+    /// <c>[</c><see cref="PeerDid"/><c>]</c> from <see cref="LocalDid"/> (compared as DID subjects);
+    /// or the snapshot or the pack failed (logged by exception type name). The message is
+    /// snapshotted before validation and packing, so a
     /// caller that keeps mutating the instance cannot race the check; it is authcrypted from
     /// <see cref="LocalDid"/> to <see cref="PeerDid"/> with no forward wrapping.
     /// </summary>

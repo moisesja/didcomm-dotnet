@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DidComm.Messages;
 using DidComm.Transports.ReturnRoute;
 using AwesomeAssertions;
@@ -7,11 +8,14 @@ namespace DidComm.Tests.Transports.ReturnRoute;
 
 /// <summary>
 /// FR-RR-03 registry contract: keyed by DID subject, bounded per peer (evict oldest) and in total
-/// (refuse), events raised once each and isolated from throwing subscribers, concurrency owned by the
-/// store (L-028, L-044).
+/// (refuse), events raised once each — on the thread pool, never inline, so a subscriber can delay
+/// neither the call nor another call's notifications — and isolated from throwing subscribers,
+/// concurrency owned by the store (L-028, L-044).
 /// </summary>
 public sealed class InMemoryReturnRouteSessionRegistryTests
 {
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+
     private sealed class FakeSession : IReturnRouteSession
     {
         public FakeSession(string peerDid, string localDid = "did:example:bob")
@@ -35,6 +39,58 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
 
     private static InMemoryReturnRouteSessionRegistry Registry(int perPeer = 8, int total = 4096)
         => new(new ReturnRouteSessionOptions { MaxSessionsPerPeer = perPeer, MaxSessions = total });
+
+    private static bool SameInstances(IEnumerable<IReturnRouteSession> actual, IEnumerable<IReturnRouteSession> expected)
+        => new HashSet<IReturnRouteSession>(actual, ReferenceEqualityComparer.Instance).SetEquals(expected);
+
+    /// <summary>One notification as a subscriber saw it, with its arrival order.</summary>
+    private sealed record Seen(long Order, bool Opened, IReturnRouteSession Session, SessionCloseReason Reason);
+
+    /// <summary>
+    /// Records every notification of a registry. Notifications arrive on the thread pool after the
+    /// call returned, so assertions wait for them (bounded) instead of reading them at once.
+    /// </summary>
+    private sealed class EventLog
+    {
+        private readonly ConcurrentQueue<Seen> _seen = new();
+        private readonly ConcurrentDictionary<IReturnRouteSession, bool> _sentinels = new(ReferenceEqualityComparer.Instance);
+        private long _order;
+
+        public EventLog(IReturnRouteSessionRegistry registry)
+        {
+            registry.SessionOpened += (_, e) => _seen.Enqueue(new Seen(Interlocked.Increment(ref _order), true, e.Session, e.Reason));
+            registry.SessionClosed += (_, e) => _seen.Enqueue(new Seen(Interlocked.Increment(ref _order), false, e.Session, e.Reason));
+        }
+
+        /// <summary>Every notification seen so far, in arrival order, without the drain's sentinels.</summary>
+        public IReadOnlyList<Seen> All => _seen.Where(s => !_sentinels.ContainsKey(s.Session)).OrderBy(s => s.Order).ToList();
+
+        public IReadOnlyList<Seen> Opened => All.Where(s => s.Opened).ToList();
+
+        public IReadOnlyList<Seen> Closed => All.Where(s => !s.Opened).ToList();
+
+        /// <summary>Wait (bounded) until <paramref name="condition"/> holds; fails the test otherwise.</summary>
+        public void WaitUntil(Func<EventLog, bool> condition, string because)
+            => SpinWait.SpinUntil(() => condition(this), Timeout).Should().BeTrue(because);
+
+        /// <summary>
+        /// Register and unregister a sentinel session of its own DID and wait for both of its
+        /// notifications (which <see cref="All"/> leaves out). Their work items were queued after
+        /// those of every call made before, so a notification still missing here would have to be
+        /// overtaken by two later ones. Events of different calls are unordered, so this bounds — it
+        /// does not prove — the absence of a late notification; the calls whose absence is asserted
+        /// queue none at all.
+        /// </summary>
+        public void Drain(IReturnRouteSessionRegistry registry)
+        {
+            var sentinel = new FakeSession("did:example:sentinel" + Guid.NewGuid().ToString("N"));
+            _sentinels[sentinel] = true;
+            registry.Register(sentinel).Registered.Should().BeTrue("the drain needs room for its sentinel");
+            registry.Unregister(sentinel).Should().BeTrue();
+            SpinWait.SpinUntil(() => _seen.Count(s => ReferenceEquals(s.Session, sentinel)) == 2, Timeout)
+                .Should().BeTrue("the sentinel's notifications arrive");
+        }
+    }
 
     [Fact]
     public void Register_unregister_and_count()
@@ -78,25 +134,23 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
     public void Events_fire_once_each_with_the_session()
     {
         var registry = Registry();
-        var opened = new List<ReturnRouteSessionEventArgs>();
-        var closed = new List<ReturnRouteSessionEventArgs>();
-        registry.SessionOpened += (_, e) => opened.Add(e);
-        registry.SessionClosed += (_, e) => closed.Add(e);
+        var log = new EventLog(registry);
         var s = new FakeSession(Alice);
 
         registry.Register(s);
         registry.Unregister(s);
+        log.WaitUntil(l => l.Opened.Count >= 1 && l.Closed.Count >= 1, "both notifications arrive");
+        log.Drain(registry);
 
-        opened.Should().ContainSingle().Which.Should().Match<ReturnRouteSessionEventArgs>(e => e.Session == s && e.Reason == SessionCloseReason.None);
-        closed.Should().ContainSingle().Which.Should().Match<ReturnRouteSessionEventArgs>(e => e.Session == s && e.Reason == SessionCloseReason.Unregistered);
+        log.Opened.Should().ContainSingle().Which.Should().Match<Seen>(e => e.Session == s && e.Reason == SessionCloseReason.None);
+        log.Closed.Should().ContainSingle().Which.Should().Match<Seen>(e => e.Session == s && e.Reason == SessionCloseReason.Unregistered);
     }
 
     [Fact]
     public void Per_peer_bound_evicts_that_peers_oldest_and_leaves_others_alone()
     {
         var registry = Registry(perPeer: 8);
-        var closed = new List<ReturnRouteSessionEventArgs>();
-        registry.SessionClosed += (_, e) => closed.Add(e);
+        var log = new EventLog(registry);
         var carol = new FakeSession(Carol);
         registry.Register(carol);
         var alices = Enumerable.Range(0, 8).Select(_ => new FakeSession(Alice)).ToList();
@@ -109,29 +163,36 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         result.Registered.Should().BeTrue();
         result.Evicted.Should().BeSameAs(alices[0]);
         registry.Count.Should().Be(9);
-        closed.Should().ContainSingle().Which.Should().Match<ReturnRouteSessionEventArgs>(e => e.Session == alices[0] && e.Reason == SessionCloseReason.Evicted);
+        log.WaitUntil(l => l.Closed.Count >= 1, "the eviction is notified");
+        log.Closed.Should().ContainSingle().Which.Should().Match<Seen>(e => e.Session == alices[0] && e.Reason == SessionCloseReason.Evicted);
         registry.Find(Alice).Should().NotContain(alices[0]).And.Contain(ninth).And.HaveCount(8);
         registry.Find(Carol).Should().ContainSingle().Which.Should().BeSameAs(carol);
         registry.Unregister(alices[0]).Should().BeFalse("the registry already forgot it; no second event");
-        closed.Should().HaveCount(1);
+        log.Drain(registry);
+        log.Closed.Should().HaveCount(1);
     }
 
     [Fact]
     public void Total_bound_refuses_a_new_DID_without_evicting_or_raising()
     {
         var registry = Registry(perPeer: 1, total: 2);
-        var events = 0;
-        registry.SessionClosed += (_, _) => events++;
+        var log = new EventLog(registry);
         registry.Register(new FakeSession(Alice));
-        registry.Register(new FakeSession(Carol));
+        var carol = new FakeSession(Carol);
+        registry.Register(carol);
+        var dave = new FakeSession("did:example:dave");
 
-        var result = registry.Register(new FakeSession("did:example:dave"));
+        var result = registry.Register(dave);
 
         result.Registered.Should().BeFalse();
         result.Outcome.Should().Be(SessionRegistrationOutcome.RefusedTotalBound);
         result.Evicted.Should().BeNull();
         registry.Count.Should().Be(2);
-        events.Should().Be(0);
+        // Room for the drain's sentinel; Carol's own close is then the only close.
+        registry.Unregister(carol).Should().BeTrue();
+        log.Drain(registry);
+        log.Closed.Should().ContainSingle().Which.Should().Match<Seen>(e => e.Session == carol && e.Reason == SessionCloseReason.Unregistered);
+        log.All.Should().NotContain(e => e.Session == dave, "a refused registration raises nothing");
     }
 
     [Fact]
@@ -141,8 +202,7 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         // registration that would grow the total, so a reconnecting peer is not locked out by a full
         // registry and no other DID is touched.
         var registry = Registry(perPeer: 1, total: 2);
-        var closed = new List<ReturnRouteSessionEventArgs>();
-        registry.SessionClosed += (_, e) => closed.Add(e);
+        var log = new EventLog(registry);
         var oldAlice = new FakeSession(Alice);
         var carol = new FakeSession(Carol);
         registry.Register(oldAlice);
@@ -156,8 +216,11 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         registry.Count.Should().Be(2);
         registry.Find(Alice).Should().ContainSingle().Which.Should().BeSameAs(newAlice);
         registry.Find(Carol).Should().ContainSingle().Which.Should().BeSameAs(carol);
-        closed.Should().ContainSingle().Which.Reason.Should().Be(SessionCloseReason.Evicted);
         registry.Register(new FakeSession("did:example:dave")).Outcome.Should().Be(SessionRegistrationOutcome.RefusedTotalBound);
+        registry.Unregister(carol).Should().BeTrue("room for the drain's sentinel");
+        log.Drain(registry);
+        log.Closed.Where(e => e.Session != carol).Should().ContainSingle()
+            .Which.Should().Match<Seen>(e => e.Session == oldAlice && e.Reason == SessionCloseReason.Evicted);
     }
 
     [Fact]
@@ -166,12 +229,14 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         var registry = Registry();
         var s = new FakeSession(Alice);
         registry.Register(s);
-        var opened = 0;
-        registry.SessionOpened += (_, _) => opened++;
+        // Subscribed after the first registration returned: that call captured its subscribers when
+        // it queued its notification, so only a notification of the second call could arrive here.
+        var log = new EventLog(registry);
 
         registry.Register(s).Outcome.Should().Be(SessionRegistrationOutcome.AlreadyRegistered);
         registry.Count.Should().Be(1);
-        opened.Should().Be(0);
+        log.Drain(registry);
+        log.All.Should().BeEmpty();
     }
 
     [Fact]
@@ -194,15 +259,17 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         var registry = Registry();
         var secondSaw = 0;
         registry.SessionOpened += (_, _) => throw new InvalidOperationException("boom");
-        registry.SessionOpened += (_, _) => secondSaw++;
+        registry.SessionOpened += (_, _) => Interlocked.Increment(ref secondSaw);
         registry.SessionClosed += (_, _) => throw new InvalidOperationException("boom");
+        var log = new EventLog(registry);
 
         var result = registry.Register(new FakeSession(Alice));
 
         result.Registered.Should().BeTrue();
-        secondSaw.Should().Be(1);
+        SpinWait.SpinUntil(() => Volatile.Read(ref secondSaw) == 1, Timeout).Should().BeTrue("the next subscriber still runs");
         var act = () => registry.Unregister(registry.Find(Alice)[0]);
         act.Should().NotThrow();
+        log.WaitUntil(l => l.Closed.Count == 1, "a subscriber after the throwing one still sees the close");
     }
 
     [Fact]
@@ -231,8 +298,7 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         const int Dids = 4;
         const int PerPeer = 4;
         var registry = Registry(perPeer: PerPeer, total: 4096);
-        var evicted = new System.Collections.Concurrent.ConcurrentBag<IReturnRouteSession>();
-        registry.SessionClosed += (_, e) => { if (e.Reason == SessionCloseReason.Evicted) evicted.Add(e.Session); };
+        var log = new EventLog(registry);
         var gate = new ManualResetEventSlim(false);
         var arrived = 0;
         var sessions = Enumerable.Range(0, Tasks).Select(i => new FakeSession($"did:example:p{i % Dids}")).ToArray();
@@ -254,8 +320,16 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         registry.Count.Should().Be(Dids * PerPeer);
         for (var d = 0; d < Dids; d++)
             registry.Find($"did:example:p{d}").Should().HaveCount(PerPeer);
-        evicted.Should().HaveCount(Tasks - Dids * PerPeer);
+        log.WaitUntil(l => l.Closed.Count >= Tasks - Dids * PerPeer && l.Opened.Count >= Tasks, "every registration and eviction is notified");
+        log.Drain(registry);
+        var evicted = log.Closed.Where(e => e.Reason == SessionCloseReason.Evicted).Select(e => e.Session).ToList();
+        evicted.Should().HaveCount(Tasks - Dids * PerPeer).And.OnlyHaveUniqueItems();
+        log.Closed.Should().OnlyContain(e => e.Reason == SessionCloseReason.Evicted);
+        log.Opened.Should().HaveCount(Tasks);
+        SameInstances(log.Opened.Select(e => e.Session), sessions).Should().BeTrue("one SessionOpened per registration");
         results.Count(r => r.Evicted is not null).Should().Be(Tasks - Dids * PerPeer);
+        SameInstances(results.Where(r => r.Evicted is not null).Select(r => r.Evicted!), evicted)
+            .Should().BeTrue("each evicted session is reported by its own call and notified once");
         foreach (var e in evicted)
             registry.Find(e.PeerDid).Should().NotContain(e);
     }
@@ -278,6 +352,94 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         results[0].Evicted.Should().NotBeSameAs(results[1].Evicted);
         registry.Count.Should().Be(2);
         registry.Find(Alice).Should().BeEquivalentTo(new IReturnRouteSession[] { a, b }, o => o.WithoutStrictOrdering());
+    }
+
+    [Fact]
+    public async Task A_subscriber_that_never_returns_delays_neither_the_call_nor_any_other_calls_notifications()
+    {
+        // PR #103 review (P2): subscribers ran inline, before Register returned, so a SessionClosed
+        // subscriber that blocked kept the registrant from closing the evicted session at all (and
+        // one that waited for that session's Closed deadlocked). Notifications are now raised on the
+        // thread pool, one work item per call.
+        var registry = Registry(perPeer: 1);
+        var oldAlice = new FakeSession(Alice);
+        registry.Register(oldAlice);
+        using var release = new ManualResetEventSlim(false);
+        using var blocking = new ManualResetEventSlim(false);
+        var returned = 0;
+        // Subscribed first: it blocks on oldAlice's close only, until the test releases it.
+        registry.SessionClosed += (_, e) =>
+        {
+            if (!ReferenceEquals(e.Session, oldAlice))
+                return;
+            blocking.Set();
+            release.Wait();
+            Interlocked.Exchange(ref returned, 1);
+        };
+        var log = new EventLog(registry);
+        var newAlice = new FakeSession(Alice);
+        try
+        {
+            // On a dedicated thread with a bounded wait, so an inline subscriber fails the test
+            // instead of hanging it.
+            var register = Task.Factory.StartNew(() => registry.Register(newAlice), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            (await Task.WhenAny(register, Task.Delay(Timeout))).Should().BeSameAs(register, "Register returns without waiting for any subscriber");
+            var registration = await register;
+            registration.Outcome.Should().Be(SessionRegistrationOutcome.Registered);
+            registration.Evicted.Should().BeSameAs(oldAlice, "the eviction is reported to the registrant at once");
+            registry.Find(Alice).Should().ContainSingle().Which.Should().BeSameAs(newAlice);
+            blocking.Wait(Timeout).Should().BeTrue("the blocking subscriber is running (the overlap happened)");
+
+            // Later calls complete, and their own notifications arrive, while it is still blocked.
+            var carol = new FakeSession(Carol);
+            registry.Register(carol).Registered.Should().BeTrue();
+            registry.Unregister(carol).Should().BeTrue();
+            var dave = new FakeSession("did:example:dave");
+            registry.Register(dave).Registered.Should().BeTrue();
+            registry.Unregister(newAlice).Should().BeTrue();
+            log.WaitUntil(l => l.All.Count == 4, "the later calls' notifications arrive");
+            log.All.Should().Contain(e => e.Opened && e.Session == carol)
+                .And.Contain(e => !e.Opened && e.Session == carol && e.Reason == SessionCloseReason.Unregistered)
+                .And.Contain(e => e.Opened && e.Session == dave)
+                .And.Contain(e => !e.Opened && e.Session == newAlice && e.Reason == SessionCloseReason.Unregistered);
+            log.All.Should().NotContain(e => e.Session == oldAlice || (e.Opened && e.Session == newAlice),
+                "only the blocked call's own later notifications wait for its subscriber");
+            Volatile.Read(ref returned).Should().Be(0, "the subscriber was still blocked throughout");
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        // Released: the blocked call's remaining notifications arrive, in the call's order.
+        log.WaitUntil(l => l.All.Count == 6, "the blocked call's remaining notifications arrive once it is released");
+        log.All.Where(e => e.Session == oldAlice || (e.Opened && e.Session == newAlice))
+            .Select(e => (e.Opened, e.Session, e.Reason))
+            .Should().Equal((false, (IReturnRouteSession)oldAlice, SessionCloseReason.Evicted), (true, (IReturnRouteSession)newAlice, SessionCloseReason.None));
+    }
+
+    [Fact]
+    public void Each_registrations_eviction_is_notified_before_its_SessionOpened()
+    {
+        // Per call, SessionClosed(Evicted) for the evicted session comes before SessionOpened for the
+        // new one; across calls nothing is ordered, so this checks each call's own pair only.
+        const int Registrations = 200;
+        var registry = Registry(perPeer: 1);
+        var log = new EventLog(registry);
+        var sessions = Enumerable.Range(0, Registrations).Select(_ => new FakeSession(Alice)).ToArray();
+
+        foreach (var session in sessions)
+            registry.Register(session).Registered.Should().BeTrue();
+        log.WaitUntil(l => l.All.Count == 2 * Registrations - 1, "every registration and eviction is notified");
+
+        var all = log.All;
+        for (var i = 1; i < Registrations; i++)
+        {
+            var closed = all.Single(e => !e.Opened && e.Session == sessions[i - 1]);
+            var opened = all.Single(e => e.Opened && e.Session == sessions[i]);
+            closed.Reason.Should().Be(SessionCloseReason.Evicted);
+            closed.Order.Should().BeLessThan(opened.Order, "registration {0}: its eviction is notified before its SessionOpened", i);
+        }
     }
 
     [Fact]

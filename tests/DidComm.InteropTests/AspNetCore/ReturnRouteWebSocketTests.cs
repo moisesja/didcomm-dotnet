@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using DidComm.AspNetCore;
@@ -78,6 +79,8 @@ public sealed class ReturnRouteWebSocketTests
         seen.ReturnRoute.Mode.Should().Be(ReturnRouteMode.All);
         host.Registry.Count.Should().Be(1);
         host.Registry.Find(host.Alice.Did).Should().ContainSingle().Which.Should().BeSameAs(seen.Session);
+        // Registry events are raised on the thread pool after the call, so they are awaited (bounded).
+        (await ReturnRouteTestHost.WaitUntilAsync(() => !opened.IsEmpty, Timeout)).Should().BeTrue("registering the session raises SessionOpened");
         opened.Should().ContainSingle().Which.Session.Should().BeSameAs(seen.Session);
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
@@ -133,6 +136,162 @@ public sealed class ReturnRouteWebSocketTests
         await second.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 0, Timeout)).Should().BeTrue();
         host.LeakingLogLines().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_SessionClosed_subscriber_that_waits_for_the_evicted_session_to_close_does_not_hold_up_the_eviction()
+    {
+        // PR #103 review (P2): subscribers ran inside Register, before the endpoint closed the evicted
+        // session, so a SessionClosed(Evicted) subscriber that waited for that session's Closed
+        // deadlocked until it gave up — no close frame, no Closed cancellation, no backstop. The
+        // registry below holds the evicting Register until the subscriber has started (bounded), so
+        // the subscriber is provably waiting before the endpoint closes the session.
+        var cap = TimeSpan.FromSeconds(15);
+        EvictionHoldingRegistry? registry = null;
+        await using var host = await ReturnRouteTestHost.StartAsync(o =>
+        {
+            o.AllowSameSocketReplies = true;
+            o.ConfigureServices = s => s.AddSingleton<IReturnRouteSessionRegistry>(_ => registry = new EvictionHoldingRegistry(Timeout));
+        });
+        var subscriber = new TaskCompletionSource<(bool ClosedAtEntry, bool SawClosed, TimeSpan Waited, IReturnRouteSession Session)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Registry.SessionClosed += (_, e) =>
+        {
+            if (e.Reason != SessionCloseReason.Evicted)
+                return;
+            var closedAtEntry = e.Session.Closed.IsCancellationRequested;
+            registry!.SubscriberStarted.Set();
+            var waited = Stopwatch.StartNew();
+            var sawClosed = e.Session.Closed.WaitHandle.WaitOne(cap); // blocks this thread, as a careless subscriber would
+            subscriber.TrySetResult((closedAtEntry, sawClosed, waited.Elapsed, e.Session));
+        };
+
+        using var first = await host.ConnectAsync();
+        await ReturnRouteTestHost.SendAsync(first, await host.AuthcryptAsync(host.Alice,
+            host.Stamped(host.RecordingMessage(host.Alice).WithReturnRoute(ReturnRouteMode.All)).Build()));
+        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 1, Timeout)).Should().BeTrue();
+        var firstSession = (WebSocketReturnRouteSession)host.Registry.Find(host.Alice.Did).Single();
+        var endedBefore = host.EndedWebSocketConnections;
+
+        using var second = await host.ConnectAsync();
+        await ReturnRouteTestHost.SendAsync(second, await host.AuthcryptAsync(host.Alice,
+            host.Stamped(host.RecordingMessage(host.Alice).WithReturnRoute(ReturnRouteMode.All)).Build()));
+
+        // FR-RR-03: the evicted peer observes the eviction as a normal close.
+        var observed = await ReturnRouteTestHost.ReceiveAsync(first, Timeout);
+        observed.Type.Should().Be(WebSocketMessageType.Close);
+        first.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure);
+        first.CloseStatusDescription.Should().Be(WebSocketReturnRouteSession.EvictedDescription);
+
+        var (closedAtEntry, sawClosed, waited, session) = await subscriber.Task.WaitAsync(Timeout);
+        session.Should().BeSameAs(firstSession);
+        registry!.SubscriberStartedWhileHeld.Should().Be(1, "the subscriber was running while Register was still held (the overlap happened)");
+        closedAtEntry.Should().BeFalse("the subscriber started before the endpoint closed the evicted session");
+        sawClosed.Should().BeTrue("the evicted session's Closed was cancelled while its SessionClosed subscriber waited for it");
+        waited.Should().BeLessThan(TimeSpan.FromSeconds(5), "the subscriber was released well before its {0} cap", cap);
+        firstSession.CloseReason.Should().Be(SessionCloseReason.Evicted);
+
+        // The client never answers the close frame: the backstop still ends the connection within the grace.
+        (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections > endedBefore,
+            WebSocketReturnRouteSession.DefaultCloseGrace + TimeSpan.FromSeconds(5))).Should().BeTrue("the eviction backstop ends the unanswered connection");
+        (await ReturnRouteTestHost.WaitUntilAsync(() => firstSession.WriterStopped, Timeout)).Should().BeTrue();
+        host.Registry.Find(host.Alice.Did).Should().ContainSingle().Which.Should().NotBeSameAs(firstSession);
+
+        await second.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 0, Timeout)).Should().BeTrue();
+        host.LeakingLogLines().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_SessionClosed_subscriber_that_blocks_does_not_hold_up_the_client_close_handshake()
+    {
+        // PR #103 review (P2): the receive loop's finally unregisters the session before it stops the
+        // writer and answers the client's close; with subscribers raised inline, one that blocked held
+        // the close handshake (and the request) for as long as it blocked.
+        await using var host = await ReturnRouteTestHost.StartAsync(o => o.AllowSameSocketReplies = true);
+        var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<ReturnRouteSessionEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var returned = 0;
+        host.Registry.SessionClosed += (_, e) =>
+        {
+            if (e.Reason != SessionCloseReason.Unregistered)
+                return;
+            entered.TrySetResult(e);
+            release.Wait(TimeSpan.FromSeconds(15)); // capped, so a failing run cannot hold a pool thread forever
+            Interlocked.Exchange(ref returned, 1);
+        };
+
+        try
+        {
+            using var socket = await host.ConnectAsync();
+            await ReturnRouteTestHost.SendAsync(socket, await host.AuthcryptAsync(host.Alice,
+                host.Stamped(host.RecordingMessage(host.Alice).WithReturnRoute(ReturnRouteMode.All)).Build()));
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 1, Timeout)).Should().BeTrue();
+            var session = (WebSocketReturnRouteSession)host.Registry.Find(host.Alice.Did).Single();
+            var endedBefore = host.EndedWebSocketConnections;
+
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "client done", default).WaitAsync(Timeout);
+            socket.State.Should().Be(WebSocketState.Closed, "the server answered the client's close");
+            socket.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure);
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections > endedBefore, Timeout)).Should().BeTrue("the connection ended");
+
+            (await entered.Task.WaitAsync(Timeout)).Session.Should().BeSameAs(session);
+            Volatile.Read(ref returned).Should().Be(0, "the subscriber had not returned when the handshake and the connection end completed");
+            host.Registry.Count.Should().Be(0);
+            session.Closed.IsCancellationRequested.Should().BeTrue();
+            session.WriterStopped.Should().BeTrue();
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        (await ReturnRouteTestHost.WaitUntilAsync(() => Volatile.Read(ref returned) == 1, Timeout)).Should().BeTrue("the released subscriber returns");
+        host.LeakingLogLines().Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// A registry (per-peer bound 1) whose <see cref="Register"/>, when it evicted a session, waits
+    /// (bounded) for <see cref="SubscriberStarted"/> before returning — so a test can prove a
+    /// SessionClosed subscriber was running before the endpoint closed the evicted session.
+    /// </summary>
+    private sealed class EvictionHoldingRegistry : IReturnRouteSessionRegistry
+    {
+        private readonly InMemoryReturnRouteSessionRegistry _inner = new(new ReturnRouteSessionOptions { MaxSessionsPerPeer = 1 });
+        private readonly TimeSpan _timeout;
+        private int _subscriberStartedWhileHeld;
+
+        public EvictionHoldingRegistry(TimeSpan timeout) => _timeout = timeout;
+
+        public ManualResetEventSlim SubscriberStarted { get; } = new(false);
+
+        /// <summary>Evicting registrations during which the subscriber started.</summary>
+        public int SubscriberStartedWhileHeld => Volatile.Read(ref _subscriberStartedWhileHeld);
+
+        public int Count => _inner.Count;
+
+        public event EventHandler<ReturnRouteSessionEventArgs>? SessionOpened
+        {
+            add => _inner.SessionOpened += value;
+            remove => _inner.SessionOpened -= value;
+        }
+
+        public event EventHandler<ReturnRouteSessionEventArgs>? SessionClosed
+        {
+            add => _inner.SessionClosed += value;
+            remove => _inner.SessionClosed -= value;
+        }
+
+        public SessionRegistration Register(IReturnRouteSession session)
+        {
+            var result = _inner.Register(session);
+            if (result.Evicted is not null && SubscriberStarted.Wait(_timeout))
+                Interlocked.Increment(ref _subscriberStartedWhileHeld);
+            return result;
+        }
+
+        public bool Unregister(IReturnRouteSession session) => _inner.Unregister(session);
+
+        public IReadOnlyList<IReturnRouteSession> Find(string did) => _inner.Find(did);
     }
 
     [Fact]
@@ -635,11 +794,14 @@ public sealed class ReturnRouteWebSocketTests
         (await host.Alice.Client.UnpackAsync(frame.Text)).Message.Id.Should().Be(probe.Id);
 
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 1, Timeout)).Should().BeTrue("the evicted connection ended");
+        // Registry events are raised on the thread pool after the call, so they are awaited (bounded).
+        (await ReturnRouteTestHost.WaitUntilAsync(() => !closed.IsEmpty, Timeout)).Should().BeTrue("the eviction raises SessionClosed");
         closed.Should().ContainSingle().Which.Should().Match<ReturnRouteSessionEventArgs>(e => e.Reason == SessionCloseReason.Evicted && ReferenceEquals(e.Session, loser));
 
         await survivorSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 2, Timeout)).Should().BeTrue();
         host.Registry.Count.Should().Be(0);
+        (await ReturnRouteTestHost.WaitUntilAsync(() => closed.Count >= 2, Timeout)).Should().BeTrue("the survivor's close raises SessionClosed");
         closed.Should().HaveCount(2);
         foreach (var session in new[] { survivor, loser }.Cast<WebSocketReturnRouteSession>())
         {

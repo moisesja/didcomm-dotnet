@@ -978,3 +978,17 @@ Format per entry:
 - **How to apply:** Before writing a guarantee into a normative doc, trace it end to end from the
   public method and name what happens first. When an engineer's report states a contract, grep every
   artifact that restates it and make them identical in substance. Prefer one sentence used verbatim.
+
+## L-053 — Never rewrite pushed history to satisfy a review; PRs land with a regular merge commit.
+
+- **Lesson:** A reviewer request to squash or rename already-pushed commits (PR #103 asked to squash
+  or rename the `wip(transports): …` checkpoint) is not acted on. History that has been pushed is
+  never rewritten — no force-push, no interactive rebase, no squash-merge chosen to hide a commit —
+  and a PR lands with a regular merge commit, like #101 and #102, unless the user says otherwise.
+- **Why:** The user decided the checkpoint commit is fine as is. Rewriting a pushed branch to tidy
+  it costs the reviewer their review anchors and risks losing work, for a cosmetic gain; the merge
+  strategy is the user's call, not the reviewer's or the agent's.
+- **How to apply:** When a review asks for history surgery, leave the branch as is, say so in the
+  per-finding disposition ("won't do: history is not rewritten; regular merge"), and do not retitle
+  the PR or reshape its body for a squash. Checkpoint commits stay honest in their message instead
+  (`wip(...)` naming what is and is not done).

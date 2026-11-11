@@ -16,6 +16,18 @@ namespace DidComm.AspNetCore;
 /// </summary>
 /// <remarks>
 /// <para>
+/// Push capacity is reserved before any work: <see cref="TrySendAsync"/> takes one of
+/// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> slots (a lock-free decrement that never
+/// goes below zero) before the snapshot, and answers <c>false</c> at once when none is free — no
+/// snapshot, no key resolution, no encryption. The slot is given back on every path that does not
+/// queue a frame (refused addressing, failed snapshot or pack, a downgrade or close that landed
+/// during the pack, a refused write, cancellation or an exception); a queued frame keeps it until the
+/// writer takes the frame off the queue, whether it then sends or discards it. So at any moment the
+/// pushes being snapshotted or packed plus the frames queued number at most
+/// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/>; the one frame the writer is sending is
+/// not counted. The bounded channel stays as a second limit with the same depth.
+/// </para>
+/// <para>
 /// <see cref="Mode"/>, <see cref="Thread"/> and the closed state are read from other threads
 /// (handlers using <see cref="IReturnRouteSessionRegistry.Find"/>), so they are volatile; the
 /// closed state is set once, atomically. A closed session never reopens: <see cref="ApplyHeader"/>
@@ -48,6 +60,7 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
     private readonly CancellationToken _connectionToken;
     private readonly ILogger? _logger;
     private readonly Channel<byte[]> _queue;
+    private int _freePushSlots; // MaxPendingPushes minus pushes reserved (snapshot / pack) or queued; never negative
     private readonly CancellationTokenSource _closedSource = new();
     private readonly CancellationToken _closedToken;
     private volatile int _mode = (int)ReturnRouteMode.All;
@@ -61,7 +74,7 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
     /// <param name="client">The facade that packs pushes.</param>
     /// <param name="peerDid">The authcrypt sender's DID subject, fixed for the session's lifetime.</param>
     /// <param name="localDid">The DID subject of the key that decrypted the opening inbound.</param>
-    /// <param name="maxPendingPushes">The writer queue's depth (<see cref="ReturnRouteSessionOptions.MaxPendingPushes"/>).</param>
+    /// <param name="maxPendingPushes">Pushes being packed or queued at once, and the writer queue's depth (<see cref="ReturnRouteSessionOptions.MaxPendingPushes"/>).</param>
     /// <param name="connection">The connection's token source; cancelled to end the connection on a writer fault or when an evicted peer never answers the close frame.</param>
     /// <param name="logger">Optional logger (ids and type / enum names only).</param>
     /// <param name="closeGrace">Override of <see cref="DefaultCloseGrace"/> (tests).</param>
@@ -90,11 +103,14 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
         _logger = logger;
         CloseGrace = closeGrace ?? DefaultCloseGrace;
         _closedToken = _closedSource.Token;
+        _freePushSlots = maxPendingPushes;
+        // Defense in depth: a frame is queued only under a reserved slot, so the channel is never
+        // fuller than the reservations allow. Only TryWrite is used: full → false, never blocks.
         _queue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(maxPendingPushes)
         {
             SingleReader = true,
             SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait, // only TryWrite is used: full → false, never blocks
+            FullMode = BoundedChannelFullMode.Wait,
         });
     }
 
@@ -152,24 +168,59 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
         ArgumentNullException.ThrowIfNull(message);
         ct.ThrowIfCancellationRequested();
 
-        // A downgraded or closed session costs no snapshot and no crypto.
+        // A downgraded or closed session costs nothing; a full one costs no snapshot and no crypto.
         if (Mode != ReturnRouteMode.All)
             return false;
-
-        var snapshot = SessionOutbound.TrySnapshotAndCheck(message, PeerDid, LocalDid, _logger);
-        if (snapshot is null)
+        if (!TryReservePushSlot())
+        {
+            SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session has no free push slot.", message.Id);
             return false;
+        }
 
-        var frame = await SessionOutbound.TryPackAsync(_client, snapshot, PeerDid, LocalDid, _logger, ct).ConfigureAwait(false);
-        if (frame is null || Mode != ReturnRouteMode.All)
+        var slotHeld = true;
+        try
+        {
+            var snapshot = SessionOutbound.TrySnapshotAndCheck(message, PeerDid, LocalDid, _logger);
+            if (snapshot is null)
+                return false;
+
+            var frame = await SessionOutbound.TryPackAsync(_client, snapshot, PeerDid, LocalDid, _logger, ct).ConfigureAwait(false);
+            if (frame is null || Mode != ReturnRouteMode.All)
+                return false;
+
+            // Never awaits the socket (JC-9). On success the slot passes to the queued frame, and the
+            // writer gives it back when it dequeues the frame; a completed (closed) queue refuses.
+            if (_queue.Writer.TryWrite(frame))
+            {
+                slotHeld = false;
+                return true;
+            }
+            SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session's writer queue is full or closed.", snapshot.Id);
             return false;
+        }
+        finally
+        {
+            if (slotHeld)
+                ReleasePushSlot();
+        }
+    }
 
-        // Never awaits the socket: a full (or completed) queue answers false at once (JC-9).
-        if (_queue.Writer.TryWrite(frame))
-            return true;
-        SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session's writer queue is full or closed.", snapshot.Id);
+    /// <summary>Take one free push slot; <c>false</c> (nothing taken) when none is free.</summary>
+    private bool TryReservePushSlot()
+    {
+        var free = Volatile.Read(ref _freePushSlots);
+        while (free > 0)
+        {
+            var seen = Interlocked.CompareExchange(ref _freePushSlots, free - 1, free);
+            if (seen == free)
+                return true;
+            free = seen;
+        }
         return false;
     }
+
+    /// <summary>Give back one push slot taken by <see cref="TryReservePushSlot"/>.</summary>
+    private void ReleasePushSlot() => Interlocked.Increment(ref _freePushSlots);
 
     /// <summary>
     /// Apply the <c>return_route</c> header of a later message authenticated by this session's own
@@ -288,6 +339,10 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
         {
             await foreach (var frame in _queue.Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
             {
+                // The frame left the queue: its slot is free again, whether it is sent or discarded
+                // below (the frame being sent is not counted against MaxPendingPushes).
+                ReleasePushSlot();
+
                 // Closed: discard what is still queued. Downgraded: nothing is written after the
                 // receive loop processed the `none` / `thread`. The check and the start of the send
                 // are one step under the send gate (ApplyHeader / RequestClose take it too); the send

@@ -9,13 +9,27 @@ namespace DidComm.Transports.ReturnRoute;
 /// that registers its own <see cref="IReturnRouteSessionRegistry"/> first keeps it.
 /// </summary>
 /// <remarks>
+/// <para>
 /// All state lives under one lock and every decision — already registered, per-peer eviction,
 /// total bound, insert — is made inside it, so two concurrent registrations for one peer at the
 /// bound evict exactly one session each. A peer at its own per-peer bound replaces its oldest
 /// session even when the registry is at <see cref="ReturnRouteSessionOptions.MaxSessions"/> (the
-/// total does not grow); only a registration that would grow the total is refused there. Eviction is O(1) per registration (the peer's list is in
-/// registration order, so its oldest is the first element); there is no amortized sweep. Events
-/// are raised after the lock is released. Log lines carry counts only, never a DID.
+/// total does not grow); only a registration that would grow the total is refused there. Eviction
+/// is O(1) per registration (the peer's list is in registration order, so its oldest is the first
+/// element); there is no amortized sweep. Log lines carry counts only, never a DID.
+/// </para>
+/// <para>
+/// Notifications: after the state change and outside the lock, a <see cref="Register"/> or
+/// <see cref="Unregister"/> that changed something queues one work item to the thread pool
+/// (<see cref="ThreadPool.UnsafeQueueUserWorkItem{TState}(Action{TState}, TState, bool)"/>, so the
+/// caller's <see cref="ExecutionContext"/> — a request's ambient state — does not flow into
+/// subscriber code) and returns. The subscribers are captured when the work item is queued; it
+/// raises that call's events in order — <see cref="SessionClosed"/>
+/// (<see cref="SessionCloseReason.Evicted"/>) and then <see cref="SessionOpened"/> for a
+/// registration — each subscriber in its own <c>try</c>/<c>catch</c> (the exception type name is
+/// logged). A subscriber that blocks holds one pool thread and delays only the notifications of
+/// that same call that come after it.
+/// </para>
 /// </remarks>
 public sealed class InMemoryReturnRouteSessionRegistry : IReturnRouteSessionRegistry
 {
@@ -108,11 +122,10 @@ public sealed class InMemoryReturnRouteSessionRegistry : IReturnRouteSessionRegi
         }
 
         if (evicted is not null)
-        {
             SafeLogInformation("Return-route session evicted: the peer reached MaxSessionsPerPeer ({MaxSessionsPerPeer}); {Count} sessions registered.", _options.MaxSessionsPerPeer, count);
-            Raise(SessionClosed, evicted, SessionCloseReason.Evicted);
-        }
-        Raise(SessionOpened, session, SessionCloseReason.None);
+        QueueNotification(
+            evicted is null ? null : new Notification(SessionClosed, new ReturnRouteSessionEventArgs(evicted, SessionCloseReason.Evicted)),
+            new Notification(SessionOpened, new ReturnRouteSessionEventArgs(session, SessionCloseReason.None)));
         return new SessionRegistration(SessionRegistrationOutcome.Registered, evicted);
 
     Refused:
@@ -136,7 +149,7 @@ public sealed class InMemoryReturnRouteSessionRegistry : IReturnRouteSessionRegi
                     _byPeer.Remove(session.PeerDid);
             }
         }
-        Raise(SessionClosed, session, SessionCloseReason.Unregistered);
+        QueueNotification(new Notification(SessionClosed, new ReturnRouteSessionEventArgs(session, SessionCloseReason.Unregistered)), null);
         return true;
     }
 
@@ -154,11 +167,33 @@ public sealed class InMemoryReturnRouteSessionRegistry : IReturnRouteSessionRegi
         }
     }
 
-    private void Raise(EventHandler<ReturnRouteSessionEventArgs>? handlers, IReturnRouteSession session, SessionCloseReason reason)
+    /// <summary>One event of one call: the subscribers captured when the call queued it, and its arguments.</summary>
+    private readonly record struct Notification(EventHandler<ReturnRouteSessionEventArgs>? Handlers, ReturnRouteSessionEventArgs Args);
+
+    /// <summary>
+    /// Raise one call's events, in order, on a thread-pool thread: never on the caller's thread, so
+    /// no subscriber can delay the call that changed the state (or what its caller does next).
+    /// </summary>
+    /// <param name="first">The call's first event, or <c>null</c>.</param>
+    /// <param name="second">The call's second event, or <c>null</c>.</param>
+    private void QueueNotification(Notification? first, Notification? second)
     {
-        if (handlers is null)
+        if (first?.Handlers is null && second?.Handlers is null)
             return;
-        var args = new ReturnRouteSessionEventArgs(session, reason);
+        ThreadPool.UnsafeQueueUserWorkItem(
+            static state =>
+            {
+                state.Registry.Raise(state.First);
+                state.Registry.Raise(state.Second);
+            },
+            (Registry: this, First: first, Second: second),
+            preferLocal: false);
+    }
+
+    private void Raise(Notification? notification)
+    {
+        if (notification is not { Handlers: { } handlers, Args: var args })
+            return;
         foreach (var handler in handlers.GetInvocationList())
         {
             try

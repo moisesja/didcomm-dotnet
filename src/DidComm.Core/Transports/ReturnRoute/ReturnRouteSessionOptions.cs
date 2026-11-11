@@ -25,10 +25,14 @@ public sealed class ReturnRouteSessionOptions
     public int MaxSessions { get; set; } = 4096;
 
     /// <summary>
-    /// Packed messages queued to one WebSocket writer before <see cref="IReturnRouteSession.TrySendAsync"/>
-    /// answers <c>false</c>. Default 16: each item is one packed message, so a socket never holds
-    /// more than 16 of them; live delivery (message-pickup) pushes at most one unacknowledged
-    /// delivery per session, so this is slack, not a working set.
+    /// Pushes one WebSocket session holds at once — being snapshotted and packed, or packed and
+    /// queued to its writer — before <see cref="IReturnRouteSession.TrySendAsync"/> answers
+    /// <c>false</c>. A push takes its place before the snapshot, so one beyond the bound costs no
+    /// snapshot, key resolution or encryption; the place is freed when the push fails or when the
+    /// writer takes its frame off the queue (the frame being sent is not counted). Default 16: each
+    /// queued item is one packed message, so a socket never holds more than 16 of them besides the
+    /// one being sent; live delivery (message-pickup) pushes at most one unacknowledged delivery per
+    /// session, so this is slack, not a working set.
     /// </summary>
     public int MaxPendingPushes { get; set; } = 16;
 

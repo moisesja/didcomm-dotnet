@@ -44,8 +44,10 @@ types live in `DidComm.Transports.ReturnRoute`.
   same subject is accepted), and authcrypts it from `LocalDid` to `PeerDid` without forward
   wrapping. `true` means held or queued, not delivered. `false` — never an exception, except
   `ArgumentNullException` or cancellation of the caller's own token — when the session is
-  downgraded or closed, an HTTP session already holds its one message, a WebSocket queue is full,
-  the addressing is refused, or the snapshot or the pack failed (logged by exception type name).
+  downgraded or closed, an HTTP session already holds its one message, a WebSocket session has no
+  free push slot (checked before the snapshot, so such a call costs no snapshot, key resolution or
+  encryption), the addressing is refused, or the snapshot or the pack failed (logged by exception
+  type name).
 - **HTTP** (FR-RR-04), on the registry-aware `MapDidCommEndpoint(pattern)` — no switch. An eligible
   request gets a request-scoped session (`IsLive == false`; never registered, so it raises no
   registry events and does not count against the bounds). If the handler returns a reply, or
@@ -70,11 +72,13 @@ types live in `DidComm.Transports.ReturnRoute`.
   Information line per connection instead). The connection becomes a session at its first eligible
   message and is registered under the peer; the peer and local DID are fixed from then on. Handler
   replies and `TrySendAsync` pushes are written as one binary WebSocket message each by a single
-  writer task — the only code that sends on the socket — through a queue of `MaxPendingPushes`; a
-  full queue answers `false` without blocking the handler. A later message from the same peer to
-  the same local DID without the header leaves the mode unchanged; `none`, `thread` or a malformed
-  value stops pushes (the session stays registered) and `all` resumes them; no new frame starts
-  once the receive loop has processed the downgrade. A message authenticated by another DID on the
+  writer task — the only code that sends on the socket — through a bounded queue. A push reserves
+  one of `MaxPendingPushes` slots before it is snapshotted and packed and keeps it until the writer
+  takes its frame off the queue (a push that fails or is cancelled gives it back); with no free slot
+  it answers `false` at once — no snapshot, key resolution or encryption, and the handler never
+  blocks. A later message from the same peer to the same local DID without the header leaves the
+  mode unchanged; `none`, `thread` or a malformed value stops pushes (the session stays registered)
+  and `all` resumes them; no new frame starts once the receive loop has processed the downgrade. A message authenticated by another DID on the
   socket is dispatched without a session and its reply is not written; it never opens or re-binds
   one, and when the registry refused the first eligible message's session only that same sender
   may try again. Closing the socket unregisters the session (`SessionClosed`, reason
@@ -93,18 +97,23 @@ types live in `DidComm.Transports.ReturnRoute`.
   registry is full, since the total does not grow; a registration that would grow the total past
   `MaxSessions` is refused and nothing is evicted, so a flood of fresh DIDs never displaces an
   existing peer. The registry forgets an evicted session; closing its transport is the
-  registrant's job (the endpoint does it). One lock, O(1) eviction, events raised outside the lock
-  with each subscriber's exception isolated. Events of concurrent registrations are not ordered
-  with respect to each other, so per-session state belongs on `IReturnRouteSession.Closed`. Log
-  lines carry counts only.
+  registrant's job (the endpoint does it). One lock, O(1) eviction. Events never run on the
+  caller's thread: each `Register` / `Unregister` that changed something queues one thread-pool
+  work item (no request `ExecutionContext` flows into subscriber code) that raises that call's
+  events in order — `SessionClosed(Evicted)`, then `SessionOpened` — each subscriber's exception
+  isolated and logged by type name. A subscriber that blocks holds one pool thread and delays only
+  the later notifications of its own call — never a registration, an eviction, the closing of the
+  evicted socket or another call's notifications. Events of different calls are not ordered with
+  respect to each other, so per-session state belongs on `IReturnRouteSession.Closed`. Log lines
+  carry counts only.
 - **`ReturnRouteSessionOptions`** (validated; configure with
   `services.AddOptions<ReturnRouteSessionOptions>().Configure(...)`): `MaxSessionsPerPeer` = 8 —
   several devices or tabs per DID (Coordinate Mediation 3.0 opens one socket per device) without
   one peer holding a meaningful share of the total; `MaxSessions` = 4096 — each live session is a
   socket plus its push queue, which keeps the registry's bookkeeping to a few megabytes, well inside
-  a small host's connection range; `MaxPendingPushes` = 16 packed messages per socket — live
-  delivery keeps at most one unacknowledged delivery per session, so this is slack, not a working
-  set.
+  a small host's connection range; `MaxPendingPushes` = 16 pushes per socket being packed or
+  queued (besides the one being sent) — live delivery keeps at most one unacknowledged delivery per
+  session, so this is slack, not a working set.
 - **Replay protection** (FR-RR-08): `IInboundReplayGuard.TryAdmit(peerDidSubject, messageId,
   createdTime, now)`, the default `InMemoryReplayGuard`, and `ReplayAdmission` (`Admitted`,
   `Duplicate`, `TooOld`, `FutureDated`, `MissingCreatedTime`, `Saturated`, `MessageIdTooLong`). The
@@ -272,10 +281,12 @@ replay admission.
   not-yet-delivered capture of it, in which case the body is ciphertext only the sender can open.
   A replay drop is a `202` like any accepted message without a session. Eviction is visible to the
   evicted peer as a normal close, which FR-RR-03 requires.
-- **Isolation.** Messages are snapshotted before validation and packing; registry events and
-  `Closed` callbacks are fire-and-forget, each subscriber's exception isolated; WebSocket pushes go
-  through a bounded queue that never blocks a handler; a throwing logging provider cannot change an
-  admission decision, a session push or the response that carries it.
+- **Isolation.** Messages are snapshotted before validation and packing; registry events run on
+  the thread pool, never on the registering or unregistering thread, and `Closed` callbacks never
+  on the closing caller's thread — each subscriber's exception isolated, and a subscriber that
+  blocks delays no registration, eviction or connection close; a WebSocket push reserves a bounded
+  slot before any snapshot or crypto and never blocks a handler; a throwing logging provider cannot
+  change an admission decision, a session push or the response that carries it.
 - **Audit.** Every return-route drop and refusal logs the message id and an enum or exception type
   name only; the registry's eviction and total-bound lines carry counts only. Malformed-header and
   replay-drop lines are rate-limited (the first and every 1000th at Warning) because any sender can
@@ -414,6 +425,20 @@ replay admission.
   step in the inbound flow and the DI fail-fast rule beside the sink rule; #91 leaves the "not built
   yet" list. The XML docs of `ProtocolDispatcher`, `DispatchOutcome`, `IProtocolHandler` and
   `ProtocolContext.Acknowledged` no longer say an HTTP receive only logs a handler's reply.
+- **PRD: the return-route requirements now match what #91 built (PR #103 review).** "Authenticated"
+  in these rows now means an authcrypt sender key id — a verified signature alone does not count —
+  so signed-only and `anoncrypt(sign(…))` messages neither open a session nor fall under replay
+  protection, and the mediator handlers are the ones that drop them (FR-RR-03, FR-RR-08, FR-MED-05,
+  FR-PICK-01, FR-TRN-03). Session bounds apply to WebSocket sessions only: an HTTP session lasts one
+  request and is never counted or evicted, so a burst of POSTs cannot push a peer's live socket out,
+  and a peer at its own bound replaces its oldest session even when the registry is full
+  (FR-RR-03). On an open WebSocket session `thread` or a malformed header stops pushes like `none`,
+  push capacity is reserved before any packing, and session notifications are raised
+  asynchronously after the change (FR-RR-05, DD-12). Also: a send to the queue endpoint is refused
+  before any transport activity (FR-RR-06); over-long message ids are refused and one replay cache
+  serves every endpoint of a host (FR-RR-08); the same-socket reply switch is described as the
+  WebSocket return-route session it now is (FR-TRN-10, FR-PROTO-05a); an unusable
+  `return_route_thread` is treated as `none` (FR-RR-01).
 
 ## [1.5.1] - 2026-11-02
 
