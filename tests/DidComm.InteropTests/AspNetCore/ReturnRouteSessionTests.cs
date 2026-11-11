@@ -460,7 +460,42 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
                 landedMidDrain++;
         }
 
-        landedMidDrain.Should().BeGreaterThan(Rounds / 2, "the downgrade must overlap the drain (L-044): some queued pushes are discarded");
+        // The per-round invariant above is the assertion; this only proves the sweep is not
+        // degenerate. How many rounds land mid-drain depends on the scheduler (13 of 60 on a loaded
+        // CI runner, most of them locally), so require overlap, not a share of rounds (L-044). The
+        // deterministic overlap is pinned by the test below.
+        landedMidDrain.Should().BeGreaterThan(0, "the downgrade must overlap the drain in some rounds (L-044)");
+    }
+
+    [Fact]
+    public async Task Ws_a_downgrade_applied_while_the_writer_is_parked_in_a_send_discards_the_queued_pushes()
+    {
+        // The deterministic half of the sweep above: the writer is parked inside a send with a full
+        // batch queued behind it, `none` is applied, then the writer is released — none of the queued
+        // pushes may start a send ("the receiver pushes nothing after it processes the None").
+        const int Queued = 8;
+        var downgraded = 0;
+        var socket = new FakeWebSocket
+        {
+            SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+            AtSendEntry = () => Volatile.Read(ref downgraded) == 1,
+        };
+        using var connection = new CancellationTokenSource();
+        var session = NewWebSocketSession(socket, connection, maxPendingPushes: Queued);
+        session.Start();
+
+        (await session.TrySendAsync(ToAlice("parked"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout);
+        for (var i = 0; i < Queued; i++)
+            (await session.TrySendAsync(ToAlice("queued-" + i), default)).Should().BeTrue();
+
+        session.ApplyHeader(ReturnRouteHeader.None);
+        Volatile.Write(ref downgraded, 1);
+        socket.SendGate.SetResult();
+        (await session.StopAsync().WaitAsync(Timeout)).Should().BeTrue();
+
+        socket.SendsAfterFlag.Should().Be(0, "no send may begin after ApplyHeader(None) returned");
+        socket.Frames.Should().HaveCount(1, "only the send already in flight completes; the queued pushes are discarded");
     }
 
     [Fact]
