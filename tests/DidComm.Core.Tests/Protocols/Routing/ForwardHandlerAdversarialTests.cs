@@ -425,14 +425,5 @@ public sealed class ForwardHandlerAdversarialTests
     // ── helpers ───────────────────────────────────────────────────────────────────────────
 
     private static void AssertNothingEchoes(ForwardHandlerTests.CapturingLogger logger, string marker)
-    {
-        foreach (var entry in logger.Entries)
-        {
-            entry.Formatted.Should().NotContain(marker);
-            foreach (var value in entry.State.Values)
-                (value?.ToString() ?? string.Empty).Should().NotContain(marker);
-            for (var e = entry.Exception; e is not null; e = e.InnerException)
-                e.Message.Should().NotContain(marker);
-        }
-    }
+        => ForwardHandlerTests.AssertLogsCarryNoExceptionObjectAndNone(logger, marker);
 }

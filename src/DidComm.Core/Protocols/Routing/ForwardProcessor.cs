@@ -44,7 +44,12 @@ namespace DidComm.Protocols.Routing;
 /// <strong>Scheduling hints.</strong> <c>expires_time</c> is propagated; <c>delay_milli</c> is
 /// resolved to <see cref="ForwardProcessingResult.Delay"/> and, on the processor's
 /// <see cref="DidCommOptions"/> clock, to the absolute <see cref="ForwardProcessingResult.NotBefore"/>
-/// (FR-ROUTE-10). The three-argument constructor uses the system clock.
+/// (FR-ROUTE-10). The public <c>ProcessAsync</c> overloads resolve the schedule when they are
+/// called — hosts such as <c>samples/04-MediatorAgent</c> call them at receipt, so that is the
+/// receipt time. <see cref="ForwardHandler"/> resolves it itself, inline at admission and before
+/// any queueing, and hands the fixed schedule to the internal overload, so a forward that waits
+/// behind a slow sink keeps the not-before it was given on arrival. The three-argument
+/// constructor uses the system clock.
 /// </para>
 /// </remarks>
 /// <example>
@@ -146,7 +151,10 @@ public sealed class ForwardProcessor
 
     /// <summary>
     /// Process one inbound forward from the host's own unpack of it. Validation order: forward
-    /// parse, encryption posture, attachment count, attachment decode, transformation.
+    /// parse, encryption posture, attachment count, attachment decode, transformation. The
+    /// <c>delay_milli</c> schedule (<see cref="ForwardProcessingResult.Delay"/> /
+    /// <see cref="ForwardProcessingResult.NotBefore"/>) is resolved on this call, on the
+    /// processor's clock — call it at receipt, as the hosts that use it directly do.
     /// </summary>
     /// <param name="unpacked">The unpack outcome of the inbound envelope — envelope metadata included, so the FR-ROUTE-11 posture can be judged.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -154,7 +162,27 @@ public sealed class ForwardProcessor
     /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
     /// <exception cref="DidResolutionException">Rewrap mode only: the next hop resolves to no usable <c>keyAgreement</c> key.</exception>
     /// <exception cref="CryptoException">Rewrap mode or extra routing keys: the onward envelope could not be built.</exception>
-    public async Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
+    public Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
+        => ProcessCoreAsync(unpacked, schedule: null, ct);
+
+    /// <summary>
+    /// Process one inbound forward with a schedule the caller already resolved. Used by
+    /// <see cref="ForwardHandler"/>, which reads the clock and samples <c>delay_milli</c> once,
+    /// inline at admission, so the time a forward spends queued never moves its
+    /// <see cref="ForwardProcessingResult.NotBefore"/>. Validation and transformation are those
+    /// of <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>; only the schedule differs.
+    /// </summary>
+    /// <param name="unpacked">The unpack outcome of the inbound envelope.</param>
+    /// <param name="delay">The resolved <c>delay_milli</c> hint (<see cref="ExtractDelay"/>), or <c>null</c> when absent.</param>
+    /// <param name="notBefore">Receipt time plus <paramref name="delay"/>, or <c>null</c> when there is no delay.</param>
+    /// <param name="ct">Cancellation token.</param>
+    internal Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, TimeSpan? delay, DateTimeOffset? notBefore, CancellationToken ct)
+        => ProcessCoreAsync(unpacked, (delay, notBefore), ct);
+
+    private async Task<ForwardProcessingResult> ProcessCoreAsync(
+        UnpackResult unpacked,
+        (TimeSpan? Delay, DateTimeOffset? NotBefore)? schedule,
+        CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(unpacked);
 
@@ -188,10 +216,10 @@ public sealed class ForwardProcessor
 
         var innerPayloadBytes = ExtractAttachmentBytes(attachments[0]);
         var expiresTime = unpacked.Message.ExpiresTime;
-        var delay = ExtractDelay(unpacked.Message);
-        // FR-ROUTE-10: resolve the hint to an absolute not-before once, at receipt, on the
-        // mediator's clock. The handler never sleeps on it.
-        var notBefore = delay is TimeSpan d ? _didCommOptions.Now() + d : (DateTimeOffset?)null;
+        // FR-ROUTE-10: resolve the hint to an absolute not-before once, on the mediator's clock —
+        // here when the public overload is the receipt point, or earlier by the handler, which
+        // passes the schedule it fixed at admission. Nothing ever sleeps on it.
+        var (delay, notBefore) = schedule ?? ResolveSchedule(unpacked.Message);
 
         if (_options.Mode == RewrapMode.ReanoncryptToNext)
         {
@@ -263,7 +291,20 @@ public sealed class ForwardProcessor
             "Forward attachment is missing both 'data.json' and 'data.base64'. The mediator has nothing to relay.");
     }
 
-    private static TimeSpan? ExtractDelay(Messages.Message message)
+    private (TimeSpan? Delay, DateTimeOffset? NotBefore) ResolveSchedule(Messages.Message message)
+    {
+        var delay = ExtractDelay(message);
+        return (delay, delay is TimeSpan d ? _didCommOptions.Now() + d : null);
+    }
+
+    /// <summary>
+    /// Resolve the forward's <c>delay_milli</c> header to a hold (FR-ROUTE-10): absent, non-integer
+    /// or non-numeric → <c>null</c>; a negative value is sampled uniformly in <c>[0, |n|]</c>; either
+    /// way the hold is capped at <see cref="int.MaxValue"/> milliseconds. Never throws. Shared with
+    /// <see cref="ForwardHandler"/>, which samples it once at admission.
+    /// </summary>
+    /// <param name="message">The inbound forward.</param>
+    internal static TimeSpan? ExtractDelay(Messages.Message message)
     {
         if (message.AdditionalHeaders is null) return null;
         if (!message.AdditionalHeaders.TryGetValue("delay_milli", out var element)) return null;

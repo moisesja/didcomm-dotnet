@@ -16,10 +16,14 @@ public sealed record ForwardProcessingResult(
 {
     /// <summary>
     /// The earliest moment the onward payload may be delivered (FR-ROUTE-10): the receipt time on
-    /// the processor's <see cref="Facade.DidCommOptions"/> clock plus <see cref="Delay"/>, resolved
-    /// once at receipt so a queue can store it as an absolute not-before. <c>null</c> when the
-    /// forward carried no <c>delay_milli</c>. The handler never sleeps on it; honoring the hint is
-    /// the sink's (or queue's) job and never delays the transport acknowledgement.
+    /// the <see cref="Facade.DidCommOptions"/> clock plus <see cref="Delay"/>, resolved once so a
+    /// queue can store it as an absolute not-before. Receipt time means: <see cref="ForwardHandler"/>
+    /// stamps it when the forward is admitted, inline on the request and before any queueing, so
+    /// time spent waiting for the transport acknowledgement or queued behind a slow sink never
+    /// moves it; the public <see cref="ForwardProcessor.ProcessAsync(Facade.UnpackResult, CancellationToken)"/>
+    /// overloads stamp it when they are called. <c>null</c> when the forward carried no
+    /// <c>delay_milli</c>. The handler never sleeps on it; honoring the hint is the sink's (or
+    /// queue's) job and never delays the transport acknowledgement.
     /// </summary>
     public DateTimeOffset? NotBefore { get; init; }
 

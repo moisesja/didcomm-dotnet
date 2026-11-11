@@ -16,13 +16,29 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   `DidCommOptions.Clock` with the FR-API-05 skew (FR-ROUTE-09), reduce `body.next` to its DID
   subject and ask the `IForwardRecipientRegistry`. Every failure is a drop logged with the message
   id only and a `null` reply — no problem report, and `please_ack` is never read (FR-ROUTE-07). An
-  admitted forward goes on a bounded channel (1024 outstanding and 64 MiB of their plaintext
-  bytes, so a slow sink cannot be used to park 1024 × `MaxReceiveBytes` in memory; beyond either
-  bound the newest is dropped with a rate-limited warning) so the transport writes its 202 before
-  `ForwardProcessor` and the sink run; the detached work runs on the handler's shutdown token, never the request's, so a
-  client abort after the 202 cannot cancel the relay. Expiry is checked again on the pump for the
-  time spent queued. A singleton, `IAsyncDisposable`: dispose stops admission, cancels the pump and
-  discards what is queued (fail closed).
+  admitted forward reserves its place on a bounded queue inline (1024 outstanding and 64 MiB of
+  their plaintext bytes, so a slow sink cannot be used to park 1024 × `MaxReceiveBytes` in memory;
+  beyond either bound the newest is dropped with a rate-limited warning) and is published to the
+  pump only once `ProtocolContext.Acknowledged` has completed — the transport's signal that the
+  inbound was acknowledged on the wire — so neither `ForwardProcessor` nor the sink runs before
+  the sender holds the 202; a cancelled or faulted acknowledgement (client abort before the
+  response was committed, a rejection after the handler ran) releases the reservation and drops
+  the forward with a warning. The detached work runs on the handler's shutdown token, never the
+  request's, so a client abort after the 202 cannot cancel the relay. The clock is read once per
+  forward, inline: it judges the relay-time expiry and fixes the `delay_milli` schedule
+  (`NotBefore`) at receipt, so time spent waiting or queued never moves it; expiry is checked again
+  on the pump for the time spent queued. Logging contract: message id plus exception type name(s)
+  only — no exception object ever reaches the logger, because a resolution or sink fault can carry
+  the next-hop DID in its message. A singleton, `IAsyncDisposable`: dispose stops admission,
+  cancels the pump and discards what is queued or still awaiting acknowledgement (fail closed).
+- **`ProtocolContext.Acknowledged`** (init-only, default `Task.CompletedTask`) and
+  **`ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task acknowledged, CancellationToken)`**:
+  a transport that has a wire acknowledgement hands it to the handlers through the new overload;
+  the existing four-argument overload delegates with `Task.CompletedTask` ("no ordering"). The
+  registry-aware `MapDidCommEndpoint(pattern)` completes it from `Response.OnCompleted` (the 202 is
+  committed) and cancels it on `RequestAborted` or when the response becomes the uniform 400 after
+  the handler ran; the registry-aware `MapDidCommWebSocket(pattern)` has no per-message wire
+  acknowledgement and keeps publishing immediately. Both additions are binary-compatible.
 - **`DidCommBuilder.AddRoutingMediator(ForwardProcessorOptions? = null)`**: registers the handler,
   the processor and `TryAdd` defaults for its collaborators, and validates the options at
   registration so a bad combination fails at startup. It also refuses, with
@@ -50,7 +66,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   request path. The default drops it after logging the id; real sinks (live push, queue, direct
   push) arrive with `DidComm.Mediator` (#95).
 - **`ForwardProcessingResult.NotBefore`** — `delay_milli` resolved once at receipt to an absolute
-  not-before on the processor's clock, for a queue to store (FR-ROUTE-10) — and
+  not-before on the `DidCommOptions` clock, for a queue to store (FR-ROUTE-10): `ForwardHandler`
+  stamps it inline at admission, before any queueing, and hands the fixed schedule to the
+  processor; the public `ProcessAsync` overloads stamp it when they are called — and
   **`IsExpired(now, skew)`**, the FR-API-05 arithmetic shared with the handler (FR-ROUTE-09).
 - **`IProtocolHandlerRoles`** and **`FeatureDisclosure.Roles`**: a handler may name the roles it
   plays; the protocol feature provider copies them onto the Discover Features `disclose` entry

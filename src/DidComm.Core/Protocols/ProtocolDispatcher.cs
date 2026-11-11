@@ -109,20 +109,49 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     /// <summary>
     /// Dispatch <paramref name="received"/> to its handler. Returns the resulting
     /// <see cref="DispatchOutcome"/> for the caller (typically the AspNetCore endpoint layer)
-    /// to act on.
+    /// to act on. The handler's <see cref="ProtocolContext.Acknowledged"/> is
+    /// <see cref="Task.CompletedTask"/>: the caller provides no wire acknowledgement to order
+    /// deferred handler work against, so a handler that defers past the acknowledgement proceeds
+    /// immediately. A transport that does have one (the registry-aware HTTP endpoint) uses the
+    /// <see cref="DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, CancellationToken)"/>
+    /// overload.
     /// </summary>
     /// <param name="received">The unpack result for the inbound envelope.</param>
     /// <param name="client">The facade — passed through to the handler via <see cref="ProtocolContext.Client"/>. Nullable for ergonomic unit tests; production code always supplies it.</param>
     /// <param name="options">The active <see cref="DidCommOptions"/>.</param>
     /// <param name="ct">Cancellation token.</param>
-    public async Task<DispatchOutcome> DispatchAsync(
+    public Task<DispatchOutcome> DispatchAsync(
         UnpackResult received,
         DidCommClient? client,
         DidCommOptions options,
         CancellationToken ct = default)
+        => DispatchAsync(received, client, options, Task.CompletedTask, ct);
+
+    /// <summary>
+    /// Dispatch <paramref name="received"/> to its handler with a transport acknowledgement
+    /// signal. <paramref name="acknowledged"/> becomes the handler's
+    /// <see cref="ProtocolContext.Acknowledged"/>: it completes once the transport has committed
+    /// its acknowledgement of the inbound on the wire (HTTP: the 202 response), and is cancelled
+    /// or faulted when that never happens (client abort, or a rejection after the handler ran).
+    /// A handler whose contract is "nothing observable before the acknowledgement" — the mediator's
+    /// <see cref="Routing.ForwardHandler"/> (FR-ROUTE-11) — awaits it before starting its deferred
+    /// work; every other handler ignores it. The dispatch itself does not wait for it.
+    /// </summary>
+    /// <param name="received">The unpack result for the inbound envelope.</param>
+    /// <param name="client">The facade — passed through to the handler via <see cref="ProtocolContext.Client"/>. Nullable for ergonomic unit tests; production code always supplies it.</param>
+    /// <param name="options">The active <see cref="DidCommOptions"/>.</param>
+    /// <param name="acknowledged">Completes when the transport has acknowledged the inbound on the wire; cancelled or faulted when it never will. <see cref="Task.CompletedTask"/> for "no ordering".</param>
+    /// <param name="ct">Cancellation token.</param>
+    public async Task<DispatchOutcome> DispatchAsync(
+        UnpackResult received,
+        DidCommClient? client,
+        DidCommOptions options,
+        Task acknowledged,
+        CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(received);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(acknowledged);
 
         // NFR-05 handle span: message type URI + dispatch outcome only (NFR-04) — never the
         // body or a reply's contents. Zero-cost when nothing listens.
@@ -171,7 +200,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 
         try
         {
-            var outcome = await DispatchCoreAsync(received, client, options, ct).ConfigureAwait(false);
+            var outcome = await DispatchCoreAsync(received, client, options, acknowledged, ct).ConfigureAwait(false);
             activity?.SetTag(DidCommDiagnostics.DispatchResultTag, outcome.Result.ToString());
             return outcome;
         }
@@ -246,6 +275,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         UnpackResult received,
         DidCommClient? client,
         DidCommOptions options,
+        Task acknowledged,
         CancellationToken ct)
     {
         // FR-PROTO-11: when Trace 2.0 is opted in via EnableTracing, exercise the decision logic
@@ -295,7 +325,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         }
 
         var thread = _threads.GetOrCreate(received.Message.Thid ?? received.Message.Id);
-        var context = new ProtocolContext(received, thread, client, options, _threads);
+        var context = new ProtocolContext(received, thread, client, options, _threads) { Acknowledged = acknowledged };
 
         var reply = await handler.HandleAsync(received.Message, context, ct).ConfigureAwait(false);
         if (reply is null)

@@ -354,9 +354,9 @@ public sealed class ForwardHandlerTests
         h.Sink.Count.Should().Be(0);
         h.Registry.Calls.Should().Be(0);
         var warning = h.Logger.Warnings.Should().ContainSingle().Which;
-        warning.Formatted.Should().Contain("malformed forward").And.Contain(forward.Id).And.NotContain(LengthCap.Run);
-        warning.Exception.Should().NotBeNull();
-        warning.Exception!.ShouldNotQuoteTheValue();
+        warning.Formatted.Should().Contain("malformed forward").And.Contain("MalformedMessageException").And.Contain(forward.Id).And.NotContain(LengthCap.Run);
+        warning.Exception.Should().BeNull("the exception type name is logged, never the exception object");
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, LengthCap.Run);
     }
 
     [Fact]
@@ -700,12 +700,340 @@ public sealed class ForwardHandlerTests
             entry.State.Should().ContainKey("MessageId");
             ids.Should().Contain((string)entry.State["MessageId"]!);
             entry.Formatted.Should().Contain((string)entry.State["MessageId"]!);
-            entry.Formatted.Should().NotContain(Bob).And.NotContain("carol").And.NotContain(MediatorKid).And.NotContain(SignerKid).And.NotContain(LengthCap.Run).And.NotContain("ciphertext");
-            foreach (var value in entry.State.Values.OfType<string>())
-                value.Should().NotContain(Bob).And.NotContain(MediatorKid).And.NotContain(LengthCap.Run);
-            if (entry.Exception is not null)
-                entry.Exception.ShouldNotQuoteTheValue();
         }
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, Bob, "carol", MediatorKid, SignerKid, LengthCap.Run, "ciphertext");
+    }
+
+    [Fact]
+    public async Task Rewrap_resolution_failure_is_logged_by_exception_type_only_and_never_renders_the_recipient_DID()
+    {
+        // Rewrap mode over an empty key service: ProcessAsync throws DidResolutionException(nextDid, ...)
+        // — an exception whose message carries the next-hop DID. A console provider prints
+        // exception.ToString(), so the object must never reach the logger (review round 1, finding 2).
+        const string PrivateRecipient = "did:example:private-recipient-marker";
+        await using var h = new Harness(processorOptions: new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext));
+        h.Recipients.Register(PrivateRecipient);
+        var forward = Forward(PrivateRecipient);
+
+        var outcome = await h.Dispatch(AsDecryptedByMediator(forward));
+        await h.Handler.FlushAsync(Flush);
+
+        outcome.Result.Should().Be(DispatchResult.NoReply);
+        h.Sink.Count.Should().Be(0);
+        var warning = h.Logger.Warnings.Should().ContainSingle().Which;
+        warning.Formatted.Should().Contain("not relayed").And.Contain(forward.Id).And.Contain("DidResolutionException");
+        warning.State["ExceptionType"].Should().Be("DidResolutionException");
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, PrivateRecipient, "private-recipient");
+    }
+
+    [Fact]
+    public async Task Sink_exception_whose_message_embeds_a_DID_is_logged_by_type_only()
+    {
+        const string Leak = "did:example:private-recipient-marker";
+        await using var h = new Harness();
+        h.Sink.Throw = new InvalidOperationException($"sink refused {Leak}", new TimeoutException($"inner {Leak}"));
+        var forward = Forward(Bob);
+
+        await h.Dispatch(AsDecryptedByMediator(forward));
+        await h.Handler.FlushAsync(Flush);
+
+        var warning = h.Logger.Warnings.Should().ContainSingle().Which;
+        warning.Formatted.Should().Contain("not relayed").And.Contain(forward.Id).And.Contain("InvalidOperationException").And.Contain("TimeoutException");
+        warning.State["InnerExceptionType"].Should().Be("TimeoutException");
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, Leak, Bob);
+    }
+
+    [Fact]
+    public async Task Registry_exception_whose_message_embeds_a_DID_is_logged_by_type_only_on_the_inline_path()
+    {
+        const string Leak = "did:example:private-recipient-marker";
+        await using var h = new Harness();
+        h.Registry.Throw = new InvalidOperationException($"registry refused {Leak}");
+        var forward = Forward(Bob);
+
+        var outcome = await h.Dispatch(AsDecryptedByMediator(forward));
+
+        outcome.Result.Should().Be(DispatchResult.NoReply);
+        h.Handler.Outstanding.Should().Be(0);
+        var warning = h.Logger.Warnings.Should().ContainSingle().Which;
+        warning.Formatted.Should().Contain("inline screening failed").And.Contain(forward.Id).And.Contain("InvalidOperationException");
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, Leak, Bob);
+    }
+
+    // ── Transport acknowledgement (review round 1, finding 1) ─────────────────────────────
+
+    [Fact]
+    public async Task Admitted_forward_is_not_processed_or_relayed_until_the_transport_acknowledges_it()
+    {
+        await using var h = new Harness();
+        var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var forward = Forward(Bob);
+
+        var outcome = await h.Dispatch(AsDecryptedByMediator(forward), acknowledged.Task);
+
+        outcome.Result.Should().Be(DispatchResult.NoReply);
+        h.Handler.Outstanding.Should().Be(1, "the slot is reserved inline, before the acknowledgement");
+        h.Handler.OutstandingBytes.Should().BeGreaterThan(0);
+        await Task.Delay(50);
+        h.Provider.Calls.Should().Be(0, "the processor must not run before the 202 is committed");
+        h.Sink.Count.Should().Be(0, "the sink must not run before the 202 is committed");
+
+        acknowledged.SetResult();
+        await h.Handler.FlushAsync(Flush);
+
+        h.Provider.Calls.Should().Be(1);
+        h.Sink.Count.Should().Be(1);
+        h.Sink.Contexts.Single().Received.Message.Id.Should().Be(forward.Id);
+        h.Handler.Outstanding.Should().Be(0);
+        h.Handler.OutstandingBytes.Should().Be(0);
+        h.Logger.Warnings.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Cancelled_acknowledgement_releases_the_reservation_and_drops_the_forward_with_the_id_only()
+    {
+        await using var h = new Harness();
+        var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var forward = Forward(Bob);
+        await h.Dispatch(AsDecryptedByMediator(forward), acknowledged.Task);
+        h.Handler.Outstanding.Should().Be(1);
+
+        acknowledged.SetCanceled();
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(0);
+        h.Provider.Calls.Should().Be(0);
+        h.Handler.Outstanding.Should().Be(0, "the slot is released");
+        h.Handler.OutstandingBytes.Should().Be(0, "the bytes are released");
+        var warning = h.Logger.Warnings.Should().ContainSingle().Which;
+        warning.Formatted.Should().Contain("did not acknowledge").And.Contain(forward.Id);
+        warning.State.Keys.Should().BeEquivalentTo("MessageId", "{OriginalFormat}");
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, Bob, MediatorKid);
+
+        // Admission resumes: the next forward (acknowledged at once) is relayed.
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)));
+        await h.Handler.FlushAsync(Flush);
+        h.Sink.Count.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Faulted_acknowledgement_drops_the_forward_without_rendering_the_fault()
+    {
+        const string Leak = "did:example:private-recipient-marker";
+        await using var h = new Harness();
+        var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var forward = Forward(Bob);
+        await h.Dispatch(AsDecryptedByMediator(forward), acknowledged.Task);
+
+        acknowledged.SetException(new InvalidOperationException($"response failed for {Leak}"));
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(0);
+        h.Handler.Outstanding.Should().Be(0);
+        h.Handler.OutstandingBytes.Should().Be(0);
+        h.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain("did not acknowledge").And.Contain(forward.Id);
+        AssertLogsCarryNoExceptionObjectAndNone(h.Logger, Leak, Bob);
+    }
+
+    [Fact]
+    public async Task Already_cancelled_acknowledgement_is_dropped_inline_without_holding_a_slot()
+    {
+        await using var h = new Harness();
+        var forward = Forward(Bob);
+
+        await h.Dispatch(AsDecryptedByMediator(forward), Task.FromCanceled(new CancellationToken(canceled: true)));
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(0);
+        h.Handler.Outstanding.Should().Be(0);
+        h.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain("did not acknowledge").And.Contain(forward.Id);
+    }
+
+    [Fact]
+    public async Task FlushAsync_waits_for_a_pending_acknowledgement()
+    {
+        await using var h = new Harness();
+        var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)), acknowledged.Task);
+
+        var flush = h.Handler.FlushAsync(Flush);
+        await Task.Delay(100);
+        flush.IsCompleted.Should().BeFalse("a forward admitted before the call has neither reached the sink nor been dropped");
+        h.Sink.Count.Should().Be(0);
+
+        acknowledged.SetResult();
+        await flush;
+
+        h.Sink.Count.Should().Be(1, "the flush completes only after the acknowledged forward reached the sink");
+        h.Handler.Outstanding.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task FlushAsync_times_out_while_an_acknowledgement_is_still_pending()
+    {
+        await using var h = new Harness();
+        var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)), acknowledged.Task);
+
+        var act = async () => await h.Handler.FlushAsync(TimeSpan.FromMilliseconds(200));
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        h.Handler.Outstanding.Should().Be(1, "a timed-out flush changes nothing");
+        acknowledged.SetResult();
+        await h.Handler.FlushAsync(Flush);
+        h.Sink.Count.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Dispose_with_a_pending_acknowledgement_discards_it_and_never_reaches_the_sink()
+    {
+        var h = new Harness(capacity: 8, shutdownGrace: TimeSpan.FromSeconds(5));
+        var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)), acknowledged.Task);
+        h.Handler.Outstanding.Should().Be(1);
+
+        await h.Handler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await h.Handler.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(10));
+
+        h.Handler.Outstanding.Should().Be(0, "the reservation is released at shutdown");
+        h.Handler.OutstandingBytes.Should().Be(0);
+        h.Logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Information && e.Formatted.Contains("discarded"))
+            .Which.State["Count"].Should().Be(1);
+
+        // The transport acknowledges later: nothing is left to publish.
+        acknowledged.SetResult();
+        await Task.Delay(50);
+        h.Sink.Count.Should().Be(0);
+        h.Provider.Calls.Should().Be(0);
+        h.Logger.Warnings.Should().BeEmpty("a shutdown discard is not a transport failure");
+        await h.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Saturation_is_decided_inline_while_acknowledgements_are_pending()
+    {
+        await using var h = new Harness(capacity: 1);
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var admitted = Forward(Bob);
+        var refused = Forward(Bob);
+
+        await h.Dispatch(AsDecryptedByMediator(admitted), first.Task);
+        var outcome = await h.Dispatch(AsDecryptedByMediator(refused), second.Task);
+
+        outcome.Result.Should().Be(DispatchResult.NoReply);
+        h.Handler.Outstanding.Should().Be(1, "the reserved-but-unpublished forward holds the only slot");
+        h.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain("saturated").And.Contain(refused.Id);
+
+        first.SetResult();
+        second.SetResult();
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(1);
+        h.Sink.Contexts.Single().Received.Message.Id.Should().Be(admitted.Id);
+        h.Handler.Outstanding.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Acknowledged_forwards_are_published_in_acknowledgement_order_and_each_exactly_once()
+    {
+        await using var h = new Harness();
+        var acks = Enumerable.Range(0, 5).Select(_ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).ToArray();
+        var forwards = Enumerable.Range(0, 5).Select(_ => Forward(Bob)).ToArray();
+        for (var i = 0; i < 5; i++)
+            await h.Dispatch(AsDecryptedByMediator(forwards[i]), acks[i].Task);
+        h.Handler.Outstanding.Should().Be(5);
+
+        // Acknowledge in reverse: the pump sees them as they are acknowledged, not as admitted.
+        for (var i = 4; i >= 0; i--)
+        {
+            acks[i].SetResult();
+            await h.WaitUntilAsync(() => h.Sink.Count == 5 - i, "each acknowledgement publishes exactly one forward");
+        }
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(5);
+        h.Sink.Contexts.Select(c => c.Received.Message.Id).Should().Equal(forwards.Reverse().Select(f => f.Id));
+        h.Handler.Outstanding.Should().Be(0);
+    }
+
+    // ── Schedule fixed at receipt (review round 1, finding 3) ─────────────────────────────
+
+    [Fact]
+    public async Task NotBefore_is_fixed_at_admission_not_at_dequeue()
+    {
+        await using var h = new Harness();
+        h.Sink.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)));
+        await h.Sink.Started.Task.WaitAsync(Flush);
+
+        // Admitted at t0 with a 500 ms hint; the pump reaches it 10 s later.
+        var delayed = Forward(Bob);
+        delayed.AdditionalHeaders = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["delay_milli"] = JsonDocument.Parse("500").RootElement.Clone(),
+        };
+        await h.Dispatch(AsDecryptedByMediator(delayed));
+        h.Now = Fixed.AddSeconds(10);
+        h.Sink.Gate.TrySetResult();
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(2);
+        var result = h.Sink.Results.Last();
+        result.Delay.Should().Be(TimeSpan.FromMilliseconds(500));
+        result.NotBefore.Should().Be(Fixed.AddMilliseconds(500), "receipt time plus the hint, not dequeue time plus the hint");
+    }
+
+    [Fact]
+    public async Task Negative_delay_milli_is_sampled_once_at_admission_and_does_not_move_while_queued()
+    {
+        await using var h = new Harness();
+        h.Sink.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)));
+        await h.Sink.Started.Task.WaitAsync(Flush);
+
+        var delayed = Forward(Bob);
+        delayed.AdditionalHeaders = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["delay_milli"] = JsonDocument.Parse("-500").RootElement.Clone(),
+        };
+        await h.Dispatch(AsDecryptedByMediator(delayed));
+        h.Now = Fixed.AddSeconds(10);
+        h.Sink.Gate.TrySetResult();
+        await h.Handler.FlushAsync(Flush);
+
+        var result = h.Sink.Results.Last();
+        result.Delay.Should().NotBeNull();
+        result.Delay!.Value.Should().BeGreaterThanOrEqualTo(TimeSpan.Zero).And.BeLessThanOrEqualTo(TimeSpan.FromMilliseconds(500));
+        result.NotBefore.Should().Be(Fixed + result.Delay.Value, "one sample at admission, on the receipt clock");
+        result.NotBefore.Should().BeOnOrAfter(Fixed).And.BeOnOrBefore(Fixed.AddMilliseconds(500));
+        h.Options.Now().Should().Be(Fixed.AddSeconds(10), "the clock has moved on; the schedule has not");
+    }
+
+    [Fact]
+    public async Task Expiry_is_still_re_checked_at_dequeue_although_the_schedule_is_fixed_at_admission()
+    {
+        await using var h = new Harness();
+        h.Sink.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)));
+        await h.Sink.Started.Task.WaitAsync(Flush);
+
+        // Admitted at t0 (not yet expired), expires at t0 + 5 s, dequeued at t0 + 10 s.
+        var expiring = Forward(Bob, expires: Fixed.AddSeconds(5).ToUnixTimeSeconds());
+        expiring.AdditionalHeaders = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["delay_milli"] = JsonDocument.Parse("500").RootElement.Clone(),
+        };
+        await h.Dispatch(AsDecryptedByMediator(expiring));
+        h.Handler.Outstanding.Should().Be(2);
+        h.Now = Fixed.AddSeconds(10);
+        h.Sink.Gate.TrySetResult();
+        await h.Handler.FlushAsync(Flush);
+
+        h.Sink.Count.Should().Be(1, "the pump re-check drops the forward that expired while queued (FR-ROUTE-09)");
+        h.Logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Information && e.Formatted.Contains("expired while queued"))
+            .Which.Formatted.Should().Contain(expiring.Id);
+        h.Handler.Outstanding.Should().Be(0);
     }
 
     // ── Direct HandleAsync contract ───────────────────────────────────────────────────────
@@ -785,6 +1113,25 @@ public sealed class ForwardHandlerTests
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The logging contract (review round 1, finding 2): no entry ever carries an exception object
+    /// — so nothing a console provider renders, template text or <c>exception.ToString()</c>, and
+    /// no state value, contains any of <paramref name="forbidden"/> (DIDs, kids, hostile markers).
+    /// </summary>
+    internal static void AssertLogsCarryNoExceptionObjectAndNone(CapturingLogger logger, params string[] forbidden)
+    {
+        foreach (var entry in logger.Entries)
+        {
+            entry.Exception.Should().BeNull("the handler logs exception type names only, never the exception object (its message may carry a DID)");
+            foreach (var value in forbidden)
+            {
+                entry.Rendered.Should().NotContain(value);
+                foreach (var stateValue in entry.State.Values)
+                    (stateValue?.ToString() ?? string.Empty).Should().NotContain(value);
+            }
+        }
+    }
+
     internal static Message Forward(string next, long? expires = null)
         => ForwardMessage.Create(Mediator, next, new[] { Inner }, expiresTimeEpochSeconds: expires);
 
@@ -797,6 +1144,11 @@ public sealed class ForwardHandlerTests
         public CapturingSink Sink { get; } = new();
         public CapturingLogger Logger { get; } = new();
         public CountingRegistry Registry { get; }
+        /// <summary>
+        /// Consulted by <see cref="ForwardProcessor"/> in pass-through mode: its call count is the
+        /// proof that the processor ran for a forward (never in rewrap mode).
+        /// </summary>
+        public CountingRoutingKeyProvider Provider { get; } = new();
         /// <summary>The directory behind <see cref="Registry"/>, holding <c>did:example:bob</c>.</summary>
         public InMemoryForwardRecipientRegistry Recipients { get; }
         public ForwardHandler Handler { get; }
@@ -815,8 +1167,9 @@ public sealed class ForwardHandlerTests
             Recipients = new InMemoryForwardRecipientRegistry();
             Recipients.Register(Bob);
             Registry = new CountingRegistry(Recipients);
+            var resolvedProcessorOptions = processorOptions ?? new ForwardProcessorOptions();
             Handler = new ForwardHandler(
-                NewProcessor(processorOptions, didCommOptions: Options),
+                NewProcessor(resolvedProcessorOptions, routingKeys: Provider, didCommOptions: Options),
                 Sink, Registry, logger ?? Logger, capacity, shutdownGrace, byteBudget);
             var registry = new ProtocolHandlerRegistry();
             registry.Register(Handler);
@@ -825,6 +1178,22 @@ public sealed class ForwardHandlerTests
 
         public Task<DispatchOutcome> Dispatch(UnpackResult unpacked, CancellationToken ct = default)
             => _dispatcher.DispatchAsync(unpacked, client: null, Options, ct);
+
+        /// <summary>Dispatch with a transport acknowledgement the test controls (the HTTP endpoint's shape).</summary>
+        public Task<DispatchOutcome> Dispatch(UnpackResult unpacked, Task acknowledged, CancellationToken ct = default)
+            => _dispatcher.DispatchAsync(unpacked, client: null, Options, acknowledged, ct);
+
+        /// <summary>Poll a handler seam until it holds, or fail after <see cref="Flush"/>.</summary>
+        public async Task WaitUntilAsync(Func<bool> condition, string because)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (!condition())
+            {
+                if (watch.Elapsed > Flush)
+                    throw new TimeoutException($"Condition not met within {Flush}: {because}");
+                await Task.Delay(5);
+            }
+        }
 
         public ProtocolContext Context(UnpackResult unpacked)
             => new(unpacked, new ThreadState(unpacked.Message.Thid ?? unpacked.Message.Id), Client: null, Options, Threads);
@@ -863,6 +1232,18 @@ public sealed class ForwardHandlerTests
         }
     }
 
+    internal sealed class CountingRoutingKeyProvider : IRecipientRoutingKeyProvider
+    {
+        private int _calls;
+        public int Calls => Volatile.Read(ref _calls);
+
+        public ValueTask<IReadOnlyList<Jwk>> GetAsync(string recipientDid, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _calls);
+            return ValueTask.FromResult<IReadOnlyList<Jwk>>(Array.Empty<Jwk>());
+        }
+    }
+
     internal sealed class CountingRegistry : IForwardRecipientRegistry
     {
         private readonly IForwardRecipientRegistry _inner;
@@ -888,7 +1269,15 @@ public sealed class ForwardHandlerTests
         }
     }
 
-    internal sealed record LogEntry(LogLevel Level, IReadOnlyDictionary<string, object?> State, string Formatted, Exception? Exception);
+    /// <summary>
+    /// One captured line. <see cref="Formatted"/> is what the template renders; <see cref="Rendered"/>
+    /// is what a console provider would print — the formatted text followed by
+    /// <c>exception.ToString()</c> when an exception object was handed to the logger.
+    /// </summary>
+    internal sealed record LogEntry(LogLevel Level, IReadOnlyDictionary<string, object?> State, string Formatted, Exception? Exception)
+    {
+        public string Rendered => Exception is null ? Formatted : Formatted + Environment.NewLine + Exception;
+    }
 
     internal sealed class CapturingLogger : ILogger<ForwardHandler>
     {

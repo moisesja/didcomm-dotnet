@@ -92,26 +92,40 @@ Inbound forward:
    `DidCommOptions.Clock` with `ExpiresClockSkew`; `DidSubjectOf(next)` and
    `IForwardRecipientRegistry.IsRegisteredAsync`. Every failure is a drop: a Warning carrying the
    message id only, a `null` reply, no problem report. `please_ack` is never read.
-4. An admitted forward is queued on a bounded channel (`DefaultCapacity` 1024 outstanding and
-   `DefaultByteBudget` 64 MiB of their plaintext UTF-8 bytes, the exact size the unpack path
-   recorded in `InboundMessageSnapshot`; the newest is dropped beyond either bound) and the handler
-   returns `null`, so the transport writes its 202
-   before any registration-dependent work. The queued item is the dispatcher's `ProtocolContext`;
-   the request token is not stored.
-5. The pump calls `ForwardProcessor.ProcessAsync(UnpackResult)`: parse, posture, attachment
-   count, attachment decode, then pass-through (verbatim, or one extra wrap per key the
+4. An admitted forward reserves its place on a bounded channel inline (`DefaultCapacity` 1024
+   outstanding and `DefaultByteBudget` 64 MiB of their plaintext UTF-8 bytes, the exact size the
+   unpack path recorded in `InboundMessageSnapshot`; the newest is dropped beyond either bound,
+   decided on the request) and the handler returns `null`. The item is published to the pump only
+   once `ProtocolContext.Acknowledged` completes: the registry-aware `MapDidCommEndpoint` creates
+   it per request, completes it from `Response.OnCompleted` (the 202 is committed) and cancels it
+   on `RequestAborted` or a post-handler 400, passing it through the
+   `ProtocolDispatcher.DispatchAsync(…, Task acknowledged, …)` overload — so neither the processor
+   nor the sink runs before the sender holds the 202. The WebSocket endpoint and a direct
+   dispatcher caller pass `Task.CompletedTask` and publish immediately. A cancelled or faulted
+   acknowledgement releases the reservation and drops the forward with a warning (id only). The
+   clock was read once, at step 3: the same instant fixes the `delay_milli` schedule
+   (`ExtractDelay` → `NotBefore`) carried in the queued item. The item is the dispatcher's
+   `ProtocolContext` plus that schedule; the request token is not stored.
+5. The pump calls the internal `ForwardProcessor.ProcessAsync(UnpackResult, delay, notBefore)`
+   overload with the schedule fixed at admission (the public overloads resolve it when called):
+   parse, posture, attachment count, attachment decode, then pass-through (verbatim, or one extra wrap per key the
    `IRecipientRoutingKeyProvider` returns for the DID subject of `next`) or rewrap
    (`RewrapMode.ReanoncryptToNext`: a fresh forward anoncrypted to every keyAgreement key of the
    next hop; the provider is not consulted). The result carries `NextHop`, `OnwardPacked`,
-   `ExpiresTime`, `Delay` and `NotBefore` (receipt time plus `delay_milli` on the processor's
-   clock, for a queue to store; the handler never sleeps on it).
+   `ExpiresTime`, `Delay` and `NotBefore` (receipt time plus `delay_milli`, for a queue to store;
+   the handler never sleeps on it).
 6. Expiry is re-checked with `ForwardProcessingResult.IsExpired` for the time spent queued, then
    `IForwardSink.AcceptAsync(result, context, shutdownToken)` runs. A processor or sink fault is
-   logged with the message id and the exception type, and swallowed.
+   logged with the message id and the exception type name(s) only — the exception object never
+   reaches the logger, because a `DidResolutionException` or a sink fault can carry the next-hop
+   DID in its message — and swallowed.
 
 Shutdown: `ForwardHandler` is `IDisposable` / `IAsyncDisposable` and the container disposes it with
-the provider. Dispose stops admission, cancels the pump and discards queued forwards (fail closed);
-`DisposeAsync` additionally waits for the pump, up to 5 s.
+the provider. Dispose stops admission, cancels the pump, discards queued forwards and unblocks the
+forwards still waiting for their acknowledgement (each releases its reservation and counts as
+discarded; a later acknowledgement publishes nothing) — fail closed; `DisposeAsync` additionally
+waits for the pump and those pending forwards, up to 5 s. `FlushAsync` (test seam) waits for
+pending acknowledgements within its timeout before fencing the pump.
 
 `ForwardProcessor.ProcessAsync(string)` stays as a convenience: it unpacks with the mediator's
 client and follows the same path, so a plaintext or signed-only forward is refused with

@@ -62,6 +62,14 @@
       "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
     },
     {
+      "member": "DidComm.Core!DidComm.Protocols.ProtocolContext::prop:Acknowledged",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.ProtocolDispatcher::DispatchAsync(DidComm.Facade.UnpackResult,DidComm.Facade.DidCommClient,DidComm.Facade.DidCommOptions,System.Threading.Tasks.Task,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
       "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardHandler",
       "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
     },

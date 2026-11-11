@@ -19,6 +19,7 @@ using DidComm.Secrets;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -77,6 +78,63 @@ public sealed class MediatorEndpointRelayTests
         bobUnpack.Message.Id.Should().Be(proposal.Id);
         bobUnpack.Authenticated.Should().BeTrue("Alice's authcrypt survives the relay untouched");
         bobUnpack.SenderKid.Should().StartWith(Alice + "#");
+    }
+
+    [Fact]
+    public async Task Forward_is_neither_processed_nor_relayed_until_the_202_has_been_committed()
+    {
+        // Review round 1, finding 1: "202 before the sink" must hold even when the response cannot
+        // be written yet. A middleware holds the response at OnStarting, so the 202 cannot leave the
+        // server until the test releases the gate; meanwhile the handler has admitted the forward,
+        // and neither the processor (its routing-key lookup) nor the sink may have run.
+        var responseGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var host = await StartMediatorAsync(responseGate: responseGate);
+        var proposal = NewProposal();
+        var packed = await PackForBobViaMediatorAsync(proposal);
+
+        var post = Task.Run(() => PostEnvelopeAsync(host.Server, packed.Message));
+        await host.WaitUntilAsync(() => host.Handler.Outstanding == 1, "the handler admits the forward while the response is held");
+
+        post.IsCompleted.Should().BeFalse("the response is held at OnStarting");
+        await Task.Delay(100);
+        host.RoutingKeys.Calls.Should().Be(0, "the processor must not run before the 202 is committed");
+        host.Sink.Entered.Should().Be(0, "the sink must not run before the 202 is committed");
+        host.Handler.Outstanding.Should().Be(1);
+
+        responseGate.SetResult();
+        var response = await post.WaitAsync(Timeout);
+        response.Status.Should().Be(HttpStatusCode.Accepted);
+
+        var results = await host.Sink.WaitForCountAsync(1, Timeout);
+        await host.Handler.FlushAsync(Timeout);
+        host.Sink.Entered.Should().Be(1, "exactly one sink call, after the 202");
+        host.RoutingKeys.Calls.Should().Be(1, "exactly one processor run, after the 202");
+        results.Should().ContainSingle().Which.NextHop.Should().Be(Bob);
+        host.Handler.Outstanding.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Request_aborted_after_the_handler_ran_but_before_the_202_is_committed_never_relays_the_forward()
+    {
+        // Review round 1, finding 1 (abort branch). TestServer cannot model a client dropping the
+        // connection while the response is pending (its client-initiated abort is ignored once the
+        // pipeline has returned, which is before OnStarting/OnCompleted run), so the abort is raised
+        // server-side: a middleware calls HttpContext.Abort() after the endpoint returned — the same
+        // RequestAborted signal Kestrel raises for a dropped connection — with the handler having
+        // admitted the forward and the 202 not yet committed. The forward must be dropped, not relayed.
+        await using var host = await StartMediatorAsync(abortAfterEndpoint: true);
+        var forward = ForwardMessage.Create(Mediator1, Bob, new[] { (await AliceClient().PackEncryptedAsync(NewProposal(), new PackEncryptedOptions(Recipients: new[] { Bob }, From: Alice))).Message });
+        var packed = await AliceClient().PackEncryptedAsync(forward, new PackEncryptedOptions(Recipients: new[] { Mediator1 }));
+
+        var act = async () => await PostEnvelopeAsync(host.Server, packed.Message);
+        await act.Should().ThrowAsync<Exception>("the client never receives a response for an aborted request");
+
+        await host.WaitUntilAsync(() => host.Handler.Outstanding == 0, "the abort cancels the acknowledgement and releases the reservation");
+        await host.Handler.FlushAsync(Timeout);
+        host.Sink.Entered.Should().Be(0, "a forward whose sender never received the 202 is not relayed");
+        host.RoutingKeys.Calls.Should().Be(0, "the processor never ran");
+        host.Logs.Entries.Should().Contain(e => e.Contains(forward.Id) && e.Contains("did not acknowledge"));
+        host.Logs.Entries.Should().NotContain(e => e.Contains(Bob));
     }
 
     [Fact]
@@ -273,18 +331,35 @@ public sealed class MediatorEndpointRelayTests
         public required WebApplication App { get; init; }
         public required CapturingForwardSink Sink { get; init; }
         public required CapturingLoggerProvider Logs { get; init; }
+        /// <summary>Consulted by the processor in pass-through mode: its call count proves the processor ran.</summary>
+        public required CountingRoutingKeyProvider RoutingKeys { get; init; }
         public TestServer Server => App.GetTestServer();
         public ForwardHandler Handler => App.Services.GetRequiredService<ForwardHandler>();
         public ValueTask DisposeAsync() => App.DisposeAsync();
+
+        public async Task WaitUntilAsync(Func<bool> condition, string because)
+        {
+            var watch = Stopwatch.StartNew();
+            while (!condition())
+            {
+                if (watch.Elapsed > Timeout)
+                    throw new TimeoutException($"Condition not met within {Timeout}: {because}");
+                await Task.Delay(10);
+            }
+        }
     }
 
-    private static async Task<MediatorHost> StartMediatorAsync(bool registerBob = true)
+    /// <param name="registerBob">Whether <c>did:example:bob</c> is a registered recipient.</param>
+    /// <param name="responseGate">When set, a middleware holds every response at <c>OnStarting</c> until it completes, so the 202 cannot be written before the test allows it.</param>
+    /// <param name="abortAfterEndpoint">When set, a middleware aborts the request (<c>HttpContext.Abort()</c>, which fires <c>RequestAborted</c>) after the endpoint has returned and before the response is committed.</param>
+    private static async Task<MediatorHost> StartMediatorAsync(bool registerBob = true, TaskCompletionSource? responseGate = null, bool abortAfterEndpoint = false)
     {
         var actors = SpecActorRegistry.LoadDefault();
         var resolver = LoadRoutingResolver();
         var keyService = new NetDidKeyService(resolver);
         var serviceResolver = new NetDidServiceEndpointResolver(resolver, keyService, new DidCommOptions());
         var sink = new CapturingForwardSink();
+        var routingKeys = new CountingRoutingKeyProvider();
         var logs = new CapturingLoggerProvider();
 
         var builder = WebApplication.CreateBuilder();
@@ -296,6 +371,7 @@ public sealed class MediatorEndpointRelayTests
         builder.Services.AddSingleton<IDidKeyService>(keyService);
         builder.Services.AddSingleton<IServiceEndpointResolver>(serviceResolver);
         builder.Services.AddSingleton<IForwardSink>(sink);
+        builder.Services.AddSingleton<IRecipientRoutingKeyProvider>(routingKeys);
         builder.Services.AddDidComm(b =>
         {
             // A real mediator holds its own keys only — not Bob's.
@@ -306,6 +382,22 @@ public sealed class MediatorEndpointRelayTests
         });
 
         var app = builder.Build();
+        if (responseGate is not null)
+        {
+            app.Use(async (HttpContext ctx, RequestDelegate next) =>
+            {
+                ctx.Response.OnStarting(static state => ((TaskCompletionSource)state!).Task, responseGate);
+                await next(ctx);
+            });
+        }
+        if (abortAfterEndpoint)
+        {
+            app.Use(async (HttpContext ctx, RequestDelegate next) =>
+            {
+                await next(ctx);
+                ctx.Abort();
+            });
+        }
         app.UseWebSockets();
         app.UseRouting();
         app.MapDidCommEndpoint("/didcomm");
@@ -316,7 +408,7 @@ public sealed class MediatorEndpointRelayTests
             app.Services.GetRequiredService<InMemoryForwardRecipientRegistry>().Register(Bob);
         app.Services.GetRequiredService<IForwardSink>().Should().BeSameAs(sink);
 
-        return new MediatorHost { App = app, Sink = sink, Logs = logs };
+        return new MediatorHost { App = app, Sink = sink, Logs = logs, RoutingKeys = routingKeys };
     }
 
     private static DidCommClient AliceClient() => ActorClient();
@@ -395,6 +487,18 @@ public sealed class MediatorEndpointRelayTests
 
         public Task<IReadOnlyList<string>> FindPresentAsync(IEnumerable<string> kids, CancellationToken ct = default)
             => _inner.FindPresentAsync(kids.Where(k => k.StartsWith(_prefix, StringComparison.Ordinal)).ToList(), ct);
+    }
+
+    private sealed class CountingRoutingKeyProvider : IRecipientRoutingKeyProvider
+    {
+        private int _calls;
+        public int Calls => Volatile.Read(ref _calls);
+
+        public ValueTask<IReadOnlyList<Jwk>> GetAsync(string recipientDid, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _calls);
+            return ValueTask.FromResult<IReadOnlyList<Jwk>>(Array.Empty<Jwk>());
+        }
     }
 
     private sealed class CapturingForwardSink : IForwardSink

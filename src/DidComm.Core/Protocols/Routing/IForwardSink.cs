@@ -9,10 +9,14 @@ namespace DidComm.Protocols.Routing;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The sink runs on the handler's background pump, after the transport has already acknowledged
-/// the forward (202) — never on the request path. It receives the handler's shutdown token, not
-/// the request's. A sink exception is logged with the message id and swallowed; it never reaches
-/// the transport.
+/// The sink runs on the handler's background pump, never on the request path, and only after the
+/// transport has acknowledged the forward: the handler publishes to the pump once
+/// <see cref="ProtocolContext.Acknowledged"/> completes, which the registry-aware HTTP endpoint
+/// ties to the committed 202 (<c>Response.OnCompleted</c>); a transport with no wire
+/// acknowledgement (WebSocket, a direct dispatcher caller) publishes immediately. It receives the
+/// handler's shutdown token, not the request's. A sink exception is logged with the message id and
+/// the exception type name(s) only — never the exception object or its message, which may name a
+/// DID — and swallowed; it never reaches the transport.
 /// </para>
 /// <para>
 /// <strong>DI rule.</strong> An implementation MUST NOT take <see cref="ProtocolHandlerRegistry"/>
