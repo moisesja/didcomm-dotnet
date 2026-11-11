@@ -268,14 +268,24 @@ public sealed class ReplayProtectionEndpointTests
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.Recorder.Count == 1, Timeout)).Should().BeTrue("the winner is dispatched");
 
         guard!.Rendezvous.MaxConcurrent.Should().Be(2, "both admissions were inside the guard together (L-044)");
-        await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", default);
-        var frame = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
         host.Recorder.Invocations.Should().Be(1, "exactly one admission wins");
-        var httpWon = response.Status == HttpStatusCode.OK;
-        var wsWon = frame.Type == WebSocketMessageType.Binary;
-        (httpWon ^ wsWon).Should().BeTrue("exactly one transport returned the reply (HTTP {0}, first WS frame {1})", response.Status, frame.Type);
-        if (!httpWon)
-            response.Status.Should().Be(HttpStatusCode.Accepted);
+
+        // The HTTP answer tells which transport won. Read the socket BEFORE closing it: the WS
+        // winner's reply is queued to the session writer, and a close processed first would discard
+        // it by design ("true means queued, not delivered").
+        if (response.Status == HttpStatusCode.OK)
+        {
+            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", default);
+            var frame = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
+            frame.Type.Should().Be(WebSocketMessageType.Close, "HTTP won: the dropped WebSocket copy writes nothing");
+        }
+        else
+        {
+            response.Status.Should().Be(HttpStatusCode.Accepted, "WebSocket won: the dropped HTTP copy is answered 202");
+            var frame = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
+            frame.Type.Should().Be(WebSocketMessageType.Binary, "WebSocket won: its reply rides the socket");
+            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", default);
+        }
         host.LeakingLogLines().Should().BeEmpty();
     }
 

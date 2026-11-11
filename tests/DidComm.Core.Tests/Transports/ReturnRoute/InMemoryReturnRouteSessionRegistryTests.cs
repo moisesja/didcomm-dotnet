@@ -586,6 +586,10 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         var maxInFlight = 0;
         var arrived = 0;
         using var go = new ManualResetEventSlim(false);
+        // Each worker's first call parks inside Call (already counted in flight) until every worker
+        // is there, so the callers are in flight together on every run — on a 2-core runner a
+        // released-together start alone did not guarantee it (L-044).
+        using var firstCalls = new Barrier(Workers);
         T Call<T>(Func<T> call)
         {
             InterlockedMax(ref maxInFlight, Interlocked.Increment(ref inFlight));
@@ -605,7 +609,13 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
             for (var k = 0; k < PerWorker; k++)
             {
                 var session = new FakeSession($"did:example:p{(w + k) % Dids}");
-                registrations.Enqueue((session, Call(() => registry.Register(session))));
+                var first = k == 0;
+                registrations.Enqueue((session, Call(() =>
+                {
+                    if (first)
+                        firstCalls.SignalAndWait(Timeout).Should().BeTrue("every worker reached its first call");
+                    return registry.Register(session);
+                })));
                 if (k % 2 == 1 && Call(() => registry.Unregister(session)))
                     unregistered.Enqueue(session);
             }
@@ -615,7 +625,7 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
         go.Set();
         foreach (var t in threads) t.Join(Timeout).Should().BeTrue();
 
-        maxInFlight.Should().BeGreaterThan(1, "the calls overlapped (L-044)");
+        maxInFlight.Should().Be(Workers, "every worker's first call was in flight at once (L-044)");
         registrations.Should().HaveCount(Workers * PerWorker).And.OnlyContain(r => r.Result.Outcome == SessionRegistrationOutcome.Registered);
         var evictedBy = new Dictionary<IReturnRouteSession, IReturnRouteSession>(ReferenceEqualityComparer.Instance);
         foreach (var (session, result) in registrations)
