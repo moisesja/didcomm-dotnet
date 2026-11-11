@@ -582,6 +582,15 @@ internal sealed class Rendezvous
     {
         _parties = parties;
         _timeout = timeout;
+
+        // The section is synchronous (IInboundReplayGuard / IReturnRouteSessionRegistry), so each
+        // party parks a thread-pool thread until all have arrived. Raise the pool's floor (never
+        // lower it) so parking them does not make the pool ramp up slowly and starve the tests that
+        // run in parallel with this one; a starved pool delays their Task.Run and timers.
+        ThreadPool.GetMinThreads(out var worker, out var io);
+        var needed = Environment.ProcessorCount + 2 * parties;
+        if (worker < needed)
+            ThreadPool.SetMinThreads(needed, io);
     }
 
     /// <summary>The most callers that were inside the section at the same time.</summary>
