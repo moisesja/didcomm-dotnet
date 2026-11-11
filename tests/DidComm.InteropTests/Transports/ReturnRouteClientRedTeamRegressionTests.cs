@@ -248,6 +248,99 @@ public sealed class ReturnRouteClientRedTeamRegressionTests
         await sp.DisposeAsync().AsTask().WaitAsync(Timeout);
     }
 
+    // ---- ADV-02 (follow-up): a host consumer that takes the transport or the router ----
+
+    public static TheoryData<Type> TransportTakingConsumers() => new()
+    {
+        typeof(WebSocketTransportTakingConsumer),
+        typeof(SingleTransportTakingConsumer),
+        typeof(AllTransportsTakingConsumer),
+        typeof(RouterTakingConsumer),
+    };
+
+    /// <summary>
+    /// The consumer is a dependency of the WebSocket transport, so a consumer that takes the
+    /// transport (directly, as <see cref="IDidCommTransport"/>, or through the router) cycles
+    /// without passing through <see cref="DidCommClient"/>. Whichever end the application resolves
+    /// first, the resolution fails fast with an actionable <see cref="InvalidOperationException"/>.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(TransportTakingConsumers))]
+    public async Task ADV_02_A_host_consumer_taking_the_transport_or_the_router_fails_first_resolution_fast_instead_of_hanging(Type consumer)
+    {
+        var entries = new (string Name, Func<IServiceProvider, object> Resolve)[]
+        {
+            ("DidCommClient", sp => sp.GetRequiredService<DidCommClient>()),
+            ("WebSocketDidCommTransport", sp => sp.GetRequiredService<WebSocketDidCommTransport>()),
+            ("IInboundFrameConsumer", sp => sp.GetRequiredService<IInboundFrameConsumer>()),
+            ("ITransportRouter", sp => sp.GetRequiredService<ITransportRouter>()),
+        };
+        foreach (var (name, resolve) in entries)
+        {
+            // A fresh container per entry point: each one is a first resolution.
+            var services = new ServiceCollection();
+            services.AddSingleton(typeof(IInboundFrameConsumer), consumer);
+            services.AddDidComm(b =>
+            {
+                b.UseNetDidResolver();
+                b.UseSecretsResolver(new InMemorySecretsResolver());
+                b.UseWebSocketTransport(o => o.ReceiveInbound = true);
+                b.UseInboundDispatch();
+            });
+            var sp = services.BuildServiceProvider();
+
+            var failure = await ResolveWithinAsync(() => resolve(sp));
+
+            var message = failure.Should().BeOfType<InvalidOperationException>(name).Which.Message;
+            message.Should().Contain("circular", name)
+                .And.Contain(typeof(WebSocketDidCommTransport).FullName!, name)
+                .And.Contain("IInboundFrameConsumer", name)
+                .And.Contain("ITransportRouter", name)
+                .And.Contain("IServiceProvider", name);
+            message.Should().NotContain("did:", "no wire value or identity in the message");
+            await sp.DisposeAsync().AsTask().WaitAsync(Timeout);
+        }
+    }
+
+    [Fact]
+    public async Task ADV_02_The_guarded_transport_factory_still_resolves_one_instance_that_IDidCommTransport_maps_to()
+    {
+        // The guard only throws on re-entry. An acyclic graph, including a host consumer that resolves
+        // the transport lazily through IServiceProvider (the documented remedy), resolves once.
+        var services = new ServiceCollection();
+        services.AddSingleton<IInboundFrameConsumer, LazyTransportConsumer>();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.UseWebSocketTransport(o => o.ReceiveInbound = true);
+            b.AddBuiltInProtocols();
+        });
+        var sp = services.BuildServiceProvider();
+        WebSocketDidCommTransport? transport = null;
+        IDidCommTransport? single = null;
+        IDidCommTransport[]? all = null;
+        IInboundFrameConsumer? resolvedConsumer = null;
+
+        var failure = await ResolveWithinAsync(() =>
+        {
+            sp.GetRequiredService<DidCommClient>();
+            transport = sp.GetRequiredService<WebSocketDidCommTransport>();
+            single = sp.GetRequiredService<IDidCommTransport>();
+            all = sp.GetServices<IDidCommTransport>().ToArray();
+            resolvedConsumer = sp.GetRequiredService<IInboundFrameConsumer>();
+            return transport;
+        });
+
+        failure.Should().BeNull();
+        single.Should().BeSameAs(transport, "IDidCommTransport maps to the one WebSocket transport");
+        all.Should().ContainSingle().Which.Should().BeSameAs(transport);
+        sp.GetServices<WebSocketDidCommTransport>().Should().ContainSingle().Which.Should().BeSameAs(transport);
+        (await Task.Run(() => sp.GetRequiredService<WebSocketDidCommTransport>()).WaitAsync(Timeout)).Should().BeSameAs(transport, "a singleton, on any thread");
+        resolvedConsumer.Should().BeOfType<LazyTransportConsumer>().Which.Transport.Should().BeSameAs(transport, "resolved lazily, after construction");
+        await sp.DisposeAsync().AsTask().WaitAsync(Timeout);
+    }
+
     // ---- ADV-04: a declared Content-Length is not allocated up front ----
 
     [Fact]
@@ -394,6 +487,50 @@ public sealed class ReturnRouteClientRedTeamRegressionTests
     private sealed class FacadeTakingConsumer : IInboundFrameConsumer
     {
         public FacadeTakingConsumer(DidCommClient client) => _ = client;
+
+        public ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Breaks the dependency rule: takes the WebSocket transport, which depends on the consumer.</summary>
+    private sealed class WebSocketTransportTakingConsumer : IInboundFrameConsumer
+    {
+        public WebSocketTransportTakingConsumer(WebSocketDidCommTransport transport) => _ = transport;
+
+        public ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Breaks the dependency rule: takes the last registered transport (the WebSocket one).</summary>
+    private sealed class SingleTransportTakingConsumer : IInboundFrameConsumer
+    {
+        public SingleTransportTakingConsumer(IDidCommTransport transport) => _ = transport;
+
+        public ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Breaks the dependency rule: takes every registered transport.</summary>
+    private sealed class AllTransportsTakingConsumer : IInboundFrameConsumer
+    {
+        public AllTransportsTakingConsumer(IEnumerable<IDidCommTransport> transports) => _ = transports;
+
+        public ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Breaks the dependency rule: takes the router, which takes every transport.</summary>
+    private sealed class RouterTakingConsumer : IInboundFrameConsumer
+    {
+        public RouterTakingConsumer(ITransportRouter router) => _ = router;
+
+        public ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    /// <summary>Follows the dependency rule: resolves the transport through the provider when first needed.</summary>
+    private sealed class LazyTransportConsumer : IInboundFrameConsumer
+    {
+        private readonly IServiceProvider _services;
+
+        public LazyTransportConsumer(IServiceProvider services) => _services = services;
+
+        public WebSocketDidCommTransport Transport => _services.GetRequiredService<WebSocketDidCommTransport>();
 
         public ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
     }

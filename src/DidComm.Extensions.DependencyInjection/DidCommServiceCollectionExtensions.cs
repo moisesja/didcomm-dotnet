@@ -44,11 +44,12 @@ public static class DidCommServiceCollectionExtensions
     /// on, must not take <see cref="DidCommClient"/>, <c>ProtocolDispatcher</c>,
     /// <c>ProtocolHandlerRegistry</c> or a protocol handler in its constructor (nor, for a consumer,
     /// the router or a transport): resolve them through an <see cref="IServiceProvider"/> when first
-    /// needed. A cycle that runs through <see cref="DidCommClient"/>, <c>ProtocolDispatcher</c> or
-    /// <c>ProtocolHandlerRegistry</c> fails the first resolution with an
-    /// <see cref="InvalidOperationException"/> instead of deadlocking it; one that runs only through
-    /// the transports or the router (a consumer that takes the WebSocket transport, for example) is
-    /// not detected and deadlocks it.
+    /// needed. A cycle that runs through <see cref="DidCommClient"/>, <c>ProtocolDispatcher</c>,
+    /// <c>ProtocolHandlerRegistry</c> or the WebSocket transport registered by
+    /// <c>UseWebSocketTransport</c> fails the first resolution with an
+    /// <see cref="InvalidOperationException"/> instead of deadlocking it. Every cycle through an
+    /// inbound consumer runs through the last of these, the only library registration that resolves
+    /// the consumer; a transport the host builds in its own factory has no such guard.
     /// </para>
     /// </remarks>
     /// <param name="services">The service collection.</param>

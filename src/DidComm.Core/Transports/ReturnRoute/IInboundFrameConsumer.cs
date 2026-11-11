@@ -14,7 +14,8 @@ namespace DidComm.Transports.ReturnRoute;
 /// after the call returns. Frames of different sockets may be consumed concurrently. A consumer, or
 /// a handler it runs, must therefore not wait for another inbound message on the same session: that
 /// session stops reading and deadlocks until the wait's own timeout. The cancellation token is
-/// cancelled when the transport is disposed or a send on the socket fails, and when a retired socket
+/// cancelled when the transport is disposed, when a send on the socket fails or finds it no longer
+/// open, and when a retired socket
 /// (after <c>return_route: none</c> or an oversized message) has not finished closing
 /// within the transport's close grace; a frame already being consumed when the socket retires may
 /// otherwise finish. An exception thrown by the consumer is logged by its type name and the loop
@@ -45,11 +46,12 @@ namespace DidComm.Transports.ReturnRoute;
 /// <see cref="ITransportRouter"/>, an <see cref="IDidCommTransport"/>, <c>ProtocolDispatcher</c>,
 /// <c>ProtocolHandlerRegistry</c> or a protocol handler in its constructor; that would cycle the
 /// DI graph. Resolve them through an <see cref="IServiceProvider"/> at call time. Under
-/// <c>AddDidComm</c>, a cycle that runs through <c>DidCommClient</c>, <c>ProtocolDispatcher</c> or
-/// <c>ProtocolHandlerRegistry</c> fails the first resolution with an
-/// <see cref="InvalidOperationException"/> instead of deadlocking it; one that runs only through
-/// the transports or the router (a consumer that takes the WebSocket transport, for example) is not
-/// detected and deadlocks it.
+/// <c>AddDidComm</c> with <c>UseWebSocketTransport</c>, such a cycle always runs through the
+/// transport's factory, the only library registration that resolves the consumer, and that factory
+/// (like the ones of <c>DidCommClient</c>, <c>ProtocolDispatcher</c> and
+/// <c>ProtocolHandlerRegistry</c>) detects its own re-entry: the first resolution fails with an
+/// <see cref="InvalidOperationException"/> instead of deadlocking. A transport the host builds in
+/// its own factory has no such guard.
 /// </para>
 /// </remarks>
 public interface IInboundFrameConsumer

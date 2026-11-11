@@ -11,7 +11,9 @@ namespace DidComm.Extensions.DependencyInjection;
 /// <c>ProtocolDispatcher</c> (or the protocol handlers) while a handler takes that service; a
 /// handler that takes the dispatcher; and a host <c>IInboundFrameConsumer</c> or a custom
 /// <c>IDidCommTransport</c> that takes <c>DidCommClient</c>, which depends on every transport (and
-/// the WebSocket transport on the consumer).
+/// the WebSocket transport on the consumer). The WebSocket transport's own factory carries the same
+/// guard (<c>WebSocketDidCommBuilderExtensions</c>, a copy: this type is internal to its assembly),
+/// so a consumer that takes the transport or the router fails fast too.
 /// </summary>
 /// <remarks>
 /// A guarded factory marks itself as running, for the provider it was called with, on the

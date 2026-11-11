@@ -287,7 +287,11 @@ public sealed class DidCommBuilder
     /// transports → the WebSocket transport → <see cref="IInboundFrameConsumer"/> → (the service
     /// provider, a logger). The consumer resolves the facade, the dispatcher, the replay guard and the
     /// options when a message arrives, never at construction. A host consumer must keep it that way:
-    /// see <see cref="IInboundFrameConsumer"/>.
+    /// see <see cref="IInboundFrameConsumer"/>. A consumer that closes a cycle anyway (it takes the
+    /// facade, the router or a transport; or the dispatcher, the registry or a handler while a handler
+    /// depends on one of those) fails the first resolution with an
+    /// <see cref="InvalidOperationException"/> instead of deadlocking it, because the cycle re-enters
+    /// the WebSocket transport's or the facade's guarded factory.
     /// </para>
     /// </remarks>
     public DidCommBuilder UseInboundDispatch()
