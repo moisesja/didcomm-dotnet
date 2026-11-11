@@ -348,6 +348,10 @@
     {
       "member": "DidComm.Core!DidComm.Transports.TransportResult::prop:ResponseMediaType",
       "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Extensions.DependencyInjection!DidComm.Extensions.DependencyInjection.DidCommBuilder::UseInboundDispatch()",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     }
   ]
 }

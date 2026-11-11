@@ -584,6 +584,18 @@
     {
       "member": "DidComm.Core!DidComm.Transports.TransportResult::prop:ResponsePayload",
       "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Extensions.DependencyInjection!DidComm.Extensions.DependencyInjection.DidCommBuilder::UseInboundDispatch()",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Transports.WebSocket!DidComm.Transports.WebSocket.WebSocketDidCommTransport::.ctor(Microsoft.Extensions.Options.IOptions`1<DidComm.Transports.WebSocket.WebSocketTransportOptions>,Microsoft.Extensions.Logging.ILogger`1<DidComm.Transports.WebSocket.WebSocketDidCommTransport>,Microsoft.Extensions.Options.IOptions`1<DidComm.Facade.DidCommOptions>,DidComm.Transports.ReturnRoute.IInboundFrameConsumer)",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Transports.WebSocket!DidComm.Transports.WebSocket.WebSocketTransportOptions::prop:ReceiveInbound",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     }
   ]
 }

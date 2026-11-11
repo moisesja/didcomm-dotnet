@@ -1,9 +1,11 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using DidComm.Transports.Stomp;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -22,6 +24,41 @@ namespace DidComm.Transports.WebSocket;
 /// <see cref="WebSocketTransportOptions.UseStomp"/> is enabled (FR-TRN-12); plain framing is
 /// the default and is byte-for-byte unchanged.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <strong>Return-route session sockets (PRD §8a, FR-RR-07).</strong> The receiver binds a
+/// return-route session to the socket the opening request arrived on (FR-RR-05), so a request whose
+/// message carries <c>return_route</c> <c>all</c> or <c>thread</c> and that the facade authcrypted
+/// directly to one DID (<see cref="TransportRequest.LocalDid"/> and
+/// <see cref="TransportRequest.PeerDid"/> set) does not use the endpoint's pooled socket: it opens a
+/// session socket of its own, S(E, L, P), one per endpoint, local DID and peer DID. Every later send
+/// to the same (E, L, P), with or without a <c>return_route</c> header, travels over S while it
+/// exists, so a header-less acknowledgement reaches the session it acknowledges. An explicit
+/// <c>none</c> is sent over S and then retires it: S stops taking sends, a close frame is sent, and
+/// the messages already on their way are still read until the peer's close frame (bounded by one
+/// <see cref="WebSocketTransportOptions.SendTimeout"/>).
+/// </para>
+/// <para>
+/// <strong>Ordering.</strong> A send that starts after an <c>all</c>/<c>thread</c> send to
+/// (E, L, P) returned uses S while S exists. A send that starts after a <c>none</c> send to
+/// (E, L, P) returned uses the pooled socket. Concurrent sends are not ordered. A send that fails on
+/// S drops it; its retry opens a fresh S when it asks for a return route, and uses the pooled socket
+/// otherwise.
+/// </para>
+/// <para>
+/// <strong>Receiving.</strong> Each session socket is read by its own loop. With
+/// <see cref="WebSocketTransportOptions.ReceiveInbound"/> every whole pushed message (fragments
+/// reassembled, FR-TRN-09), at most <c>DidCommOptions.MaxReceiveBytes</c> long, is handed to the
+/// <see cref="IInboundFrameConsumer"/>, one at a time: the next message is read only after the
+/// consumer returned. A bigger message closes S with status 1009 and nothing past the limit is kept.
+/// The loop never sends anything but close frames. Pooled sockets are never read. Under
+/// <see cref="WebSocketTransportOptions.UseStomp"/> no session socket is opened.
+/// </para>
+/// <para>
+/// <strong>Resource bound.</strong> One send gate (a <see cref="SemaphoreSlim"/>) is kept per
+/// endpoint and per (E, L, P) the application ever sent to, until the transport is disposed.
+/// </para>
+/// </remarks>
 /// <example>
 /// Bidirectional chat with reconnect runs in <c>samples/05-WebSocketChat</c>; one-message-per-frame receive in <c>samples/02-Cookbook</c> (section R).
 /// </example>
@@ -58,10 +95,40 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly TaskCompletionSource _disposeCompleted =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    // ---- Return-route session sockets (PRD §8a, FR-RR-07) ----
+    // The consumer of pushed messages; null when none was supplied. Called only when _receiveInbound.
+    private readonly IInboundFrameConsumer? _consumer;
+    // WebSocketTransportOptions.ReceiveInbound, read once at construction (the options object is mutable).
+    private readonly bool _receiveInbound;
+    // DidCommOptions.MaxReceiveBytes: the largest pushed message a session loop keeps (JC-11, JC-16).
+    private readonly int _inboundCap;
+    // The ACTIVE session socket of each session key (PoolKey + "\n" + L + "\n" + P, see SendAsync).
+    // Written only under that key's send gate; removed conditionally (by instance) by the socket's
+    // own receive loop and by dispose. A key lives in exactly one of _pool and _sessions: a session
+    // key contains line feeds, which neither a pool key nor a validated DID can.
+    private readonly ConcurrentDictionary<string, SessionSocket> _sessions = new(StringComparer.Ordinal);
+    // Every session socket whose receive loop has not finished: active ones and retiring ones (no
+    // longer in _sessions, still reading the frames already sent). Dispose sweeps and awaits these.
+    private readonly ConcurrentDictionary<SessionSocket, byte> _liveSessionSockets = new();
+    // One-time notices (0 = not yet logged).
+    private int _stompSessionNotice;
+    private int _discardNotice;
+    // Rate-limiter counters for the flood-shaped session log lines (first and every 1000th at Warning).
+    private long _consumerFaults;
+    private long _oversizedPushes;
+    // Whole pushed messages read and dropped without reaching the consumer (ReceiveInbound off, or
+    // the socket is discarding after a 1009). Diagnostics for tests only; never logged per message.
+    private long _inboundMessagesDropped;
+    private const long WarnEvery = 1000;
+    // FR-API-09: the longest LocalDid / PeerDid a session key accepts.
+    private const int MaxSessionDidLength = 2048;
+
     /// <summary>Fires when the transport opens, closes, or fails to send (FR-TRN-11).</summary>
     /// <remarks>
     /// Handlers run synchronously on transport code paths — including from inside
-    /// <see cref="DisposeAsync"/> itself (the <c>Disconnected</c> events). A handler must
+    /// <see cref="DisposeAsync"/> itself (the <c>Disconnected</c> events) and from the receive loop of a
+    /// return-route session socket (its <c>Disconnected</c>, raised once per socket and naming the
+    /// endpoint it was opened to). A handler must
     /// therefore never block on this transport's own teardown:
     /// <c>DisposeAsync().GetAwaiter().GetResult()</c> from a handler deadlocks permanently,
     /// because dispose completes only after the handler returns while the handler is waiting for
@@ -71,21 +138,71 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// </remarks>
     public event EventHandler<WebSocketLifecycleEventArgs>? Lifecycle;
 
-    /// <summary>Initialize the transport with bound options.</summary>
+    /// <summary>Initialize the transport with bound options and no inbound consumer.</summary>
     /// <param name="options">Bound <see cref="WebSocketTransportOptions"/>.</param>
     /// <param name="logger">Optional logger; pass <see cref="NullLogger{T}.Instance"/> outside DI.</param>
     /// <param name="coreOptions">
     /// Optional core <see cref="DidComm.Facade.DidCommOptions"/>; its <c>OutboundEndpointPolicy</c> is
     /// inherited as the single source of truth when this transport's policy is left unset (#27).
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// When <see cref="WebSocketTransportOptions.ReceiveInbound"/> is set: it needs an
+    /// <see cref="IInboundFrameConsumer"/>, which only the four-parameter constructor accepts.
+    /// </exception>
     public WebSocketDidCommTransport(
         IOptions<WebSocketTransportOptions> options,
         ILogger<WebSocketDidCommTransport>? logger = null,
         IOptions<DidComm.Facade.DidCommOptions>? coreOptions = null)
+        : this(options, logger, coreOptions, inboundConsumer: null)
+    {
+    }
+
+    /// <summary>
+    /// Initialize the transport with bound options and the consumer of the messages peers push on
+    /// return-route session sockets (PRD §8a, FR-RR-07).
+    /// </summary>
+    /// <param name="options">Bound <see cref="WebSocketTransportOptions"/>.</param>
+    /// <param name="logger">Optional logger; <c>null</c> logs nothing.</param>
+    /// <param name="coreOptions">
+    /// Optional core <see cref="DidComm.Facade.DidCommOptions"/>. Its <c>OutboundEndpointPolicy</c> is
+    /// inherited when this transport's policy is left unset (#27), and its <c>MaxReceiveBytes</c>
+    /// caps every pushed message a session socket keeps; <c>null</c> uses the defaults.
+    /// </param>
+    /// <param name="inboundConsumer">
+    /// Receives each whole message pushed on a session socket when
+    /// <see cref="WebSocketTransportOptions.ReceiveInbound"/> is set; <c>null</c> for none.
+    /// <c>DidCommBuilder.UseInboundDispatch()</c> registers the built-in consumer, and
+    /// <c>UseWebSocketTransport</c> passes the registered one here.
+    /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// When <see cref="WebSocketTransportOptions.ReceiveInbound"/> is set and
+    /// <paramref name="inboundConsumer"/> is <c>null</c>.
+    /// </exception>
+    public WebSocketDidCommTransport(
+        IOptions<WebSocketTransportOptions> options,
+        ILogger<WebSocketDidCommTransport>? logger,
+        IOptions<DidComm.Facade.DidCommOptions>? coreOptions,
+        IInboundFrameConsumer? inboundConsumer)
     {
         ArgumentNullException.ThrowIfNull(options);
         _options = options.Value;
+        // Read once: the options object stays mutable after construction, and the receive loops must
+        // never see the flag turn on without the consumer it requires.
+        _receiveInbound = _options.ReceiveInbound;
+        if (_receiveInbound && inboundConsumer is null)
+        {
+            throw new InvalidOperationException(
+                "WebSocketTransportOptions.ReceiveInbound requires an IInboundFrameConsumer: call DidCommBuilder.UseInboundDispatch() " +
+                "(or register your own IInboundFrameConsumer) before resolving the transport, or pass one to the WebSocketDidCommTransport constructor.");
+        }
+        _consumer = inboundConsumer;
+        _inboundCap = coreOptions?.Value.MaxReceiveBytes ?? new DidComm.Facade.DidCommOptions().MaxReceiveBytes;
         _logger = logger ?? NullLogger<WebSocketDidCommTransport>.Instance;
+        if (inboundConsumer is not null && !_receiveInbound)
+        {
+            Log(LogLevel.Information,
+                "WebSocketDidCommTransport: an IInboundFrameConsumer is registered but WebSocketTransportOptions.ReceiveInbound is off; messages pushed on return-route session sockets are discarded.");
+        }
         _reconnectPipeline = BuildReconnectPipeline(_options);
         // Single source of truth (#27): inherit the core policy when this transport's is unset.
         var policy = _options.OutboundEndpointPolicy
@@ -158,6 +275,15 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <summary>The largest wait <see cref="SemaphoreSlim"/> and <see cref="CancellationTokenSource"/> accept.</summary>
     private static readonly TimeSpan MaxWaitBudget = TimeSpan.FromMilliseconds(int.MaxValue);
 
+    /// <summary>Session sockets that currently take sends (diagnostics for tests).</summary>
+    internal int ActiveSessionSocketCount => _sessions.Count;
+
+    /// <summary>Session sockets whose receive loop has not finished, retiring ones included (diagnostics for tests).</summary>
+    internal int LiveSessionSocketCount => _liveSessionSockets.Count;
+
+    /// <summary>Whole pushed messages read and dropped without reaching the consumer (diagnostics for tests).</summary>
+    internal long InboundMessagesDropped => Interlocked.Read(ref _inboundMessagesDropped);
+
     /// <inheritdoc />
     public string Scheme => "wss";
 
@@ -174,10 +300,27 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Which socket carries the send (PRD §8a, FR-RR-07): the session socket S(E, L, P) when the
+    /// request names both <see cref="TransportRequest.LocalDid"/> and
+    /// <see cref="TransportRequest.PeerDid"/> and either asks for <c>return_route</c> <c>all</c> /
+    /// <c>thread</c> (which opens S when there is none) or S already exists; the endpoint's pooled
+    /// socket otherwise. See the class remarks for the ordering guarantee. Under
+    /// <see cref="WebSocketTransportOptions.UseStomp"/> every send uses the pooled socket.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// When <see cref="TransportRequest.LocalDid"/> or <see cref="TransportRequest.PeerDid"/> is set
+    /// but is not a DID (<c>did:</c> prefix) of at most 2048 characters without whitespace or control
+    /// characters. The value is not repeated in the message.
+    /// </exception>
     public async Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.Endpoint);
+        // The session key is built from these values (JC-21), so they are shape-checked before any
+        // state is touched: a line feed in either would let two identities share a key.
+        ValidateSessionDid(request.LocalDid, nameof(TransportRequest.LocalDid));
+        ValidateSessionDid(request.PeerDid, nameof(TransportRequest.PeerDid));
         // Fail fast before touching any pool state: once DisposeAsync has begun, no send may
         // start (see the dispose invariant on DisposeAsync).
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -207,6 +350,21 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // the wire untouched, exactly as before.
         var payload = _options.UseStomp ? BuildStompSendPayload(request) : request.Payload;
 
+        // FR-RR-07 (JC-10, JC-21): a request that names both identities may use the return-route
+        // session socket S(E, L, P). `opens`: this send asks for a return route and opens S when there
+        // is none; `retires`: an explicit `none` ends S after it was sent over it. Under STOMP there
+        // are no session sockets (a spec-shaped push needs broker semantics outside the minimal subset).
+        var opens = request.ReturnRoute is ReturnRouteMode.All or ReturnRouteMode.Thread;
+        var retires = request.ReturnRoute == ReturnRouteMode.None;
+        string? sessionKey = null;
+        if (request.LocalDid is not null && request.PeerDid is not null)
+        {
+            if (!_options.UseStomp)
+                sessionKey = key + "\n" + request.LocalDid + "\n" + request.PeerDid;
+            else if (opens && Interlocked.Exchange(ref _stompSessionNotice, 1) == 0)
+                Log(LogLevel.Information, "WebSocketDidCommTransport: return-route session sockets are not available under STOMP (FR-RR-05); return-route sends use the pooled socket and nothing is received.");
+        }
+
         try
         {
             await _reconnectPipeline.ExecuteAsync(async token =>
@@ -214,65 +372,15 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 // The reconnect pipeline runs attempts sequentially, so a plain counter is safe.
                 // attempt 0 is the first try; > 0 means this attempt is a recovery after a failure.
                 var isReconnect = attempt++ > 0;
-                // Serialize socket use per endpoint (see _sendLocks): acquisition + send under one
-                // gate so a concurrent SendAsync can never collide on (or dispose) the socket that
-                // another send is actively using.
-                var sendGate = _sendLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-                await sendGate.WaitAsync(token).ConfigureAwait(false);
-                // Lifecycle handlers must never run while this gate is held: SemaphoreSlim is not
-                // reentrant, so a handler that sends to this same endpoint would deadlock forever on
-                // the gate its own notification is holding (DisposeAsync already releases first).
-                // Record the events here, raise them after Release() — recorded order IS raise order,
-                // so the Connected → Disconnected → SendFailed → Reconnected sequencing is unchanged.
-                List<(WebSocketLifecycleEventKind Kind, Exception? Error)>? pending = null;
-                try
+                // Routing is decided inside every attempt (JC-10), so a retry after S failed, or a send
+                // that finds S retired once it holds S's gate, goes where the current state says.
+                if (sessionKey is not null
+                    && (opens || _sessions.ContainsKey(sessionKey))
+                    && await SendOnSessionAsync(sessionKey, request, payload, opens, retires, isReconnect, token).ConfigureAwait(false))
                 {
-                    // Dispose invariant: _pool and the pooled socket are only touched inside the
-                    // send gate and only after re-checking _disposed HERE, inside the gate.
-                    // DisposeAsync sets _disposed first and then acquires this gate, so a send
-                    // that wins the gate after disposal has begun observes the flag and bails
-                    // before it can resurrect a pool entry or race the closing socket.
-                    ObjectDisposedException.ThrowIf(_disposed, this);
-                    try
-                    {
-                        var (socket, opened) = await GetOrConnectAsync(key, request.Endpoint, token).ConfigureAwait(false);
-                        if (opened)
-                            (pending ??= new()).Add((WebSocketLifecycleEventKind.Connected, null));
-                        using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                        sendCts.CancelAfter(_options.SendTimeout);
-                        // FR-TRN-09: one logical WebSocket message per packed envelope. We always send
-                        // the full buffer with EndOfMessage = true; receivers MUST loop until they see
-                        // EndOfMessage to handle fragmentation at the wire layer.
-                        await socket.SendAsync(payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Drop the broken socket so the next attempt opens a fresh connection. A socket
-                        // only lands in the pool once it has connected, so a non-null entry here means an
-                        // established connection was lost (Disconnected); a connect failure leaves the
-                        // pool empty and registers as SendFailed only.
-                        _pool.TryRemove(key, out var broken);
-                        if (broken is not null)
-                        {
-                            broken.Dispose();
-                            (pending ??= new()).Add((WebSocketLifecycleEventKind.Disconnected, ex));
-                        }
-                        (pending ??= new()).Add((WebSocketLifecycleEventKind.SendFailed, ex));
-                        throw;
-                    }
-
-                    if (isReconnect)
-                        (pending ??= new()).Add((WebSocketLifecycleEventKind.Reconnected, null));
+                    return;
                 }
-                finally
-                {
-                    sendGate.Release();
-                    if (pending is not null)
-                    {
-                        foreach (var (kind, error) in pending)
-                            RaiseLifecycle(kind, request.Endpoint, error);
-                    }
-                }
+                await SendOnPoolAsync(key, request, payload, isReconnect, token).ConfigureAwait(false);
             }, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -318,6 +426,540 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
 
         return new TransportResult(Accepted: true, HttpStatusCode: null);
+    }
+
+    /// <summary>
+    /// One attempt over the endpoint's pooled socket: connect it when there is none, then send.
+    /// Every pool read and write happens under the endpoint's send gate (see <see cref="DisposeAsync"/>).
+    /// </summary>
+    /// <param name="key">Pool key of the endpoint.</param>
+    /// <param name="request">The request (for its endpoint).</param>
+    /// <param name="payload">The bytes to send (STOMP-framed when enabled).</param>
+    /// <param name="isReconnect">Whether this attempt follows a failed one (raises <c>Reconnected</c> on success).</param>
+    /// <param name="token">The attempt's cancellation token.</param>
+    private async Task SendOnPoolAsync(string key, TransportRequest request, ReadOnlyMemory<byte> payload, bool isReconnect, CancellationToken token)
+    {
+        // Serialize socket use per endpoint (see _sendLocks): acquisition + send under one
+        // gate so a concurrent SendAsync can never collide on (or dispose) the socket that
+        // another send is actively using.
+        var sendGate = _sendLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await sendGate.WaitAsync(token).ConfigureAwait(false);
+        // Lifecycle handlers must never run while this gate is held: SemaphoreSlim is not
+        // reentrant, so a handler that sends to this same endpoint would deadlock forever on
+        // the gate its own notification is holding (DisposeAsync already releases first).
+        // Record the events here, raise them after Release() — recorded order IS raise order,
+        // so the Connected → Disconnected → SendFailed → Reconnected sequencing is unchanged.
+        List<(WebSocketLifecycleEventKind Kind, Exception? Error)>? pending = null;
+        try
+        {
+            // Dispose invariant: _pool and the pooled socket are only touched inside the
+            // send gate and only after re-checking _disposed HERE, inside the gate.
+            // DisposeAsync sets _disposed first and then acquires this gate, so a send
+            // that wins the gate after disposal has begun observes the flag and bails
+            // before it can resurrect a pool entry or race the closing socket.
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            try
+            {
+                var (socket, opened) = await GetOrConnectAsync(key, request.Endpoint, token).ConfigureAwait(false);
+                if (opened)
+                    (pending ??= new()).Add((WebSocketLifecycleEventKind.Connected, null));
+                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                sendCts.CancelAfter(_options.SendTimeout);
+                // FR-TRN-09: one logical WebSocket message per packed envelope. We always send
+                // the full buffer with EndOfMessage = true; receivers MUST loop until they see
+                // EndOfMessage to handle fragmentation at the wire layer.
+                await socket.SendAsync(payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Drop the broken socket so the next attempt opens a fresh connection. A socket
+                // only lands in the pool once it has connected, so a non-null entry here means an
+                // established connection was lost (Disconnected); a connect failure leaves the
+                // pool empty and registers as SendFailed only.
+                _pool.TryRemove(key, out var broken);
+                if (broken is not null)
+                {
+                    broken.Dispose();
+                    (pending ??= new()).Add((WebSocketLifecycleEventKind.Disconnected, ex));
+                }
+                (pending ??= new()).Add((WebSocketLifecycleEventKind.SendFailed, ex));
+                throw;
+            }
+
+            if (isReconnect)
+                (pending ??= new()).Add((WebSocketLifecycleEventKind.Reconnected, null));
+        }
+        finally
+        {
+            sendGate.Release();
+            if (pending is not null)
+            {
+                foreach (var (kind, error) in pending)
+                    RaiseLifecycle(kind, request.Endpoint, error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// One attempt over the session socket S(E, L, P) of <paramref name="sessionKey"/>, under that
+    /// key's send gate (FR-RR-07, JC-10): use S when it is open, open it when this send asks for a
+    /// return route, and retire it after an explicit <c>none</c> was sent over it.
+    /// </summary>
+    /// <param name="sessionKey">The session key (pool key, local DID, peer DID).</param>
+    /// <param name="request">The request (endpoint and identities).</param>
+    /// <param name="payload">The bytes to send.</param>
+    /// <param name="opens">Whether this send opens S when there is none (<c>all</c> / <c>thread</c>).</param>
+    /// <param name="retires">Whether this send retires S once sent (<c>none</c>).</param>
+    /// <param name="isReconnect">Whether this attempt follows a failed one (raises <c>Reconnected</c> on success).</param>
+    /// <param name="token">The attempt's cancellation token.</param>
+    /// <returns>
+    /// <c>true</c> when the payload was sent over S; <c>false</c>, having sent nothing, when S is
+    /// gone and this send does not open one: the caller then uses the pooled socket in the same
+    /// attempt. A send that queued behind a retiring S therefore lands on the pooled socket.
+    /// </returns>
+    private async Task<bool> SendOnSessionAsync(
+        string sessionKey,
+        TransportRequest request,
+        ReadOnlyMemory<byte> payload,
+        bool opens,
+        bool retires,
+        bool isReconnect,
+        CancellationToken token)
+    {
+        // The same per-key gate dictionary as the pool (JC-21), so the dispose drain covers session
+        // sockets with its existing logic. Minted once per key and kept until dispose (L-028).
+        var sendGate = _sendLocks.GetOrAdd(sessionKey, _ => new SemaphoreSlim(1, 1));
+        await sendGate.WaitAsync(token).ConfigureAwait(false);
+        // Events are recorded under the gate and raised after it is released, as on the pool path.
+        List<(WebSocketLifecycleEventKind Kind, Exception? Error)>? pending = null;
+        // Receive loops to stop once the gate is released: cancelling a loop's token runs the inbound
+        // consumer's cancellation callbacks synchronously, and host code never runs under a send gate.
+        List<SessionSocket>? toStop = null;
+        try
+        {
+            // The dispose invariant, as on the pool path: _sessions is only written under this gate,
+            // after re-checking the flag here.
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            SessionSocket? session = null;
+            try
+            {
+                if (_sessions.TryGetValue(sessionKey, out var current))
+                {
+                    if (current.Socket.State == WebSocketState.Open)
+                    {
+                        session = current;
+                    }
+                    else
+                    {
+                        // Closed under us (the peer's close frame, e.g. a receiver eviction, not yet
+                        // handled by the loop; or a dead connection): never send on it again.
+                        _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, current));
+                        current.DisposeSocket();
+                        (toStop ??= new()).Add(current);
+                        if (current.TryEnd())
+                            (pending ??= new()).Add((WebSocketLifecycleEventKind.Disconnected, null));
+                    }
+                }
+
+                if (session is null)
+                {
+                    if (!opens)
+                        return false;
+                    session = await OpenSessionAsync(sessionKey, request, token).ConfigureAwait(false);
+                    (pending ??= new()).Add((WebSocketLifecycleEventKind.Connected, null));
+                }
+
+                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                sendCts.CancelAfter(_options.SendTimeout);
+                // FR-TRN-09: one logical WebSocket message per packed envelope.
+                await session.Socket.SendAsync(payload, WebSocketMessageType.Binary, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // E9: a failed send drops S, so the retry re-routes (all/thread: a fresh S; header-less
+                // or none: the pooled socket). Disconnected is raised once per socket: by whoever
+                // ends it first, this path or its receive loop.
+                if (session is not null)
+                {
+                    _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, session));
+                    session.DisposeSocket();
+                    (toStop ??= new()).Add(session);
+                    if (session.TryEnd())
+                        (pending ??= new()).Add((WebSocketLifecycleEventKind.Disconnected, ex));
+                }
+                (pending ??= new()).Add((WebSocketLifecycleEventKind.SendFailed, ex));
+                throw;
+            }
+
+            if (retires)
+                await RetireAsync(sessionKey, session).ConfigureAwait(false);
+            if (isReconnect)
+                (pending ??= new()).Add((WebSocketLifecycleEventKind.Reconnected, null));
+            return true;
+        }
+        finally
+        {
+            sendGate.Release();
+            if (toStop is not null)
+            {
+                foreach (var stopped in toStop)
+                    stopped.StopLoop();
+            }
+            if (pending is not null)
+            {
+                foreach (var (kind, error) in pending)
+                    RaiseLifecycle(kind, request.Endpoint, error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Connect a fresh session socket for <paramref name="sessionKey"/>, publish it and start its
+    /// receive loop. Called only under the key's send gate, when the key has no open socket.
+    /// </summary>
+    /// <param name="sessionKey">The session key.</param>
+    /// <param name="request">The request (endpoint and identities, both non-null here).</param>
+    /// <param name="token">Cancels the connect.</param>
+    /// <returns>The new, published session socket.</returns>
+    private async Task<SessionSocket> OpenSessionAsync(string sessionKey, TransportRequest request, CancellationToken token)
+    {
+        var factory = _options.WebSocketFactory ?? (() => new ClientWebSocket());
+        var connect = _options.Connect ?? DefaultConnect;
+        var socket = factory();
+        try
+        {
+            // The same connect budget as a pooled socket; no STOMP handshake (no sessions under STOMP).
+            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            connectCts.CancelAfter(_options.ConnectTimeout);
+            await connect(socket, request.Endpoint, connectCts.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+
+        var session = new SessionSocket(sessionKey, request.Endpoint, request.LocalDid!, request.PeerDid!, socket);
+        // Publish BEFORE reading the seal; dispose seals BEFORE its final sweep, so at least one side
+        // always sees the other (the pool's rule, see GetOrConnectAsync).
+        _liveSessionSockets[session] = 0;
+        _sessions[sessionKey] = session;
+        if (_poolSealed)
+        {
+            _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, session));
+            _liveSessionSockets.TryRemove(session, out _);
+            session.TryEnd();
+            session.DisposeSocket();
+            session.MarkLoopDone();
+            throw new ObjectDisposedException(nameof(WebSocketDidCommTransport));
+        }
+
+        StartReceiveLoop(session);
+        if (!_receiveInbound && Interlocked.Exchange(ref _discardNotice, 1) == 0)
+        {
+            Log(LogLevel.Information,
+                "WebSocketDidCommTransport: messages pushed on return-route session sockets are discarded (WebSocketTransportOptions.ReceiveInbound is off).");
+        }
+        return session;
+    }
+
+    /// <summary>
+    /// Retire <paramref name="session"/> after an explicit <c>return_route: none</c> was sent over it
+    /// (FR-RR-05), still under its send gate: stop routing to it, send the close frame (bounded), and
+    /// arm the backstop that ends its loop if the peer never answers. The loop keeps surfacing the
+    /// messages already on their way until the peer's close frame. Never throws.
+    /// </summary>
+    /// <param name="sessionKey">The session key.</param>
+    /// <param name="session">The session socket the <c>none</c> was sent over.</param>
+    private async Task RetireAsync(string sessionKey, SessionSocket session)
+    {
+        _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, session));
+        try
+        {
+            using var closeCts = new CancellationTokenSource(CloseBudget);
+            await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "return-route session ended", closeCts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: closing a retired return-route session socket failed ({ExceptionType}).", ex.GetType().Name);
+        }
+        session.ArmBackstop(CloseBudget);
+    }
+
+    /// <summary>
+    /// Start <paramref name="session"/>'s receive loop without the caller's
+    /// <see cref="ExecutionContext"/>: the loop lives as long as the socket, and must not hold the
+    /// sending caller's ambient state (async locals, activity) for that long.
+    /// </summary>
+    /// <param name="session">The published session socket.</param>
+    private void StartReceiveLoop(SessionSocket session)
+    {
+        // SuppressFlow throws when the flow is already suppressed, so only suppress when it is not.
+        // The loop never faults (it catches everything), so discarding its task leaves nothing unobserved.
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            _ = Task.Run(() => ReceiveLoopAsync(session));
+            return;
+        }
+        using (ExecutionContext.SuppressFlow())
+            _ = Task.Run(() => ReceiveLoopAsync(session));
+    }
+
+    /// <summary>
+    /// Read <paramref name="session"/> until it closes (E7): reassemble each message (FR-TRN-09),
+    /// close the socket with 1009 when one exceeds the receive cap (JC-11), and hand each whole
+    /// message to the inbound consumer, one at a time (JC-8), when <c>ReceiveInbound</c> is on. Never
+    /// sends anything but close frames, never throws (L-043), and always ends through
+    /// <see cref="EndReceiveLoopAsync"/>.
+    /// </summary>
+    /// <param name="session">The session socket to read.</param>
+    private async Task ReceiveLoopAsync(SessionSocket session)
+    {
+        byte[]? buffer = null;
+        var token = session.LoopToken;
+        try
+        {
+            buffer = ArrayPool<byte>.Shared.Rent(8 * 1024);
+            while (true)
+            {
+                using var message = new MemoryStream();
+                // Buffer only what may be surfaced: with ReceiveInbound off, or once S is discarding,
+                // frames are read and dropped without being kept.
+                var surface = _receiveInbound && !session.DiscardInbound;
+                long total = 0;
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await session.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                        return;
+                    total += result.Count;
+                    if (total > _inboundCap && !session.DiscardInbound)
+                    {
+                        // JC-11: stop buffering at once (nothing past the cap is kept) and close with 1009.
+                        surface = false;
+                        message.SetLength(0);
+                        message.Capacity = 0;
+                        await CloseOversizedAsync(session).ConfigureAwait(false);
+                    }
+                    if (surface)
+                        message.Write(buffer, 0, result.Count);
+                }
+                while (!result.EndOfMessage);
+
+                if (!surface || session.DiscardInbound)
+                {
+                    Interlocked.Increment(ref _inboundMessagesDropped);
+                    continue;
+                }
+
+                var payload = message.TryGetBuffer(out var written)
+                    ? new ReadOnlyMemory<byte>(written.Array, written.Offset, written.Count)
+                    : message.ToArray();
+                try
+                {
+                    // JC-8: inline, so this socket's next message is read only after the consumer
+                    // returned; other sockets' loops are unaffected.
+                    await _consumer!.ConsumeAsync(new InboundFrame(session.Endpoint, session.LocalDid, session.PeerDid, payload), token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // Any other fault, including a cancellation that is not ours, is the consumer's:
+                    // logged by type name (rate-limited), and the loop goes on with the next message.
+                    LogRateLimited(ref _consumerFaults,
+                        "WebSocketDidCommTransport: the inbound consumer threw {ExceptionType}; the message is dropped and the session socket keeps reading. {Count} such faults.",
+                        "WebSocketDidCommTransport: the inbound consumer threw {ExceptionType}; the message is dropped and the session socket keeps reading.",
+                        ex.GetType().Name);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // The socket ended: a fault, a dispose, a retire backstop or a send-failure stop.
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: a return-route session socket stopped reading ({ExceptionType}).", ex.GetType().Name);
+        }
+        finally
+        {
+            if (buffer is not null)
+                ArrayPool<byte>.Shared.Return(buffer);
+            await EndReceiveLoopAsync(session).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// JC-11: a pushed message exceeded the receive cap. Stop routing to <paramref name="session"/>,
+    /// switch it to discarding, send a 1009 close frame under its send gate (so the close never
+    /// overlaps a send), arm the backstop and log once (rate-limited). Never throws.
+    /// </summary>
+    /// <param name="session">The session socket that received the oversized message.</param>
+    private async Task CloseOversizedAsync(SessionSocket session)
+    {
+        session.DiscardInbound = true;
+        _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(session.Key, session));
+        SemaphoreSlim? gate = null;
+        var held = false;
+        try
+        {
+            // A loop never waits on a gate once dispose began (dispose owns the gates then), and the
+            // wait is bounded and ends when the loop's token is cancelled (dispose, backstop).
+            if (!_disposed && _sendLocks.TryGetValue(session.Key, out gate))
+            {
+                held = await gate.WaitAsync(DrainBudget, session.LoopToken).ConfigureAwait(false);
+                if (held && !_disposed && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                {
+                    using var closeCts = new CancellationTokenSource(CloseBudget);
+                    await session.Socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", closeCts.Token).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: closing an oversized return-route session socket failed ({ExceptionType}).", ex.GetType().Name);
+        }
+        finally
+        {
+            if (held)
+                gate!.Release();
+        }
+        session.ArmBackstop(CloseBudget);
+        LogRateLimited(ref _oversizedPushes,
+            "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07). {Count} such messages.",
+            "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07).",
+            _inboundCap);
+    }
+
+    /// <summary>
+    /// The end of a receive loop (E8): stop routing to the socket, answer a close the peer started
+    /// (under the send gate, bounded; skipped once dispose began), dispose the socket, raise
+    /// <c>Disconnected</c> when this is the first end of the socket, and mark the loop done. Never throws.
+    /// </summary>
+    /// <param name="session">The session socket whose loop ended.</param>
+    private async Task EndReceiveLoopAsync(SessionSocket session)
+    {
+        try
+        {
+            _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(session.Key, session));
+            // The peer started the close (a receiver eviction, FR-RR-03; or its answer to nothing we
+            // sent): complete the handshake. Under the gate, so the close never overlaps a send; no
+            // gate holder ever waits for a loop, so this cannot deadlock.
+            if (!_disposed
+                && session.Socket.State == WebSocketState.CloseReceived
+                && _sendLocks.TryGetValue(session.Key, out var gate))
+            {
+                var held = false;
+                try
+                {
+                    held = await gate.WaitAsync(DrainBudget, session.LoopToken).ConfigureAwait(false);
+                    if (held && !_disposed && session.Socket.State == WebSocketState.CloseReceived)
+                    {
+                        using var closeCts = new CancellationTokenSource(CloseBudget);
+                        await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "return-route session closed", closeCts.Token).ConfigureAwait(false);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log(LogLevel.Debug, "WebSocketDidCommTransport: answering a return-route session socket's close failed ({ExceptionType}).", ex.GetType().Name);
+                }
+                finally
+                {
+                    if (held)
+                        gate.Release();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: ending a return-route session socket failed ({ExceptionType}).", ex.GetType().Name);
+        }
+        finally
+        {
+            try
+            {
+                session.DisposeSocket();
+                if (session.TryEnd())
+                    RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, session.Endpoint);
+            }
+            catch
+            {
+                // RaiseLifecycle swallows handler faults, but its own logging is host code too.
+            }
+            finally
+            {
+                // Last: dispose awaits LoopDone for every socket still in _liveSessionSockets.
+                _liveSessionSockets.TryRemove(session, out _);
+                session.MarkLoopDone();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Refuse a <see cref="TransportRequest.LocalDid"/> / <see cref="TransportRequest.PeerDid"/> that
+    /// cannot be part of a session key: not a DID, longer than 2048 characters (FR-API-09), or holding
+    /// whitespace or a control character (the key's separator is a line feed). The value is not echoed.
+    /// </summary>
+    /// <param name="value">The value; <c>null</c> passes.</param>
+    /// <param name="name">The property name, for the message.</param>
+    private static void ValidateSessionDid(string? value, string name)
+    {
+        if (value is null)
+            return;
+        var ok = value.Length > 4
+                 && value.Length <= MaxSessionDidLength
+                 && value.StartsWith("did:", StringComparison.Ordinal);
+        if (ok)
+        {
+            foreach (var c in value)
+            {
+                if (c <= ' ')
+                {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (!ok)
+        {
+            throw new ArgumentException(
+                $"TransportRequest.{name} must be a DID ('did:' prefix) of at most {MaxSessionDidLength} characters without whitespace or control characters.",
+                "request");
+        }
+    }
+
+    /// <summary>Write one log line; never throws (a logging provider is host code).</summary>
+    /// <param name="level">The level.</param>
+    /// <param name="message">The message template.</param>
+    /// <param name="args">The template arguments: type, enum and count values only — never a DID, endpoint or body.</param>
+    private void Log(LogLevel level, string message, params object?[] args)
+    {
+        try
+        {
+            _logger.Log(level, message, args);
+        }
+        catch
+        {
+            // Logging must never change what the transport does.
+        }
+    }
+
+    /// <summary>
+    /// Write a line a peer could make the transport repeat: the first and every 1000th at Warning
+    /// (with the running count), every other one at Debug.
+    /// </summary>
+    /// <param name="counter">The line's counter.</param>
+    /// <param name="warning">The Warning template; its last placeholder is the count.</param>
+    /// <param name="debug">The Debug template.</param>
+    /// <param name="arg">The one argument both templates share.</param>
+    private void LogRateLimited(ref long counter, string warning, string debug, object arg)
+    {
+        var n = Interlocked.Increment(ref counter);
+        if (n == 1 || n % WarnEvery == 0)
+            Log(LogLevel.Warning, warning, arg, n);
+        else
+            Log(LogLevel.Debug, debug, arg);
     }
 
     /// <summary>
@@ -611,17 +1253,23 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <summary>
     /// Close every connection and release every gate. What this guarantees, precisely:
     /// <list type="bullet">
-    /// <item>No send that has not yet acquired its endpoint's send gate will ever run — new sends
-    /// fail fast at the <see cref="SendAsync"/> entry check, retries stop (the retry predicate
-    /// tests the flag), and a send that wins a gate after this point re-checks it inside.</item>
+    /// <item>No send that has not yet acquired its endpoint's (or session's) send gate will ever run —
+    /// new sends fail fast at the <see cref="SendAsync"/> entry check, retries stop (the retry
+    /// predicate tests the flag), and a send that wins a gate after this point re-checks it inside.</item>
     /// <item>Every send already past that check is drained — including one still inside its
-    /// CONNECT phase, which holds its gate but has no pool entry yet. That is why the drain
-    /// iterates the gates, not the pool, and reads the pool <i>inside</i> the gate: every pool
-    /// write happens under the same gate.</item>
+    /// CONNECT phase, which holds its gate but has no pool (or session) entry yet. That is why the
+    /// drain iterates the gates, not the pool, and reads the pool and the session sockets
+    /// <i>inside</i> the gate: every pool and session write happens under the same gate.</item>
     /// <item>A send that outlives the drain budget is abandoned, not waited for: its socket is
     /// hard-disposed (or, if it has not been published yet, refused by the seal in
-    /// <see cref="GetOrConnectAsync"/>), so no Open socket survives this call either way.</item>
-    /// <item>The call is bounded: at most <see cref="DrainBudget"/> + <see cref="CloseBudget"/>
+    /// <see cref="GetOrConnectAsync"/> / <see cref="OpenSessionAsync"/>), so no Open socket survives
+    /// this call either way: pooled, return-route session, or retiring session socket.</item>
+    /// <item>Every session socket's receive loop is cancelled and awaited for at most
+    /// <see cref="CloseBudget"/>. A loop held by an inbound consumer that ignores cancellation is
+    /// abandoned; its socket is already disposed, and the loop raises nothing more when it ends.
+    /// A loop never waits on a send gate once this call has begun.</item>
+    /// <item><c>Disconnected</c> is raised once per socket that was connected, naming its endpoint.</item>
+    /// <item>The call is bounded: at most <see cref="DrainBudget"/> + 2 × <see cref="CloseBudget"/>
     /// in total, no matter how many endpoints are wedged (they drain concurrently) or how
     /// unresponsive the peers are (every network write here is cancellation-bounded).</item>
     /// <item>It is idempotent and concurrency-safe: the first caller tears down, the rest wait.</item>
@@ -644,9 +1292,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
         try
         {
-            // Every endpoint with a gate (a send is, or was, running) or a pooled socket.
+            // Every endpoint with a gate (a send is, or was, running), a pooled socket or an active
+            // session socket (session keys share the gate dictionary, JC-21).
             var keys = new HashSet<string>(_sendLocks.Keys, StringComparer.Ordinal);
             keys.UnionWith(_pool.Keys);
+            keys.UnionWith(_sessions.Keys);
             // Concurrently: the drain was serial, so N unresponsive endpoints cost N × budget.
             var disconnected = await Task.WhenAll(keys.Select(CloseEndpointAsync)).ConfigureAwait(false);
             // Raised here, not inside the per-endpoint tasks, so handlers are never invoked
@@ -667,6 +1317,36 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                     leftover.Dispose();
             }
 
+            // Session sockets: an active one the drain could not reach, and every retiring one (no
+            // longer in _sessions, still reading). Each is stopped and disposed here — after the seal,
+            // like the pool — and its loop is awaited, bounded: a loop never throws, and one held by a
+            // consumer that ignores cancellation is abandoned with its socket already disposed.
+            var ended = new List<Uri>();
+            foreach (var key in _sessions.Keys)
+            {
+                if (_sessions.TryRemove(key, out var active))
+                    StopSessionForDispose(active, ended);
+            }
+            var loops = new List<Task>();
+            foreach (var live in _liveSessionSockets.Keys)
+            {
+                StopSessionForDispose(live, ended);
+                loops.Add(live.LoopDone);
+            }
+            foreach (var endpoint in ended)
+                RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, endpoint);
+            if (loops.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(loops).WaitAsync(CloseBudget).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    Log(LogLevel.Debug, "WebSocketDidCommTransport: {Count} return-route session receive loop(s) did not end within the close budget; abandoned.", loops.Count(t => !t.IsCompleted));
+                }
+            }
+
             DisposeIdleGates(_connectLocks);
             DisposeIdleGates(_sendLocks);
             _pinnedInvoker?.Dispose();
@@ -678,13 +1358,15 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     }
 
     /// <summary>
-    /// Drain one endpoint's in-flight send and close its pooled socket. Never throws: a close is
-    /// best effort, and one bad endpoint must not abort the teardown of the others.
+    /// Drain one endpoint's (or session's) in-flight send and close its pooled (or active session)
+    /// socket. Never throws: a close is best effort, and one bad endpoint must not abort the
+    /// teardown of the others.
     /// </summary>
-    /// <param name="key">Pool key of the endpoint to close.</param>
+    /// <param name="key">Pool key of the endpoint, or session key of a session socket, to close.</param>
     /// <returns>
     /// The endpoint to report as <c>Disconnected</c>, or <c>null</c> when there was no connection
-    /// to close (a gate exists, but the endpoint has no pooled socket).
+    /// to close (a gate exists, but no pooled or active session socket), or when the session socket
+    /// already reported its end.
     /// </returns>
     private async Task<Uri?> CloseEndpointAsync(string key)
     {
@@ -692,6 +1374,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         _sendLocks.TryGetValue(key, out var sendGate);
         var gateHeld = false;
         System.Net.WebSockets.WebSocket? socket = null;
+        SessionSocket? session = null;
         try
         {
             // Bounded by the worst case for a HEALTHY hold — the gate spans connect + STOMP
@@ -703,6 +1386,14 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             // Read the pool INSIDE the gate: a send that was still connecting when dispose began
             // has published its socket by now, and every pool write happens under this same gate.
             _pool.TryRemove(key, out socket);
+            // The same for the session sockets. A key names a pooled socket or a session socket,
+            // never both, so at most one of these is non-null.
+            _sessions.TryRemove(key, out session);
+            if (gateHeld && session is not null && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            {
+                using var closeCts = new CancellationTokenSource(CloseBudget);
+                await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
+            }
             if (gateHeld && socket is not null && socket.State == WebSocketState.Open)
             {
                 // Both shutdown writes are cancellation-bounded: a peer that stopped reading (TCP
@@ -725,17 +1416,39 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "WebSocketDidCommTransport: ignoring close exception during dispose");
+            // Guarded and by type name only: a throwing logging provider must not strand the rest of
+            // this endpoint's teardown, and the exception text is not ours to log.
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: ignoring close exception during dispose ({ExceptionType}).", ex.GetType().Name);
         }
         finally
         {
             socket?.Dispose();
+            session?.DisposeSocket();
             if (gateHeld)
                 sendGate!.Release();
+            // After the release: stopping the loop runs the consumer's cancellation callbacks, which
+            // never run under a send gate.
+            session?.StopLoop();
         }
+        if (session is not null)
+            return session.TryEnd() ? session.Endpoint : null;
         // The pool key is a well-formed absolute URI string (see PoolKey); reconstruct it so
         // observers see which endpoint just disconnected on a clean close.
         return socket is not null && Uri.TryCreate(key, UriKind.Absolute, out var endpoint) ? endpoint : null;
+    }
+
+    /// <summary>
+    /// Dispose-time teardown of one session socket: stop its loop, dispose it, and collect its
+    /// endpoint for <c>Disconnected</c> when this is the socket's first end.
+    /// </summary>
+    /// <param name="session">The session socket.</param>
+    /// <param name="ended">Collects the endpoints to report.</param>
+    private static void StopSessionForDispose(SessionSocket session, List<Uri> ended)
+    {
+        session.StopLoop();
+        session.DisposeSocket();
+        if (session.TryEnd())
+            ended.Add(session.Endpoint);
     }
 
     /// <summary>
@@ -765,6 +1478,115 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             }
         }
         gates.Clear();
+    }
+
+    /// <summary>
+    /// One return-route session socket S(E, L, P) (E11): the socket, the identities it was opened
+    /// for, and its receive loop's cancellation and completion. Every member is safe to call from
+    /// any thread, any number of times.
+    /// </summary>
+    /// <remarks>
+    /// The loop's <see cref="CancellationTokenSource"/> is never disposed: several parties may cancel
+    /// it (a failed send, a retire backstop, dispose) at any time, and
+    /// <see cref="CancellationTokenSource.Dispose()"/> must not race a cancel. It holds no unmanaged
+    /// state; an armed backstop timer releases itself when it fires.
+    /// </remarks>
+    private sealed class SessionSocket
+    {
+        private readonly CancellationTokenSource _loop = new();
+        private readonly TaskCompletionSource _loopDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _ended;
+        private volatile bool _discardInbound;
+
+        /// <summary>Create the record of a connected session socket.</summary>
+        /// <param name="key">The session key.</param>
+        /// <param name="endpoint">The endpoint it was opened to.</param>
+        /// <param name="localDid">The local DID of the request that opened it.</param>
+        /// <param name="peerDid">The peer DID of the request that opened it.</param>
+        /// <param name="socket">The connected socket.</param>
+        public SessionSocket(string key, Uri endpoint, string localDid, string peerDid, System.Net.WebSockets.WebSocket socket)
+        {
+            Key = key;
+            Endpoint = endpoint;
+            LocalDid = localDid;
+            PeerDid = peerDid;
+            Socket = socket;
+            LoopToken = _loop.Token;
+        }
+
+        /// <summary>The session key.</summary>
+        public string Key { get; }
+
+        /// <summary>The endpoint the socket was opened to (named by <c>Disconnected</c>).</summary>
+        public Uri Endpoint { get; }
+
+        /// <summary>The local DID of the request that opened the socket (the frames' attribution).</summary>
+        public string LocalDid { get; }
+
+        /// <summary>The peer DID of the request that opened the socket (the frames' attribution).</summary>
+        public string PeerDid { get; }
+
+        /// <summary>The socket.</summary>
+        public System.Net.WebSockets.WebSocket Socket { get; }
+
+        /// <summary>Cancels the receive loop, and is the token the inbound consumer gets.</summary>
+        public CancellationToken LoopToken { get; }
+
+        /// <summary>Completes when the receive loop has fully ended (or never started).</summary>
+        public Task LoopDone => _loopDone.Task;
+
+        /// <summary>Set once an oversized message closed the socket with 1009: every later message is dropped.</summary>
+        public bool DiscardInbound
+        {
+            get => _discardInbound;
+            set => _discardInbound = value;
+        }
+
+        /// <summary>Whether this call is the socket's first end — the one that raises <c>Disconnected</c>.</summary>
+        public bool TryEnd() => Interlocked.Exchange(ref _ended, 1) == 0;
+
+        /// <summary>Cancel the receive loop now. Never throws.</summary>
+        public void StopLoop()
+        {
+            try
+            {
+                _loop.Cancel();
+            }
+            catch
+            {
+                // A consumer's cancellation callback threw; the token is cancelled regardless.
+            }
+        }
+
+        /// <summary>Cancel the receive loop after <paramref name="after"/> unless it ended first. Never throws.</summary>
+        /// <param name="after">The backstop delay.</param>
+        public void ArmBackstop(TimeSpan after)
+        {
+            try
+            {
+                _loop.CancelAfter(after);
+            }
+            catch
+            {
+                // Already cancelled: nothing to arm.
+            }
+        }
+
+        /// <summary>Dispose the socket (idempotent). Never throws.</summary>
+        public void DisposeSocket()
+        {
+            try
+            {
+                Socket.Dispose();
+            }
+            catch
+            {
+                // A socket implementation that throws on dispose is closed as far as we are concerned.
+            }
+        }
+
+        /// <summary>Mark the receive loop as ended.</summary>
+        public void MarkLoopDone() => _loopDone.TrySetResult();
     }
 
     /// <summary>

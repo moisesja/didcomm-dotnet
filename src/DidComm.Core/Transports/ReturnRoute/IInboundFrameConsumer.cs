@@ -14,8 +14,11 @@ namespace DidComm.Transports.ReturnRoute;
 /// after the call returns. Frames of different sockets may be consumed concurrently. A consumer, or
 /// a handler it runs, must therefore not wait for another inbound message on the same session: that
 /// session stops reading and deadlocks until the wait's own timeout. The cancellation token is
-/// cancelled when the socket retires or the transport is disposed. An exception thrown by the
-/// consumer is logged by its type name and the loop continues with the next frame.
+/// cancelled when the transport is disposed or a send on the socket fails, and when a retired socket
+/// (after <c>return_route: none</c> or an oversized message) has not finished closing
+/// within the transport's close grace; a frame already being consumed when the socket retires may
+/// otherwise finish. An exception thrown by the consumer is logged by its type name and the loop
+/// continues with the next frame.
 /// </para>
 /// <para>
 /// <strong>Trust.</strong> <see cref="InboundFrame.Payload"/> is untrusted bytes from the network.
@@ -37,6 +40,6 @@ public interface IInboundFrameConsumer
     /// the returned task before it reads the socket's next frame.
     /// </summary>
     /// <param name="frame">The received bytes and the session's attribution.</param>
-    /// <param name="ct">Cancelled when the session socket retires or the transport is disposed.</param>
+    /// <param name="ct">Cancelled when the session socket stops being read (see the remarks).</param>
     ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct);
 }
