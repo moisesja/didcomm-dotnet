@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using DidComm.Transports.ReturnRoute;
 
 namespace DidComm.Messages;
 
@@ -174,6 +176,61 @@ public sealed class MessageBuilder
         if (rankedLangs.Length == 0)
             throw new ArgumentException("At least one language tag is required.", nameof(rankedLangs));
         _message.AcceptLang = rankedLangs.ToList();
+        return this;
+    }
+
+    /// <summary>
+    /// Set the <c>return_route</c> header extension (PRD §8a, FR-RR-01), asking the receiving
+    /// transport to return messages over the same connection. <see cref="ReturnRouteMode.None"/>
+    /// writes an explicit <c>"none"</c> (the downgrade shape); <see cref="ReturnRouteMode.All"/>
+    /// writes <c>"all"</c>; <see cref="ReturnRouteMode.Thread"/> writes <c>"thread"</c> plus
+    /// <c>return_route_thread</c> = <paramref name="thread"/>. Any stale <c>return_route_thread</c>
+    /// is removed when the mode is not <see cref="ReturnRouteMode.Thread"/>. The values are stored
+    /// as JSON strings in <see cref="Message.AdditionalHeaders"/>, so the serialized message carries
+    /// exactly <c>"return_route":"all"</c>.
+    /// </summary>
+    /// <param name="mode">The requested mode.</param>
+    /// <param name="thread">The thread id for <see cref="ReturnRouteMode.Thread"/>: required then, with the <c>thid</c> constraints (RFC 3986 unreserved characters, at most <see cref="ReturnRouteHeader.MaxThreadLength"/> characters); must be <c>null</c> for the other modes.</param>
+    /// <exception cref="ArgumentException">A <see cref="ReturnRouteMode.Thread"/> request without a usable thread, or a thread given with another mode.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="mode"/> is not a defined value.</exception>
+    public MessageBuilder WithReturnRoute(ReturnRouteMode mode, string? thread = null)
+    {
+        string value;
+        switch (mode)
+        {
+            case ReturnRouteMode.None:
+                value = ReturnRouteHeader.NoneValue;
+                break;
+            case ReturnRouteMode.All:
+                value = ReturnRouteHeader.AllValue;
+                break;
+            case ReturnRouteMode.Thread:
+                value = ReturnRouteHeader.ThreadValue;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), "Not a defined ReturnRouteMode.");
+        }
+
+        if (mode == ReturnRouteMode.Thread)
+        {
+            if (string.IsNullOrWhiteSpace(thread))
+                throw new ArgumentException("return_route 'thread' requires a return_route_thread value.", nameof(thread));
+            if (!UnreservedUriChars.IsUnreserved(thread))
+                throw new ArgumentException("return_route_thread must consist of RFC 3986 unreserved characters only (FR-MSG-11).", nameof(thread));
+            if (thread.Length > ReturnRouteHeader.MaxThreadLength)
+                throw new ArgumentException($"return_route_thread must be at most {ReturnRouteHeader.MaxThreadLength} characters.", nameof(thread));
+        }
+        else if (thread is not null)
+        {
+            throw new ArgumentException("A return_route_thread value is only valid with ReturnRouteMode.Thread.", nameof(thread));
+        }
+
+        _message.AdditionalHeaders ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        _message.AdditionalHeaders[ReturnRouteHeader.HeaderName] = JsonSerializer.SerializeToElement(value);
+        if (mode == ReturnRouteMode.Thread)
+            _message.AdditionalHeaders[ReturnRouteHeader.ThreadHeaderName] = JsonSerializer.SerializeToElement(thread);
+        else
+            _message.AdditionalHeaders.Remove(ReturnRouteHeader.ThreadHeaderName);
         return this;
     }
 

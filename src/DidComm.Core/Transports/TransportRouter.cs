@@ -1,4 +1,5 @@
 using DidComm.Exceptions;
+using DidComm.Transports.ReturnRoute;
 
 namespace DidComm.Transports;
 
@@ -8,6 +9,12 @@ namespace DidComm.Transports;
 /// accepts the endpoint, and delegates to its <see cref="IDidCommTransport.SendAsync"/>.
 /// Throws <see cref="TransportException"/> with the offending scheme when no transport matches.
 /// </summary>
+/// <remarks>
+/// The queue endpoint <c>didcomm:transport/queue</c> (<see cref="QueueTransport"/>, FR-RR-06) is
+/// refused before any transport is consulted — with <see cref="QueueTransport.RefusalMessage"/>
+/// and scheme <c>didcomm</c> — so a custom <see cref="IDidCommTransport"/> claiming that scheme is
+/// never asked to send to it.
+/// </remarks>
 public sealed class TransportRouter : ITransportRouter
 {
     private readonly IReadOnlyList<IDidCommTransport> _transports;
@@ -25,6 +32,10 @@ public sealed class TransportRouter : ITransportRouter
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.Endpoint);
+
+        // FR-RR-06: the queue URI names no transport; the sender holds the message for pickup.
+        if (QueueTransport.IsQueueTransport(request.Endpoint))
+            throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
 
         foreach (var transport in _transports)
         {

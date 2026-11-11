@@ -4,6 +4,7 @@ using DidComm.Protocols;
 using DidComm.Protocols.Empty;
 using DidComm.Protocols.TrustPing;
 using DidComm.Threading;
+using DidComm.Transports.ReturnRoute;
 using AwesomeAssertions;
 using Xunit;
 
@@ -100,6 +101,100 @@ public sealed class ProtocolDispatcherTests
         Func<Task> act = async () => await dispatcher.DispatchAsync(
             Unpack(Msg("https://didcomm.org/test/1.0/m")), client: null, new DidCommOptions());
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*FR-THR-04*");
+    }
+
+    private sealed class ContextCapturingHandler : IProtocolHandler
+    {
+        public ProtocolContext? Context { get; private set; }
+        public int CallCount { get; private set; }
+        public string ProtocolUri => "https://didcomm.org/test/1.0";
+        public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+        {
+            CallCount++;
+            Context = context;
+            return Task.FromResult<Message?>(null);
+        }
+    }
+
+    private sealed class FakeSession : IReturnRouteSession
+    {
+        public string PeerDid => "did:peer:alice";
+        public string LocalDid => "did:peer:bob";
+        public ReturnRouteMode Mode => ReturnRouteMode.All;
+        public string? Thread => null;
+        public ReturnRouteTransport Transport => ReturnRouteTransport.Http;
+        public bool IsLive => false;
+        public CancellationToken Closed => CancellationToken.None;
+        public ValueTask<bool> TrySendAsync(Message message, CancellationToken ct) => ValueTask.FromResult(false);
+    }
+
+    [Fact]
+    public async Task Six_arg_overload_places_the_session_and_the_parsed_header_on_the_context()
+    {
+        var reg = new ProtocolHandlerRegistry();
+        var handler = new ContextCapturingHandler();
+        reg.Register(handler);
+        var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
+        var session = new FakeSession();
+        var msg = Message.Empty().WithType("https://didcomm.org/test/1.0/m").WithFrom("did:peer:alice").WithTo("did:peer:bob")
+            .WithReturnRoute(ReturnRouteMode.Thread, "thid-7").Build();
+
+        var result = await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions(), Task.CompletedTask, session);
+
+        result.Result.Should().Be(DispatchResult.NoReply);
+        handler.Context.Should().NotBeNull();
+        handler.Context!.Session.Should().BeSameAs(session);
+        handler.Context.ReturnRoute.Mode.Should().Be(ReturnRouteMode.Thread);
+        handler.Context.ReturnRoute.Thread.Should().Be("thid-7");
+        handler.Context.Acknowledged.Should().BeSameAs(Task.CompletedTask);
+    }
+
+    [Fact]
+    public async Task Four_and_five_arg_overloads_yield_no_session_and_a_truthful_header()
+    {
+        var reg = new ProtocolHandlerRegistry();
+        var handler = new ContextCapturingHandler();
+        reg.Register(handler);
+        var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
+        var msg = Message.Empty().WithType("https://didcomm.org/test/1.0/m").WithFrom("did:peer:alice").WithTo("did:peer:bob")
+            .WithReturnRoute(ReturnRouteMode.All).Build();
+
+        await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions());
+        handler.Context!.Session.Should().BeNull();
+        handler.Context.ReturnRoute.Mode.Should().Be(ReturnRouteMode.All);
+
+        var ack = new TaskCompletionSource().Task;
+        await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions(), ack, CancellationToken.None);
+        handler.Context!.Session.Should().BeNull();
+        handler.Context.ReturnRoute.Mode.Should().Be(ReturnRouteMode.All);
+        handler.Context.Acknowledged.Should().BeSameAs(ack);
+
+        // A null literal binds the 6-arg overload (it cannot convert to CancellationToken).
+        await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions(), Task.CompletedTask, null);
+        handler.Context!.Session.Should().BeNull();
+        handler.CallCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Malformed_return_route_header_reads_as_None_and_the_handler_still_runs()
+    {
+        // FR-RR-01: the header never fails dispatch.
+        var reg = new ProtocolHandlerRegistry();
+        var handler = new ContextCapturingHandler();
+        reg.Register(handler);
+        var dispatcher = new ProtocolDispatcher(reg, new InMemoryThreadStateStore());
+        var msg = Msg("https://didcomm.org/test/1.0/m");
+        msg.AdditionalHeaders = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal)
+        {
+            ["return_route"] = System.Text.Json.JsonSerializer.SerializeToElement(42),
+        };
+
+        var result = await dispatcher.DispatchAsync(Unpack(msg), client: null, new DidCommOptions(), Task.CompletedTask, new FakeSession());
+
+        result.Result.Should().Be(DispatchResult.NoReply);
+        handler.CallCount.Should().Be(1);
+        handler.Context!.ReturnRoute.Should().Be(ReturnRouteHeader.None);
+        handler.Context.Session.Should().NotBeNull("the dispatcher does not re-check admission; the session is the transport's decision");
     }
 
     [Fact]

@@ -57,6 +57,23 @@ public sealed class TransportRouterTests
     }
 
     [Fact]
+    public async Task SendAsync_refuses_the_queue_uri_before_consulting_any_transport()
+    {
+        // FR-RR-06: even a transport claiming scheme "didcomm" is never asked.
+        var didcomm = new FakeTransport("didcomm", expected: new Uri("didcomm:transport/queue"));
+        var router = new TransportRouter(new IDidCommTransport[] { didcomm });
+
+        var act = async () => await router.SendAsync(NewRequest("didcomm:transport/queue"), default);
+
+        var ex = (await act.Should().ThrowAsync<TransportException>()).Which;
+        ex.Message.Should().Be(DidComm.Transports.ReturnRoute.QueueTransport.RefusalMessage);
+        ex.Message.Should().NotContain("did:");
+        ex.Scheme.Should().Be("didcomm");
+        ex.HttpStatusCode.Should().BeNull();
+        didcomm.CallCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task SendAsync_picks_transport_case_insensitively()
     {
         // The router itself just calls CanHandle; the case-insensitive comparison is the

@@ -1,5 +1,6 @@
 using DidComm.Facade;
 using DidComm.Threading;
+using DidComm.Transports.ReturnRoute;
 using ThreadState = DidComm.Threading.ThreadState; // disambiguate from System.Threading.ThreadState
 
 namespace DidComm.Protocols;
@@ -36,4 +37,31 @@ public sealed record ProtocolContext(
     /// <see cref="ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, CancellationToken)"/>.
     /// </summary>
     public Task Acknowledged { get; init; } = Task.CompletedTask;
+
+    /// <summary>
+    /// The return-route session bound to this inbound, or <c>null</c> when there is none. Non-null
+    /// only when the transport admitted the inbound under FR-RR-03 — encrypted with an authcrypt
+    /// layer, carrying <c>return_route: all</c>, not a <c>forward</c>, FR-RR-08 replay-admitted —
+    /// and bound this inbound's (peer, local DID) pair to it. A handler returns a reply or pushes
+    /// follow-ups through <see cref="IReturnRouteSession.TrySendAsync"/>; <c>null</c> means reply
+    /// out of band (<see cref="DidCommClient.SendAsync"/>) or not at all. Set by
+    /// <see cref="ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, IReturnRouteSession?, CancellationToken)"/>;
+    /// <c>null</c> from the other overloads.
+    /// </summary>
+    /// <remarks>
+    /// Upgrader note: <see cref="ProtocolContext"/> is a positional record, so this member and
+    /// <see cref="ReturnRoute"/> take part in value equality and <c>GetHashCode</c>. Two contexts
+    /// that were equal before 1.6.0 remain equal unless they differ in these members. Binary- and
+    /// source-compatible; only equality semantics changed.
+    /// </remarks>
+    public IReturnRouteSession? Session { get; init; }
+
+    /// <summary>
+    /// The parsed <c>return_route</c> header of THIS message (FR-RR-01), truthful for every
+    /// dispatch path: the dispatcher re-reads it. A <see cref="ReturnRouteMode.Thread"/> request is
+    /// surfaced here but opens no session (DD-12, PRD §15.2). On a WebSocket a header-less message
+    /// shows <see cref="ReturnRouteMode.None"/> here while <see cref="Session"/> keeps its own mode
+    /// (FR-RR-05). A malformed header reads as <see cref="ReturnRouteHeader.None"/>.
+    /// </summary>
+    public ReturnRouteHeader ReturnRoute { get; init; } = ReturnRouteHeader.None;
 }

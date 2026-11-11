@@ -78,6 +78,19 @@ public sealed class ServiceEndpointParserTests
     }
 
     [Fact]
+    public void Queue_transport_uri_parses_like_any_other_uri()
+    {
+        // FR-RR-06: the parser recognises didcomm:transport/queue as a valid uri; the send path refuses it.
+        var endpoint = ServiceEndpointValue.FromMap(MakeMap(("uri", "didcomm:transport/queue")));
+
+        var result = ServiceEndpointParser.Parse(new[] { MakeService(endpoint) });
+
+        result.Should().ContainSingle();
+        result[0].Uri.Should().Be("didcomm:transport/queue");
+        DidComm.Transports.ReturnRoute.QueueTransport.IsQueueTransport(result[0].Uri).Should().BeTrue();
+    }
+
+    [Fact]
     public void Defaults_routing_keys_and_accept_to_empty_when_absent_from_the_map()
     {
         var endpoint = ServiceEndpointValue.FromMap(MakeMap(("uri", "https://only-uri/")));
