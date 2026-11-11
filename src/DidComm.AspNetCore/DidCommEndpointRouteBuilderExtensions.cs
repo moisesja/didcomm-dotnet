@@ -155,11 +155,13 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// registered <see cref="IProtocolHandler"/> via <see cref="ProtocolDispatcher"/>.
     /// <para>
     /// <b>Return-route (FR-RR-04).</b> After unpack, the inbound goes through return-route
-    /// admission: an authenticated message carrying <c>return_route</c> (other than <c>none</c>) or
-    /// of a mediator-service type must pass the FR-RR-08 replay guard (a fresh <c>created_time</c>
-    /// and a first-seen id) — a refused one is answered <c>202</c> with an empty body and is not
-    /// dispatched. When the inbound was authcrypted (<c>UnpackResult.Encrypted &amp;&amp; Authenticated</c>),
-    /// carries <c>return_route: all</c> and is not a <c>forward</c>, the handler gets a session
+    /// admission: an authcrypted message (one with an authcrypt layer) carrying <c>return_route</c>
+    /// (other than <c>none</c>) or of a mediator-service type must pass the FR-RR-08 replay guard (a
+    /// fresh <c>created_time</c> and a first-seen id) — a refused one is answered <c>202</c> with an
+    /// empty body and is not dispatched. When the inbound was authcrypted (an authcrypt layer with a
+    /// sender key id — a verified signature alone does not count, although it also sets
+    /// <c>UnpackResult.Authenticated</c>), carries <c>return_route: all</c> and is not a
+    /// <c>forward</c>, the handler gets a session
     /// (<see cref="ProtocolContext.Session"/>) bound to the authenticated sender; a reply the handler
     /// returns — or the one message it pushes through the session — is authcrypted from the DID
     /// that decrypted the inbound to exactly that sender and returned as the <c>200</c> body
@@ -537,9 +539,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// callback overload (FR-TRN-09/10/API-06 enforced); each reassembled envelope is unpacked,
     /// passed through return-route admission and dispatched through <see cref="ProtocolDispatcher"/>.
     /// <para>
-    /// <b>Replay (FR-RR-08).</b> An authenticated message carrying <c>return_route</c> (other than
-    /// <c>none</c>) or of a mediator-service type must pass the replay guard; a refused one is
-    /// dropped with nothing written and nothing dispatched.
+    /// <b>Replay (FR-RR-08).</b> An authcrypted message (one with an authcrypt layer) carrying
+    /// <c>return_route</c> (other than <c>none</c>) or of a mediator-service type must pass the replay
+    /// guard; a refused one is dropped with nothing written and nothing dispatched.
     /// </para>
     /// <para>
     /// <b>Return-route (FR-RR-05)</b>, only when <see cref="DidCommReceiveOptions.AllowSameSocketReplies"/>
@@ -555,8 +557,12 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// is dispatched without a session and its reply is not written. A header-less message on a
     /// socket without a session gets no reply. The registry bounds the sessions per peer (one more
     /// evicts that peer's oldest, whose socket is then closed with a normal close frame) and in total
-    /// (a new session is refused and the message is dispatched without one). Closing the socket
-    /// unregisters the session.
+    /// (a new session is refused and the message is dispatched without one). An evicted connection
+    /// keeps reading until the peer answers the close frame — dispatching, without a session, what
+    /// the peer sent before it saw the close — and is cancelled if that takes longer than the close
+    /// grace (5 s). Closing the socket unregisters the session. The close this endpoint initiates for
+    /// an oversized message (1009) is bounded by the same grace; a peer that never answers it is
+    /// aborted.
     /// </para>
     /// <para>
     /// There is no per-message wire acknowledgement on a WebSocket (nothing is written back for an
@@ -650,7 +656,12 @@ public static class DidCommEndpointRouteBuilderExtensions
         string? pendingCloseReason = null;
         try
         {
-            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
+            // CloseSent too: only the session writer's eviction close puts the socket there, and the
+            // loop then keeps reading — messages the peer sent before it saw the close are still
+            // dispatched (without a session) — until the peer's answering close frame completes the
+            // handshake, bounded by the eviction backstop (JC-21). Stopping at CloseSent would dispose
+            // the socket mid-handshake whenever the eviction landed while this loop was dispatching.
+            while (!ct.IsCancellationRequested && socket.State is WebSocketState.Open or WebSocketState.CloseSent)
             {
                 using var ms = new MemoryStream();
                 long total = 0;
@@ -845,13 +856,21 @@ public static class DidCommEndpointRouteBuilderExtensions
             }
             else if (pendingClose is { } closeStatus && socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
+                // CloseAsync waits for the peer's close frame when we initiate the close (the 1009
+                // path). Bound the handshake by the close grace: a peer that sends one oversize
+                // message and then never reads nor answers must not hold this request — and its
+                // buffers — for the life of the TCP connection. On timeout the socket is aborted.
+                using var closeCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+                closeCts.CancelAfter(WebSocketReturnRouteSession.DefaultCloseGrace);
                 try
                 {
-                    await socket.CloseAsync(closeStatus, pendingCloseReason, CancellationToken.None).ConfigureAwait(false);
+                    await socket.CloseAsync(closeStatus, pendingCloseReason, closeCts.Token).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
                 {
                     SafeLog.Write(logger, LogLevel.Debug, "MapDidCommWebSocket: close failed with {ExceptionType}.", ex.GetType().Name);
+                    if (closeCts.IsCancellationRequested)
+                        socket.Abort();
                 }
             }
             ArrayPool<byte>.Shared.Return(buffer);

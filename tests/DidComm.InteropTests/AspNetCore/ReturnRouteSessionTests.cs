@@ -380,6 +380,116 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Ws_eviction_while_the_writer_is_stuck_in_a_send_still_ends_the_connection_within_the_grace()
+    {
+        // QA #91: the JC-21 backstop used to be armed only after the eviction close frame was sent,
+        // and the writer sends it only after its current send completes. A peer that stops reading
+        // keeps that send pending forever, so the evicted connection never ended (FR-RR-03: eviction
+        // closes the socket). The backstop is now armed at eviction.
+        var socket = new FakeWebSocket { SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        using var connection = new CancellationTokenSource();
+        var grace = TimeSpan.FromMilliseconds(200);
+        var session = NewWebSocketSession(socket, connection, closeGrace: grace);
+        session.Start();
+
+        (await session.TrySendAsync(ToAlice("stuck"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout); // the gate is never released: the peer does not read
+
+        session.RequestClose(SessionCloseReason.Evicted);
+
+        (await ReturnRouteTestHost.WaitUntilAsync(() => connection.IsCancellationRequested, grace + TimeSpan.FromSeconds(3)))
+            .Should().BeTrue("the eviction backstop ends the connection even though the writer never reached the close frame");
+        (await ReturnRouteTestHost.WaitUntilAsync(() => session.WriterStopped, Timeout)).Should().BeTrue("the cancelled send releases the writer");
+        (await session.StopAsync().WaitAsync(Timeout)).Should().BeTrue();
+        socket.Frames.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Ws_no_send_starts_after_a_downgrade_was_applied_even_while_the_writer_drains_its_queue()
+    {
+        // FR-RR-07 / judgment call 3: "the receiver pushes nothing after it processes the None". The
+        // invariant must hold for every interleaving of the writer draining queued pushes and the
+        // receive loop applying `none`: once ApplyHeader(None) has returned, no SendAsync may begin.
+        // QA #91 regression: the writer read the mode and then started the send without excluding
+        // ApplyHeader, so a downgrade landing between the two let one more frame out.
+        // Each round parks the writer in a send, queues a full batch, then releases the writer while a
+        // second thread follows its progress and applies `none` right after the k-th frame, a few
+        // spins later each round, so the downgrade sweeps the writer's check-then-send step.
+        const int Rounds = 60;
+        const int Queued = 8;
+        var random = new Random(91);
+        var landedMidDrain = 0;
+        for (var round = 0; round < Rounds; round++)
+        {
+            var downgraded = 0;
+            var socket = new FakeWebSocket
+            {
+                SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+                AtSendEntry = () => Volatile.Read(ref downgraded) == 1,
+            };
+            using var connection = new CancellationTokenSource();
+            var session = NewWebSocketSession(socket, connection, maxPendingPushes: Queued);
+            session.Start();
+
+            (await session.TrySendAsync(ToAlice("parked"), default)).Should().BeTrue();
+            await socket.SendEntered.Task.WaitAsync(Timeout);
+            for (var i = 0; i < Queued; i++)
+                (await session.TrySendAsync(ToAlice("queued-" + i), default)).Should().BeTrue();
+
+            var k = 1 + (round % 4);
+            var spin = random.Next(0, 64);
+            var ready = new ManualResetEventSlim();
+            var downgrader = Task.Factory.StartNew(() =>
+            {
+                ready.Set();
+                var deadline = DateTime.UtcNow + Timeout;
+                while (socket.Frames.Count < k && DateTime.UtcNow < deadline)
+                    Thread.SpinWait(1);
+                Thread.SpinWait(spin);
+                session.ApplyHeader(ReturnRouteHeader.None);
+                Volatile.Write(ref downgraded, 1);
+            }, TaskCreationOptions.LongRunning);
+            ready.Wait(Timeout).Should().BeTrue();
+
+            socket.SendGate.SetResult();
+            await downgrader.WaitAsync(Timeout);
+            (await session.StopAsync().WaitAsync(Timeout)).Should().BeTrue();
+
+            socket.SendsAfterFlag.Should().Be(0, "round {0}: a send began after ApplyHeader(None) returned", round);
+            if (socket.Frames.Count < Queued + 1)
+                landedMidDrain++;
+        }
+
+        landedMidDrain.Should().BeGreaterThan(Rounds / 2, "the downgrade must overlap the drain (L-044): some queued pushes are discarded");
+    }
+
+    [Fact]
+    public async Task Ws_StopAsync_reports_false_when_the_writer_ignores_cancellation()
+    {
+        // A socket whose send never observes the token: StopAsync gives up after the grace twice and
+        // answers false, so the receive loop aborts the socket instead of closing it over a send.
+        var socket = new FakeWebSocket
+        {
+            SendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+            IgnoreCancellation = true,
+        };
+        using var connection = new CancellationTokenSource();
+        var session = NewWebSocketSession(socket, connection, closeGrace: TimeSpan.FromMilliseconds(100));
+        session.Start();
+
+        (await session.TrySendAsync(ToAlice("wedged"), default)).Should().BeTrue();
+        await socket.SendEntered.Task.WaitAsync(Timeout);
+
+        (await session.StopAsync().WaitAsync(Timeout)).Should().BeFalse("the writer could not be stopped");
+        connection.IsCancellationRequested.Should().BeTrue("the connection was cancelled before giving up");
+        session.WriterStopped.Should().BeFalse();
+        _logs.Entries.Should().Contain(e => e.Contains("did not stop within the close grace"));
+
+        socket.SendGate.SetResult(); // let the wedged send finish so the writer task ends
+        (await ReturnRouteTestHost.WaitUntilAsync(() => session.WriterStopped, Timeout)).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Ws_a_session_that_was_never_started_stops_at_once()
     {
         using var connection = new CancellationTokenSource();
@@ -480,6 +590,16 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
 
         public Exception? SendFault { get; init; }
 
+        /// <summary>Park on <see cref="SendGate"/> without observing the send's cancellation token.</summary>
+        public bool IgnoreCancellation { get; init; }
+
+        /// <summary>Evaluated on entry to every send; a <c>true</c> answer is counted in <see cref="SendsAfterFlag"/>.</summary>
+        public Func<bool>? AtSendEntry { get; init; }
+
+        public int SendsAfterFlag => Volatile.Read(ref _sendsAfterFlag);
+
+        private int _sendsAfterFlag;
+
         public int MaxConcurrentSends => Volatile.Read(ref _maxConcurrentSends);
 
         public override WebSocketCloseStatus? CloseStatus => null;
@@ -514,6 +634,8 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
 
         public override async Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken)
         {
+            if (AtSendEntry?.Invoke() == true)
+                Interlocked.Increment(ref _sendsAfterFlag);
             var concurrent = Interlocked.Increment(ref _concurrentSends);
             int seen;
             while ((seen = Volatile.Read(ref _maxConcurrentSends)) < concurrent
@@ -527,7 +649,7 @@ public sealed class ReturnRouteSessionTests : IAsyncLifetime
                 if (SendFault is not null)
                     throw SendFault;
                 if (SendGate is { } gate)
-                    await gate.Task.WaitAsync(cancellationToken);
+                    await (IgnoreCancellation ? gate.Task : gate.Task.WaitAsync(cancellationToken));
                 Frames.Enqueue(buffer.ToArray());
                 MessageTypes.Enqueue(messageType);
             }

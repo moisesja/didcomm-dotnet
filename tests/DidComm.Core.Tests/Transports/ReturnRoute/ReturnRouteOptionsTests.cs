@@ -75,6 +75,28 @@ public sealed class ReturnRouteOptionsTests
     }
 
     [Fact]
+    public void Validation_messages_name_the_property_and_echo_no_configured_value()
+    {
+        // Distinctive values so an echo would be visible in the message text.
+        var cases = new (Action Validate, string Property, string[] Values)[]
+        {
+            (() => new ReturnRouteSessionOptions { MaxSessionsPerPeer = -4242 }.Validate(), "MaxSessionsPerPeer", new[] { "4242" }),
+            (() => new ReturnRouteSessionOptions { MaxSessionsPerPeer = 7373, MaxSessions = 6161 }.Validate(), "MaxSessionsPerPeer", new[] { "7373", "6161" }),
+            (() => new ReturnRouteSessionOptions { MaxPendingPushes = -5858 }.Validate(), "MaxPendingPushes", new[] { "5858" }),
+            (() => new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(-3737) }.Validate(), "Window", new[] { "3737", "01:02" }),
+            (() => new ReplayProtectionOptions { MaxEntries = 9292, MaxEntriesPerPeer = 9393 }.Validate(), "MaxEntriesPerPeer", new[] { "9292", "9393" }),
+            (() => new ReplayProtectionOptions { MaxMessageIdLength = -2828 }.Validate(), "MaxMessageIdLength", new[] { "2828" }),
+        };
+        foreach (var (validate, property, values) in cases)
+        {
+            var message = validate.Should().Throw<InvalidOperationException>().Which.Message;
+            message.Should().Contain(property);
+            foreach (var value in values)
+                message.Should().NotContain(value, "a validation message names the property, never the configured value");
+        }
+    }
+
+    [Fact]
     public void Replay_options_are_validated_by_the_guard_ctor()
     {
         var act = () => new InMemoryReplayGuard(new ReplayProtectionOptions { MaxEntries = 0 }, new DidComm.Facade.DidCommOptions());

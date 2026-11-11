@@ -87,17 +87,21 @@ internal static class InboundAdmission
         var sessionEligible = peerDid is not null && header.Mode == ReturnRouteMode.All;
 
         // FR-RR-08 scope: (a) an authenticated message with return_route other than none, or (b) a
-        // mediator-service message type; a forward is exempt. Unauthenticated in-scope messages pass
-        // through — their handlers drop them (FR-MED-05 / FR-PICK-01).
+        // mediator-service message type; a forward is exempt. "Authenticated" is the FR-RR-03 sense:
+        // an authcrypt layer (a sender key id). UnpackResult.Authenticated alone is not enough — a
+        // verified JWS sets it too — and a signed-only or anoncrypt(signed) message, like plaintext and
+        // anoncrypt, can neither open a session nor mutate mediator state: such in-scope messages pass
+        // through and their handlers drop them (FR-MED-05 / FR-PICK-01).
         var type = message.Type;
-        var inScope = unpacked.Authenticated
+        var authcrypted = unpacked.Authenticated && !string.IsNullOrEmpty(unpacked.SenderKid);
+        var inScope = authcrypted
             && !MediatorServiceProtocols.IsReplayExempt(type)
             && (header.Mode != ReturnRouteMode.None || MediatorServiceProtocols.IsMediatorServiceType(type));
         if (!inScope)
             return new InboundAdmissionResult(true, header, headerPresent, sessionEligible, peerDid, localDid, null);
 
-        // Keyed on the authcrypt sender key id's subject — never on the plaintext `from`. An
-        // authenticated result without a usable key id (or id) fails closed (L-034).
+        // Keyed on the authcrypt sender key id's subject — never on the plaintext `from`. A sender key
+        // id that is not a DID (or an empty id) fails closed (L-034).
         var peerSubject = DidSubject.DidSubjectOf(unpacked.SenderKid);
         if (peerSubject is null || string.IsNullOrEmpty(messageId))
         {
@@ -184,7 +188,7 @@ internal static class InboundAdmission
 /// </summary>
 internal sealed class InboundAdmissionEndpoint
 {
-    /// <summary>Drop-counter slot for an authenticated in-scope message whose sender key id has no DID subject (or whose id is empty).</summary>
+    /// <summary>Drop-counter slot for an authcrypted in-scope message whose sender key id has no DID subject (or whose id is empty).</summary>
     internal const int NoSenderSubjectSlot = 7;
 
     /// <summary>Drop-counter slot for a replay guard that threw.</summary>

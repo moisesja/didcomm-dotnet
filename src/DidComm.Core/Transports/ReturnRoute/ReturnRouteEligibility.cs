@@ -37,9 +37,11 @@ internal enum ReturnRouteIneligibility
 /// DID subject (of the decrypting key id). Pure; the transport decides what to do with the answer.
 /// </summary>
 /// <remarks>
-/// The peer is fixed to the sender key id of an authcrypt layer — <see cref="UnpackResult.Authenticated"/>
-/// is only ever set by one — so a signer-only binding is not accepted. When a signer key id is also
-/// present it must name the same subject (FR-CONSIST-05, defense in depth).
+/// The peer is fixed to the sender key id of an authcrypt layer. <see cref="UnpackResult.Authenticated"/>
+/// alone does not prove one — a verified signature also sets it — so a non-empty
+/// <see cref="UnpackResult.SenderKid"/> is required and a signer-only binding (signed-only or
+/// <c>anoncrypt(sign(…))</c>) is not accepted. When a signer key id is also present it must name
+/// the same subject (FR-CONSIST-05, defense in depth).
 /// </remarks>
 internal static class ReturnRouteEligibility
 {

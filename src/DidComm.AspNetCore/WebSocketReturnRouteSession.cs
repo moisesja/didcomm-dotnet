@@ -24,10 +24,14 @@ namespace DidComm.AspNetCore;
 /// <para>
 /// On close for any reason queued pushes are discarded — <c>true</c> from
 /// <see cref="TrySendAsync"/> meant queued, not delivered. A push dequeued while the session is
-/// downgraded (<c>none</c> / <c>thread</c>) is not sent either, so nothing is written after the
-/// receive loop processed the downgrade. On eviction the writer sends a normal close frame and arms
-/// a backstop that cancels the connection after <see cref="CloseGrace"/> if the peer never answers
-/// (JC-21).
+/// downgraded (<c>none</c> / <c>thread</c>) is not sent either. The writer's "may I send?" check and
+/// the start of the send happen under one send gate that <see cref="ApplyHeader"/> and
+/// <see cref="RequestClose"/> also take, so once either has returned no send begins: nothing is
+/// written after the receive loop processed a downgrade (a send already in progress completes). On
+/// eviction a backstop is armed at once that cancels the connection after <see cref="CloseGrace"/>,
+/// and the writer — once its current send, if any, is done — sends a normal close frame; the peer's
+/// answering close ends the connection sooner (JC-21). The backstop also covers a writer stuck in a
+/// send to a peer that stopped reading.
 /// </para>
 /// </remarks>
 internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
@@ -49,6 +53,7 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
     private volatile int _mode = (int)ReturnRouteMode.All;
     private volatile string? _thread;
     private int _closeState;   // 0 = open; otherwise 1 + (int)SessionCloseReason, set once (Interlocked)
+    private readonly object _sendGate = new(); // the writer's check + send start vs. ApplyHeader / RequestClose
     private volatile Task? _writer;
 
     /// <summary>Create the session for one connection; call <see cref="Start"/> once it is registered.</summary>
@@ -120,6 +125,9 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
     /// <summary><c>true</c> once the session closed, for any reason.</summary>
     internal bool IsClosed => Volatile.Read(ref _closeState) != 0;
 
+    /// <summary><c>true</c> when the writer task never started or has run to completion (diagnostics and tests).</summary>
+    internal bool WriterStopped => _writer is not { IsCompleted: false };
+
     /// <summary>Why the session closed, or <c>null</c> while it is open.</summary>
     internal SessionCloseReason? CloseReason
     {
@@ -173,37 +181,61 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
     /// <param name="header">The parsed header of the later message.</param>
     internal void ApplyHeader(ReturnRouteHeader header)
     {
-        if (IsClosed)
-            return;
-        switch (header.Mode)
+        // Under the send gate: once this returns, the writer cannot start a send it checked against
+        // the previous mode.
+        lock (_sendGate)
         {
-            case ReturnRouteMode.All:
-                _thread = null;
-                _mode = (int)ReturnRouteMode.All;
-                break;
-            case ReturnRouteMode.Thread:
-                _thread = header.Thread;
-                _mode = (int)ReturnRouteMode.None;
-                break;
-            default:
-                _mode = (int)ReturnRouteMode.None;
-                break;
+            if (IsClosed)
+                return;
+            switch (header.Mode)
+            {
+                case ReturnRouteMode.All:
+                    _thread = null;
+                    _mode = (int)ReturnRouteMode.All;
+                    break;
+                case ReturnRouteMode.Thread:
+                    _thread = header.Thread;
+                    _mode = (int)ReturnRouteMode.None;
+                    break;
+                default:
+                    _mode = (int)ReturnRouteMode.None;
+                    break;
+            }
         }
     }
 
     /// <summary>
     /// Close the session (idempotent; the first reason wins): pushes stop, queued pushes are
     /// discarded, <see cref="Closed"/> is cancelled. For <see cref="SessionCloseReason.Evicted"/>
-    /// the writer then sends a normal close frame (FR-RR-03: the peer observes the eviction).
-    /// Safe from any thread.
+    /// the connection backstop is armed (<see cref="CloseGrace"/>) and the writer then sends a
+    /// normal close frame (FR-RR-03: the peer observes the eviction). Safe from any thread.
     /// </summary>
     /// <param name="reason">Why the session closes.</param>
     internal void RequestClose(SessionCloseReason reason)
     {
-        if (Interlocked.CompareExchange(ref _closeState, 1 + (int)reason, 0) != 0)
-            return;
-        _mode = (int)ReturnRouteMode.None;
+        // Under the send gate, like ApplyHeader: once this returns no new send begins.
+        lock (_sendGate)
+        {
+            if (Interlocked.CompareExchange(ref _closeState, 1 + (int)reason, 0) != 0)
+                return;
+            _mode = (int)ReturnRouteMode.None;
+        }
         _queue.Writer.TryComplete();
+
+        // JC-21 backstop, armed at eviction rather than after the close frame went out: the writer
+        // reaches the close frame only after its current send, which never completes when the peer
+        // stopped reading.
+        if (reason == SessionCloseReason.Evicted)
+        {
+            try
+            {
+                _connection.CancelAfter(CloseGrace);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The connection already ended.
+            }
+        }
 
         // Closed callbacks are handler code: never run them on the caller's thread (which may be
         // another connection's receive loop evicting this session).
@@ -257,10 +289,17 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
             await foreach (var frame in _queue.Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
             {
                 // Closed: discard what is still queued. Downgraded: nothing is written after the
-                // receive loop processed the `none` / `thread`.
-                if (IsClosed || _mode != (int)ReturnRouteMode.All)
-                    continue;
-                await _socket.SendAsync(frame, WebSocketMessageType.Binary, endOfMessage: true, _connectionToken).ConfigureAwait(false);
+                // receive loop processed the `none` / `thread`. The check and the start of the send
+                // are one step under the send gate (ApplyHeader / RequestClose take it too); the send
+                // itself is awaited outside it.
+                ValueTask send;
+                lock (_sendGate)
+                {
+                    if (IsClosed || _mode != (int)ReturnRouteMode.All)
+                        continue;
+                    send = _socket.SendAsync(frame.AsMemory(), WebSocketMessageType.Binary, endOfMessage: true, _connectionToken);
+                }
+                await send.ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (_connectionToken.IsCancellationRequested)
@@ -297,16 +336,8 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
             return;
         }
 
-        // Backstop (JC-21): the peer answers with its close frame, which ends the receive loop; if it
-        // never does, the connection is cancelled after the grace.
-        try
-        {
-            _connection.CancelAfter(CloseGrace);
-        }
-        catch (ObjectDisposedException)
-        {
-            // The connection already ended.
-        }
+        // The peer answers with its close frame, which ends the receive loop; if it never does, the
+        // backstop RequestClose(Evicted) armed cancels the connection after the grace (JC-21).
     }
 
     private void CancelConnection()

@@ -8,10 +8,10 @@ namespace DidComm.Transports.ReturnRoute;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Scope is the transport's decision (the AspNetCore endpoints: an authenticated message that
-/// carries <c>return_route</c> or whose type is a mediator-service protocol per
-/// <see cref="MediatorServiceProtocols"/>, except Routing 2.0 <c>forward</c>). The guard only
-/// answers the question "first sight within the retention?".
+/// Scope is the transport's decision (the AspNetCore endpoints: an authcrypted message — one with
+/// an authcrypt layer, not merely a verified signature — that carries <c>return_route</c> or whose
+/// type is a mediator-service protocol per <see cref="MediatorServiceProtocols"/>, except Routing
+/// 2.0 <c>forward</c>). The guard only answers the question "first sight within the retention?".
 /// </para>
 /// <para>
 /// Dependency rule: an implementation must not take <c>ProtocolHandlerRegistry</c>,

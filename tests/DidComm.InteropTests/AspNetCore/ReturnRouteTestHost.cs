@@ -79,6 +79,17 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
 
     public IReturnRouteSessionRegistry Registry => App.Services.GetRequiredService<IReturnRouteSessionRegistry>();
 
+    /// <summary>The replay guard the endpoints use (the host's own registration when the test made one).</summary>
+    public IInboundReplayGuard ReplayGuard => App.Services.GetRequiredService<IInboundReplayGuard>();
+
+    /// <summary>WebSocket requests on <c>/ws*</c> currently inside the endpoint (the receive loop has not returned).</summary>
+    public int ActiveWebSocketConnections => Volatile.Read(ref _connections.Active);
+
+    /// <summary>WebSocket requests on <c>/ws*</c> whose endpoint delegate has returned (the receive loop and its finally ran).</summary>
+    public int EndedWebSocketConnections => Volatile.Read(ref _connections.Ended);
+
+    private ConnectionCounters _connections = new();
+
     /// <summary>Every DID and key id the host knows about — none may ever appear in a log line.</summary>
     public IEnumerable<string> SensitiveValues
         => new[] { ServerDid, Alice.Did, Carol.Did, Mallory.Did }
@@ -102,12 +113,15 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
         builder.Logging.SetMinimumLevel(LogLevel.Trace);
         builder.Logging.AddProvider(logs);
         builder.Services.AddSingleton(recorder);
+        // Before AddDidComm, so a test's own registry / guard (decorators) wins over the TryAdd defaults.
+        options.ConfigureServices?.Invoke(builder.Services);
         builder.Services.AddDidComm(b =>
         {
             b.UseNetDidResolver();
             b.UseSecretsResolver(serverSecrets);
             b.AddBuiltInProtocols();
             b.AddProtocol<RecordingHandler>();
+            options.ConfigureDidComm?.Invoke(b);
             b.Configure(o =>
             {
                 o.Clock = () => clock.Now;
@@ -126,6 +140,27 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
 
         var app = builder.Build();
         app.UseWebSockets();
+        var connections = new ConnectionCounters();
+        app.Use(async (context, next) =>
+        {
+            // Observe when a WebSocket request's endpoint delegate returns: that is after the receive
+            // loop's finally (unregister, writer stopped, final close or abort) ran.
+            if (!context.Request.Path.StartsWithSegments("/ws"))
+            {
+                await next();
+                return;
+            }
+            Interlocked.Increment(ref connections.Active);
+            try
+            {
+                await next();
+            }
+            finally
+            {
+                Interlocked.Decrement(ref connections.Active);
+                Interlocked.Increment(ref connections.Ended);
+            }
+        });
         app.UseRouting();
         app.MapDidCommEndpoint("/didcomm");
         app.MapDidCommWebSocket("/ws");
@@ -134,8 +169,62 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
             callback is null ? Task.FromResult<Message?>(null) : callback(unpacked, session, ct));
         await app.StartAsync();
 
-        return new ReturnRouteTestHost(app, clock, logs, recorder, server.Did, KidsOf(server), alice, carol, mallory);
+        var host = new ReturnRouteTestHost(app, clock, logs, recorder, server.Did, KidsOf(server), alice, carol, mallory);
+        host._connections = connections;
+        return host;
     }
+
+    /// <summary>Mint <paramref name="count"/> more did:peer peers (their DIDs and kids join <see cref="SensitiveValues"/>).</summary>
+    public async Task<IReadOnlyList<TestPeer>> CreatePeersAsync(int count)
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+        });
+        await using var provider = services.BuildServiceProvider();
+        var manager = provider.GetRequiredService<IDidManager>();
+        var keyGenerator = provider.GetRequiredService<IKeyGenerator>();
+        var crypto = provider.GetRequiredService<ICryptoProvider>();
+        var peers = new List<TestPeer>(count);
+        for (var i = 0; i < count; i++)
+            peers.Add(TestPeer.Create(await PeerIdentityFactory.CreateAsync(manager, keyGenerator, crypto)));
+        lock (_extraPeers)
+            _extraPeers.AddRange(peers);
+        return peers;
+    }
+
+    private readonly List<TestPeer> _extraPeers = new();
+
+    /// <summary>Anoncrypt <paramref name="message"/> to the server (no sender authentication), optionally around an authcrypt layer.</summary>
+    public async Task<string> AnoncryptAsync(Message message)
+    {
+        var packed = await Alice.Client.PackEncryptedAsync(message, new PackEncryptedOptions(
+            Recipients: new[] { ServerDid },
+            From: null,
+            Forward: false));
+        return packed.Message;
+    }
+
+    /// <summary>
+    /// Pack <paramref name="message"/> from <paramref name="from"/> in the given envelope and return it
+    /// with the media type an HTTP POST carries for it.
+    /// </summary>
+    public async Task<(string Packed, string ContentType)> PackAsync(TestPeer from, Message message, EnvelopeShape shape)
+        => shape switch
+        {
+            EnvelopeShape.Plaintext => (await from.Client.PackPlaintextAsync(message), "application/didcomm-plain+json"),
+            EnvelopeShape.SignedOnly => (await from.Client.PackSignedAsync(message, from.Did), "application/didcomm-signed+json"),
+            EnvelopeShape.Anoncrypt => (await AnoncryptAsync(message), "application/didcomm-encrypted+json"),
+            EnvelopeShape.AnoncryptOfAuthcrypt => (await AuthcryptAsync(from, message, protectSender: true), "application/didcomm-encrypted+json"),
+            EnvelopeShape.Authcrypt => (await AuthcryptAsync(from, message), "application/didcomm-encrypted+json"),
+            EnvelopeShape.AnoncryptOfSigned => ((await from.Client.PackEncryptedAsync(message, new PackEncryptedOptions(
+                Recipients: new[] { ServerDid }, From: null, SignFrom: from.Did, Forward: false))).Message, "application/didcomm-encrypted+json"),
+            EnvelopeShape.AuthcryptOfSigned => ((await from.Client.PackEncryptedAsync(message, new PackEncryptedOptions(
+                Recipients: new[] { ServerDid }, From: from.Did, SignFrom: from.Did, Forward: false))).Message, "application/didcomm-encrypted+json"),
+            _ => throw new ArgumentOutOfRangeException(nameof(shape)),
+        };
 
     /// <summary>Stamp <c>created_time</c> from the server's injected clock (FR-RR-09 client stamping is #92).</summary>
     public MessageBuilder Stamped(MessageBuilder builder) => builder.WithCreatedTime(Clock.Now.ToUnixTimeSeconds());
@@ -213,9 +302,21 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
     /// <summary>Log lines that carry any DID or key id the host knows about (must be empty, JC-6).</summary>
     public IReadOnlyList<string> LeakingLogLines(params string[] extraSensitive)
     {
-        var sensitive = SensitiveValues.Concat(extraSensitive).Where(v => !string.IsNullOrEmpty(v)).ToArray();
+        List<TestPeer> extra;
+        lock (_extraPeers)
+            extra = _extraPeers.ToList();
+        var sensitive = SensitiveValues
+            .Concat(extra.SelectMany(p => p.Kids.Append(p.Did)))
+            .Concat(extraSensitive)
+            .Where(v => !string.IsNullOrEmpty(v))
+            .ToArray();
         return Logs.Entries.Where(line => sensitive.Any(v => line.Contains(v, StringComparison.Ordinal))).ToList();
     }
+
+    /// <summary>The FR-RR-08 drop lines (Warning and Debug) written for <paramref name="messageId"/>.</summary>
+    public IReadOnlyList<string> DropLines(string messageId)
+        => Logs.Entries.Where(line => line.Contains("dropped: replay admission", StringComparison.Ordinal)
+                                      && line.Contains(messageId, StringComparison.Ordinal)).ToList();
 
     /// <summary>Every key id of <paramref name="identity"/>.</summary>
     public static IReadOnlyList<string> KidsOf(PeerIdentity identity)
@@ -228,6 +329,17 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
         await Alice.DisposeAsync();
         await Carol.DisposeAsync();
         await Mallory.DisposeAsync();
+        List<TestPeer> extra;
+        lock (_extraPeers)
+            extra = _extraPeers.ToList();
+        foreach (var peer in extra)
+            await peer.DisposeAsync();
+    }
+
+    private sealed class ConnectionCounters
+    {
+        public int Active;
+        public int Ended;
     }
 
     /// <summary>Mint the server identity (its private keys go into <paramref name="serverSecrets"/>) and three peers.</summary>
@@ -269,8 +381,28 @@ internal sealed class ReturnRouteTestHostOptions
 
     public Action<ReplayProtectionOptions>? ConfigureReplay { get; set; }
 
+    /// <summary>Runs before <c>AddDidComm</c>: a registry or replay guard registered here replaces the defaults.</summary>
+    public Action<IServiceCollection>? ConfigureServices { get; set; }
+
+    /// <summary>Extra <c>AddDidComm</c> configuration (more protocol handlers).</summary>
+    public Action<DidCommBuilder>? ConfigureDidComm { get; set; }
+
     /// <summary>The <c>/didcomm-callback</c> endpoint's behaviour (the session-aware overload).</summary>
     public Func<UnpackResult, IReturnRouteSession?, CancellationToken, Task<Message?>>? Callback { get; set; }
+}
+
+/// <summary>The envelope an inbound arrives in (FR-RR-03 eligibility matrix).</summary>
+public enum EnvelopeShape
+{
+    Plaintext,
+    SignedOnly,
+    Anoncrypt,
+    /// <summary>anoncrypt(sign(plaintext)): encrypted, and <c>Authenticated</c> by the JWS, but no authcrypt layer.</summary>
+    AnoncryptOfSigned,
+    AnoncryptOfAuthcrypt,
+    Authcrypt,
+    /// <summary>authcrypt(sign(plaintext)).</summary>
+    AuthcryptOfSigned,
 }
 
 internal sealed record HttpPostResult(HttpStatusCode Status, string? ContentType, byte[] Body, long? ContentLength)
@@ -347,35 +479,189 @@ internal sealed class RecordingHandlerState
     public Func<Message, ProtocolContext, (IReadOnlyList<Message> Pushes, Message? Reply)> Behavior { get; set; }
         = (_, _) => (Array.Empty<Message>(), null);
 
+    /// <summary>Runs after the pushes and after the inbound was recorded; may throw (a handler fault after a push).</summary>
+    public Action<Message, ProtocolContext, IReadOnlyList<bool>>? AfterPushes { get; set; }
+
+    /// <summary>Runs on handler entry, before <see cref="Behavior"/>; may block (a rendezvous).</summary>
+    public Action<Message>? OnEnter { get; set; }
+
     public IReadOnlyCollection<RecordedInbound> Seen => _seen;
 
     public int Count => _seen.Count;
+
+    /// <summary>Handler invocations so far (counted on entry, before any push).</summary>
+    public int Invocations => Volatile.Read(ref _invocations);
+
+    private int _invocations;
+
+    internal void Entered(Message message)
+    {
+        Interlocked.Increment(ref _invocations);
+        OnEnter?.Invoke(message);
+    }
 
     internal void Record(RecordedInbound inbound) => _seen.Enqueue(inbound);
 }
 
 /// <summary>
-/// A protocol handler for <see cref="ProtocolUri"/> that records <c>context.Session</c> and
-/// <c>context.ReturnRoute</c> and does whatever <see cref="RecordingHandlerState.Behavior"/> says:
-/// push messages through the session and / or return a reply.
+/// A protocol handler that records <c>context.Session</c> and <c>context.ReturnRoute</c> and does
+/// whatever <see cref="RecordingHandlerState.Behavior"/> says: push messages through the session and
+/// / or return a reply; then runs <see cref="RecordingHandlerState.AfterPushes"/> (which may throw).
 /// </summary>
-internal sealed class RecordingHandler : IProtocolHandler
+internal abstract class RecordingHandlerBase : IProtocolHandler
 {
-    public const string ProtocolUri = "https://didcomm.org/test-rr/1.0";
-
     private readonly RecordingHandlerState _state;
 
-    public RecordingHandler(RecordingHandlerState state) => _state = state;
+    protected RecordingHandlerBase(RecordingHandlerState state) => _state = state;
 
-    string IProtocolHandler.ProtocolUri => ProtocolUri;
+    protected abstract string Uri { get; }
+
+    string IProtocolHandler.ProtocolUri => Uri;
 
     public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
     {
+        _state.Entered(message);
         var (pushes, reply) = _state.Behavior(message, context);
         var results = new List<bool>();
         foreach (var push in pushes)
             results.Add(context.Session is not null && await context.Session.TrySendAsync(push, ct));
         _state.Record(new RecordedInbound(message, context.Session, context.ReturnRoute, results));
+        _state.AfterPushes?.Invoke(message, context, results);
         return reply;
     }
+}
+
+/// <summary>The recording handler for the test protocol <see cref="ProtocolUri"/>.</summary>
+internal sealed class RecordingHandler : RecordingHandlerBase
+{
+    public const string ProtocolUri = "https://didcomm.org/test-rr/1.0";
+
+    public RecordingHandler(RecordingHandlerState state) : base(state) { }
+
+    protected override string Uri => ProtocolUri;
+}
+
+/// <summary>A recording handler for Message Pickup 3.0 — a mediator-service PIURI (FR-RR-08 scope b).</summary>
+internal sealed class PickupRecordingHandler : RecordingHandlerBase
+{
+    public const string ProtocolUri = "https://didcomm.org/messagepickup/3.0";
+
+    public PickupRecordingHandler(RecordingHandlerState state) : base(state) { }
+
+    protected override string Uri => ProtocolUri;
+}
+
+/// <summary>A recording handler for Routing 2.0 (<c>forward</c>) — replay-exempt and never a session (FR-RR-02).</summary>
+internal sealed class RoutingRecordingHandler : RecordingHandlerBase
+{
+    public const string ProtocolUri = "https://didcomm.org/routing/2.0";
+
+    public RoutingRecordingHandler(RecordingHandlerState state) : base(state) { }
+
+    protected override string Uri => ProtocolUri;
+}
+
+/// <summary>
+/// Counts callers inside a section and parks each one until <c>parties</c> have arrived (bounded),
+/// so a concurrency test can force overlap and then prove it happened (L-044).
+/// </summary>
+internal sealed class Rendezvous
+{
+    private readonly int _parties;
+    private readonly TimeSpan _timeout;
+    private readonly ManualResetEventSlim _release = new(false);
+    private int _arrived;
+    private int _inside;
+    private int _maxInside;
+
+    public Rendezvous(int parties, TimeSpan timeout)
+    {
+        _parties = parties;
+        _timeout = timeout;
+    }
+
+    /// <summary>The most callers that were inside the section at the same time.</summary>
+    public int MaxConcurrent => Volatile.Read(ref _maxInside);
+
+    public int Arrived => Volatile.Read(ref _arrived);
+
+    public T Run<T>(Func<T> body)
+    {
+        var inside = Interlocked.Increment(ref _inside);
+        int seen;
+        while ((seen = Volatile.Read(ref _maxInside)) < inside
+               && Interlocked.CompareExchange(ref _maxInside, inside, seen) != seen)
+        {
+        }
+        try
+        {
+            if (Interlocked.Increment(ref _arrived) >= _parties)
+                _release.Set();
+            _release.Wait(_timeout);
+            return body();
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inside);
+        }
+    }
+}
+
+/// <summary>An <see cref="IInboundReplayGuard"/> that runs every admission through a <see cref="Rendezvous"/>.</summary>
+internal sealed class RendezvousReplayGuard : IInboundReplayGuard
+{
+    private readonly IInboundReplayGuard _inner;
+
+    public RendezvousReplayGuard(IInboundReplayGuard inner, Rendezvous rendezvous)
+    {
+        _inner = inner;
+        Rendezvous = rendezvous;
+    }
+
+    public Rendezvous Rendezvous { get; }
+
+    public ReplayAdmission TryAdmit(string peerDidSubject, string messageId, long? createdTimeEpochSeconds, DateTimeOffset now)
+        => Rendezvous.Run(() => _inner.TryAdmit(peerDidSubject, messageId, createdTimeEpochSeconds, now));
+}
+
+/// <summary>An <see cref="IReturnRouteSessionRegistry"/> whose registrations run through a <see cref="Rendezvous"/> and are recorded.</summary>
+internal sealed class RendezvousSessionRegistry : IReturnRouteSessionRegistry
+{
+    private readonly IReturnRouteSessionRegistry _inner;
+
+    public RendezvousSessionRegistry(IReturnRouteSessionRegistry inner, Rendezvous rendezvous)
+    {
+        _inner = inner;
+        Rendezvous = rendezvous;
+    }
+
+    public Rendezvous Rendezvous { get; }
+
+    /// <summary>Every session offered to <see cref="Register"/>, with its outcome.</summary>
+    public ConcurrentQueue<(IReturnRouteSession Session, SessionRegistration Result)> Registrations { get; } = new();
+
+    public int Count => _inner.Count;
+
+    public event EventHandler<ReturnRouteSessionEventArgs>? SessionOpened
+    {
+        add => _inner.SessionOpened += value;
+        remove => _inner.SessionOpened -= value;
+    }
+
+    public event EventHandler<ReturnRouteSessionEventArgs>? SessionClosed
+    {
+        add => _inner.SessionClosed += value;
+        remove => _inner.SessionClosed -= value;
+    }
+
+    public SessionRegistration Register(IReturnRouteSession session)
+    {
+        var result = Rendezvous.Run(() => _inner.Register(session));
+        Registrations.Enqueue((session, result));
+        return result;
+    }
+
+    public bool Unregister(IReturnRouteSession session) => _inner.Unregister(session);
+
+    public IReadOnlyList<IReturnRouteSession> Find(string did) => _inner.Find(did);
 }

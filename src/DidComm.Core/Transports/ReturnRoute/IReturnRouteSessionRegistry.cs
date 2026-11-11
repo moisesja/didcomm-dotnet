@@ -19,7 +19,13 @@ namespace DidComm.Transports.ReturnRoute;
 /// <para>
 /// Events are raised outside any lock, after the state change, each subscriber in its own
 /// <c>try</c>/<c>catch</c> (the exception type name is logged, never rethrown), so a subscriber can
-/// neither corrupt the registry nor affect the registrant.
+/// neither corrupt the registry nor affect the registrant. Events of one call are raised in the
+/// order documented on it, but events of concurrent calls are not ordered with respect to each
+/// other: under concurrent registrations for one peer a subscriber can see
+/// <see cref="SessionClosed"/> (<see cref="SessionCloseReason.Evicted"/>) for a session before that
+/// session's <see cref="SessionOpened"/>. Keep per-session state on
+/// <see cref="IReturnRouteSession.Closed"/> (a callback registered on an already-cancelled token
+/// runs at once), or confirm with <see cref="Find"/>, rather than on event order.
 /// </para>
 /// <para>
 /// Dependency rule: an implementation must not take <c>ProtocolHandlerRegistry</c>,

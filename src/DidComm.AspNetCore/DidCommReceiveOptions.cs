@@ -21,7 +21,7 @@ public sealed class DidCommReceiveOptions
 
     /// <summary>
     /// The WebSocket return-route switch (PRD §8a, FR-RR-05). When <c>true</c>, the registry-aware
-    /// <c>MapDidCommWebSocket</c> opens a return-route session at the first encrypted+authenticated
+    /// <c>MapDidCommWebSocket</c> opens a return-route session at the first authcrypted (authcrypt layer)
     /// message carrying <c>return_route: all</c> (FR-RR-03) and delivers handler replies and
     /// <c>IReturnRouteSession.TrySendAsync</c> pushes on that socket, authcrypted from the DID that
     /// decrypted that message to exactly its authenticated sender; a header-less message on a
