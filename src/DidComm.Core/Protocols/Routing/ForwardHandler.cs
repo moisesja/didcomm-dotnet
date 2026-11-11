@@ -76,6 +76,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private int _outstandingItems;
     private long _dropped;
     private int _shutdownStarted;
+    private int _discardedAtShutdown;
 
     // The dispatcher-built ProtocolContext (an immutable record) is everything the detached work
     // needs: the UnpackResult, the options/clock and the facade. The request token is NOT stored.
@@ -245,6 +246,17 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                     continue;
                 }
 
+                // ReadAllAsync hands out already-buffered items without re-checking the token, so
+                // once shutdown is signalled a sink that returns on cancellation would let this loop
+                // race DrainQueued for the forwards still queued — and hand them to the sink with a
+                // cancelled token. Discard this one and stop; the finally drains the rest (fail closed).
+                if (shutdown.IsCancellationRequested)
+                {
+                    ReleaseSlot();
+                    Interlocked.Increment(ref _discardedAtShutdown);
+                    break;
+                }
+
                 try
                 {
                     await ProcessOneAsync(item.Context!, shutdown).ConfigureAwait(false);
@@ -400,6 +412,11 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
         finally
         {
+            // Both drains (the disposer's, synchronous in BeginShutdown, and the pump's own finally)
+            // have run by now, so this is the one place the total is known: one line, once.
+            var discarded = Volatile.Read(ref _discardedAtShutdown);
+            if (discarded > 0)
+                SafeLogInformation("Forward handler shut down: {Count} queued forward(s) discarded (fail closed).", discarded);
             _shutdown.Dispose();
             _shutdownCompletion.TrySetResult();
         }
@@ -421,7 +438,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
 
         if (discarded > 0)
-            SafeLogInformation("Forward handler shutting down: {Count} queued forward(s) discarded (fail closed).", discarded);
+            Interlocked.Add(ref _discardedAtShutdown, discarded);
     }
 
     private void ReleaseSlot()

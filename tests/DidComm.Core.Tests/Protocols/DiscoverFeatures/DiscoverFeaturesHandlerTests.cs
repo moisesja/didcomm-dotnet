@@ -187,4 +187,56 @@ public sealed class DiscoverFeaturesHandlerTests
         new DiscoverFeaturesHandler(Array.Empty<IFeatureProvider>()).ProtocolUri
             .Should().Be("https://didcomm.org/discover-features/2.0");
     }
+
+    // ── U4 (#90): optional `roles` on protocol disclosures via IProtocolHandlerRoles ──────
+
+    /// <summary>A handler that plays named roles in its protocol (the shape of <c>ForwardHandler</c>).</summary>
+    private sealed class RolePlayingHandler : IProtocolHandler, IProtocolHandlerRoles
+    {
+        public string ProtocolUri => "https://didcomm.org/role-test/1.0";
+        public IReadOnlyList<string> Roles { get; } = new[] { "mediator", "observer" };
+        public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+            => Task.FromResult<Message?>(null);
+    }
+
+    [Fact]
+    public async Task Disclosure_carries_roles_for_a_handler_implementing_IProtocolHandlerRoles()
+    {
+        var (registry, handler) = BuildHandler();
+        registry.Register(new RolePlayingHandler());
+        var query = DiscoverFeaturesApi.CreateQuery("did:peer:alice", "did:peer:bob",
+            new FeatureQuery { FeatureType = "protocol", Match = "*" });
+
+        var reply = await handler.HandleAsync(query, Ctx(query), CancellationToken.None);
+
+        var disclosures = DiscoverFeaturesApi.ReadDisclosures(reply!);
+        var withRoles = disclosures.Should().ContainSingle(d => d.Id == "https://didcomm.org/role-test/1.0").Which;
+        withRoles.Roles.Should().Equal("mediator", "observer");
+        // The wire shape: a "roles" JSON array on exactly that entry.
+        var onTheWire = reply!.Body!["disclosures"]!.AsArray()
+            .Single(d => d!["id"]!.GetValue<string>() == "https://didcomm.org/role-test/1.0")!.AsObject();
+        onTheWire.ContainsKey("roles").Should().BeTrue();
+        onTheWire["roles"]!.AsArray().Select(r => r!.GetValue<string>()).Should().Equal("mediator", "observer");
+    }
+
+    [Fact]
+    public async Task Disclosure_omits_roles_on_the_wire_when_null()
+    {
+        var (registry, handler) = BuildHandler();
+        registry.Register(new RolePlayingHandler());
+        var query = DiscoverFeaturesApi.CreateQuery("did:peer:alice", "did:peer:bob",
+            new FeatureQuery { FeatureType = "protocol", Match = "*" });
+
+        var reply = await handler.HandleAsync(query, Ctx(query), CancellationToken.None);
+
+        var disclosures = DiscoverFeaturesApi.ReadDisclosures(reply!);
+        disclosures.Should().ContainSingle(d => d.Id == TrustPingApi.ProtocolUri).Which.Roles.Should().BeNull();
+        var entries = reply!.Body!["disclosures"]!.AsArray().Select(d => d!.AsObject()).ToList();
+        entries.Where(e => e["id"]!.GetValue<string>() != "https://didcomm.org/role-test/1.0")
+            .Should().NotBeEmpty().And.AllSatisfy(e => e.ContainsKey("roles").Should().BeFalse("a handler without IProtocolHandlerRoles has no roles key on the wire"));
+        // Round trip through the public serializer too: a null Roles never writes the key.
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            new FeatureDisclosure { FeatureType = "protocol", Id = TrustPingApi.ProtocolUri }, DidComm.Json.DidCommJson.Default);
+        json.Should().NotContain("roles");
+    }
 }

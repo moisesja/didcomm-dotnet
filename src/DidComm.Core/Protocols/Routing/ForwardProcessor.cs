@@ -257,7 +257,9 @@ public sealed class ForwardProcessor
             var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)cappedInclusiveMax + 1);
             return TimeSpan.FromMilliseconds(sample);
         }
-        return TimeSpan.FromMilliseconds(millis);
+        // The same cap on the positive side: a hostile hint past ~2^53 ms overflows TimeSpan, and
+        // one past the year 9999 overflows the NotBefore addition — neither may throw out of here.
+        return TimeSpan.FromMilliseconds(Math.Min(millis, int.MaxValue));
     }
 
     private static string StripFragment(string didUrl)
