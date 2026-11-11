@@ -4,6 +4,7 @@ using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Tests.Envelopes;
 using DidComm.Tests.Facade;
+using static DidComm.Tests.Protocols.Routing.ForwardTestEnvelopes;
 using AwesomeAssertions;
 using NetCrypto;
 using Xunit;
@@ -103,10 +104,11 @@ public sealed class ForwardNextLengthCapTests
     [Fact]
     public async Task ProcessAsync_passes_a_bare_DID_next_of_exactly_the_DID_cap_through_to_the_host()
     {
+        // Rewritten for FR-ROUTE-11 (#89): the contract is "a next at the cap is accepted"; the input is now a forward decrypted by the mediator.
         var nextDid = LengthCap.DidOfLength(LengthCap.DidCap);
-        var (processor, packed) = await MediatorFor(nextDid, RewrapMode.PassThrough, new SpyDidResolver());
+        var (processor, unpacked) = DecryptedMediatorFor(nextDid, RewrapMode.PassThrough, new SpyDidResolver());
 
-        var result = await processor.ProcessAsync(packed);
+        var result = await processor.ProcessAsync(unpacked);
 
         result.NextHop.Should().Be(nextDid);
     }
@@ -133,10 +135,11 @@ public sealed class ForwardNextLengthCapTests
     [Fact]
     public async Task ProcessAsync_passes_next_at_exactly_the_cap_through_to_the_host()
     {
+        // Rewritten for FR-ROUTE-11 (#89): the contract is "a next at the cap is accepted"; the input is now a forward decrypted by the mediator.
         var next = LengthCap.KidOfLength(NextDid, LengthCap.KeyIdCap);
-        var (processor, packed) = await MediatorFor(next, RewrapMode.PassThrough, new SpyDidResolver());
+        var (processor, unpacked) = DecryptedMediatorFor(next, RewrapMode.PassThrough, new SpyDidResolver());
 
-        var result = await processor.ProcessAsync(packed);
+        var result = await processor.ProcessAsync(unpacked);
 
         result.NextHop.Should().Be(next);
     }
@@ -147,9 +150,10 @@ public sealed class ForwardNextLengthCapTests
         var nextKey = TestKeyMaterial.Generate(KeyType.X25519, NextDid + "#ka-1");
         var resolver = new SpyDidResolver(LengthCap.Doc(NextDid, keyAgreement: nextKey.PublicJwk));
         var next = LengthCap.KidOfLength(NextDid, LengthCap.KeyIdCap);
-        var (processor, packed) = await MediatorFor(next, RewrapMode.ReanoncryptToNext, resolver);
+        // Rewritten for FR-ROUTE-11 (#89): the rewrap contract is unchanged; the input is now a forward decrypted by the mediator.
+        var (processor, unpacked) = DecryptedMediatorFor(next, RewrapMode.ReanoncryptToNext, resolver);
 
-        var result = await processor.ProcessAsync(packed);
+        var result = await processor.ProcessAsync(unpacked);
 
         result.NextHop.Should().Be(next);
         resolver.Requested.Should().Contain(NextDid, "rewrap addresses the DID part of 'next'");
@@ -225,9 +229,23 @@ public sealed class ForwardNextLengthCapTests
     }
 
     /// <summary>
-    /// A mediator over <paramref name="resolver"/> and a plaintext forward to it. A plaintext forward
-    /// keeps the test on the <c>next</c> check: the processor reads <c>next</c> the same way whatever
-    /// envelope carried it.
+    /// A mediator over <paramref name="resolver"/> and a forward to it as the mediator sees it after
+    /// decrypting with its own key (FR-ROUTE-11 posture satisfied), so the test is about <c>next</c>.
+    /// </summary>
+    private static (ForwardProcessor Processor, UnpackResult Unpacked) DecryptedMediatorFor(
+        string next, RewrapMode mode, SpyDidResolver resolver)
+    {
+        var keyService = new NetDidKeyService(resolver);
+        var mediator = new DidCommClient(new SpySecretsResolver(), keyService, new DidCommOptions());
+        var processor = new ForwardProcessor(mediator, keyService, new ForwardProcessorOptions(Mode: mode));
+        return (processor, AsDecryptedByMediator(ForwardMessage.Create(Mediator, next, new[] { InnerPayload })));
+    }
+
+    /// <summary>
+    /// A mediator over <paramref name="resolver"/> and a plaintext forward to it. The refusal tests
+    /// stay on this path on purpose: <c>TryParse</c> runs before the FR-ROUTE-11 posture check, so an
+    /// over-long <c>next</c> is refused as malformed before the plaintext envelope could be refused —
+    /// which pins that ordering.
     /// </summary>
     private static async Task<(ForwardProcessor Processor, string Packed)> MediatorFor(
         string next, RewrapMode mode, SpyDidResolver resolver, IReadOnlyList<Jwk>? extraRoutingKeys = null)

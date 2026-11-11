@@ -24,4 +24,13 @@ public sealed class FeatureDisclosure
     /// </summary>
     [JsonPropertyName("value")]
     public long? Value { get; init; }
+
+    /// <summary>
+    /// Optional roles the responder plays in a disclosed protocol (spec: <c>disclose</c> entries
+    /// may carry <c>roles</c>). Filled from <see cref="IProtocolHandlerRoles"/> for protocol
+    /// disclosures — e.g. <c>routing/2.0</c> with <c>["mediator"]</c> (FR-ROUTE-11). Omitted on
+    /// the wire when <c>null</c>.
+    /// </summary>
+    [JsonPropertyName("roles")]
+    public IReadOnlyList<string>? Roles { get; init; }
 }

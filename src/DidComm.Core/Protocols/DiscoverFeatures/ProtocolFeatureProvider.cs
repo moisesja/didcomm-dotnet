@@ -43,6 +43,7 @@ internal sealed class ProtocolFeatureProvider : IFeatureProvider
                 {
                     FeatureType = DiscoverFeatures.FeatureTypeProtocol,
                     Id = handler.ProtocolUri,
+                    Roles = handler is IProtocolHandlerRoles withRoles ? withRoles.Roles : null,
                 };
         }
     }

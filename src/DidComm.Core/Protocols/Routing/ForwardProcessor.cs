@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Jose;
@@ -8,25 +9,42 @@ using JoseCryptoProvider = DataProofsDotnet.Jose.JoseCryptoProvider;
 namespace DidComm.Protocols.Routing;
 
 /// <summary>
-/// Mediator-side <c>forward</c> processing (PRD §8 / FR-ROUTE-05/06/07). A pure
-/// transformation: takes a packed inbound DIDComm envelope, asks the consumer's
-/// <see cref="DidCommClient"/> to decrypt it, validates that it is a forward, drops
-/// <c>please_ack</c> (FR-ROUTE-07), and produces a <see cref="ForwardProcessingResult"/>
-/// describing where the onward bytes should go.
+/// Mediator-side <c>forward</c> processing (PRD §8 / FR-ROUTE-05/06/07/10/11). A pure
+/// transformation: takes the <see cref="UnpackResult"/> of an inbound forward, validates that it
+/// is a forward the mediator may relay, drops <c>please_ack</c> (FR-ROUTE-07), and produces a
+/// <see cref="ForwardProcessingResult"/> describing where the onward bytes should go.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The processor performs no transport I/O. Hosts driving the mediator role hand it the bytes
-/// they received and route the result to the next-hop transport (Phase 5 wiring). Keeping the
-/// processor transport-agnostic lets one mediator service multiplex HTTP, WebSocket, or
-/// any custom Phase 5 transport without re-implementing FR-ROUTE-05 each time.
+/// <strong>Inputs.</strong> The primary entry point is
+/// <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>, fed with the host's own unpack of
+/// the inbound envelope (the ASP.NET Core endpoint and the <see cref="ProtocolDispatcher"/> both
+/// have one). The <see cref="ProcessAsync(string, CancellationToken)"/> overload is a convenience
+/// for hosts that hold the packed bytes: it unpacks with the mediator's
+/// <see cref="DidCommClient"/> and continues on the same path.
 /// </para>
 /// <para>
-/// FR-ROUTE-06 rewrap mode (constant-size onion) is enabled by setting
-/// <see cref="ForwardProcessorOptions.Mode"/> to <see cref="RewrapMode.ReanoncryptToNext"/>.
-/// In that mode the processor re-anoncrypts the inner attachment for the next-hop DID before
-/// surfacing it on <see cref="ForwardProcessingResult.OnwardPacked"/>; the consumer's
-/// transport sends the result to <see cref="ForwardProcessingResult.NextHop"/> as usual.
+/// <strong>Posture (FR-ROUTE-11).</strong> A forward is relayed only when its outer envelope was
+/// encrypted and decrypted with a key this mediator holds: <see cref="UnpackResult.Encrypted"/>
+/// and a non-empty <see cref="UnpackResult.RecipientKid"/>. A plaintext or signed-only forward,
+/// or a synthetic result without a recipient kid, is refused with <see cref="ConsistencyException"/>.
+/// The checks run in a fixed order: forward parse (a malformed or over-long <c>next</c> throws
+/// <see cref="MalformedMessageException"/> first, FR-API-09), posture, attachment count,
+/// attachment decode, then the transformation.
+/// </para>
+/// <para>
+/// <strong>Transformations.</strong> Pass-through relays the attachment verbatim unless the
+/// <see cref="IRecipientRoutingKeyProvider"/> returns extra routing keys for the DID subject of
+/// <c>next</c>, in which case the payload is wrapped once per key (FR-ROUTE-05 second paragraph).
+/// FR-ROUTE-06 rewrap mode (<see cref="ForwardProcessorOptions.Mode"/> =
+/// <see cref="RewrapMode.ReanoncryptToNext"/>) re-anoncrypts the attachment for the next hop and
+/// never consults the provider. The processor performs no transport I/O.
+/// </para>
+/// <para>
+/// <strong>Scheduling hints.</strong> <c>expires_time</c> is propagated; <c>delay_milli</c> is
+/// resolved to <see cref="ForwardProcessingResult.Delay"/> and, on the processor's
+/// <see cref="DidCommOptions"/> clock, to the absolute <see cref="ForwardProcessingResult.NotBefore"/>
+/// (FR-ROUTE-10). The three-argument constructor uses the system clock.
 /// </para>
 /// </remarks>
 /// <example>
@@ -38,8 +56,13 @@ public sealed class ForwardProcessor
     private readonly IDidKeyServiceForFacadeOnlyAlias _keyService; // alias so the public ctor reads cleanly.
     private readonly JoseCryptoProvider _cryptoProvider;
     private readonly ForwardProcessorOptions _options;
+    private readonly IRecipientRoutingKeyProvider _routingKeys;
+    private readonly DidCommOptions _didCommOptions;
 
-    /// <summary>Initialise the processor.</summary>
+    /// <summary>
+    /// Initialise the processor with the routing keys from <see cref="ForwardProcessorOptions.ExtraRecipientRoutingKeys"/>
+    /// (applied to every recipient) and the system clock for <see cref="ForwardProcessingResult.NotBefore"/>.
+    /// </summary>
     /// <param name="client">The mediator's <see cref="DidCommClient"/> — must be configured with the mediator's own <c>ISecretsResolver</c> so it can decrypt forwards addressed to mediator keys.</param>
     /// <param name="keyService">Used for rewrap-mode next-hop key lookups. Optional only when <see cref="ForwardProcessorOptions.Mode"/> is <see cref="RewrapMode.PassThrough"/> with no extra recipient routing keys.</param>
     /// <param name="options">Per-mediator processing options.</param>
@@ -47,7 +70,7 @@ public sealed class ForwardProcessor
         DidCommClient client,
         Resolution.IDidKeyService keyService,
         ForwardProcessorOptions options)
-        : this(client, keyService, options, new JoseCryptoProvider()) { }
+        : this(client, keyService, options, new StaticRecipientRoutingKeyProvider(options?.ExtraRecipientRoutingKeys), new DidCommOptions(), new JoseCryptoProvider()) { }
 
     /// <summary>Test-only constructor that accepts a shared crypto provider.</summary>
     internal ForwardProcessor(
@@ -55,21 +78,61 @@ public sealed class ForwardProcessor
         Resolution.IDidKeyService keyService,
         ForwardProcessorOptions options,
         JoseCryptoProvider cryptoProvider)
+        : this(client, keyService, options, new StaticRecipientRoutingKeyProvider(options?.ExtraRecipientRoutingKeys), new DidCommOptions(), cryptoProvider) { }
+
+    /// <summary>
+    /// Initialise the processor with a per-recipient routing-key provider and the clock that stamps
+    /// <see cref="ForwardProcessingResult.NotBefore"/>. This is the constructor <c>AddRoutingMediator</c> uses.
+    /// </summary>
+    /// <param name="client">The mediator's <see cref="DidCommClient"/> — must be configured with the mediator's own <c>ISecretsResolver</c> so it can decrypt forwards addressed to mediator keys.</param>
+    /// <param name="keyService">Used for rewrap-mode next-hop key lookups.</param>
+    /// <param name="options">Per-mediator processing options. <see cref="ForwardProcessorOptions.ExtraRecipientRoutingKeys"/> is NOT read on this path — <paramref name="routingKeys"/> is the source of extra wraps.</param>
+    /// <param name="routingKeys">Per-recipient extra routing keys, consulted in pass-through mode only.</param>
+    /// <param name="didCommOptions">The options whose <see cref="DidCommOptions.Clock"/> stamps <see cref="ForwardProcessingResult.NotBefore"/>.</param>
+    public ForwardProcessor(
+        DidCommClient client,
+        Resolution.IDidKeyService keyService,
+        ForwardProcessorOptions options,
+        IRecipientRoutingKeyProvider routingKeys,
+        DidCommOptions didCommOptions)
+        : this(client, keyService, options, routingKeys, didCommOptions, new JoseCryptoProvider()) { }
+
+    /// <summary>Master constructor every other overload delegates to.</summary>
+    /// <param name="client">The mediator's facade.</param>
+    /// <param name="keyService">Rewrap-mode key lookups.</param>
+    /// <param name="options">Per-mediator processing options; validated here.</param>
+    /// <param name="routingKeys">Per-recipient extra routing keys.</param>
+    /// <param name="didCommOptions">Clock source for <see cref="ForwardProcessingResult.NotBefore"/>.</param>
+    /// <param name="cryptoProvider">The JOSE crypto provider for rewrap and extra-key wraps.</param>
+    internal ForwardProcessor(
+        DidCommClient client,
+        Resolution.IDidKeyService keyService,
+        ForwardProcessorOptions options,
+        IRecipientRoutingKeyProvider routingKeys,
+        DidCommOptions didCommOptions,
+        JoseCryptoProvider cryptoProvider)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(keyService);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(routingKeys);
+        ArgumentNullException.ThrowIfNull(didCommOptions);
         ArgumentNullException.ThrowIfNull(cryptoProvider);
         options.Validate();
         _client = client;
         _keyService = new KeyServiceAdapter(keyService);
         _options = options;
+        _routingKeys = routingKeys;
+        _didCommOptions = didCommOptions;
         _cryptoProvider = cryptoProvider;
     }
 
     /// <summary>
-    /// Process one inbound forward envelope. Throws <see cref="ConsistencyException"/> when
-    /// <paramref name="packed"/> unwraps to a non-forward message.
+    /// Convenience overload: unpack <paramref name="packed"/> with the mediator's
+    /// <see cref="DidCommClient"/>, then process it exactly as
+    /// <see cref="ProcessAsync(UnpackResult, CancellationToken)"/> does. A forward that arrives as
+    /// plaintext or signed-only therefore unpacks fine and is then refused with
+    /// <see cref="ConsistencyException"/> (FR-ROUTE-11).
     /// </summary>
     /// <param name="packed">The packed envelope as received from the inbound transport.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -77,40 +140,77 @@ public sealed class ForwardProcessor
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
 
-        var unpack = await _client.UnpackAsync(packed, ct).ConfigureAwait(false);
+        var unpacked = await _client.UnpackAsync(packed, ct).ConfigureAwait(false);
+        return await ProcessAsync(unpacked, ct).ConfigureAwait(false);
+    }
 
-        if (!ForwardMessage.TryParse(unpack.Message, out var next, out var attachments))
+    /// <summary>
+    /// Process one inbound forward from the host's own unpack of it. Validation order: forward
+    /// parse, encryption posture, attachment count, attachment decode, transformation.
+    /// </summary>
+    /// <param name="unpacked">The unpack outcome of the inbound envelope — envelope metadata included, so the FR-ROUTE-11 posture can be judged.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ConsistencyException">The message is not a <c>forward</c>; or the envelope was not encrypted (plaintext or signed-only); or it was not decrypted with a key this mediator holds (no <see cref="UnpackResult.RecipientKid"/>); or the forward carries more than one attachment or an attachment with no data (FR-ROUTE-05/11). None of these messages quote wire values.</exception>
+    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, or its attachment's <c>data.base64</c> is not base64.</exception>
+    public async Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(unpacked);
+
+        // 1. Is it a forward at all? TryParse also enforces FR-ROUTE-01 / FR-API-09 (throws
+        //    MalformedMessageException) before anything else, so the cap is checked before the
+        //    posture and no over-long value is ever touched again. Do not echo the inbound type.
+        if (!ForwardMessage.TryParse(unpacked.Message, out var next, out var attachments))
         {
             throw new ConsistencyException(
-                $"ForwardProcessor.ProcessAsync received a non-forward message (type='{unpack.Message.Type}'). The mediator role only handles {ForwardConstants.ForwardTypeUri}.");
+                $"ForwardProcessor received a non-forward message; the mediator role only handles {ForwardConstants.ForwardTypeUri}.");
         }
 
-        // FR-ROUTE-07: please_ack on a forward is silently ignored at the mediator. We log
-        // nothing in core (no logger dependency in Phase 4); the contract is that the
-        // processor does NOT propagate an ack request onward. This is achieved trivially by
-        // never reading `please_ack` here and never adding one to the rewrap envelope.
+        // 2./3. FR-ROUTE-11 posture: relay only what was encrypted to a key this mediator holds. A
+        //       decrypt with a non-owned kid cannot produce an UnpackResult, so a non-empty
+        //       RecipientKid is the proof of a held-key decrypt. Never put the kid in the message.
+        if (!unpacked.Encrypted)
+            throw new ConsistencyException(
+                "Forward was not encrypted (plaintext or signed-only); a mediator relays only forwards decrypted with a held key (FR-ROUTE-11).");
+
+        if (string.IsNullOrEmpty(unpacked.RecipientKid))
+            throw new ConsistencyException(
+                "Forward was not decrypted with a key this mediator holds (FR-ROUTE-11).");
+
+        // FR-ROUTE-07: please_ack on a forward is silently ignored at the mediator. The contract is
+        // that the processor does NOT propagate an ack request onward — achieved trivially by never
+        // reading `please_ack` here and never adding one to the rewrap envelope.
 
         if (attachments.Count > 1)
             throw new ConsistencyException(
                 $"Forward message carries {attachments.Count} attachments; this mediator relays exactly one packed payload per forward (FR-ROUTE-05). Re-send each payload in its own forward.");
 
         var innerPayloadBytes = ExtractAttachmentBytes(attachments[0]);
-        var expiresTime = unpack.Message.ExpiresTime;
-        var delay = ExtractDelay(unpack.Message);
+        var expiresTime = unpacked.Message.ExpiresTime;
+        var delay = ExtractDelay(unpacked.Message);
+        // FR-ROUTE-10: resolve the hint to an absolute not-before once, at receipt, on the
+        // mediator's clock. The handler never sleeps on it.
+        var notBefore = delay is TimeSpan d ? _didCommOptions.Now() + d : (DateTimeOffset?)null;
 
         if (_options.Mode == RewrapMode.ReanoncryptToNext)
         {
             var rewrapped = await RewrapToNextAsync(innerPayloadBytes, next, ct).ConfigureAwait(false);
-            return new ForwardProcessingResult(next, rewrapped, expiresTime, delay);
+            return new ForwardProcessingResult(next, rewrapped, expiresTime, delay) { NotBefore = notBefore };
         }
 
-        if (_options.ExtraRecipientRoutingKeys is { Count: > 0 } extra)
+        // Pass-through: extra routing keys are per recipient, keyed by the DID subject of `next`.
+        // A `next` that is not a DID/DID URL (within the FR-API-09 cap) skips the lookup and passes
+        // through verbatim — the handler drops such forwards before the processor ever runs.
+        var subject = DidSubject.DidSubjectOf(next);
+        IReadOnlyList<Jwk> extra = subject is null
+            ? Array.Empty<Jwk>()
+            : await _routingKeys.GetAsync(subject, ct).ConfigureAwait(false);
+        if (extra.Count > 0)
         {
             var wrapped = await WrapForExtraKeysAsync(innerPayloadBytes, next, extra, ct).ConfigureAwait(false);
-            return new ForwardProcessingResult(next, wrapped, expiresTime, delay);
+            return new ForwardProcessingResult(next, wrapped, expiresTime, delay) { NotBefore = notBefore };
         }
 
-        return new ForwardProcessingResult(next, innerPayloadBytes, expiresTime, delay);
+        return new ForwardProcessingResult(next, innerPayloadBytes, expiresTime, delay) { NotBefore = notBefore };
     }
 
     private static byte[] ExtractAttachmentBytes(Messages.Attachment attachment)

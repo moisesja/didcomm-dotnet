@@ -110,9 +110,9 @@ public static class Program
             var keyService = mediatorApp.Services.GetRequiredService<IDidKeyService>();
 
             // MapDidCommEndpoint already peeled the encryption layer that was addressed to the
-            // mediator; hand the decrypted forward back to ForwardProcessor (in packed
-            // plaintext form) so it applies the Routing 2.0 rules: reject non-forwards, drop
-            // please_ack (FR-ROUTE-07), and surface the next hop + the onward payload.
+            // mediator; ForwardProcessor then applies the Routing 2.0 rules to the decrypted
+            // forward: reject non-forwards, drop please_ack (FR-ROUTE-07), and surface the next
+            // hop + the onward payload.
             // Pre-screen with TryParse: "is this a Routing 2.0 forward at all?" — false for any
             // other message type, so a mediator can branch before doing forward-specific work.
             if (ForwardMessage.TryParse(unpacked.Message, out var forwardNext, out var forwardPayloads))
@@ -129,9 +129,12 @@ public static class Program
             narrator.Value("[mediator] rewrap mode", forwardOptions.Mode);
             narrator.Value("[mediator] extra routing wraps", forwardOptions.ExtraRecipientRoutingKeys?.Count ?? 0);
 
+            // Hand the endpoint's UnpackResult straight to the processor so the envelope metadata
+            // (was it encrypted, and with which of the mediator's keys) travels with the message:
+            // a mediator relays only forwards that were encrypted to a key it holds, so a forward
+            // that arrived as plaintext or signed-only is refused here (FR-ROUTE-11).
             var processor = new ForwardProcessor(mediatorClient, keyService, forwardOptions);
-            var forwardPlain = await mediatorClient.PackPlaintextAsync(unpacked.Message, ct);
-            var processed = await processor.ProcessAsync(forwardPlain, ct);
+            var processed = await processor.ProcessAsync(unpacked, ct);
 
             var nextHop = StripFragment(processed.NextHop);
             narrator.Step($"[mediator] forward unwrapped — next hop {Trunc(nextHop, 56)}, onward payload {processed.OnwardPacked.Length} bytes.");

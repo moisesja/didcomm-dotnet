@@ -48,6 +48,126 @@
     {
       "member": "DidComm.Transports.WebSocket!DidComm.Transports.WebSocket.WebSocketLifecycleEventArgs::.ctor(DidComm.Transports.WebSocket.WebSocketLifecycleEventKind,System.Uri,System.Exception)",
       "reason": "Raised by the WebSocket transport; consumers subscribe and read (demonstrated in the cookbook and sample 05) — constructing the args in a sample would fake a lifecycle event."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.DiscoverFeatures.FeatureDisclosure::prop:Roles",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.IProtocolHandlerRoles",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.IProtocolHandlerRoles::prop:Roles",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardHandler",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardHandler::.ctor(DidComm.Protocols.Routing.ForwardProcessor,DidComm.Protocols.Routing.IForwardSink,DidComm.Protocols.Routing.IForwardRecipientRegistry,Microsoft.Extensions.Logging.ILogger`1<DidComm.Protocols.Routing.ForwardHandler>)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardHandler::Dispose()",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardHandler::DisposeAsync()",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardHandler::prop:Roles",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardProcessingResult::IsExpired(System.DateTimeOffset,System.TimeSpan)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardProcessingResult::prop:NotBefore",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.ForwardProcessor::.ctor(DidComm.Facade.DidCommClient,DidComm.Resolution.IDidKeyService,DidComm.Protocols.Routing.ForwardProcessorOptions,DidComm.Protocols.Routing.IRecipientRoutingKeyProvider,DidComm.Facade.DidCommOptions)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.IForwardRecipientRegistry",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.IForwardRecipientRegistry::IsRegisteredAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.IForwardSink",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.IForwardSink::AcceptAsync(DidComm.Protocols.Routing.ForwardProcessingResult,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.IRecipientRoutingKeyProvider",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.IRecipientRoutingKeyProvider::GetAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.InMemoryForwardRecipientRegistry",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.InMemoryForwardRecipientRegistry::.ctor()",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.InMemoryForwardRecipientRegistry::IsRegisteredAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.InMemoryForwardRecipientRegistry::Register(System.String)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.InMemoryForwardRecipientRegistry::Unregister(System.String)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.InMemoryForwardRecipientRegistry::prop:Count",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.NullForwardSink",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.NullForwardSink::.ctor(Microsoft.Extensions.Logging.ILogger`1<DidComm.Protocols.Routing.NullForwardSink>)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.NullForwardSink::AcceptAsync(DidComm.Protocols.Routing.ForwardProcessingResult,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.StaticRecipientRoutingKeyProvider",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.StaticRecipientRoutingKeyProvider::.ctor(System.Collections.Generic.IReadOnlyList`1<DataProofsDotnet.Jose.Jwk>)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Protocols.Routing.StaticRecipientRoutingKeyProvider::GetAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Extensions.DependencyInjection!DidComm.Extensions.DependencyInjection.DidCommBuilder::AddRoutingMediator(DidComm.Protocols.Routing.ForwardProcessorOptions)",
+      "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
     }
   ]
 }
