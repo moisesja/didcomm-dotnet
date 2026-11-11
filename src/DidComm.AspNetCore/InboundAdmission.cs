@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using DidComm.Consistency;
 using DidComm.Facade;
@@ -48,7 +49,7 @@ internal static class InboundAdmission
     /// <param name="unpacked">The verified unpack result of the inbound.</param>
     /// <param name="options">The facade options; its clock (<c>DidCommOptions.Now()</c>) is read once here.</param>
     /// <param name="replayGuard">The FR-RR-08 guard.</param>
-    /// <param name="endpoint">The per-endpoint state holding the drop-log rate limiters.</param>
+    /// <param name="endpoint">The per-endpoint state holding the log rate limiters.</param>
     /// <param name="logger">Optional logger.</param>
     internal static InboundAdmissionResult Evaluate(
         UnpackResult unpacked,
@@ -67,9 +68,9 @@ internal static class InboundAdmission
         var headerPresent = message.AdditionalHeaders?.ContainsKey(ReturnRouteHeader.HeaderName) == true;
 
         // FR-RR-01: a malformed header is `none` for this message and is logged — by id only, never
-        // the value — and it never fails the message.
+        // the value, rate-limited because any sender can produce one — and it never fails the message.
         if (!ReturnRouteHeader.TryRead(message, out var header))
-            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01).", messageId);
+            endpoint.LogMalformedHeader(logger, messageId);
 
         // FR-RR-03: the identity half. The peer is the authcrypt sender's DID subject; a message that
         // is not encrypted+authenticated, or is a forward (FR-RR-02), never binds a session.
@@ -181,10 +182,10 @@ internal static class InboundAdmission
 }
 
 /// <summary>
-/// Per-mapped-endpoint state of the return-route pipeline: the lazily built default registry and
-/// replay guard used when the host registered none (JC-17), and the drop-log rate limiters
-/// (JC-22). One instance is created by each <c>Map*</c> call, so one endpoint (or test host) can
-/// never suppress another's first Warning.
+/// Per-mapped-endpoint state of the return-route pipeline: the drop-log rate limiters (JC-22), and
+/// the application's shared defaults for a host that registered no registry or replay guard
+/// (JC-17, <see cref="InboundAdmissionDefaults"/>). One instance is created by each <c>Map*</c>
+/// call, so one endpoint (or test host) can never suppress another's first Warning.
 /// </summary>
 internal sealed class InboundAdmissionEndpoint
 {
@@ -196,68 +197,52 @@ internal sealed class InboundAdmissionEndpoint
 
     private const long WarnEvery = 1000;
 
-    private readonly object _gate = new();
     private readonly long[] _drops = new long[9];
-    private IReturnRouteSessionRegistry? _defaultRegistry;
-    private IInboundReplayGuard? _defaultGuard;
+    private readonly InboundAdmissionDefaults _defaults;
+    private long _malformedHeaders;
+
+    /// <summary>Create the state of one endpoint mapped on the application whose root services are <paramref name="applicationServices"/>.</summary>
+    /// <param name="applicationServices">The application's root provider (<c>IEndpointRouteBuilder.ServiceProvider</c>); it keys the defaults every endpoint of the application shares.</param>
+    internal InboundAdmissionEndpoint(IServiceProvider applicationServices)
+    {
+        ArgumentNullException.ThrowIfNull(applicationServices);
+        _defaults = InboundAdmissionDefaults.For(applicationServices);
+    }
 
     /// <summary>
     /// The replay guard for this request: the host's registered <see cref="IInboundReplayGuard"/>,
-    /// else this endpoint's own default (built once, logged once at Information).
+    /// else the application's shared default (built once, logged once at Information).
     /// </summary>
     /// <param name="services">The request services.</param>
     /// <param name="coreOptions">The facade options the default guard reads the clock skew from.</param>
     /// <param name="logger">Optional logger.</param>
     internal IInboundReplayGuard ResolveGuard(IServiceProvider services, DidCommOptions coreOptions, ILogger? logger)
-    {
-        var registered = services.GetService<IInboundReplayGuard>();
-        if (registered is not null)
-            return registered;
-
-        var existing = Volatile.Read(ref _defaultGuard);
-        if (existing is not null)
-            return existing;
-        lock (_gate)
-        {
-            if (_defaultGuard is null)
-            {
-                var options = services.GetService<IOptions<ReplayProtectionOptions>>()?.Value ?? new ReplayProtectionOptions();
-                var guard = new InMemoryReplayGuard(options, coreOptions, services.GetService<ILogger<InMemoryReplayGuard>>());
-                Volatile.Write(ref _defaultGuard, guard);
-                SafeLog.Write(logger, LogLevel.Information, "No IInboundReplayGuard is registered; this endpoint uses its own in-memory replay guard. Register them through AddDidComm to share one registry/guard across endpoints and handlers.");
-            }
-            return _defaultGuard;
-        }
-    }
+        => services.GetService<IInboundReplayGuard>() ?? _defaults.Guard(services, coreOptions, logger);
 
     /// <summary>
     /// The session registry for this connection: the host's registered
-    /// <see cref="IReturnRouteSessionRegistry"/>, else this endpoint's own default (built once,
+    /// <see cref="IReturnRouteSessionRegistry"/>, else the application's shared default (built once,
     /// logged once at Information).
     /// </summary>
     /// <param name="services">The request services.</param>
     /// <param name="logger">Optional logger.</param>
     internal IReturnRouteSessionRegistry ResolveRegistry(IServiceProvider services, ILogger? logger)
-    {
-        var registered = services.GetService<IReturnRouteSessionRegistry>();
-        if (registered is not null)
-            return registered;
+        => services.GetService<IReturnRouteSessionRegistry>() ?? _defaults.Registry(services, logger);
 
-        var existing = Volatile.Read(ref _defaultRegistry);
-        if (existing is not null)
-            return existing;
-        lock (_gate)
-        {
-            if (_defaultRegistry is null)
-            {
-                var registry = new InMemoryReturnRouteSessionRegistry(
-                    ResolveSessionOptions(services),
-                    services.GetService<ILogger<InMemoryReturnRouteSessionRegistry>>());
-                Volatile.Write(ref _defaultRegistry, registry);
-                SafeLog.Write(logger, LogLevel.Information, "No IReturnRouteSessionRegistry is registered; this endpoint uses its own in-memory session registry. Register them through AddDidComm to share one registry/guard across endpoints and handlers.");
-            }
-            return _defaultRegistry;
-        }
+    /// <summary>
+    /// Log one malformed <c>return_route</c> header (FR-RR-01): the first and every 1000th at Warning
+    /// (with the running count), every other one at Debug — any sender can produce one, authenticated
+    /// or not, so it is rate-limited like the replay drops. The line carries the message id only.
+    /// </summary>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="messageId">The message's id.</param>
+    internal void LogMalformedHeader(ILogger? logger, string messageId)
+    {
+        var n = Interlocked.Increment(ref _malformedHeaders);
+        if (n == 1 || n % WarnEvery == 0)
+            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01); {Count} such headers on this endpoint.", messageId, n);
+        else
+            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01).", messageId);
     }
 
     /// <summary>The session options (validated): the host's configured <see cref="ReturnRouteSessionOptions"/>, else the defaults.</summary>
@@ -286,6 +271,70 @@ internal sealed class InboundAdmissionEndpoint
             SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId} dropped: replay admission {Admission} (FR-RR-08); {Count} such drops on this endpoint.", messageId, outcome, n);
         else
             SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId} dropped: replay admission {Admission} (FR-RR-08).", messageId, outcome);
+    }
+}
+
+/// <summary>
+/// The default session registry and replay guard of one application, used by every registry-aware
+/// endpoint it maps when the host registered none (JC-17): built lazily on first use, logged once
+/// at Information. Keyed by the application's root service provider, so all endpoints of a host
+/// share one replay cache — a request admitted over HTTP is a duplicate on the WebSocket endpoint
+/// and vice versa (FR-RR-08) — and one session registry (its bounds hold per application), while
+/// separate hosts in one process never share state. The table holds its keys weakly.
+/// </summary>
+internal sealed class InboundAdmissionDefaults
+{
+    private static readonly ConditionalWeakTable<IServiceProvider, InboundAdmissionDefaults> PerApplication = new();
+
+    private readonly object _gate = new();
+    private IReturnRouteSessionRegistry? _registry;
+    private IInboundReplayGuard? _guard;
+
+    /// <summary>The defaults of the application whose root provider is <paramref name="applicationServices"/>.</summary>
+    /// <param name="applicationServices">The application's root service provider.</param>
+    internal static InboundAdmissionDefaults For(IServiceProvider applicationServices)
+        => PerApplication.GetValue(applicationServices, static _ => new InboundAdmissionDefaults());
+
+    /// <summary>The application's default replay guard, built on first use from the configured <see cref="ReplayProtectionOptions"/> (or the defaults).</summary>
+    /// <param name="services">The request services.</param>
+    /// <param name="coreOptions">The facade options the guard reads the clock skew from.</param>
+    /// <param name="logger">Optional logger.</param>
+    internal IInboundReplayGuard Guard(IServiceProvider services, DidCommOptions coreOptions, ILogger? logger)
+    {
+        var existing = Volatile.Read(ref _guard);
+        if (existing is not null)
+            return existing;
+        lock (_gate)
+        {
+            if (_guard is null)
+            {
+                var options = services.GetService<IOptions<ReplayProtectionOptions>>()?.Value ?? new ReplayProtectionOptions();
+                Volatile.Write(ref _guard, new InMemoryReplayGuard(options, coreOptions, services.GetService<ILogger<InMemoryReplayGuard>>()));
+                SafeLog.Write(logger, LogLevel.Information, "No IInboundReplayGuard is registered; this application's return-route endpoints share one in-memory replay guard. Register it through AddDidComm to share it with handlers too.");
+            }
+            return _guard;
+        }
+    }
+
+    /// <summary>The application's default session registry, built on first use from the configured <see cref="ReturnRouteSessionOptions"/> (or the defaults).</summary>
+    /// <param name="services">The request services.</param>
+    /// <param name="logger">Optional logger.</param>
+    internal IReturnRouteSessionRegistry Registry(IServiceProvider services, ILogger? logger)
+    {
+        var existing = Volatile.Read(ref _registry);
+        if (existing is not null)
+            return existing;
+        lock (_gate)
+        {
+            if (_registry is null)
+            {
+                Volatile.Write(ref _registry, new InMemoryReturnRouteSessionRegistry(
+                    InboundAdmissionEndpoint.ResolveSessionOptions(services),
+                    services.GetService<ILogger<InMemoryReturnRouteSessionRegistry>>()));
+                SafeLog.Write(logger, LogLevel.Information, "No IReturnRouteSessionRegistry is registered; this application's return-route endpoints share one in-memory session registry. Register it through AddDidComm to share it with handlers too.");
+            }
+            return _registry;
+        }
     }
 }
 

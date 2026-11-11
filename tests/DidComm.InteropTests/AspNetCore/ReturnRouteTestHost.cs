@@ -137,6 +137,7 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
             builder.Services.AddOptions<ReturnRouteSessionOptions>().Configure(options.ConfigureSessions);
         if (options.ConfigureReplay is not null)
             builder.Services.AddOptions<ReplayProtectionOptions>().Configure(options.ConfigureReplay);
+        options.PostConfigureServices?.Invoke(builder.Services);
 
         var app = builder.Build();
         app.UseWebSockets();
@@ -383,6 +384,9 @@ internal sealed class ReturnRouteTestHostOptions
 
     /// <summary>Runs before <c>AddDidComm</c>: a registry or replay guard registered here replaces the defaults.</summary>
     public Action<IServiceCollection>? ConfigureServices { get; set; }
+
+    /// <summary>Runs after <c>AddDidComm</c>: lets a test remove a default registration (a host that never registered the registry / guard).</summary>
+    public Action<IServiceCollection>? PostConfigureServices { get; set; }
 
     /// <summary>Extra <c>AddDidComm</c> configuration (more protocol handlers).</summary>
     public Action<DidCommBuilder>? ConfigureDidComm { get; set; }

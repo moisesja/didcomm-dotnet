@@ -166,8 +166,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// returns — or the one message it pushes through the session — is authcrypted from the DID
     /// that decrypted the inbound to exactly that sender and returned as the <c>200</c> body
     /// (<c>Content-Type: application/didcomm-encrypted+json</c>). At most one message per request: a
-    /// second push, or a returned reply after a push, is dropped (the push wins). Otherwise the
-    /// answer is <c>202</c> with an empty body and a handler reply is only logged. There is no
+    /// second push, or a returned reply after a push, is dropped (the push wins). A handler that
+    /// throws after pushing gets the uniform <c>400</c> below and its push is discarded unsent.
+    /// Otherwise the answer is <c>202</c> with an empty body and a handler reply is only logged. There is no
     /// switch: the response is addressed only to the authenticated sender, which is exactly why it
     /// is allowed. A reply to anyone else is never sent automatically — an inbound-triggered
     /// outbound send that trusts the message's (possibly attacker-advertised) sender or endpoint is
@@ -194,8 +195,8 @@ public static class DidCommEndpointRouteBuilderExtensions
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
 
-        // Per mapped endpoint (JC-17 defaults, JC-22 drop-log rate limiters).
-        var admissionEndpoint = new InboundAdmissionEndpoint();
+        // Per mapped endpoint: the log rate limiters (JC-22); the JC-17 defaults are per application.
+        var admissionEndpoint = new InboundAdmissionEndpoint(endpoints.ServiceProvider);
 
         return endpoints.MapPost(pattern, async (HttpContext httpContext) =>
         {
@@ -302,9 +303,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             catch (Exception ex)
             {
                 // A 400 also completes OnCompleted, but it is never an acknowledgement of the inbound:
-                // cancel first, so a handler that ran before this throw (a logger fault in
-                // LogOutcome is the one such path) drops its deferred work instead of publishing it.
-                // The session closes without a response: nothing it held is sent.
+                // cancel first, so a handler that ran before this throw (one that threw itself, or
+                // whose reply the dispatcher refused under FR-THR-04) drops its deferred work instead
+                // of publishing it. The session closes without a response: nothing it held is sent.
                 session?.TakeResponseAndClose();
                 acknowledged.TrySetCanceled();
                 return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
@@ -348,7 +349,7 @@ public static class DidCommEndpointRouteBuilderExtensions
         ArgumentException.ThrowIfNullOrEmpty(pattern);
         ArgumentNullException.ThrowIfNull(onReceive);
 
-        var admissionEndpoint = new InboundAdmissionEndpoint();
+        var admissionEndpoint = new InboundAdmissionEndpoint(endpoints.ServiceProvider);
 
         return endpoints.MapPost(pattern, async (HttpContext httpContext) =>
         {
@@ -580,8 +581,8 @@ public static class DidCommEndpointRouteBuilderExtensions
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
 
-        // Per mapped endpoint (JC-17 defaults, JC-22 drop-log rate limiters).
-        var admissionEndpoint = new InboundAdmissionEndpoint();
+        // Per mapped endpoint: the log rate limiters (JC-22); the JC-17 defaults are per application.
+        var admissionEndpoint = new InboundAdmissionEndpoint(endpoints.ServiceProvider);
 
         return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
         {
@@ -886,24 +887,26 @@ public static class DidCommEndpointRouteBuilderExtensions
         => string.Equals(peerDid, admission.PeerDid, StringComparison.Ordinal)
            & string.Equals(localDid, admission.LocalDid, StringComparison.Ordinal);
 
+    // Runs after the handler, and after a session push: through SafeLog, so a logging provider (host
+    // code) that fails on these lines can neither turn the HTTP 200 carrying the push into the
+    // uniform 400 nor end the WebSocket connection carrying the session.
     private static void LogOutcome(ILogger? logger, DispatchOutcome outcome, bool returnedOnSession)
     {
-        if (logger is null) return;
         switch (outcome.Result)
         {
             case DispatchResult.ReplyProduced:
-                logger.LogInformation(
+                SafeLog.Write(logger, LogLevel.Information,
                     "Protocol dispatch produced a reply (handler={Handler}, returned-on-session={Returned}).",
                     outcome.Handler?.ProtocolUri, returnedOnSession);
                 break;
             case DispatchResult.NoReply:
-                logger.LogDebug("Protocol dispatch ran handler '{Handler}' which produced no reply.", outcome.Handler?.ProtocolUri);
+                SafeLog.Write(logger, LogLevel.Debug, "Protocol dispatch ran handler '{Handler}' which produced no reply.", outcome.Handler?.ProtocolUri);
                 break;
             case DispatchResult.NoHandler:
-                logger.LogDebug("Protocol dispatch found no handler for inbound message.");
+                SafeLog.Write(logger, LogLevel.Debug, "Protocol dispatch found no handler for inbound message.");
                 break;
             case DispatchResult.DroppedAsAckLoop:
-                logger.LogWarning("Protocol dispatch dropped inbound pure-ACK that also requested an ACK (FR-THR-04 rule 3).");
+                SafeLog.Write(logger, LogLevel.Warning, "Protocol dispatch dropped inbound pure-ACK that also requested an ACK (FR-THR-04 rule 3).");
                 break;
         }
     }

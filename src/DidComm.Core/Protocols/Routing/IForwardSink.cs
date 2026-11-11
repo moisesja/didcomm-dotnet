@@ -23,8 +23,9 @@ namespace DidComm.Protocols.Routing;
 /// or <see cref="ProtocolDispatcher"/> in its constructor: the registry's factory constructs every
 /// <see cref="IProtocolHandler"/>, including <see cref="ForwardHandler"/>, which takes the sink —
 /// a sink that needs either must inject <see cref="IServiceProvider"/> and resolve it at call
-/// time, or the first resolution of the registry deadlocks on itself. Implementations are
-/// singletons and MUST be thread-safe.
+/// time, or the first resolution of the registry fails: the cycle re-enters the registry's factory,
+/// which (registered by <c>AddDidComm</c>) throws <see cref="InvalidOperationException"/> instead of
+/// letting the container hang. Implementations are singletons and MUST be thread-safe.
 /// </para>
 /// </remarks>
 public interface IForwardSink

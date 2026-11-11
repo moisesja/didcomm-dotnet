@@ -31,8 +31,10 @@ namespace DidComm.Transports.ReturnRoute;
 /// Dependency rule: an implementation must not take <c>ProtocolHandlerRegistry</c>,
 /// <c>ProtocolDispatcher</c>, <c>DidCommClient</c> or an <c>IProtocolHandler</c> in its constructor —
 /// the registry is a dependency of handlers and of the endpoints, and the handler registry's
-/// factory walks every handler, so such a dependency would cycle the DI graph. The in-memory
-/// default depends on options only.
+/// factory walks every handler, so such a dependency would cycle the DI graph. With
+/// <c>AddDidComm</c>'s registrations, a cycle through the handler registry, the dispatcher or a
+/// handler fails the first resolution with an <see cref="InvalidOperationException"/>; it is still
+/// a bug to fix. The in-memory default depends on options only.
 /// </para>
 /// </remarks>
 public interface IReturnRouteSessionRegistry

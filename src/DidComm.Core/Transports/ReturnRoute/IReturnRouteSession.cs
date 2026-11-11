@@ -48,10 +48,12 @@ public interface IReturnRouteSession
 
     /// <summary>
     /// Try to return <paramref name="message"/> to the peer on this session. Returns <c>true</c>
-    /// when the message was accepted for transmission — on HTTP it will be the 200 body of the
+    /// when the message was accepted for transmission — on HTTP it is held as the 200 body of the
     /// request that opened the session; on a WebSocket it was queued to the socket writer.
     /// Delivery is not acknowledged at this layer: <c>true</c> means queued, not delivered, and
-    /// queued pushes are discarded when the session closes. Returns <c>false</c>, and never throws
+    /// queued pushes are discarded when the session closes without sending them — on HTTP that is
+    /// a request that ends in the uniform 400 instead (the handler threw after the push) or is
+    /// aborted; on a WebSocket, a socket that closes or is evicted. Returns <c>false</c>, and never throws
     /// (except <see cref="ArgumentNullException"/> and <see cref="OperationCanceledException"/> on
     /// <paramref name="ct"/>), when <see cref="Mode"/> is not <see cref="ReturnRouteMode.All"/>;
     /// the session is closed; an HTTP session already holds a message; the WebSocket queue is

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using DidComm.Consistency;
 using DidComm.Messages;
@@ -47,7 +48,8 @@ public readonly record struct ReturnRouteHeader(ReturnRouteMode Mode, string? Th
     /// <summary>
     /// The longest <c>return_route_thread</c> value accepted (2048 characters, the same bound as a
     /// DID, FR-API-09). A longer value is treated as a malformed header: parsed as <see cref="None"/>,
-    /// never stored, never logged.
+    /// never stored, never logged — and a value whose raw JSON is already too long to unescape to
+    /// this many characters is refused without being copied out of the message.
     /// </summary>
     public const int MaxThreadLength = IdentifierLimits.MaxDidLength;
 
@@ -56,9 +58,13 @@ public readonly record struct ReturnRouteHeader(ReturnRouteMode Mode, string? Th
     /// header is absent or well-formed and <c>false</c> when a present header was treated as
     /// <see cref="None"/> because it was malformed: a non-string value, a value other than
     /// <c>none</c> / <c>all</c> / <c>thread</c> (case-sensitive), or <c>thread</c> without a usable
-    /// <c>return_route_thread</c> (absent, not a string, blank, or longer than
-    /// <see cref="MaxThreadLength"/>). The caller logs on <c>false</c>, by message id only. Never
-    /// throws except <see cref="ArgumentNullException"/> for a null message.
+    /// <c>return_route_thread</c> — absent, not a string, longer than <see cref="MaxThreadLength"/>,
+    /// or not a possible thread id: empty, or not made entirely of RFC 3986 unreserved characters,
+    /// the constraint FR-MSG-11 puts on every <c>thid</c> (so a value no thread can have, such as one
+    /// carrying whitespace or control characters, is never surfaced to a handler). The caller logs on
+    /// <c>false</c>, by message id only. The header values are compared in place: a value over the
+    /// cap is never copied into a string. Never throws except <see cref="ArgumentNullException"/>
+    /// for a null message.
     /// </summary>
     /// <param name="message">The message whose headers to read.</param>
     /// <param name="header">The parsed header; <see cref="None"/> when absent or malformed.</param>
@@ -73,28 +79,36 @@ public readonly record struct ReturnRouteHeader(ReturnRouteMode Mode, string? Th
         if (element.ValueKind != JsonValueKind.String)
             return false;
 
-        switch (element.GetString())
+        // ValueEquals compares the raw value with the constant (unescaping as needed) without
+        // allocating, so a megabyte-long value costs no copy.
+        if (element.ValueEquals(NoneValue))
+            return true;
+        if (element.ValueEquals(AllValue))
         {
-            case NoneValue:
-                return true;
-            case AllValue:
-                header = new ReturnRouteHeader(ReturnRouteMode.All, null);
-                return true;
-            case ThreadValue:
-                if (!headers.TryGetValue(ThreadHeaderName, out var threadElement)
-                    || threadElement.ValueKind != JsonValueKind.String)
-                {
-                    return false;
-                }
-                var thread = threadElement.GetString();
-                if (string.IsNullOrWhiteSpace(thread) || thread.Length > MaxThreadLength)
-                    return false;
-                header = new ReturnRouteHeader(ReturnRouteMode.Thread, thread);
-                return true;
-            default:
-                return false;
+            header = new ReturnRouteHeader(ReturnRouteMode.All, null);
+            return true;
         }
+        if (!element.ValueEquals(ThreadValue))
+            return false;
+
+        if (!headers.TryGetValue(ThreadHeaderName, out var threadElement)
+            || threadElement.ValueKind != JsonValueKind.String
+            || !RawLengthCanFitTheCap(threadElement))
+        {
+            return false;
+        }
+        var thread = threadElement.GetString();
+        if (thread is null || thread.Length > MaxThreadLength || !UnreservedUriChars.IsUnreserved(thread))
+            return false;
+        header = new ReturnRouteHeader(ReturnRouteMode.Thread, thread);
+        return true;
     }
+
+    // A JSON string escape spends at most six raw bytes on one UTF-16 code unit (\uXXXX), so a value
+    // whose raw text (quotes included) exceeds 6 × MaxThreadLength + 2 bytes cannot unescape to
+    // MaxThreadLength characters or fewer: refuse it before GetString() would copy it.
+    private static bool RawLengthCanFitTheCap(JsonElement element)
+        => JsonMarshal.GetRawUtf8Value(element).Length <= (6 * MaxThreadLength) + 2;
 
     /// <summary>
     /// Read the return-route header of <paramref name="message"/>, treating a malformed header as

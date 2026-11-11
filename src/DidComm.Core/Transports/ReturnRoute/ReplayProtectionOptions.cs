@@ -27,8 +27,12 @@ public sealed class ReplayProtectionOptions
     /// Entries the guard holds in total; at the bound a new entry is refused as
     /// <see cref="ReplayAdmission.Saturated"/> (not admitted — fail closed; nothing unexpired is ever
     /// evicted to make room). Default 32 768 ≈ 109 admitted in-scope messages per second sustained
-    /// over the 5-minute window on one mediator host; worst-case memory ≈ 40 MB with 512-character
-    /// ids, ≈ 6 MB with UUIDs. A busier host raises it.
+    /// over the 5-minute window on one mediator host. Memory of <see cref="InMemoryReplayGuard"/> at
+    /// this bound (measured): ≈ 35 MB when a few dozen senders hold it with 512-character ids, ≈ 6 MB
+    /// with UUID ids, and up to ≈ 170 MB when every entry belongs to a different sender with a
+    /// maximal (2048-character) DID and a 512-character id — the most a flood of fresh DIDs can
+    /// reach, because each sender's DID subject is kept once while it has entries. A busier host
+    /// raises it; a host that must cap memory lower lowers it.
     /// </summary>
     public int MaxEntries { get; set; } = 32_768;
 
