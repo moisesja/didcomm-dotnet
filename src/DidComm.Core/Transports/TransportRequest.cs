@@ -39,7 +39,8 @@ public sealed record TransportRequest(Uri Endpoint, ReadOnlyMemory<byte> Payload
     /// The most bytes of an in-band response the transport may read (FR-RR-07). <c>null</c> (the
     /// default) means "do not read an in-band response". The facade sets it to
     /// <see cref="Facade.DidCommOptions.MaxReceiveBytes"/> only for an authcrypt send asking for
-    /// <c>return_route</c> <c>all</c> or <c>thread</c>. A transport that can return a response
+    /// <c>return_route</c> <c>all</c> or <c>thread</c> whose <see cref="LocalDid"/> is set (both DIDs
+    /// within 2048 characters, see <see cref="LocalDid"/>). A transport that can return a response
     /// reads at most this many bytes and never buffers more.
     /// </summary>
     public int? MaxResponseBytes { get; init; }

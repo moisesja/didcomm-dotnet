@@ -32,7 +32,7 @@ public sealed record SendResult(
     /// that identity rule is discarded and logged (by the request's message id and the reason
     /// only), and this property stays <c>null</c>. A returned message that could not be read
     /// (over <see cref="DidCommOptions.MaxReceiveBytes"/>, not received within the transport's
-    /// timeout, or not unpackable) fails the send with a
+    /// timeout, failed mid-read, or not unpackable) fails the send with a
     /// <see cref="Exceptions.TransportException"/> whose status is <c>200</c> instead.
     /// </para>
     /// <para>

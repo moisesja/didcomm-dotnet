@@ -86,7 +86,8 @@ public sealed class WebSocketTransportOptions
     /// <remarks>
     /// <para>
     /// A send whose message carries <c>return_route</c> <c>all</c> or <c>thread</c> and is authcrypted
-    /// directly to one DID opens a session socket of its own (see
+    /// directly to one DID (the sending and receiving DIDs each at most 2048 characters) opens a
+    /// session socket of its own (see
     /// <see cref="WebSocketDidCommTransport"/>); the receiver may push messages back on it. With this
     /// flag on, each whole pushed message, at most <c>DidCommOptions.MaxReceiveBytes</c> long, is
     /// handed to the consumer one at a time. <c>DidCommBuilder.UseInboundDispatch()</c> registers the

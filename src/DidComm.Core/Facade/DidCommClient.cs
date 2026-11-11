@@ -569,7 +569,7 @@ public sealed partial class DidCommClient
     /// <exception cref="ArgumentException">No recipient or a malformed recipient entry; <see cref="SendOptions.ReturnRouteThread"/> missing, malformed or over-long with <see cref="ReturnRouteMode.Thread"/>, or set with any other mode; <c>return_route</c> <c>all</c> or <c>thread</c> with recipients naming more than one DID; or the message could not be copied.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><see cref="SendOptions.ReturnRoute"/> is not a defined <see cref="ReturnRouteMode"/>.</exception>
     /// <exception cref="InvalidOperationException">No <see cref="ITransportRouter"/> is wired in; <c>return_route</c> <c>all</c> or <c>thread</c> to a recipient reached through routing keys or a mediator; or any pack-stage refusal of <see cref="PackEncryptedAsync"/>.</exception>
-    /// <exception cref="TransportException">The endpoint is the queue URI; the transport failed; or the request was accepted (status <c>200</c>) but the message returned for an <c>all</c> / <c>thread</c> send exceeded <see cref="DidCommOptions.MaxReceiveBytes"/>, was not received in time, or could not be unpacked.</exception>
+    /// <exception cref="TransportException">The endpoint is the queue URI; the transport failed; or the request was accepted (status <c>200</c>) but the message returned for an <c>all</c> / <c>thread</c> send exceeded <see cref="DidCommOptions.MaxReceiveBytes"/>, was not received in time, failed mid-read, or could not be unpacked.</exception>
     public async Task<SendResult> SendAsync(Message message, SendOptions options, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -784,7 +784,7 @@ public sealed partial class DidCommClient
         if (transportResult.ResponseDiscarded)
         {
             throw new TransportException(
-                $"The request was accepted (HTTP {transportResult.HttpStatusCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "status unknown"}), but the returned message exceeded DidCommOptions.MaxReceiveBytes or could not be read in time and was discarded (FR-RR-07).",
+                $"The request was accepted (HTTP {transportResult.HttpStatusCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "status unknown"}), but the returned message exceeded DidCommOptions.MaxReceiveBytes, was not received in time, or could not be read, and was discarded (FR-RR-07).",
                 httpStatusCode: transportResult.HttpStatusCode,
                 scheme: endpoint.Scheme);
         }

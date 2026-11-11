@@ -432,8 +432,10 @@ public sealed class MockKmsSecretsResolver : ISecretsResolver, IOpaqueKeyResolve
 /// <summary>
 /// A complete custom transport (FR-TRN-01): bind a scheme, accept matching endpoints, move
 /// the bytes. This one appends to an in-memory queue; a real one would speak Bluetooth,
-/// libp2p, a message bus — anything that can carry an opaque payload. Transports are
-/// delivery-only: they report acceptance, never a protocol reply (FR-TRN-03).
+/// libp2p, a message bus — anything that can carry an opaque payload. This one is
+/// delivery-only: it reports acceptance and never hands back a reply (FR-TRN-03). A transport
+/// that implements the return-route extension may return more (the HTTP transport hands back the
+/// response body when the send asked for one, PRD §8a); this one ignores those request fields.
 /// </summary>
 public sealed class MemoryQueueTransport : IDidCommTransport
 {

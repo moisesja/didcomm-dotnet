@@ -110,7 +110,8 @@ public static class Section_P_SendOverTransport
             ServiceEndpointOverride: endpoint);
 
         // SendOptions mirrors PackEncryptedOptions (recipients, sender, optional inner signature,
-        // cipher, sender protection) plus the delivery-only extras — read it back like any record.
+        // cipher, sender protection) plus the options only a send needs (an endpoint override, and
+        // an optional return route) — read it back like any record.
         ctx.Narrator.Value("SendOptions.Recipients", string.Join(", ", sendOptions.Recipients));
         ctx.Narrator.Value("SendOptions.From", sendOptions.From);
         ctx.Narrator.Value("SendOptions.SignFrom (null ⇒ no inner signature)", sendOptions.SignFrom);
