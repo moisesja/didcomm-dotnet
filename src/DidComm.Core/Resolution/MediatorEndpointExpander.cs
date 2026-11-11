@@ -49,6 +49,19 @@ internal static class MediatorEndpointExpander
     internal const int MaxForwardLayers = 8;
 
     /// <summary>
+    /// The number of forward layers <paramref name="primary"/> needs: one per routing key, plus one
+    /// for a mediator named by its DID as the endpoint (FR-ROUTE-04). Resolves nothing. The single
+    /// counting rule for <see cref="ExpandAsync"/> and for the facade's return-route refusal
+    /// (FR-RR-07), so both judge the same entry the same way (L-041).
+    /// </summary>
+    /// <param name="primary">The selected (first) DIDCommMessaging entry of the recipient.</param>
+    internal static int ForwardLayerCount(DidCommServiceInfo primary)
+    {
+        ArgumentNullException.ThrowIfNull(primary);
+        return primary.RoutingKeys.Count + (LooksLikeDid(primary.Uri) ? 1 : 0);
+    }
+
+    /// <summary>
     /// Expand the first candidate in <paramref name="candidates"/> into a fully-resolved
     /// route. Throws <see cref="DidResolutionException"/> when the candidate list is empty.
     /// </summary>
@@ -82,7 +95,7 @@ internal static class MediatorEndpointExpander
         // Bound the route before resolving anything in it: the layer count, then each reference's
         // length. A refusal names counts only, never a reference from the peer's document.
         var mediatorAsEndpoint = LooksLikeDid(primary.Uri);
-        var layerCount = primary.RoutingKeys.Count + (mediatorAsEndpoint ? 1 : 0);
+        var layerCount = ForwardLayerCount(primary);
         if (layerCount > MaxForwardLayers)
         {
             throw new DidResolutionException(

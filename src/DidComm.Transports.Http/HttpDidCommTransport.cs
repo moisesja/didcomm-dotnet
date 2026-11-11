@@ -16,6 +16,13 @@ namespace DidComm.Transports.Http;
 /// (retry + circuit-breaker + timeout — FR-TRN-08) injected via
 /// <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/>.
 /// </summary>
+/// <remarks>
+/// Delivery-only (FR-TRN-03) unless the request asks for an in-band response
+/// (<see cref="TransportRequest.MaxResponseBytes"/>, set by <c>DidCommClient.SendAsync</c> for a
+/// return-route send, FR-RR-07): a final <c>200</c> with a DIDComm <c>Content-Type</c> then has its
+/// body read, capped and time-bounded, into <see cref="TransportResult.ResponsePayload"/>. Any other
+/// response body is never read.
+/// </remarks>
 /// <example>
 /// Sends the packed envelope in <c>samples/04-MediatorAgent</c> and <c>samples/02-Cookbook</c> (section P).
 /// </example>
@@ -98,6 +105,15 @@ public sealed class HttpDidCommTransport : IDidCommTransport
                 if (status >= 200 && status < 300)
                 {
                     _logger.LogDebug("HttpDidCommTransport POST {Uri} → {Status}", currentUri, status);
+                    // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and
+                    // only when the request carries a cap, which the facade sets only for a send that
+                    // asked for a return route. Otherwise the body is never touched.
+                    if (status == 200
+                        && request.MaxResponseBytes is int cap
+                        && TryDidCommMediaType(response.Content.Headers.ContentType?.MediaType, out var canonical))
+                    {
+                        return await ReadCappedAsync(response.Content, cap, canonical, ct).ConfigureAwait(false);
+                    }
                     return new TransportResult(Accepted: true, HttpStatusCode: status);
                 }
 
@@ -138,6 +154,177 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             httpStatusCode: 307,
             scheme: request.Endpoint.Scheme);
     }
+
+    /// <summary>The 16 KiB unit a body of unknown length is read in.</summary>
+    private const int ChunkSize = 16 * 1024;
+
+    /// <summary>The largest wait a <see cref="CancellationTokenSource"/> accepts.</summary>
+    private static readonly TimeSpan MaxWaitBudget = TimeSpan.FromMilliseconds(int.MaxValue);
+
+    /// <summary>Why an in-band response body was discarded rather than returned (FR-RR-07).</summary>
+    private enum DiscardReason
+    {
+        /// <summary>The body is longer than the request's cap.</summary>
+        OverCap,
+
+        /// <summary>The body did not arrive within <see cref="HttpTransportOptions.RequestTimeout"/>.</summary>
+        ReadTimeout,
+
+        /// <summary>Reading the body failed (connection reset, truncated body).</summary>
+        ReadFailed,
+    }
+
+    /// <summary>
+    /// Read a <c>200</c> DIDComm response body of at most <paramref name="cap"/> bytes (FR-RR-07,
+    /// JC-2). A declared <c>Content-Length</c> over the cap is discarded without reading a byte; a
+    /// known length within the cap is read into a buffer of exactly that size; a body of unknown
+    /// length is read in 16 KiB chunks into a buffer that grows only as data arrives, never past the
+    /// cap, and reading stops as soon as the total exceeds the cap. So nothing scales with the body
+    /// beyond the cap: peak memory is at most about twice the cap plus one chunk. The read is bounded
+    /// by <see cref="HttpTransportOptions.RequestTimeout"/> (the resilience pipeline's timeout ends
+    /// with the headers). A body that is over the cap, late or unreadable yields an accepted result
+    /// with <see cref="TransportResult.ResponseDiscarded"/> and one Warning; the caller's own
+    /// cancellation propagates.
+    /// </summary>
+    /// <param name="content">The response content.</param>
+    /// <param name="cap">The most bytes to accept.</param>
+    /// <param name="canonical">The canonical DIDComm media type the response matched.</param>
+    /// <param name="ct">The caller's cancellation token.</param>
+    private async Task<TransportResult> ReadCappedAsync(HttpContent content, int cap, string canonical, CancellationToken ct)
+    {
+        var declared = content.Headers.ContentLength;
+        if (declared > cap)
+            return Discarded(DiscardReason.OverCap, cap);
+        if (declared == 0)
+            return new TransportResult(Accepted: true, HttpStatusCode: 200);
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(AsWaitBudget(_options.RequestTimeout));
+        byte[]? chunk = null;
+        try
+        {
+            var stream = await content.ReadAsStreamAsync(budget.Token).ConfigureAwait(false);
+            await using (stream.ConfigureAwait(false))
+            {
+                byte[] body;
+                if (declared is long length)
+                {
+                    body = new byte[length];
+                    var read = 0;
+                    while (read < body.Length)
+                    {
+                        var n = await stream.ReadAsync(body.AsMemory(read), budget.Token).ConfigureAwait(false);
+                        if (n == 0)
+                            return Discarded(DiscardReason.ReadFailed, cap);
+                        read += n;
+                    }
+                }
+                else
+                {
+                    chunk = System.Buffers.ArrayPool<byte>.Shared.Rent(ChunkSize);
+                    using var buffer = new MemoryStream();
+                    long total = 0;
+                    while (true)
+                    {
+                        var n = await stream.ReadAsync(chunk.AsMemory(0, ChunkSize), budget.Token).ConfigureAwait(false);
+                        if (n == 0)
+                            break;
+                        total += n;
+                        if (total > cap)
+                            return Discarded(DiscardReason.OverCap, cap);
+                        // Grow geometrically, but never past the cap.
+                        if (buffer.Capacity < total)
+                            buffer.Capacity = (int)Math.Min(cap, Math.Max(total, 2L * buffer.Capacity));
+                        buffer.Write(chunk, 0, n);
+                    }
+                    if (total == 0)
+                        return new TransportResult(Accepted: true, HttpStatusCode: 200);
+                    body = buffer.ToArray();
+                }
+
+                return new TransportResult(Accepted: true, HttpStatusCode: 200)
+                {
+                    ResponsePayload = body,
+                    ResponseMediaType = canonical,
+                };
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return Discarded(DiscardReason.ReadTimeout, cap);
+        }
+        catch (Exception ex) when (ex is IOException or HttpRequestException or ObjectDisposedException)
+        {
+            return Discarded(DiscardReason.ReadFailed, cap);
+        }
+        finally
+        {
+            if (chunk is not null)
+                System.Buffers.ArrayPool<byte>.Shared.Return(chunk);
+        }
+    }
+
+    /// <summary>
+    /// The accepted-but-discarded result, plus one Warning naming the reason and the limit only:
+    /// never the URL or any body bytes. A throwing logging provider changes nothing.
+    /// </summary>
+    /// <param name="reason">Why the body was discarded.</param>
+    /// <param name="cap">The request's cap.</param>
+    private TransportResult Discarded(DiscardReason reason, int cap)
+    {
+        try
+        {
+            _logger.LogWarning("HTTP 200 DIDComm response discarded: {Reason} (limit {MaxBytes} bytes, FR-RR-07).", reason.ToString(), cap);
+        }
+        catch
+        {
+            // Logging providers are host code; they must not change the send's outcome.
+        }
+        return new TransportResult(Accepted: true, HttpStatusCode: 200) { ResponseDiscarded = true };
+    }
+
+    /// <summary>
+    /// Match a response <c>Content-Type</c> media type (parameters already stripped) against the
+    /// three DIDComm media types (FR-MSG-06 normalization); <paramref name="canonical"/> is the
+    /// matching constant.
+    /// </summary>
+    /// <param name="mediaType">The response's media type, or <c>null</c>.</param>
+    /// <param name="canonical">The matching canonical constant.</param>
+    private static bool TryDidCommMediaType(string? mediaType, out string canonical)
+    {
+        foreach (var candidate in DidCommMediaTypes)
+        {
+            if (Messages.MediaTypes.Matches(mediaType, candidate))
+            {
+                canonical = candidate;
+                return true;
+            }
+        }
+        canonical = string.Empty;
+        return false;
+    }
+
+    private static readonly string[] DidCommMediaTypes =
+    {
+        Messages.MediaTypes.Encrypted,
+        Messages.MediaTypes.Signed,
+        Messages.MediaTypes.Plaintext,
+    };
+
+    /// <summary>
+    /// Clamp a configured timeout into a legal, finite <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/>
+    /// value: below zero (including <see cref="Timeout.InfiniteTimeSpan"/>) maps to zero, above
+    /// <see cref="int.MaxValue"/> ms to that maximum.
+    /// </summary>
+    /// <param name="value">The configured timeout.</param>
+    private static TimeSpan AsWaitBudget(TimeSpan value) =>
+        value < TimeSpan.Zero ? TimeSpan.Zero
+        : value > MaxWaitBudget ? MaxWaitBudget
+        : value;
 
     private static HttpRequestMessage BuildRequest(Uri uri, TransportRequest request)
     {

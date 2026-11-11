@@ -508,6 +508,82 @@
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.SessionRegistrationOutcome",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Facade.DidCommClient::SendPackedAsync(System.ReadOnlyMemory`1<System.Byte>,System.Uri,System.String,System.Threading.CancellationToken)",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.IInboundFrameConsumer",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.IInboundFrameConsumer::ConsumeAsync(DidComm.Transports.ReturnRoute.InboundFrame,System.Threading.CancellationToken)",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InboundFrame",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InboundFrame::.ctor(System.Uri,System.String,System.String,System.ReadOnlyMemory`1<System.Byte>)",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InboundFrame::prop:Endpoint",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InboundFrame::prop:LocalDid",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InboundFrame::prop:Payload",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InboundFrame::prop:PeerDid",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.SendOptions::prop:ReturnRoute",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.SendOptions::prop:ReturnRouteThread",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.SendResult::prop:Returned",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportRequest::prop:LocalDid",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportRequest::prop:MaxResponseBytes",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportRequest::prop:PeerDid",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportRequest::prop:ReturnRoute",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportResult::prop:ResponseDiscarded",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportResult::prop:ResponseMediaType",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.TransportResult::prop:ResponsePayload",
+      "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     }
   ]
 }

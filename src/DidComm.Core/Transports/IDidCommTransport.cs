@@ -5,7 +5,10 @@ namespace DidComm.Transports;
 /// FR-TRN-01). The transport router picks an implementation by matching the recipient's
 /// service-endpoint URI scheme against <see cref="Scheme"/> / <see cref="CanHandle"/>, then
 /// hands off the packed envelope via <see cref="SendAsync"/>. Transports are delivery-only
-/// (FR-TRN-03) — they do not return protocol replies.
+/// (FR-TRN-03) unless the return-route extension is in effect (PRD §8a): an HTTP transport may
+/// surface the response body in <see cref="TransportResult.ResponsePayload"/> when the request sets
+/// <see cref="TransportRequest.MaxResponseBytes"/>, and a WebSocket transport hands messages pushed
+/// on its return-route session sockets to its <see cref="ReturnRoute.IInboundFrameConsumer"/>.
 /// </summary>
 /// <example>
 /// A custom in-memory transport is implemented in <c>samples/08-Extensibility</c> (and <c>samples/02-Cookbook</c> section Z).
