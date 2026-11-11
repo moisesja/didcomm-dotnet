@@ -37,6 +37,19 @@ public static class DidCommServiceCollectionExtensions
     /// options on first resolution. Neither depends on the handler registry, the dispatcher, the
     /// facade or any handler, so a protocol handler may take either in its constructor without
     /// cycling the DI graph.
+    /// <para>
+    /// <see cref="DidCommClient"/> depends on every registered <see cref="IDidCommTransport"/> (through
+    /// the <see cref="ITransportRouter"/>), and the WebSocket transport on the registered
+    /// <see cref="IInboundFrameConsumer"/>. So a transport or a consumer, or anything either depends
+    /// on, must not take <see cref="DidCommClient"/>, <c>ProtocolDispatcher</c>,
+    /// <c>ProtocolHandlerRegistry</c> or a protocol handler in its constructor (nor, for a consumer,
+    /// the router or a transport): resolve them through an <see cref="IServiceProvider"/> when first
+    /// needed. A cycle that runs through <see cref="DidCommClient"/>, <c>ProtocolDispatcher</c> or
+    /// <c>ProtocolHandlerRegistry</c> fails the first resolution with an
+    /// <see cref="InvalidOperationException"/> instead of deadlocking it; one that runs only through
+    /// the transports or the router (a consumer that takes the WebSocket transport, for example) is
+    /// not detected and deadlocks it.
+    /// </para>
     /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="configure">Builder callback.</param>
@@ -80,7 +93,13 @@ public static class DidCommServiceCollectionExtensions
         // so Forward = true and SendAsync work whenever the host has registered the relevant
         // services. Each .UseXxxTransport()/.UseNetDidResolver() registers what it needs;
         // missing pieces fall through to the facade's own null checks.
-        services.TryAddSingleton(sp => new DidCommClient(
+        // Guarded (DependencyCycleGuard, ADV-02): the facade depends on every registered transport,
+        // and the WebSocket transport on the IInboundFrameConsumer, so a host consumer or a custom
+        // IDidCommTransport that takes DidCommClient (or the dispatcher, the registry or a handler
+        // that does) in its constructor re-enters this factory. That cycle now fails the first
+        // resolution with an InvalidOperationException instead of deadlocking it. The descriptor's
+        // service type stays DidCommClient (TryAddSingleton<DidCommClient> infers it from the guard).
+        services.TryAddSingleton(DependencyCycleGuard.Guard(typeof(DidCommClient), sp => new DidCommClient(
             sp.GetRequiredService<ISecretsResolver>(),
             sp.GetRequiredService<IDidKeyService>(),
             sp.GetService<IServiceEndpointResolver>(),
@@ -94,7 +113,7 @@ public static class DidCommServiceCollectionExtensions
             sp.GetService<IOpaqueKeyResolver>(),
             // Structured facade diagnostics (e.g. the FR-SIG-05 missing-'to' warning). Optional:
             // hosts without logging keep the NullLogger default and behave identically.
-            sp.GetService<ILogger<DidCommClient>>()));
+            sp.GetService<ILogger<DidCommClient>>())));
 
         if (!IsRegistered<ISecretsResolver>(services))
         {

@@ -129,24 +129,47 @@ public sealed class ReturnRouteClientQaTests
         logs.Warnings.Should().BeEmpty();
     }
 
-    [Fact(Skip = "QA-F03: a non-IO exception thrown while reading the body (InvalidDataException from a decompressing handler) escapes HttpDidCommTransport raw instead of ResponseDiscarded/ReadFailed")]
-    public async Task QA_F03_A_body_that_fails_with_a_non_IO_exception_is_discarded_as_ReadFailed()
+    public static TheoryData<string> NonIoBodyFailures() => new() { nameof(InvalidDataException), nameof(InvalidOperationException), nameof(NotSupportedException) };
+
+    [Theory]
+    [MemberData(nameof(NonIoBodyFailures))]
+    public async Task QA_F03_A_body_that_fails_with_a_non_IO_exception_is_discarded_as_ReadFailed(string failure)
     {
         // ReadCappedAsync promises that a body that is "over the cap, late or unreadable yields an
-        // accepted result with ResponseDiscarded", but it only catches IOException,
+        // accepted result with ResponseDiscarded", but it used to catch only IOException,
         // HttpRequestException and ObjectDisposedException. A response stream can fail otherwise: a
         // GZip/Deflate decompressing handler (AutomaticDecompression on the "didcomm" client) throws
-        // InvalidDataException, Brotli throws InvalidOperationException. Either escapes the transport
+        // InvalidDataException, Brotli throws InvalidOperationException. Either escaped the transport
         // and SendAsync raw — and InvalidOperationException is also what SendAsync documents for a
         // routed return-route refusal.
-        var content = new ThrowingContent(new InvalidDataException("corrupt compressed body (test)"));
+        Exception thrown = failure switch
+        {
+            nameof(InvalidDataException) => new InvalidDataException("corrupt compressed body did:example:secret (test)"),
+            nameof(InvalidOperationException) => new InvalidOperationException("brotli failure did:example:secret (test)"),
+            _ => new NotSupportedException("stream failure did:example:secret (test)"),
+        };
+        var content = new ThrowingContent(thrown);
         var (transport, logs) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
 
         var result = await transport.SendAsync(Request(Cap), default);
 
         result.Accepted.Should().BeTrue();
         result.ResponseDiscarded.Should().BeTrue();
-        logs.Warnings.Should().ContainSingle().Which.Should().Contain("ReadFailed");
+        result.ResponsePayload.Should().BeNull();
+        var warning = logs.Warnings.Should().ContainSingle().Which;
+        warning.Should().Contain("ReadFailed").And.Contain(failure, "the exception's type name is logged");
+        logs.Entries.Should().NotContain(e => e.Text.Contains("did:example:secret", StringComparison.Ordinal), "never the exception's message or the exception object");
+    }
+
+    [Fact]
+    public async Task QA_F03_Caller_cancellation_still_propagates_from_a_body_that_fails_with_a_non_IO_exception()
+    {
+        using var cts = new CancellationTokenSource();
+        var content = new ThrowingContent(new OperationCanceledException(cts.Token), beforeThrow: cts.Cancel);
+        var (transport, logs) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+
+        await ((Func<Task>)(() => transport.SendAsync(Request(Cap), cts.Token))).Should().ThrowAsync<OperationCanceledException>();
+        logs.Warnings.Should().BeEmpty("the caller's cancellation is not a discard");
     }
 
     // ---- the facade over HTTP ----
@@ -389,10 +412,12 @@ public sealed class ReturnRouteClientQaTests
     private sealed class ThrowingContent : HttpContent
     {
         private readonly Exception _failure;
+        private readonly Action? _beforeThrow;
 
-        public ThrowingContent(Exception failure)
+        public ThrowingContent(Exception failure, Action? beforeThrow = null)
         {
             _failure = failure;
+            _beforeThrow = beforeThrow;
             Headers.TryAddWithoutValidation("Content-Type", MediaTypes.Encrypted);
         }
 
@@ -405,13 +430,18 @@ public sealed class ReturnRouteClientQaTests
             return false;
         }
 
-        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new FailingStream(_failure));
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new FailingStream(_failure, _beforeThrow));
 
         private sealed class FailingStream : Stream
         {
             private readonly Exception _failure;
+            private readonly Action? _beforeThrow;
 
-            public FailingStream(Exception failure) => _failure = failure;
+            public FailingStream(Exception failure, Action? beforeThrow)
+            {
+                _failure = failure;
+                _beforeThrow = beforeThrow;
+            }
 
             public override bool CanRead => true;
 
@@ -423,9 +453,17 @@ public sealed class ReturnRouteClientQaTests
 
             public override long Position { get => 0; set => throw new NotSupportedException(); }
 
-            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.FromException<int>(_failure);
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                _beforeThrow?.Invoke();
+                return ValueTask.FromException<int>(_failure);
+            }
 
-            public override int Read(byte[] buffer, int offset, int count) => throw _failure;
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                _beforeThrow?.Invoke();
+                throw _failure;
+            }
 
             public override void Flush() { }
 

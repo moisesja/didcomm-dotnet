@@ -36,11 +36,28 @@ internal enum ReturnedMessageRefusal
 /// addressed and whose decrypting key id names the local DID that sent it. Pure.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Both identities come from verified envelope key ids through
 /// <see cref="ReturnRouteEligibility.TryGetPeer"/>, never from the plaintext <c>from</c> / <c>to</c>.
 /// Both sides of each compare are DID subjects (PRD §4.3, L-034): the expected values are reduced to
 /// their subjects here too, so a DID URL of the same subject matches. Both compares always run and
 /// are combined without short-circuiting, so the work done does not depend on which one fails.
+/// </para>
+/// <para>
+/// The decrypting identity is the unpack's <c>RecipientKid</c>: the first recipient key of the
+/// envelope this client holds, in envelope order. So a message encrypted to several recipients,
+/// whose first held key belongs to another local DID than the expected one, is not attributed to
+/// the expected local DID and is refused (<see cref="ReturnedMessageRefusal.LocalMismatch"/>) even
+/// when a later recipient key is the expected DID's (ADV-05, accepted). A receiver's return-route
+/// replies and pushes (FR-RR-03) are always encrypted to exactly one peer, so honest traffic never
+/// takes that path.
+/// </para>
+/// <para>
+/// Passing proves authcrypt by the expected peer to the expected local DID, nothing more: it is not
+/// FR-RR-08 replay admission, and it does not bind the message to the request it came back on
+/// (ADV-03, accepted; callers correlate on <c>thid</c>, DD-11). The inbound consumer runs FR-RR-08
+/// admission after this rule; <c>SendResult.Returned</c> does not.
+/// </para>
 /// </remarks>
 internal static class ReturnRouteIdentity
 {

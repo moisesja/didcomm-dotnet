@@ -36,6 +36,22 @@ public sealed record SendResult(
     /// <see cref="Exceptions.TransportException"/> whose status is <c>200</c> instead.
     /// </para>
     /// <para>
+    /// <strong>What it proves, and what it does not.</strong> A non-null value proves one thing: the
+    /// message was authcrypted by the DID the send addressed to the DID that sent it. It is not
+    /// FR-RR-08 replay-admitted, and it does not prove that it answers this request: a reply the same
+    /// peer authcrypted earlier, for another request, passes the same rule. Over HTTPS the response
+    /// arrives on the TLS connection the client opened to the endpoint it chose, so only that
+    /// endpoint (or a party terminating TLS for it) could have returned it. Correlate it with the
+    /// request on its <c>thid</c> (DD-11) and handle it idempotently.
+    /// </para>
+    /// <para>
+    /// The decrypting DID is the one of the first recipient key of the envelope this client holds
+    /// (in envelope order). So a message encrypted to several recipients, whose first held key
+    /// belongs to another local DID than the sending one, is not attributed to the sending DID and is
+    /// discarded. A receiver's return-route replies (FR-RR-03) are always encrypted to exactly one
+    /// peer.
+    /// </para>
+    /// <para>
     /// The returned message is neither dispatched to a protocol handler nor run through replay
     /// admission: the caller asked for it and handles it. Over WebSocket, returned messages reach
     /// the registered inbound consumer instead, so this property is always <c>null</c> there.

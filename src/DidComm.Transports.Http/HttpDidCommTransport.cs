@@ -155,8 +155,16 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             scheme: request.Endpoint.Scheme);
     }
 
-    /// <summary>The 16 KiB unit a body of unknown length is read in.</summary>
+    /// <summary>The 16 KiB unit a body of unknown (or large declared) length is read in.</summary>
     private const int ChunkSize = 16 * 1024;
+
+    /// <summary>
+    /// The largest declared <c>Content-Length</c> read into a buffer of exactly that size before any
+    /// body byte arrived (ADV-04). A larger declared length is read like a body of unknown length,
+    /// into a buffer that grows only as data arrives, so a peer cannot make the client commit up to
+    /// the cap by declaring a length it never sends.
+    /// </summary>
+    private const int ExactSizeThreshold = 64 * 1024;
 
     /// <summary>The largest wait a <see cref="CancellationTokenSource"/> accepts.</summary>
     private static readonly TimeSpan MaxWaitBudget = TimeSpan.FromMilliseconds(int.MaxValue);
@@ -170,21 +178,28 @@ public sealed class HttpDidCommTransport : IDidCommTransport
         /// <summary>The body did not arrive within <see cref="HttpTransportOptions.RequestTimeout"/>.</summary>
         ReadTimeout,
 
-        /// <summary>Reading the body failed (connection reset, truncated body).</summary>
+        /// <summary>
+        /// Reading the body failed: a connection reset, a body shorter than its declared length, or
+        /// any other fault of the response stream (a decompressing handler's corrupt data, for
+        /// example).
+        /// </summary>
         ReadFailed,
     }
 
     /// <summary>
     /// Read a <c>200</c> DIDComm response body of at most <paramref name="cap"/> bytes (FR-RR-07,
-    /// JC-2). A declared <c>Content-Length</c> over the cap is discarded without reading a byte; a
-    /// known length within the cap is read into a buffer of exactly that size; a body of unknown
-    /// length is read in 16 KiB chunks into a buffer that grows only as data arrives, never past the
-    /// cap, and reading stops as soon as the total exceeds the cap. So nothing scales with the body
-    /// beyond the cap: peak memory is at most about twice the cap plus one chunk. The read is bounded
-    /// by <see cref="HttpTransportOptions.RequestTimeout"/> (the resilience pipeline's timeout ends
-    /// with the headers). A body that is over the cap, late or unreadable yields an accepted result
-    /// with <see cref="TransportResult.ResponseDiscarded"/> and one Warning; the caller's own
-    /// cancellation propagates.
+    /// JC-2). A declared <c>Content-Length</c> over the cap is discarded without reading a byte. A
+    /// declared length of at most 64 KiB is read into a buffer of exactly that size. Any other body,
+    /// of a larger declared length or of unknown length, is read in 16 KiB chunks into a buffer that
+    /// grows only as data arrives (ADV-04): with a declared length, exactly that many bytes are read
+    /// and fewer is a failed read; without one, reading stops as soon as the total exceeds the cap.
+    /// So memory follows the bytes received, never the length a peer declares, and nothing scales
+    /// with the body beyond the cap: peak memory is at most about twice the cap plus one chunk. The
+    /// read is bounded by <see cref="HttpTransportOptions.RequestTimeout"/> (the resilience
+    /// pipeline's timeout ends with the headers). A body that is over the cap, late or unreadable
+    /// (whatever the response stream throws) yields an accepted result with
+    /// <see cref="TransportResult.ResponseDiscarded"/> and one Warning naming the reason and, for a
+    /// failed read, the exception's type; the caller's own cancellation propagates.
     /// </summary>
     /// <param name="content">The response content.</param>
     /// <param name="cap">The most bytes to accept.</param>
@@ -207,7 +222,7 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             await using (stream.ConfigureAwait(false))
             {
                 byte[] body;
-                if (declared is long length)
+                if (declared is long length && length <= ExactSizeThreshold)
                 {
                     body = new byte[length];
                     var read = 0;
@@ -221,25 +236,34 @@ public sealed class HttpDidCommTransport : IDidCommTransport
                 }
                 else
                 {
+                    // ADV-04: a large declared length commits nothing up front. With a declared
+                    // length (at most the cap, checked above) exactly that many bytes are read, as
+                    // on the exact-size path; without one, up to the cap plus one chunk.
+                    var limit = declared ?? cap;
                     chunk = System.Buffers.ArrayPool<byte>.Shared.Rent(ChunkSize);
                     using var buffer = new MemoryStream();
                     long total = 0;
-                    while (true)
+                    while (declared is null || total < limit)
                     {
-                        var n = await stream.ReadAsync(chunk.AsMemory(0, ChunkSize), budget.Token).ConfigureAwait(false);
+                        var want = declared is null ? ChunkSize : (int)Math.Min(ChunkSize, limit - total);
+                        var n = await stream.ReadAsync(chunk.AsMemory(0, want), budget.Token).ConfigureAwait(false);
                         if (n == 0)
                             break;
                         total += n;
                         if (total > cap)
                             return Discarded(DiscardReason.OverCap, cap);
-                        // Grow geometrically, but never past the cap.
+                        // Grow geometrically, but never past the declared length or the cap.
                         if (buffer.Capacity < total)
-                            buffer.Capacity = (int)Math.Min(cap, Math.Max(total, 2L * buffer.Capacity));
+                            buffer.Capacity = (int)Math.Min(limit, Math.Max(total, 2L * buffer.Capacity));
                         buffer.Write(chunk, 0, n);
                     }
+                    if (declared is long expected && total != expected)
+                        return Discarded(DiscardReason.ReadFailed, cap);
                     if (total == 0)
                         return new TransportResult(Accepted: true, HttpStatusCode: 200);
-                    body = buffer.ToArray();
+                    // When the buffer is exactly the body, hand it over instead of copying it: always
+                    // so for a declared length, since growth is clamped to it.
+                    body = buffer.Capacity == total ? buffer.GetBuffer() : buffer.ToArray();
                 }
 
                 return new TransportResult(Accepted: true, HttpStatusCode: 200)
@@ -251,15 +275,20 @@ public sealed class HttpDidCommTransport : IDidCommTransport
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // The caller's own cancellation is not a discard: it propagates, first.
             throw;
         }
         catch (OperationCanceledException)
         {
             return Discarded(DiscardReason.ReadTimeout, cap);
         }
-        catch (Exception ex) when (ex is IOException or HttpRequestException or ObjectDisposedException)
+        catch (Exception ex)
         {
-            return Discarded(DiscardReason.ReadFailed, cap);
+            // QA-F03: whatever else the response stream throws — an IOException or
+            // HttpRequestException from the connection, an InvalidDataException from a GZip/Deflate
+            // decompressing handler, an InvalidOperationException from Brotli — is an unreadable
+            // body, never an exception escaping the transport. Logged by its type name only.
+            return Discarded(DiscardReason.ReadFailed, cap, ex.GetType().Name);
         }
         finally
         {
@@ -269,16 +298,21 @@ public sealed class HttpDidCommTransport : IDidCommTransport
     }
 
     /// <summary>
-    /// The accepted-but-discarded result, plus one Warning naming the reason and the limit only:
-    /// never the URL or any body bytes. A throwing logging provider changes nothing.
+    /// The accepted-but-discarded result, plus one Warning naming the reason, the limit and, for a
+    /// failed read, the exception's type name only: never the URL, any body bytes, the exception's
+    /// message or the exception object. A throwing logging provider changes nothing.
     /// </summary>
     /// <param name="reason">Why the body was discarded.</param>
     /// <param name="cap">The request's cap.</param>
-    private TransportResult Discarded(DiscardReason reason, int cap)
+    /// <param name="exceptionType">The type name of the exception that failed the read, if one did.</param>
+    private TransportResult Discarded(DiscardReason reason, int cap, string? exceptionType = null)
     {
         try
         {
-            _logger.LogWarning("HTTP 200 DIDComm response discarded: {Reason} (limit {MaxBytes} bytes, FR-RR-07).", reason.ToString(), cap);
+            if (exceptionType is null)
+                _logger.LogWarning("HTTP 200 DIDComm response discarded: {Reason} (limit {MaxBytes} bytes, FR-RR-07).", reason.ToString(), cap);
+            else
+                _logger.LogWarning("HTTP 200 DIDComm response discarded: {Reason} ({ExceptionType}; limit {MaxBytes} bytes, FR-RR-07).", reason.ToString(), exceptionType, cap);
         }
         catch
         {

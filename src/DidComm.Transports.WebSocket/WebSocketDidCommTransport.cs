@@ -36,7 +36,8 @@ namespace DidComm.Transports.WebSocket;
 /// exists, so a header-less acknowledgement reaches the session it acknowledges. An explicit
 /// <c>none</c> is sent over S and then retires it: S stops taking sends, a close frame is sent, and
 /// the messages already on their way are still read until the peer's close frame (bounded by one
-/// <see cref="WebSocketTransportOptions.SendTimeout"/>).
+/// <see cref="WebSocketTransportOptions.SendTimeout"/>, or by 30 seconds when that is infinite or not
+/// positive).
 /// </para>
 /// <para>
 /// <strong>Ordering.</strong> A send that starts after an <c>all</c>/<c>thread</c> send to
@@ -251,10 +252,28 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private TimeSpan DrainBudget => AsWaitBudget(AsWaitBudget(_options.ConnectTimeout) + AsWaitBudget(_options.SendTimeout));
 
     /// <summary>
-    /// How long the polite shutdown (STOMP DISCONNECT + close frame) may take. One per-send budget:
-    /// these are ordinary socket writes, and the peer is under no obligation to read them.
+    /// How long dispose's polite shutdown (STOMP DISCONNECT + close frame) and its wait for the
+    /// session receive loops may take. One per-send budget: these are ordinary socket writes, and the
+    /// peer is under no obligation to read them. Dispose only: an infinite or non-positive
+    /// <see cref="WebSocketTransportOptions.SendTimeout"/> maps to zero here (see
+    /// <see cref="AsWaitBudget"/>), which is right for a teardown that must be bounded and wrong for
+    /// a session socket that is still meant to be read (see <see cref="CloseGrace"/>).
     /// </summary>
     private TimeSpan CloseBudget => AsWaitBudget(_options.SendTimeout);
+
+    /// <summary>
+    /// How long a session socket that is closing outside dispose may take: the close frame sent on a
+    /// retire (<c>return_route: none</c>), on an oversized message (1009) or in answer to the peer's
+    /// close, and the backstop after which a retiring socket stops being read. One
+    /// <see cref="WebSocketTransportOptions.SendTimeout"/> when it is finite and positive (clamped to
+    /// the largest legal wait), else <see cref="DefaultCloseGrace"/>: unlike dispose, these paths must
+    /// leave the messages already on their way time to arrive, so an infinite <c>SendTimeout</c> must
+    /// not turn into a zero grace that stops the loop at once.
+    /// </summary>
+    private TimeSpan CloseGrace => _options.SendTimeout > TimeSpan.Zero ? AsWaitBudget(_options.SendTimeout) : DefaultCloseGrace;
+
+    /// <summary>The <see cref="CloseGrace"/> used when <see cref="WebSocketTransportOptions.SendTimeout"/> is infinite or not positive.</summary>
+    private static readonly TimeSpan DefaultCloseGrace = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Clamp a caller-configured timeout into something legal — and finite — as a dispose-time
@@ -309,18 +328,33 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <see cref="WebSocketTransportOptions.UseStomp"/> every send uses the pooled socket.
     /// </remarks>
     /// <exception cref="ArgumentException">
-    /// When <see cref="TransportRequest.LocalDid"/> or <see cref="TransportRequest.PeerDid"/> is set
-    /// but is not a DID (<c>did:</c> prefix) of at most 2048 characters without whitespace or control
-    /// characters. The value is not repeated in the message.
+    /// When the request would open a session socket (<see cref="TransportRequest.ReturnRoute"/>
+    /// <c>all</c> or <c>thread</c>, both identities set, no STOMP) and
+    /// <see cref="TransportRequest.LocalDid"/> or <see cref="TransportRequest.PeerDid"/> is not a DID
+    /// (<c>did:</c> prefix) of at most 2048 characters without whitespace or control characters. The
+    /// value is not repeated in the message. Any other request treats such identities as absent and
+    /// uses the pooled socket: no session socket can exist under them.
     /// </exception>
     public async Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.Endpoint);
-        // The session key is built from these values (JC-21), so they are shape-checked before any
-        // state is touched: a line feed in either would let two identities share a key.
-        ValidateSessionDid(request.LocalDid, nameof(TransportRequest.LocalDid));
-        ValidateSessionDid(request.PeerDid, nameof(TransportRequest.PeerDid));
+        // FR-RR-07 (JC-10, JC-21): a request that names both identities may use the return-route
+        // session socket S(E, L, P). `opens`: this send asks for a return route and opens S when there
+        // is none; `retires`: an explicit `none` ends S after it was sent over it.
+        var opens = request.ReturnRoute is ReturnRouteMode.All or ReturnRouteMode.Thread;
+        var retires = request.ReturnRoute == ReturnRouteMode.None;
+        // The session key is built from the identities, so they are shape-checked before any state is
+        // touched: a line feed in either would let two identities share a key. Only a send that would
+        // open S refuses an invalid identity (QA-F02). S is only ever created under a valid key, so a
+        // header-less or `none` send naming an invalid one cannot belong to an S: it is delivered over
+        // the pooled socket, as before session sockets existed. Under STOMP no session socket exists,
+        // so the identities are never used as a key and never refused there.
+        var keyable = request.LocalDid is not null && request.PeerDid is not null && !_options.UseStomp;
+        var localOk = keyable && IsSessionDid(request.LocalDid!);
+        var peerOk = keyable && IsSessionDid(request.PeerDid!);
+        if (opens && keyable && !(localOk && peerOk))
+            throw InvalidSessionIdentity(localOk ? nameof(TransportRequest.PeerDid) : nameof(TransportRequest.LocalDid));
         // Fail fast before touching any pool state: once DisposeAsync has begun, no send may
         // start (see the dispose invariant on DisposeAsync).
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -350,19 +384,13 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // the wire untouched, exactly as before.
         var payload = _options.UseStomp ? BuildStompSendPayload(request) : request.Payload;
 
-        // FR-RR-07 (JC-10, JC-21): a request that names both identities may use the return-route
-        // session socket S(E, L, P). `opens`: this send asks for a return route and opens S when there
-        // is none; `retires`: an explicit `none` ends S after it was sent over it. Under STOMP there
-        // are no session sockets (a spec-shaped push needs broker semantics outside the minimal subset).
-        var opens = request.ReturnRoute is ReturnRouteMode.All or ReturnRouteMode.Thread;
-        var retires = request.ReturnRoute == ReturnRouteMode.None;
-        string? sessionKey = null;
-        if (request.LocalDid is not null && request.PeerDid is not null)
+        // Under STOMP there are no session sockets (a spec-shaped push needs broker semantics outside
+        // the minimal subset).
+        string? sessionKey = localOk && peerOk ? key + "\n" + request.LocalDid + "\n" + request.PeerDid : null;
+        if (_options.UseStomp && opens && request.LocalDid is not null && request.PeerDid is not null
+            && Interlocked.Exchange(ref _stompSessionNotice, 1) == 0)
         {
-            if (!_options.UseStomp)
-                sessionKey = key + "\n" + request.LocalDid + "\n" + request.PeerDid;
-            else if (opens && Interlocked.Exchange(ref _stompSessionNotice, 1) == 0)
-                Log(LogLevel.Information, "WebSocketDidCommTransport: return-route session sockets are not available under STOMP (FR-RR-05); return-route sends use the pooled socket and nothing is received.");
+            Log(LogLevel.Information, "WebSocketDidCommTransport: return-route session sockets are not available under STOMP (FR-RR-05); return-route sends use the pooled socket and nothing is received.");
         }
 
         try
@@ -665,9 +693,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
     /// <summary>
     /// Retire <paramref name="session"/> after an explicit <c>return_route: none</c> was sent over it
-    /// (FR-RR-05), still under its send gate: stop routing to it, send the close frame (bounded), and
-    /// arm the backstop that ends its loop if the peer never answers. The loop keeps surfacing the
-    /// messages already on their way until the peer's close frame. Never throws.
+    /// (FR-RR-05), still under its send gate: stop routing to it, send the close frame (bounded by
+    /// <see cref="CloseGrace"/>), and arm the backstop that ends its loop if the peer never answers.
+    /// The loop keeps surfacing the messages already on their way until the peer's close frame.
+    /// Never throws: a failed close is caught and logged by its type name, and arming the backstop
+    /// does not throw (see <see cref="SessionSocket.ArmBackstop"/>).
     /// </summary>
     /// <param name="sessionKey">The session key.</param>
     /// <param name="session">The session socket the <c>none</c> was sent over.</param>
@@ -676,14 +706,14 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, session));
         try
         {
-            using var closeCts = new CancellationTokenSource(CloseBudget);
+            using var closeCts = new CancellationTokenSource(CloseGrace);
             await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "return-route session ended", closeCts.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             Log(LogLevel.Debug, "WebSocketDidCommTransport: closing a retired return-route session socket failed ({ExceptionType}).", ex.GetType().Name);
         }
-        session.ArmBackstop(CloseBudget);
+        session.ArmBackstop(CloseGrace);
     }
 
     /// <summary>
@@ -811,7 +841,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 held = await gate.WaitAsync(DrainBudget, session.LoopToken).ConfigureAwait(false);
                 if (held && !_disposed && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
                 {
-                    using var closeCts = new CancellationTokenSource(CloseBudget);
+                    using var closeCts = new CancellationTokenSource(CloseGrace);
                     await session.Socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", closeCts.Token).ConfigureAwait(false);
                 }
             }
@@ -825,7 +855,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             if (held)
                 gate!.Release();
         }
-        session.ArmBackstop(CloseBudget);
+        session.ArmBackstop(CloseGrace);
         LogRateLimited(ref _oversizedPushes,
             "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07). {Count} such messages.",
             "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07).",
@@ -856,7 +886,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                     held = await gate.WaitAsync(DrainBudget, session.LoopToken).ConfigureAwait(false);
                     if (held && !_disposed && session.Socket.State == WebSocketState.CloseReceived)
                     {
-                        using var closeCts = new CancellationTokenSource(CloseBudget);
+                        using var closeCts = new CancellationTokenSource(CloseGrace);
                         await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "return-route session closed", closeCts.Token).ConfigureAwait(false);
                     }
                 }
@@ -897,37 +927,32 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     }
 
     /// <summary>
-    /// Refuse a <see cref="TransportRequest.LocalDid"/> / <see cref="TransportRequest.PeerDid"/> that
-    /// cannot be part of a session key: not a DID, longer than 2048 characters (FR-API-09), or holding
-    /// whitespace or a control character (the key's separator is a line feed). The value is not echoed.
+    /// Whether a <see cref="TransportRequest.LocalDid"/> / <see cref="TransportRequest.PeerDid"/> can
+    /// be part of a session key: a DID (<c>did:</c> prefix) of at most 2048 characters (FR-API-09)
+    /// without whitespace or a control character (the key's separator is a line feed).
     /// </summary>
-    /// <param name="value">The value; <c>null</c> passes.</param>
-    /// <param name="name">The property name, for the message.</param>
-    private static void ValidateSessionDid(string? value, string name)
+    /// <param name="value">The value.</param>
+    private static bool IsSessionDid(string value)
     {
-        if (value is null)
-            return;
-        var ok = value.Length > 4
-                 && value.Length <= MaxSessionDidLength
-                 && value.StartsWith("did:", StringComparison.Ordinal);
-        if (ok)
+        if (value.Length <= 4
+            || value.Length > MaxSessionDidLength
+            || !value.StartsWith("did:", StringComparison.Ordinal))
         {
-            foreach (var c in value)
-            {
-                if (c <= ' ')
-                {
-                    ok = false;
-                    break;
-                }
-            }
+            return false;
         }
-        if (!ok)
+        foreach (var c in value)
         {
-            throw new ArgumentException(
-                $"TransportRequest.{name} must be a DID ('did:' prefix) of at most {MaxSessionDidLength} characters without whitespace or control characters.",
-                "request");
+            if (c <= ' ')
+                return false;
         }
+        return true;
     }
+
+    /// <summary>The refusal of an identity that cannot key a session socket; the value is not echoed.</summary>
+    /// <param name="name">The property name, for the message.</param>
+    private static ArgumentException InvalidSessionIdentity(string name) => new(
+        $"TransportRequest.{name} must be a DID ('did:' prefix) of at most {MaxSessionDidLength} characters without whitespace or control characters to open a return-route session socket.",
+        "request");
 
     /// <summary>Write one log line; never throws (a logging provider is host code).</summary>
     /// <param name="level">The level.</param>
@@ -1486,17 +1511,35 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// any thread, any number of times.
     /// </summary>
     /// <remarks>
-    /// The loop's <see cref="CancellationTokenSource"/> is never disposed: several parties may cancel
-    /// it (a failed send, a retire backstop, dispose) at any time, and
+    /// <para>
+    /// The loop's <see cref="CancellationTokenSource"/> is cancelled only through
+    /// <see cref="StopLoop"/>, which contains whatever the callbacks registered on its token throw.
+    /// That token is the one the inbound consumer gets, so host code (the consumer, the dispatcher,
+    /// every handler) can register callbacks on it; a callback that throws must not escape on a
+    /// thread the transport does not own. That is why the backstop is a timer of its own whose
+    /// callback calls <see cref="StopLoop"/>, and never <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/>:
+    /// the source's own timer rethrows a callback's exception on a thread-pool thread, which ends
+    /// the process.
+    /// </para>
+    /// <para>
+    /// The <see cref="CancellationTokenSource"/> is never disposed: several parties may cancel it (a
+    /// failed send, the backstop, dispose) at any time, and
     /// <see cref="CancellationTokenSource.Dispose()"/> must not race a cancel. It holds no unmanaged
-    /// state; an armed backstop timer releases itself when it fires.
+    /// state. The backstop timer is disposed when the loop ends (<see cref="MarkLoopDone"/>), or
+    /// right after it is armed when the loop has already ended.
+    /// </para>
     /// </remarks>
     private sealed class SessionSocket
     {
+        // The backstop's callback: a static lambda over the socket, so the timer roots nothing else.
+        private static readonly TimerCallback s_backstop = static state => ((SessionSocket)state!).StopLoop();
+
         private readonly CancellationTokenSource _loop = new();
         private readonly TaskCompletionSource _loopDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _ended;
         private volatile bool _discardInbound;
+        // The armed backstop, or null. Set once (the first arm wins); disposed when the loop ends.
+        private Timer? _backstop;
 
         /// <summary>Create the record of a connected session socket.</summary>
         /// <param name="key">The session key.</param>
@@ -1545,7 +1588,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         /// <summary>Whether this call is the socket's first end — the one that raises <c>Disconnected</c>.</summary>
         public bool TryEnd() => Interlocked.Exchange(ref _ended, 1) == 0;
 
-        /// <summary>Cancel the receive loop now. Never throws.</summary>
+        /// <summary>
+        /// Cancel the receive loop now. Never throws: the token is cancelled and every callback
+        /// registered on it runs (on the calling thread) even when one of them throws, and what they
+        /// throw is swallowed here. The only path that cancels the loop's token.
+        /// </summary>
         public void StopLoop()
         {
             try
@@ -1554,22 +1601,54 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             }
             catch
             {
-                // A consumer's cancellation callback threw; the token is cancelled regardless.
+                // A host callback registered on the consumer's token threw (AggregateException); the
+                // token is cancelled and every other callback ran regardless.
             }
         }
 
-        /// <summary>Cancel the receive loop after <paramref name="after"/> unless it ended first. Never throws.</summary>
-        /// <param name="after">The backstop delay.</param>
+        /// <summary>
+        /// Stop the receive loop after <paramref name="after"/> unless it ended first: a timer whose
+        /// callback calls <see cref="StopLoop"/>, so what a host callback on the loop's token throws
+        /// is contained on the timer thread instead of escaping it. Only the first arm counts: every
+        /// caller passes the same grace, so the first deadline is the earliest. The timer does not
+        /// capture the caller's <see cref="ExecutionContext"/>. Arming does not throw (a timer
+        /// disposed by a concurrent loop end is tolerated), and the timer's callback does not throw.
+        /// </summary>
+        /// <param name="after">The backstop delay; a legal timer due time (finite, at most <see cref="int.MaxValue"/> ms).</param>
         public void ArmBackstop(TimeSpan after)
         {
+            if (_loopDone.Task.IsCompleted || Volatile.Read(ref _backstop) is not null)
+                return;
+            Timer timer;
+            // The callback runs host cancellation callbacks: never under the arming caller's async
+            // locals (SuppressFlow throws when the flow is already suppressed, hence the check).
+            if (ExecutionContext.IsFlowSuppressed())
+            {
+                timer = new Timer(s_backstop, this, System.Threading.Timeout.InfiniteTimeSpan, System.Threading.Timeout.InfiniteTimeSpan);
+            }
+            else
+            {
+                using (ExecutionContext.SuppressFlow())
+                    timer = new Timer(s_backstop, this, System.Threading.Timeout.InfiniteTimeSpan, System.Threading.Timeout.InfiniteTimeSpan);
+            }
+            if (Interlocked.CompareExchange(ref _backstop, timer, null) is not null)
+            {
+                // A concurrent arm won; its deadline is the same or earlier.
+                timer.Dispose();
+                return;
+            }
             try
             {
-                _loop.CancelAfter(after);
+                timer.Change(after, System.Threading.Timeout.InfiniteTimeSpan);
             }
-            catch
+            catch (ObjectDisposedException)
             {
-                // Already cancelled: nothing to arm.
+                // The loop ended and MarkLoopDone disposed the timer between the publish and here.
             }
+            // Published before this read, and MarkLoopDone completes the loop before it reads the
+            // timer: at least one side sees the other, so a timer armed as the loop ends is disposed.
+            if (_loopDone.Task.IsCompleted)
+                timer.Dispose();
         }
 
         /// <summary>Dispose the socket (idempotent). Never throws.</summary>
@@ -1585,8 +1664,12 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             }
         }
 
-        /// <summary>Mark the receive loop as ended.</summary>
-        public void MarkLoopDone() => _loopDone.TrySetResult();
+        /// <summary>Mark the receive loop as ended and release the backstop timer, if one was armed.</summary>
+        public void MarkLoopDone()
+        {
+            _loopDone.TrySetResult();
+            Volatile.Read(ref _backstop)?.Dispose();
+        }
     }
 
     /// <summary>

@@ -548,6 +548,11 @@ public sealed partial class DidCommClient
     /// packed or any mediator, sender key or secret is looked up. Over HTTP, an authcrypt send then
     /// reads the response body (at most <see cref="DidCommOptions.MaxReceiveBytes"/>) and surfaces
     /// the reply in <see cref="SendResult.Returned"/>; see that property for the identity rule.
+    /// <see cref="SendResult.Returned"/> proves only that the reply was authcrypted by the addressed
+    /// DID to the sending DID: it is not FR-RR-08 replay-admitted and does not prove that it answers
+    /// this request, so correlate it on <c>thid</c> (DD-11) and handle it idempotently. A send whose
+    /// sending or addressed DID is longer than 2048 characters (FR-API-09) reads no response and uses
+    /// no return-route connection: no reply between them could pass the identity rule.
     /// </para>
     /// <para>
     /// FR-RR-06: when the endpoint — the override, or the one resolved from the recipient's
@@ -684,7 +689,11 @@ public sealed partial class DidCommClient
 
         // JC-18: connection affinity only for an authcrypt send delivered directly (no forward
         // layer) to recipients naming one DID; a routed or anoncrypt send never carries identities.
-        // The pack succeeded, so every entry is well-formed here.
+        // The pack succeeded, so every entry is well-formed here. Nor does a send whose local or peer
+        // DID is longer than FR-API-09's 2048 characters (QA-F02): a message between them can never
+        // pass the identity rule, because the receive path refuses a key id whose DID part is over
+        // that bound. Such a send is delivered as it was before return routes (no session socket, no
+        // in-band response read), and nothing that could have been accepted is lost.
         string? localDid = null;
         string? peerDid = null;
         if (forwardLayers == 0 && options.From is not null)
@@ -694,7 +703,7 @@ public sealed partial class DidCommClient
             {
                 var local = DidSubject.DidSubjectOf(options.From);
                 var peer = DidSubject.DidSubjectOf(entries[0].Did);
-                if (local is not null && peer is not null)
+                if (local is { Length: <= IdentifierLimits.MaxDidLength } && peer is { Length: <= IdentifierLimits.MaxDidLength })
                 {
                     localDid = local;
                     peerDid = peer;

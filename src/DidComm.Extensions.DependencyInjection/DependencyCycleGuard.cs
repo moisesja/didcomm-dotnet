@@ -8,8 +8,10 @@ namespace DidComm.Extensions.DependencyInjection;
 /// resolution on a fresh thread, which then blocks on the singleton lock the first thread holds
 /// while the first thread waits for it — a silent deadlock on first resolution. Typical shapes: a
 /// host-registered <c>IReturnRouteSessionRegistry</c> or <c>IInboundReplayGuard</c> that takes the
-/// <c>ProtocolDispatcher</c> (or the protocol handlers) while a handler takes that service, or a
-/// handler that takes the dispatcher.
+/// <c>ProtocolDispatcher</c> (or the protocol handlers) while a handler takes that service; a
+/// handler that takes the dispatcher; and a host <c>IInboundFrameConsumer</c> or a custom
+/// <c>IDidCommTransport</c> that takes <c>DidCommClient</c>, which depends on every transport (and
+/// the WebSocket transport on the consumer).
 /// </summary>
 /// <remarks>
 /// A guarded factory marks itself as running, for the provider it was called with, on the
@@ -45,8 +47,10 @@ internal static class DependencyCycleGuard
                 throw new InvalidOperationException(
                     $"A circular dependency was detected while resolving '{service.FullName}': it was requested again by a service its own construction depends on. " +
                     "A protocol handler, or a service a handler depends on (for example a host-registered IReturnRouteSessionRegistry or IInboundReplayGuard), " +
-                    "must not take ProtocolDispatcher, ProtocolHandlerRegistry or the protocol handlers in its constructor; resolve that side lazily " +
-                    "(inject IServiceProvider and resolve it when first needed).");
+                    "must not take ProtocolDispatcher, ProtocolHandlerRegistry or the protocol handlers in its constructor. " +
+                    "An IInboundFrameConsumer or an IDidCommTransport, or anything either depends on, must not take DidCommClient, ProtocolDispatcher, " +
+                    "ProtocolHandlerRegistry or the protocol handlers in its constructor, because DidCommClient depends on every registered transport " +
+                    "(and the WebSocket transport on the IInboundFrameConsumer). Resolve that side lazily: inject IServiceProvider and resolve it when first needed.");
             }
             try
             {

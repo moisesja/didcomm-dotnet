@@ -21,16 +21,35 @@ namespace DidComm.Transports.ReturnRoute;
 /// continues with the next frame.
 /// </para>
 /// <para>
+/// <strong>Cancellation callbacks.</strong> The token is the session's own, and the same token
+/// reaches everything the consumer passes it to (the built-in consumer hands it to unpacking, to the
+/// dispatcher and to every protocol handler). A callback registered on it with
+/// <see cref="CancellationToken.Register(Action)"/> runs on whichever transport thread cancels it: a
+/// timer thread when the close grace expires, the thread that disposes the transport, or the
+/// thread of the send that failed. Such a callback must be short, must not block, and must not
+/// throw. <c>WebSocketDidCommTransport</c> contains what one throws (it is swallowed, and the
+/// remaining callbacks still run), so a faulty callback does not end the process through the
+/// transport's cancellation, but nothing reports the failure either. Dispose every registration
+/// once the work it guards is done: a registration left on the token runs whenever the session
+/// ends, long after the frame was consumed.
+/// </para>
+/// <para>
 /// <strong>Trust.</strong> <see cref="InboundFrame.Payload"/> is untrusted bytes from the network.
 /// <see cref="InboundFrame.LocalDid"/> and <see cref="InboundFrame.PeerDid"/> are the transport's
 /// attribution (the identities of the send that opened the socket), not a claim that the frame
 /// came from that peer: only an authcrypt envelope from the peer to the local DID establishes that.
 /// </para>
 /// <para>
-/// <strong>Dependency rule.</strong> The transport is a dependency of <c>DidCommClient</c>, so an
-/// implementation must not take <c>DidCommClient</c>, <c>ProtocolDispatcher</c>,
+/// <strong>Dependency rule.</strong> The transport is a dependency of <c>DidCommClient</c>, and the
+/// consumer a dependency of the transport, so an implementation must not take <c>DidCommClient</c>,
+/// <see cref="ITransportRouter"/>, an <see cref="IDidCommTransport"/>, <c>ProtocolDispatcher</c>,
 /// <c>ProtocolHandlerRegistry</c> or a protocol handler in its constructor; that would cycle the
-/// DI graph. Resolve them through an <see cref="IServiceProvider"/> at call time.
+/// DI graph. Resolve them through an <see cref="IServiceProvider"/> at call time. Under
+/// <c>AddDidComm</c>, a cycle that runs through <c>DidCommClient</c>, <c>ProtocolDispatcher</c> or
+/// <c>ProtocolHandlerRegistry</c> fails the first resolution with an
+/// <see cref="InvalidOperationException"/> instead of deadlocking it; one that runs only through
+/// the transports or the router (a consumer that takes the WebSocket transport, for example) is not
+/// detected and deadlocks it.
 /// </para>
 /// </remarks>
 public interface IInboundFrameConsumer

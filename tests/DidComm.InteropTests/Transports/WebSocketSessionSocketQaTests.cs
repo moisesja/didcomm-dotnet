@@ -417,24 +417,27 @@ public sealed class WebSocketSessionSocketQaTests
         await AssertRetireSurfacesInFlightPushesAsync(TimeSpan.FromSeconds(10));
     }
 
-    [Fact(Skip = "QA-F01: SendTimeout = Timeout.InfiniteTimeSpan makes CloseBudget zero, so a retire cancels the receive loop at once and drops pushes already on their way")]
+    [Fact]
     public async Task QA_F01_Retire_with_an_infinite_SendTimeout_still_surfaces_messages_already_on_their_way()
     {
-        // Timeout.InfiniteTimeSpan is a legal SendTimeout (sends use CancelAfter, which accepts it), but
-        // CloseBudget maps it to zero: RetireAsync sends its close frame with an already-cancelled
-        // token and arms the loop's backstop with zero, so the loop stops before the messages the peer
-        // pushed ahead of the none are read. The class remarks promise they are still read.
+        // Timeout.InfiniteTimeSpan is a legal SendTimeout (sends use CancelAfter, which accepts it). It
+        // used to map the retire's close grace to zero, as dispose's budget does: the close frame went
+        // out with an already-cancelled token and the backstop fired at once, so the loop stopped
+        // before the messages the peer pushed ahead of the none were read. The non-dispose paths now
+        // get a finite grace (30 s when SendTimeout is infinite or not positive).
         await AssertRetireSurfacesInFlightPushesAsync(System.Threading.Timeout.InfiniteTimeSpan);
     }
 
-    [Fact(Skip = "QA-F02: a header-less direct authcrypt WebSocket send to a peer whose DID is 2049..4096 characters now fails with ArgumentException (TransportRequest.PeerDid); main delivers it over the pool")]
+    [Fact]
     public async Task QA_F02_A_header_less_send_to_a_peer_with_a_long_DID_is_still_delivered_over_the_pool()
     {
         // On main, SendAsync built a TransportRequest without identities, so a direct authcrypt send to a
         // recipient whose DID is longer than 2048 characters (accepted by the facade up to 4096, and
         // packable: FR-API-09 keeps an over-long recipient kid in the envelope) was delivered over the
-        // pooled socket. #92 sets PeerDid on EVERY direct authcrypt send, and the WebSocket transport
-        // refuses any PeerDid over 2048 characters, even for a send that asks for no return route.
+        // pooled socket. #92 first set PeerDid on every direct authcrypt send, and the WebSocket
+        // transport refused any PeerDid over 2048 characters, even for a send that asks for no return
+        // route. Now the facade sets no identities for such a peer, and the transport refuses an
+        // invalid identity only on a send that would open a session socket.
         var longBob = "did:example:" + new string('b', 2100 - "did:example:".Length);
         var aliceKey = Key(Alice + "#x1");
         var bobKey = Key(longBob + "#x1");
@@ -453,6 +456,106 @@ public sealed class WebSocketSessionSocketQaTests
         result.Transport.Accepted.Should().BeTrue();
         t.Sockets.Count.Should().Be(1);
         t.Transport.ActiveSessionSocketCount.Should().Be(0, "a header-less send never opens a session socket");
+    }
+
+    [Theory]
+    [InlineData(2048, true)]
+    [InlineData(2049, false)]
+    public async Task QA_F02_The_facade_sets_identities_only_when_both_DIDs_are_within_2048_characters(int peerLength, bool carriesIdentities)
+    {
+        // A peer whose DID is longer than FR-API-09's 2048 characters can never pass the identity rule:
+        // its key ids fail the receive path's DID-part bound. So the send carries no identities, uses
+        // no session socket and reads no in-band response, for every return-route mode.
+        var peer = "did:example:" + new string('b', peerLength - "did:example:".Length);
+        var aliceKey = Key(Alice + "#x1");
+        var peerKey = Key(peer + "#x1");
+        var transport = new CapturingTransport();
+        var client = new DidCommClient(
+            new InMemorySecretsResolver(new[] { aliceKey.Private }),
+            new NetDidKeyService(new DocResolver(Doc(Alice, aliceKey.Public), Doc(peer, peerKey.Public))),
+            new NoServices(),
+            new TransportRouter(new IDidCommTransport[] { transport }),
+            new DidCommOptions());
+        var message = new MessageBuilder().WithType("https://example.com/protocols/qa/1.0/note").WithFrom(Alice).WithBody(new JsonObject()).Build();
+
+        foreach (var mode in new ReturnRouteMode?[] { null, ReturnRouteMode.None, ReturnRouteMode.All })
+        {
+            var result = await client.SendAsync(message, new SendOptions(Recipients: new[] { peer }, From: Alice, ServiceEndpointOverride: Endpoint) { ReturnRoute = mode });
+            result.Transport.Accepted.Should().BeTrue();
+            result.Returned.Should().BeNull();
+        }
+
+        transport.Requests.Should().HaveCount(3);
+        foreach (var request in transport.Requests)
+        {
+            if (carriesIdentities)
+            {
+                request.LocalDid.Should().Be(Alice);
+                request.PeerDid.Should().Be(peer);
+            }
+            else
+            {
+                request.LocalDid.Should().BeNull("a peer DID over 2048 characters can never be verified, so no identity is sent");
+                request.PeerDid.Should().BeNull();
+                request.MaxResponseBytes.Should().BeNull("no in-band response is read for a reply that could never pass the identity rule");
+            }
+        }
+    }
+
+    public static TheoryData<string> InvalidIdentities() => new() { "2049 characters", "space", "not a DID", "line feed" };
+
+    [Theory]
+    [MemberData(nameof(InvalidIdentities))]
+    public async Task QA_F02_A_send_that_opens_no_session_treats_invalid_identities_as_absent_and_uses_the_pool(string @case)
+    {
+        var invalid = @case switch
+        {
+            "2049 characters" => "did:example:" + new string('b', 2049 - "did:example:".Length),
+            "space" => "did:example:b ob",
+            "not a DID" => "mailto:bob@example.com",
+            _ => "did:example:bob\ndid:example:mallory",
+        };
+        await using var t = QaHarness.Create();
+
+        var sends = new[]
+        {
+            Request("header-less peer", peer: invalid),
+            Request("none peer", ReturnRouteMode.None, peer: invalid),
+            Request("header-less local", local: invalid),
+            Request("none local", ReturnRouteMode.None, local: invalid),
+        };
+        foreach (var request in sends)
+            (await t.Transport.SendAsync(request, default)).Accepted.Should().BeTrue(@case);
+
+        t.Sockets.Count.Should().Be(1, "every send used the one pooled socket: no session socket can exist under an invalid key");
+        t.Sockets.Sockets[0].Sent.Select(Text).Should().Equal("header-less peer", "none peer", "header-less local", "none local");
+        t.Transport.ActiveSessionSocketCount.Should().Be(0);
+        t.Transport.LiveSessionSocketCount.Should().Be(0);
+        var open = () => t.Transport.SendAsync(Request("all", ReturnRouteMode.All, peer: invalid), default);
+        (await open.Should().ThrowAsync<ArgumentException>("a send that would open a session socket still refuses it")).Which.Message.Should().NotContain("mallory");
+        t.Sockets.Count.Should().Be(1);
+        t.ShouldNotLeakIdentities();
+    }
+
+    [Fact]
+    public async Task QA_F02_Under_STOMP_invalid_identities_never_throw()
+    {
+        // No session socket exists under STOMP, so the identities are never used as a key.
+        var connected = DidComm.Transports.Stomp.StompFrameCodec.Encode(new DidComm.Transports.Stomp.StompFrame(
+            "CONNECTED", new[] { KeyValuePair.Create("version", "1.2") }, ReadOnlyMemory<byte>.Empty));
+        await using var t = QaHarness.Create(o => o.UseStomp = true);
+        t.Sockets.OnCreate = s => s.PushMessage(connected);
+        var invalid = "did:example:" + new string('b', 2049 - "did:example:".Length);
+
+        foreach (var mode in new ReturnRouteMode?[] { null, ReturnRouteMode.None, ReturnRouteMode.All, ReturnRouteMode.Thread })
+        {
+            (await t.Transport.SendAsync(Request("stomp", mode, peer: invalid), default)).Accepted.Should().BeTrue(mode?.ToString() ?? "header-less");
+            (await t.Transport.SendAsync(Request("stomp", mode, local: "did:example:al ice"), default)).Accepted.Should().BeTrue(mode?.ToString() ?? "header-less");
+        }
+
+        t.Sockets.Count.Should().Be(1, "every send used the pooled STOMP socket");
+        t.Transport.ActiveSessionSocketCount.Should().Be(0);
+        t.ShouldNotLeakIdentities();
     }
 
     // ---- helpers ----
@@ -547,6 +650,24 @@ public sealed class WebSocketSessionSocketQaTests
     {
         public Task<IReadOnlyList<DidCommServiceInfo>> ResolveAsync(string did, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<DidCommServiceInfo>>(Array.Empty<DidCommServiceInfo>());
+    }
+
+    /// <summary>Records every request and accepts it; never reads anything back.</summary>
+    private sealed class CapturingTransport : IDidCommTransport
+    {
+        private readonly ConcurrentQueue<TransportRequest> _requests = new();
+
+        public IReadOnlyList<TransportRequest> Requests => _requests.ToArray();
+
+        public string Scheme => "ws";
+
+        public bool CanHandle(Uri endpoint) => true;
+
+        public Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
+        {
+            _requests.Enqueue(request);
+            return Task.FromResult(new TransportResult(Accepted: true, HttpStatusCode: 200));
+        }
     }
 
     /// <summary>A transport over scripted sockets, with a recording consumer, its lifecycle events and its logs.</summary>

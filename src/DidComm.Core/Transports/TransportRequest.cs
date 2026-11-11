@@ -22,7 +22,8 @@ public sealed record TransportRequest(Uri Endpoint, ReadOnlyMemory<byte> Payload
 
     /// <summary>
     /// The sending DID's subject (a bare DID), set by the facade only for an authcrypt send
-    /// delivered directly (no forward layer) to recipients naming one DID; <c>null</c> otherwise.
+    /// delivered directly (no forward layer) to recipients naming one DID, and only when both this
+    /// and <see cref="PeerDid"/> are at most 2048 characters long (FR-API-09); <c>null</c> otherwise.
     /// A transport that keeps return-route connections uses it, together with
     /// <see cref="PeerDid"/>, for connection affinity (FR-RR-07).
     /// </summary>
