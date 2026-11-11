@@ -79,7 +79,7 @@ public sealed class ReturnRouteWebSocketTests
         seen.ReturnRoute.Mode.Should().Be(ReturnRouteMode.All);
         host.Registry.Count.Should().Be(1);
         host.Registry.Find(host.Alice.Did).Should().ContainSingle().Which.Should().BeSameAs(seen.Session);
-        // Registry events are raised on the thread pool after the call, so they are awaited (bounded).
+        // Registry events come from the registry's notifier, possibly after the call, so they are awaited (bounded).
         (await ReturnRouteTestHost.WaitUntilAsync(() => !opened.IsEmpty, Timeout)).Should().BeTrue("registering the session raises SessionOpened");
         opened.Should().ContainSingle().Which.Session.Should().BeSameAs(seen.Session);
 
@@ -292,6 +292,76 @@ public sealed class ReturnRouteWebSocketTests
         public bool Unregister(IReturnRouteSession session) => _inner.Unregister(session);
 
         public IReadOnlyList<IReturnRouteSession> Find(string did) => _inner.Find(did);
+    }
+
+    [Fact]
+    public async Task A_blocked_lifecycle_subscriber_under_reconnect_churn_delays_no_eviction_close_and_keeps_its_backlog_bounded()
+    {
+        // PR #103 review (P2, round 3): with one pool work item per registry call, a lifecycle
+        // subscriber that blocked made every reconnect pin a pool thread or queue a work item that
+        // kept its sessions, without bound. With one notifier per registry the backlog is bounded,
+        // and the eviction path — close frame, Closed, connection end — never waits for it.
+        const int Reconnects = 6;
+        const int Capacity = 2;
+        await using var host = await ReturnRouteTestHost.StartAsync(o =>
+        {
+            o.AllowSameSocketReplies = true;
+            o.ConfigureSessions = s =>
+            {
+                s.MaxSessionsPerPeer = 1;
+                s.MaxPendingNotifications = Capacity;
+            };
+        });
+        var registry = (InMemoryReturnRouteSessionRegistry)host.Registry;
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Registry.SessionOpened += (_, _) =>
+        {
+            entered.TrySetResult();
+            release.Wait(TimeSpan.FromSeconds(30)); // every SessionOpened waits for the gate (capped)
+        };
+        var sockets = new List<WebSocket>();
+        try
+        {
+            sockets.Add(await OpenSessionAsync(host, host.Alice));
+            await entered.Task.WaitAsync(Timeout); // the notifier is blocked in the first SessionOpened
+
+            for (var i = 1; i <= Reconnects; i++)
+            {
+                var evicted = (WebSocketReturnRouteSession)host.Registry.Find(host.Alice.Did).Single();
+                sockets.Add(await OpenSessionAsync(host, host.Alice));
+
+                // FR-RR-03: the evicted peer observes its normal close while the subscriber is blocked.
+                var observed = await ReturnRouteTestHost.ReceiveAsync(sockets[i - 1], Timeout);
+                observed.Type.Should().Be(WebSocketMessageType.Close, "reconnect {0}: the evicted socket gets its close frame", i);
+                sockets[i - 1].CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure);
+                sockets[i - 1].CloseStatusDescription.Should().Be(WebSocketReturnRouteSession.EvictedDescription);
+                evicted.Closed.IsCancellationRequested.Should().BeTrue("reconnect {0}: the evicted session's Closed fired", i);
+                evicted.CloseReason.Should().Be(SessionCloseReason.Evicted);
+                await sockets[i - 1].CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", default);
+                registry.PendingNotifications.Should().BeLessThanOrEqualTo(Capacity + 1, "reconnect {0}: the backlog stays within the bound", i);
+                host.Registry.Count.Should().Be(1);
+            }
+
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == Reconnects, Timeout))
+                .Should().BeTrue("every evicted connection ended while the subscriber was blocked");
+            entered.Task.IsCompleted.Should().BeTrue();
+            release.IsSet.Should().BeFalse("the gate was held throughout");
+            registry.PendingNotifications.Should().Be(Capacity + 1, "the one being delivered plus a full queue");
+            registry.DroppedNotifications.Should().Be(Reconnects - Capacity, "each reconnect past the bound dropped the oldest waiting notification");
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        (await ReturnRouteTestHost.WaitUntilAsync(() => registry.PendingNotifications == 0, Timeout)).Should().BeTrue("the rest is delivered once the gate opens");
+        await sockets[^1].CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
+        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 0 && host.EndedWebSocketConnections == Reconnects + 1, Timeout)).Should().BeTrue();
+        foreach (var socket in sockets)
+            socket.Dispose();
+        host.Logs.Entries.Should().ContainSingle(l => l.Contains("lifecycle notifications dropped", StringComparison.Ordinal), "the first drop is logged; the next Warning is the 1000th");
+        host.LeakingLogLines().Should().BeEmpty("the drop Warning carries counts only");
     }
 
     [Fact]
@@ -794,7 +864,7 @@ public sealed class ReturnRouteWebSocketTests
         (await host.Alice.Client.UnpackAsync(frame.Text)).Message.Id.Should().Be(probe.Id);
 
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 1, Timeout)).Should().BeTrue("the evicted connection ended");
-        // Registry events are raised on the thread pool after the call, so they are awaited (bounded).
+        // Registry events come from the registry's notifier, possibly after the call, so they are awaited (bounded).
         (await ReturnRouteTestHost.WaitUntilAsync(() => !closed.IsEmpty, Timeout)).Should().BeTrue("the eviction raises SessionClosed");
         closed.Should().ContainSingle().Which.Should().Match<ReturnRouteSessionEventArgs>(e => e.Reason == SessionCloseReason.Evicted && ReferenceEquals(e.Session, loser));
 

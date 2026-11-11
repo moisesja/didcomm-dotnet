@@ -98,6 +98,27 @@ public sealed class ReturnRouteDiTests
     }
 
     [Fact]
+    public async Task The_container_disposes_the_registry_AddDidComm_built_and_the_registry_keeps_working()
+    {
+        // The registry owns a notifier loop; the container that built it stops it, and an endpoint
+        // that unregisters during host shutdown still finds a working registry.
+        var sp = BuildProvider();
+        var registry = (InMemoryReturnRouteSessionRegistry)sp.GetRequiredService<IReturnRouteSessionRegistry>();
+        var opened = 0;
+        registry.SessionOpened += (_, _) => Interlocked.Increment(ref opened);
+        registry.Notifier.IsCompleted.Should().BeFalse();
+
+        await sp.DisposeAsync().AsTask().WaitAsync(Timeout);
+
+        await registry.Notifier.WaitAsync(Timeout); // only Dispose stops it
+        var session = new StubSession("did:example:alice");
+        registry.Register(session).Registered.Should().BeTrue();
+        registry.Unregister(session).Should().BeTrue();
+        registry.DroppedNotifications.Should().Be(1, "the registration's notification had no notifier to deliver it");
+        Volatile.Read(ref opened).Should().Be(0);
+    }
+
+    [Fact]
     public void Invalid_replay_options_throw_on_first_resolution()
     {
         var services = new ServiceCollection();

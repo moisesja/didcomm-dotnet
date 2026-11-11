@@ -43,7 +43,13 @@ public interface IReturnRouteSession
     /// <summary><c>true</c> for a WebSocket session (pushes continue while the socket stays open); <c>false</c> for HTTP (one response at most).</summary>
     bool IsLive { get; }
 
-    /// <summary>Cancelled when the session ends: the HTTP response was written, the socket closed, or the registry evicted it.</summary>
+    /// <summary>
+    /// Cancelled when the session ends: the HTTP response was written, the socket closed, or the
+    /// registry evicted it. The authoritative per-session end signal: it fires without waiting for
+    /// the registry's lifecycle notifications, which are best-effort
+    /// (<see cref="IReturnRouteSessionRegistry"/>), so per-session state such as message-pickup live
+    /// mode should key on it.
+    /// </summary>
     CancellationToken Closed { get; }
 
     /// <summary>

@@ -280,7 +280,11 @@ internal sealed class InboundAdmissionEndpoint
 /// at Information. Keyed by the application's root service provider, so all endpoints of a host
 /// share one replay cache — a request admitted over HTTP is a duplicate on the WebSocket endpoint
 /// and vice versa (FR-RR-08) — and one session registry (its bounds hold per application), while
-/// separate hosts in one process never share state. The table holds its keys weakly.
+/// separate hosts in one process never share state. The table holds its keys weakly. The default
+/// registry is never disposed: nothing can subscribe to it (it is not in the container), so its
+/// notifier never has anything to deliver and stays a parked asynchronous loop that holds no
+/// thread; it becomes unreachable together with the registry once the application's provider is
+/// gone.
 /// </summary>
 internal sealed class InboundAdmissionDefaults
 {

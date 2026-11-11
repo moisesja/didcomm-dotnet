@@ -561,7 +561,7 @@ public sealed class ReturnRouteAdversarialTests
                 r.Session.Should().BeSameAs(session, "a header-less message keeps the session (FR-RR-05)");
                 r.ReturnRoute.Should().Be(ReturnRouteHeader.None);
             });
-        // Registry events are raised on the thread pool after the call, so the one expected is awaited.
+        // Registry events come from the registry's notifier, possibly after the call, so the one expected is awaited.
         (await ReturnRouteTestHost.WaitUntilAsync(() => !opened.IsEmpty, Timeout)).Should().BeTrue();
         opened.Should().ContainSingle();
         closed.Should().BeEmpty();
@@ -687,7 +687,7 @@ public sealed class ReturnRouteAdversarialTests
 
             (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == N - 1,
                 WebSocketReturnRouteSession.DefaultCloseGrace + TimeSpan.FromSeconds(5))).Should().BeTrue("every evicted connection ends, answered or not");
-            (await ReturnRouteTestHost.WaitUntilAsync(() => opened.Count >= N, Timeout)).Should().BeTrue("every registration raises SessionOpened (on the thread pool)");
+            (await ReturnRouteTestHost.WaitUntilAsync(() => opened.Count >= N, Timeout)).Should().BeTrue("every registration raises SessionOpened (from the registry's notifier)");
             opened.Should().HaveCount(N);
             foreach (var session in opened.Where(s => !ReferenceEquals(s, survivor)).Cast<WebSocketReturnRouteSession>())
             {

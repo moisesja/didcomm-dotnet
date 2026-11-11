@@ -14,6 +14,7 @@ public sealed class ReturnRouteOptionsTests
         o.MaxSessionsPerPeer.Should().Be(8);
         o.MaxSessions.Should().Be(4096);
         o.MaxPendingPushes.Should().Be(16);
+        o.MaxPendingNotifications.Should().Be(1024);
         var act = () => o.Validate();
         act.Should().NotThrow();
     }
@@ -29,6 +30,26 @@ public sealed class ReturnRouteOptionsTests
         var o = new ReturnRouteSessionOptions { MaxSessionsPerPeer = perPeer, MaxSessions = total, MaxPendingPushes = pushes };
         var act = () => o.Validate();
         act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain(property);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void MaxPendingNotifications_must_be_at_least_one(int pending)
+    {
+        var o = new ReturnRouteSessionOptions { MaxPendingNotifications = pending };
+        var act = () => o.Validate();
+        act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("MaxPendingNotifications");
+        var ctor = () => new InMemoryReturnRouteSessionRegistry(new ReturnRouteSessionOptions { MaxPendingNotifications = pending });
+        ctor.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("MaxPendingNotifications");
+    }
+
+    [Fact]
+    public void MaxPendingNotifications_of_one_is_valid()
+    {
+        var act = () => new ReturnRouteSessionOptions { MaxPendingNotifications = 1 }.Validate();
+        act.Should().NotThrow();
     }
 
     [Fact]
@@ -83,6 +104,7 @@ public sealed class ReturnRouteOptionsTests
             (() => new ReturnRouteSessionOptions { MaxSessionsPerPeer = -4242 }.Validate(), "MaxSessionsPerPeer", new[] { "4242" }),
             (() => new ReturnRouteSessionOptions { MaxSessionsPerPeer = 7373, MaxSessions = 6161 }.Validate(), "MaxSessionsPerPeer", new[] { "7373", "6161" }),
             (() => new ReturnRouteSessionOptions { MaxPendingPushes = -5858 }.Validate(), "MaxPendingPushes", new[] { "5858" }),
+            (() => new ReturnRouteSessionOptions { MaxPendingNotifications = -4646 }.Validate(), "MaxPendingNotifications", new[] { "4646" }),
             (() => new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(-3737) }.Validate(), "Window", new[] { "3737", "01:02" }),
             (() => new ReplayProtectionOptions { MaxEntries = 9292, MaxEntriesPerPeer = 9393 }.Validate(), "MaxEntriesPerPeer", new[] { "9292", "9393" }),
             (() => new ReplayProtectionOptions { MaxMessageIdLength = -2828 }.Validate(), "MaxMessageIdLength", new[] { "2828" }),

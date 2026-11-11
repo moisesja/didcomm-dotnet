@@ -838,8 +838,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             var mayClose = true;
             if (session is not null)
             {
-                // Unregister first (its SessionClosed(Unregistered) is raised on the thread pool, so
-                // no subscriber delays this path; a no-op when the registry already evicted it), then
+                // Unregister first (it never runs or waits for a subscriber — the registry's notifier
+                // delivers SessionClosed(Unregistered) later, best-effort — so no subscriber delays
+                // this path; a no-op when the registry already evicted it), then
                 // stop the writer, so a close never overlaps a send.
                 try
                 {

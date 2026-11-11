@@ -310,6 +310,10 @@
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReturnRouteSessionRegistry::Dispose()",
+      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReturnRouteSessionRegistry::Find(System.String)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
@@ -331,6 +335,10 @@
     },
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReturnRouteSessionRegistry::prop:Count",
+      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReturnRouteSessionRegistry::prop:DroppedNotifications",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
@@ -451,6 +459,10 @@
     },
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReturnRouteSessionOptions::Validate()",
+      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReturnRouteSessionOptions::prop:MaxPendingNotifications",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {

@@ -97,15 +97,21 @@ types live in `DidComm.Transports.ReturnRoute`.
   registry is full, since the total does not grow; a registration that would grow the total past
   `MaxSessions` is refused and nothing is evicted, so a flood of fresh DIDs never displaces an
   existing peer. The registry forgets an evicted session; closing its transport is the
-  registrant's job (the endpoint does it). One lock, O(1) eviction. Events never run on the
-  caller's thread: each `Register` / `Unregister` that changed something queues one thread-pool
-  work item (no request `ExecutionContext` flows into subscriber code) that raises that call's
-  events in order — `SessionClosed(Evicted)`, then `SessionOpened` — each subscriber's exception
-  isolated and logged by type name. A subscriber that blocks holds one pool thread and delays only
-  the later notifications of its own call — never a registration, an eviction, the closing of the
-  evicted socket or another call's notifications. Events of different calls are not ordered with
-  respect to each other, so per-session state belongs on `IReturnRouteSession.Closed`. Log lines
-  carry counts only.
+  registrant's job (the endpoint does it). One lock, O(1) eviction. Notifications are best-effort
+  and never run on the caller's thread: each `Register` / `Unregister` that changed something
+  writes that call's events — `SessionClosed(Evicted)` then `SessionOpened` for a registration —
+  to a bounded queue inside the lock and returns, and one notifier per registry (started without
+  any request's `ExecutionContext`; none flows from the callers either) delivers them one at a time
+  in the order of the state changes, each subscriber's exception isolated and logged by type name.
+  A subscriber that blocks stalls only that registry's later notifications and holds one pool
+  thread — never a registration, an eviction, `Find` or the closing of the evicted socket. While
+  subscribers lag, at most `MaxPendingNotifications` notifications wait; a call that finds them all
+  taken drops the oldest — already superseded by the newer ones — and counts it in
+  `DroppedNotifications` (a Warning with the running total for the first and every 1000th drop).
+  Per-session state belongs on `IReturnRouteSession.Closed`, the authoritative per-session signal.
+  The registry is `IDisposable` (the container disposes `AddDidComm`'s): `Dispose` stops the
+  notifier without waiting for a subscriber, drops what was waiting, and leaves `Register`,
+  `Unregister` and `Find` working. Log lines carry counts only.
 - **`ReturnRouteSessionOptions`** (validated; configure with
   `services.AddOptions<ReturnRouteSessionOptions>().Configure(...)`): `MaxSessionsPerPeer` = 8 —
   several devices or tabs per DID (Coordinate Mediation 3.0 opens one socket per device) without
@@ -113,7 +119,10 @@ types live in `DidComm.Transports.ReturnRoute`.
   socket plus its push queue, which keeps the registry's bookkeeping to a few megabytes, well inside
   a small host's connection range; `MaxPendingPushes` = 16 pushes per socket being packed or
   queued (besides the one being sent) — live delivery keeps at most one unacknowledged delivery per
-  session, so this is slack, not a working set.
+  session, so this is slack, not a working set; `MaxPendingNotifications` = 1024 lifecycle
+  notifications held for lagging subscribers (besides the one being delivered), each with at most
+  two session references — a reconnect burst of about a thousand sessions fits without a drop, and
+  a stalled subscriber can make the registry retain about 2048 sessions at most.
 - **Replay protection** (FR-RR-08): `IInboundReplayGuard.TryAdmit(peerDidSubject, messageId,
   createdTime, now)`, the default `InMemoryReplayGuard`, and `ReplayAdmission` (`Admitted`,
   `Duplicate`, `TooOld`, `FutureDated`, `MissingCreatedTime`, `Saturated`, `MessageIdTooLong`). The
@@ -281,14 +290,17 @@ replay admission.
   not-yet-delivered capture of it, in which case the body is ciphertext only the sender can open.
   A replay drop is a `202` like any accepted message without a session. Eviction is visible to the
   evicted peer as a normal close, which FR-RR-03 requires.
-- **Isolation.** Messages are snapshotted before validation and packing; registry events run on
-  the thread pool, never on the registering or unregistering thread, and `Closed` callbacks never
-  on the closing caller's thread — each subscriber's exception isolated, and a subscriber that
-  blocks delays no registration, eviction or connection close; a WebSocket push reserves a bounded
-  slot before any snapshot or crypto and never blocks a handler; a throwing logging provider cannot
-  change an admission decision, a session push or the response that carries it.
+- **Isolation.** Messages are snapshotted before validation and packing; registry notifications
+  come from one notifier per registry, never the registering or unregistering thread, and `Closed`
+  callbacks never run on the closing caller's thread — each subscriber's exception isolated, and a
+  subscriber that blocks delays no registration, eviction or connection close, parks at most one
+  pool thread and makes the registry hold at most `MaxPendingNotifications` waiting notifications
+  (the oldest are dropped and counted); a WebSocket push reserves a bounded slot before any
+  snapshot or crypto and never blocks a handler; a throwing logging provider cannot change an
+  admission decision, a session push or the response that carries it.
 - **Audit.** Every return-route drop and refusal logs the message id and an enum or exception type
-  name only; the registry's eviction and total-bound lines carry counts only. Malformed-header and
+  name only; the registry's eviction, total-bound and dropped-notification lines carry counts
+  only. Malformed-header and
   replay-drop lines are rate-limited (the first and every 1000th at Warning) because any sender can
   produce the former and any enrolled peer can flood the latter.
 - **Tested adversarially** (`ReturnRouteAdversarialTests`, Core and interop suites): Mallory cannot
@@ -433,8 +445,10 @@ replay admission.
   request and is never counted or evicted, so a burst of POSTs cannot push a peer's live socket out,
   and a peer at its own bound replaces its oldest session even when the registry is full
   (FR-RR-03). On an open WebSocket session `thread` or a malformed header stops pushes like `none`,
-  push capacity is reserved before any packing, and session notifications are raised
-  asynchronously after the change (FR-RR-05, DD-12). Also: a send to the queue endpoint is refused
+  push capacity is reserved before any packing, and session notifications are best-effort —
+  delivered in state-change order by one notifier per registry, bounded, the oldest dropped under
+  subscriber backpressure, with `IReturnRouteSession.Closed` the authoritative signal (FR-RR-05,
+  DD-12). Also: a send to the queue endpoint is refused
   before any transport activity (FR-RR-06); over-long message ids are refused and one replay cache
   serves every endpoint of a host (FR-RR-08); the same-socket reply switch is described as the
   WebSocket return-route session it now is (FR-TRN-10, FR-PROTO-05a); an unusable

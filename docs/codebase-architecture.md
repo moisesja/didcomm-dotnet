@@ -278,8 +278,9 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
 - The receive loop keeps reading in `Open` and `CloseSent` — an evicted connection dispatches,
   without a session, what the peer sent before it saw the close — until the peer's close frame or
   the backstop. A closed session is never reopened on that socket.
-- Loop exit (`finally`): `Unregister` (its `SessionClosed(Unregistered)` is raised on the thread
-  pool, so no subscriber delays this path; a no-op after an eviction), then `StopAsync` — waits up
+- Loop exit (`finally`): `Unregister` (it never runs or waits for a subscriber — the registry's
+  notifier delivers `SessionClosed(Unregistered)` later — so no subscriber delays this path; a
+  no-op after an eviction), then `StopAsync` — waits up
   to the grace for the writer, then cancels a send stuck on a peer that stopped reading and waits
   once more; a writer that still has not stopped means the socket is aborted rather than closed —
   then the deferred close (`client closed`, or `1009` after an oversized message), itself bounded
@@ -295,16 +296,29 @@ Registry (`InMemoryReturnRouteSessionRegistry`):
   because replacing a peer's own session does not grow it, so a reconnecting peer is not locked
   out by a flood of other DIDs; otherwise the total at `MaxSessions` (default 4096) →
   `RefusedTotalBound`, nothing evicted; otherwise added.
-- Events never run on the caller's thread. After the state change and outside the lock, a
-  `Register` / `Unregister` that changed something queues one work item
-  (`ThreadPool.UnsafeQueueUserWorkItem`, so no request `ExecutionContext` flows into subscribers;
-  the subscribers are captured when it is queued) and returns. The work item raises that call's
-  events in order — `SessionClosed(Evicted)` for an evicted session, then `SessionOpened` — each
-  subscriber in its own `try`/`catch` (type name logged). A subscriber that blocks holds one pool
-  thread and delays only its own call's later notifications — never the registration, the
-  endpoint's `CloseEvicted` and backstop, the receive loop's `finally` or another call's
-  notifications. Events of different calls are not ordered with respect to each other;
-  `IReturnRouteSession.Closed` is the authoritative per-session signal.
+- Notifications (best-effort; never on the caller's thread): one notifier per registry. Inside
+  the lock, right after the state change, a `Register` / `Unregister` that changed something
+  `TryWrite`s one item — that call's events, `SessionClosed(Evicted)` then `SessionOpened` for a
+  registration, with the subscribers captured then — to a bounded `Channel`
+  (`MaxPendingNotifications`, default 1024; `DropOldest`; one reader; no synchronous
+  continuations, so the notifier never resumes inside the lock) and returns. Queue order is
+  therefore state-change order. One consumer loop, started in the constructor under
+  `ExecutionContext.SuppressFlow` (no request's ambient state is kept for the registry's
+  lifetime, and none flows from the writers), delivers the items one at a time, each subscriber in
+  its own `try`/`catch` (type name logged), so subscriber calls never overlap and a throwing one
+  never ends the loop. A subscriber that blocks holds the notifier's one pool thread and stalls
+  that registry's later notifications only — never the registration, the endpoint's
+  `CloseEvicted` and backstop, `Find` or the receive loop's `finally`. A write that finds the queue
+  full drops the oldest item — superseded by the newer ones, and its session references go with
+  it — counted in `DroppedNotifications` by the channel's drop callback (inside the write: count
+  only); outside the lock the call logs a Warning with the running total for the first and every
+  1000th drop. `IReturnRouteSession.Closed` is the authoritative per-session signal.
+- `Dispose` (the container disposes `AddDidComm`'s registry): under the lock, marks the registry
+  disposed and completes the channel, then returns without waiting. The notifier checks the flag
+  before every subscriber call, stops, and drops (counting) what is still queued; a later write
+  fails and is counted. `Register` / `Unregister` / `Find` keep working. The endpoints'
+  per-application fallback registry (`InboundAdmissionDefaults`) is never disposed and has no
+  subscribers, so its notifier stays a parked asynchronous loop holding no thread.
 - `Find(did)`: reduces a DID or DID URL to its subject and returns a snapshot, oldest first; empty
   for a non-DID. HTTP sessions never appear.
 
