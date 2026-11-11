@@ -6,6 +6,99 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — mediator routing core: `forward` as a registered handler (FR-ROUTE-09/10/11, #90, epic #88)
+
+- **`ForwardHandler`** (`DidComm.Protocols.Routing`): the mediator-role `IProtocolHandler` for
+  `https://didcomm.org/routing/2.0`, dispatched through `ProtocolHandlerRegistry` like every other
+  PIURI. Inline, on the request, it only screens: parse the forward (a malformed or over-cap `next`
+  is a drop, not a throw), require the FR-ROUTE-11 posture (`UnpackResult.Encrypted` and a
+  non-empty `RecipientKid`), refuse a forward whose own `expires_time` has passed on
+  `DidCommOptions.Clock` with the FR-API-05 skew (FR-ROUTE-09), reduce `body.next` to its DID
+  subject and ask the `IForwardRecipientRegistry`. Every failure is a drop logged with the message
+  id only and a `null` reply — no problem report, and `please_ack` is never read (FR-ROUTE-07). An
+  admitted forward reserves its place on a bounded queue inline (1024 outstanding and 64 MiB of
+  their plaintext bytes, so a slow sink cannot be used to park 1024 × `MaxReceiveBytes` in memory;
+  beyond either bound the newest is dropped with a rate-limited warning) and is published to the
+  pump only once `ProtocolContext.Acknowledged` has completed — the transport's signal that the
+  inbound was acknowledged on the wire — so neither `ForwardProcessor` nor the sink runs before
+  the sender holds the 202; a cancelled or faulted acknowledgement (client abort before the
+  response was committed, a rejection after the handler ran) releases the reservation and drops
+  the forward with a warning. The detached work runs on the handler's shutdown token, never the
+  request's, so a client abort after the 202 cannot cancel the relay. The clock is read once per
+  forward, inline: it judges the relay-time expiry and fixes the `delay_milli` schedule
+  (`NotBefore`) at receipt, so time spent waiting or queued never moves it; expiry is checked again
+  on the pump for the time spent queued. Logging contract: message id plus exception type name(s)
+  only — no exception object ever reaches the logger, because a resolution or sink fault can carry
+  the next-hop DID in its message. A singleton, `IAsyncDisposable`: dispose stops admission,
+  cancels the pump and discards what is queued or still awaiting acknowledgement (fail closed).
+- **`ProtocolContext.Acknowledged`** (init-only, default `Task.CompletedTask`) and
+  **`ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task acknowledged, CancellationToken)`**:
+  a transport that has a wire acknowledgement hands it to the handlers through the new overload;
+  the existing four-argument overload delegates with `Task.CompletedTask` ("no ordering"). The
+  registry-aware `MapDidCommEndpoint(pattern)` completes it from `Response.OnCompleted` (the 202 is
+  committed) and cancels it on `RequestAborted` or when the response becomes the uniform 400 after
+  the handler ran; the registry-aware `MapDidCommWebSocket(pattern)` has no per-message wire
+  acknowledgement and keeps publishing immediately. Both additions are binary-compatible.
+- **`DidCommBuilder.AddRoutingMediator(ForwardProcessorOptions? = null)`**: registers the handler,
+  the processor and `TryAdd` defaults for its collaborators, and validates the options at
+  registration so a bad combination fails at startup. It also refuses, with
+  `InvalidOperationException`, a host-registered sink, registry or routing-key provider whose
+  public constructor takes `ProtocolHandlerRegistry`, `ProtocolDispatcher` or a protocol handler:
+  that dependency cycle is invisible to the container and would hang the first resolution (lesson
+  L-017); such a collaborator injects `IServiceProvider` and resolves at call time instead. Not
+  part of `AddBuiltInProtocols()` — an ordinary agent is not a mediator. Once registered, Discover Features discloses `routing/2.0`
+  with `roles: ["mediator"]`.
+- **`ForwardProcessor.ProcessAsync(UnpackResult, CancellationToken)`** is now the primary entry
+  point: the host hands over its own unpack of the inbound envelope so the envelope metadata
+  travels with the message. New public constructor `(DidCommClient, IDidKeyService,
+  ForwardProcessorOptions, IRecipientRoutingKeyProvider, DidCommOptions)`; the three-argument one
+  stays and uses the system clock.
+- **`IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`**: extra routing keys per
+  recipient (FR-ROUTE-05 second paragraph), looked up by the DID subject of `next` in pass-through
+  mode only; rewrap mode never consults it. The static provider carries
+  `ForwardProcessorOptions.ExtraRecipientRoutingKeys` for every recipient.
+- **`IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`**: the recipients this
+  mediator relays for, keyed by DID subject (`Register` reduces a DID URL to its DID; `Unregister`,
+  `Count`). Starts empty — nothing is relayed until the host registers someone. The lookup is one
+  ordinal hash probe whose work does not depend on whether the DID is present, and an unknown
+  `next` is dropped silently (decision D4), so the response is not a registration oracle.
+- **`IForwardSink` / `NullForwardSink`**: where the handler hands a processed forward, off the
+  request path. The default drops it after logging the id; real sinks (live push, queue, direct
+  push) arrive with `DidComm.Mediator` (#95).
+- **`ForwardProcessingResult.NotBefore`** — `delay_milli` resolved once at receipt to an absolute
+  not-before on the `DidCommOptions` clock, for a queue to store (FR-ROUTE-10): `ForwardHandler`
+  stamps it inline at admission, before any queueing, and hands the fixed schedule to the
+  processor; the public `ProcessAsync` overloads stamp it when they are called — and
+  **`IsExpired(now, skew)`**, the FR-API-05 arithmetic shared with the handler (FR-ROUTE-09).
+- **`IProtocolHandlerRoles`** and **`FeatureDisclosure.Roles`**: a handler may name the roles it
+  plays; the protocol feature provider copies them onto the Discover Features `disclose` entry
+  (`roles` is omitted on the wire when null).
+- DX gate: the new surface is allowlisted in `coverage-allowlist.json` / `execution-allowlist.json`
+  until the handler-based rewrite of sample 04 (#97) demonstrates it; the gate's stale-entry check
+  forces the entries out then.
+
+### Changed — `ForwardProcessor` posture and `delay_milli` cap (#90)
+
+- **`ForwardProcessor.ProcessAsync(string)` refuses forwards that were not encrypted to a held key
+  (FR-ROUTE-11).** A plaintext or signed-only forward, or one whose unpack carries no
+  `RecipientKid`, now throws `ConsistencyException` right after the forward parse (an over-cap
+  `next` still throws `MalformedMessageException` first, FR-API-09). Consumer impact: a host that
+  re-packed a decrypted forward as plaintext and fed the string overload — the pattern the old
+  sample 04 used after `MapDidCommEndpoint` had opened the envelope — must hand the endpoint's
+  `UnpackResult` to `ProcessAsync(UnpackResult)` instead. Hosts feeding real anoncrypt forwards
+  (Cookbook section O, `InteropCli unwrap-forward`) see no change.
+- The non-forward `ConsistencyException` no longer echoes the inbound message `type`.
+- In rewrap mode or with extra routing keys, an attachment that is not a JSON envelope or a `next`
+  with no DID part now surfaces as `MalformedMessageException` (previously a raw
+  `ArgumentException` escaped the string overload). Plain pass-through still relays the bytes
+  opaquely.
+- A positive `delay_milli` is capped at `int.MaxValue` ms, as a negative one already was. A hostile
+  value (`long.MaxValue`, or one that lands past year 9999) no longer escapes as
+  `OverflowException` / `ArgumentOutOfRangeException`.
+- `samples/04-MediatorAgent` hands the endpoint's `UnpackResult` straight to `ForwardProcessor`
+  instead of re-packing it as plaintext; narrator output is unchanged. The handler-based rewrite
+  of the sample is #97.
+
 ### Docs
 
 - **PRD: mediator-service requirements (#89, epic #88).** §2.1 gains the `DidComm.Mediator` scope

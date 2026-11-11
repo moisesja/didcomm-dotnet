@@ -21,4 +21,19 @@ public sealed record ProtocolContext(
     ThreadState Thread,
     DidCommClient? Client,
     DidCommOptions Options,
-    IThreadStateStore Threads);
+    IThreadStateStore Threads)
+{
+    /// <summary>
+    /// Completes once the transport has acknowledged the inbound message on the wire — for HTTP,
+    /// when the response (the 202) has been committed. A handler that defers work past the
+    /// acknowledgement (the mediator's <see cref="Routing.ForwardHandler"/>: nothing registration-
+    /// dependent may run before the 202 is in the sender's hands, FR-ROUTE-11) awaits it before
+    /// starting that work. <see cref="Task.CompletedTask"/> when the transport provides no such
+    /// ordering — dispatcher-only use (tests, samples, the WebSocket endpoints), where the handler
+    /// proceeds immediately. A cancelled or faulted task means the inbound was never acknowledged
+    /// (the client aborted, or the response turned into a rejection after the handler ran); a
+    /// handler that was waiting on it must drop the deferred work. Set by
+    /// <see cref="ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, CancellationToken)"/>.
+    /// </summary>
+    public Task Acknowledged { get; init; } = Task.CompletedTask;
+}

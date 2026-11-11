@@ -153,6 +153,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// reply under your own egress policy (bind the recipient to the authenticated inbound sender).
     /// A Discover Features round-trip completes when the responder app sends its <c>disclose</c> back
     /// to the initiator's endpoint this way.
+    /// <para>
+    /// The dispatch carries a transport acknowledgement (<see cref="ProtocolContext.Acknowledged"/>):
+    /// it completes from <c>Response.OnCompleted</c>, once the 202 has been committed to the client,
+    /// and is cancelled when the request is aborted first or when the response turns into the
+    /// uniform 400 after the handler ran. A handler that must not act before the sender holds the
+    /// 202 — the mediator's <c>ForwardHandler</c>, whose processor and sink never run before the
+    /// response is on the wire (FR-ROUTE-11) — waits on it; other handlers ignore it.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
@@ -195,6 +203,24 @@ public static class DidCommEndpointRouteBuilderExtensions
             // matching note in the callback overload above.
             var startTimestamp = Stopwatch.GetTimestamp();
 
+            // The transport acknowledgement handed to the handler (ProtocolContext.Acknowledged):
+            // completes once the response has been committed to the client (Response.OnCompleted),
+            // which — because every path below that reaches the handler returns 202 — means "the
+            // sender holds the 202". Cancelled when the request aborts before that, so a forward
+            // whose sender never received its 202 is not relayed (the abort registration is kept
+            // until OnCompleted fires, not disposed when this delegate returns, because the
+            // response is written after it returns). If the response completed first, TrySetResult
+            // has already won and the late cancel is a no-op.
+            var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var abortRegistration = httpContext.RequestAborted.Register(static state => ((TaskCompletionSource)state!).TrySetCanceled(), acknowledged);
+            httpContext.Response.OnCompleted(static state =>
+            {
+                var (tcs, registration) = ((TaskCompletionSource, CancellationTokenRegistration))state;
+                registration.Dispose();
+                tcs.TrySetResult();
+                return Task.CompletedTask;
+            }, (acknowledged, abortRegistration));
+
             // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException),
             // an unpack rejection (crypto/malformed/consistency/resolution), and a downstream
             // DID-resolution timeout (TaskCanceledException with the request token NOT cancelled) all
@@ -203,19 +229,26 @@ public static class DidCommEndpointRouteBuilderExtensions
             try
             {
                 var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
-                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, httpContext.RequestAborted).ConfigureAwait(false);
+                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, acknowledged.Task, httpContext.RequestAborted).ConfigureAwait(false);
                 // HTTP receive is one-way (FR-TRN-10): the reply is logged, not sent. Delivering it is
                 // the application's decision — see the onReceive-callback overload and MapDidCommEndpoint's
                 // remarks for why an automatic inbound-triggered outbound send is deliberately absent.
                 LogOutcome(logger, outcome, sameSocketDelivered: false);
+                // The only exit after the handler ran: the 202. OnCompleted then completes the
+                // acknowledgement once it is committed.
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
             catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
+                acknowledged.TrySetCanceled();
                 throw; // genuine client abort — propagate
             }
             catch (Exception ex)
             {
+                // A 400 also completes OnCompleted, but it is never an acknowledgement of the inbound:
+                // cancel first, so a handler that ran before this throw (a logger fault in
+                // LogOutcome is the one such path) drops its deferred work instead of publishing it.
+                acknowledged.TrySetCanceled();
                 return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
             }
         });
@@ -308,6 +341,12 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// recipient key ids bind the peer and local DID, and the reply names exactly those participants.
     /// Signed-only, plaintext, anoncrypt, keyless, cross-tenant, and fan-out cases emit no frame.
     /// Defaults to <c>false</c> per FR-TRN-10's one-way reading.
+    /// <para>
+    /// There is no per-message wire acknowledgement on a WebSocket (nothing is written back for an
+    /// accepted envelope), so the dispatch carries none: <see cref="ProtocolContext.Acknowledged"/>
+    /// is already complete and a handler that defers past the acknowledgement — the mediator's
+    /// <c>ForwardHandler</c> — proceeds as soon as it has admitted the message.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
