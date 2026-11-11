@@ -20,12 +20,15 @@ public sealed class DidCommReceiveOptions
     };
 
     /// <summary>
-    /// When the registry-aware <c>MapDidCommWebSocket</c> overload's dispatcher produces a
-    /// reply (e.g. a Trust Ping response), should it be sent back over the SAME WebSocket the
-    /// inbound message arrived on? Defaults to <c>false</c>: DIDComm is one-way per FR-TRN-10
-    /// and replies travel out of band by default. When enabled, delivery still fails closed unless
-    /// the inbound envelope is both encrypted and authenticated, the peer and decrypting local DID
-    /// are bound by verified key ids, and the reply targets exactly that peer from that local DID.
+    /// The WebSocket return-route switch (PRD §8a, FR-RR-05). When <c>true</c>, the registry-aware
+    /// <c>MapDidCommWebSocket</c> opens a return-route session at the first authcrypted (authcrypt layer)
+    /// message carrying <c>return_route: all</c> (FR-RR-03) and delivers handler replies and
+    /// <c>IReturnRouteSession.TrySendAsync</c> pushes on that socket, authcrypted from the DID that
+    /// decrypted that message to exactly its authenticated sender; a header-less message on a
+    /// socket without a session gets no reply (FR-RR-01). Defaults to <c>false</c> (FR-TRN-10
+    /// one-way): no session is opened and nothing is written back, while FR-RR-08 replay admission
+    /// still applies. HTTP return-route (<c>MapDidCommEndpoint</c>) has no switch (FR-RR-04). Not
+    /// available under <see cref="UseStomp"/>.
     /// </summary>
     public bool AllowSameSocketReplies { get; set; }
 
@@ -40,8 +43,9 @@ public sealed class DidCommReceiveOptions
     /// out-of-order STOMP frames close the connection with 1002 (protocol error); the
     /// <c>MaxReceiveBytes</c> cap still closes with 1009 before any decoding (FR-API-06). No
     /// broker semantics — subscriptions, acks, receipts, and heart-beats are not supported.
-    /// Pair with <c>WebSocketTransportOptions.UseStomp</c> on the sending side. In STOMP mode
-    /// <see cref="AllowSameSocketReplies"/> is ignored (no frame is emitted): a compliant
+    /// Pair with <c>WebSocketTransportOptions.UseStomp</c> on the sending side. In STOMP mode no
+    /// return-route session is ever created and <see cref="AllowSameSocketReplies"/> is ignored
+    /// (one Information line per connection on the first eligible message): a compliant
     /// server-to-client push needs MESSAGE frames and subscriptions — broker semantics outside
     /// this minimal subset — so replies travel out of band per FR-TRN-10.
     /// </summary>

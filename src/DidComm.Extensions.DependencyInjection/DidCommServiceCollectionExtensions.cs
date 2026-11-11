@@ -2,6 +2,7 @@ using DidComm.Facade;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -27,6 +28,16 @@ public static class DidCommServiceCollectionExtensions
     /// (via <see cref="DidCommBuilder.UseNetDidResolver"/> or by calling
     /// <c>Services.AddSingleton&lt;IDidKeyService&gt;</c> directly) — FR-SEC-02 fail-fast.
     /// </summary>
+    /// <remarks>
+    /// Also registers, unless the host registered them first, the return-route receive side
+    /// (FR-RR-03 / FR-RR-08): a singleton <see cref="IReturnRouteSessionRegistry"/>
+    /// (<see cref="InMemoryReturnRouteSessionRegistry"/> over <see cref="ReturnRouteSessionOptions"/>)
+    /// and a singleton <see cref="IInboundReplayGuard"/> (<see cref="InMemoryReplayGuard"/> over
+    /// <see cref="ReplayProtectionOptions"/> and <see cref="DidCommOptions"/>). Both validate their
+    /// options on first resolution. Neither depends on the handler registry, the dispatcher, the
+    /// facade or any handler, so a protocol handler may take either in its constructor without
+    /// cycling the DI graph.
+    /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="configure">Builder callback.</param>
     public static IServiceCollection AddDidComm(
@@ -40,6 +51,25 @@ public static class DidCommServiceCollectionExtensions
         configure(builder);
 
         services.AddOptions<DidCommOptions>();
+        // Return-route receive side (#91, FR-RR-03 / FR-RR-08): one shared session registry and one
+        // replay guard per host, so the endpoints and the handlers that take them (message-pickup
+        // live delivery) see the same sessions and the same admissions. TryAdd: a host that
+        // registered its own implementation first keeps it. Both validate their options at
+        // construction (fail fast on first resolution). Configure via
+        // services.AddOptions<ReturnRouteSessionOptions>().Configure(...) and the replay sibling.
+        // Dependency walk (DI cycle rule): registry <- options + logger; guard <- options +
+        // DidCommOptions + logger. Neither reaches ProtocolHandlerRegistry, ProtocolDispatcher,
+        // DidCommClient or any handler, so a handler may take either in its constructor and the
+        // handler registry's IEnumerable<IProtocolHandler> walk cannot cycle.
+        services.AddOptions<ReturnRouteSessionOptions>();
+        services.AddOptions<ReplayProtectionOptions>();
+        services.TryAddSingleton<IReturnRouteSessionRegistry>(sp => new InMemoryReturnRouteSessionRegistry(
+            sp.GetRequiredService<IOptions<ReturnRouteSessionOptions>>().Value,
+            sp.GetService<ILogger<InMemoryReturnRouteSessionRegistry>>()));
+        services.TryAddSingleton<IInboundReplayGuard>(sp => new InMemoryReplayGuard(
+            sp.GetRequiredService<IOptions<ReplayProtectionOptions>>().Value,
+            sp.GetRequiredService<IOptions<DidCommOptions>>().Value,
+            sp.GetService<ILogger<InMemoryReplayGuard>>()));
         services.TryAddSingleton<JoseCryptoProvider>();
         // Phase 5: a TransportRouter wraps whatever IDidCommTransport implementations the
         // consumer has registered. We register it unconditionally so SendAsync's null check

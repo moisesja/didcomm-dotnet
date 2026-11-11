@@ -23,6 +23,11 @@ namespace DidComm.Resolution;
 /// shape. The parser refuses it by default; opt in by passing
 /// <c>allowBareStringServiceEndpoint = true</c>.
 /// </para>
+/// <para>
+/// The parser recognises <c>didcomm:transport/queue</c> as a valid <c>uri</c> (FR-RR-06): it is a
+/// plain string here, projected like any other; <see cref="Transports.ReturnRoute.QueueTransport.IsQueueTransport(string?)"/>
+/// identifies it downstream, where the send path refuses it.
+/// </para>
 /// </remarks>
 internal static class ServiceEndpointParser
 {

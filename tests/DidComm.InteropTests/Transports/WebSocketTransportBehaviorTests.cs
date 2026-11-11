@@ -472,6 +472,7 @@ public sealed class WebSocketTransportBehaviorTests
         // dispose walks away, and the send is then killed on a transport that was still able to
         // wait for it. Hold here is ~1.5 s connect + ~0.5 s send = 2 s, with SendTimeout 0.8 s.
         var socket = new SlowSendWebSocket(TimeSpan.FromMilliseconds(500));
+        var connectEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var options = Options.Create(new WebSocketTransportOptions
         {
             AllowedSchemes = new[] { "ws" },
@@ -479,12 +480,20 @@ public sealed class WebSocketTransportBehaviorTests
             ConnectTimeout = TimeSpan.FromSeconds(3),
             SendTimeout = TimeSpan.FromMilliseconds(800),
             WebSocketFactory = () => socket,
-            Connect = (_, _, ct) => Task.Delay(TimeSpan.FromMilliseconds(1500), ct),
+            Connect = async (_, _, ct) =>
+            {
+                connectEntered.TrySetResult();
+                await Task.Delay(TimeSpan.FromMilliseconds(1500), ct).ConfigureAwait(false);
+            },
         });
         var transport = new WebSocketDidCommTransport(options);
 
         var send = Task.Run(() => transport.SendAsync(NewRequest(), default));
-        await Task.Delay(200); // dispose lands while the send is still connecting
+        // Dispose must land while the send is still connecting. Wait for the send to reach its
+        // connect rather than sleeping a fixed 200 ms: on a loaded runner the Task.Run may not have
+        // started by then, and the send would meet an already-disposed transport (L-044).
+        (await Task.WhenAny(connectEntered.Task, Task.Delay(TimeSpan.FromSeconds(5))))
+            .Should().Be(connectEntered.Task, "the send must reach the connect before dispose starts");
         var dispose = transport.DisposeAsync().AsTask();
 
         (await send).Accepted.Should().BeTrue(

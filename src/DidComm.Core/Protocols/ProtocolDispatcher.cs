@@ -3,6 +3,7 @@ using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Protocols.Trace;
 using DidComm.Threading;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.Logging;
 
 namespace DidComm.Protocols;
@@ -18,11 +19,24 @@ namespace DidComm.Protocols;
 /// trust model.
 /// </summary>
 /// <remarks>
-/// The dispatcher does NOT itself send replies — that decision is the transport's, because
-/// HTTP receive is one-way per FR-TRN-10 (replies travel out of band) while WebSocket can
-/// optionally reply on the same socket when the operator opts in. Keeping the dispatcher
-/// transport-agnostic also makes it directly testable from unit tests without spinning up an
-/// ASP.NET Core host.
+/// <para>
+/// The dispatcher does NOT itself send replies — that decision is the transport's. Receive is
+/// one-way by default (FR-TRN-10: replies travel out of band); only when the transport bound a
+/// return-route session to the inbound (PRD §8a, <see cref="ProtocolContext.Session"/>) does a
+/// reply go back on the same connection — as the HTTP <c>200</c> body, or as a push on a
+/// WebSocket whose operator enabled it. Keeping the dispatcher transport-agnostic also makes it
+/// directly testable from unit tests without spinning up an ASP.NET Core host.
+/// </para>
+/// <para>
+/// The dispatcher checks neither return-route eligibility nor FR-RR-08 replay: both are transport
+/// admission. A session must never be findable for a message that was not admitted, and admission
+/// is a one-shot check-and-insert — if the dispatcher re-checked it, every admitted message would
+/// reject itself. The AspNetCore endpoints run their inbound admission before calling here; a
+/// transport of its own must do the same and pass the session it created to
+/// <see cref="DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, IReturnRouteSession?, CancellationToken)"/>.
+/// The dispatcher does re-read the <c>return_route</c> header (pure, one dictionary lookup, no
+/// log) so <see cref="ProtocolContext.ReturnRoute"/> is truthful for every caller.
+/// </para>
 /// </remarks>
 /// <example>
 /// Driven by the receive endpoints in <c>samples/04-MediatorAgent</c> and the custom-handler section of <c>samples/02-Cookbook</c> (section X).
@@ -142,11 +156,34 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     /// <param name="options">The active <see cref="DidCommOptions"/>.</param>
     /// <param name="acknowledged">Completes when the transport has acknowledged the inbound on the wire; cancelled or faulted when it never will. <see cref="Task.CompletedTask"/> for "no ordering".</param>
     /// <param name="ct">Cancellation token.</param>
+    public Task<DispatchOutcome> DispatchAsync(
+        UnpackResult received,
+        DidCommClient? client,
+        DidCommOptions options,
+        Task acknowledged,
+        CancellationToken ct = default)
+        => DispatchAsync(received, client, options, acknowledged, session: null, ct);
+
+    /// <summary>
+    /// Dispatch <paramref name="received"/> to its handler with a transport acknowledgement signal
+    /// and the return-route session the transport bound to this inbound (FR-RR-03).
+    /// <paramref name="session"/> becomes the handler's <see cref="ProtocolContext.Session"/>; the
+    /// parsed <c>return_route</c> header becomes <see cref="ProtocolContext.ReturnRoute"/>. The
+    /// dispatcher performs no admission of its own (see the class remarks): the caller passes a
+    /// session only for an inbound it admitted, and <c>null</c> otherwise.
+    /// </summary>
+    /// <param name="received">The unpack result for the inbound envelope.</param>
+    /// <param name="client">The facade — passed through to the handler via <see cref="ProtocolContext.Client"/>. Nullable for ergonomic unit tests; production code always supplies it.</param>
+    /// <param name="options">The active <see cref="DidCommOptions"/>.</param>
+    /// <param name="acknowledged">Completes when the transport has acknowledged the inbound on the wire; cancelled or faulted when it never will. <see cref="Task.CompletedTask"/> for "no ordering".</param>
+    /// <param name="session">The return-route session bound to this inbound, or <c>null</c> when the transport opened none.</param>
+    /// <param name="ct">Cancellation token.</param>
     public async Task<DispatchOutcome> DispatchAsync(
         UnpackResult received,
         DidCommClient? client,
         DidCommOptions options,
         Task acknowledged,
+        IReturnRouteSession? session,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(received);
@@ -200,7 +237,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
 
         try
         {
-            var outcome = await DispatchCoreAsync(received, client, options, acknowledged, ct).ConfigureAwait(false);
+            var outcome = await DispatchCoreAsync(received, client, options, acknowledged, session, ct).ConfigureAwait(false);
             activity?.SetTag(DidCommDiagnostics.DispatchResultTag, outcome.Result.ToString());
             return outcome;
         }
@@ -276,6 +313,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         DidCommClient? client,
         DidCommOptions options,
         Task acknowledged,
+        IReturnRouteSession? session,
         CancellationToken ct)
     {
         // FR-PROTO-11: when Trace 2.0 is opted in via EnableTracing, exercise the decision logic
@@ -325,7 +363,14 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         }
 
         var thread = _threads.GetOrCreate(received.Message.Thid ?? received.Message.Id);
-        var context = new ProtocolContext(received, thread, client, options, _threads) { Acknowledged = acknowledged };
+        var context = new ProtocolContext(received, thread, client, options, _threads)
+        {
+            Acknowledged = acknowledged,
+            Session = session,
+            // Re-read here (pure, no log) so the context is truthful for direct dispatcher callers
+            // too; the endpoint logged a malformed value once already (FR-RR-01).
+            ReturnRoute = ReturnRouteHeader.Read(received.Message),
+        };
 
         var reply = await handler.HandleAsync(received.Message, context, ct).ConfigureAwait(false);
         if (reply is null)

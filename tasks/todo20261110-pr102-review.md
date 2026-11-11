@@ -20,3 +20,17 @@ Validation: targeted tests rebuilt HEAD and passed (189 Core + 28 Interop); full
 Reproduction artifacts: `/tmp/pr102-adversarial`, `/tmp/pr102-delay-repro`, `/tmp/pr102-qa`.
 
 Posted change-requesting conversation comment: https://github.com/moisesja/didcomm-dotnet/pull/102#issuecomment-6785883066 . Head rechecked as `1fd024dac4958dcd1543761587e80c1d26968ff1` immediately before publication. Connector write returned 403; authenticated GitHub CLI posted successfully after network sandbox escalation. No formal review disposition, merge, or branch changes performed.
+
+## Re-review
+
+- [x] Read updated PR metadata and the fix commit following 1fd024d.
+- [x] Independently recheck acknowledgement ordering, logging privacy, and receipt-based scheduling, including new integration risks.
+- [x] Rebuild and validate regression coverage and CI for the final reviewed head.
+- [x] Recheck the remote head, publish and verify follow-up feedback.
+- [x] Record the outcome and validation limits.
+
+Re-reviewed `b55794b8c8a260b0282629646ff844acbb303f03` (production changes in `e386e018`; subsequent commit adds task documents only). All three prior findings are resolved; architecture, QA, and adversarial reviewers found no remaining blocker. Release build with `/warnaserror` passed with zero warnings/errors; 1308 Core and 320 Interop tests passed, zero skipped/failed. CI run 42954600916 passed; `git diff --check` passed.
+
+The original console-log and receipt-delay reproductions now pass. A 200-round concurrent admission/acknowledgement/cancellation/disposal check left zero item/byte reservations; a 5000-message sequential HTTP probe found no delivery inversions. Isolated probes use actual production components with synthetic unpack metadata; the suite's integration tests cover encrypted envelopes. These checks do not prove every possible interleaving.
+
+Approving follow-up posted and verified: https://github.com/moisesja/didcomm-dotnet/pull/102#issuecomment-6786406425 . Head rechecked immediately before publication. Nonblocking cleanup: PR description still claims AspNetCore had no changes and lists old test counts. No formal GitHub approval, merge, or implementation changes performed.

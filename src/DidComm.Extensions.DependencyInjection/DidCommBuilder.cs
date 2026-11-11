@@ -43,7 +43,9 @@ public sealed class DidCommBuilder
         // registered IProtocolHandler — so AddProtocol<T>() only needs to add the handler to
         // the IServiceCollection, and first resolution of the singleton picks up everything
         // registered before that point.
-        Services.TryAddSingleton<ProtocolHandlerRegistry>(sp =>
+        // Guarded (DependencyCycleGuard): a dependency cycle through this factory — a handler that
+        // depends back on the registry or the dispatcher — fails fast instead of deadlocking.
+        Services.TryAddSingleton<ProtocolHandlerRegistry>(DependencyCycleGuard.Guard(typeof(ProtocolHandlerRegistry), sp =>
         {
             var registry = new ProtocolHandlerRegistry();
             var logger = sp.GetService<ILogger<ProtocolHandlerRegistry>>();
@@ -64,20 +66,20 @@ public sealed class DidCommBuilder
                 registry.Register(handler);
             }
             return registry;
-        });
+        }));
         // Explicit factory rather than TryAddSingleton<ProtocolDispatcher>(): the default greediest-
         // constructor selection would only pick the observer/correlator-aware ctor when TraceOptions
         // also happens to be registered (i.e. EnableTracing was called), silently dropping them
         // otherwise. The factory always calls the full ctor, resolving the optional pieces explicitly,
         // so FR-PROTO-12 observers AND FR-PROTO-05a inline correlators (e.g. DiscoverFeaturesClient)
         // are wired regardless of tracing.
-        Services.TryAddSingleton<ProtocolDispatcher>(sp => new ProtocolDispatcher(
+        Services.TryAddSingleton<ProtocolDispatcher>(DependencyCycleGuard.Guard(typeof(ProtocolDispatcher), sp => new ProtocolDispatcher(
             sp.GetRequiredService<ProtocolHandlerRegistry>(),
             sp.GetRequiredService<IThreadStateStore>(),
             sp.GetService<ILogger<ProtocolDispatcher>>(),
             sp.GetService<TraceOptions>(),
             sp.GetServices<IProtocolObserver>(),
-            sp.GetServices<IInboundCorrelator>()));
+            sp.GetServices<IInboundCorrelator>())));
     }
 
     /// <summary>
@@ -94,9 +96,11 @@ public sealed class DidCommBuilder
         // TryAddEnumerable de-dupes by ImplementationType; the typed factory below sets
         // ImplementationType = typeof(T), so repeat AddProtocol<T>() calls are no-ops. The
         // factory forwards to the singleton T registered above so the IEnumerable entry shares
-        // that single T instance instead of constructing a duplicate.
+        // that single T instance instead of constructing a duplicate. Guarded: every walk of the
+        // handlers passes through it, so a cycle back into the handlers (a service T depends on
+        // that takes IEnumerable<IProtocolHandler>) fails fast instead of deadlocking.
         Services.TryAddEnumerable(
-            ServiceDescriptor.Singleton<IProtocolHandler, T>(sp => sp.GetRequiredService<T>()));
+            ServiceDescriptor.Singleton<IProtocolHandler, T>(DependencyCycleGuard.Guard(typeof(T), sp => sp.GetRequiredService<T>())));
         return this;
     }
 
@@ -173,14 +177,16 @@ public sealed class DidCommBuilder
     /// <see cref="ProtocolDispatcher"/> or <see cref="IFeatureProvider"/>. An <see cref="IForwardSink"/>
     /// implementation MUST keep it that way: never take the registry or the dispatcher in its
     /// constructor — inject <see cref="IServiceProvider"/> and resolve at call time — or the first
-    /// resolution of the registry deadlocks on itself: the container cannot see the cycle (both
-    /// ends are factories) and parks the resolving thread forever, so the first inbound request
-    /// hangs and every later resolution of the registry with it. This method therefore refuses a
-    /// host-registered <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or
+    /// resolution of the registry fails: the container cannot see the cycle (both ends are
+    /// factories) and, left alone, would park the resolving thread forever; the registry, dispatcher
+    /// and handler factories registered here detect being re-entered and throw
+    /// <see cref="InvalidOperationException"/> instead, so the first inbound request fails rather
+    /// than hangs. This method also refuses, at registration, a host-registered
+    /// <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or
     /// <see cref="IRecipientRoutingKeyProvider"/> whose implementation type takes the registry,
     /// the dispatcher or a protocol handler in a public constructor. A collaborator registered
     /// through a factory, or one that closes the cycle through a further dependency, cannot be
-    /// inspected and stays the host's responsibility.
+    /// inspected here; its cycle surfaces as that exception on first resolution.
     /// </para>
     /// <para>
     /// The container disposes the singleton <see cref="ForwardHandler"/> with the provider, which
@@ -189,7 +195,7 @@ public sealed class DidCommBuilder
     /// </remarks>
     /// <param name="options">Pass-through / rewrap / extra routing keys; <c>null</c> for the defaults (pass-through, no extras). A positional record, so an instance rather than a callback.</param>
     /// <exception cref="ArgumentException">When <paramref name="options"/> combines rewrap mode with extra routing keys (<see cref="ForwardProcessorOptions.Validate"/>).</exception>
-    /// <exception cref="InvalidOperationException">When a host-registered <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or <see cref="IRecipientRoutingKeyProvider"/> implementation type takes <see cref="ProtocolHandlerRegistry"/>, <see cref="ProtocolDispatcher"/> or an <see cref="IProtocolHandler"/> in a public constructor — the dependency cycle that would hang the first resolution.</exception>
+    /// <exception cref="InvalidOperationException">When a host-registered <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or <see cref="IRecipientRoutingKeyProvider"/> implementation type takes <see cref="ProtocolHandlerRegistry"/>, <see cref="ProtocolDispatcher"/> or an <see cref="IProtocolHandler"/> in a public constructor — the dependency cycle that would otherwise fail the first resolution.</exception>
     public DidCommBuilder AddRoutingMediator(ForwardProcessorOptions? options = null)
     {
         var resolved = options ?? new ForwardProcessorOptions();
@@ -216,7 +222,8 @@ public sealed class DidCommBuilder
     /// Refuse a <see cref="ForwardHandler"/> collaborator whose public constructor would close the
     /// L-017 cycle: the registry factory realizes <see cref="ForwardHandler"/>, which realizes the
     /// collaborator, which would need the registry (or the dispatcher, which needs the registry; or
-    /// a handler, which the registry is realizing) — a hang the container never diagnoses.
+    /// a handler, which the registry is realizing) — a cycle the container never diagnoses, refused
+    /// here at registration rather than on the first resolution.
     /// </summary>
     /// <param name="collaborator">The collaborator service type registered before <see cref="AddRoutingMediator"/>.</param>
     private void RejectRegistryCycle(Type collaborator)
@@ -238,7 +245,7 @@ public sealed class DidCommBuilder
                         $"{implementation.FullName}, registered as {collaborator.Name}, takes {parameter.ParameterType.Name} in a constructor. " +
                         "ForwardHandler is built inside the ProtocolHandlerRegistry factory, so a collaborator that needs the registry, the " +
                         "dispatcher or a protocol handler at construction closes a dependency cycle the container cannot detect, and the first " +
-                        "resolution hangs. Inject IServiceProvider and resolve it when AcceptAsync (or the lookup) runs instead.");
+                        "resolution fails. Inject IServiceProvider and resolve it when AcceptAsync (or the lookup) runs instead.");
                 }
             }
         }

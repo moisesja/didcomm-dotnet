@@ -10,6 +10,7 @@ using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using DpEnc = DataProofsDotnet.Jose.Encryption;
@@ -487,6 +488,14 @@ public sealed partial class DidCommClient
     /// <see cref="IServiceEndpointResolver"/> and a <see cref="ITransportRouter"/> to be wired in
     /// (use <c>AddDidComm(b =&gt; b.UseNetDidResolver().UseHttpTransport()...)</c>).
     /// </summary>
+    /// <remarks>
+    /// FR-RR-06: when the endpoint — the override, or the one resolved from the recipient's
+    /// <c>DIDCommMessaging</c> service — is <c>didcomm:transport/queue</c>
+    /// (<see cref="Transports.ReturnRoute.QueueTransport"/>), <c>SendAsync</c> throws a
+    /// <see cref="TransportException"/> (scheme <c>didcomm</c>) before any transport activity; the
+    /// recipient's keys and service entry are resolved and the message is packed first, because the
+    /// endpoint lives in that service entry. The sender holds the message for pickup.
+    /// </remarks>
     /// <param name="message">The plaintext message.</param>
     /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional explicit endpoint override.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -529,6 +538,14 @@ public sealed partial class DidCommClient
                 "SendAsync requires an ITransportRouter. Register a transport via builder.UseHttpTransport()/UseWebSocketTransport() or pass one to the (secrets, keyService, serviceResolver, transportRouter, options) constructor (FR-TRN-01).");
         }
 
+        // FR-RR-06: the queue URI names no transport. A caller-supplied override is judged on its
+        // shape before any packing; the resolved endpoint is judged right after the pack below,
+        // because it lives in the recipient's service entry. Either way SendAsync throws before
+        // any transport activity — the recipient's keys and service entry are resolved and the
+        // message is packed first.
+        if (QueueTransport.IsQueueTransport(options.ServiceEndpointOverride))
+            throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
+
         // When the caller supplies an explicit endpoint, we skip the FR-ROUTE-02 forward
         // wrapping path: the sender already knows where to send the inner envelope. Useful
         // for tests, for direct (non-mediated) recipients, and for transports built on top
@@ -543,6 +560,9 @@ public sealed partial class DidCommClient
             Forward: options.ServiceEndpointOverride is null);
 
         var packed = await PackEncryptedAsync(message, packOptions, ct).ConfigureAwait(false);
+
+        if (QueueTransport.IsQueueTransport(packed.ServiceEndpoint))
+            throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
 
         var endpointUri = options.ServiceEndpointOverride;
         if (endpointUri is null)
