@@ -9,9 +9,11 @@ namespace DidComm.Transports.ReturnRoute;
 /// that registers its own <see cref="IReturnRouteSessionRegistry"/> first keeps it.
 /// </summary>
 /// <remarks>
-/// All state lives under one lock and every decision — already registered, total bound, per-peer
-/// eviction, insert — is made inside it, so two concurrent registrations for one peer at the bound
-/// evict exactly one session each. Eviction is O(1) per registration (the peer's list is in
+/// All state lives under one lock and every decision — already registered, per-peer eviction,
+/// total bound, insert — is made inside it, so two concurrent registrations for one peer at the
+/// bound evict exactly one session each. A peer at its own per-peer bound replaces its oldest
+/// session even when the registry is at <see cref="ReturnRouteSessionOptions.MaxSessions"/> (the
+/// total does not grow); only a registration that would grow the total is refused there. Eviction is O(1) per registration (the peer's list is in
 /// registration order, so its oldest is the first element); there is no amortized sweep. Events
 /// are raised after the lock is released. Log lines carry counts only, never a DID.
 /// </remarks>
@@ -73,23 +75,30 @@ public sealed class InMemoryReturnRouteSessionRegistry : IReturnRouteSessionRegi
         {
             if (_all.Contains(session))
                 return new SessionRegistration(SessionRegistrationOutcome.AlreadyRegistered, null);
-            if (_count >= _options.MaxSessions)
-            {
-                count = _count;
-                goto Refused;
-            }
 
-            if (!_byPeer.TryGetValue(peer, out var list))
-            {
-                list = new List<IReturnRouteSession>();
-                _byPeer[peer] = list;
-            }
-            else if (list.Count >= _options.MaxSessionsPerPeer)
+            // The per-peer bound is checked first: a peer at its own bound replaces its oldest
+            // session, which never grows the total and never touches another DID — so a peer
+            // reconnecting while the registry is full (its old socket not yet noticed dead) is not
+            // locked out by a flood of other DIDs. Only a registration that would grow the total
+            // is refused at MaxSessions.
+            _byPeer.TryGetValue(peer, out var list);
+            if (list is not null && list.Count >= _options.MaxSessionsPerPeer)
             {
                 evicted = list[0];
                 list.RemoveAt(0);
                 _all.Remove(evicted);
                 _count--;
+            }
+            else if (_count >= _options.MaxSessions)
+            {
+                count = _count;
+                goto Refused;
+            }
+
+            if (list is null)
+            {
+                list = new List<IReturnRouteSession>();
+                _byPeer[peer] = list;
             }
 
             list.Add(session);

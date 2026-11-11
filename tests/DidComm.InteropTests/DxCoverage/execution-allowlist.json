@@ -102,15 +102,7 @@
       "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Messages.MessageBuilder::WithReturnRoute(DidComm.Transports.ReturnRoute.ReturnRouteMode,System.String)",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.IInboundReplayGuard",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.IInboundReplayGuard::TryAdmit(System.String,System.String,System.Nullable`1<System.Int64>,System.DateTimeOffset)",
+      "member": "DidComm.AspNetCore!DidComm.AspNetCore.DidCommEndpointRouteBuilderExtensions::MapDidCommEndpoint(Microsoft.AspNetCore.Routing.IEndpointRouteBuilder,System.String,System.Func`4<DidComm.Facade.UnpackResult,DidComm.Transports.ReturnRoute.IReturnRouteSession,System.Threading.CancellationToken,System.Threading.Tasks.Task`1<DidComm.Messages.Message>>)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
@@ -178,19 +170,7 @@
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions,DidComm.Facade.DidCommOptions)",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions,DidComm.Facade.DidCommOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Transports.ReturnRoute.InMemoryReplayGuard>)",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::TryAdmit(System.String,System.String,System.Nullable`1<System.Int64>,System.DateTimeOffset)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
@@ -246,55 +226,11 @@
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.MediatorServiceProtocols",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.MediatorServiceProtocols::IsMediatorServiceType(System.String)",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.MediatorServiceProtocols::IsReplayExempt(System.String)",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.MediatorServiceProtocols::prop:All",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::.ctor()",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::Validate()",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:MaxEntries",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:MaxEntriesPerPeer",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:MaxMessageIdLength",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:RequireCreatedTime",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:Window",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReturnRouteHeader::prop:Mode",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {

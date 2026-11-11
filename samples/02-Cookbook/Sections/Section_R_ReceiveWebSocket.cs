@@ -10,6 +10,7 @@ using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Threading;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using DidComm.Transports.WebSocket;
 
 // L-014: alias the static TrustPing API class so the namespace import doesn't shadow it.
@@ -112,8 +113,22 @@ public static class Section_R_ReceiveWebSocket
         await using var dispatchTransport = new WebSocketDidCommTransport(dispatchOptions);
         var dispatchSender = new DidCommClient(secrets, keyService, serviceResolver,
             new TransportRouter(new IDidCommTransport[] { dispatchTransport }), new DidCommOptions());
+        // The ping asks for replies on this connection with `return_route: all` — the DIDComm
+        // return-route extension. Bob's endpoint below has same-socket replies switched off, so no
+        // return-route session opens and nothing comes back on the socket; the ping is still
+        // dispatched to the Trust Ping handler. A message carrying the header must also carry a
+        // fresh created_time (the receiver's replay protection checks it); it is stamped by hand
+        // here because the client does not stamp it automatically yet.
+        var ping = new MessageBuilder()
+            .WithType(TrustPingApi.PingType)
+            .WithFrom(ctx.Alice.Did)
+            .WithTo(ctx.Bob.Did)
+            .WithReturnRoute(ReturnRouteMode.All)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+        ctx.Narrator.Note("The ping carries return_route: all, but this endpoint's same-socket replies are off, so no session opens and no reply rides back.");
         var pingSend = await dispatchSender.SendAsync(
-            TrustPingApi.CreatePing(from: ctx.Alice.Did, to: ctx.Bob.Did),
+            ping,
             new SendOptions(
                 Recipients: new[] { ctx.Bob.Did },
                 From: ctx.Alice.Did,
@@ -140,9 +155,10 @@ public static class Section_R_ReceiveWebSocket
             sp.GetRequiredService<IOptions<DidCommOptions>>().Value));
 
         // Receive-side policy for the endpoint: which media types are accepted, the minimum time
-        // any rejection takes (a timing-oracle defense), whether a handler's reply may ride back
-        // on the same socket (off by default per FR-TRN-10's one-way reading), and whether the
-        // socket speaks raw binary frames or STOMP (section 05-WebSocketChat shows STOMP).
+        // any rejection takes (a timing-oracle defense), whether the socket honours a
+        // `return_route: all` request from an authenticated peer (off here, so the dispatching
+        // endpoint answers nothing on the socket — the return-route extension, FR-RR-05), and
+        // whether the socket speaks raw binary frames or STOMP (section 05-WebSocketChat shows STOMP).
         var receiveOptions = new DidCommReceiveOptions
         {
             AllowSameSocketReplies = false,

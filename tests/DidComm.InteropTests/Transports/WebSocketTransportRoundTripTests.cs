@@ -11,6 +11,7 @@ using DidComm.Samples.Shared;
 using DidComm.Secrets;
 using DidComm.TestSupport;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using DidComm.Transports.WebSocket;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
@@ -52,10 +53,14 @@ public sealed class WebSocketTransportRoundTripTests
         // The shared server holds both Bob and Carol. The plaintext puts Carol first, but the real
         // authcrypt recipient is Bob. The old path would successfully authenticate the reply as
         // Carol, so this is a real cross-tenant regression—not merely a missing-key failure.
+        // FR-RR-01/FR-RR-05: a same-socket reply now needs a return-route session, opened only by a
+        // message carrying `return_route: all` (and, for FR-RR-08 replay admission, created_time).
         var ping = new MessageBuilder()
             .WithType(TrustPing.PingType)
             .WithFrom(aliceDid)
             .WithTo(carolDid, bobDid)
+            .WithReturnRoute(ReturnRouteMode.All)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
             .Build();
         var packed = await client.PackEncryptedAsync(ping, new PackEncryptedOptions(
             Recipients: new[] { bobDid },
@@ -96,7 +101,15 @@ public sealed class WebSocketTransportRoundTripTests
         await using var aliceServices = BuildPeerServices(aliceSecrets);
         var client = aliceServices.GetRequiredService<DidCommClient>();
 
-        var ping = TrustPing.CreatePing(aliceDid, bobDid);
+        // FR-RR-01/FR-RR-05: the ping asks for return-route, so this also proves "signed-only + all →
+        // no session" (FR-RR-03), not merely "no header → no reply".
+        var ping = new MessageBuilder()
+            .WithType(TrustPing.PingType)
+            .WithFrom(aliceDid)
+            .WithTo(bobDid)
+            .WithReturnRoute(ReturnRouteMode.All)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
         var signed = await client.PackSignedAsync(ping, aliceDid);
         var wsClient = server.CreateWebSocketClient();
         using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(server, "/ws/didcomm"), default);
@@ -307,7 +320,16 @@ public sealed class WebSocketTransportRoundTripTests
         var client = aliceServices.GetRequiredService<DidCommClient>();
 
         var hostile = WithSignerKid(await client.PackSignedAsync(TrustPing.CreatePing(aliceDid, bobDid), aliceDid), OverLongKid(aliceDid));
-        var valid = await client.PackEncryptedAsync(TrustPing.CreatePing(aliceDid, bobDid), new PackEncryptedOptions(
+        // FR-RR-01/FR-RR-05: the reply rides the socket only through a return-route session, which the
+        // valid ping opens with `return_route: all` (+ created_time for FR-RR-08).
+        var validPing = new MessageBuilder()
+            .WithType(TrustPing.PingType)
+            .WithFrom(aliceDid)
+            .WithTo(bobDid)
+            .WithReturnRoute(ReturnRouteMode.All)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+        var valid = await client.PackEncryptedAsync(validPing, new PackEncryptedOptions(
             Recipients: new[] { bobDid },
             From: aliceDid,
             Forward: false));

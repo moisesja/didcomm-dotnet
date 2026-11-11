@@ -11,6 +11,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.OutOfBand;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -41,6 +42,13 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// returns a uniform <c>400 Bad Request</c> with an empty body and the reason logged server-side
     /// only, so the response cannot be used as a decryption / recipient-kid / resolution oracle
     /// (FR-API-07, issues #20/#28/#33).
+    /// <para>
+    /// No return-route session and no FR-RR-08 replay admission: the callback receives every
+    /// unpacked message as before and the response is always <c>202</c>. Use the registry-aware
+    /// overload (<c>MapDidCommEndpoint(pattern)</c>) or the session-aware callback overload
+    /// (<c>Func&lt;UnpackResult, IReturnRouteSession?, CancellationToken, Task&lt;Message?&gt;&gt;</c>)
+    /// for FR-RR-* behaviour.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
@@ -142,24 +150,37 @@ public static class DidCommEndpointRouteBuilderExtensions
 
     /// <summary>
     /// Registry-aware HTTP receive endpoint (FR-PROTO-03). Same shape as the
-    /// <c>onReceive</c>-callback overload (validates content-type → 415, caps body → 413,
-    /// returns 202 on success) but resolves the inbound message to a registered
-    /// <see cref="IProtocolHandler"/> via <see cref="ProtocolDispatcher"/>. Any reply the
-    /// handler produces is LOGGED (HTTP receive is one-way per FR-TRN-10). Delivering a reply is
-    /// the application's decision, made out of band with <see cref="DidCommClient.SendAsync"/> —
-    /// deliberately NOT automatic: an inbound-triggered outbound send that trusts the message's
-    /// (possibly attacker-advertised) sender/endpoint is a reflection / amplification / cross-tenant
-    /// hazard. Use the <c>onReceive</c>-callback overload if you want to dispatch and then send a
-    /// reply under your own egress policy (bind the recipient to the authenticated inbound sender).
-    /// A Discover Features round-trip completes when the responder app sends its <c>disclose</c> back
-    /// to the initiator's endpoint this way.
+    /// <c>onReceive</c>-callback overload (validates content-type → 415, caps body → 413, opaque
+    /// <c>400</c> for any envelope or processing failure) but resolves the inbound message to a
+    /// registered <see cref="IProtocolHandler"/> via <see cref="ProtocolDispatcher"/>.
+    /// <para>
+    /// <b>Return-route (FR-RR-04).</b> After unpack, the inbound goes through return-route
+    /// admission: an authenticated message carrying <c>return_route</c> (other than <c>none</c>) or
+    /// of a mediator-service type must pass the FR-RR-08 replay guard (a fresh <c>created_time</c>
+    /// and a first-seen id) — a refused one is answered <c>202</c> with an empty body and is not
+    /// dispatched. When the inbound was authcrypted (<c>UnpackResult.Encrypted &amp;&amp; Authenticated</c>),
+    /// carries <c>return_route: all</c> and is not a <c>forward</c>, the handler gets a session
+    /// (<see cref="ProtocolContext.Session"/>) bound to the authenticated sender; a reply the handler
+    /// returns — or the one message it pushes through the session — is authcrypted from the DID
+    /// that decrypted the inbound to exactly that sender and returned as the <c>200</c> body
+    /// (<c>Content-Type: application/didcomm-encrypted+json</c>). At most one message per request: a
+    /// second push, or a returned reply after a push, is dropped (the push wins). Otherwise the
+    /// answer is <c>202</c> with an empty body and a handler reply is only logged. There is no
+    /// switch: the response is addressed only to the authenticated sender, which is exactly why it
+    /// is allowed. A reply to anyone else is never sent automatically — an inbound-triggered
+    /// outbound send that trusts the message's (possibly attacker-advertised) sender or endpoint is
+    /// a reflection / amplification / cross-tenant hazard; deliver such replies out of band with
+    /// <see cref="DidCommClient.SendAsync"/> under your own egress policy. A Discover Features
+    /// round-trip completes when the responder app sends its <c>disclose</c> back that way.
+    /// </para>
     /// <para>
     /// The dispatch carries a transport acknowledgement (<see cref="ProtocolContext.Acknowledged"/>):
-    /// it completes from <c>Response.OnCompleted</c>, once the 202 has been committed to the client,
-    /// and is cancelled when the request is aborted first or when the response turns into the
-    /// uniform 400 after the handler ran. A handler that must not act before the sender holds the
-    /// 202 — the mediator's <c>ForwardHandler</c>, whose processor and sink never run before the
-    /// response is on the wire (FR-ROUTE-11) — waits on it; other handlers ignore it.
+    /// it completes from <c>Response.OnCompleted</c>, once the response (the <c>202</c>, or the
+    /// <c>200</c> carrying the returned message) has been committed to the client, and is cancelled
+    /// when the request is aborted first or when the response turns into the uniform 400 after the
+    /// handler ran. A handler that must not act before the sender holds the response — the
+    /// mediator's <c>ForwardHandler</c>, whose processor and sink never run before the response is
+    /// on the wire (FR-ROUTE-11) — waits on it; other handlers ignore it.
     /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
@@ -171,6 +192,9 @@ public static class DidCommEndpointRouteBuilderExtensions
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
 
+        // Per mapped endpoint (JC-17 defaults, JC-22 drop-log rate limiters).
+        var admissionEndpoint = new InboundAdmissionEndpoint();
+
         return endpoints.MapPost(pattern, async (HttpContext httpContext) =>
         {
             var sp = httpContext.RequestServices;
@@ -179,6 +203,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
             var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Dispatch");
+            var replayGuard = admissionEndpoint.ResolveGuard(sp, coreOptions, logger);
 
             var contentType = httpContext.Request.ContentType;
             if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
@@ -205,12 +230,12 @@ public static class DidCommEndpointRouteBuilderExtensions
 
             // The transport acknowledgement handed to the handler (ProtocolContext.Acknowledged):
             // completes once the response has been committed to the client (Response.OnCompleted),
-            // which — because every path below that reaches the handler returns 202 — means "the
-            // sender holds the 202". Cancelled when the request aborts before that, so a forward
-            // whose sender never received its 202 is not relayed (the abort registration is kept
-            // until OnCompleted fires, not disposed when this delegate returns, because the
-            // response is written after it returns). If the response completed first, TrySetResult
-            // has already won and the late cancel is a no-op.
+            // which — because every path below that reaches the handler returns 202, or the 200
+            // carrying the returned message — means "the sender holds the response". Cancelled when
+            // the request aborts before that, so a forward whose sender never received its 202 is
+            // not relayed (the abort registration is kept until OnCompleted fires, not disposed when
+            // this delegate returns, because the response is written after it returns). If the
+            // response completed first, TrySetResult has already won and the late cancel is a no-op.
             var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var abortRegistration = httpContext.RequestAborted.Register(static state => ((TaskCompletionSource)state!).TrySetCanceled(), acknowledged);
             httpContext.Response.OnCompleted(static state =>
@@ -226,20 +251,49 @@ public static class DidCommEndpointRouteBuilderExtensions
             // DID-resolution timeout (TaskCanceledException with the request token NOT cancelled) all
             // return the same 400 with no body, so the status code itself is not an oracle (no
             // 400-vs-500 partition). Only a genuine client abort is rethrown.
+            HttpReturnRouteSession? session = null;
             try
             {
                 var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
-                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, acknowledged.Task, httpContext.RequestAborted).ConfigureAwait(false);
-                // HTTP receive is one-way (FR-TRN-10): the reply is logged, not sent. Delivering it is
-                // the application's decision — see the onReceive-callback overload and MapDidCommEndpoint's
-                // remarks for why an automatic inbound-triggered outbound send is deliberately absent.
-                LogOutcome(logger, outcome, sameSocketDelivered: false);
-                // The only exit after the handler ran: the 202. OnCompleted then completes the
-                // acknowledgement once it is committed.
-                return Results.StatusCode(StatusCodes.Status202Accepted);
+
+                // FR-RR-01/03/08: header, eligibility, replay. A refused message is answered like an
+                // accepted one (202, empty) and is neither dispatched nor given a session (JC-2).
+                var admission = InboundAdmission.Evaluate(unpacked, coreOptions, replayGuard, admissionEndpoint, logger);
+                if (!admission.Admitted)
+                    return Results.StatusCode(StatusCodes.Status202Accepted);
+
+                // FR-RR-04: no switch on HTTP — an eligible request gets a request-scoped session,
+                // never registered (JC-16).
+                if (admission.SessionEligible)
+                    session = new HttpReturnRouteSession(client, admission.PeerDid!, admission.LocalDid!, logger);
+
+                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, acknowledged.Task, session, httpContext.RequestAborted).ConfigureAwait(false);
+
+                // Without a session a reply is logged, not sent: an automatic inbound-triggered send to
+                // anyone but the authenticated sender is deliberately absent (see the remarks above).
+                var returned = false;
+                if (session is not null && outcome is { Result: DispatchResult.ReplyProduced, Reply: not null })
+                {
+                    // A pack failure is swallowed (type name logged) inside TrySendAsync and the
+                    // request still answers 202 — never a 400 after dispatch (JC-13).
+                    returned = await session.TrySendAsync(outcome.Reply, httpContext.RequestAborted).ConfigureAwait(false);
+                    if (!returned && session.HasResponse)
+                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the handler's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", unpacked.Message.Id);
+                }
+                LogOutcome(logger, outcome, returnedOnSession: returned);
+
+                // The last step closes the session and takes its message in one transition (PA-2):
+                // a push still packing now returns false and never reaches this response.
+                var returnedBody = session?.TakeResponseAndClose();
+                // The only exits after the handler ran: the 202, or the 200 carrying the returned
+                // message. OnCompleted then completes the acknowledgement once it is committed.
+                return returnedBody is null
+                    ? Results.StatusCode(StatusCodes.Status202Accepted)
+                    : Results.Bytes(returnedBody, DidCommMediaTypes.Encrypted);
             }
             catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
+                session?.TakeResponseAndClose();
                 acknowledged.TrySetCanceled();
                 throw; // genuine client abort — propagate
             }
@@ -248,9 +302,151 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // A 400 also completes OnCompleted, but it is never an acknowledgement of the inbound:
                 // cancel first, so a handler that ran before this throw (a logger fault in
                 // LogOutcome is the one such path) drops its deferred work instead of publishing it.
+                // The session closes without a response: nothing it held is sent.
+                session?.TakeResponseAndClose();
                 acknowledged.TrySetCanceled();
                 return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
             }
+        });
+    }
+
+    /// <summary>
+    /// Map an HTTP POST endpoint that unpacks DIDComm envelopes, runs return-route admission, and
+    /// hands each admitted message to <paramref name="onReceive"/> together with its return-route
+    /// session (FR-RR-04) — the callback counterpart of the registry-aware
+    /// <c>MapDidCommEndpoint(pattern)</c>. Same envelope handling as the other overloads: 415 for an
+    /// unknown content type, 413 above <see cref="DidCommOptions.MaxReceiveBytes"/>, and one opaque,
+    /// time-floored <c>400</c> for any unpack failure (FR-API-07).
+    /// <para>
+    /// The session argument is non-null only when the inbound was authcrypted, carries
+    /// <c>return_route: all</c>, is not a <c>forward</c> and passed FR-RR-08 replay admission; a
+    /// message the replay guard refuses is answered <c>202</c> and never reaches the callback. A
+    /// non-null message the callback returns is sent through the session (authcrypted from the DID
+    /// that decrypted the inbound to exactly the authenticated sender; refused otherwise) and
+    /// becomes the <c>200</c> body (<c>Content-Type: application/didcomm-encrypted+json</c>); at most
+    /// one message per request, and a message the callback already pushed through the session wins
+    /// over its return value. Every other outcome is <c>202</c> with an empty body.
+    /// </para>
+    /// <para>
+    /// A callback that throws is logged (exception type name only) and answered <c>202</c> — never a
+    /// 500, so a callback fault cannot become an unpack-success oracle — and anything it pushed
+    /// before throwing is discarded. There is no transport acknowledgement here (no
+    /// <see cref="ProtocolContext"/>): ordering work after the response is the callback's own job.
+    /// </para>
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
+    /// <param name="onReceive">Invoked with each admitted message and its session (or <c>null</c>); returns the message to send back on the session, or <c>null</c>.</param>
+    public static IEndpointConventionBuilder MapDidCommEndpoint(
+        this IEndpointRouteBuilder endpoints,
+        string pattern,
+        Func<UnpackResult, IReturnRouteSession?, CancellationToken, Task<Message?>> onReceive)
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+        ArgumentException.ThrowIfNullOrEmpty(pattern);
+        ArgumentNullException.ThrowIfNull(onReceive);
+
+        var admissionEndpoint = new InboundAdmissionEndpoint();
+
+        return endpoints.MapPost(pattern, async (HttpContext httpContext) =>
+        {
+            var sp = httpContext.RequestServices;
+            var client = sp.GetRequiredService<DidCommClient>();
+            var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
+            var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
+            var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
+            var replayGuard = admissionEndpoint.ResolveGuard(sp, coreOptions, logger);
+
+            var contentType = httpContext.Request.ContentType;
+            if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
+                return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+
+            var maxBytes = coreOptions.MaxReceiveBytes;
+            if (httpContext.Request.ContentLength is long declared && declared > maxBytes)
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+
+            string body;
+            try
+            {
+                body = await ReadCappedAsync(httpContext.Request.Body, maxBytes, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (PayloadTooLargeException)
+            {
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+            }
+
+            // #35: the floor budgets only the unpack window (see the first callback overload).
+            var startTimestamp = Stopwatch.GetTimestamp();
+
+            UnpackResult unpacked;
+            try
+            {
+                unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
+            {
+                throw; // genuine client abort — propagate, do not mask as a rejection
+            }
+            catch (Exception ex)
+            {
+                // The same uniform, time-floored 400 as the other overloads (#20/#28/#33/#35).
+                return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
+            }
+
+            var admission = InboundAdmission.Evaluate(unpacked, coreOptions, replayGuard, admissionEndpoint, logger);
+            if (!admission.Admitted)
+                return Results.StatusCode(StatusCodes.Status202Accepted);
+
+            var session = admission.SessionEligible
+                ? new HttpReturnRouteSession(client, admission.PeerDid!, admission.LocalDid!, logger)
+                : null;
+
+            Message? reply;
+            try
+            {
+                reply = await onReceive(unpacked, session, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
+            {
+                session?.TakeResponseAndClose();
+                throw; // genuine client abort
+            }
+            catch (Exception ex)
+            {
+                // The callback is the host's own code: log by type name, answer 202, send nothing it
+                // may have pushed (a fault must not become a 500 or a partial response).
+                session?.TakeResponseAndClose();
+                SafeLog.Write(logger, LogLevel.Error, "Inbound {MessageId}: onReceive callback threw {ExceptionType} after a successful unpack; acknowledging with 202.", unpacked.Message.Id, ex.GetType().Name);
+                return Results.StatusCode(StatusCodes.Status202Accepted);
+            }
+
+            if (reply is not null)
+            {
+                if (session is null)
+                {
+                    SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: callback reply not returned: no return-route session for this request.", unpacked.Message.Id);
+                }
+                else
+                {
+                    bool returned;
+                    try
+                    {
+                        returned = await session.TrySendAsync(reply, httpContext.RequestAborted).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
+                    {
+                        session.TakeResponseAndClose();
+                        throw;
+                    }
+                    if (!returned && session.HasResponse)
+                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the callback's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", unpacked.Message.Id);
+                }
+            }
+
+            var returnedBody = session?.TakeResponseAndClose();
+            return returnedBody is null
+                ? Results.StatusCode(StatusCodes.Status202Accepted)
+                : Results.Bytes(returnedBody, DidCommMediaTypes.Encrypted);
         });
     }
 
@@ -298,6 +494,11 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// With <see cref="DidCommReceiveOptions.UseStomp"/> the endpoint instead speaks the
     /// minimal STOMP 1.2 subset (FR-TRN-12): CONNECT→CONNECTED, one packed envelope per SEND
     /// frame body, DISCONNECT to close.
+    /// <para>
+    /// No return-route session and no FR-RR-08 replay admission: the callback receives every
+    /// unpacked message as before. Use the registry-aware overload
+    /// (<c>MapDidCommWebSocket(pattern)</c>) for FR-RR-* behaviour.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -333,14 +534,30 @@ public static class DidCommEndpointRouteBuilderExtensions
 
     /// <summary>
     /// Registry-aware WebSocket overload (FR-PROTO-03). Same wire behavior as the inline-
-    /// callback overload (FR-TRN-09/10/API-06 enforced); each reassembled envelope is unpacked
-    /// and dispatched through <see cref="ProtocolDispatcher"/>. When the inbound endpoint's
-    /// <see cref="DidCommReceiveOptions.AllowSameSocketReplies"/> is <c>true</c>, any handler
-    /// reply may be packed and written on the same socket as one binary message. This convenience
-    /// fails closed unless the inbound was encrypted and authenticated, verified sender/signer and
-    /// recipient key ids bind the peer and local DID, and the reply names exactly those participants.
-    /// Signed-only, plaintext, anoncrypt, keyless, cross-tenant, and fan-out cases emit no frame.
-    /// Defaults to <c>false</c> per FR-TRN-10's one-way reading.
+    /// callback overload (FR-TRN-09/10/API-06 enforced); each reassembled envelope is unpacked,
+    /// passed through return-route admission and dispatched through <see cref="ProtocolDispatcher"/>.
+    /// <para>
+    /// <b>Replay (FR-RR-08).</b> An authenticated message carrying <c>return_route</c> (other than
+    /// <c>none</c>) or of a mediator-service type must pass the replay guard; a refused one is
+    /// dropped with nothing written and nothing dispatched.
+    /// </para>
+    /// <para>
+    /// <b>Return-route (FR-RR-05)</b>, only when <see cref="DidCommReceiveOptions.AllowSameSocketReplies"/>
+    /// is <c>true</c> (default <c>false</c>, FR-TRN-10 one-way) and never under STOMP. The connection
+    /// becomes a session at its first message that was authcrypted, carries <c>return_route: all</c>
+    /// and is not a <c>forward</c>; the session's peer (the authenticated sender) is fixed from then
+    /// on and it is registered in the <see cref="IReturnRouteSessionRegistry"/>, where handlers find
+    /// it for live pushes. Handler replies and <see cref="IReturnRouteSession.TrySendAsync"/> pushes
+    /// are authcrypted from the DID that decrypted the opening message to exactly that peer and
+    /// written as one binary WebSocket message each, by a single writer. A later header-less message
+    /// leaves the mode unchanged; a later <c>none</c> (or <c>thread</c>) from the same pair stops
+    /// pushes and <c>all</c> resumes them. A message authenticated by another DID on the same socket
+    /// is dispatched without a session and its reply is not written. A header-less message on a
+    /// socket without a session gets no reply. The registry bounds the sessions per peer (one more
+    /// evicts that peer's oldest, whose socket is then closed with a normal close frame) and in total
+    /// (a new session is refused and the message is dispatched without one). Closing the socket
+    /// unregisters the session.
+    /// </para>
     /// <para>
     /// There is no per-message wire acknowledgement on a WebSocket (nothing is written back for an
     /// accepted envelope), so the dispatch carries none: <see cref="ProtocolContext.Acknowledged"/>
@@ -356,6 +573,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
+
+        // Per mapped endpoint (JC-17 defaults, JC-22 drop-log rate limiters).
+        var admissionEndpoint = new InboundAdmissionEndpoint();
 
         return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
         {
@@ -373,11 +593,28 @@ public static class DidCommEndpointRouteBuilderExtensions
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
             var loggerFactory = sp.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
+            var returnRoute = new WebSocketReturnRoute(
+                admissionEndpoint,
+                admissionEndpoint.ResolveGuard(sp, coreOptions, logger),
+                // The registry only matters when the switch can open sessions (never under STOMP).
+                receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? admissionEndpoint.ResolveRegistry(sp, logger) : null,
+                receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? InboundAdmissionEndpoint.ResolveSessionOptions(sp).MaxPendingPushes : 0);
 
-            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, logger, httpContext.RequestAborted)
+            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, returnRoute, logger, httpContext.RequestAborted)
                 .ConfigureAwait(false);
         });
     }
+
+    /// <summary>The return-route collaborators of one WebSocket connection.</summary>
+    /// <param name="Endpoint">The mapped endpoint's state (drop-log rate limiters).</param>
+    /// <param name="Guard">The FR-RR-08 replay guard.</param>
+    /// <param name="Registry">The session registry; <c>null</c> when this connection can never open a session.</param>
+    /// <param name="MaxPendingPushes">The writer queue depth for a session on this connection.</param>
+    private sealed record WebSocketReturnRoute(
+        InboundAdmissionEndpoint Endpoint,
+        IInboundReplayGuard Guard,
+        IReturnRouteSessionRegistry? Registry,
+        int MaxPendingPushes);
 
     private static async Task ReceiveLoopWithDispatchAsync(
         System.Net.WebSockets.WebSocket socket,
@@ -385,14 +622,32 @@ public static class DidCommEndpointRouteBuilderExtensions
         DidCommOptions coreOptions,
         DidCommReceiveOptions receiveOptions,
         ProtocolDispatcher dispatcher,
+        WebSocketReturnRoute returnRoute,
         ILogger? logger,
-        CancellationToken ct)
+        CancellationToken requestAborted)
     {
+        // The connection's own token: cancelled by a client abort, or by the session when the socket
+        // is broken (writer fault) or an evicted peer never answers the close frame (JC-21).
+        using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+        var ct = connectionCts.Token;
         var maxBytes = coreOptions.MaxReceiveBytes;
         // FR-TRN-12: opt-in STOMP session for this connection. The MaxReceiveBytes 1009 close
         // below still applies to the whole (framed) message BEFORE any STOMP decoding.
         var stomp = receiveOptions.UseStomp ? new StompServerSession() : null;
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
+        // FR-RR-05: the connection's return-route session, opened at the first eligible message.
+        // Once it closed (evicted, writer fault) it is never reopened or re-bound on this socket (PA-3).
+        WebSocketReturnRouteSession? session = null;
+        // The socket's (peer, local) pair is fixed by its first eligible message even when the registry
+        // refused that message's session (total bound): only the same pair may retry, so another DID
+        // on this socket never opens or re-binds a session here (FR-RR-05).
+        string? socketPeer = null;
+        string? socketLocal = null;
+        var stompNoticeLogged = false;
+        // Close requests from the loop are deferred to `finally`, after the session's writer has
+        // stopped, so a close never overlaps a send (the writer is the only other sender).
+        WebSocketCloseStatus? pendingClose = null;
+        string? pendingCloseReason = null;
         try
         {
             while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
@@ -406,18 +661,22 @@ public static class DidCommEndpointRouteBuilderExtensions
                     result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "client closed", CancellationToken.None).ConfigureAwait(false);
-                        return;
+                        pendingClose = WebSocketCloseStatus.NormalClosure;
+                        pendingCloseReason = "client closed";
+                        break;
                     }
                     total += result.Count;
                     if (total > maxBytes)
                     {
-                        await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", CancellationToken.None).ConfigureAwait(false);
-                        return;
+                        pendingClose = WebSocketCloseStatus.MessageTooBig;
+                        pendingCloseReason = "payload too large";
+                        break;
                     }
                     ms.Write(buffer, 0, result.Count);
                 }
                 while (!result.EndOfMessage);
+                if (pendingClose is not null)
+                    break;
 
                 string packed;
                 if (stomp is not null)
@@ -472,10 +731,64 @@ public static class DidCommEndpointRouteBuilderExtensions
                     continue;
                 }
 
+                // FR-RR-01/03/08: header, eligibility, replay. A refused message is dropped: nothing
+                // written, nothing dispatched, the session untouched (JC-2).
+                var admission = InboundAdmission.Evaluate(unpacked, coreOptions, returnRoute.Guard, returnRoute.Endpoint, logger);
+                if (!admission.Admitted)
+                    continue;
+
+                // FR-RR-05: open, update or use the connection's session. Only an identity-eligible
+                // message (encrypted+authenticated, not a forward) ever touches it.
+                IReturnRouteSession? dispatchSession = null;
+                if (admission.PeerDid is not null)
+                {
+                    if (stomp is not null)
+                    {
+                        // A spec-shaped push needs STOMP MESSAGE frames and subscriptions (broker
+                        // semantics outside the minimal subset), so STOMP never gets a session.
+                        if (admission.SessionEligible && !stompNoticeLogged)
+                        {
+                            stompNoticeLogged = true;
+                            SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return_route all is not available under STOMP (FR-RR-05); no session is opened on this connection.", unpacked.Message.Id);
+                        }
+                    }
+                    else if (returnRoute.Registry is not null)
+                    {
+                        if (session is null)
+                        {
+                            if (admission.SessionEligible && (socketPeer is null || IsPair(socketPeer, socketLocal, admission)))
+                            {
+                                socketPeer ??= admission.PeerDid;
+                                socketLocal ??= admission.LocalDid;
+                                var candidate = new WebSocketReturnRouteSession(
+                                    socket, client, admission.PeerDid, admission.LocalDid!, returnRoute.MaxPendingPushes, connectionCts, logger);
+                                if (InboundAdmission.TryOpen(returnRoute.Registry, candidate, unpacked.Message.Id, logger))
+                                {
+                                    session = candidate;
+                                    session.Start();
+                                }
+                                // Refused (total bound): dispatched without a session; a later eligible
+                                // message from the same pair may try again.
+                            }
+                        }
+                        else if (IsSessionPair(session, admission) && admission.HeaderPresent)
+                        {
+                            // The mode changes only for a message that carries return_route (a
+                            // header-less one leaves it unchanged); a closed session ignores it (PA-3).
+                            session.ApplyHeader(admission.Header);
+                        }
+
+                        // Another DID on this socket is dispatched without a session and never re-binds it.
+                        if (session is not null && !session.IsClosed && IsSessionPair(session, admission))
+                            dispatchSession = session;
+                    }
+                }
+
                 DispatchOutcome outcome;
                 try
                 {
-                    outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, ct).ConfigureAwait(false);
+                    // No wire acknowledgement on a WebSocket (#90): the dispatch carries none.
+                    outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, Task.CompletedTask, dispatchSession, ct).ConfigureAwait(false);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -493,169 +806,76 @@ public static class DidCommEndpointRouteBuilderExtensions
                     continue;
                 }
 
-                var delivered = false;
-                // FR-TRN-12: same-socket replies are suppressed in STOMP mode — pushing a bare
-                // binary reply into a peer's STOMP session would corrupt its frame parser, and a
-                // spec-shaped push needs MESSAGE frames + subscriptions (broker semantics that are
-                // deliberately outside the minimal subset). Deliver replies out of band instead.
-                if (outcome is { Result: DispatchResult.ReplyProduced, Reply: not null } && receiveOptions.AllowSameSocketReplies && stomp is null)
-                {
-                    delivered = await TrySendReplyOnSocketAsync(socket, client, unpacked, outcome.Reply, logger, ct).ConfigureAwait(false);
-                }
-                LogOutcome(logger, outcome, sameSocketDelivered: delivered);
+                // A reply rides the session only; without one it is logged, not sent (a header-less
+                // message on a socket without a session gets no reply — FR-RR-01/05).
+                var returned = false;
+                if (dispatchSession is not null && outcome is { Result: DispatchResult.ReplyProduced, Reply: not null })
+                    returned = await dispatchSession.TrySendAsync(outcome.Reply, ct).ConfigureAwait(false);
+                LogOutcome(logger, outcome, returnedOnSession: returned);
             }
+        }
+        catch (Exception ex) when ((ex is OperationCanceledException or WebSocketException)
+                                   && connectionCts.IsCancellationRequested
+                                   && !requestAborted.IsCancellationRequested)
+        {
+            // Server-initiated end of the connection: an evicted peer never answered the close frame,
+            // or the session's writer found the socket broken. Nothing more to read or write.
         }
         finally
         {
+            var mayClose = true;
+            if (session is not null)
+            {
+                // Unregister first (raises SessionClosed(Unregistered); a no-op when the registry
+                // already evicted it), then stop the writer, so a close never overlaps a send.
+                try
+                {
+                    returnRoute.Registry!.Unregister(session);
+                }
+                catch (Exception ex)
+                {
+                    SafeLog.Write(logger, LogLevel.Warning, "Return-route session unregister threw {ExceptionType}.", ex.GetType().Name);
+                }
+                mayClose = await session.StopAsync().ConfigureAwait(false);
+            }
+
+            if (!mayClose)
+            {
+                socket.Abort();
+            }
+            else if (pendingClose is { } closeStatus && socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            {
+                try
+                {
+                    await socket.CloseAsync(closeStatus, pendingCloseReason, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
+                {
+                    SafeLog.Write(logger, LogLevel.Debug, "MapDidCommWebSocket: close failed with {ExceptionType}.", ex.GetType().Name);
+                }
+            }
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
-    private static async Task<bool> TrySendReplyOnSocketAsync(
-        System.Net.WebSockets.WebSocket socket,
-        DidCommClient client,
-        UnpackResult inbound,
-        DidComm.Messages.Message reply,
-        ILogger? logger,
-        CancellationToken ct)
-    {
-        DidComm.Messages.Message replySnapshot;
-        try
-        {
-            // Message is deliberately mutable. Snapshot the handler-owned instance before validation
-            // and packing so a handler retaining and mutating it cannot race the security gate.
-            var json = JsonSerializer.Serialize(reply, DidCommJson.Default);
-            replySnapshot = JsonSerializer.Deserialize<DidComm.Messages.Message>(json, DidCommJson.Default)
-                ?? throw new JsonException("Handler reply deserialized to null.");
-        }
-        catch (Exception ex)
-        {
-            logger?.LogWarning(ex, "MapDidCommWebSocket: dropping same-socket reply because it could not be snapshotted.");
-            return false;
-        }
+    private static bool IsSessionPair(WebSocketReturnRouteSession session, InboundAdmissionResult admission)
+        => IsPair(session.PeerDid, session.LocalDid, admission);
 
-        if (!TryRouteSameSocketReply(inbound, replySnapshot, out var from, out var peerDid, out var reason))
-        {
-            logger?.LogWarning("MapDidCommWebSocket: dropping same-socket reply — {Reason}", reason);
-            return false;
-        }
+    // PA-5: both ordinal comparisons always run (non-short-circuit `&`), so the comparison of a wire
+    // identity against the socket's pair has no data-dependent branch between them.
+    private static bool IsPair(string? peerDid, string? localDid, InboundAdmissionResult admission)
+        => string.Equals(peerDid, admission.PeerDid, StringComparison.Ordinal)
+           & string.Equals(localDid, admission.LocalDid, StringComparison.Ordinal);
 
-        try
-        {
-            var packed = await client.PackEncryptedAsync(replySnapshot, new PackEncryptedOptions(
-                Recipients: new[] { peerDid! }, From: from!), ct).ConfigureAwait(false);
-            var bytes = System.Text.Encoding.UTF8.GetBytes(packed.Message);
-            await socket.SendAsync(bytes, WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
-            return true;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger?.LogWarning(ex, "MapDidCommWebSocket: failed to deliver dispatcher reply on same socket.");
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Decide whether a handler's reply can be delivered back on the SAME WebSocket as the
-    /// inbound envelope. Sender and responder identities come from verified envelope key ids, not
-    /// from handler-selected or plaintext ordering. Any envelope written here is consumed by the
-    /// authenticated inbound peer, so the reply MUST target exactly that peer. Handlers fanning out
-    /// or rebinding identities must use <c>ProtocolContext.Client.SendAsync</c> under application policy.
-    /// </summary>
-    /// <param name="inbound">The unpack result for the inbound envelope.</param>
-    /// <param name="reply">The handler-produced reply message.</param>
-    /// <param name="from">The bare DID subject of the key that decrypted the inbound on success.</param>
-    /// <param name="peerDid">The bare DID subject of the authenticated inbound peer on success.</param>
-    /// <param name="reason">Human-readable failure reason on rejection; <c>null</c> on success.</param>
-    /// <returns><c>true</c> when the reply is safe to deliver on this socket.</returns>
-    internal static bool TryRouteSameSocketReply(
-        UnpackResult inbound,
-        DidComm.Messages.Message reply,
-        out string? from,
-        out string? peerDid,
-        out string? reason)
-    {
-        ArgumentNullException.ThrowIfNull(inbound);
-        ArgumentNullException.ThrowIfNull(reply);
-        from = null;
-        peerDid = null;
-        reason = null;
-
-        // Same-socket convenience is deliberately narrower than general DIDComm replies: require an
-        // encrypted, authenticated inbound so both ends are bound to verified envelope key ids.
-        // Signed-only, plaintext, and anoncrypt inputs cannot supply both bindings and fail closed.
-        if (!inbound.Encrypted || !inbound.Authenticated)
-        {
-            reason = "inbound envelope must be both encrypted and authenticated for a same-socket reply.";
-            return false;
-        }
-
-        string? senderDid = null;
-        if (!string.IsNullOrEmpty(inbound.SenderKid))
-        {
-            senderDid = DidSubject.DidSubjectOf(inbound.SenderKid);
-            if (senderDid is null)
-            {
-                reason = "authenticated sender kid is not a valid DID or DID URL.";
-                return false;
-            }
-        }
-
-        string? signerDid = null;
-        if (!string.IsNullOrEmpty(inbound.SignerKid))
-        {
-            signerDid = DidSubject.DidSubjectOf(inbound.SignerKid);
-            if (signerDid is null)
-            {
-                reason = "authenticated signer kid is not a valid DID or DID URL.";
-                return false;
-            }
-        }
-
-        if (senderDid is null && signerDid is null)
-        {
-            reason = "authenticated inbound has no sender or signer key id to bind its peer identity.";
-            return false;
-        }
-        if (senderDid is not null && signerDid is not null && !string.Equals(senderDid, signerDid, StringComparison.Ordinal))
-        {
-            reason = "sender and signer key ids identify different DID subjects.";
-            return false;
-        }
-
-        var authenticatedPeerDid = senderDid ?? signerDid!;
-        var decryptingDid = DidSubject.DidSubjectOf(inbound.RecipientKid);
-        if (decryptingDid is null)
-        {
-            reason = "inbound has no valid recipient key id identifying the local decrypting DID.";
-            return false;
-        }
-        if (!DidSubject.SameDidSubject(reply.From, decryptingDid))
-        {
-            reason = "handler reply.from does not match the local decrypting key DID subject.";
-            return false;
-        }
-
-        if (reply.To is not { Count: 1 } || !DidSubject.SameDidSubject(reply.To[0], authenticatedPeerDid))
-        {
-            reason = $"handler reply.to must contain exactly the authenticated inbound peer '{authenticatedPeerDid}'; use ProtocolContext.Client.SendAsync for other recipients.";
-            return false;
-        }
-
-        from = decryptingDid;
-        peerDid = authenticatedPeerDid;
-        return true;
-    }
-
-    private static void LogOutcome(ILogger? logger, DispatchOutcome outcome, bool sameSocketDelivered)
+    private static void LogOutcome(ILogger? logger, DispatchOutcome outcome, bool returnedOnSession)
     {
         if (logger is null) return;
         switch (outcome.Result)
         {
             case DispatchResult.ReplyProduced:
                 logger.LogInformation(
-                    "Protocol dispatch produced a reply (handler={Handler}, delivered-on-same-socket={Delivered}).",
-                    outcome.Handler?.ProtocolUri, sameSocketDelivered);
+                    "Protocol dispatch produced a reply (handler={Handler}, returned-on-session={Returned}).",
+                    outcome.Handler?.ProtocolUri, returnedOnSession);
                 break;
             case DispatchResult.NoReply:
                 logger.LogDebug("Protocol dispatch ran handler '{Handler}' which produced no reply.", outcome.Handler?.ProtocolUri);

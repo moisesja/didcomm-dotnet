@@ -135,6 +135,32 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
     }
 
     [Fact]
+    public void A_peer_at_its_own_bound_replaces_its_oldest_even_when_the_registry_is_full()
+    {
+        // FR-RR-03: the per-DID bound evicts that DID's oldest; the total bound refuses only a
+        // registration that would grow the total, so a reconnecting peer is not locked out by a full
+        // registry and no other DID is touched.
+        var registry = Registry(perPeer: 1, total: 2);
+        var closed = new List<ReturnRouteSessionEventArgs>();
+        registry.SessionClosed += (_, e) => closed.Add(e);
+        var oldAlice = new FakeSession(Alice);
+        var carol = new FakeSession(Carol);
+        registry.Register(oldAlice);
+        registry.Register(carol);
+
+        var newAlice = new FakeSession(Alice);
+        var result = registry.Register(newAlice);
+
+        result.Outcome.Should().Be(SessionRegistrationOutcome.Registered);
+        result.Evicted.Should().BeSameAs(oldAlice);
+        registry.Count.Should().Be(2);
+        registry.Find(Alice).Should().ContainSingle().Which.Should().BeSameAs(newAlice);
+        registry.Find(Carol).Should().ContainSingle().Which.Should().BeSameAs(carol);
+        closed.Should().ContainSingle().Which.Reason.Should().Be(SessionCloseReason.Evicted);
+        registry.Register(new FakeSession("did:example:dave")).Outcome.Should().Be(SessionRegistrationOutcome.RefusedTotalBound);
+    }
+
+    [Fact]
     public void Registering_the_same_instance_twice_is_AlreadyRegistered()
     {
         var registry = Registry();

@@ -178,7 +178,7 @@
       "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Messages.MessageBuilder::WithReturnRoute(DidComm.Transports.ReturnRoute.ReturnRouteMode,System.String)",
+      "member": "DidComm.AspNetCore!DidComm.AspNetCore.DidCommEndpointRouteBuilderExtensions::MapDidCommEndpoint(Microsoft.AspNetCore.Routing.IEndpointRouteBuilder,System.String,System.Func`4<DidComm.Facade.UnpackResult,DidComm.Transports.ReturnRoute.IReturnRouteSession,System.Threading.CancellationToken,System.Threading.Tasks.Task`1<DidComm.Messages.Message>>)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
@@ -423,10 +423,6 @@
     },
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReturnRouteHeader::prop:Thread",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReturnRouteMode",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {

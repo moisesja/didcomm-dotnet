@@ -9,8 +9,9 @@ namespace DidComm.Transports.ReturnRoute;
 /// <remarks>
 /// <para>
 /// Bounds: at most <see cref="ReturnRouteSessionOptions.MaxSessionsPerPeer"/> sessions per peer —
-/// one more evicts that peer's oldest — and <see cref="ReturnRouteSessionOptions.MaxSessions"/> in
-/// total — at the bound a new registration is refused and nothing is evicted, so a flood of fresh
+/// one more evicts that peer's oldest (also when the registry is full, since the total does not
+/// grow) — and <see cref="ReturnRouteSessionOptions.MaxSessions"/> in total — at the bound a
+/// registration that would grow the total is refused and nothing is evicted, so a flood of fresh
 /// DIDs can never displace an existing peer. The registry forgets an evicted session and reports
 /// it in <see cref="SessionRegistration.Evicted"/>; closing its transport is the registrant's job,
 /// because the registry has no handle on sockets.
