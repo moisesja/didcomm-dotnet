@@ -437,7 +437,7 @@ public sealed class MessagePickupWebSocketTests
     }
 
     [Fact]
-    public async Task Over_a_socket_messages_the_recipients_envelope_cannot_carry_are_passed_over_by_the_request_that_meets_them_and_tried_once_more_on_the_next_socket()
+    public async Task Over_a_socket_messages_the_recipients_envelope_cannot_carry_are_passed_over_by_the_request_that_meets_them_and_a_reconnect_does_not_bring_them_back()
     {
         // Two payloads at the admission bound for a 38-key recipient (over the budget even alone,
         // see the HTTP twin), and a deliverable one behind them. Each keeps the lease of the request
@@ -496,17 +496,15 @@ public sealed class MessagePickupWebSocketTests
             .Should().BeTrue("a lease kept on a socket ends when that socket closes, not by its timeout");
         mediator.Store.MessageCount.Should().Be(2);
 
-        // On the next socket the two are first in line again: the request that meets them tries
-        // each once more and delivers the message that arrived behind them — in that one request.
+        // On the next socket the two are NOT first in line again: that they did not fit is the
+        // records' own memory, not a lease that ended with the first socket. The first request on
+        // the new connection spends nothing on them and delivers the message that arrived behind.
         var later = await mediator.QueueAsync(wide, packedBytes: small);
         var (second, reopened) = await mediator.OpenAsync(wide);
         using var disposeSecond = second;
         reopened.MessageCount.Should().Be(3);
         var again = await FetchAsync(second);
-        again.Rounds.Should().HaveCount(3);
-        again.Rounds[0].Should().Equal(new[] { bigs[0].Id }, "after the lease the message is at its original position and is tried again");
-        again.Rounds[1].Should().Equal(bigs[1].Id);
-        again.Rounds[2].Should().Equal(later.Id);
+        again.Rounds.Should().ContainSingle("a reconnect does not bring the passed-over messages up again").Which.Should().Equal(later.Id);
         await mediator.ShouldBeRelayedAsync(wide, again.Answer.Delivery(again.Answer.Message.Thid).Should().ContainSingle().Subject, later);
         (await mediator.AcknowledgeAsync(second, wide, later.Id!)).MessageCount.Should().Be(2);
 
@@ -515,9 +513,11 @@ public sealed class MessagePickupWebSocketTests
         last.Rounds.Should().ContainSingle().Which.Should().BeEmpty();
         last.Answer.Status(last.Answer.Message.Thid!).MessageCount.Should().Be(2);
 
-        // Through all of it the mediator neither removed the two nor gave their leases back by id.
+        // Through all of it the mediator neither removed the two nor gave them back by id: each
+        // was set aside once, by the request that met it.
         mediator.Parking.Acknowledged.Should().BeEquivalentTo(new[] { behind.Id, later.Id });
         mediator.Parking.GivenBack.Should().NotContain(new[] { bigs[0].Id, bigs[1].Id });
+        mediator.Parking.PassedOver.Select(p => p.Id).Should().Equal(bigs[0].Id, bigs[1].Id);
         mediator.Store.MessageCount.Should().Be(2);
         mediator.Store.TotalBytes.Should().Be(bigs[0].Payload.Length + bigs[1].Payload.Length);
 

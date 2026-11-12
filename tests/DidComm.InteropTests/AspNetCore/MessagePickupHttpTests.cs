@@ -649,20 +649,28 @@ public sealed class MessagePickupHttpTests
         mediator.Store.MessageCount.Should().Be(1);
         mediator.Store.TotalBytes.Should().Be(big.Payload.Length);
 
-        // A lease period later, with a new message behind it: the big one is first in line again
-        // and is tried once more — by a request that goes on to deliver what is behind it.
+        // One lease timeout later — the period it was passed over for the first time — with a new
+        // message behind it: the big one is first in line again and is tried once more, by a
+        // request that goes on to deliver what is behind it.
         var later = await mediator.QueueAsync(wide, packedBytes: small);
         mediator.Clock.Advance(lease);
         var third = await FetchAsync();
         third.Rounds.Should().HaveCount(2);
-        third.Rounds[0].Should().Equal(new[] { big.Id }, "after its lease the message is at its original position and is tried again");
+        third.Rounds[0].Should().Equal(new[] { big.Id }, "after its first period the message is at its original position and is tried again");
         third.Rounds[1].Should().Equal(later.Id);
         var deliveredLater = third.Answer.Delivery(third.Answer.Message.Thid).Should().ContainSingle().Subject;
         await mediator.ShouldBeRelayedAsync(wide, deliveredLater, later);
         var ackLater = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { deliveredLater.Id });
         (await mediator.AskAsync(wide, ackLater)).Status(ackLater.Id).MessageCount.Should().Be(1);
 
-        // Another lease period later with nothing behind it: tried once more, then a status.
+        // The second time it is passed over for twice as long: another lease timeout later it is
+        // not even tried (one empty lease round, a status) …
+        mediator.Clock.Advance(lease);
+        var early = await FetchAsync();
+        early.Rounds.Should().ContainSingle().Which.Should().BeEmpty();
+        Counted(early.Answer).Should().Be((1, big.Payload.Length));
+
+        // … and after the second lease timeout of that period it is: tried once more, then a status.
         mediator.Clock.Advance(lease);
         var fourth = await FetchAsync();
         fourth.Rounds.Should().HaveCount(2);
@@ -670,9 +678,14 @@ public sealed class MessagePickupHttpTests
         fourth.Rounds[1].Should().BeEmpty();
         Counted(fourth.Answer).Should().Be((1, big.Payload.Length));
 
-        // Through all of it the mediator neither removed the big message nor gave its lease back.
+        // Through all of it the mediator never removed the big message. It set it aside three
+        // times, each time for twice as long, under no lease and no connection.
         mediator.Parking.Acknowledged.Should().NotContain(big.Id);
         mediator.Parking.GivenBack.Should().NotContain(big.Id);
+        mediator.Parking.PassedOver.Select(p => p.Id).Should().Equal(big.Id, big.Id, big.Id);
+        var untils = mediator.Parking.PassedOver.Select(p => p.Until).ToArray();
+        (untils[1] - untils[0]).Should().Be(lease * 2, "tried again one lease timeout after the first time, then set aside for two");
+        (untils[2] - untils[1]).Should().Be(lease * 4, "tried again two lease timeouts after the second time, then set aside for four");
         mediator.Store.MessageCount.Should().Be(1);
 
         // It is logged by the pickup classes — once at Warning, then quietly — and the lines name
@@ -692,9 +705,10 @@ public sealed class MessagePickupHttpTests
     public async Task A_recipient_that_polls_once_per_lease_period_or_slower_gets_what_is_queued_behind_a_message_that_cannot_be_carried_in_that_same_poll()
     {
         // The recipient asks once per poll and stops at whatever comes back, as the protocol page
-        // describes; its polls are 61 seconds apart, the lease is 60. So every poll finds the
-        // message that does not fit first in line again. Each poll still brings what arrived
-        // behind it, in that one request; a status means nothing deliverable is left.
+        // describes; its polls are 61 seconds apart, the lease is 60. The message that does not fit
+        // is set aside for 60 s the first time and 120 s the second, so the first two polls find it
+        // first in line again and the third does not. Every poll brings what arrived behind it, in
+        // that one request; a status means nothing deliverable is left.
         const int budget = 352 * Kibibyte;
         const int small = 86 * Kibibyte;
         await using var mediator = await PickupEndpointHost.StartAsync(
@@ -719,7 +733,11 @@ public sealed class MessagePickupHttpTests
             response.Body.Length.Should().BeLessThanOrEqualTo(budget);
             var delivered = (await mediator.AnswerAsync(wide, response)).Delivery(request.Id).Should().ContainSingle().Subject;
             await mediator.ShouldBeRelayedAsync(wide, delivered, fresh);
-            mediator.Parking.Leased.Skip(calls).Select(round => round.Single()).Should().Equal(new[] { big.Id, fresh.Id }, "the message that does not fit is tried once, then the one behind it is delivered");
+            var rounds = mediator.Parking.Leased.Skip(calls).Select(round => round.Single()).ToArray();
+            if (poll < 2)
+                rounds.Should().Equal(new[] { big.Id, fresh.Id }, "the message that does not fit is tried once, then the one behind it is delivered");
+            else
+                rounds.Should().Equal(new[] { fresh.Id }, "the period the message is passed over for has outgrown the polling interval: it costs this poll nothing");
             var ack = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { delivered.Id });
             (await mediator.AskAsync(wide, ack)).Status(ack.Id).MessageCount.Should().Be(1, "only the message that does not fit is left, and it is counted");
 

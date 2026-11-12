@@ -54,7 +54,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         session.Sent.Should().ContainSingle().Which.ShouldBeDelivery(request, h.Mediator, h.Alice, null, ids.Skip(1).ToArray());
         h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[3], ids[2], ids[1]);
         h.Store.Acknowledged.Should().BeEmpty();
-        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync");
+        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync");
         var lease = h.Store.LeaseRequests.Select(r => r.Lease).Distinct().Should().ContainSingle("both rounds are under the request's one lease").Subject;
         h.Store.ReleasedLeaseIds.Should().OnlyContain(id => id == lease.Id);
         PassedOverLines(h, logged).Should().ContainSingle().Which.State["Bytes"].Should().Be(10);
@@ -64,13 +64,18 @@ public sealed class MessagePickupHandlerUndeliverableTests
         var status = h.StatusRequest(h.Alice);
         (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 4, 100, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
 
-        // It is exactly as the request leased it: no owner (a request-scoped session), the
-        // request's lease id and nobody else's.
+        // It was given up under the request's lease and is under no lease now: the mark that
+        // keeps it out is the record's own, for one lease timeout the first time, and nothing but
+        // time ends it.
         lease.Owner.Should().BeNull();
+        var passedOver = h.Store.PassedOver.Should().ContainSingle().Subject;
+        (passedOver.GrantPeerDid, passedOver.LeaseId, passedOver.Until).Should().Be((h.Alice, lease.Id, h.Clock.Now + TimeSpan.FromSeconds(60)));
+        passedOver.Ids.Should().Equal(ids[0]);
         (await h.DeliverableAsync(h.Alice)).Should().BeEmpty("one is passed over, three are delivered and waiting for their messages-received");
-        (await h.Store.Inner.ReleaseAsync(h.Alice, new[] { ids[0] }, "not-a-lease-of-anyone", default)).Should().Be(0);
-        (await h.Store.Inner.ReleaseAsync(h.Alice, new[] { ids[0] }, lease.Id, default)).Should().Be(1);
-        (await h.DeliverableAsync(h.Alice)).Should().Equal(ids[0]);
+        (await h.Store.Inner.ReleaseAsync(h.Alice, new[] { ids[0] }, lease.Id, default)).Should().Be(0, "it carries no lease to give back");
+        (await h.DeliverableAsync(h.Alice)).Should().BeEmpty();
+        h.Clock.Advance(TimeSpan.FromSeconds(60));
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(ids, "its period is over, and so are the leases of the three that were delivered and never acknowledged");
     }
 
     [Theory]
@@ -133,7 +138,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session)).Status().MessageCount.Should().Be(1);
         session.Attempts.Should().HaveCount(attempts + 1);
         session.Attempts.Last().Message.Attachments!.Select(a => a.Id).Should().Equal(stuck);
-        h.StoreTrace.Should().Equal("LeaseAsync", "LeaseAsync", "GetStatusAsync");
+        h.StoreTrace.Should().Equal("LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync");
         PassedOverLines(h, logged).Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug);
     }
 
@@ -196,7 +201,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
 
         outcome.ShouldBeStatus(request, h.Mediator, h.Alice, ids.Count, limit == 1 ? 60 : 10, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
         session.Attempts.Select(a => string.Join(",", a.Message.Attachments!.Select(x => x.Id))).Should().Equal(ids, "each is tried alone, in order");
-        h.StoreTrace.Should().Equal(Enumerable.Repeat("LeaseAsync", ids.Count + 1).Append("GetStatusAsync"));
+        h.StoreTrace.Should().Equal(Enumerable.Range(0, ids.Count).SelectMany(_ => new[] { "LeaseAsync", "PassOverAsync" }).Append("LeaseAsync").Append("GetStatusAsync"));
         h.Store.Released.Should().BeEmpty("a message that does not fit alone keeps the lease");
         h.Store.Acknowledged.Should().BeEmpty("and is not removed");
         h.Store.Inner.MessageCount.Should().Be(ids.Count);
@@ -238,7 +243,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         h.Store.Released.Should().BeEmpty();
         (await h.DeliverableAsync(h.Alice)).Should().BeEmpty("each of them is held by the lease of the request that tried it");
         var lines = h.Fixture.PickupLogs.Skip(logged).ToArray();
-        lines.Should().HaveCount(1001).And.OnlyContain(e => e.Formatted.Contains("even alone; it stays queued and is passed over until this request's lease ends"));
+        lines.Should().HaveCount(1001).And.OnlyContain(e => e.Formatted.Contains("even alone; it stays queued and is passed over for a period that doubles each time"));
         lines.Count(e => e.Level == LogLevel.Warning).Should().Be(2, "the 1st and the 1000th");
         lines.Count(e => e.Level == LogLevel.Debug).Should().Be(999);
         lines[0].Level.Should().Be(LogLevel.Warning);
@@ -278,7 +283,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         // budget is found spent: it goes back whole, under the request's lease, and the answer is
         // the status.
         session.Attempts.Select(a => string.Join(",", a.Message.Attachments!.Select(x => ids.IndexOf(x.Id!)))).Should().Equal("0,1,2", "0,1", "0", "1,2,3", "1,2", "1");
-        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync", "ReleaseAsync", "GetStatusAsync");
+        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "ReleaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "ReleaseAsync", "GetStatusAsync");
         h.Store.Released.Select(r => string.Join(",", r.Ids.Select(id => ids.IndexOf(id)))).Should().Equal("2", "1", "3", "2", "2,3,4");
         h.Store.ReleasedLeaseIds.Should().OnlyContain(id => id == h.Store.LeaseRequests.First().Lease.Id);
         h.Store.LeaseRequests.Select(r => r.Lease.Id).Distinct().Should().ContainSingle();
@@ -345,127 +350,6 @@ public sealed class MessagePickupHandlerUndeliverableTests
     }
 
     // ---- the lease period ---------------------------------------------------------------------
-
-    [Fact]
-    public async Task A_message_that_does_not_fit_is_passed_over_for_one_lease_period_at_a_time_and_tried_once_when_each_ends()
-    {
-        await using var h = await MessagePickupHandlerHarness.CreateAsync();
-        await h.EnrolAsync(h.Alice, h.Alice);
-        var stuck = await h.QueueAsync(h.Alice, 50, 1);
-        var behind = new[] { await h.QueueAsync(h.Alice, 10, 2), await h.QueueAsync(h.Alice, 20, 3) };
-        var session = h.Http(h.Alice);
-        session.OnSend = TooLargeWith(stuck);
-        var logged = h.Fixture.PickupLogs.Count;
-        h.ResetTraces();
-        int Tries() => session.Attempts.Count(a => a.Message.Attachments!.Count == 1 && a.Message.Attachments[0].Id == stuck);
-
-        // t = 0: tried (after the trim, alone), does not fit, keeps this request's lease — and the
-        // same request delivers what is behind it.
-        var first = h.DeliveryRequest(h.Alice, 10);
-        (await h.SendAsync(first, session)).ShouldBeNoReply();
-        session.Sent.Should().ContainSingle().Which.ShouldBeDelivery(first, h.Mediator, h.Alice, null, behind);
-        var firstLease = h.Store.LeaseRequests.Last().Lease;
-        Tries().Should().Be(1);
-        (await h.SendAsync(h.MessagesReceived(h.Alice, behind), session)).Status().MessageCount.Should().Be(1);
-
-        // t = 20 s: a message that arrives now is delivered; the one that does not fit is passed over.
-        h.Clock.Advance(TimeSpan.FromSeconds(20));
-        var arrival = await h.QueueAsync(h.Alice, 30, 4);
-        (await h.Fixture.FetchAsync(h.Alice, h.Mediator, session, 10))!.Value.Messages.Select(m => m.Id).Should().Equal(arrival);
-        (await h.SendAsync(h.MessagesReceived(h.Alice, new[] { arrival }), session)).Status().MessageCount.Should().Be(1);
-        Tries().Should().Be(1);
-
-        // One tick before the lease ends (t = 60 s): still passed over — not tried, nothing logged.
-        h.Clock.Now = h.Start + TimeSpan.FromSeconds(60) - TimeSpan.FromTicks(1);
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session)).Status().MessageCount.Should().Be(1);
-        Tries().Should().Be(1);
-
-        // t = 60 s: the lease has ended, the message is where it always was, and it is tried again
-        // — once — and now held by the lease of the request that tried it.
-        h.Clock.Now = h.Start + TimeSpan.FromSeconds(60);
-        var second = h.DeliveryRequest(h.Alice, 10);
-        (await h.SendAsync(second, session)).Status().MessageCount.Should().Be(1);
-        var secondLease = h.Store.LeaseRequests.Last().Lease;
-        Tries().Should().Be(2);
-        secondLease.Id.Should().NotBe(firstLease.Id);
-        secondLease.ExpiresAt.Should().Be(h.Start + TimeSpan.FromSeconds(120));
-        (await h.Store.Inner.ReleaseAsync(h.Alice, new[] { stuck }, firstLease.Id, default)).Should().Be(0, "the first request's lease is over; giving back under it finds nothing");
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session)).Status().MessageCount.Should().Be(1);
-        Tries().Should().Be(2, "one try per lease period");
-
-        // t = 120 s − 1 tick: passed over. t = 120 s: the third try.
-        h.Clock.Now = h.Start + TimeSpan.FromSeconds(120) - TimeSpan.FromTicks(1);
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session)).Status().MessageCount.Should().Be(1);
-        Tries().Should().Be(2);
-        h.Clock.Now = h.Start + TimeSpan.FromSeconds(120);
-        var third = h.DeliveryRequest(h.Alice, 10);
-        (await h.SendAsync(third, session)).Status().MessageCount.Should().Be(1);
-        Tries().Should().Be(3);
-
-        // Three tries, three lines; it was never delivered, never removed, and is still stored.
-        var lines = PassedOverLines(h, logged);
-        lines.Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug, LogLevel.Debug);
-        lines.Select(e => e.State["MessageId"]).Should().Equal(first.Id, second.Id, third.Id);
-        lines.Select(e => e.State["Count"]).Should().Equal(1L, 2L, 3L);
-        session.Sent.Should().OnlyContain(m => m.Attachments!.All(a => a.Id != stuck));
-        h.Store.Acknowledged.SelectMany(a => a.Ids).Should().NotContain(stuck);
-        h.Store.Inner.MessageCount.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task A_message_passed_over_under_a_live_sessions_lease_is_tried_again_as_soon_as_that_session_closes()
-    {
-        await using var h = await MessagePickupHandlerHarness.CreateAsync();
-        await h.EnrolAsync(h.Alice, h.Alice);
-        var stuck = await h.QueueAsync(h.Alice, 50, 1);
-        var behind = await h.QueueAsync(h.Alice, 10, 2);
-        var socket = h.Live(h.Alice);
-        var other = h.Http(h.Alice);
-        socket.OnSend = TooLargeWith(stuck);
-        other.OnSend = TooLargeWith(stuck);
-        // The close of a live session ends its leases in the background: wait for exactly that.
-        var ownerReleased = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        h.Store.OnReleaseLeases = async (owner, ct) =>
-        {
-            var ended = await h.Store.Inner.ReleaseLeasesAsync(owner, ct);
-            ownerReleased.TrySetResult(ended);
-            return ended;
-        };
-        h.ResetTraces();
-
-        // Over the socket: does not fit, keeps the request's lease — which the socket owns — and
-        // the same request delivers what is behind it over the socket.
-        var first = h.DeliveryRequest(h.Alice, 10);
-        (await h.SendAsync(first, socket)).ShouldBeNoReply();
-        socket.Sent.Should().ContainSingle().Which.ShouldBeDelivery(first, h.Mediator, h.Alice, null, new[] { behind });
-        var socketLease = h.Store.LeaseRequests.Last().Lease;
-        socketLease.Owner.Should().NotBeNullOrEmpty();
-        (await h.SendAsync(h.MessagesReceived(h.Alice, new[] { behind }), other)).Status().MessageCount.Should().Be(1);
-
-        // On another connection, the clock not moved: there is nothing to try.
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), other)).Status().MessageCount.Should().Be(1);
-        other.Attempts.Should().BeEmpty();
-
-        // The socket closes: its leases end, this one with them.
-        socket.Close();
-        (await ownerReleased.Task.WaitAsync(Deadline)).Should().Be(1);
-        h.Store.ReleasedOwners.Should().Equal(socketLease.Owner!);
-
-        // The very next request — the clock still has not moved — tries it again, alone, and passes
-        // it over under its own lease, which no session owns.
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), other)).Status().MessageCount.Should().Be(1);
-        var retried = other.Attempts.Should().ContainSingle().Subject;
-        retried.Message.Attachments!.Select(a => a.Id).Should().Equal(stuck);
-        retried.Result.Should().Be(ReturnRouteSendResult.TooLarge);
-        var laterLease = h.Store.LeaseRequests.Last().Lease;
-        laterLease.Owner.Should().BeNull();
-        laterLease.Id.Should().NotBe(socketLease.Id);
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), other)).Status().MessageCount.Should().Be(1);
-        other.Attempts.Should().ContainSingle("passed over again until that lease ends");
-
-        h.Store.Acknowledged.SelectMany(a => a.Ids).Should().NotContain(stuck);
-        h.Store.Inner.MessageCount.Should().Be(1);
-    }
 
     [Fact]
     public async Task A_message_too_large_for_one_requests_framing_is_delivered_later_by_a_request_whose_framing_lets_it_fit()
@@ -633,37 +517,6 @@ public sealed class MessagePickupHandlerUndeliverableTests
 
     // ---- nothing is left to fail at that step ---------------------------------------------------
 
-    [Theory]
-    [InlineData("IMessageStore.AcknowledgeAsync throws")]
-    [InlineData("IMessageStore.ReleaseAsync throws")]
-    [InlineData("IMessageStore.PurgeRecipientAsync throws")]
-    [InlineData("the logging provider throws")]
-    public async Task Passing_a_message_over_calls_no_store_method_that_changes_anything_so_none_of_them_can_make_it_fail(string broken)
-    {
-        await using var h = await MessagePickupHandlerHarness.CreateAsync(throwingLogger: broken == "the logging provider throws");
-        await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
-        var session = h.Http(h.Alice);
-        session.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
-        h.Store.OnAcknowledge = broken.Contains("AcknowledgeAsync", StringComparison.Ordinal) ? (_, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker) : null;
-        h.Store.OnRelease = broken.Contains("ReleaseAsync", StringComparison.Ordinal) ? (_, _, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker) : null;
-        h.Store.OnPurgeRecipient = broken.Contains("PurgeRecipientAsync", StringComparison.Ordinal) ? (_, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker) : null;
-        var t0 = h.Start.ToUnixTimeSeconds();
-        h.ResetTraces();
-
-        var request = h.DeliveryRequest(h.Alice, 10);
-        var outcome = await h.SendAsync(request, session);
-
-        // Answered exactly as with everything healthy: the status, and the message under its lease.
-        // The only store calls are the lease rounds and the status read.
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 1, 10, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
-        h.StoreTrace.Should().Equal("LeaseAsync", "LeaseAsync", "GetStatusAsync");
-        h.Store.Inner.MessageCount.Should().Be(1);
-        (await h.DeliverableAsync(h.Alice)).Should().BeEmpty();
-        h.Clock.Advance(TimeSpan.FromSeconds(60));
-        (await h.DeliverableAsync(h.Alice)).Should().Equal(id);
-    }
-
     [Fact]
     public async Task When_the_status_cannot_be_read_after_messages_were_passed_over_there_is_no_reply_and_nothing_else_changes()
     {
@@ -679,7 +532,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         var request = h.DeliveryRequest(h.Alice, 10);
         (await h.SendAsync(request, session)).ShouldBeNoReply();
 
-        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync");
+        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync");
         h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[1]);
         h.Store.Acknowledged.Should().BeEmpty();
         h.Store.Inner.MessageCount.Should().Be(2);
@@ -706,7 +559,8 @@ public sealed class MessagePickupHandlerUndeliverableTests
         if (atTheVerdict)
         {
             // The verdict on the first message alone arrives together with the cancellation; the
-            // real store then refuses the next lease round under a cancelled token.
+            // real store then refuses to pass it over under a cancelled token, and the request
+            // gives it back with what it holds.
             session.OnSend = (message, _) =>
             {
                 if (message.Attachments!.Count == 1)
@@ -735,19 +589,20 @@ public sealed class MessagePickupHandlerUndeliverableTests
         thrown.InnerException.Should().BeNull();
         ((OperationCanceledException)thrown).CancellationToken.Should().Be(cts.Token);
 
-        // Exactly what an uncancelled request would have left behind up to that point: the trimmed
-        // message given back, what did not fit under its lease, nothing removed.
+        // Nothing removed. Cancelled at the verdict: the trimmed message was given back and so is
+        // the one that could not be passed over any more. Cancelled at the status read: both
+        // messages were passed over before that.
         session.Sent.Should().BeEmpty();
         h.StoreTrace.Should().Equal(atTheVerdict
-            ? new[] { "LeaseAsync", "ReleaseAsync", "LeaseAsync" }
-            : new[] { "LeaseAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync" });
-        h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[1]);
+            ? new[] { "LeaseAsync", "ReleaseAsync", "PassOverAsync", "ReleaseAsync" }
+            : new[] { "LeaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync" });
+        h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(atTheVerdict ? new[] { ids[1], ids[0] } : new[] { ids[1] });
         h.Store.Acknowledged.Should().BeEmpty();
         h.Store.Inner.MessageCount.Should().Be(2);
-        (await h.DeliverableAsync(h.Alice)).Should().Equal(atTheVerdict ? new[] { ids[1] } : Array.Empty<string>());
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(atTheVerdict ? ids : Array.Empty<string>());
         var lines = h.Fixture.PickupLogs.Skip(logged).ToArray();
-        lines.Select(e => e.Level).Should().Equal(atTheVerdict ? new[] { LogLevel.Warning } : new[] { LogLevel.Warning, LogLevel.Debug },
-            "the messages were passed over before the cancellation was noticed; the cancellation itself is not a fault to log");
+        lines.Select(e => e.Level).Should().Equal(atTheVerdict ? Array.Empty<LogLevel>() : new[] { LogLevel.Warning, LogLevel.Debug },
+            "a message is logged as passed over once the store has taken the mark; the cancellation itself is not a fault to log");
         lines.Should().OnlyContain(e => !e.Everything.Contains(HandlerBoomException.Marker) && !e.Everything.Contains("did:"));
     }
 

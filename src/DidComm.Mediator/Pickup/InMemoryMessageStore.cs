@@ -28,7 +28,8 @@ namespace DidComm.Mediator.Pickup;
 /// store-wide bounds would otherwise refuse a message, and by <see cref="PurgeExpiredAsync"/>; there
 /// is no timer. Until one of those happens an expired record still occupies memory, so a host with
 /// many idle grants calls <see cref="MessagePickupQueue.PurgeExpiredAsync"/> now and then. A lease
-/// that has run out is simply no longer honoured by the next <see cref="LeaseAsync"/>.
+/// that has run out is simply no longer honoured by the next <see cref="LeaseAsync"/>, and so is a
+/// pass-over mark whose instant has come.
 /// </para>
 /// </remarks>
 public sealed class InMemoryMessageStore : IMessageStore
@@ -173,6 +174,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                     continue;
                 if (entry.LeaseExpiresAt > request.Now)
                     continue;
+                if (entry.PassedOverUntil > request.Now)
+                    continue;
 
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
                 // skip to a smaller one. The first record is taken whatever its size.
@@ -238,6 +241,34 @@ public sealed class InMemoryMessageStore : IMessageStore
                 }
             }
             return new ValueTask<int>(released);
+        }
+    }
+
+    /// <inheritdoc />
+    public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(grantPeerDid);
+        ArgumentNullException.ThrowIfNull(leaseId);
+        var ids = Copy(messageIds);
+        ct.ThrowIfCancellationRequested();
+
+        lock (_gate)
+        {
+            if (!_grants.TryGetValue(grantPeerDid, out var queue))
+                return new ValueTask<int>(0);
+            var passed = 0;
+            foreach (var id in ids)
+            {
+                // Only records still under the lease named: one taken again since is not this caller's.
+                if (queue.ById.TryGetValue(id, out var entry) && string.Equals(entry.LeaseId, leaseId, StringComparison.Ordinal))
+                {
+                    Unmark(entry);
+                    entry.PassedOverUntil = until;
+                    entry.Message = entry.Message with { PassOvers = entry.Message.PassOvers == int.MaxValue ? int.MaxValue : entry.Message.PassOvers + 1 };
+                    passed++;
+                }
+            }
+            return new ValueTask<int>(passed);
         }
     }
 
@@ -486,10 +517,12 @@ public sealed class InMemoryMessageStore : IMessageStore
     }
 
     // One stored record with its lease mark. LeaseId == null means "not leased"; a lease whose
-    // expiry has passed is ignored by the readers and overwritten by the next Mark.
+    // expiry has passed is ignored by the readers and overwritten by the next Mark. PassedOverUntil
+    // is the other mark: no owner, no id, ended only by time (default = never passed over).
     private sealed class Entry(QueuedMessage message)
     {
-        public QueuedMessage Message { get; } = message;
+        public QueuedMessage Message { get; set; } = message;
+        public DateTimeOffset PassedOverUntil { get; set; }
         public LinkedListNode<Entry>? Node { get; set; }
         public string? LeaseId { get; set; }
         public string? LeaseOwner { get; set; }

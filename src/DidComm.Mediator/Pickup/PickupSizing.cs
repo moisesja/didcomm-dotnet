@@ -25,8 +25,8 @@ namespace DidComm.Mediator.Pickup;
 /// (<c>IReturnRouteSession.TrySendAsync(message, maxPackedBytes, ct)</c>), and the batch is then
 /// trimmed. A peer whose own DID document makes its envelopes larger than the allowance (many
 /// keys with long ids) gets smaller batches, and a message that does not fit such a peer's
-/// envelope even alone stays queued: a request that meets it leaves it leased and goes on to
-/// the messages behind it.
+/// envelope even alone stays queued: a request that meets it passes it over (for a period that
+/// doubles each time) and goes on to the messages behind it.
 /// </para>
 /// </remarks>
 internal sealed class PickupSizing

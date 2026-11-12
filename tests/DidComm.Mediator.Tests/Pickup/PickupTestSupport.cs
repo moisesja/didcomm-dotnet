@@ -132,6 +132,7 @@ internal sealed class PickupFakeStore : IMessageStore
     public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids)> Acknowledged { get; } = new();
     public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids)> Released { get; } = new();
     public ConcurrentQueue<string> ReleasedLeaseIds { get; } = new();
+    public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids, string LeaseId, DateTimeOffset Until)> PassedOver { get; } = new();
     public ConcurrentQueue<string> ReleasedOwners { get; } = new();
     public ConcurrentQueue<(string GrantPeerDid, string? RecipientDid)> StatusRequests { get; } = new();
     public ConcurrentQueue<(string GrantPeerDid, string RecipientDid)> PurgedRecipients { get; } = new();
@@ -141,6 +142,7 @@ internal sealed class PickupFakeStore : IMessageStore
     public Func<string, IReadOnlyList<string>, CancellationToken, ValueTask<int>>? OnAcknowledge { get; set; }
     public Func<string, IReadOnlyList<string>, string, CancellationToken, ValueTask<int>>? OnRelease { get; set; }
     public Func<string, CancellationToken, ValueTask<int>>? OnReleaseLeases { get; set; }
+    public Func<string, IReadOnlyList<string>, string, DateTimeOffset, CancellationToken, ValueTask<int>>? OnPassOver { get; set; }
     public Func<string, string?, DateTimeOffset, CancellationToken, ValueTask<QueueStatus>>? OnGetStatus { get; set; }
     public Func<string, string, CancellationToken, ValueTask<int>>? OnPurgeRecipient { get; set; }
 
@@ -173,6 +175,13 @@ internal sealed class PickupFakeStore : IMessageStore
         Released.Enqueue((grantPeerDid, messageIds.ToArray()));
         ReleasedLeaseIds.Enqueue(leaseId);
         return OnRelease?.Invoke(grantPeerDid, messageIds, leaseId, ct) ?? Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    }
+
+    public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct)
+    {
+        Calls.Enqueue(nameof(PassOverAsync));
+        PassedOver.Enqueue((grantPeerDid, messageIds.ToArray(), leaseId, until));
+        return OnPassOver?.Invoke(grantPeerDid, messageIds, leaseId, until, ct) ?? Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     }
 
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct)

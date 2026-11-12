@@ -16,6 +16,7 @@ internal sealed class PickupSessionState
     private readonly PickupSessionTracker _tracker;
     private int _hooked;
     private int _closed;
+    private int _leasing;
     private volatile Func<string, string, DeliveredMessage, Message>? _liveDelivery;
 
     public PickupSessionState(PickupSessionTracker tracker) => _tracker = tracker;
@@ -28,6 +29,14 @@ internal sealed class PickupSessionState
 
     /// <summary>The session has ended. Once <c>true</c> it stays <c>true</c>, and live delivery is off.</summary>
     public bool IsClosed => Volatile.Read(ref _closed) == 1;
+
+    /// <summary>
+    /// Say that a lease is about to be taken under <see cref="OwnerToken"/>. Called before the
+    /// store call that records the lease; the caller looks at <see cref="IsClosed"/> again once the
+    /// lease is in use. A session that never took a lease has nothing to clean up when it closes,
+    /// so a peer that only opens connections and toggles live mode costs the store nothing.
+    /// </summary>
+    public void MarkLeasing() => Volatile.Write(ref _leasing, 1);
 
     /// <summary>
     /// How to build a live <c>delivery</c> (from, to, message) in the protocol version the recipient
@@ -61,7 +70,10 @@ internal sealed class PickupSessionState
     {
         Volatile.Write(ref _closed, 1);
         _liveDelivery = null;
-        _tracker.ReleaseLeasesInBackground(OwnerToken);
+        // Closed is written before the flag is read, and a taker writes the flag before it reads
+        // Closed: one of the two always sees the other, so no lease is left to its timeout by a race.
+        if (Volatile.Read(ref _leasing) == 1)
+            _tracker.ReleaseLeasesInBackground(OwnerToken);
     }
 }
 
@@ -80,8 +92,15 @@ internal sealed class PickupSessionState
 internal sealed class PickupSessionTracker
 {
     private readonly ConditionalWeakTable<IReturnRouteSession, PickupSessionState> _states = new();
+    /// <summary>The most owner tokens that wait for, or are in, their clean-up at any time.</summary>
+    internal const int MaxPendingReleases = 1024;
+
     private readonly IMessageStore _store;
     private readonly ILogger? _logger;
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _pending = new();
+    private int _pendingCount;
+    private int _pumping;
+    private long _dropped;
 
     public PickupSessionTracker(IMessageStore store, ILogger? logger)
     {
@@ -109,29 +128,69 @@ internal sealed class PickupSessionTracker
 
     /// <summary>
     /// End every lease taken over a session that has closed (FR-PICK-04/08): what it was sent but
-    /// did not acknowledge becomes deliverable again. Runs on the thread pool so the thread that
-    /// closed the session never executes store code; a failure is logged and the leases then end by
-    /// their timeout.
+    /// did not acknowledge becomes deliverable again. Never blocks and never runs store code on the
+    /// calling thread: the owner token joins a backlog that one worker drains, one store call at a
+    /// time. Both are bounded — at most <see cref="MaxPendingReleases"/> tokens wait or are being
+    /// released, however many sessions close and however slow the store is. A token that finds the
+    /// backlog full is dropped (counted, logged): those leases then end by their timeout, as do the
+    /// leases of a release that fails.
     /// </summary>
     public void ReleaseLeasesInBackground(string ownerToken)
     {
-        // Unsafe queue: the closing thread's ExecutionContext (its AsyncLocals, an ambient request)
-        // does not flow into store code that runs after that thread has moved on.
-        ThreadPool.UnsafeQueueUserWorkItem(
-            static work => _ = work.Tracker.ReleaseLeasesAsync(work.OwnerToken),
-            (Tracker: this, OwnerToken: ownerToken),
-            preferLocal: false);
+        if (Interlocked.Increment(ref _pendingCount) > MaxPendingReleases)
+        {
+            Interlocked.Decrement(ref _pendingCount);
+            var level = MediatorLog.RateLimited(ref _dropped, out var n);
+            MediatorLog.Write(_logger, level, "Message pickup: the lease clean-up backlog is full ({MaxPendingReleases}); the leases of a closed session end by timeout. {Count} such sessions.", MaxPendingReleases, n);
+            return;
+        }
+
+        _pending.Enqueue(ownerToken);
+        StartPumpIfIdle();
     }
 
-    private async Task ReleaseLeasesAsync(string ownerToken)
+    /// <summary>Releases dropped because the backlog was full; their leases ended by timeout.</summary>
+    internal long DroppedReleases => Interlocked.Read(ref _dropped);
+
+    /// <summary>Owner tokens waiting for, or in, their release call.</summary>
+    internal int PendingReleases => Volatile.Read(ref _pendingCount);
+
+    private void StartPumpIfIdle()
     {
-        try
+        if (Interlocked.CompareExchange(ref _pumping, 1, 0) != 0)
+            return;
+        // Unsafe queue: the closing thread's ExecutionContext (its AsyncLocals, an ambient request)
+        // does not flow into store code that runs after that thread has moved on.
+        ThreadPool.UnsafeQueueUserWorkItem(static tracker => _ = tracker.PumpAsync(), this, preferLocal: false);
+    }
+
+    // The one worker: drains the backlog in order, one release at a time, then stops. A release
+    // that never completes stops the clean-up; the backlog then fills and later closes fall back
+    // to lease expiry — bounded either way.
+    private async Task PumpAsync()
+    {
+        while (true)
         {
-            await _store.ReleaseLeasesAsync(ownerToken, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            MediatorLog.Write(_logger, LogLevel.Warning, "Message pickup: the leases of a closed session could not be released ({ExceptionType}); they end by timeout.", ex.GetType().Name);
+            while (_pending.TryDequeue(out var ownerToken))
+            {
+                try
+                {
+                    await _store.ReleaseLeasesAsync(ownerToken, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    MediatorLog.Write(_logger, LogLevel.Warning, "Message pickup: the leases of a closed session could not be released ({ExceptionType}); they end by timeout.", ex.GetType().Name);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _pendingCount);
+                }
+            }
+
+            Volatile.Write(ref _pumping, 0);
+            // A token enqueued after the last TryDequeue and before the reset has no pump: take it up.
+            if (_pending.IsEmpty || Interlocked.CompareExchange(ref _pumping, 1, 0) != 0)
+                return;
         }
     }
 }

@@ -664,6 +664,16 @@ internal sealed class PickupParkingStore : IMessageStore
         return Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
     }
 
+    /// <summary>Every id the mediator passed over (set aside as undeliverable for now), with the instant it may come up again.</summary>
+    public ConcurrentQueue<(string Id, DateTimeOffset Until)> PassedOver { get; } = new();
+
+    public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct)
+    {
+        foreach (var id in messageIds)
+            PassedOver.Enqueue((id, until));
+        return Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
+    }
+
     public async ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
     {
         foreach (var id in messageIds)

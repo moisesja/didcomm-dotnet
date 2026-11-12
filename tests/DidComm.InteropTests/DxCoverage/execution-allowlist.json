@@ -738,6 +738,10 @@
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::PassOverAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
       "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::PurgeExpiredAsync(System.DateTimeOffset,System.Threading.CancellationToken)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
@@ -783,6 +787,10 @@
     },
     {
       "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::LeaseAsync(DidComm.Mediator.Pickup.MessageLeaseRequest,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::PassOverAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,System.DateTimeOffset,System.Threading.CancellationToken)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -1130,7 +1138,7 @@
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::.ctor(System.String,System.String,System.String,System.ReadOnlyMemory`1<System.Byte>,System.DateTimeOffset,System.Nullable`1<System.DateTimeOffset>,System.Nullable`1<System.DateTimeOffset>)",
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::.ctor(System.String,System.String,System.String,System.ReadOnlyMemory`1<System.Byte>,System.DateTimeOffset,System.Nullable`1<System.DateTimeOffset>,System.Nullable`1<System.DateTimeOffset>,System.Int32)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -1147,6 +1155,10 @@
     },
     {
       "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:NotBefore",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:PassOvers",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {

@@ -442,12 +442,12 @@ public sealed class MessagePickupHandlerFaultTests
         (int[] Attempts, int[] GivenBack, string[] Trace)? trim = (fault, variant) switch
         {
             (TooLargeAlways, Unfiltered) => (new[] { 3, 2, 1, 2, 1, 1 }, new[] { 3, 2, 3 },
-                new[] { "LeaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
-            (TooLargeAlways, Filtered) => (new[] { 1 }, Array.Empty<int>(), new[] { "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+                new[] { "LeaseAsync", "ReleaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync" }),
+            (TooLargeAlways, Filtered) => (new[] { 1 }, Array.Empty<int>(), new[] { "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync" }),
             (TooLargeAlways, Removed) => (new[] { 2, 1, 1 }, new[] { 3 },
-                new[] { "LeaseAsync", "AcknowledgeAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+                new[] { "LeaseAsync", "AcknowledgeAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync" }),
             (TooLargeOnce, Unfiltered) => (new[] { 3, 2 }, new[] { 3 }, new[] { "LeaseAsync", "ReleaseAsync" }),
-            (TooLargeOnce, Filtered) => (new[] { 1 }, Array.Empty<int>(), new[] { "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+            (TooLargeOnce, Filtered) => (new[] { 1 }, Array.Empty<int>(), new[] { "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync" }),
             (TooLargeOnce, Removed) => (new[] { 2, 1 }, new[] { 3 }, new[] { "LeaseAsync", "AcknowledgeAsync", "ReleaseAsync" }),
             _ => null,
         };
@@ -782,7 +782,7 @@ public sealed class MessagePickupHandlerFaultTests
         h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[2], ids[1], ids[2]);
         h.Store.Released.Should().OnlyContain(r => r.GrantPeerDid == h.Alice);
         h.Store.Acknowledged.Should().BeEmpty("a message that does not fit is not removed");
-        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync");
+        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync", "PassOverAsync", "LeaseAsync", "GetStatusAsync");
         h.Store.Inner.MessageCount.Should().Be(3);
         (await h.DeliverableAsync(h.Alice)).Should().BeEmpty("each of the three keeps the request's lease");
 
@@ -800,7 +800,7 @@ public sealed class MessagePickupHandlerFaultTests
         lines.Select(e => e.State["Count"]).Should().Equal(1L, 2L, 3L);
         foreach (var line in lines)
         {
-            line.Formatted.Should().Contain("even alone; it stays queued and is passed over until this request's lease ends");
+            line.Formatted.Should().Contain("even alone; it stays queued and is passed over for a period that doubles each time");
             line.State.Keys.Should().BeEquivalentTo("MessageId", "Bytes", "Count", "{OriginalFormat}");
             line.State["MessageId"].Should().Be(request.Id);
         }
@@ -817,11 +817,12 @@ public sealed class MessagePickupHandlerFaultTests
         h.Store.Acknowledged.Should().BeEmpty();
         h.Store.Inner.MessageCount.Should().Be(3);
 
-        // All three are held by the first request's lease and by no other: giving back under
-        // another id finds nothing, under that one all of them.
-        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, "not-a-lease-of-anyone", default)).Should().Be(0);
-        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, h.Store.LeaseRequests.Last().Lease.Id, default)).Should().Be(0);
-        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, lease.Id, default)).Should().Be(3);
+        // All three were given up under the first request's lease and are under no lease now:
+        // each is passed over for one lease timeout, and nothing but time brings them up again.
+        h.Store.PassedOver.Select(p => (string.Join(",", p.Ids), p.LeaseId)).Should().Equal((ids[0], lease.Id), (ids[1], lease.Id), (ids[2], lease.Id));
+        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, lease.Id, default)).Should().Be(0);
+        (await h.DeliverableAsync(h.Alice)).Should().BeEmpty();
+        h.Clock.Advance(TimeSpan.FromSeconds(60));
         (await h.DeliverableAsync(h.Alice)).Should().Equal(ids);
     }
 

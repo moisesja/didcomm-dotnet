@@ -16,6 +16,7 @@ namespace DidComm.Mediator.Pickup;
 /// <item><description><strong>Everything is confined to a grant.</strong> Each operation names a <c>grantPeerDid</c> — the DID subject of the recipient that enrolled (<c>MediationGrant.PeerDid</c>) — and touches only records stored under it. A message id means something only together with its grant: an id held under another grant is a plain miss, reported and handled exactly like an id nobody holds. Keys are bare DIDs of at most 2048 characters, compared ordinally; the store parses nothing.</description></item>
 /// <item><description><strong>A record is in exactly one place.</strong> It is stored once by <see cref="EnqueueAsync"/> and leaves by <see cref="AcknowledgeAsync"/> or a purge. A lease is a mark on the record (the lease's id, an owner token and an expiry instant), never a move: ending a lease — by <see cref="ReleaseAsync"/>, <see cref="ReleaseLeasesAsync"/> or the passing of its expiry — never copies, re-inserts or re-orders the record.</description></item>
 /// <item><description><strong>A lease is given back only by its taker.</strong> <see cref="ReleaseAsync"/> names the lease it ends (<see cref="MessageLease.Id"/>) and leaves a record alone when it carries another lease by now — the first one ran out and somebody else took the record — so a late clean-up can never make a message that was just delivered deliverable again.</description></item>
+/// <item><description><strong>A record that was passed over stays where it is.</strong> <see cref="PassOverAsync"/> marks a record the taker could not deliver for now: it stays stored and counted, in its position, and <see cref="LeaseAsync"/> does not hand it out again before the instant given — whatever happens to leases, sessions or connections in the meantime. The mark and the number of times it was set (<see cref="QueuedMessage.PassOvers"/>) belong to the record and last as long as it does; they are what lets a recipient's later requests get past such records instead of meeting the same ones first every time.</description></item>
 /// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due. A record that is expired at the instant of the call does not: expired records never keep a new message out.</description></item>
 /// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, not of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
 /// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>.</description></item>
@@ -60,7 +61,8 @@ public interface IMessageStore
     /// Select the next deliverable records of a grant and mark them leased, in one step. Walks the
     /// grant's records in arrival order — only those for <see cref="MessageLeaseRequest.RecipientDid"/>
     /// when it is set — and takes each record that is not expired, is due and is not under a live
-    /// lease, until <see cref="MessageLeaseRequest.MaxMessages"/> are taken or the next one would
+    /// lease and is not passed over for now (<see cref="PassOverAsync"/>), until
+    /// <see cref="MessageLeaseRequest.MaxMessages"/> are taken or the next one would
     /// carry the payload total past <see cref="MessageLeaseRequest.MaxPayloadBytes"/>. It stops
     /// there and does not look for a smaller record further on, so the result is always a prefix of
     /// what is deliverable; the first deliverable record is taken whatever its size. Expired
@@ -95,6 +97,24 @@ public interface IMessageStore
     /// <param name="ct">Cancellation token.</param>
     /// <returns>How many leases were ended.</returns>
     ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct);
+
+    /// <summary>
+    /// Set aside records taken under the lease <paramref name="leaseId"/> that could not be
+    /// delivered for now: the records of <paramref name="grantPeerDid"/> with these ids that still
+    /// carry that lease lose it, are not handed out by <see cref="LeaseAsync"/> before
+    /// <paramref name="until"/>, and have their <see cref="QueuedMessage.PassOvers"/> raised by
+    /// one. They stay stored, counted and in position. Unlike a lease, the mark has no owner and is
+    /// not ended by <see cref="ReleaseAsync"/> or <see cref="ReleaseLeasesAsync"/>: only the passing
+    /// of <paramref name="until"/> ends it. Ids the grant does not hold are ignored, and so is a
+    /// record that carries a different lease by now.
+    /// </summary>
+    /// <param name="grantPeerDid">The grant the ids belong to.</param>
+    /// <param name="messageIds">The ids to pass over.</param>
+    /// <param name="leaseId">The <see cref="MessageLease.Id"/> the records were taken under.</param>
+    /// <param name="until">The first instant at which the records may be handed out again.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>How many records were passed over.</returns>
+    ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct);
 
     /// <summary>
     /// End every lease whose <see cref="MessageLease.Owner"/> is <paramref name="leaseOwner"/>,
@@ -149,6 +169,7 @@ public interface IMessageStore
 /// <param name="ReceivedAt">When the mediator accepted the message.</param>
 /// <param name="NotBefore">The message must not be delivered before this instant (a forward's <c>delay_milli</c>, FR-ROUTE-10); <c>null</c> for none.</param>
 /// <param name="ExpiresAt">The first instant at which the message is expired and must no longer be delivered (FR-ROUTE-09); <c>null</c> for none.</param>
+/// <param name="PassOvers">How many times the message has been passed over (<see cref="IMessageStore.PassOverAsync"/>): found undeliverable for now and set aside. Zero when enqueued; kept by the store and returned with the record by <see cref="IMessageStore.LeaseAsync"/>.</param>
 public sealed record QueuedMessage(
     string Id,
     string GrantPeerDid,
@@ -156,7 +177,8 @@ public sealed record QueuedMessage(
     ReadOnlyMemory<byte> Payload,
     DateTimeOffset ReceivedAt,
     DateTimeOffset? NotBefore = null,
-    DateTimeOffset? ExpiresAt = null)
+    DateTimeOffset? ExpiresAt = null,
+    int PassOvers = 0)
 {
     /// <summary>The payload length and the times only: no DID, id or payload is printed, so a logged instance carries no wire value.</summary>
     public override string ToString()

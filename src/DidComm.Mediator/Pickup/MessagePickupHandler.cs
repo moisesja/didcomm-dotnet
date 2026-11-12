@@ -38,11 +38,14 @@ namespace DidComm.Mediator.Pickup;
 /// return-route session with a size bound (<c>IReturnRouteSession.TrySendAsync(message,
 /// maxPackedBytes, ct)</c>) and, when the packed message is over the bound, takes the last message
 /// out and tries again. A message that is over the bound even alone (the peer's own DID document
-/// makes its envelopes that large) is not delivered and not removed: the request is answered
-/// <c>status</c> only if nothing else can be delivered — the message keeps the request's lease, so
-/// the same request goes on to what is queued behind it, and later requests pass it over until
-/// that lease ends and it is tried again. Over HTTP the pushed <c>delivery</c> is the response
-/// body. Delivered
+/// makes its envelopes that large) is not delivered and not removed: it is passed over — set aside
+/// in the store for a period that starts at <see cref="MessagePickupOptions.LeaseTimeout"/> and
+/// doubles each time the message is tried and does not fit — and the same request goes on to what
+/// is queued behind it, answering <c>status</c> only if nothing else can be delivered. That mark
+/// belongs to the message, not to a lease or a connection, so later requests, however far apart
+/// and on whatever connection, are not held up by the same messages again. One request does a
+/// bounded amount of work: at most twice <see cref="MessagePickupOptions.MaxDeliveryBatch"/> lease
+/// rounds and as many packs. Over HTTP the pushed <c>delivery</c> is the response body. Delivered
 /// messages stay stored, under a lease, until a <c>messages-received</c> names them; a lease that
 /// runs out (<see cref="MessagePickupOptions.LeaseTimeout"/>), or whose WebSocket closes, makes
 /// them deliverable again, so a recipient may see a message more than once. A request that arrives

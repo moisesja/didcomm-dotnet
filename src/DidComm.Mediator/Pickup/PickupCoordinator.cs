@@ -117,6 +117,9 @@ internal sealed class PickupCoordinator
     /// <summary>The sizing in effect.</summary>
     public PickupSizing Sizing => _sizing;
 
+    /// <summary>The per-session state and the lease clean-up backlog (its counters are read by tests and hosts' diagnostics).</summary>
+    internal PickupSessionTracker Tracker => _tracker;
+
     // ---- who is asking ----------------------------------------------------------------------
 
     /// <summary>
@@ -318,6 +321,8 @@ internal sealed class PickupCoordinator
             var due = options.NotBefore is not { } notBefore || notBefore <= now;
             var target = options.AllowLive && due ? FindLiveTarget(peerDid) : null;
             lease = target is null ? null : new MessageLease(target.Value.State.OwnerToken, now + _leaseTimeout);
+            // Before the lease exists: the session's close then knows there may be leases to end.
+            target?.State.MarkLeasing();
 
             var outcome = EnqueueOutcome.DuplicateId;
             for (var attempt = 0; attempt < 2 && outcome == EnqueueOutcome.DuplicateId; attempt++)
@@ -433,8 +438,8 @@ internal sealed class PickupCoordinator
     // Lease, check, push, trim — and look further when a batch came to nothing. Returns the
     // outcome when the request is settled here, or null when nothing could be delivered and the
     // caller answers with the status. Whatever was leased and not pushed is released on every path
-    // out, including a fault — with one exception, on purpose: a message that did not fit even
-    // alone keeps the lease (see below).
+    // out, including a fault. A message that did not fit even alone is passed over (see below):
+    // that mark is the store's and outlives the request.
     private async Task<PickupOutcome?> LeaseAndPushAsync(
         string peerDid,
         int max,
@@ -449,6 +454,8 @@ internal sealed class PickupCoordinator
         var state = _tracker.Track(session);
         var lease = new MessageLease(state?.OwnerToken, now + _leaseTimeout);
         var request = new MessageLeaseRequest(peerDid, recipientDid, max, _sizing.BatchPayloadBudget, now, lease);
+        // Before the first lease exists: the session's close then knows there may be leases to end.
+        state?.MarkLeasing();
 
         // One request does a bounded amount of work whatever the queue holds: this many lease
         // rounds and this many packs (a pack is a full encryption of up to max_delivery_bytes).
@@ -520,13 +527,17 @@ internal sealed class PickupCoordinator
                     // One message, alone, is over the budget in the delivery this request asked for
                     // (its thread id and filter are part of what was measured). Nothing is removed:
                     // another request, a larger budget or a smaller envelope may still deliver it.
-                    // It is not given back either — it keeps this request's lease, so the next
-                    // round of this request, and every request until that lease ends, passes it
-                    // over and delivers what is queued behind it.
+                    // It is passed over: the store keeps it out of every lease, this request's
+                    // next round included, for a period that doubles each time the record is
+                    // passed over. That memory belongs to the record, not to this request, a
+                    // lease or a connection — so requests that come after a lease ran out, or on a
+                    // new connection, do not spend their work on the same records again and get
+                    // to what is queued behind them.
+                    await _store.PassOverAsync(peerDid, new[] { last.Id }, lease.Id, PassedOverUntil(now, last.PassOvers), ct).ConfigureAwait(false);
                     held.Remove(last.Id);
                     settled.Add(last.Id);
                     var level = MediatorLog.RateLimited(ref _undeliverable, out var n);
-                    Log(level, "Message-pickup delivery request {MessageId}: a queued message of {Bytes} bytes does not fit this peer's envelope within max_delivery_bytes even alone; it stays queued and is passed over until this request's lease ends. {Count} such messages.", MediatorLog.LogId(messageId), last.Payload.Length, n);
+                    Log(level, "Message-pickup delivery request {MessageId}: a queued message of {Bytes} bytes does not fit this peer's envelope within max_delivery_bytes even alone; it stays queued and is passed over for a period that doubles each time. {Count} such messages.", MediatorLog.LogId(messageId), last.Payload.Length, n);
                 }
                 // The batch came to nothing — its records were unregistered leftovers, or its head
                 // did not fit alone. Look at what is queued behind it.
@@ -538,6 +549,17 @@ internal sealed class PickupCoordinator
             if (held.Count > 0)
                 await ReleaseQuietlyAsync(peerDid, held, lease.Id).ConfigureAwait(false);
         }
+    }
+
+    // How long a record that did not fit alone is passed over: the lease timeout the first time,
+    // twice that the next, and so on, without a ceiling short of the end of time. Whatever the
+    // interval a recipient asks at, the periods outgrow it, so such records cannot keep meeting
+    // every request first.
+    private DateTimeOffset PassedOverUntil(DateTimeOffset now, int passOvers)
+    {
+        var factor = 1L << Math.Clamp(passOvers, 0, 40);
+        var ticks = _leaseTimeout.Ticks > long.MaxValue / factor ? long.MaxValue : _leaseTimeout.Ticks * factor;
+        return ticks >= (DateTimeOffset.MaxValue - now).Ticks ? DateTimeOffset.MaxValue : now.AddTicks(ticks);
     }
 
     // What a store hands out is not trusted further than its contract: every record must be the
