@@ -214,8 +214,15 @@ public sealed class MessagePickupAdversarialResourceHammerTests
             }
             for (var i = 1; i < ordered.Length; i++)
             {
-                // Delivered again: one of the sessions that carried it before had begun to close.
-                var freed = ordered.Take(i).Any(d => closing.TryGetValue(d.Session, out var closedAt) && closedAt < ordered[i].Seq);
+                // Delivered again: one of the sessions that carried it had begun to close by then —
+                // one that carried it before, or the very session of this delivery. The second case
+                // is a push that was already inside a session's send when that session closed: the
+                // close released its lease, another connection was handed the message, and only
+                // then did the closing session's send report it as taken (its number is assigned
+                // after the send's own delay, so it sorts last although it started first). Looking
+                // only at the earlier deliveries made this check depend on which of the two sends
+                // was numbered first (it failed once on the Windows runner; L-044).
+                var freed = ordered.Take(i + 1).Any(d => closing.TryGetValue(d.Session, out var closedAt) && closedAt < ordered[i].Seq);
                 freed.Should().BeTrue("a message is delivered again only after a lease on it ended, and here leases end only when their session closes");
             }
         }
