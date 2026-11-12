@@ -1028,3 +1028,83 @@ Format per entry:
   surrogate escape, which breaks re-reading the body). Then read the doc sentence against the code
   path from the public entry point (L-052) and keep only what holds.
 
+## L-056 — Do not destroy on a measurement that depends on the request; and test a back-off rule with the slowest honest client.
+
+- **Lesson:** "This can never be delivered, so remove it" was decided from one request's packed
+  size — but that size included the request's own thread id and filter, so the same message was
+  delivered or destroyed depending on which request met it first. The replacement ("leave it under
+  the request's lease and answer status") lost nothing, and then starved every recipient that
+  polls no faster than the lease lasts. An irreversible action needs a fact about the thing itself,
+  not about the attempt; and a rule that sets something aside for a period has to be walked through
+  with a client that comes back only after that period.
+- **Why:** In #94 the rule for a queued message that does not fit a many-key recipient's envelope
+  went through four versions: released at once (head-of-line blocking, found over the real
+  endpoints), removed (two QA agents showed a deliverable message destroyed by a request with a
+  512-character thread id, and a late verdict removing a message another request had delivered),
+  kept under the lease with a `status` answer (three agents showed a once-a-minute poller never
+  gets what is queued behind it), and finally kept under the lease while the same request looks
+  further. Each version was "obviously fine" for the client I had in mind.
+- **How to apply:** Before code deletes, drops or acknowledges on the mediator's own initiative,
+  write down which inputs the verdict read and ask whether another caller could get a different
+  verdict for the same record; if so, defer instead of destroying. For any lease, back-off or
+  pass-over, add the test "a client that asks once per period, or slower, still gets everything
+  deliverable", and state in the docs what an answer means to a client that stops at it (here:
+  `status` after `delivery-request` must mean "nothing deliverable now"). See [[L-052]].
+
+## L-057 — A give-back names what it took; a check removes only what it looked at.
+
+- **Lesson:** Two clean-up operations acted on "whatever is there now" instead of "what I took":
+  release-by-ids ended any lease on the record, so a late clean-up freed a message another request
+  had just delivered; and the delivery-time registration check, having looked at the leased
+  records of a DID, purged every record of that DID — including one accepted after the DID was
+  registered again. Both are the two-reads shape of [[L-039]] in a store API: the read and the
+  write must be tied together by an identity (a lease id, the record ids that were checked), not
+  by a key that others can write under in between.
+- **Why:** Found in #94 by the QA and red-team agents with deterministic rendezvous tests; the
+  first as a duplicate delivery inside a live lease, the second as a message reported `Queued`
+  and then deleted undelivered. My own tests never parked a request between its check and its
+  write.
+- **How to apply:** For every store operation that undoes or removes, ask "what if the record
+  changed hands since I read it?" and pass the token that proves it did not (compare-and-release,
+  remove-by-id of exactly the records examined). In the QA brief, ask for one parked-in-the-middle
+  test per check-then-write pair.
+
+## L-058 — A work bound that restarts with every request needs progress that outlives the request.
+
+- **Lesson:** "At most N units of work per request" is half a design. The other half is where the
+  result of that work is remembered. If the memory expires (a lease) or belongs to someone who
+  leaves (a connection), a caller who comes back after it is gone starts from the same place, and
+  with more blocked items than N the bound has turned into starvation. Keep the progress on the
+  thing itself, make it survive everything the caller can lose, and let the back-off grow so that
+  it outlasts any interval the caller may choose.
+- **Why:** In #94 a queued message that does not fit the recipient's envelope was "passed over" by
+  leaving it under the request's lease, and each request was bounded to 2 × the batch size of
+  sends. The PR #107 review showed two such messages, a batch of one and a poll every 61 s (lease
+  60 s) never delivering the third message. I had fixed the single-blocker version of this twice
+  under QA pressure and each time tested one blocker only; the bound and the lease were designed
+  in different sittings and never checked against each other.
+- **How to apply:** For every per-request budget, write the test with more blocked items than the
+  budget, a caller that returns only after every timer in the design has run out, and a caller on
+  a fresh connection each time. Ask of each piece of progress state: what ends it, and can the
+  slowest honest caller outwait that? Prefer a mark on the record (count + not-before, doubling)
+  to a lease or session field. See [[L-056]] and [[L-055]].
+
+## L-059 — Background work started by an external event is itself a resource: bound it, and owe it only for work taken.
+
+- **Lesson:** A fire-and-forget call per closed connection has no bound just because each call is
+  small. Its concurrency and its backlog are set by how fast the outside world produces the event
+  and how slow the dependency is — the two things an attacker or an outage controls. Give such
+  work one worker (or a fixed few), a bounded backlog and a stated saturation policy that is safe
+  without the work (here: leases end by their timeout anyway). And do not queue clean-up for
+  something that was never acquired: track "took a lease", not "exists".
+- **Why:** In #94 every tracked session close queued its own `ReleaseLeasesAsync` awaited with
+  `CancellationToken.None`, and a session was tracked as soon as it toggled live mode, before any
+  grant lookup. The PR #107 review reproduced 1 000 store calls in flight from one grant-less peer
+  reconnecting against a slow store, while the session registry reported one session at a time.
+  My red-team brief asked about memory held by sessions, not about what closed sessions leave
+  behind.
+- **How to apply:** Grep each change for `Task.Run`, `UnsafeQueueUserWorkItem`, discarded tasks
+  and `CancellationToken.None` awaits. For each: who can trigger it, how often, and what is in
+  flight if the callee never returns? Bound both numbers, test them with a gated dependency and
+  churn, and write the saturation behaviour into the docs. See [[L-054]].
+

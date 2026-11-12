@@ -819,15 +819,21 @@ A `delivery-request`, step by step (`PickupCoordinator.LeaseAndPushAsync`):
    is a fault of the check: nothing is removed.
 5. `session.TrySendAsync(delivery, MaxDeliveryBytes, ct)`. `Sent` → done (over HTTP the pushed
    message is the 200 body). `TooLarge` with more than one message → the last one is released and
-   the rest sent again. `TooLarge` with one message → that record keeps this request's lease:
-   nothing is removed, and until the lease ends it is passed over. `NotSent` → no reply.
+   the rest sent again. `TooLarge` with one message → `IMessageStore.PassOverAsync`: the record
+   gives up the lease and is left out of every lease until `now + LeaseTimeout × 2^PassOvers`
+   (the store keeps the count on the record). Nothing is removed. `NotSent` → no reply.
 6. A batch that came to nothing (its head was passed over, or all of it was unregistered
    leftovers) → the request leases again and goes on with what is queued behind; `status` is the
    answer only when a lease round returns nothing. One request does at most 2 × `MaxDeliveryBatch`
    lease rounds and 2 × `MaxDeliveryBatch` sends.
 7. On every exit, including a fault or cancellation, whatever is still held under this request's
-   lease is released (`ReleaseAsync` names the lease id, with `CancellationToken.None`) — except
-   the records of step 5 that did not fit alone.
+   lease is released (`ReleaseAsync` names the lease id, with `CancellationToken.None`). Records
+   passed over in step 5 are under no lease any more.
+
+Why the pass-over mark is the record's and not a lease: the work bound of step 6 restarts with
+every request, so whatever a request learned must outlive it — and its lease, and its connection —
+or a queue with more unfit records than one request can try would meet every later request with the
+same records first. The doubling makes the periods outgrow any polling interval.
 
 A new message (`MessagePickupQueue.DeliverAsync`, the pipeline's call): size bound first
 (`MaxAdmissiblePayloadBytes`, before any lookup) → expiry → `FindGrantByRecipientDidAsync` → the
@@ -846,10 +852,16 @@ payload admitted — so an admitted payload always fits alone. The estimate only
 the guarantee is the session measuring the packed bytes.
 
 Session lifecycle: `PickupSessionState` hooks `Closed` once (`UnsafeRegister`). When it fires the
-state is marked closed, live delivery is off, and `ReleaseLeasesAsync(ownerToken)` is queued to
-the thread pool without the closing thread's execution context. Every path that takes a
-session-owned lease checks the closed mark again afterwards, so a lease recorded after the release
-ran is released too. HTTP sessions are never tracked: their leases end by time only.
+state is marked closed and live delivery is off. If the session ever took a lease
+(`MarkLeasing`, set before the store call that records one), its owner token joins the tracker's
+clean-up backlog: one worker, started on the thread pool without the closing thread's execution
+context, calls `ReleaseLeasesAsync(ownerToken)` for one token at a time. The backlog holds at most
+`PickupSessionTracker.MaxPendingReleases` (1 024) tokens, the one in flight included; a close that
+finds it full is dropped (counted, logged) and its leases end by timeout. So neither the number of
+store calls in flight (one) nor the number waiting is set by how fast connections come and go, and
+a peer that only opens connections and toggles live mode costs the store nothing. Every path that
+takes a session-owned lease checks the closed mark again afterwards, so a lease recorded after the
+release ran is released too. HTTP sessions are never tracked: their leases end by time only.
 
 Faults: a message store, mediation store, registry, session or id generator that throws, or
 returns something outside its contract, never leaves the role — a request gets no reply, a
@@ -864,8 +876,8 @@ Documented limits:
   a recipient that never acknowledges fills its quota.
 - **Many-key recipients.** An envelope larger than the allowance means trimmed batches. A message
   that does not fit alone is never delivered and never removed by the role: it is passed over,
-  tried again once per lease period, and stays stored and counted until it expires or is purged —
-  so `message_count` does not reach zero while it exists.
+  tried again at intervals that double, and stays stored and counted until it expires or is
+  purged — so `message_count` does not reach zero while it exists.
 - **Not-yet-due messages** count against the quota but are not reported by `status`; a sender
   asking for long delays can use a recipient's quota up unseen. The pipeline (#95) must bound the
   delay it accepts.

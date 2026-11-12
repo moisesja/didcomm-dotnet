@@ -80,8 +80,9 @@ into the queue — the delivery pipeline — is #95; the recipient-side client i
   confined to one grant, and a message id means something only under its grant, so one recipient
   can never acknowledge or probe another's messages. Enqueue is one check-and-insert against the
   bounds; leasing is one select-and-mark; a lease is a mark with its own id, and giving messages
-  back names that id, so a late clean-up cannot undo a lease someone else has taken since. Time is
-  passed in by the caller. Only the in-memory store ships; the interface's remarks state the
+  back names that id, so a late clean-up cannot undo a lease someone else has taken since. A
+  message that could not be delivered for now is passed over: a second mark, with no owner, that
+  only time ends. Time is passed in by the caller. Only the in-memory store ships; the interface's remarks state the
   contract a durable one has to keep.
 - **Bounds (FR-PICK-10).** Per grant: `MaxQueueMessages` (100) and `MaxQueueBytes` (8 MiB). For the
   in-memory store as a whole: `MaxStoreMessages` (5 000) and `MaxStoreBytes` (128 MiB) — modest on
@@ -118,11 +119,15 @@ Things to know before running a mediator on this:
 - **A recipient whose DID document lists many keys gets smaller batches.** Each key adds an entry
   to the envelope. When the envelope outgrows the allowance (about 32 KiB), batches are trimmed.
   A message that does not fit such a recipient even alone is neither delivered nor removed: the
-  request passes it over (a warning in the log; the message keeps the request's lease) and goes on
-  to what is queued behind it, and it is tried again when that lease ends. It stays stored, counted
-  in `status` and in the quota, until it expires or the host purges it — so a recipient should not
-  loop on `message_count` alone. Raise `MaxDeliveryBytes` (and the recipients' `MaxReceiveBytes`)
-  if you serve such recipients.
+  request passes it over (a warning in the log) and goes on to what is queued behind it. Passing
+  over is a mark the store keeps on the message itself (`IMessageStore.PassOverAsync`,
+  `QueuedMessage.PassOvers`): the message is left out for `LeaseTimeout` the first time and for
+  twice as long each time it is tried again and still does not fit. Because the mark is not a
+  lease, it survives lease expiry and reconnects, so however many such messages there are and
+  however rarely the recipient asks, its requests get past them to what can be delivered. Such a
+  message stays stored, counted in `status` and in the quota, until it expires or the host purges
+  it — so a recipient should not loop on `message_count` alone. Raise `MaxDeliveryBytes` (and the
+  recipients' `MaxReceiveBytes`) if you serve such recipients.
 - **One request does a bounded amount of work.** At most 2 × `MaxDeliveryBatch` lease rounds and as
   many packs, whatever the queue holds; a request that runs out answers `status` and the next one
   continues.
@@ -132,6 +137,11 @@ Things to know before running a mediator on this:
   forwards into the queue; the delivery pipeline (#95) has to bound the delay it accepts.
 - **A live connection whose peer stops reading** can hold up to `MaxPendingPushes` packed
   deliveries (16 by default, each up to `MaxDeliveryBytes`) until it closes.
+- **Clean-up after a closed connection is bounded.** Ending the leases of a closed WebSocket is a
+  store call made in the background, one at a time, from a backlog of at most 1 024 connections;
+  a connection that never took a lease queues nothing. When the backlog is full (a store that
+  cannot keep up with connection churn) further closes are not queued: their leases end by
+  `LeaseTimeout` instead. Closing never waits for the store.
 - **A request without a return-route session gets nothing over the library endpoints.** A
   `delivery-request` that arrives without `return_route: all` leases nothing; the handler's
   `status` reply is logged, not sent.
