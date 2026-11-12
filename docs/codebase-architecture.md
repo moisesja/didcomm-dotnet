@@ -686,13 +686,18 @@ How a request is handled (`CoordinateMediationHandler.HandleAsync` → `Mediatio
 2. **Parse.** `CoordinateMediation.TryParse…` over `MediationBodies`. A malformed body from a peer
    throws `MalformedMessageException` out of dispatch (the endpoint's 400); the text names the
    member and the rule, never a value. A DID member over 2048 characters is refused by one length
-   comparison before anything parses it. More than `MaxUpdatesPerMessage` entries is malformed.
+   comparison before anything parses it. More than `MaxUpdatesPerMessage` entries is malformed,
+   and that is decided from the list's length before the body is re-read or any entry decoded
+   (`MediationBodies.RequireUpdatesWithin`, then again in `ReadUpdates` before it allocates).
 3. **Act.**
    - `mediate-request`: a peer that holds a grant gets the same grant again (the policy is not
      asked). Otherwise `IMediationPolicy.OnMediateRequestAsync` decides; a grant is recorded with
      the routing DIDs of `IMediatorIdentity`, or, when none are configured, the DID that decrypted
      the request. A full store answers `mediate-deny`.
-   - `recipient-update`: one store read for the grant (none → every entry `client_error`), then per
+   - `recipient-update`: one store read for the grant (none → every entry `client_error`), and in
+     the same fault boundary the list of the mediator's own DIDs (the decrypting DID, the grant's
+     routing DIDs, the currently configured ones, `OwnIdentifiers`). If either cannot be read,
+     every entry is `server_error` and nothing is applied: the own-DID guard fails closed. Then per
      entry: not a bare DID → `client_error` (a DID URL is never reduced to its DID); one of the
      mediator's own DIDs → `client_error`; `IMediationPolicy.MayRegisterAsync` for an `add`. What
      remains goes to `IMediationStore.UpdateRecipientsAsync` in one call, and the store's

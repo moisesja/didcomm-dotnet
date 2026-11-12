@@ -42,7 +42,11 @@ follow. No existing package changes behaviour.
     a DID URL is refused, never reduced to its DID — or held by another peer, or a removal of
     something this peer does not hold, or one of the mediator's own DIDs, or refused by the policy,
     or over the per-peer limit, or the peer has no grant); `server_error` (the store or the policy
-    failed, or the mediator-wide limit is reached).
+    failed, or the mediator-wide limit is reached). The mediator's own DIDs are the DID that
+    decrypted the request, the routing DIDs in the peer's grant, the routing DIDs configured now
+    (they may be newer than the grant) and `DidCommOptions.OwnIdentifiers`. If that list cannot be
+    read — the `IMediatorIdentity` throws — the guard fails closed: every entry of the message gets
+    `server_error` and nothing is applied.
   - `recipient-query` → `recipient` with one page of the peer's own DIDs in registration order.
     `limit` is clamped to `MaxPageSize` (default 100); zero or less gives an empty page; an offset
     past the end gives an empty page with `remaining: 0`; without `paginate` the first page is
@@ -83,9 +87,11 @@ follow. No existing package changes behaviour.
 - **`IMediatorIdentity`**: where the granted routing DIDs come from; the default reads
   `CoordinateMediationOptions.RoutingDids`.
 - **Bounds on one message (FR-MED-08).** A `recipient-update` may carry at most
-  `MaxUpdatesPerMessage` entries (default 1024); more is malformed. A `recipient_did` longer than
-  2048 characters is refused by a length check before anything parses it. A peer without a grant
-  costs one store read.
+  `MaxUpdatesPerMessage` entries (default 1024). A longer list is malformed and is refused from its
+  length alone, before the body is re-read and before any entry is decoded or allocated, so
+  whatever sits beyond the bound is never looked at. A `recipient_did` longer than 2048 characters
+  is refused by a length check before anything parses it. A peer without a grant costs one store
+  read.
 - **Failures stay inside.** A store, policy or identity provider that throws, or returns something
   unusable, never throws through the dispatcher: the affected `recipient-update` entries get
   `server_error`, and a `mediate-request` or `recipient-query` gets no reply (the protocol defines
