@@ -700,6 +700,462 @@
     {
       "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Result",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage::.ctor(System.String,System.ReadOnlyMemory`1<System.Byte>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage::prop:Id",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage::prop:Payload",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::AcknowledgeAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::EnqueueAsync(DidComm.Mediator.Pickup.QueuedMessage,DidComm.Mediator.Pickup.MessageLease,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::GetStatusAsync(System.String,System.String,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::LeaseAsync(DidComm.Mediator.Pickup.MessageLeaseRequest,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::PurgeExpiredAsync(System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::PurgeGrantAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::PurgeRecipientAsync(System.String,System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::ReleaseAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::ReleaseLeasesAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::.ctor()",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::.ctor(DidComm.Mediator.Pickup.MessagePickupOptions)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::AcknowledgeAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::EnqueueAsync(DidComm.Mediator.Pickup.QueuedMessage,DidComm.Mediator.Pickup.MessageLease,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::GetStatusAsync(System.String,System.String,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::LeaseAsync(DidComm.Mediator.Pickup.MessageLeaseRequest,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::PurgeExpiredAsync(System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::PurgeGrantAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::PurgeRecipientAsync(System.String,System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::ReleaseAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::ReleaseLeasesAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::prop:MessageCount",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::prop:TotalBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLease",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLease::.ctor(System.String,System.DateTimeOffset)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLease::prop:ExpiresAt",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLease::prop:Owner",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::.ctor(System.String,System.String,System.Int32,System.Int64,System.DateTimeOffset,DidComm.Mediator.Pickup.MessageLease)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:GrantPeerDid",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:Lease",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:MaxMessages",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:MaxPayloadBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:Now",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:RecipientDid",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateDelivery(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Pickup.DeliveredMessage>,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateDeliveryRequest(System.String,System.String,System.Int32,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateLiveDeliveryChange(System.String,System.String,System.Boolean,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateLiveModeNotSupported(System.String,System.String,System.String)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateMessagesReceived(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateStatus(System.String,System.String,DidComm.Mediator.Pickup.PickupStatus,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateStatusRequest(System.String,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::ResponseThreadId(DidComm.Messages.Message)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseDelivery(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Pickup.DeliveredMessage>&,System.String&)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseDeliveryRequest(DidComm.Messages.Message,System.Int32&,System.String&)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseLiveDeliveryChange(DidComm.Messages.Message,System.Boolean&)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseMessagesReceived(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseStatus(DidComm.Messages.Message,DidComm.Mediator.Pickup.PickupStatus&)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseStatusRequest(DidComm.Messages.Message,System.String&)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupBuilderExtensions",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupBuilderExtensions::AddMessagePickup(DidComm.Extensions.DependencyInjection.DidCommBuilder,System.Action`1<DidComm.Mediator.Pickup.MessagePickupOptions>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupHandler",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupHandler::.ctor(DidComm.Mediator.Pickup.MessagePickupQueue,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Pickup.MessagePickupHandler>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupHandler::HandleAsync(DidComm.Messages.Message,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupHandler::prop:ProtocolUri",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupHandler::prop:Roles",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::.ctor()",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::Validate()",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:LeaseTimeout",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxAckIds",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxDeliveryBatch",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxDeliveryBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxQueueBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxQueueMessages",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxStoreBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupOptions::prop:MaxStoreMessages",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupQueue",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupQueue::.ctor(DidComm.Mediator.Pickup.IMessageStore,DidComm.Mediator.Coordination.IMediationStore,DidComm.Transports.ReturnRoute.IReturnRouteSessionRegistry,Microsoft.Extensions.Options.IOptions`1<DidComm.Mediator.Pickup.MessagePickupOptions>,Microsoft.Extensions.Options.IOptions`1<DidComm.Facade.DidCommOptions>,DidComm.Messages.IMessageIdGenerator,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Pickup.MessagePickupQueue>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupQueue::DeliverAsync(System.String,System.ReadOnlyMemory`1<System.Byte>,DidComm.Mediator.Pickup.PickupDeliveryOptions,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupQueue::PurgeExpiredAsync(System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupQueue::RemoveAsync(System.String,System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickupQueue::prop:MaxAdmissiblePayloadBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryOptions",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryOptions::.ctor(System.Nullable`1<System.DateTimeOffset>,System.Nullable`1<System.Int64>,System.Boolean)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryOptions::prop:AllowLive",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryOptions::prop:ExpiresTime",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryOptions::prop:NotBefore",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryResult",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryResult::.ctor(DidComm.Mediator.Pickup.PickupDeliveryOutcome,System.String,System.String)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryResult::prop:GrantPeerDid",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryResult::prop:MessageId",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupDeliveryResult::prop:Outcome",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::.ctor(System.Int32,System.String,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Boolean>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:LiveDelivery",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:LongestWaitedSeconds",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:MessageCount",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:NewestReceivedTime",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:OldestReceivedTime",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:RecipientDid",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:TotalBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::.ctor(System.Int32,System.Int64,System.Nullable`1<System.DateTimeOffset>,System.Nullable`1<System.DateTimeOffset>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::prop:Empty",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::prop:MessageCount",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::prop:NewestReceivedAt",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::prop:OldestReceivedAt",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::prop:TotalBytes",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::.ctor(System.String,System.String,System.String,System.ReadOnlyMemory`1<System.Byte>,System.DateTimeOffset,System.Nullable`1<System.DateTimeOffset>,System.Nullable`1<System.DateTimeOffset>)",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:ExpiresAt",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:GrantPeerDid",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:Id",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:NotBefore",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:Payload",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:ReceivedAt",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:RecipientDid",
+      "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     }
   ]
 }

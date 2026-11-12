@@ -1,7 +1,7 @@
 using DidComm.Consistency;
 using DidComm.Facade;
+using DidComm.Mediator.Internal;
 using DidComm.Protocols;
-using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.Logging;
 
 namespace DidComm.Mediator.Coordination;
@@ -38,8 +38,7 @@ internal enum MediateOutcome
 /// </remarks>
 internal sealed class MediationCoordinator
 {
-    internal const int MaxLoggedIdLength = 128;
-    private const long DropLogEvery = 1000;
+    internal const int MaxLoggedIdLength = MediatorLog.MaxLoggedIdLength;
 
     private readonly IMediationStore _store;
     private readonly IMediationPolicy _policy;
@@ -80,12 +79,11 @@ internal sealed class MediationCoordinator
     /// </summary>
     public bool TryGetPeer(UnpackResult received, string messageId, out string peerDid, out string localDid)
     {
-        if (ReturnRouteEligibility.TryGetPeer(received, out peerDid, out localDid, out _))
+        if (MediatorPeer.TryGet(received, out peerDid, out localDid))
             return true;
 
         // Anyone can send these, so the line is rate-limited: the first and every 1000th at Warning.
-        var n = Interlocked.Increment(ref _unauthenticated);
-        var level = n == 1 || n % DropLogEvery == 0 ? LogLevel.Warning : LogLevel.Debug;
+        var level = MediatorLog.RateLimited(ref _unauthenticated, out var n);
         Log(level, "Coordinate-mediation message {MessageId} dropped: no authcrypt sender (FR-MED-05); not applied, not answered. {Count} such drops.", LogId(messageId), n);
         return false;
     }
@@ -122,8 +120,7 @@ internal sealed class MediationCoordinator
             if (granted is null)
             {
                 // Any authenticated stranger can cause this once the store is full: rate-limited.
-                var n = Interlocked.Increment(ref _capacityDenials);
-                var level = n == 1 || n % DropLogEvery == 0 ? LogLevel.Warning : LogLevel.Debug;
+                var level = MediatorLog.RateLimited(ref _capacityDenials, out var n);
                 Log(level, "Coordinate-mediation request {MessageId} denied: the mediation store holds its maximum number of grants (FR-MED-08). {Count} such denials.", LogId(messageId), n);
                 return (MediateOutcome.Denied, Array.Empty<string>());
             }
@@ -284,35 +281,17 @@ internal sealed class MediationCoordinator
 
     /// <summary>Write a log line; a throwing logging provider changes nothing.</summary>
     public void Log(LogLevel level, string message, params object?[] args)
-    {
-        if (_logger is null)
-            return;
-        try
-        {
-            _logger.Log(level, message, args);
-        }
-        catch
-        {
-            // Logging providers are host code; they must not change dispatch.
-        }
-    }
+        => MediatorLog.Write(_logger, level, message, args);
 
     /// <summary>
     /// A message id for a log line. Ids are attacker-chosen and not length-bounded by the message
     /// model, so a long one is replaced, not written.
     /// </summary>
-    public static string LogId(string? messageId)
-        => messageId is null ? "(none)"
-            : messageId.Length <= MaxLoggedIdLength ? messageId
-            : $"(id of {messageId.Length} characters)";
+    public static string LogId(string? messageId) => MediatorLog.LogId(messageId);
 
     // Inside a fault boundary: when the dispatch token is cancelled, cancellation is what leaves,
     // never the collaborator's own exception (a driver's "cancelled by user" error carries its text).
-    private static void ThrowIfCancelled(CancellationToken ct)
-    {
-        if (ct.IsCancellationRequested)
-            throw new OperationCanceledException(ct);
-    }
+    private static void ThrowIfCancelled(CancellationToken ct) => MediatorLog.ThrowIfCancelled(ct);
 
     private static RecipientUpdateOutcome ToWire(RecipientStoreOutcome outcome) => outcome switch
     {

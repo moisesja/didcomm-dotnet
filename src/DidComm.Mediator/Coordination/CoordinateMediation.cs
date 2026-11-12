@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
 using DidComm.Exceptions;
+using DidComm.Mediator.Internal;
 using DidComm.Messages;
 using DidComm.Protocols;
 
@@ -303,11 +304,7 @@ public static class CoordinateMediation
 
     // ---- shared pieces --------------------------------------------------------------------
 
-    internal static bool IsType(Message message, MessageTypeUri expected)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        return MessageTypeUri.TryParse(message.Type, out var actual) && actual is not null && expected.Matches(actual);
-    }
+    internal static bool IsType(Message message, MessageTypeUri expected) => WireJson.IsType(message, expected);
 
     private static MessageBuilder Start(string type, string from, string to, IMessageIdGenerator? idGenerator)
     {
