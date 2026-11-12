@@ -1,7 +1,5 @@
 using DidComm.Consistency;
-using DidComm.Exceptions;
 using DidComm.Facade;
-using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.Logging;
