@@ -26,9 +26,9 @@ namespace DidComm.Samples.Cookbook.Sections;
 
 /// <summary>
 /// Section R (PRD §14.2 / FR-TRN-09..11): one packed envelope per WebSocket message; the
-/// receiver reassembles fragments before unpacking, and the connection is one-way. The
-/// example also subscribes to the transport's lifecycle event so the reader sees the
-/// Connected/Disconnected hooks fire.
+/// receiver reassembles fragments before unpacking, and with same-socket replies off (as here) the
+/// connection is one-way. The example also subscribes to the transport's lifecycle event so the
+/// reader sees the Connected/Disconnected hooks fire.
 /// </summary>
 public static class Section_R_ReceiveWebSocket
 {
@@ -116,15 +116,13 @@ public static class Section_R_ReceiveWebSocket
         // The ping asks for replies on this connection with `return_route: all` — the DIDComm
         // return-route extension. Bob's endpoint below has same-socket replies switched off, so no
         // return-route session opens and nothing comes back on the socket; the ping is still
-        // dispatched to the Trust Ping handler. A message carrying the header must also carry a
-        // fresh created_time (the receiver's replay protection checks it); it is stamped by hand
-        // here because the client does not stamp it automatically yet.
+        // dispatched to the Trust Ping handler. SendAsync adds the created_time the receiver's
+        // replay protection needs, because the header puts the ping in its replay scope (FR-RR-09).
         var ping = new MessageBuilder()
             .WithType(TrustPingApi.PingType)
             .WithFrom(ctx.Alice.Did)
             .WithTo(ctx.Bob.Did)
             .WithReturnRoute(ReturnRouteMode.All)
-            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
             .Build();
         ctx.Narrator.Note("The ping carries return_route: all, but this endpoint's same-socket replies are off, so no session opens and no reply rides back.");
         var pingSend = await dispatchSender.SendAsync(

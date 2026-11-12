@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using DidComm.Consistency;
 using DidComm.Facade;
 using DidComm.Json;
 using DidComm.Messages;
@@ -87,47 +86,33 @@ internal static class InboundAdmission
         }
         var sessionEligible = peerDid is not null && header.Mode == ReturnRouteMode.All;
 
-        // FR-RR-08 scope: (a) an authenticated message with return_route other than none, or (b) a
-        // mediator-service message type; a forward is exempt. "Authenticated" is the FR-RR-03 sense:
-        // an authcrypt layer (a sender key id). UnpackResult.Authenticated alone is not enough — a
+        // FR-RR-08 (the one rule, shared with the client's inbound consumer, InboundReplayGate):
+        // scope is (a) an authcrypted message with return_route other than none, or (b) a
+        // mediator-service message type; a forward is exempt. "Authcrypted" is the FR-RR-03 sense: an
+        // authcrypt layer (a sender key id). UnpackResult.Authenticated alone is not enough — a
         // verified JWS sets it too — and a signed-only or anoncrypt(signed) message, like plaintext and
         // anoncrypt, can neither open a session nor mutate mediator state: such in-scope messages pass
-        // through and their handlers drop them (FR-MED-05 / FR-PICK-01).
-        var type = message.Type;
-        var authcrypted = unpacked.Authenticated && !string.IsNullOrEmpty(unpacked.SenderKid);
-        var inScope = authcrypted
-            && !MediatorServiceProtocols.IsReplayExempt(type)
-            && (header.Mode != ReturnRouteMode.None || MediatorServiceProtocols.IsMediatorServiceType(type));
-        if (!inScope)
-            return new InboundAdmissionResult(true, header, headerPresent, sessionEligible, peerDid, localDid, null);
-
-        // Keyed on the authcrypt sender key id's subject — never on the plaintext `from`. A sender key
-        // id that is not a DID (or an empty id) fails closed (L-034).
-        var peerSubject = DidSubject.DidSubjectOf(unpacked.SenderKid);
-        if (peerSubject is null || string.IsNullOrEmpty(messageId))
+        // through and their handlers drop them (FR-MED-05 / FR-PICK-01). Admission is keyed on the
+        // authcrypt sender key id's subject, never on the plaintext `from`; a sender key id that is not
+        // a DID (or an empty id) fails closed (L-034), and so does a throwing guard.
+        var gate = InboundReplayGate.Run(unpacked, header, replayGuard, options);
+        switch (gate.Outcome)
         {
-            endpoint.LogRefusal(logger, messageId, InboundAdmissionEndpoint.NoSenderSubjectSlot, "NoSenderSubject");
-            return new InboundAdmissionResult(false, header, headerPresent, false, peerDid, localDid, null);
+            case ReplayGateOutcome.OutOfScope:
+                return new InboundAdmissionResult(true, header, headerPresent, sessionEligible, peerDid, localDid, null);
+            case ReplayGateOutcome.Admitted:
+                return new InboundAdmissionResult(true, header, headerPresent, sessionEligible, peerDid, localDid, gate.Replay);
+            case ReplayGateOutcome.NoSenderSubject:
+                endpoint.LogRefusal(logger, messageId, InboundAdmissionEndpoint.NoSenderSubjectSlot, "NoSenderSubject");
+                return new InboundAdmissionResult(false, header, headerPresent, false, peerDid, localDid, null);
+            case ReplayGateOutcome.GuardFault:
+                endpoint.LogRefusal(logger, messageId, InboundAdmissionEndpoint.GuardFaultSlot, "GuardFault:" + gate.GuardFaultType);
+                return new InboundAdmissionResult(false, header, headerPresent, false, peerDid, localDid, null);
+            default:
+                var replay = gate.Replay.GetValueOrDefault();
+                endpoint.LogRefusal(logger, messageId, (int)replay, replay.ToString());
+                return new InboundAdmissionResult(false, header, headerPresent, false, peerDid, localDid, gate.Replay);
         }
-
-        ReplayAdmission replay;
-        try
-        {
-            replay = replayGuard.TryAdmit(peerSubject, messageId, message.CreatedTime, options.Now());
-        }
-        catch (Exception ex)
-        {
-            endpoint.LogRefusal(logger, messageId, InboundAdmissionEndpoint.GuardFaultSlot, "GuardFault:" + ex.GetType().Name);
-            return new InboundAdmissionResult(false, header, headerPresent, false, peerDid, localDid, null);
-        }
-
-        if (replay != ReplayAdmission.Admitted)
-        {
-            endpoint.LogRefusal(logger, messageId, (int)replay, replay.ToString());
-            return new InboundAdmissionResult(false, header, headerPresent, false, peerDid, localDid, replay);
-        }
-
-        return new InboundAdmissionResult(true, header, headerPresent, sessionEligible, peerDid, localDid, replay);
     }
 
     /// <summary>
@@ -385,7 +370,8 @@ internal static class SessionOutbound
 
     /// <summary>
     /// Authcrypt <paramref name="snapshot"/> from <paramref name="localDid"/> to
-    /// <paramref name="peerDid"/>. Returns the packed envelope's UTF-8 bytes, or <c>null</c> when the
+    /// <paramref name="peerDid"/>, first stamping <c>created_time</c> on it when it falls under the
+    /// FR-RR-09 scope and has none. Returns the packed envelope's UTF-8 bytes, or <c>null</c> when the
     /// pack failed (logged by exception type name). Throws <see cref="OperationCanceledException"/>
     /// only for <paramref name="ct"/>.
     /// </summary>
@@ -400,6 +386,10 @@ internal static class SessionOutbound
     {
         try
         {
+            // FR-RR-09 (JC-17): a reply or push of a mediator-service type, or carrying return_route
+            // all/thread, falls under the client's FR-RR-08 admission, which refuses it without
+            // created_time. Stamped on the library's own snapshot; a value already set is kept.
+            OutgoingCreatedTime.StampIfInScope(snapshot, client.Options.Now());
             var packed = await client.PackEncryptedAsync(snapshot, new PackEncryptedOptions(
                 Recipients: new[] { peerDid },
                 From: localDid,

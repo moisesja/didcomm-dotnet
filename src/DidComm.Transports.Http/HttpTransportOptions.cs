@@ -9,7 +9,11 @@ namespace DidComm.Transports.Http;
 /// </summary>
 public sealed class HttpTransportOptions
 {
-    /// <summary>Per-request timeout, applied via Polly's timeout policy. Defaults to 30 s.</summary>
+    /// <summary>
+    /// Per-request timeout, applied via Polly's timeout policy. Defaults to 30 s. It also bounds, on
+    /// its own budget, the read of an in-band return-route response body (FR-RR-07): a body not
+    /// received within it is discarded and the send reports <c>ResponseDiscarded</c>.
+    /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>Max retries on 5xx + timeout (FR-TRN-08). Defaults to 3.</summary>

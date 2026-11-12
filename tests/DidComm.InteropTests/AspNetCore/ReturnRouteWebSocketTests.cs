@@ -757,6 +757,10 @@ public sealed class ReturnRouteWebSocketTests
         var inside = 0;
         var maxInside = 0;
         var go = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Rendezvous (L-044): every pusher's first push waits, inside the counted region, until a
+        // second pusher is inside too, so the pushes provably overlap however the scheduler runs the
+        // tasks (on a 2-core runner they could otherwise run one after another).
+        var twoInside = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var pushes = peers.Select((peer, index) => Task.Run(async () =>
         {
             await go.Task;
@@ -768,8 +772,12 @@ public sealed class ReturnRouteWebSocketTests
                 while ((seen = Volatile.Read(ref maxInside)) < now && Interlocked.CompareExchange(ref maxInside, now, seen) != seen)
                 {
                 }
+                if (now >= 2)
+                    twoInside.TrySetResult();
                 try
                 {
+                    if (i == 0)
+                        await twoInside.Task.WaitAsync(Timeout);
                     var message = new MessageBuilder()
                         .WithType(RecordingHandler.ProtocolUri + "/fan-out")
                         .WithFrom(host.ServerDid)

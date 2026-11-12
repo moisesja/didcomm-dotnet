@@ -1,4 +1,5 @@
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 
 namespace DidComm.Transports.WebSocket;
 
@@ -77,4 +78,38 @@ public sealed class WebSocketTransportOptions
     /// value only to give this transport a policy distinct from the core one.
     /// </remarks>
     public OutboundEndpointPolicy? OutboundEndpointPolicy { get; set; }
+
+    /// <summary>
+    /// Hand the messages a peer pushes on a return-route session socket to the registered
+    /// <see cref="IInboundFrameConsumer"/> (PRD §8a, FR-RR-07). Off by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A send whose message carries <c>return_route</c> <c>all</c> or <c>thread</c> and is authcrypted
+    /// directly to one DID (the sending and receiving DIDs each at most 2048 characters) opens a
+    /// session socket of its own (see
+    /// <see cref="WebSocketDidCommTransport"/>); the receiver may push messages back on it. With this
+    /// flag on, each whole pushed message, at most <c>DidCommOptions.MaxReceiveBytes</c> long, is
+    /// handed to the consumer one at a time. <c>DidCommBuilder.UseInboundDispatch()</c> registers the
+    /// built-in consumer, which unpacks the message, checks it is authcrypt from the session's peer to
+    /// its local DID, applies FR-RR-08 replay admission and dispatches it to the protocol handlers
+    /// with no session; a handler's reply is never sent automatically.
+    /// </para>
+    /// <para>
+    /// Turning it on without a consumer fails at construction with
+    /// <see cref="InvalidOperationException"/>. Off, session sockets are still read, so the transport
+    /// notices a close or an eviction and completes the close handshake, but every pushed message is
+    /// discarded (logged once). Pooled sockets, used by sends without a return route, are never read.
+    /// Under <see cref="UseStomp"/> no session socket is ever opened, so nothing is received.
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// services.AddDidComm(b => b
+    ///     .UseWebSocketTransport(o => o.ReceiveInbound = true)
+    ///     .UseInboundDispatch()
+    ///     .AddBuiltInProtocols());
+    /// </code>
+    /// </example>
+    public bool ReceiveInbound { get; set; }
 }

@@ -15,18 +15,26 @@ public sealed class DidCommOptions
     /// Per-message receive ceiling enforced by <c>UnpackAsync</c>; oversized inputs throw
     /// <see cref="Exceptions.MalformedMessageException"/> before any cryptographic work begins
     /// (FR-API-06 / problem code <c>me.res.storage.message_too_big</c> — surfaced by the
-    /// transport layer in Phase 5). Defaults to 1 MiB.
+    /// transport layer in Phase 5). Defaults to 1 MiB. The return-route client side applies the same
+    /// ceiling to an in-band HTTP response it reads (FR-RR-07; a larger body is never buffered) and to
+    /// each message pushed on a WebSocket session socket (a larger one closes the socket with 1009).
     /// </summary>
     public int MaxReceiveBytes { get; set; } = 1 * 1024 * 1024;
 
     /// <summary>
     /// Tolerance applied when checking <see cref="Messages.Message.ExpiresTime"/> against the
-    /// current clock (FR-API-05). Defaults to <see cref="TimeSpan.Zero"/> — strict expiry.
+    /// current clock (FR-API-05). Defaults to <see cref="TimeSpan.Zero"/> — strict expiry. The
+    /// FR-RR-08 replay guard uses the same tolerance (whole seconds, a sub-second value counts as
+    /// zero) for its future-dated bound and its retention, on the receive endpoints and on the
+    /// client's WebSocket inbound loop: with the default, a message stamped by a host whose clock runs
+    /// even slightly ahead can be refused as future-dated, so hosts that exchange return-route or
+    /// mediator-service messages across machines should set it to their expected clock offset.
     /// </summary>
     public TimeSpan ExpiresClockSkew { get; set; } = TimeSpan.Zero;
 
     /// <summary>
-    /// Override the clock used for FR-API-05 expiry checks and FR-ROT-* claims validation.
+    /// Override the clock used for FR-API-05 expiry checks, FR-ROT-* claims validation, FR-RR-08
+    /// replay admission and the FR-RR-09 <c>created_time</c> stamping of <c>SendAsync</c>.
     /// <c>null</c> ⇒ <see cref="DateTimeOffset.UtcNow"/>. Set in tests to make time deterministic.
     /// </summary>
     public Func<DateTimeOffset>? Clock { get; set; }

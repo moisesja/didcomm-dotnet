@@ -227,7 +227,10 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
             _ => throw new ArgumentOutOfRangeException(nameof(shape)),
         };
 
-    /// <summary>Stamp <c>created_time</c> from the server's injected clock (FR-RR-09 client stamping is #92).</summary>
+    /// <summary>
+    /// Stamp <c>created_time</c> from the server's injected clock. These tests pack with
+    /// <c>PackEncryptedAsync</c>, which does not stamp; <c>SendAsync</c> does (FR-RR-09).
+    /// </summary>
     public MessageBuilder Stamped(MessageBuilder builder) => builder.WithCreatedTime(Clock.Now.ToUnixTimeSeconds());
 
     /// <summary>A message of the recording protocol from <paramref name="from"/> to the server.</summary>
@@ -551,6 +554,19 @@ internal sealed class PickupRecordingHandler : RecordingHandlerBase
     public const string ProtocolUri = "https://didcomm.org/messagepickup/3.0";
 
     public PickupRecordingHandler(RecordingHandlerState state) : base(state) { }
+
+    protected override string Uri => ProtocolUri;
+}
+
+/// <summary>
+/// A recording handler for Message Pickup 4.0 — a mediator-service PIURI (FR-RR-08 scope b) whose
+/// <c>messages-received</c> acknowledgement is sent header-less (#92: the FR-RR-09 PIURI clause stamps it).
+/// </summary>
+internal sealed class Pickup40RecordingHandler : RecordingHandlerBase
+{
+    public const string ProtocolUri = "https://didcomm.org/message-pickup/4.0";
+
+    public Pickup40RecordingHandler(RecordingHandlerState state) : base(state) { }
 
     protected override string Uri => ProtocolUri;
 }

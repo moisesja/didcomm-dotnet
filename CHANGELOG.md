@@ -6,14 +6,304 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — return-route client side (FR-RR-07, FR-RR-09, #92, epic #88)
+
+This agent can now ask a peer to send messages back over the connection it used, and take them
+in: as the HTTP response to its request, or pushed on a WebSocket it opened (the DIDComm
+return-route extension, PRD §8a; the receiving side is #91 below). Messages that fall under the
+receiver's replay protection are timestamped automatically. The mediator clients (#93, #94, #96)
+build on it. The new types live in `DidComm.Transports.ReturnRoute`.
+
+- **`SendOptions.ReturnRoute`** (`ReturnRouteMode?`) and **`SendOptions.ReturnRouteThread`**
+  (`string?`), both init-only (FR-RR-07). `null` (the default) adds nothing and leaves a header the
+  message already carries (`MessageBuilder.WithReturnRoute`) as it is; `None` sends an explicit
+  `"none"` (the downgrade shape); `All` and `Thread` send those values and replace a header the
+  message carries. `ReturnRouteThread` is required with `Thread` and invalid with any other value,
+  `null` included; it must be a possible `thid` (RFC 3986 unreserved characters, FR-MSG-11) of at
+  most 2048 characters. An undefined mode throws `ArgumentOutOfRangeException` and a bad thread
+  value `ArgumentException` (the value is not quoted), both before anything is resolved. The
+  header is written by the same code as `MessageBuilder.WithReturnRoute`, so both produce
+  byte-identical headers, and it is written on a copy: the caller's `Message` is never modified.
+- **What `all` / `thread` does to `SendAsync`.** "The effective header" is the one the message goes
+  out with, from `SendOptions.ReturnRoute` or from the message itself; a malformed value counts as
+  `none`, as the receiver reads it (FR-RR-01). With an effective `all` or `thread`:
+  - recipients naming more than one DID → `ArgumentException`, before anything is resolved (replies
+    come back over one connection, from one peer);
+  - a recipient reached through routing keys or a mediator (its selected service entry needs at
+    least one forward layer) → `InvalidOperationException`, after the recipient's keys and service
+    entry are read and before any mediator or routing-key DID, sender key or secret is looked up and
+    before anything is packed (FR-RR-02). The text names no DID. With `ServiceEndpointOverride`
+    there is no route, so there is no refusal;
+  - over HTTP, an authcrypt send (`From` set) has the transport read a `200` DIDComm response
+    body, at most `DidCommOptions.MaxReceiveBytes`, and returns the reply in `SendResult.Returned`;
+  - over WebSocket, an authcrypt send opens a session socket of its own (below);
+  - an anoncrypt send (no `From`) carries the header and is timestamped, but reads no response and
+    opens no session socket: there is no sending DID to verify a reply against.
+- **`created_time` stamping** (FR-RR-09). `SendAsync` stamps `created_time` (Unix seconds, from
+  `DidCommOptions.Clock`) on its copy when the message has none and falls under the receiver's
+  FR-RR-08 scope: its effective `return_route` is `all` or `thread`, or its `type` belongs to a
+  mediator-service protocol (Coordinate Mediation 2.0 / 3.0, Message Pickup 3.0 / 4.0, any minor).
+  A value the caller set is sent unchanged, however old: a stale request is refused by the
+  receiver, never refreshed into a fresh one. A message that needs neither a header nor a stamp is
+  sent as it is, with no copy. `PackEncryptedAsync` and `SendPackedAsync` stamp nothing. The return-route sessions of the
+  AspNetCore endpoints stamp their replies and pushes by the same rule (Changed, below).
+- **`SendResult.Returned`** (`UnpackResult?`, init-only): the reply returned in the HTTP response.
+  Non-null only when the message went out with `all` / `thread` from an authcrypt sender, the
+  response was `200` with a DIDComm `Content-Type`, and its body unpacked as authcrypt whose sender
+  key id names the DID the send addressed and whose decrypting key id names the sending DID (DID
+  subjects of the verified key ids, PRD §4.3; a signer, if any, bound to the same subject; not a
+  Routing 2.0 `forward`). A reply that fails that rule is discarded, `Returned` stays `null`, and a
+  Warning (EventId 6) carries the id of the message the caller sent and the reason name only. A body
+  that was over the cap, did not arrive in time, failed mid-read or does not unpack fails the send
+  with a `TransportException` whose `HttpStatusCode` is `200` (the request itself was delivered),
+  never a raw parser exception (FR-API-07). `202`, a non-DIDComm content type or an empty body →
+  `null`. The reply is neither dispatched nor replay-admitted: the caller asked for it, and what it
+  proves is limited (Security, below). Over WebSocket it is always `null`: replies arrive through
+  the inbound consumer.
+- **`TransportRequest.ReturnRoute`** (the effective header as sent; `null` when absent, `None` when
+  malformed), **`.LocalDid`** / **`.PeerDid`** (the sending and addressed DID subjects, set only for
+  an authcrypt send delivered directly — no forward layer — to recipients naming one DID, when both
+  are at most 2048 characters; `null` otherwise; a transport uses them for connection affinity) and
+  **`.MaxResponseBytes`** (`int?`; `null` means "do not read an in-band response"; set to
+  `MaxReceiveBytes` only when the send asks for `all` / `thread` and `LocalDid` is set; a transport
+  reads at most that many bytes). All init-only and set only by `SendAsync`; a transport that does
+  not implement the extension may ignore them.
+- **`TransportResult.ResponsePayload`** (`ReadOnlyMemory<byte>?`, the raw and unverified body),
+  **`.ResponseMediaType`** (the canonical `MediaTypes` constant the response's `Content-Type`
+  matched) and **`.ResponseDiscarded`** (`true` when the peer returned a DIDComm body that was not
+  read: over the cap, not received in time, or the read failed; `Accepted` stays `true`), all
+  init-only.
+- **HTTP response read** (`HttpDidCommTransport`). The body is read only when the request carries
+  `MaxResponseBytes` and the final response (after a `307`, the last hop's) is `200` with a DIDComm
+  `Content-Type` (FR-MSG-06 normalization); otherwise it is never touched, as before. A declared
+  `Content-Length` over the cap is discarded without reading a byte; a declared length of at most
+  64 KiB is read into a buffer of exactly that size; a larger declared length, or none (chunked),
+  is read in 16 KiB chunks into a buffer that grows only as bytes arrive, stops as soon as the
+  total passes the cap, and must match a declared length exactly. So memory follows the bytes
+  received, never the length a peer declares: at most about twice the cap plus one chunk. The read
+  has its own `HttpTransportOptions.RequestTimeout` budget (the resilience pipeline's timeout ends
+  with the headers) and is never retried. Over the cap, late, or failed (anything the response
+  stream throws, other than the caller's own cancellation, which propagates) → `Accepted` with
+  `ResponseDiscarded` and one Warning naming the reason (`OverCap`, `ReadTimeout`, or `ReadFailed`
+  with the exception type name) and the limit, never the URL or a body byte.
+- **WebSocket session sockets** (`WebSocketDidCommTransport`). A request carrying `all` / `thread`
+  and both identities opens, or reuses, a session socket S(E, L, P) of its own, keyed by endpoint,
+  local DID and peer DID and never by endpoint alone (the receiver binds a socket to its first
+  authenticated sender, FR-RR-05). While S exists, every send to the same (E, L, P) travels over
+  it, with or without a header, so a header-less acknowledgement reaches the session it
+  acknowledges. An explicit `none` is sent over S and then retires it: S stops taking sends, a
+  close frame is sent, and the messages already on their way are still read until the peer's close
+  frame; later sends use the endpoint's pooled socket until another `all` / `thread` opens a fresh
+  S. Ordering, for the caller: a send that starts after an `all` / `thread` send to (E, L, P)
+  returned uses S while S exists; one that starts after a `none` send returned uses the pool;
+  concurrent sends are not ordered. A send that fails on S drops it, and its retry opens a fresh S
+  (`all` / `thread`) or uses the pool (anything else). Requests without both identities keep the
+  pool. Under `UseStomp` no session socket is opened (one Information line). A request that would
+  open S with an identity that is not a `did:` value of at most 2048 characters without whitespace
+  or control characters → `ArgumentException` (the value is not repeated); any other request with
+  such an identity uses the pool. `Lifecycle` reports `Connected` when S opens and `Disconnected`
+  once per socket, naming its endpoint, also from the socket's receive loop.
+- **Reading session sockets.** Every session socket is read by its own loop, which sends nothing
+  but close frames and never throws. A whole message (fragments reassembled, FR-TRN-09) longer than
+  `DidCommOptions.MaxReceiveBytes` closes S with `1009`, whether or not `ReceiveInbound` is on:
+  nothing past the cap plus one read is kept, S stops taking sends, and every later message on it
+  is discarded. A close the peer starts (a receiver eviction) is answered. The retire close, the
+  `1009` close and the close answer are bounded by the close grace — one `SendTimeout`, or 30
+  seconds when that is infinite or not positive — after which a retiring socket stops being read.
+  Pooled sockets are still never read.
+- **`WebSocketTransportOptions.ReceiveInbound`** (`bool`, default `false`, read once at
+  construction). On: each whole pushed message is handed to the registered `IInboundFrameConsumer`.
+  Off: session sockets are still read, so the transport notices a close or an eviction and
+  completes the close handshake, but every pushed message is discarded (logged once). On without a
+  consumer → `InvalidOperationException` at construction (under DI, on first resolution), naming
+  what to register.
+- **`WebSocketDidCommTransport(IOptions<WebSocketTransportOptions>, ILogger<WebSocketDidCommTransport>?, IOptions<DidCommOptions>?, IInboundFrameConsumer?)`**,
+  a new constructor with all four parameters required (pass `null` for none). The 1.5.0
+  three-parameter constructor is unchanged and delegates with no consumer, so existing calls bind
+  to it as before; it throws `InvalidOperationException` when `ReceiveInbound` is set. In both,
+  `coreOptions` now also supplies `MaxReceiveBytes`, the cap on a pushed message (the default when
+  `null`).
+- **`IInboundFrameConsumer`** (`ValueTask ConsumeAsync(InboundFrame frame, CancellationToken ct)`)
+  and **`InboundFrame(Uri Endpoint, string LocalDid, string PeerDid, ReadOnlyMemory<byte> Payload)`**
+  (a sealed record whose equality compares `Payload` by memory identity). The contract: called from
+  one session socket's receive loop, one message at a time — the socket's next message is read only
+  after the call returns — while different sockets may be consumed concurrently. So a consumer, or
+  a handler it runs, must not wait for another inbound message on the same session: that session
+  deadlocks until the wait's own timeout. The token is the session's own: cancelled when the
+  transport is disposed, when a send on the socket fails or finds it no longer open, and when a
+  retiring socket has not finished closing within the close grace; a callback registered on it
+  runs on the transport thread that cancels it, must be short and must not throw (a throw is
+  swallowed). An exception from the consumer is logged by its type name (rate-limited) and the
+  loop goes on. `Payload` is untrusted bytes, at most the receive cap; `LocalDid` and `PeerDid` are
+  the transport's attribution (the identities of the send that opened the socket), not evidence.
+  An implementation must not take `DidCommClient`, `ITransportRouter`, a transport,
+  `ProtocolDispatcher`, `ProtocolHandlerRegistry` or a protocol handler in its constructor: it
+  resolves them through an `IServiceProvider` at call time.
+- **`DidCommBuilder.UseInboundDispatch()`** registers the built-in consumer (`TryAdd`: a consumer
+  the host registered first wins); pair it with `UseWebSocketTransport(o => o.ReceiveInbound =
+  true)`. For each pushed message it resolves the facade, the dispatcher, the replay guard and the
+  options (at call time, never at construction), unpacks the message, requires authcrypt from the
+  session's peer to its local DID (the `Returned` rule), applies FR-RR-08 replay admission with the
+  receive side's own rule and the `IInboundReplayGuard` from DI, and dispatches it with
+  `ProtocolContext.Session` `null`. Anoncrypt, signed-only, `anoncrypt(sign)`, plaintext,
+  `forward`, another sender and another local DID are dropped before admission, so they consume no
+  replay budget. A handler's reply is never sent (a Debug line says so): reply with an explicit
+  `SendAsync`. Handlers never re-check replay. Nothing runs in the background. Every drop is
+  logged — the first and every 1000th of each kind at Warning with the count, the rest at Debug —
+  with no message id before the identity rule passed and the id after it, plus enum or exception
+  type names; never a DID, key id, thread id, endpoint or body.
+- **`DidCommClient.SendPackedAsync(ReadOnlyMemory<byte> packed, Uri endpoint, string mediaType, CancellationToken ct = default)`**
+  → `Task<TransportResult>`: deliver bytes that are already packed (for example a mediator relaying
+  a forward, #95) through the registered router. It always applies the SSRF guard
+  (`DidCommOptions.OutboundEndpointPolicy`) and refuses the queue URI (`TransportException`); it
+  requires a non-empty payload, an absolute endpoint and one of the three DIDComm media types (the
+  `application/` prefix may be omitted; the canonical constant is sent) (`ArgumentException`), and a
+  router (`InvalidOperationException`). Nothing is packed, stamped, resolved or read back: the
+  request carries no return-route fields. Same span and failure log as `SendAsync`.
+- DX gate: the new surface is allowlisted in `coverage-allowlist.json` / `execution-allowlist.json`
+  until cookbook sections CC–FF / sample 11 (#97) demonstrate it. Cookbook section R no longer
+  stamps its ping's `created_time` by hand: `SendAsync` does.
+
+### Changed — return-route client side (#92)
+
+- **With `Forward`, the service entry is read before packing.** `PackEncryptedAsync` (and so
+  `SendAsync` without an endpoint override) reads the recipient's DIDCommMessaging service entry
+  once, right after the recipient's keys and before the sender's keys, the signer and the pack;
+  any mediator or routing-key DID is still resolved after the pack, from that same entry. The only
+  observable difference: when both the service resolver and the sender-key or secret lookup would
+  fail, the resolver's exception now surfaces first. An empty service list still fails after the
+  pack, as before.
+- **A builder-set `all` / `thread` now takes effect in `SendAsync`.** A message built with
+  `MessageBuilder.WithReturnRoute(ReturnRouteMode.All)` (or `Thread`) used to be sent like any
+  other. Now `SendAsync` refuses it for a routed recipient (`InvalidOperationException`, before
+  packing) and for recipients naming more than one DID (`ArgumentException`), stamps its
+  `created_time` when missing, and, for an authcrypt send: over HTTP reads a `200` DIDComm response
+  into `SendResult.Returned`, where a body over the cap, late or unreadable now fails the send with
+  `TransportException` (status `200`) instead of returning `Accepted`; over WebSocket (without
+  STOMP) opens a session socket instead of using the pooled one, and later sends to the same peer
+  from the same DID at that endpoint travel over it until a `none`.
+- **`UseWebSocketTransport` registers the transport through an explicit factory** instead of type
+  activation. It passes the same values activation resolved before (the options, the logger and
+  `IOptions<DidCommOptions>` when registered) plus the registered `IInboundFrameConsumer`, so the
+  consumer is wired whatever else is registered.
+- **DI cycles through the facade or the WebSocket transport now fail fast.** `AddDidComm`'s
+  `DidCommClient` factory and `UseWebSocketTransport`'s transport factory are cycle-guarded, like
+  the dispatcher, registry and handler factories since #91: a dependency cycle through the facade or
+  the WebSocket transport factory (for example an `IInboundFrameConsumer` that takes
+  `DidCommClient`, a transport or the router in its constructor, or a custom `IDidCommTransport`
+  that takes `DidCommClient`) fails first resolution with `InvalidOperationException` instead of
+  deadlocking it. A WebSocket transport the host builds in its own factory has no such guard. The
+  guard's exception text changed: it now also says that an `IInboundFrameConsumer` or an
+  `IDidCommTransport` must not take `DidCommClient`, the dispatcher, the registry or a handler,
+  because the facade depends on every transport; the WebSocket transport factory's guard has a
+  message of its own. Code that matched the old text must be updated.
+- **Return-route session replies and pushes are timestamped.** A reply or push sent through
+  `IReturnRouteSession.TrySendAsync` (the HTTP `200` body or a WebSocket push, internally
+  `SessionOutbound`) that falls under the FR-RR-09 scope — a mediator-service type, or `return_route`
+  `all` / `thread` — now gets `created_time` from `DidCommOptions.Clock` when it has none, on the
+  library's own snapshot (a value already set is kept), so a client's FR-RR-08 admission accepts
+  it. Other replies, such as `ping-response`, are unchanged.
+- **The WebSocket transport reads return-route session sockets** (above); it used to read no
+  socket at all, and pooled sockets are still never read. Each open session socket costs one
+  receive-loop task and an 8 KiB pooled read buffer. `DisposeAsync` now also closes active and
+  retiring session sockets and waits for their loops (a loop held by a consumer that ignores
+  cancellation is abandoned, its socket already disposed): the bound becomes
+  `DrainBudget + 2 × CloseBudget` (`ConnectTimeout + SendTimeout`, plus two `SendTimeout`s instead
+  of one; each clamped to a finite wait, an infinite one counting as zero). Its close-failure Debug
+  line now carries the exception type name, not the exception object.
+- `TransportResult`, `TransportRequest` and `IDidCommTransport` no longer describe every transport
+  as delivery-only: an HTTP transport may hand back a response body, and a WebSocket transport
+  hands pushed messages to its consumer, when the return-route extension is in effect.
+  `MessageBuilder.WithReturnRoute` and the receive side's replay admission now share their code with
+  the client (`ReturnRouteHeaderWriter`, `InboundReplayGate`); their behaviour is unchanged.
+- **Upgrader note — value equality of the send records.** `SendOptions`, `SendResult`,
+  `TransportRequest` and `TransportResult` are positional records, so their new init-only members
+  take part in the synthesized `Equals` / `GetHashCode` / `ToString`: two instances that agree on
+  every other member but differ on a new one no longer compare equal — for example two
+  `TransportResult`s for the same `200` that carry different response buffers, which compared
+  equal before this release. `ReadOnlyMemory<byte>` members (`TransportResult.ResponsePayload`,
+  like the existing `TransportRequest.Payload` and the new `InboundFrame.Payload`) compare by
+  memory identity — the same buffer and range — not by content; `SendResult.Returned` compares
+  through `UnpackResult`'s own equality. Binary and API compatible — no constructor,
+  `Deconstruct` or existing member changed (package validation against 1.5.0 is clean); code that
+  compared these records should compare the members it means.
+
+### Security — return-route client threat model and known limitations (#92)
+
+- **Who registers a consumer.** The host, at startup only: `UseInboundDispatch()`, its own
+  `IInboundFrameConsumer` registration, or the four-parameter transport constructor. Nothing adds
+  or removes one at run time.
+- **What a consumer sees and can do.** Only the bytes a peer pushed on a session socket this client
+  opened itself, with the transport's (endpoint, local DID, peer DID) attribution — the client's own
+  routing facts from its own request, never wire claims. A consumer holds no socket handle and
+  cannot write to the transport.
+- **Trust comes from authcrypt, not from the socket.** `Returned` and the built-in consumer accept
+  only authcrypt whose sender key id names the addressed peer and whose decrypting key id names the
+  sending DID: DID subjects of verified envelope key ids, never the plaintext `from` / `to`, with
+  both compares always run (no early exit). Anything else is dropped before replay admission. A
+  dispatched push gets no session and a handler's reply to it is never sent, so a peer cannot use
+  the client as a reflector.
+- **Bounded input.** A response body is read only for a send that asked for a return route, never
+  buffered past the cap (memory follows the bytes received, not a declared length), and
+  time-bounded; a pushed message is capped at `MaxReceiveBytes` (`1009` beyond it); unpacking
+  applies the FR-API-09 caps.
+- **Flood isolation.** Each session socket hands its own messages to the consumer, one at a time: a
+  peer that floods or stalls its session slows only that socket, and no other peer's message is
+  dropped or delayed.
+- **SSRF.** `SendPackedAsync` always applies the outbound guard; the routed-recipient refusal comes
+  before any mediator or routing-key DID is resolved.
+- **Audit.** The new log lines carry message ids (on the inbound side only after the identity rule
+  passed) and enum or exception type names, never a DID, key id, thread id, endpoint, body or
+  exception object; lines a peer can repeat are rate-limited; all are written through guarded
+  calls, so a throwing logging provider changes nothing.
+- **Tested adversarially** (`ReturnRouteClientAdversarialTests`,
+  `ReturnRouteClientRedTeamRegressionTests` and the QA suites): wrong-peer, wrong-local and
+  unauthenticated pushes; a replayed push; an in-scope push without `created_time`; a 100 MB
+  response, declared and chunked; a large declared length that never arrives; a stalled body;
+  garbage under a DIDComm content type; a flood on one session beside traffic on another; retire,
+  close and send races; dispose with a consumer that ignores cancellation; throwing cancellation
+  callbacks; consumers and transports that close a DI cycle; a log scan for DIDs, key ids, thread
+  ids and bodies.
+- **Known limitations:**
+  - `Returned` proves one thing: the reply was authcrypted by the addressed DID to the sending DID.
+    It is not FR-RR-08 replay-admitted and it is not bound to the request — a reply the same peer
+    authcrypted earlier, for another request, passes the same rule. Correlate it with the request
+    on its `thid` (DD-11) and handle it idempotently. Over HTTPS only the endpoint the client chose
+    (or whoever terminates TLS for it) can return one. (ADV-03, won't fix: PRD FR-RR-07 specifies
+    identity only, and admitting it would drop the unstamped in-scope replies of third-party
+    mediators.)
+  - A message encrypted to several recipients whose first recipient key this client holds belongs
+    to another local DID than the sending one is attributed to that DID and discarded, by
+    `Returned` and by the consumer, even when a later key is the sending DID's. A receiver's
+    return-route replies and pushes are always encrypted to exactly one peer. (ADV-05.)
+  - Unpacking a hostile response or push resolves the DID its sender key id names before the
+    identity rule runs, as every receive endpoint does (ADV-06, a pre-existing class). It is bounded
+    by the FR-API-09 caps and `MaxReceiveBytes`, and reachable only through a return-route send or
+    a session socket the client opened.
+  - A send racing the peer's close may be reported accepted and still be lost: WebSocket has no
+    acknowledgement.
+  - A consumer or handler that waits for another inbound message on the same session deadlocks
+    that session until the wait's own timeout.
+  - One send gate per (endpoint, local DID, peer DID) the application ever sent to is kept until
+    the transport is disposed.
+  - A sending or addressed DID longer than 2048 characters (FR-API-09) gets no session socket and
+    no `Returned`: the send is delivered as before return routes, without reading a response. No
+    reply between such DIDs could pass the identity rule anyway.
+  - **Clock skew.** FR-RR-08 admission — on the receiver, and now in the client's inbound consumer —
+    refuses `created_time > now + ExpiresClockSkew`, compared in whole seconds (a skew under one
+    second counts as zero), and `DidCommOptions.ExpiresClockSkew` defaults to zero. So a message
+    stamped by a host whose clock runs even slightly ahead can be refused as `FutureDated`. Hosts
+    that talk across machines should set `DidCommOptions.ExpiresClockSkew` to their expected clock
+    offset.
+
 ### Added — return-route receive side (FR-RR-01..06, FR-RR-08, #91, epic #88)
 
 A peer that authenticates itself can now ask this agent to send messages back over the connection
 it used — in the HTTP response, or pushed on its WebSocket — instead of needing an inbound endpoint
 of its own (the DIDComm return-route extension, PRD §8a). Mediator clients (Coordinate Mediation,
-Message Pickup) depend on it; the sending side is #92 and the mediator protocols #93–#95. Requests
-that can open such a session or change mediator state are now protected against replay. The new
-types live in `DidComm.Transports.ReturnRoute`.
+Message Pickup) depend on it; the sending side is #92 (above) and the mediator protocols #93–#95.
+Requests that can open such a session or change mediator state are now protected against replay.
+The new types live in `DidComm.Transports.ReturnRoute`.
 
 - **Reading and writing the header** (FR-RR-01, DD-12). `ReturnRouteMode` (`None`, `All`,
   `Thread`) and `ReturnRouteHeader`, the parsed `return_route` / `return_route_thread` pair with the
@@ -175,9 +465,10 @@ types live in `DidComm.Transports.ReturnRoute`.
   **`ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task acknowledged, IReturnRouteSession? session, CancellationToken)`**.
   The existing overloads keep their signatures and pass no session; the dispatcher reads the
   header on every path, so `ReturnRoute` is truthful for direct callers too. The dispatcher admits
-  nothing itself: a transport of its own (#92's WebSocket inbound loop, #95) must run replay
-  admission before dispatching and pass the session it opened. Record equality changes — see the
-  upgrader note under Changed.
+  nothing itself: any other caller must run replay admission before dispatching and pass the
+  session it opened, if any — #92's built-in inbound consumer (`UseInboundDispatch`, above) runs
+  the same rule and passes none; #95 will do the same. Record equality changes — see the upgrader
+  note under Changed.
 - **DI** (`AddDidComm`): registers a singleton `IReturnRouteSessionRegistry`
   (`InMemoryReturnRouteSessionRegistry`) and `IInboundReplayGuard` (`InMemoryReplayGuard`) plus
   their options, with `TryAdd`, so a host that registers its own first keeps it; both validate
@@ -194,8 +485,8 @@ types live in `DidComm.Transports.ReturnRoute`.
   lines, which log the exception object, are unchanged by this release.
 - DX gate: the new surface is allowlisted in `coverage-allowlist.json` / `execution-allowlist.json`
   until cookbook sections CC–FF / sample 11 (#97) demonstrate it. Cookbook section R now builds its
-  ping with `WithReturnRoute(ReturnRouteMode.All)` and a hand-stamped `created_time`; same-socket
-  replies stay off there, so nothing comes back on the socket.
+  ping with `WithReturnRoute(ReturnRouteMode.All)` (`SendAsync` adds its `created_time`, #92);
+  same-socket replies stay off there, so nothing comes back on the socket.
 
 ### Changed — return-route receive side (#91)
 
@@ -211,8 +502,9 @@ replay admission.
   return-route session, opened by an authcrypted message carrying `return_route: all`; a message
   without the header on a socket that has no session gets no reply (FR-RR-01: an absent header
   means `none`). To keep same-socket replies, have the sender put `return_route: all`
-  (`MessageBuilder.WithReturnRoute(ReturnRouteMode.All)`) and a fresh `created_time` on its first
-  message on the socket. Its later messages keep getting replies there without the header until it
+  (`MessageBuilder.WithReturnRoute(ReturnRouteMode.All)` or `SendOptions.ReturnRoute`) and a fresh
+  `created_time` (which `DidCommClient.SendAsync` adds itself, #92) on its first message on the
+  socket. Its later messages keep getting replies there without the header until it
   sends `none` (or `thread`); any message that carries `return_route: all` again needs its own
   fresh `created_time` (replay admission, below).
 - **`anoncrypt(sign(…))` and other signer-only inbound no longer get a same-socket reply.**
@@ -233,10 +525,11 @@ replay admission.
   `return_route` (or `none`) and are outside those protocols — is dispatched exactly as before. No
   shipped handler serves a mediator-service protocol, so for an existing host the visible change
   is this: an authcrypted message carrying `return_route: all` or `thread` without a fresh
-  `created_time`, which was dispatched before, is now dropped. This library's sender does not
-  stamp `created_time` yet (FR-RR-09, #92): add `MessageBuilder.WithCreatedTime(...)` to such
-  messages, or relax the rule with `ReplayProtectionOptions.RequireCreatedTime = false` (see its
-  limitation above).
+  `created_time`, which was dispatched before, is now dropped. `DidCommClient.SendAsync` stamps
+  `created_time` on such messages (FR-RR-09, #92 above); a message packed with
+  `PackEncryptedAsync`, or by another sender, needs its own (`MessageBuilder.WithCreatedTime(...)`),
+  or relax the rule with `ReplayProtectionOptions.RequireCreatedTime = false` (see its limitation
+  above).
 - **HTTP can answer `200` with a body.** The registry-aware `MapDidCommEndpoint(pattern)` used to
   answer every accepted message `202` and only log a handler's reply. An authcrypted request
   carrying `return_route: all` whose handler returns (or pushes) a message from the decrypting DID
@@ -453,6 +746,24 @@ replay admission.
   serves every endpoint of a host (FR-RR-08); the same-socket reply switch is described as the
   WebSocket return-route session it now is (FR-TRN-10, FR-PROTO-05a); an unusable
   `return_route_thread` is treated as `none` (FR-RR-01).
+- **Architecture: return-route client side (#92).** `docs/codebase-architecture.md` gains the
+  section "Return-route client side (Phase 7, #92)" — the wiring, the `SendAsync` steps in order,
+  the HTTP response read, the `Returned` rule, the session sockets, the inbound consumer and its
+  admission, `SendPackedAsync`, the threat model and the known limitations — plus the new types in
+  the package table and a rewritten outbound flow. The receive-side section now points at the
+  shared `InboundReplayGate` and the client's built-in consumer and mentions the session-reply
+  timestamps; #92 leaves the "not built yet" list.
+- **PRD: FR-RR-07's over-cap response (#92, a replanning item).** The row said an over-cap response
+  body "is discarded and logged; the send still counts as accepted", which would make an
+  unreadable reply silent loss. It now says what is built: the body is never buffered; the
+  transport reports the send accepted with no payload and `ResponseDiscarded`, and logs it;
+  `SendAsync`, having asked for the return route, then throws `TransportException` with status
+  `200`, the same outcome as an unpack failure; a body that stalls past the transport's request
+  timeout or fails mid-read is treated the same. Nothing else in the PRD changed. The other
+  client-side refinements — the refusal of `all` / `thread` to recipients naming more than one DID,
+  anoncrypt return-route sends, the local-DID half of the `Returned` rule and the per-socket
+  inbound consumer — are documented above and in the architecture doc as proposed PRD
+  clarifications.
 
 ## [1.5.1] - 2026-11-02
 

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Transports.ReturnRoute;
 
@@ -195,42 +194,9 @@ public sealed class MessageBuilder
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="mode"/> is not a defined value.</exception>
     public MessageBuilder WithReturnRoute(ReturnRouteMode mode, string? thread = null)
     {
-        string value;
-        switch (mode)
-        {
-            case ReturnRouteMode.None:
-                value = ReturnRouteHeader.NoneValue;
-                break;
-            case ReturnRouteMode.All:
-                value = ReturnRouteHeader.AllValue;
-                break;
-            case ReturnRouteMode.Thread:
-                value = ReturnRouteHeader.ThreadValue;
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(mode), "Not a defined ReturnRouteMode.");
-        }
-
-        if (mode == ReturnRouteMode.Thread)
-        {
-            if (string.IsNullOrWhiteSpace(thread))
-                throw new ArgumentException("return_route 'thread' requires a return_route_thread value.", nameof(thread));
-            if (!UnreservedUriChars.IsUnreserved(thread))
-                throw new ArgumentException("return_route_thread must consist of RFC 3986 unreserved characters only (FR-MSG-11).", nameof(thread));
-            if (thread.Length > ReturnRouteHeader.MaxThreadLength)
-                throw new ArgumentException($"return_route_thread must be at most {ReturnRouteHeader.MaxThreadLength} characters.", nameof(thread));
-        }
-        else if (thread is not null)
-        {
-            throw new ArgumentException("A return_route_thread value is only valid with ReturnRouteMode.Thread.", nameof(thread));
-        }
-
-        _message.AdditionalHeaders ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        _message.AdditionalHeaders[ReturnRouteHeader.HeaderName] = JsonSerializer.SerializeToElement(value);
-        if (mode == ReturnRouteMode.Thread)
-            _message.AdditionalHeaders[ReturnRouteHeader.ThreadHeaderName] = JsonSerializer.SerializeToElement(thread);
-        else
-            _message.AdditionalHeaders.Remove(ReturnRouteHeader.ThreadHeaderName);
+        // One writer for the builder and SendOptions.ReturnRoute (#92), so both emit byte-identical
+        // headers under the same shape rules.
+        ReturnRouteHeaderWriter.Write(_message, mode, thread, nameof(mode), nameof(thread));
         return this;
     }
 

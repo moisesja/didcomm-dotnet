@@ -9,6 +9,7 @@ using DidComm.Protocols.TrustPing;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Threading;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -260,6 +261,43 @@ public sealed class DidCommBuilder
         return parameterType.IsGenericType
             && parameterType.GetGenericTypeDefinition() == typeof(IEnumerable<>)
             && typeof(IProtocolHandler).IsAssignableFrom(parameterType.GetGenericArguments()[0]);
+    }
+
+    /// <summary>
+    /// Register the built-in <see cref="IInboundFrameConsumer"/> (PRD §8a, FR-RR-07): the messages a
+    /// peer pushes on a return-route session socket are unpacked, accepted only when authcrypted by
+    /// the session's peer to its local DID, admitted under FR-RR-08 replay protection, and dispatched
+    /// to the protocol handlers with <see cref="ProtocolContext.Session"/> <c>null</c>. Pair it with
+    /// <c>UseWebSocketTransport(o => o.ReceiveInbound = true)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <c>TryAdd</c>: an <see cref="IInboundFrameConsumer"/> the host registered first wins. Nothing
+    /// is started in the background: each session socket's own receive loop calls the consumer, one
+    /// message at a time, so a message is dispatched exactly when its socket is read.
+    /// </para>
+    /// <para>
+    /// A handler's reply to a pushed message is never sent automatically (it is logged at Debug):
+    /// reply with an explicit <see cref="DidCommClient.SendAsync"/>. A handler must not wait for
+    /// another pushed message on the same session, because that session reads its next message only
+    /// after the handler returned. Handlers never re-check replay admission.
+    /// </para>
+    /// <para>
+    /// <strong>DI graph (no cycle, L-017).</strong> <see cref="DidCommClient"/> → transport router →
+    /// transports → the WebSocket transport → <see cref="IInboundFrameConsumer"/> → (the service
+    /// provider, a logger). The consumer resolves the facade, the dispatcher, the replay guard and the
+    /// options when a message arrives, never at construction. A host consumer must keep it that way:
+    /// see <see cref="IInboundFrameConsumer"/>. A consumer that closes a cycle anyway (it takes the
+    /// facade, the router or a transport; or the dispatcher, the registry or a handler while a handler
+    /// depends on one of those) fails the first resolution with an
+    /// <see cref="InvalidOperationException"/> instead of deadlocking it, because the cycle re-enters
+    /// the WebSocket transport's or the facade's guarded factory.
+    /// </para>
+    /// </remarks>
+    public DidCommBuilder UseInboundDispatch()
+    {
+        Services.TryAddSingleton<IInboundFrameConsumer>(sp => new InboundDispatchConsumer(sp, sp.GetService<ILogger<InboundDispatchConsumer>>()));
+        return this;
     }
 
     /// <summary>

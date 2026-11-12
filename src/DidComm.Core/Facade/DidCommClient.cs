@@ -1,9 +1,11 @@
 using System.Collections.Frozen;
+using System.Text.Json;
 using DidComm.Composition;
 using DidComm.Consistency;
 using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using DidComm.Jose;
+using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols.Rotation;
 using DidComm.Protocols.Routing;
@@ -287,6 +289,12 @@ public sealed partial class DidCommClient
     /// (<see cref="PackEncryptedOptions.ProtectSender"/>) use the same recipient keys. Keys left out
     /// for another curve or the cap are reported by a Debug log with counts only.
     /// </para>
+    /// <para>
+    /// <strong>Order with <see cref="PackEncryptedOptions.Forward"/>.</strong> The recipient's
+    /// DIDCommMessaging service entry is read once, right after the recipient's keys and before the
+    /// sender's keys, the signer and the pack; any mediator or routing-key DID the route names is
+    /// resolved after the pack, from that same entry.
+    /// </para>
     /// </remarks>
     /// <param name="message">The plaintext message.</param>
     /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional forward toggle.</param>
@@ -298,6 +306,20 @@ public sealed partial class DidCommClient
     /// <exception cref="SecretNotFoundException">The authcrypt sender holds the private key of none of its usable keyAgreement keys, or the signer of none of its authentication keys.</exception>
     /// <exception cref="InvalidOperationException">No curve is common to every entry (and the authcrypt sender); a forbidden content encryption for authcrypt; or <see cref="PackEncryptedOptions.Forward"/> with entries naming more than one DID or without an <see cref="IServiceEndpointResolver"/>.</exception>
     public async Task<PackEncryptedResult> PackEncryptedAsync(Message message, PackEncryptedOptions options, CancellationToken ct = default)
+        => (await PackEncryptedInstrumentedAsync(message, options, refuseForwardLayers: false, ct).ConfigureAwait(false)).Result;
+
+    /// <summary>
+    /// <see cref="PackEncryptedAsync"/> with its span, failure log and argument checks, also
+    /// reporting how many forward layers were wrapped. <see cref="SendAsync"/> calls it directly so
+    /// it can refuse a routed recipient for a return-route send (FR-RR-07) and learn whether the
+    /// route is direct; the pack keeps its own child span either way.
+    /// </summary>
+    /// <param name="message">The plaintext message.</param>
+    /// <param name="options">The pack options.</param>
+    /// <param name="refuseForwardLayers">With <see cref="PackEncryptedOptions.Forward"/>: throw <see cref="InvalidOperationException"/> when the recipient's selected service entry needs a forward layer, right after it is read and before packing.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task<(PackEncryptedResult Result, int ForwardLayers)> PackEncryptedInstrumentedAsync(
+        Message message, PackEncryptedOptions options, bool refuseForwardLayers, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(options);
@@ -313,7 +335,7 @@ public sealed partial class DidCommClient
         }
         try
         {
-            return await PackEncryptedCoreAsync(message, options, ct).ConfigureAwait(false);
+            return await PackEncryptedCoreAsync(message, options, refuseForwardLayers, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -324,9 +346,10 @@ public sealed partial class DidCommClient
         }
     }
 
-    // The un-instrumented body of PackEncryptedAsync; the public wrapper above owns the span,
-    // failure log, and argument null checks.
-    private async Task<PackEncryptedResult> PackEncryptedCoreAsync(Message message, PackEncryptedOptions options, CancellationToken ct)
+    // The un-instrumented body of PackEncryptedAsync; the instrumented wrapper above owns the span,
+    // failure log, and argument null checks. Returns the result and the number of forward layers.
+    private async Task<(PackEncryptedResult Result, int ForwardLayers)> PackEncryptedCoreAsync(
+        Message message, PackEncryptedOptions options, bool refuseForwardLayers, CancellationToken ct)
     {
         if (options.Recipients is null || options.Recipients.Count == 0)
             throw new ArgumentException("At least one recipient DID is required.", nameof(options));
@@ -388,6 +411,20 @@ public sealed partial class DidCommClient
         var entryKeys = new IReadOnlyList<Jwk>[entries.Length];
         for (var i = 0; i < entries.Length; i++)
             entryKeys[i] = CandidatesOf(entries[i], addressableByDid[entries[i].Did]);
+
+        // FR-ROUTE-02/03: with Forward, the recipient's service entry is read here, once, right after
+        // its keys and before the sender's keys, the signer or the pack (JC-14). ExpandAsync below
+        // consumes this same list, so the refusal and the route judge one read of one entry (L-039),
+        // counted by the expander's own rule (L-041). FR-RR-07: a return-route send to a recipient
+        // reached through routing keys or a mediator is refused before any mediator or routing-key
+        // DID is resolved and before anything is packed; the message names no DID.
+        IReadOnlyList<DidCommServiceInfo>? serviceEntries = null;
+        if (options.Forward)
+        {
+            serviceEntries = await _serviceResolver!.ResolveAsync(entries[0].Did, ct).ConfigureAwait(false);
+            if (refuseForwardLayers && serviceEntries.Count > 0 && MediatorEndpointExpander.ForwardLayerCount(serviceEntries[0]) > 0)
+                throw new InvalidOperationException(RoutedReturnRouteRefusal);
+        }
 
         IReadOnlyList<Jwk> senderPublics = Array.Empty<Jwk>();
         var senderOverLimit = 0;
@@ -461,24 +498,23 @@ public sealed partial class DidCommClient
         var innerPacked = await EnvelopeWriter.PackEncryptedAsync(parameters, _cryptoProvider, ct).ConfigureAwait(false);
 
         if (!options.Forward)
-            return new PackEncryptedResult(innerPacked, ServiceEndpoint: null, Array.Empty<string>());
+            return (new PackEncryptedResult(innerPacked, ServiceEndpoint: null, Array.Empty<string>()), 0);
 
-        // FR-ROUTE-02 sender path: input-shape checks already validated up front. Resolve the
-        // (single) recipient DID's DIDCommMessaging service, expand any mediator-as-DID endpoint
-        // (FR-ROUTE-04), then wrap forward layers. body.next is the bare DID even when the entries
-        // pinned keys of it.
+        // FR-ROUTE-02 sender path: input-shape checks already validated up front, and the (single)
+        // recipient DID's DIDCommMessaging service was read above. Expand any mediator-as-DID
+        // endpoint (FR-ROUTE-04) from that same list, then wrap forward layers. body.next is the bare
+        // DID even when the entries pinned keys of it.
         var recipientDid = entries[0].Did;
-        var candidates = await _serviceResolver!.ResolveAsync(recipientDid, ct).ConfigureAwait(false);
-        var route = await MediatorEndpointExpander.ExpandAsync(candidates, _serviceResolver, _keyService, recipientDid, ct).ConfigureAwait(false);
+        var route = await MediatorEndpointExpander.ExpandAsync(serviceEntries!, _serviceResolver!, _keyService, recipientDid, ct).ConfigureAwait(false);
 
         if (route.Layers.Count == 0)
         {
             // No routing keys → direct delivery; surface the endpoint URI but skip wrapping.
-            return new PackEncryptedResult(innerPacked, route.TransportUri, route.FallbackUris);
+            return (new PackEncryptedResult(innerPacked, route.TransportUri, route.FallbackUris), 0);
         }
 
         var wrapped = await ForwardWrapper.WrapAsync(innerPacked, route.Layers, recipientDid, _cryptoProvider, ct).ConfigureAwait(false);
-        return new PackEncryptedResult(wrapped, route.TransportUri, route.FallbackUris);
+        return (new PackEncryptedResult(wrapped, route.TransportUri, route.FallbackUris), route.Layers.Count);
     }
 
     /// <summary>
@@ -489,16 +525,51 @@ public sealed partial class DidCommClient
     /// (use <c>AddDidComm(b =&gt; b.UseNetDidResolver().UseHttpTransport()...)</c>).
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <strong>The caller's message is never modified.</strong> When the send adds or changes a
+    /// header (<see cref="SendOptions.ReturnRoute"/>, or the FR-RR-09 <c>created_time</c> below), it
+    /// does so on a copy, and the copy is what is packed and sent.
+    /// </para>
+    /// <para>
+    /// <strong><c>created_time</c> (FR-RR-09).</strong> A message that goes out with
+    /// <c>return_route</c> <c>all</c> or <c>thread</c>, or whose type belongs to a mediator-service
+    /// protocol (Coordinate Mediation 2.0/3.0, Message Pickup 3.0/4.0), falls under the receiver's
+    /// FR-RR-08 replay admission, which refuses such a message without <c>created_time</c>. When it
+    /// has none, the copy is stamped from <see cref="DidCommOptions.Clock"/>. A value the message
+    /// already carries is sent unchanged, however old.
+    /// </para>
+    /// <para>
+    /// <strong>Return route (FR-RR-07).</strong> With <c>all</c> or <c>thread</c> (from
+    /// <see cref="SendOptions.ReturnRoute"/> or already on the message), the send is refused, in this
+    /// order: with <see cref="ArgumentException"/> before anything is resolved when the recipients
+    /// name more than one DID; and, when the endpoint is resolved rather than overridden, with
+    /// <see cref="InvalidOperationException"/> when the recipient is reached through routing keys or
+    /// a mediator, after the recipient's keys and service entry are read and before the message is
+    /// packed or any mediator, sender key or secret is looked up. Over HTTP, an authcrypt send then
+    /// reads the response body (at most <see cref="DidCommOptions.MaxReceiveBytes"/>) and surfaces
+    /// the reply in <see cref="SendResult.Returned"/>; see that property for the identity rule.
+    /// <see cref="SendResult.Returned"/> proves only that the reply was authcrypted by the addressed
+    /// DID to the sending DID: it is not FR-RR-08 replay-admitted and does not prove that it answers
+    /// this request, so correlate it on <c>thid</c> (DD-11) and handle it idempotently. A send whose
+    /// sending or addressed DID is longer than 2048 characters (FR-API-09) reads no response and uses
+    /// no return-route connection: no reply between them could pass the identity rule.
+    /// </para>
+    /// <para>
     /// FR-RR-06: when the endpoint — the override, or the one resolved from the recipient's
     /// <c>DIDCommMessaging</c> service — is <c>didcomm:transport/queue</c>
     /// (<see cref="Transports.ReturnRoute.QueueTransport"/>), <c>SendAsync</c> throws a
     /// <see cref="TransportException"/> (scheme <c>didcomm</c>) before any transport activity; the
     /// recipient's keys and service entry are resolved and the message is packed first, because the
     /// endpoint lives in that service entry. The sender holds the message for pickup.
+    /// </para>
     /// </remarks>
     /// <param name="message">The plaintext message.</param>
-    /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional explicit endpoint override.</param>
+    /// <param name="options">Recipient list, sender/signer DIDs, content-encryption choice, optional explicit endpoint override, optional return route.</param>
     /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentException">No recipient or a malformed recipient entry; <see cref="SendOptions.ReturnRouteThread"/> missing, malformed or over-long with <see cref="ReturnRouteMode.Thread"/>, or set with any other mode; <c>return_route</c> <c>all</c> or <c>thread</c> with recipients naming more than one DID; or the message could not be copied.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><see cref="SendOptions.ReturnRoute"/> is not a defined <see cref="ReturnRouteMode"/>.</exception>
+    /// <exception cref="InvalidOperationException">No <see cref="ITransportRouter"/> is wired in; <c>return_route</c> <c>all</c> or <c>thread</c> to a recipient reached through routing keys or a mediator; or any pack-stage refusal of <see cref="PackEncryptedAsync"/>.</exception>
+    /// <exception cref="TransportException">The endpoint is the queue URI; the transport failed; or the request was accepted (status <c>200</c>) but the message returned for an <c>all</c> / <c>thread</c> send exceeded <see cref="DidCommOptions.MaxReceiveBytes"/>, was not received in time, failed mid-read, or could not be unpacked.</exception>
     public async Task<SendResult> SendAsync(Message message, SendOptions options, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -527,7 +598,7 @@ public sealed partial class DidCommClient
     }
 
     // The un-instrumented body of SendAsync; the public wrapper above owns the span, failure
-    // log, and argument null checks. The nested PackEncryptedAsync call keeps its own child span.
+    // log, and argument null checks. The nested pack keeps its own child span.
     private async Task<SendResult> SendCoreAsync(Message message, SendOptions options, CancellationToken ct)
     {
         if (options.Recipients is null || options.Recipients.Count == 0)
@@ -538,6 +609,18 @@ public sealed partial class DidCommClient
                 "SendAsync requires an ITransportRouter. Register a transport via builder.UseHttpTransport()/UseWebSocketTransport() or pass one to the (secrets, keyService, serviceResolver, transportRouter, options) constructor (FR-TRN-01).");
         }
 
+        // Shape checks on the return-route options, before any I/O (L-008). No value is echoed.
+        if (options.ReturnRoute is { } requestedMode)
+        {
+            if (!Enum.IsDefined(requestedMode))
+                throw new ArgumentOutOfRangeException(nameof(options), "SendOptions.ReturnRoute is not a defined ReturnRouteMode.");
+            ReturnRouteHeaderWriter.Validate(requestedMode, options.ReturnRouteThread, nameof(options), nameof(options));
+        }
+        else if (options.ReturnRouteThread is not null)
+        {
+            throw new ArgumentException("SendOptions.ReturnRouteThread is only valid with ReturnRoute = ReturnRouteMode.Thread.", nameof(options));
+        }
+
         // FR-RR-06: the queue URI names no transport. A caller-supplied override is judged on its
         // shape before any packing; the resolved endpoint is judged right after the pack below,
         // because it lives in the recipient's service entry. Either way SendAsync throws before
@@ -546,11 +629,30 @@ public sealed partial class DidCommClient
         if (QueueTransport.IsQueueTransport(options.ServiceEndpointOverride))
             throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
 
+        // JC-15: the header override and FR-RR-09 stamping happen on a snapshot, only when needed.
+        var outgoing = PrepareOutgoing(message, options);
+
+        // The effective header is read from what is actually sent. A malformed value counts as
+        // `none`, as the receiver reads it (FR-RR-01/05); absent stays null.
+        ReturnRouteMode? effectiveMode = outgoing.AdditionalHeaders?.ContainsKey(ReturnRouteHeader.HeaderName) == true
+            ? ReturnRouteHeader.Read(outgoing).Mode
+            : null;
+        var asksReturn = effectiveMode is ReturnRouteMode.All or ReturnRouteMode.Thread;
+
+        // JC-4: a return route binds one peer. Checked by a linear scan before anything is resolved.
+        if (asksReturn && !AllNameOneDid(ParseRecipientEntries(options.Recipients, nameof(options))))
+        {
+            throw new ArgumentException(
+                "A return_route of 'all' or 'thread' requires Recipients naming exactly one DID (FR-RR-07): replies come back over one connection, from one peer.",
+                nameof(options));
+        }
+
         // When the caller supplies an explicit endpoint, we skip the FR-ROUTE-02 forward
         // wrapping path: the sender already knows where to send the inner envelope. Useful
         // for tests, for direct (non-mediated) recipients, and for transports built on top
         // of a known peer URI. Otherwise we pack with Forward = true so the facade resolves
-        // the recipient's DIDCommMessaging service and surfaces a transport URI.
+        // the recipient's DIDCommMessaging service and surfaces a transport URI. With an override
+        // there is no route, so the return-route refusal never applies.
         var packOptions = new PackEncryptedOptions(
             Recipients: options.Recipients,
             From: options.From,
@@ -559,7 +661,7 @@ public sealed partial class DidCommClient
             ProtectSender: options.ProtectSender,
             Forward: options.ServiceEndpointOverride is null);
 
-        var packed = await PackEncryptedAsync(message, packOptions, ct).ConfigureAwait(false);
+        var (packed, forwardLayers) = await PackEncryptedInstrumentedAsync(outgoing, packOptions, refuseForwardLayers: asksReturn, ct).ConfigureAwait(false);
 
         if (QueueTransport.IsQueueTransport(packed.ServiceEndpoint))
             throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
@@ -585,12 +687,210 @@ public sealed partial class DidCommClient
             new OutboundEndpointGuard(_options.OutboundEndpointPolicy).Validate(endpointUri);
         }
 
+        // JC-18: connection affinity only for an authcrypt send delivered directly (no forward
+        // layer) to recipients naming one DID; a routed or anoncrypt send never carries identities.
+        // The pack succeeded, so every entry is well-formed here. Nor does a send whose local or peer
+        // DID is longer than FR-API-09's 2048 characters (QA-F02): a message between them can never
+        // pass the identity rule, because the receive path refuses a key id whose DID part is over
+        // that bound. Such a send is delivered as it was before return routes (no session socket, no
+        // in-band response read), and nothing that could have been accepted is lost.
+        string? localDid = null;
+        string? peerDid = null;
+        if (forwardLayers == 0 && options.From is not null)
+        {
+            var entries = ParseRecipientEntries(options.Recipients, nameof(options));
+            if (AllNameOneDid(entries))
+            {
+                var local = DidSubject.DidSubjectOf(options.From);
+                var peer = DidSubject.DidSubjectOf(entries[0].Did);
+                if (local is { Length: <= IdentifierLimits.MaxDidLength } && peer is { Length: <= IdentifierLimits.MaxDidLength })
+                {
+                    localDid = local;
+                    peerDid = peer;
+                }
+            }
+        }
+
+        // JC-3/JC-5: an in-band response is read only when this send asked for one and can verify it
+        // (an authcrypt send with a sending DID to compare against).
+        var expectsReturned = asksReturn && localDid is not null;
+
         var payload = Encoding.UTF8.GetBytes(packed.Message);
-        var mediaType = ForwardConstants.PayloadMediaType;
-        var request = new TransportRequest(endpointUri, payload, mediaType);
+        var request = new TransportRequest(endpointUri, payload, ForwardConstants.PayloadMediaType)
+        {
+            ReturnRoute = effectiveMode,
+            LocalDid = localDid,
+            PeerDid = peerDid,
+            MaxResponseBytes = expectsReturned ? _options.MaxReceiveBytes : null,
+        };
         var transportResult = await _transportRouter.SendAsync(request, ct).ConfigureAwait(false);
-        return new SendResult(packed, transportResult, endpointUri);
+
+        // A payload on any other send is ignored: never unpacked, never resolved against.
+        var returned = expectsReturned
+            ? await EvaluateReturnedAsync(outgoing.Id, transportResult, endpointUri, peerDid!, localDid!, ct).ConfigureAwait(false)
+            : null;
+        return new SendResult(packed, transportResult, endpointUri) { Returned = returned };
     }
+
+    /// <summary>
+    /// The message to pack for <see cref="SendAsync"/> (JC-15): the caller's own instance when the
+    /// send changes nothing, otherwise a snapshot (serialize → deserialize) with the
+    /// <see cref="SendOptions.ReturnRoute"/> header written and <c>created_time</c> stamped when
+    /// the snapshot falls under FR-RR-09. The caller's message is never mutated.
+    /// </summary>
+    /// <param name="message">The caller's message.</param>
+    /// <param name="options">The send options (already shape-checked).</param>
+    private Message PrepareOutgoing(Message message, SendOptions options)
+    {
+        if (options.ReturnRoute is null && !(message.CreatedTime is null && OutgoingCreatedTime.IsInScope(message)))
+            return message;
+
+        Message snapshot;
+        try
+        {
+            var json = JsonSerializer.Serialize(message, DidCommJson.Default);
+            snapshot = JsonSerializer.Deserialize<Message>(json, DidCommJson.Default)
+                ?? throw new JsonException("The message deserialized to null.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new ArgumentException("The message could not be copied for sending (its headers or body do not serialize).", nameof(message), ex);
+        }
+
+        if (options.ReturnRoute is { } mode)
+            ReturnRouteHeaderWriter.Write(snapshot, mode, options.ReturnRouteThread, nameof(options), nameof(options));
+        // Re-evaluated on the snapshot, so an overriding header decides the scope.
+        OutgoingCreatedTime.StampIfInScope(snapshot, _options.Now());
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Turn the transport's in-band response to an <c>all</c> / <c>thread</c> send into
+    /// <see cref="SendResult.Returned"/> (FR-RR-07): a discarded body or one that does not unpack
+    /// fails the send with <see cref="TransportException"/> (status as reported, normally 200); a
+    /// message that fails the identity rule is logged by the request's id and the reason and
+    /// dropped; anything else is returned as unpacked. No dispatch and no replay admission: the
+    /// caller asked for it.
+    /// </summary>
+    /// <param name="requestId">The id of the message that was sent (never a wire value).</param>
+    /// <param name="transportResult">The transport's result.</param>
+    /// <param name="endpoint">The endpoint used, for the exception's scheme.</param>
+    /// <param name="peerDid">The DID subject the send addressed.</param>
+    /// <param name="localDid">The DID subject that sent it.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task<UnpackResult?> EvaluateReturnedAsync(
+        string requestId, TransportResult transportResult, Uri endpoint, string peerDid, string localDid, CancellationToken ct)
+    {
+        if (transportResult.ResponseDiscarded)
+        {
+            throw new TransportException(
+                $"The request was accepted (HTTP {transportResult.HttpStatusCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "status unknown"}), but the returned message exceeded DidCommOptions.MaxReceiveBytes, was not received in time, or could not be read, and was discarded (FR-RR-07).",
+                httpStatusCode: transportResult.HttpStatusCode,
+                scheme: endpoint.Scheme);
+        }
+
+        if (transportResult.ResponsePayload is not { IsEmpty: false } payload)
+            return null;
+
+        UnpackResult unpacked;
+        try
+        {
+            unpacked = await UnpackAsync(Encoding.UTF8.GetString(payload.Span), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+        {
+            // The outer text names no DID; the typed inner exception keeps the FR-API-07 detail.
+            throw new TransportException(
+                "The request was accepted, but the returned message could not be unpacked (FR-RR-07, FR-API-07).",
+                ex,
+                transportResult.HttpStatusCode,
+                endpoint.Scheme);
+        }
+
+        if (!ReturnRouteIdentity.IsFromPeerToLocal(unpacked, peerDid, localDid, out var refusal))
+        {
+            LogReturnedDiscarded(_logger, requestId, refusal.ToString());
+            return null;
+        }
+        return unpacked;
+    }
+
+    /// <summary>
+    /// Deliver bytes that are already packed to <paramref name="endpoint"/> through the registered
+    /// <see cref="ITransportRouter"/> (FR-TRN-01), for a caller that packed or received the envelope
+    /// itself, such as a mediator relaying a forwarded message (FR-MED-01). Nothing is packed,
+    /// resolved or read back: the request carries no return-route fields, so no transport reads a
+    /// response body and no return-route connection is used.
+    /// </summary>
+    /// <remarks>
+    /// The SSRF guard (<see cref="DidCommOptions.OutboundEndpointPolicy"/>) is always applied to
+    /// <paramref name="endpoint"/>, because a relay target comes from a DID document or a wire
+    /// message. The queue URI <c>didcomm:transport/queue</c> is refused (FR-RR-06). Failures are
+    /// recorded on the same span and logged the same way as <see cref="SendAsync"/>.
+    /// </remarks>
+    /// <param name="packed">The packed envelope bytes (UTF-8 JSON); must not be empty.</param>
+    /// <param name="endpoint">The absolute transport URI to deliver to.</param>
+    /// <param name="mediaType">The envelope's DIDComm media type: one of <see cref="MediaTypes.Encrypted"/>, <see cref="MediaTypes.Signed"/> or <see cref="MediaTypes.Plaintext"/> (the <c>application/</c> prefix may be omitted, FR-MSG-06).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The transport's result.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="endpoint"/> or <paramref name="mediaType"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="packed"/> is empty, <paramref name="endpoint"/> is not absolute, or <paramref name="mediaType"/> is not a DIDComm media type.</exception>
+    /// <exception cref="InvalidOperationException">No <see cref="ITransportRouter"/> is wired in.</exception>
+    /// <exception cref="TransportException"><paramref name="endpoint"/> is the queue URI or a blocked destination, or the transport failed.</exception>
+    public async Task<TransportResult> SendPackedAsync(ReadOnlyMemory<byte> packed, Uri endpoint, string mediaType, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(mediaType);
+        using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.SendActivity);
+        try
+        {
+            if (packed.IsEmpty)
+                throw new ArgumentException("The packed message is empty.", nameof(packed));
+            if (!endpoint.IsAbsoluteUri)
+                throw new ArgumentException("The endpoint must be an absolute URI.", nameof(endpoint));
+            var canonicalType = CanonicalDidCommMediaType(mediaType)
+                ?? throw new ArgumentException(
+                    $"The media type must be a DIDComm media type: {MediaTypes.Encrypted}, {MediaTypes.Signed} or {MediaTypes.Plaintext} (FR-TRN-02).",
+                    nameof(mediaType));
+            if (_transportRouter is null)
+            {
+                throw new InvalidOperationException(
+                    "SendPackedAsync requires an ITransportRouter. Register a transport via builder.UseHttpTransport()/UseWebSocketTransport() or pass one to the (secrets, keyService, serviceResolver, transportRouter, options) constructor (FR-TRN-01).");
+            }
+            if (QueueTransport.IsQueueTransport(endpoint))
+                throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
+
+            // Always: a relay target is attacker-influenced (JC-20).
+            new OutboundEndpointGuard(_options.OutboundEndpointPolicy).Validate(endpoint);
+
+            // A bounded vocabulary (https/wss/...), never the endpoint host or path (NFR-04).
+            activity?.SetTag(DidCommDiagnostics.TransportSchemeTag, endpoint.Scheme);
+            return await _transportRouter.SendAsync(new TransportRequest(endpoint, packed, canonicalType), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DidCommDiagnostics.RecordFailure(activity, ex);
+            if (ex is not OperationCanceledException)
+                LogSendFailed(_logger, ex.GetType().Name);
+            throw;
+        }
+    }
+
+    // The canonical constant a DIDComm media type matches (FR-MSG-06 normalization), or null.
+    private static string? CanonicalDidCommMediaType(string mediaType)
+        => MediaTypes.Matches(mediaType, MediaTypes.Encrypted) ? MediaTypes.Encrypted
+            : MediaTypes.Matches(mediaType, MediaTypes.Signed) ? MediaTypes.Signed
+            : MediaTypes.Matches(mediaType, MediaTypes.Plaintext) ? MediaTypes.Plaintext
+            : null;
+
+    /// <summary>The facade's options, for the library's own receive and session paths (the FR-RR-09 stamping clock).</summary>
+    internal DidCommOptions Options => _options;
+
+    /// <summary>
+    /// The refusal of a return-route send to a routed recipient (FR-RR-02, FR-RR-07). Names no DID.
+    /// </summary>
+    internal const string RoutedReturnRouteRefusal =
+        "A return_route of 'all' or 'thread' is not valid for a recipient reached through routing keys or a mediator: the return_route extension applies only between directly connected agents (FR-RR-02, FR-RR-07). Send without it, or to the recipient's direct endpoint (ServiceEndpointOverride).";
 
     /// <summary>
     /// Unpack <paramref name="packed"/>, auto-detecting the envelope shape (plaintext / signed
@@ -897,6 +1197,18 @@ public sealed partial class DidCommClient
     private static partial void LogRecipientKeysSkipped(ILogger logger, int recipientKeyCount, string curve, int offCurveCount, int overCapCount, int maxKeysPerDid);
 
     /// <summary>
+    /// A message returned for a return-route send was discarded because it failed the identity rule
+    /// (FR-RR-07, JC-6): not authcrypt, or not from the addressed DID to the sending DID. Warning
+    /// level; the line carries the id of the message the caller sent and the reason name only, never
+    /// a DID, key id or anything from the returned bytes (NFR-04).
+    /// </summary>
+    [LoggerMessage(
+        EventId = 6,
+        Level = LogLevel.Warning,
+        Message = "The message returned for {MessageId} was discarded: {Refusal} (FR-RR-07).")]
+    private static partial void LogReturnedDiscarded(ILogger logger, string messageId, string refusal);
+
+    /// <summary>
     /// The JOSE identifier for a content-encryption choice, for span tags only. Unlike
     /// <see cref="MapContentEncryption"/> this never throws — a forbidden combination must
     /// still tag the span before the core path rejects it.
@@ -979,6 +1291,15 @@ public sealed partial class DidCommClient
         }
 
         return new RecipientEntry(entry[..didLength], PinnedKid: entry);
+    }
+
+    // Every entry of a recipient list, parsed (FR-ENC-19); throws ArgumentException for a malformed one.
+    private static RecipientEntry[] ParseRecipientEntries(IReadOnlyList<string> recipients, string paramName)
+    {
+        var entries = new RecipientEntry[recipients.Count];
+        for (var i = 0; i < entries.Length; i++)
+            entries[i] = ParseRecipientEntry(recipients[i], paramName);
+        return entries;
     }
 
     private static bool AllNameOneDid(RecipientEntry[] entries)
