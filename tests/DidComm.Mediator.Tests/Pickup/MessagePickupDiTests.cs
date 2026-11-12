@@ -676,7 +676,7 @@ public sealed class MessagePickupDiTests
 
         public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => _inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
 
-        public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => _inner.ReleaseAsync(grantPeerDid, messageIds, ct);
+        public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => _inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
 
         public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => _inner.ReleaseLeasesAsync(leaseOwner, ct);
 

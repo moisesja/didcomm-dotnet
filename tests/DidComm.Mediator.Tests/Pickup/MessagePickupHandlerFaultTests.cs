@@ -93,7 +93,7 @@ public sealed class MessagePickupHandlerFaultTests
                 case GetStatus: H.Store.OnGetStatus = (_, _, _, _) => throw boom(); break;
                 case Lease: H.Store.OnLease = (_, _) => throw boom(); break;
                 case Acknowledge: H.Store.OnAcknowledge = (_, _, _) => throw boom(); break;
-                case Release: H.Store.OnRelease = (_, _, _) => throw boom(); break;
+                case Release: H.Store.OnRelease = (_, _, _, _) => throw boom(); break;
                 case Purge: H.Store.OnPurgeRecipient = (_, _, _) => throw boom(); break;
                 case SendThrows: Fake!.OnSend = (_, _) => throw boom(); break;
                 case NotSent: Fake!.OnSend = (_, _) => ReturnRouteSendResult.NotSent; break;
@@ -278,9 +278,12 @@ public sealed class MessagePickupHandlerFaultTests
                 (Lease, LimitZero, "status:3"),
                 (Lease, NoSession, "status:3"),
 
+                // Read by a delivery only when the delivery-time check found leased records of a DID
+                // that is gone: those records — exactly those, by id — are removed with it. When that
+                // fails the batch fails as a whole: released, nothing removed, nothing delivered.
                 (Acknowledge, Unfiltered, "delivery:1,2,3"),
                 (Acknowledge, Filtered, "delivery:2"),
-                (Acknowledge, Removed, "delivery:1,3"),
+                (Acknowledge, Removed, None),
                 (Acknowledge, LimitZero, "status:3"),
 
                 // Not read when the first send is taken (the trim has its own tests below).
@@ -289,10 +292,11 @@ public sealed class MessagePickupHandlerFaultTests
                 (Release, Removed, "delivery:1,3"),
                 (Release, LimitZero, "status:3"),
 
-                // Read only when the delivery-time check found a DID that is gone.
+                // Never read by a request: the role removes the stale records it leased, by id, and
+                // leaves purging a DID to the host.
                 (Purge, Unfiltered, "delivery:1,2,3"),
                 (Purge, Filtered, "delivery:2"),
-                (Purge, Removed, None),
+                (Purge, Removed, "delivery:1,3"),
                 (Purge, LimitZero, "status:3"),
                 (Purge, NoSession, "status:3"),
 
@@ -307,15 +311,22 @@ public sealed class MessagePickupHandlerFaultTests
                 (NotSent, Removed, None),
                 (NotSent, LimitZero, "status:3"),
 
-                // Trimmed to nothing: the status, with everything back in the queue.
-                (TooLargeAlways, Unfiltered, "status:3"),
-                (TooLargeAlways, Filtered, "status:1"),
-                (TooLargeAlways, Removed, "status:2"),
+                // Trimmed from the end down to the first message, and that one, alone, is still over
+                // the budget: it is neither removed nor given back — it keeps the request's lease and
+                // is passed over (" passing over #…") — and the same request leases again and tries
+                // what is behind it. With a session that finds everything too large that ends with
+                // every message passed over, one after the other, and the status, which still counts
+                // all that is stored.
+                (TooLargeAlways, Unfiltered, "status:3 passing over #1,2,3"),
+                (TooLargeAlways, Filtered, "status:1 passing over #2"),
+                (TooLargeAlways, Removed, "status:2 passing over #1,3"),
                 (TooLargeAlways, LimitZero, "status:3"),
 
-                // One too many: the last message goes back and the rest is delivered.
+                // One too many: the last message goes back and the rest is delivered. A batch of one
+                // has no "rest": the first answer already is the verdict on that message alone, and
+                // the next lease round finds nothing more in the filter's scope.
                 (TooLargeOnce, Unfiltered, "delivery:1,2"),
-                (TooLargeOnce, Filtered, "status:1"),
+                (TooLargeOnce, Filtered, "status:1 passing over #2"),
                 (TooLargeOnce, Removed, "delivery:1"),
 
                 (IsLiveThrows, Unfiltered, None),
@@ -364,44 +375,133 @@ public sealed class MessagePickupHandlerFaultTests
         };
         var outcome = await w.DispatchAsync(request, fault, withSession: variant != NoSession);
 
-        // What is still stored: everything, unless the delivery-time check got as far as purging #2.
-        var stored = await h.StoredAsync(h.Alice);
-        var purged = h.Store.PurgedRecipients.Count > 0 && fault != Purge;
-        var storedIds = w.Ids.Where((_, i) => !(purged && i == 1)).ToArray();
-        stored.Should().Be(storedIds.Length);
-        if (variant != Removed)
-            h.Store.PurgedRecipients.Should().BeEmpty();
-        h.Store.Acknowledged.Should().BeEmpty("a delivery-request never removes a message");
+        // "… passing over #a,b": the messages that, alone in the delivery this request asked for,
+        // were still over the byte budget, in the order the request came to them. None is removed
+        // or given back: each keeps the request's lease, so it is passed over until that lease
+        // ends, and the request goes on to what is queued behind it (JC-19).
+        const string passing = " passing over #";
+        var passedOver = Array.Empty<int>();
+        var answer = expected;
+        if (expected.IndexOf(passing, StringComparison.Ordinal) is var at and >= 0)
+        {
+            passedOver = expected[(at + passing.Length)..].Split(',').Select(n => int.Parse(n, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            answer = expected[..at];
+        }
+
+        // The one thing a delivery-request ever removes: the records it leased itself for a DID
+        // that is no longer registered to the peer — here #2, once the delivery-time check has
+        // got that far — by id, with AcknowledgeAsync. It never purges a DID.
+        var removesTheStaleRecord = variant == Removed && fault is not (GetGrant or FindGrant or Lease or IsLiveThrows or ClosedThrows or ClockThrows);
+        var staleRecordIsGone = removesTheStaleRecord && fault != Acknowledge;
+        var storedIds = w.Ids.Where((_, i) => !(staleRecordIsGone && i == 1)).ToArray();
+        (await h.StoredAsync(h.Alice)).Should().Be(storedIds.Length);
+        h.Store.PurgedRecipients.Should().BeEmpty("the role removes the stale records it leased and leaves purging a DID to the host");
+        if (removesTheStaleRecord)
+        {
+            var removal = h.Store.Acknowledged.Should().ContainSingle().Subject;
+            removal.GrantPeerDid.Should().Be(h.Alice);
+            removal.Ids.Should().Equal(w.Ids[1]);
+        }
+        else
+        {
+            h.Store.Acknowledged.Should().BeEmpty("a delivery-request removes nothing else — not even a message it cannot deliver");
+        }
 
         string[] delivered = Array.Empty<string>();
-        if (expected == None)
+        var kept = passedOver.Select(n => w.Ids[n - 1]).ToArray();
+        if (answer == None)
         {
             outcome.ShouldBeNoReply();
             w.Sent.Should().BeEmpty("nothing is delivered when the request fails");
             if (fault is not NotSent)
                 w.ShouldHaveLoggedTheFault(request, loggerDown);
         }
-        else if (expected.StartsWith("status:", StringComparison.Ordinal))
+        else if (answer.StartsWith("status:", StringComparison.Ordinal))
         {
-            var count = int.Parse(expected["status:".Length..], System.Globalization.CultureInfo.InvariantCulture);
+            // The status counts what is stored in the scope the request named — a message that was
+            // passed over included: it is stored, due and unexpired.
+            var sizes = new Dictionary<string, int> { [w.Ids[0]] = 10, [w.Ids[1]] = 20, [w.Ids[2]] = 30 };
+            var scope = variant == Filtered ? storedIds.Where(id => id == w.Ids[1]).ToArray() : storedIds;
+            scope.Should().HaveCount(int.Parse(answer["status:".Length..], System.Globalization.CultureInfo.InvariantCulture));
             w.Sent.Should().BeEmpty();
-            if (variant == Filtered)
-                outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 1, 20, live: false, recipientDid: w.Second, times: new MessagePickupHandlerTimes(0, t0, t0));
-            else
-                outcome.ShouldBeStatus(request, h.Mediator, h.Alice, count, count == 3 ? 60 : 40, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, scope.Length, scope.Sum(id => sizes[id]), live: false,
+                recipientDid: variant == Filtered ? w.Second : null,
+                times: scope.Length > 0 ? new MessagePickupHandlerTimes(0, t0, t0) : null);
         }
         else
         {
-            delivered = expected["delivery:".Length..].Split(',').Select(n => w.Ids[int.Parse(n, System.Globalization.CultureInfo.InvariantCulture) - 1]).ToArray();
+            delivered = answer["delivery:".Length..].Split(',').Select(n => w.Ids[int.Parse(n, System.Globalization.CultureInfo.InvariantCulture) - 1]).ToArray();
             outcome.ShouldBeNoReply();
             w.Sent.Should().ContainSingle().Which.ShouldBeDelivery(request, h.Mediator, h.Alice, variant == Filtered ? w.Second : null, delivered);
         }
 
-        // No lease outlives a request that did not deliver under it: what is stored and was not
-        // pushed is deliverable again at once.
-        (await h.DeliverableAsync(h.Alice)).Should().Equal(storedIds.Except(delivered));
+        // The trim itself, where the session answers TooLarge: how many attachments each attempt
+        // carried, which message was given back after each (always the last one of the batch), and
+        // the store calls in order. A message that does not fit alone costs no store call; the
+        // request leases again and goes on, and reads the status only when a round finds nothing.
+        (int[] Attempts, int[] GivenBack, string[] Trace)? trim = (fault, variant) switch
+        {
+            (TooLargeAlways, Unfiltered) => (new[] { 3, 2, 1, 2, 1, 1 }, new[] { 3, 2, 3 },
+                new[] { "LeaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+            (TooLargeAlways, Filtered) => (new[] { 1 }, Array.Empty<int>(), new[] { "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+            (TooLargeAlways, Removed) => (new[] { 2, 1, 1 }, new[] { 3 },
+                new[] { "LeaseAsync", "AcknowledgeAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+            (TooLargeOnce, Unfiltered) => (new[] { 3, 2 }, new[] { 3 }, new[] { "LeaseAsync", "ReleaseAsync" }),
+            (TooLargeOnce, Filtered) => (new[] { 1 }, Array.Empty<int>(), new[] { "LeaseAsync", "LeaseAsync", "GetStatusAsync" }),
+            (TooLargeOnce, Removed) => (new[] { 2, 1 }, new[] { 3 }, new[] { "LeaseAsync", "AcknowledgeAsync", "ReleaseAsync" }),
+            _ => null,
+        };
+        if (trim is { } expectedTrim)
+        {
+            w.Fake!.Attempts.Select(a => a.Message.Attachments!.Count).Should().Equal(expectedTrim.Attempts);
+            h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(expectedTrim.GivenBack.Select(n => w.Ids[n - 1]));
+            h.StoreTrace.Should().Equal(expectedTrim.Trace);
+        }
+
+        // The only leases that outlive a request that did not deliver under them are those on the
+        // messages it passed over: everything else that is stored and was not pushed is deliverable
+        // again at once.
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(storedIds.Except(delivered).Except(kept));
+        if (kept.Length > 0)
+        {
+            // … and those are exactly as the request leased them: under its lease for the whole
+            // timeout, and back at their old positions when it ends.
+            h.Clock.Advance(TimeSpan.FromSeconds(60) - TimeSpan.FromTicks(1));
+            (await h.DeliverableAsync(h.Alice)).Should().NotContain(kept, "the lease is the request's, with its whole timeout");
+            h.Clock.Advance(TimeSpan.FromTicks(1));
+            (await h.DeliverableAsync(h.Alice)).Should().Equal(storedIds.Except(delivered), "when the lease ends the messages are back at their old positions");
+        }
+
+        // One request, one lease, however many rounds it took — and whatever the request gave back,
+        // it gave back under that lease.
+        h.Store.ReleasedLeaseIds.Should().HaveCount(h.Store.Released.Count);
+        if (h.Store.LeaseRequests.Count > 0)
+        {
+            var leaseId = h.Store.LeaseRequests.Select(r => r.Lease.Id).Distinct().Should().ContainSingle().Subject;
+            h.Store.ReleasedLeaseIds.Should().OnlyContain(id => id == leaseId);
+        }
+        else
+        {
+            h.Store.Released.Should().BeEmpty("a request that took no lease has nothing to give back");
+        }
+
         if (!loggerDown)
-            w.LinesOfLastDispatch();
+        {
+            // Passing a message over is said once per message, with the request id, the size and
+            // the running count — no DID, no queue id (LinesOfLastDispatch checks every line for
+            // those). Any enrolled peer can cause the line, so only the first is a Warning.
+            var lines = w.LinesOfLastDispatch();
+            lines.Should().NotContain(e => e.Formatted.Contains("removed: alone", StringComparison.Ordinal), "nothing is removed for being too large");
+            var passedOverLines = lines.Where(e => e.Formatted.Contains("even alone; it stays queued and is passed over", StringComparison.Ordinal)).ToArray();
+            passedOverLines.Select(e => e.State["Bytes"]).Should().Equal(passedOver.Select(n => (object?)(10 * n)));
+            passedOverLines.Select(e => e.State["Count"]).Should().Equal(passedOver.Select((_, i) => (object?)(long)(i + 1)));
+            passedOverLines.Select(e => e.Level).Should().Equal(passedOver.Select((_, i) => i == 0 ? LogLevel.Warning : LogLevel.Debug));
+            foreach (var line in passedOverLines)
+            {
+                line.State.Keys.Should().BeEquivalentTo("MessageId", "Bytes", "Count", "{OriginalFormat}");
+                line.State["MessageId"].Should().Be(request.Id);
+            }
+        }
     }
 
     // ---- messages-received --------------------------------------------------------------------
@@ -547,11 +647,45 @@ public sealed class MessagePickupHandlerFaultTests
         release.GrantPeerDid.Should().Be(h.Alice);
         release.Ids.Should().BeEquivalentTo(ids);
         h.Store.PurgedRecipients.Should().BeEmpty("nothing is purged on the strength of a check that did not finish");
+        h.Store.Acknowledged.Should().BeEmpty("and nothing is removed on it either");
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(ids);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("empty")]
+    [InlineData("a DID URL")]
+    public async Task A_registry_answer_that_names_no_usable_peer_is_a_fault_of_the_check_not_an_unregistered_did(string peerDidOfTheGrant)
+    {
+        // "Registered to nobody we can name" must not be read as "not registered to this peer":
+        // that would remove the record. The check failed; the batch fails with it (L-054).
+        await using var h = await MessagePickupHandlerHarness.CreateAsync();
+        var second = await h.NewDidAsync();
+        await h.EnrolAsync(h.Alice, h.Alice, second);
+        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(second, 20, 2) };
+        var session = h.Http(h.Alice);
+        var unusable = peerDidOfTheGrant switch
+        {
+            "null" => null!,
+            "empty" => string.Empty,
+            _ => h.Alice + "#key-1",
+        };
+        h.Mediation.OnFindGrantByRecipientDid = (did, ct) => did == second
+            ? new ValueTask<MediationGrant?>(new MediationGrant(unusable, new[] { h.Mediator }))
+            : h.Mediation.Inner.FindGrantByRecipientDidAsync(did, ct);
+        h.ResetTraces();
+
+        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session)).ShouldBeNoReply();
+
+        session.Attempts.Should().BeEmpty();
+        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync");
+        h.ReleasedIds.Should().BeEquivalentTo(ids);
+        h.Store.Acknowledged.Should().BeEmpty("nothing is removed");
         (await h.DeliverableAsync(h.Alice)).Should().Equal(ids);
     }
 
     [Fact]
-    public async Task A_purge_that_fails_releases_the_whole_batch_and_delivers_nothing()
+    public async Task A_removal_of_stale_records_that_fails_releases_the_whole_batch_delivers_nothing_and_removes_nothing()
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var gone1 = await h.NewDidAsync();
@@ -560,26 +694,31 @@ public sealed class MessagePickupHandlerFaultTests
         var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(gone1, 20, 2), await h.QueueAsync(gone2, 30, 3) };
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(gone1, RecipientUpdateAction.Remove), new RecipientUpdate(gone2, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
-        // The first purge works, the second one fails.
-        var purges = 0;
-        h.Store.OnPurgeRecipient = (grant, did, ct) => Interlocked.Increment(ref purges) == 2
-            ? throw new HandlerBoomException(HandlerBoomException.Marker)
-            : h.Store.Inner.PurgeRecipientAsync(grant, did, ct);
+        h.Store.OnAcknowledge = (_, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
         h.ResetTraces();
 
         (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session)).ShouldBeNoReply();
 
         session.Attempts.Should().BeEmpty("the still-registered message is not delivered either: the batch failed as a whole");
-        h.Store.PurgedRecipients.Should().HaveCount(2);
-        h.ReleasedIds.Should().Contain(ids[0]);
-        var left = await h.DeliverableAsync(h.Alice);
-        left.Should().Contain(ids[0]).And.HaveCount(2, "one unregistered DID was purged before the fault, the other is still there, and nothing stayed leased");
+        // One removal was asked for — of exactly the two leased records whose DID is gone — and failed.
+        var attempted = h.Store.Acknowledged.Should().ContainSingle().Subject;
+        attempted.GrantPeerDid.Should().Be(h.Alice);
+        attempted.Ids.Should().Equal(ids[1], ids[2]);
+        h.StoreTrace.Should().Equal("LeaseAsync", "AcknowledgeAsync", "ReleaseAsync");
+        h.ReleasedIds.Should().BeEquivalentTo(ids);
+        h.Store.PurgedRecipients.Should().BeEmpty();
+        h.Store.Inner.MessageCount.Should().Be(3, "nothing is removed when the removal fails");
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(ids, "and nothing stays leased");
 
-        // The next request finishes the job.
-        h.Store.OnPurgeRecipient = null;
+        // The next request, with the store working again, finishes the job: the same two records
+        // removed by id, the still-registered message delivered.
+        h.Store.OnAcknowledge = null;
+        h.ResetTraces();
         var retry = h.DeliveryRequest(h.Alice, 10);
         (await h.SendAsync(retry, session)).ShouldBeNoReply();
         session.Sent.Should().ContainSingle().Which.ShouldBeDelivery(retry, h.Mediator, h.Alice, null, new[] { ids[0] });
+        h.Store.Acknowledged.Should().ContainSingle().Which.Ids.Should().Equal(ids[1], ids[2]);
+        h.Store.PurgedRecipients.Should().BeEmpty();
         h.Store.Inner.MessageCount.Should().Be(1);
     }
 
@@ -616,7 +755,7 @@ public sealed class MessagePickupHandlerFaultTests
     }
 
     [Fact]
-    public async Task A_delivery_that_never_fits_is_trimmed_to_nothing_and_answered_with_status()
+    public async Task When_nothing_fits_even_alone_one_request_passes_every_message_over_in_turn_and_is_answered_with_status()
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
@@ -625,28 +764,65 @@ public sealed class MessagePickupHandlerFaultTests
         (await h.SendAsync(h.LiveChange(h.Alice, true), socket)).Status().LiveDelivery.Should().BeTrue();
         socket.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
         var t0 = h.Start.ToUnixTimeSeconds();
+        var times = new MessagePickupHandlerTimes(0, t0, t0);
         h.ResetTraces();
         var logged = h.Fixture.PickupLogs.Count;
 
         var request = h.DeliveryRequest(h.Alice, 10);
         var outcome = await h.SendAsync(request, socket);
 
-        // JC-19: nothing fits this peer's envelope; everything stays queued and the peer is told the state.
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 60, live: true, times: new MessagePickupHandlerTimes(0, t0, t0));
-        socket.Attempts.Select(a => a.Message.Attachments!.Count).Should().Equal(3, 2, 1);
+        // JC-19: the batch is trimmed from the end down to its first message, and the delivery that
+        // carries that one alone is still over the byte budget. Nothing is removed and that message
+        // is not given back: it keeps this request's lease. The same request then leases again and
+        // tries what is behind it — here with the same result, twice more — and when a lease round
+        // finds nothing left the peer is told the state, which still counts all three.
+        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 60, live: true, times: times);
+        socket.Attempts.Select(a => string.Join(",", a.Message.Attachments!.Select(x => Array.IndexOf(ids, x.Id)))).Should().Equal("0,1,2", "0,1", "0", "1,2", "1", "2");
         socket.Sent.Should().BeEmpty();
-        h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[2], ids[1], ids[0]);
-        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "ReleaseAsync", "GetStatusAsync");
-        (await h.DeliverableAsync(h.Alice)).Should().Equal(ids);
+        h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[2], ids[1], ids[2]);
+        h.Store.Released.Should().OnlyContain(r => r.GrantPeerDid == h.Alice);
+        h.Store.Acknowledged.Should().BeEmpty("a message that does not fit is not removed");
+        h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "LeaseAsync", "ReleaseAsync", "LeaseAsync", "LeaseAsync", "GetStatusAsync");
+        h.Store.Inner.MessageCount.Should().Be(3);
+        (await h.DeliverableAsync(h.Alice)).Should().BeEmpty("each of the three keeps the request's lease");
 
-        // Logged with the request id; a line any enrolled peer can cause, so rate-limited.
-        var line = h.Fixture.PickupLogs.Skip(logged).Should().ContainSingle().Subject;
-        line.Level.Should().Be(LogLevel.Warning);
-        line.State["MessageId"].Should().Be(request.Id);
-        line.State["Count"].Should().Be(1L);
-        (await h.SendAsync(h.DeliveryRequest(h.Alice, 10), socket)).Status().MessageCount.Should().Be(3);
-        h.Fixture.PickupLogs.Skip(logged).Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug);
-        h.Fixture.PickupLogs.Skip(logged).Should().OnlyContain(e => !e.Everything.Contains("did:") && ids.All(id => !e.Everything.Contains(id)));
+        // Four lease rounds, one lease: the same request object's lease, which the socket owns.
+        var lease = h.Store.LeaseRequests.Select(r => r.Lease).Distinct().Should().ContainSingle().Subject;
+        h.Store.LeaseRequests.Should().HaveCount(4);
+        lease.Owner.Should().NotBeNullOrEmpty();
+        h.Store.ReleasedLeaseIds.Should().OnlyContain(id => id == lease.Id);
+
+        // One line per message passed over, with the request id, the size and the running count; a
+        // line any enrolled peer can cause, so rate-limited.
+        var lines = h.Fixture.PickupLogs.Skip(logged).ToArray();
+        lines.Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug, LogLevel.Debug);
+        lines.Select(e => e.State["Bytes"]).Should().Equal(10, 20, 30);
+        lines.Select(e => e.State["Count"]).Should().Equal(1L, 2L, 3L);
+        foreach (var line in lines)
+        {
+            line.Formatted.Should().Contain("even alone; it stays queued and is passed over until this request's lease ends");
+            line.State.Keys.Should().BeEquivalentTo("MessageId", "Bytes", "Count", "{OriginalFormat}");
+            line.State["MessageId"].Should().Be(request.Id);
+        }
+        lines.Should().OnlyContain(e => e.Exception == null && !e.Everything.Contains("did:") && ids.All(id => !e.Everything.Contains(id)));
+
+        // The next request, the clock not moved: there is nothing to try. It says so with the
+        // status and logs nothing.
+        h.ResetTraces();
+        var second = h.DeliveryRequest(h.Alice, 10);
+        (await h.SendAsync(second, socket)).ShouldBeStatus(second, h.Mediator, h.Alice, 3, 60, live: true, times: times);
+        h.StoreTrace.Should().Equal("LeaseAsync", "GetStatusAsync");
+        socket.Attempts.Should().HaveCount(6, "3 + 2 + 1 attempts by the first request, and none by the second");
+        h.Fixture.PickupLogs.Skip(logged).Should().HaveCount(3);
+        h.Store.Acknowledged.Should().BeEmpty();
+        h.Store.Inner.MessageCount.Should().Be(3);
+
+        // All three are held by the first request's lease and by no other: giving back under
+        // another id finds nothing, under that one all of them.
+        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, "not-a-lease-of-anyone", default)).Should().Be(0);
+        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, h.Store.LeaseRequests.Last().Lease.Id, default)).Should().Be(0);
+        (await h.Store.Inner.ReleaseAsync(h.Alice, ids, lease.Id, default)).Should().Be(3);
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(ids);
     }
 
     [Fact]
@@ -686,9 +862,9 @@ public sealed class MessagePickupHandlerFaultTests
         var session = h.Http(h.Alice);
         session.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
         var releases = 0;
-        h.Store.OnRelease = (grant, messageIds, ct) => Interlocked.Increment(ref releases) == 1 || storeStaysDown
+        h.Store.OnRelease = (grant, messageIds, lease, ct) => Interlocked.Increment(ref releases) == 1 || storeStaysDown
             ? throw new HandlerBoomException(HandlerBoomException.Marker)
-            : h.Store.Inner.ReleaseAsync(grant, messageIds, ct);
+            : h.Store.Inner.ReleaseAsync(grant, messageIds, lease, ct);
         h.ResetTraces();
         var logged = h.Fixture.PickupLogs.Count;
 
@@ -736,7 +912,7 @@ public sealed class MessagePickupHandlerFaultTests
         { GetStatus, "live-delivery-change{true}" },
         { Lease, "delivery-request" },
         { Acknowledge, "messages-received" },
-        { Purge, "delivery-request after a DID was removed" },
+        { Acknowledge, "delivery-request after a DID was removed" },
         { SendThrows, "delivery-request" },
         { SendThrows, "filtered delivery-request" },
         { IsLiveThrows, "delivery-request" },
@@ -765,10 +941,10 @@ public sealed class MessagePickupHandlerFaultTests
             return w.Boom();
         }
         var releaseTokens = new List<CancellationToken>();
-        h.Store.OnRelease = (grant, ids, ct) =>
+        h.Store.OnRelease = (grant, ids, lease, ct) =>
         {
             releaseTokens.Add(ct);
-            return h.Store.Inner.ReleaseAsync(grant, ids, ct);
+            return h.Store.Inner.ReleaseAsync(grant, ids, lease, ct);
         };
         var message = request switch
         {
@@ -869,40 +1045,76 @@ public sealed class MessagePickupHandlerFaultTests
     // ---- a session whose identity cannot be read ----------------------------------------------
 
     [Theory]
-    [InlineData("PeerDid")]
-    [InlineData("LocalDid")]
-    public async Task A_session_whose_identity_cannot_be_read_never_makes_dispatch_throw(string member)
+    [InlineData("PeerDid", false)]
+    [InlineData("LocalDid", false)]
+    [InlineData("PeerDid", true)]
+    [InlineData("LocalDid", true)]
+    public async Task A_session_whose_identity_cannot_be_read_is_handled_as_no_session_and_never_makes_dispatch_throw(string member, bool loggerDown)
     {
         // "A store, registry or session fault never leaves the handler." Which pair a session is
         // bound to is read before anything else is done with it; a session that fails there is not
-        // this peer's connection, and must not turn into an exception out of dispatch.
-        await using var w = await World.CreateAsync(IsLiveThrows, loggerDown: false);
+        // this peer's connection: every request is answered as it is without a session (JC-9, JC-10).
+        await using var w = await World.CreateAsync(IsLiveThrows, loggerDown);
         var h = w.H;
-        var requests = new[]
-        {
-            h.StatusRequest(h.Alice),
-            h.DeliveryRequest(h.Alice, 10),
-            h.MessagesReceived(h.Alice, new[] { "no-such-id" }),
-            h.LiveChange(h.Alice, true),
-        };
+        var t0 = h.Start.ToUnixTimeSeconds();
+        var times = new MessagePickupHandlerTimes(0, t0, t0);
 
-        var escaped = new List<string>();
-        foreach (var message in requests)
+        async Task<DispatchOutcome> SendOnTheBrokenSessionAsync(Message message)
         {
             var received = await h.Fixture.ReceiveAsync(message, h.Mediator);
+            h.ResetTraces();
+            w.LoggedBefore = h.Fixture.PickupLogs.Count;
             if (member == "PeerDid")
                 w.Faulty!.OnPeerDid = () => throw w.Boom();
             else
                 w.Faulty!.OnLocalDid = () => throw w.Boom();
-            var thrown = await Record.ExceptionAsync(() => h.Fixture.Host.Dispatcher.DispatchAsync(received, h.Fixture.Host.Client, h.Fixture.Host.Options, Task.CompletedTask, w.Session, CancellationToken.None));
-            w.Faulty.OnPeerDid = null;
-            w.Faulty.OnLocalDid = null;
-            if (thrown is not null)
-                escaped.Add(message.Type[(message.Type.LastIndexOf('/') + 1)..] + ": " + thrown.GetType().Name);
+            try
+            {
+                return await h.Fixture.Host.Dispatcher.DispatchAsync(received, h.Fixture.Host.Client, h.Fixture.Host.Options, Task.CompletedTask, w.Session, CancellationToken.None);
+            }
+            finally
+            {
+                w.Faulty.OnPeerDid = null;
+                w.Faulty.OnLocalDid = null;
+            }
         }
 
-        string.Join("; ", escaped).Should().BeEmpty("an exception from the session's " + member + " getter must not leave dispatch");
-        w.Sent.Should().BeEmpty();
+        // Said once per request, at Warning: the request id and the exception's type name.
+        void ShouldHaveSaidSoOnce(Message request)
+        {
+            if (loggerDown)
+                return;
+            var line = w.LinesOfLastDispatch().Should().ContainSingle().Subject;
+            line.Level.Should().Be(LogLevel.Warning);
+            line.State["MessageId"].Should().Be(request.Id);
+            line.State["ExceptionType"].Should().Be(nameof(HandlerBoomException));
+        }
+
+        var status = h.StatusRequest(h.Alice);
+        (await SendOnTheBrokenSessionAsync(status)).ShouldBeStatus(status, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        ShouldHaveSaidSoOnce(status);
+
+        // No connection to carry a batch on: nothing is leased, the status instead.
+        var fetch = h.DeliveryRequest(h.Alice, 10);
+        (await SendOnTheBrokenSessionAsync(fetch)).ShouldBeStatus(fetch, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        h.Store.LeaseRequests.Should().BeEmpty();
+        ShouldHaveSaidSoOnce(fetch);
+
+        var ack = h.MessagesReceived(h.Alice, new[] { "no-such-id" });
+        (await SendOnTheBrokenSessionAsync(ack)).ShouldBeStatus(ack, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        ShouldHaveSaidSoOnce(ack);
+
+        // No connection that could do live delivery: the problem report, and the flag stays off.
+        var on = h.LiveChange(h.Alice, true);
+        (await SendOnTheBrokenSessionAsync(on)).ShouldBeLiveModeNotSupported(on, h.Mediator, h.Alice);
+        ShouldHaveSaidSoOnce(on);
+
+        var off = h.LiveChange(h.Alice, false);
+        (await SendOnTheBrokenSessionAsync(off)).ShouldBeStatus(off, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        ShouldHaveSaidSoOnce(off);
+
+        w.Sent.Should().BeEmpty("a session that cannot say whose it is is never written to");
         (await h.DeliverableAsync(h.Alice)).Should().Equal(w.Ids);
+        (await h.LiveFlagAsync(w.Session)).Should().BeFalse();
     }
 }

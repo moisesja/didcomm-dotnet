@@ -68,7 +68,9 @@ internal sealed class PickupCoordinator
     private readonly IReturnRouteSessionRegistry _sessions;
     private readonly PickupSessionTracker _tracker;
     private readonly PickupSizing _sizing;
-    private readonly MessagePickupOptions _options;
+    private readonly int _maxDeliveryBatch;
+    private readonly TimeSpan _leaseTimeout;
+    private readonly int _maxAckIds;
     private readonly DidCommOptions _didCommOptions;
     private readonly IMessageIdGenerator _ids;
     private readonly ILogger? _logger;
@@ -95,7 +97,10 @@ internal sealed class PickupCoordinator
         _store = store;
         _mediation = mediation;
         _sessions = sessions;
-        _options = options;
+        // Read once, after validation: a host that changes the options object later changes nothing here.
+        _maxDeliveryBatch = options.MaxDeliveryBatch;
+        _leaseTimeout = options.LeaseTimeout;
+        _maxAckIds = options.EffectiveMaxAckIds;
         _didCommOptions = didCommOptions;
         _sizing = new PickupSizing(options, didCommOptions.MaxReceiveBytes);
         _tracker = new PickupSessionTracker(store, logger);
@@ -107,7 +112,7 @@ internal sealed class PickupCoordinator
     }
 
     /// <summary>The largest <c>message_id_list</c> a <c>messages-received</c> may carry.</summary>
-    public int MaxAckIds => _options.EffectiveMaxAckIds;
+    public int MaxAckIds => _maxAckIds;
 
     /// <summary>The sizing in effect.</summary>
     public PickupSizing Sizing => _sizing;
@@ -132,15 +137,25 @@ internal sealed class PickupCoordinator
 
     /// <summary>
     /// The session a reply to this request may travel on: <paramref name="session"/> when it is
-    /// bound to exactly this (peer, local) pair, else <c>null</c>. Both comparisons always run.
+    /// bound to exactly this (peer, local) pair, else <c>null</c>. Both comparisons always run. A
+    /// session that throws when asked who it is counts as no session.
     /// </summary>
-    public static IReturnRouteSession? SessionFor(IReturnRouteSession? session, string peerDid, string localDid)
+    public IReturnRouteSession? SessionFor(IReturnRouteSession? session, string peerDid, string localDid, string messageId)
     {
         if (session is null)
             return null;
-        var same = string.Equals(session.PeerDid, peerDid, StringComparison.Ordinal)
-                   & string.Equals(session.LocalDid, localDid, StringComparison.Ordinal);
-        return same ? session : null;
+        try
+        {
+            var same = string.Equals(session.PeerDid, peerDid, StringComparison.Ordinal)
+                       & string.Equals(session.LocalDid, localDid, StringComparison.Ordinal);
+            return same ? session : null;
+        }
+        catch (Exception ex)
+        {
+            // A session whose identity cannot be read is not this peer's connection.
+            Log(LogLevel.Warning, "Message-pickup message {MessageId}: the return-route session could not be read ({ExceptionType}); handled as if there were none.", MediatorLog.LogId(messageId), ex.GetType().Name);
+            return null;
+        }
     }
 
     // ---- requests ---------------------------------------------------------------------------
@@ -184,7 +199,7 @@ internal sealed class PickupCoordinator
             var owned = await OwnsAsync(peerDid, recipientDid, ct).ConfigureAwait(false);
 
             // The count bound, before any record is touched: whatever the request asked for.
-            var max = Math.Min(Math.Max(0, limit), _options.MaxDeliveryBatch);
+            var max = Math.Min(Math.Max(0, limit), _maxDeliveryBatch);
             if (owned && max > 0 && session is not null)
             {
                 var pushed = await LeaseAndPushAsync(peerDid, max, recipientDid, session, buildDelivery, now, messageId, ct).ConfigureAwait(false);
@@ -282,8 +297,8 @@ internal sealed class PickupCoordinator
 
         string? peerDid = null;
         string? id = null;
+        MessageLease? lease = null;
         var stored = false;
-        var leased = false;
         try
         {
             var now = _didCommOptions.Now();
@@ -302,7 +317,7 @@ internal sealed class PickupCoordinator
             // A message that is not yet due is never pushed: it is queued and picked up once due.
             var due = options.NotBefore is not { } notBefore || notBefore <= now;
             var target = options.AllowLive && due ? FindLiveTarget(peerDid) : null;
-            var lease = target is null ? null : new MessageLease(target.Value.State.OwnerToken, now + _options.LeaseTimeout);
+            lease = target is null ? null : new MessageLease(target.Value.State.OwnerToken, now + _leaseTimeout);
 
             var outcome = EnqueueOutcome.DuplicateId;
             for (var attempt = 0; attempt < 2 && outcome == EnqueueOutcome.DuplicateId; attempt++)
@@ -316,7 +331,6 @@ internal sealed class PickupCoordinator
             {
                 case EnqueueOutcome.Enqueued:
                     stored = true;
-                    leased = lease is not null;
                     break;
                 case EnqueueOutcome.GrantMessageLimitReached or EnqueueOutcome.GrantByteLimitReached or EnqueueOutcome.StoreLimitReached:
                     var level = MediatorLog.RateLimited(ref _queueFull, out var n);
@@ -327,7 +341,7 @@ internal sealed class PickupCoordinator
                     return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
             }
 
-            if (target is null)
+            if (target is null || lease is null)
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
 
             // Admitted and leased to the live session in one step; now the push (FR-PICK-08/09).
@@ -342,14 +356,14 @@ internal sealed class PickupCoordinator
                 return new PickupDeliveryResult(PickupDeliveryOutcome.PushedLive, id, peerDid);
 
             // Not pushed (no free push slot, a downgraded or closing session, an envelope over the
-            // budget): the record stays where it is and loses its lease, so a delivery-request gets it.
-            await ReleaseQuietlyAsync(peerDid, new[] { id! }).ConfigureAwait(false);
+            // budget): the record stays where it is and loses this lease, so a delivery-request gets it.
+            await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
             return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
         }
         catch (Exception ex)
         {
-            if (stored && leased)
-                await ReleaseQuietlyAsync(peerDid!, new[] { id! }).ConfigureAwait(false);
+            if (stored && lease is not null)
+                await ReleaseQuietlyAsync(peerDid!, new[] { id! }, lease.Id).ConfigureAwait(false);
             MediatorLog.ThrowIfCancelled(ct);
             Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType}; retained: {Retained}.", ex.GetType().Name, stored);
             return stored
@@ -384,8 +398,8 @@ internal sealed class PickupCoordinator
 
     // Whether the peer may see the scope it names (FR-PICK-02/03): its own grant, or a recipient
     // DID registered under its own grant. "Not registered" and "registered under another grant"
-    // take the same store call and give the same answer; the comparison has no branch that depends
-    // on which it was. A value that is not a bare DID is never looked up (and never normalised).
+    // take the same single store call and give the same answer; nothing else is read or done for
+    // either. A value that is not a bare DID is never looked up (and never normalised).
     private async ValueTask<bool> OwnsAsync(string peerDid, string? recipientDid, CancellationToken ct)
     {
         if (recipientDid is null)
@@ -416,9 +430,11 @@ internal sealed class PickupCoordinator
     private bool IsLive(IReturnRouteSession? session)
         => session is not null && _tracker.Find(session)?.LiveDelivery is not null;
 
-    // Lease, check, push, trim. Returns the outcome when the request is settled here, or null when
-    // nothing could be delivered and the caller answers with the status. Whatever was leased and
-    // not pushed is released on every path out, including a fault.
+    // Lease, check, push, trim — and look further when a batch came to nothing. Returns the
+    // outcome when the request is settled here, or null when nothing could be delivered and the
+    // caller answers with the status. Whatever was leased and not pushed is released on every path
+    // out, including a fault — with one exception, on purpose: a message that did not fit even
+    // alone keeps the lease (see below).
     private async Task<PickupOutcome?> LeaseAndPushAsync(
         string peerDid,
         int max,
@@ -431,85 +447,116 @@ internal sealed class PickupCoordinator
     {
         // Over a live session the lease also ends when the session closes; over HTTP by time only.
         var state = _tracker.Track(session);
-        var lease = new MessageLease(state?.OwnerToken, now + _options.LeaseTimeout);
+        var lease = new MessageLease(state?.OwnerToken, now + _leaseTimeout);
         var request = new MessageLeaseRequest(peerDid, recipientDid, max, _sizing.BatchPayloadBudget, now, lease);
+
+        // One request does a bounded amount of work whatever the queue holds: this many lease
+        // rounds and this many packs (a pack is a full encryption of up to max_delivery_bytes).
+        var rounds = 2 * _maxDeliveryBatch;
+        var sends = 2 * _maxDeliveryBatch;
 
         var leased = new List<QueuedMessage>();
         var held = new List<string>();
+        // What this request has already set aside (passed over, or removed as unregistered): a
+        // store that hands one of these out again is outside its contract.
+        var settled = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            var taken = await _store.LeaseAsync(request, ct).ConfigureAwait(false);
-            // Copied before anything is checked: what the store handed out is held from here on.
-            if (taken is not null)
+            while (rounds-- > 0)
             {
+                var taken = await _store.LeaseAsync(request, ct).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The message store returned no lease list.");
+                // Copied before anything is checked: what the store handed out is held from here on.
+                leased.Clear();
                 foreach (var record in taken)
                 {
                     if (record?.Id is { } heldId)
                         held.Add(heldId);
                     leased.Add(record!);
                 }
-            }
-            RequireLeasedWithinContract(leased, peerDid, recipientDid, max);
-
-            if (recipientDid is null)
-                await DropUnregisteredAsync(peerDid, leased, held, ct).ConfigureAwait(false);
-
-            while (leased.Count > 0)
-            {
-                var batch = new DeliveredMessage[leased.Count];
-                for (var i = 0; i < batch.Length; i++)
-                    batch[i] = new DeliveredMessage(leased[i].Id, leased[i].Payload);
-
-                var sent = await session.TrySendAsync(buildDelivery(batch), _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
-                if (sent == ReturnRouteSendResult.Sent)
-                {
-                    held.Clear();
-                    // A session that closed while the batch was in hand may have run its release
-                    // before these leases existed; release again so nothing waits for the timeout.
-                    if (state is { IsClosed: true })
-                        _tracker.ReleaseLeasesInBackground(state.OwnerToken);
-                    return PickupOutcome.Delivered;
-                }
-                if (sent != ReturnRouteSendResult.TooLarge)
-                {
-                    Log(LogLevel.Information, "Message-pickup delivery request {MessageId}: the session did not take the delivery; {Count} lease(s) released, no reply.", MediatorLog.LogId(messageId), leased.Count);
-                    return PickupOutcome.None;
-                }
-
-                // Over the byte budget once packed (the estimate was short for this peer's
-                // envelope): give the last message back and try again with one fewer.
-                var last = leased[^1];
-                leased.RemoveAt(leased.Count - 1);
-                await _store.ReleaseAsync(peerDid, new[] { last.Id }, ct).ConfigureAwait(false);
-                held.Remove(last.Id);
+                RequireLeasedWithinContract(leased, peerDid, recipientDid, max, settled);
                 if (leased.Count == 0)
+                    return null;
+
+                if (recipientDid is null)
+                    await DropUnregisteredAsync(peerDid, leased, held, settled, ct).ConfigureAwait(false);
+
+                while (leased.Count > 0)
                 {
+                    if (sends-- <= 0)
+                        return null;
+
+                    var batch = new DeliveredMessage[leased.Count];
+                    for (var i = 0; i < batch.Length; i++)
+                        batch[i] = new DeliveredMessage(leased[i].Id, leased[i].Payload);
+
+                    var sent = await session.TrySendAsync(buildDelivery(batch), _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
+                    if (sent == ReturnRouteSendResult.Sent)
+                    {
+                        held.Clear();
+                        // A session that closed while the batch was in hand may have run its release
+                        // before these leases existed; release again so nothing waits for the timeout.
+                        if (state is { IsClosed: true })
+                            _tracker.ReleaseLeasesInBackground(state.OwnerToken);
+                        return PickupOutcome.Delivered;
+                    }
+                    if (sent != ReturnRouteSendResult.TooLarge)
+                    {
+                        Log(LogLevel.Information, "Message-pickup delivery request {MessageId}: the session did not take the delivery; {Count} lease(s) released, no reply.", MediatorLog.LogId(messageId), leased.Count);
+                        return PickupOutcome.None;
+                    }
+
+                    // Over the byte budget once packed (the estimate was short for this peer's
+                    // envelope). More than one message: give the last one back and try with one fewer.
+                    var last = leased[^1];
+                    leased.RemoveAt(leased.Count - 1);
+                    if (leased.Count > 0)
+                    {
+                        await _store.ReleaseAsync(peerDid, new[] { last.Id }, lease.Id, ct).ConfigureAwait(false);
+                        held.Remove(last.Id);
+                        continue;
+                    }
+
+                    // One message, alone, is over the budget in the delivery this request asked for
+                    // (its thread id and filter are part of what was measured). Nothing is removed:
+                    // another request, a larger budget or a smaller envelope may still deliver it.
+                    // It is not given back either — it keeps this request's lease, so the next
+                    // round of this request, and every request until that lease ends, passes it
+                    // over and delivers what is queued behind it.
+                    held.Remove(last.Id);
+                    settled.Add(last.Id);
                     var level = MediatorLog.RateLimited(ref _undeliverable, out var n);
-                    Log(level, "Message-pickup delivery request {MessageId}: a single queued message does not fit this peer's envelope within max_delivery_bytes; it stays queued. {Count} such requests.", MediatorLog.LogId(messageId), n);
+                    Log(level, "Message-pickup delivery request {MessageId}: a queued message of {Bytes} bytes does not fit this peer's envelope within max_delivery_bytes even alone; it stays queued and is passed over until this request's lease ends. {Count} such messages.", MediatorLog.LogId(messageId), last.Payload.Length, n);
                 }
+                // The batch came to nothing — its records were unregistered leftovers, or its head
+                // did not fit alone. Look at what is queued behind it.
             }
             return null;
         }
         finally
         {
             if (held.Count > 0)
-                await ReleaseQuietlyAsync(peerDid, held).ConfigureAwait(false);
+                await ReleaseQuietlyAsync(peerDid, held, lease.Id).ConfigureAwait(false);
         }
     }
 
     // What a store hands out is not trusted further than its contract: every record must be the
-    // caller's own (the grant key), within the count asked for, for the DID asked for, and carry an
-    // id that can go on the wire. One wrong record and nothing of the batch is delivered.
-    private static void RequireLeasedWithinContract(List<QueuedMessage> leased, string peerDid, string? recipientDid, int max)
+    // caller's own (the grant key), within the count asked for, for the DID asked for, carry an id
+    // that can go on the wire, appear once, and not be one this request has already set aside. One
+    // wrong record and nothing of the batch is delivered.
+    private static void RequireLeasedWithinContract(List<QueuedMessage> leased, string peerDid, string? recipientDid, int max, HashSet<string> settled)
     {
         var ok = leased.Count <= max;
+        var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var record in leased)
         {
             ok &= record is not null
                   && string.Equals(record.GrantPeerDid, peerDid, StringComparison.Ordinal)
                   && (recipientDid is null || string.Equals(record.RecipientDid, recipientDid, StringComparison.Ordinal))
                   && record.RecipientDid is not null
-                  && IsUsableId(record.Id, PickupBodies.MaxIdLength);
+                  && IsUsableId(record.Id, PickupBodies.MaxIdLength)
+                  && ids.Add(record.Id)
+                  && !settled.Contains(record.Id);
         }
         if (!ok)
             throw new InvalidOperationException("The message store returned records outside the lease it was asked for.");
@@ -517,11 +564,13 @@ internal sealed class PickupCoordinator
 
     // Registration is checked at delivery time (owner decision, FR-PICK-03): in a batch that was not
     // filtered by DID, every distinct recipient DID must still be registered under the peer's
-    // grant. Records of a DID that is not are purged (they can never be delivered, and would
-    // otherwise sit at the head of the queue for ever) and leave the batch. Every DID is checked,
-    // whatever the earlier ones answered. A fault here leaves through the caller's finally, which
-    // releases the whole batch: the check is the input of a refusal and fails with it (L-054).
-    private async ValueTask DropUnregisteredAsync(string peerDid, List<QueuedMessage> leased, List<string> held, CancellationToken ct)
+    // grant. The leased records of a DID that is not are removed — exactly those records, by id:
+    // the ones this check looked at, so a message that arrives for the DID a moment later (it may
+    // have been registered again) is judged by its own check — and leave the batch. Every DID is
+    // checked, whatever the earlier ones answered. A fault here, and an answer that names no usable
+    // peer, leave through the caller's finally, which releases the whole batch: the check is the
+    // input of a refusal and fails with it (L-054).
+    private async ValueTask DropUnregisteredAsync(string peerDid, List<QueuedMessage> leased, List<string> held, HashSet<string> settled, CancellationToken ct)
     {
         HashSet<string>? gone = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -530,24 +579,31 @@ internal sealed class PickupCoordinator
             if (!seen.Add(record.RecipientDid))
                 continue;
             var grant = await _mediation.FindGrantByRecipientDidAsync(record.RecipientDid, ct).ConfigureAwait(false);
+            if (grant is not null && !BareDid.IsBareDid(grant.PeerDid))
+                throw new InvalidOperationException("The mediation store returned a grant without a usable peer DID.");
             if (!string.Equals(grant?.PeerDid, peerDid, StringComparison.Ordinal))
                 (gone ??= new HashSet<string>(StringComparer.Ordinal)).Add(record.RecipientDid);
         }
         if (gone is null)
             return;
 
-        var purged = 0;
-        foreach (var did in gone)
-            purged += await _store.PurgeRecipientAsync(peerDid, did, ct).ConfigureAwait(false);
+        var stale = new List<string>();
+        foreach (var record in leased)
+        {
+            if (gone.Contains(record.RecipientDid))
+                stale.Add(record.Id);
+        }
+        var removed = await _store.AcknowledgeAsync(peerDid, stale, ct).ConfigureAwait(false);
         for (var i = leased.Count - 1; i >= 0; i--)
         {
             if (gone.Contains(leased[i].RecipientDid))
             {
                 held.Remove(leased[i].Id);
+                settled.Add(leased[i].Id);
                 leased.RemoveAt(i);
             }
         }
-        Log(LogLevel.Information, "Message pickup: {Count} queued message(s) removed: their recipient DID is no longer registered to the requesting peer.", purged);
+        Log(LogLevel.Information, "Message pickup: {Count} queued message(s) removed: their recipient DID is no longer registered to the requesting peer.", removed);
     }
 
     // The live session a new message for this peer is pushed to: the newest one that turned live
@@ -608,13 +664,14 @@ internal sealed class PickupCoordinator
         return DateTimeOffset.FromUnixTimeSeconds((long)first);
     }
 
-    // On a path that is already failing or cleaning up: never throws, never cancelled. A lease that
-    // could not be released ends by its timeout.
-    private async ValueTask ReleaseQuietlyAsync(string peerDid, IReadOnlyList<string> ids)
+    // On a path that is already failing or cleaning up: never throws, never cancelled. Only the
+    // caller's own lease is ended: a record taken again since is left to whoever holds it now. A
+    // lease that could not be released ends by its timeout.
+    private async ValueTask ReleaseQuietlyAsync(string peerDid, IReadOnlyList<string> ids, string leaseId)
     {
         try
         {
-            await _store.ReleaseAsync(peerDid, ids, CancellationToken.None).ConfigureAwait(false);
+            await _store.ReleaseAsync(peerDid, ids, leaseId, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

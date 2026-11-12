@@ -72,10 +72,15 @@ public sealed class MessagePickupHandlerLogTests
         await h.EnrolAsync(alice, alice, second, gone);
         await h.EnrolAsync(bob, bob);
         var a1 = await h.QueueAsync(alice, 10, 1);
-        var a2 = await h.QueueAsync(second, 20, 2);
-        await h.QueueAsync(gone, 30, 3);
-        await h.QueueAsync(alice, 40, 4);
-        await h.QueueAsync(bob, 5, 5);
+        // Three for the second DID: the first two will turn out not to fit even alone and be passed
+        // over (they stay stored, under the lease of the request that found out); the third is
+        // delivered and acknowledged.
+        await h.QueueAsync(second, 20, 2);
+        await h.QueueAsync(second, 21, 3);
+        var s3 = await h.QueueAsync(second, 22, 4);
+        await h.QueueAsync(gone, 30, 5);
+        await h.QueueAsync(alice, 40, 6);
+        await h.QueueAsync(bob, 5, 7);
         await h.Mediation.Inner.UpdateRecipientsAsync(alice, new[] { new RecipientUpdate(gone, RecipientUpdateAction.Remove) }, default);
         h.Clock.Advance(TimeSpan.FromSeconds(42));
         var http = h.Http(alice);
@@ -84,6 +89,8 @@ public sealed class MessagePickupHandlerLogTests
         var longId = new string('i', 300);
         run.Secrets.Add(longId);
         Exception Boom() => new HandlerBoomException(HandlerBoomException.Marker + " " + alice + " " + a1);
+        // A session of the right pair that fails when asked whose it is.
+        var broken = new MessagePickupHandlerFaultySession(alice, h.Mediator) { OnPeerDid = () => throw Boom() };
 
         async Task StepAsync(string label, Message message, IReturnRouteSession? session = null, HandlerEnvelope shape = HandlerEnvelope.Authcrypt, Action<DidComm.Facade.UnpackResult>? tamper = null, Action? arm = null)
         {
@@ -127,7 +134,7 @@ public sealed class MessagePickupHandlerLogTests
         // -- dropped: no authcrypt layer (FR-PICK-01) -----------------------------------------
         await StepAsync("anoncrypt status-request", h.StatusRequest(alice), http, HandlerEnvelope.Anoncrypt);
         await StepAsync("signed-only delivery-request with a long id", h.Raw("delivery-request", alice, new JsonObject { ["limit"] = 10 }, id: longId, thid: run.NewThread()), http, HandlerEnvelope.SignedOnly);
-        await StepAsync("plaintext messages-received", h.MessagesReceived(alice, new[] { a1, a2 }), http, HandlerEnvelope.Plaintext);
+        await StepAsync("plaintext messages-received", h.MessagesReceived(alice, new[] { a1, s3 }), http, HandlerEnvelope.Plaintext);
         await StepAsync("anoncrypt(sign) live-delivery-change", h.LiveChange(alice, true), socket, HandlerEnvelope.AnoncryptOfSigned);
 
         // -- ignored: not a request of the mediator role --------------------------------------
@@ -147,29 +154,37 @@ public sealed class MessagePickupHandlerLogTests
         await StepAsync("live-delivery-change{true} over a socket", Threaded(h.LiveChange(alice, true)), socket);
         await StepAsync("delivery-request without a session", h.DeliveryRequest(alice, 10), null);
         await StepAsync("delivery-request with limit 0", h.DeliveryRequest(alice, 0, second), http);
+        await StepAsync("status-request on a session that cannot say whose it is", h.StatusRequest(alice), broken);
+        await StepAsync("delivery-request on a session that cannot say whose it is", h.DeliveryRequest(alice, 10), broken);
 
         // -- faults on a delivery, before anything is delivered --------------------------------
         await StepAsync("delivery: the grant cannot be read", h.DeliveryRequest(alice, 10), http, arm: () => h.Mediation.OnGetGrant = (_, _) => throw Boom());
         await StepAsync("delivery: the lease fails", h.DeliveryRequest(alice, 10), http, arm: () => h.Store.OnLease = (_, _) => throw Boom());
         await StepAsync("delivery: the registration check fails", Threaded(h.DeliveryRequest(alice, 10)), http, arm: () => h.Mediation.OnFindGrantByRecipientDid = (_, _) => throw Boom());
-        await StepAsync("delivery: the purge fails", h.DeliveryRequest(alice, 10), http, arm: () => h.Store.OnPurgeRecipient = (_, _, _) => throw Boom());
+        await StepAsync("delivery: the stale records cannot be removed", h.DeliveryRequest(alice, 10), http, arm: () => h.Store.OnAcknowledge = (_, _, _) => throw Boom());
         await StepAsync("delivery: the store hands back another grant's record", h.DeliveryRequest(alice, 10), http,
             arm: () => h.Store.OnLease = async (request, ct) => (await h.Store.Inner.LeaseAsync(request, ct)).Append(new QueuedMessage("foreign-secret-id", bob, bob, PickupFixture.Payload(3), request.Now)).ToArray());
         run.Secrets.Add("foreign-secret-id");
+        await StepAsync("delivery: the store returns no list", h.DeliveryRequest(alice, 10), http,
+            arm: () => h.Store.OnLease = (_, _) => new ValueTask<IReadOnlyList<QueuedMessage>>((IReadOnlyList<QueuedMessage>)null!));
         await StepAsync("delivery: the clock fails", h.DeliveryRequest(alice, 10), http, arm: () => h.ClockFault = Boom);
         await StepAsync("delivery: the session throws", h.DeliveryRequest(alice, 10, second), http, arm: () => http.OnSend = (_, _) => throw Boom());
         await StepAsync("delivery: the session does not take it", Threaded(h.DeliveryRequest(alice, 10, second)), http, arm: () => http.OnSend = (_, _) => ReturnRouteSendResult.NotSent);
-        await StepAsync("delivery: nothing fits the byte budget", h.DeliveryRequest(alice, 10, second), socket, arm: () => socket.OnSend = (_, _) => ReturnRouteSendResult.TooLarge);
-        await StepAsync("delivery: nothing fits, again", h.DeliveryRequest(alice, 10, second), socket, arm: () => socket.OnSend = (_, _) => ReturnRouteSendResult.TooLarge);
         await StepAsync("delivery: the trim cannot release", h.DeliveryRequest(alice, 10, second), http, arm: () =>
         {
             http.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
-            h.Store.OnRelease = (_, _, _) => throw Boom();
+            h.Store.OnRelease = (_, _, _, _) => throw Boom();
         });
         // The leases that could not be released end by their timeout.
         h.Clock.Advance(TimeSpan.FromSeconds(61));
 
-        // -- a delivery that works: the removed DID's message is purged on the way --------------
+        // -- too large even alone: trimmed from the end to the first message, which still does not
+        //    fit and keeps the request's lease; the same request goes on to the next, and the
+        //    next, and answers status when nothing is left to try. A second request finds nothing.
+        await StepAsync("delivery: nothing fits the byte budget", Threaded(h.DeliveryRequest(alice, 10, second)), socket, arm: () => socket.OnSend = (_, _) => ReturnRouteSendResult.TooLarge);
+        await StepAsync("delivery: nothing fits, again", h.DeliveryRequest(alice, 10, second), socket, arm: () => socket.OnSend = (_, _) => ReturnRouteSendResult.TooLarge);
+
+        // -- a delivery that works: the removed DID's leased message is removed on the way -------
         await StepAsync("delivery-request", Threaded(h.DeliveryRequest(alice, 10)), http);
         await StepAsync("messages-received", Threaded(h.MessagesReceived(alice, new[] { a1, "unknown-secret-id" })), socket);
         run.Secrets.Add("unknown-secret-id");
@@ -179,8 +194,8 @@ public sealed class MessagePickupHandlerLogTests
         await StepAsync("status: the grant cannot be read", h.StatusRequest(alice), http, arm: () => h.Mediation.OnGetGrant = (_, _) => throw Boom());
         await StepAsync("status: the registration cannot be read", h.StatusRequest(alice, second), http, arm: () => h.Mediation.OnFindGrantByRecipientDid = (_, _) => throw Boom());
         await StepAsync("status: the store reports a negative count", h.StatusRequest(alice), http, arm: () => h.Store.OnGetStatus = (_, _, _, _) => new ValueTask<QueueStatus>(new QueueStatus(-1, -1, null, null)));
-        await StepAsync("acknowledgement: the store fails", h.MessagesReceived(alice, new[] { a2 }), http, arm: () => h.Store.OnAcknowledge = (_, _, _) => throw Boom());
-        await StepAsync("acknowledgement: the status cannot be read", Threaded(h.MessagesReceived(alice, new[] { a2 })), http, arm: () => h.Store.OnGetStatus = (_, _, _, _) => throw Boom());
+        await StepAsync("acknowledgement: the store fails", h.MessagesReceived(alice, new[] { s3 }), http, arm: () => h.Store.OnAcknowledge = (_, _, _) => throw Boom());
+        await StepAsync("acknowledgement: the status cannot be read", Threaded(h.MessagesReceived(alice, new[] { s3 })), http, arm: () => h.Store.OnGetStatus = (_, _, _, _) => throw Boom());
         await StepAsync("live change: the status cannot be read", h.LiveChange(alice, true), socket, arm: () => h.Store.OnGetStatus = (_, _, _, _) => throw Boom());
         await StepAsync("status after the failed live change", h.StatusRequest(alice), socket);
 
@@ -212,7 +227,7 @@ public sealed class MessagePickupHandlerLogTests
 
         var lines = h.Fixture.PickupLogs;
         var queueIds = h.Store.Enqueued.Select(e => e.Message.Id).ToArray();
-        queueIds.Should().HaveCount(5);
+        queueIds.Should().HaveCount(7);
 
         // The run really took every branch that logs.
         foreach (var fragment in new[]
@@ -220,13 +235,14 @@ public sealed class MessagePickupHandlerLogTests
             "a delivery is at most",                              // start-up
             "dropped: no authcrypt sender (FR-PICK-01)",          // unauthenticated
             "ignored: not a request the mediator role answers",   // status, unknown name
+            "the return-route session could not be read",         // a session that cannot say whose it is
             "status request",                                     // faults, by request
             "delivery request",
             "acknowledgement",
             "live-delivery change",
             "the reply could not be built",
             "the session did not take the delivery",
-            "does not fit this peer's envelope",
+            "even alone; it stays queued and is passed over",     // too large for this request's delivery
             "could not be released",
             "queued message(s) removed",
         })
@@ -271,6 +287,26 @@ public sealed class MessagePickupHandlerLogTests
         lines.Where(e => e.Level == LogLevel.Error).Select(e => e.State["ExceptionType"]).Should()
             .Contain(nameof(HandlerBoomException)).And.Contain(nameof(InvalidOperationException)).And.Contain("MalformedMessageException");
         run.Transcript.Should().NotContain(step => step.Contains("unexpected"));
+
+        // The line for a message that did not fit even alone and is passed over: the request id,
+        // the size of that message and the running count — and no other value at all (so no DID, no
+        // queue id, no thread id, though the request had a thread of its own). One request passed
+        // all three over, one line each. Any enrolled peer can cause it, so only the first is a Warning.
+        var passedOver = lines.Where(e => e.Formatted.Contains("even alone; it stays queued and is passed over", StringComparison.Ordinal)).ToArray();
+        passedOver.Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug, LogLevel.Debug);
+        passedOver.Select(e => e.State["Bytes"]).Should().Equal(20, 21, 22);
+        passedOver.Select(e => e.State["Count"]).Should().Equal(1L, 2L, 3L);
+        passedOver.Select(e => e.State["MessageId"]).Distinct().Should().ContainSingle("the second such request found nothing left to try");
+        foreach (var line in passedOver)
+        {
+            line.State.Keys.Should().BeEquivalentTo("MessageId", "Bytes", "Count", "{OriginalFormat}");
+            run.RequestIds.Should().Contain((string)line.State["MessageId"]!);
+        }
+        lines.Should().NotContain(e => e.Formatted.Contains("was removed", StringComparison.Ordinal), "nothing is removed for being too large");
+
+        // The line for a session that could not be read: one per request, the id and the type name.
+        var unreadable = lines.Where(e => e.Formatted.Contains("the return-route session could not be read", StringComparison.Ordinal)).ToArray();
+        unreadable.Should().HaveCount(2).And.OnlyContain(e => e.Level == LogLevel.Warning && Equals(e.State["ExceptionType"], nameof(HandlerBoomException)));
     }
 
     [Fact]
@@ -286,15 +322,23 @@ public sealed class MessagePickupHandlerLogTests
         silent.Fixture.Logs.Entries.Should().BeEmpty("the provider threw on every call; nothing was captured");
 
         // And the run is the one the log test reads: these are its landmarks.
-        expected.Should().Contain("anoncrypt status-request: no reply (NoReply); pushed=0; stored=5");
-        expected.Should().Contain("live-delivery-change{true} over HTTP: problem-report e.m.live-mode-not-supported; pushed=0; stored=5");
-        expected.Should().Contain("delivery: the registration check fails: no reply (NoReply); pushed=0; stored=5");
-        expected.Should().Contain("delivery-request: no reply (NoReply); pushed=1; stored=4");
-        expected.Should().Contain("messages-received: status count=2 bytes=60 live=True filtered=False times=True threaded=True; pushed=0; stored=3");
-        expected.Should().Contain("acknowledgement: the status cannot be read: no reply (NoReply); pushed=0; stored=2", "the acknowledgement itself was applied");
-        expected.Should().Contain("status-request whose thread cannot be echoed: no reply (NoReply); pushed=0; stored=2");
-        expected.Should().Contain("malformed delivery-request: threw MalformedMessageException; pushed=0; stored=2");
-        expected.Should().Contain("the other peer's delivery-request: no reply (NoReply); pushed=1; stored=2");
+        expected.Should().Contain("anoncrypt status-request: no reply (NoReply); pushed=0; stored=7");
+        expected.Should().Contain("live-delivery-change{true} over HTTP: problem-report e.m.live-mode-not-supported; pushed=0; stored=7");
+        expected.Should().Contain("status-request on a session that cannot say whose it is: status count=6 bytes=143 live=False filtered=False times=True threaded=True; pushed=0; stored=7");
+        expected.Should().Contain("delivery-request on a session that cannot say whose it is: status count=6 bytes=143 live=False filtered=False times=True threaded=True; pushed=0; stored=7", "no session, so nothing is leased");
+        expected.Should().Contain("delivery: the registration check fails: no reply (NoReply); pushed=0; stored=7");
+        expected.Should().Contain("delivery: the stale records cannot be removed: no reply (NoReply); pushed=0; stored=7", "the batch fails as a whole and nothing is removed");
+        expected.Should().Contain("delivery: the store returns no list: no reply (NoReply); pushed=0; stored=7");
+        expected.Should().Contain("delivery: the trim cannot release: no reply (NoReply); pushed=0; stored=7");
+        expected.Should().Contain("delivery: nothing fits the byte budget: status count=3 bytes=63 live=True filtered=True times=True threaded=True; pushed=0; stored=7", "each of the three is passed over in turn and keeps the request's lease; all three are still stored and counted");
+        expected.Should().Contain("delivery: nothing fits, again: status count=3 bytes=63 live=True filtered=True times=True threaded=True; pushed=0; stored=7", "nothing is left to try while that lease runs");
+        expected.Should().Contain("delivery-request: no reply (NoReply); pushed=1; stored=6", "what is queued around the three that were passed over is delivered; the removed DID's leased message is removed");
+        expected.Should().Contain("messages-received: status count=4 bytes=103 live=True filtered=False times=True threaded=True; pushed=0; stored=5");
+        expected.Should().Contain("acknowledgement: the status cannot be read: no reply (NoReply); pushed=0; stored=4", "the acknowledgement itself was applied");
+        expected.Should().Contain("status after the failed live change: status count=3 bytes=81 live=False filtered=False times=True threaded=True; pushed=0; stored=4", "the two that do not fit are still there");
+        expected.Should().Contain("status-request whose thread cannot be echoed: no reply (NoReply); pushed=0; stored=4");
+        expected.Should().Contain("malformed delivery-request: threw MalformedMessageException; pushed=0; stored=4");
+        expected.Should().Contain("the other peer's delivery-request: no reply (NoReply); pushed=1; stored=4");
     }
 
     [Theory]

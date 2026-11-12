@@ -49,12 +49,14 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
 
     private readonly List<TestPeer> _ownPeers = new();
+    private readonly PickupParkingStore? _parking;
     private int _sequence;
 
-    private PickupEndpointHost(ReturnRouteTestHost host, PickupLogCapture logs)
+    private PickupEndpointHost(ReturnRouteTestHost host, PickupLogCapture logs, PickupParkingStore? parking)
     {
         Host = host;
         Logs = logs;
+        _parking = parking;
     }
 
     public ReturnRouteTestHost Host { get; }
@@ -78,7 +80,11 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
 
     public MessagePickupQueue Queue => Host.App.Services.GetRequiredService<MessagePickupQueue>();
 
-    public InMemoryMessageStore Store => (InMemoryMessageStore)Host.App.Services.GetRequiredService<IMessageStore>();
+    /// <summary>The product's in-memory store (the one behind <see cref="Parking"/> when the host was started with it).</summary>
+    public InMemoryMessageStore Store => _parking?.Inner ?? (InMemoryMessageStore)Host.App.Services.GetRequiredService<IMessageStore>();
+
+    /// <summary>The pass-through store around <see cref="Store"/>; only on a host started with <c>parkingStore: true</c>.</summary>
+    public PickupParkingStore Parking => _parking ?? throw new InvalidOperationException("Start the host with parkingStore: true.");
 
     public IMediationStore Mediation => Host.App.Services.GetRequiredService<IMediationStore>();
 
@@ -88,22 +94,44 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
     /// </summary>
     /// <param name="pickup">Settings of the pickup role (<c>AddMessagePickup(configure)</c>).</param>
     /// <param name="sessions">Settings of the return-route session registry (bounds per peer, pending pushes).</param>
-    public static async Task<PickupEndpointHost> StartAsync(Action<MessagePickupOptions>? pickup = null, Action<ReturnRouteSessionOptions>? sessions = null)
+    /// <param name="parkingStore">
+    /// Register a <see cref="PickupParkingStore"/> as the host's own <c>IMessageStore</c> (a host may
+    /// register one before <c>AddMessagePickup()</c>): a pass-through around the product's
+    /// <see cref="InMemoryMessageStore"/> that records lease requests and can hold one
+    /// give-back call until the test lets it go.
+    /// </param>
+    public static async Task<PickupEndpointHost> StartAsync(
+        Action<MessagePickupOptions>? pickup = null,
+        Action<ReturnRouteSessionOptions>? sessions = null,
+        bool parkingStore = false)
     {
         var logs = new PickupLogCapture();
+        PickupParkingStore? parking = null;
+        if (parkingStore)
+        {
+            var options = new MessagePickupOptions();
+            pickup?.Invoke(options);
+            parking = new PickupParkingStore(new InMemoryMessageStore(options));
+        }
+
         var host = await ReturnRouteTestHost.StartAsync(o =>
         {
             o.AllowSameSocketReplies = true;
             o.MaxReceiveBytes = Mebibyte;
             o.ConfigureSessions = sessions;
-            o.ConfigureServices = services => services.AddSingleton<ILoggerProvider>(logs);
+            o.ConfigureServices = services =>
+            {
+                services.AddSingleton<ILoggerProvider>(logs);
+                if (parking is not null)
+                    services.AddSingleton<IMessageStore>(parking);
+            };
             o.ConfigureDidComm = b =>
             {
                 b.AddCoordinateMediation();
                 b.AddMessagePickup(pickup);
             };
         });
-        return new PickupEndpointHost(host, logs);
+        return new PickupEndpointHost(host, logs, parking);
     }
 
     // ---- requests -------------------------------------------------------------------------
@@ -335,18 +363,74 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
     /// closed. Every attempt is a new request; the answers before the delivery are <c>status</c>.
     /// The clock is never moved, so a delivery here was not freed by the lease timeout.
     /// </summary>
-    public async Task<(Message Request, PickupAnswer Delivery)> FetchUntilDeliveredAsync(WebSocket socket, TestPeer peer, int limit = 10)
+    public Task<(Message Request, PickupAnswer Delivery)> FetchUntilDeliveredAsync(WebSocket socket, TestPeer peer, int limit = 10)
+        => FetchUntilDeliveredAsync(peer, request => AskAsync(socket, peer, request), limit);
+
+    /// <summary><see cref="FetchUntilDeliveredAsync(WebSocket, TestPeer, int)"/> over any connection: <paramref name="ask"/> sends one request and returns its answer.</summary>
+    public async Task<(Message Request, PickupAnswer Delivery)> FetchUntilDeliveredAsync(TestPeer peer, Func<Message, Task<PickupAnswer>> ask, int limit = 10)
     {
         var deadline = DateTime.UtcNow + Timeout;
         while (true)
         {
             var request = MessagePickup.CreateDeliveryRequest(peer.Did, Mediator, limit);
-            var answer = await AskAsync(socket, peer, request);
+            var answer = await ask(request);
             if (answer.Message.Type == MessagePickup.DeliveryType)
                 return (request, answer);
             answer.Message.Type.Should().Be(MessagePickup.StatusType);
             (DateTime.UtcNow < deadline).Should().BeTrue("the leases of a closed socket are released without waiting for the lease timeout (FR-PICK-04)");
             await Task.Delay(10);
+        }
+    }
+
+    /// <summary>
+    /// What a recipient does to fetch what its queue holds, over any connection: ask for a delivery
+    /// (<c>limit: 10</c>), take what comes, ask again — until a <c>status</c> counts only what it
+    /// has already been given plus the <paramref name="left"/> messages that are known to stay
+    /// behind. Every answer must fit <paramref name="budget"/> once packed, and the loop must end
+    /// within <paramref name="maxRequests"/> delivery-requests. The clock is never moved.
+    /// </summary>
+    /// <param name="peer">The recipient.</param>
+    /// <param name="ask">Sends one request and returns its answer (an HTTP POST, or a socket).</param>
+    /// <param name="budget">The mediator's <c>max_delivery_bytes</c>.</param>
+    /// <param name="maxRequests">The largest number of delivery-requests the queue may need.</param>
+    /// <param name="acknowledge"><c>true</c> to acknowledge each delivery before asking again; <c>false</c> to leave everything delivered under its lease.</param>
+    /// <param name="left">How many queued messages cannot be delivered to this recipient and stay queued (and counted) at the end; 0 for an ordinary queue.</param>
+    public async Task<IReadOnlyList<PickupDrainStep>> DrainAsync(TestPeer peer, Func<Message, Task<PickupAnswer>> ask, int budget, int maxRequests, bool acknowledge, int left = 0)
+    {
+        var steps = new List<PickupDrainStep>();
+        var inHand = 0; // delivered and not acknowledged: still counted by a status
+        while (true)
+        {
+            steps.Count.Should().BeLessThan(maxRequests, "everything deliverable is fetched within {0} delivery-requests", maxRequests);
+            var request = MessagePickup.CreateDeliveryRequest(peer.Did, Mediator, 10);
+            var answer = await ask(request);
+            answer.Packed.Length.Should().BeLessThanOrEqualTo(budget, "whatever is queued, a packed answer fits max_delivery_bytes");
+
+            if (answer.Message.Type != MessagePickup.DeliveryType)
+            {
+                var status = answer.Status(request.Id);
+                steps.Add(new PickupDrainStep(Array.Empty<DeliveredMessage>(), status));
+                if (status.MessageCount == inHand + left)
+                    return steps;
+                continue;
+            }
+
+            var delivered = answer.Delivery(request.Id);
+            delivered.Should().NotBeEmpty();
+            if (!acknowledge)
+            {
+                inHand += delivered.Count;
+                steps.Add(new PickupDrainStep(delivered, null));
+                continue;
+            }
+
+            var ack = MessagePickup.CreateMessagesReceived(peer.Did, Mediator, delivered.Select(m => m.Id).ToArray());
+            var acked = await ask(ack);
+            acked.Packed.Length.Should().BeLessThanOrEqualTo(budget);
+            var after = acked.Status(ack.Id);
+            steps.Add(new PickupDrainStep(delivered, after));
+            if (after.MessageCount == left)
+                return steps;
         }
     }
 
@@ -512,5 +596,147 @@ internal sealed class PickupLogCapture : ILoggerProvider
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
             => _records.Enqueue(new PickupLogRecord(_category, logLevel, formatter(state, exception), exception));
+    }
+}
+
+/// <summary>
+/// One delivery-request of <see cref="PickupEndpointHost.DrainAsync"/>: what it delivered (empty when
+/// it was answered with a <c>status</c>) and the status seen after it (the answer itself, or the
+/// answer to the acknowledgement; <c>null</c> for a delivery that was not acknowledged).
+/// </summary>
+internal sealed record PickupDrainStep(IReadOnlyList<DeliveredMessage> Delivered, PickupStatus? Status);
+
+/// <summary>
+/// A host's own <see cref="IMessageStore"/> for the tests that need to order two connections'
+/// store calls without sleeping (L-044), or to see what the mediator asked of its store. Every
+/// call goes straight to the product's <see cref="InMemoryMessageStore"/>; on top of that it
+/// remembers every lease taken (the request, so a test knows the id and owner of the lease, and
+/// the ids it handed out), every id acknowledged and every id given back, and it can hold the next
+/// <see cref="ReleaseAsync"/> — a lease being given back by its id — at the door until the test
+/// lets it in.
+/// </summary>
+internal sealed class PickupParkingStore : IMessageStore
+{
+    private readonly ConcurrentQueue<(MessageLeaseRequest Request, IReadOnlyList<string> Ids)> _leases = new();
+    private readonly ConcurrentQueue<string> _acknowledged = new();
+    private readonly ConcurrentQueue<string> _givenBack = new();
+    private PickupParkedRelease? _next;
+
+    public PickupParkingStore(InMemoryMessageStore inner) => Inner = inner;
+
+    /// <summary>The product store every call ends up in.</summary>
+    public InMemoryMessageStore Inner { get; }
+
+    /// <summary>Every lease request so far, in order.</summary>
+    public IReadOnlyCollection<MessageLeaseRequest> LeaseRequests => _leases.Select(l => l.Request).ToList();
+
+    /// <summary>The ids each lease call handed out, in call order (an empty list for a call that found nothing deliverable).</summary>
+    public IReadOnlyList<IReadOnlyList<string>> Leased => _leases.Select(l => l.Ids).ToList();
+
+    /// <summary>Every id the mediator asked the store to remove through <see cref="AcknowledgeAsync"/>.</summary>
+    public IReadOnlyCollection<string> Acknowledged => _acknowledged;
+
+    /// <summary>Every id the mediator gave back by lease id through <see cref="ReleaseAsync"/>.</summary>
+    public IReadOnlyCollection<string> GivenBack => _givenBack;
+
+    /// <summary>Hold the next give-back-by-id at the door; the returned handle tells when it arrived and lets it in.</summary>
+    public PickupParkedRelease ParkNextRelease()
+    {
+        var parked = new PickupParkedRelease();
+        Interlocked.Exchange(ref _next, parked).Should().BeNull("one give-back is parked at a time");
+        return parked;
+    }
+
+    public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct)
+        => Inner.EnqueueAsync(message, lease, now, ct);
+
+    public async ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct)
+    {
+        var leased = await Inner.LeaseAsync(request, ct);
+        _leases.Enqueue((request, leased.Select(m => m.Id).ToArray()));
+        return leased;
+    }
+
+    public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
+    {
+        foreach (var id in messageIds)
+            _acknowledged.Enqueue(id);
+        return Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
+    }
+
+    public async ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
+    {
+        foreach (var id in messageIds)
+            _givenBack.Enqueue(id);
+        var parked = Interlocked.Exchange(ref _next, null);
+        if (parked is null)
+            return await Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+
+        try
+        {
+            await parked.ArriveAsync(messageIds.ToArray(), leaseId);
+            var released = await Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+            parked.Finish(released);
+            return released;
+        }
+        catch (Exception ex)
+        {
+            parked.Fail(ex);
+            throw;
+        }
+    }
+
+    /// <summary>How many times the leases of a closed session have been released by owner, to completion.</summary>
+    public int OwnerReleases => Volatile.Read(ref _ownerReleases);
+
+    private int _ownerReleases;
+
+    public async ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct)
+    {
+        var released = await Inner.ReleaseLeasesAsync(leaseOwner, ct);
+        Interlocked.Increment(ref _ownerReleases);
+        return released;
+    }
+
+    public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct)
+        => Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);
+
+    public ValueTask<int> PurgeRecipientAsync(string grantPeerDid, string recipientDid, CancellationToken ct)
+        => Inner.PurgeRecipientAsync(grantPeerDid, recipientDid, ct);
+
+    public ValueTask<int> PurgeGrantAsync(string grantPeerDid, CancellationToken ct) => Inner.PurgeGrantAsync(grantPeerDid, ct);
+
+    public ValueTask<int> PurgeExpiredAsync(DateTimeOffset now, CancellationToken ct) => Inner.PurgeExpiredAsync(now, ct);
+}
+
+/// <summary>One give-back held by <see cref="PickupParkingStore"/>: a rendezvous between the mediator's call and the test.</summary>
+internal sealed class PickupParkedRelease
+{
+    private readonly TaskCompletionSource<(IReadOnlyList<string> Ids, string LeaseId)> _arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<int> _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes when the mediator's give-back is at the door, with the ids and the lease id it names. Nothing has been released yet.</summary>
+    public Task<(IReadOnlyList<string> Ids, string LeaseId)> Arrived => _arrived.Task;
+
+    /// <summary>Completes when the give-back has run in the product store, with the number of leases it ended.</summary>
+    public Task<int> Finished => _finished.Task;
+
+    /// <summary>Let the give-back in.</summary>
+    public void Resume() => _gate.TrySetResult();
+
+    internal async Task ArriveAsync(IReadOnlyList<string> ids, string leaseId)
+    {
+        _arrived.TrySetResult((ids, leaseId));
+        // Bounded, so a test that failed before Resume() does not leave the server waiting for ever.
+        await Task.WhenAny(_gate.Task, Task.Delay(PickupEndpointHost.Timeout));
+    }
+
+    internal void Finish(int released) => _finished.TrySetResult(released);
+
+    internal void Fail(Exception ex)
+    {
+        _arrived.TrySetException(ex);
+        _finished.TrySetException(ex);
     }
 }

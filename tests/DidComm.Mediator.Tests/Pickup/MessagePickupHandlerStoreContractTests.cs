@@ -147,6 +147,7 @@ public sealed class MessagePickupHandlerStoreContractTests
         var known = handedOut.Where(id => id is not null).Select(id => id!).ToArray();
         h.ReleasedIds.Should().BeEquivalentTo(known);
         h.Store.Released.Should().OnlyContain(call => call.GrantPeerDid == h.Alice);
+        h.Store.ReleasedLeaseIds.Should().OnlyContain(id => id == h.Store.LeaseRequests.Single().Lease.Id, "what is given back is given back under the lease this request took");
         if (garbage is not (DiesPartWay or DiesAtOnce))
             (await h.DeliverableAsync(h.Alice)).Should().Equal(real, "what was leased for the failed request is deliverable again at once");
         (await h.DeliverableAsync(h.Bob)).Should().Equal(bobs);
@@ -209,12 +210,19 @@ public sealed class MessagePickupHandlerStoreContractTests
         var session = h.Http(h.Alice);
         h.Store.OnLease = (_, _) => new ValueTask<IReadOnlyList<QueuedMessage>>((IReadOnlyList<QueuedMessage>)null!);
         h.ResetTraces();
+        var logged = h.Fixture.PickupLogs.Count;
 
-        var outcome = await h.SendAsync(h.DeliveryRequest(h.Alice, 10), session);
+        var request = h.DeliveryRequest(h.Alice, 10);
+        var outcome = await h.SendAsync(request, session);
 
         session.Attempts.Should().BeEmpty();
         outcome.ShouldBeNoReply();
-        h.Fixture.PickupLogs.Should().Contain(e => e.Level == LogLevel.Error);
+        h.StoreTrace.Should().Equal(new[] { "LeaseAsync" }, "no status is read after it, and there is no id to give back");
+        var line = h.Fixture.PickupLogs.Skip(logged).Should().ContainSingle().Subject;
+        line.Level.Should().Be(LogLevel.Error);
+        line.State["MessageId"].Should().Be(request.Id);
+        line.State["ExceptionType"].Should().Be(nameof(InvalidOperationException));
+        line.Everything.Should().NotContain("did:");
     }
 
     // ---- GetStatusAsync ---------------------------------------------------------------------

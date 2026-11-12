@@ -29,7 +29,7 @@ public sealed class MessagePickupOptions
     /// <summary>
     /// The largest number of ids one <c>messages-received</c> may carry (<c>max_ack_ids</c>,
     /// FR-PICK-10). A longer list is refused as malformed from its length alone: no id is decoded
-    /// or allocated and the store is not called. <c>null</c> (the default) means
+    /// and the store is not called. <c>null</c> (the default) means
     /// <see cref="MaxDeliveryBatch"/> × 10. Must be at least <see cref="MaxDeliveryBatch"/>, so a
     /// full batch can be acknowledged in one message.
     /// </summary>

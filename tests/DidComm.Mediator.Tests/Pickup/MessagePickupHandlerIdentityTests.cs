@@ -427,13 +427,17 @@ public sealed class MessagePickupHandlerIdentityTests
         h.StoreTrace.Should().BeEmpty();
 
         // Unfiltered: registration is checked at delivery time. The stray record is not delivered
-        // and is purged under Bob's key only; Bob's own message is delivered.
+        // and is removed — that record, by id, under Bob's key; Bob's own message is delivered.
         h.ResetTraces();
         var unfiltered = h.DeliveryRequest(h.Bob, 10);
         (await h.SendAsync(unfiltered, bobSession)).ShouldBeNoReply();
         bobSession.Sent.Should().ContainSingle().Which.ShouldBeDelivery(unfiltered, h.Mediator, h.Bob, null, new[] { bobOwn });
-        h.Store.PurgedRecipients.Should().Equal((h.Bob, shared));
-        (await h.DeliverableAsync(h.Alice)).Should().Equal(new[] { "alice-1" }, "a purge is confined to the grant it names");
+        var removal = h.Store.Acknowledged.Should().ContainSingle().Subject;
+        removal.GrantPeerDid.Should().Be(h.Bob);
+        removal.Ids.Should().Equal("bob-stray");
+        h.Store.PurgedRecipients.Should().BeEmpty("the role removes the records it leased and never purges a DID");
+        h.StoreTrace.Should().Equal("LeaseAsync", "AcknowledgeAsync");
+        (await h.DeliverableAsync(h.Alice)).Should().Equal(new[] { "alice-1" }, "the removal is confined to the grant it names");
     }
 
     // ---- (e) the peer's own DID is not a recipient DID unless it registered it --------------
@@ -477,21 +481,20 @@ public sealed class MessagePickupHandlerIdentityTests
     // ---- (f) a DID removed from the grant, with messages still queued ------------------------
 
     [Fact]
-    public async Task What_is_queued_for_a_did_removed_from_the_grant_is_never_delivered_and_is_purged_by_the_next_unfiltered_delivery()
+    public async Task What_is_queued_for_a_did_removed_from_the_grant_is_never_delivered_and_is_removed_by_the_next_unfiltered_delivery()
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var removed = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, removed);
         var kept1 = await h.QueueAsync(h.Alice, 10, 1);
-        await h.QueueAsync(removed, 20, 2);
-        await h.QueueAsync(removed, 30, 3);
+        var stale = new[] { await h.QueueAsync(removed, 20, 2), await h.QueueAsync(removed, 30, 3) };
         var kept2 = await h.QueueAsync(h.Alice, 40, 4);
         (await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(removed, RecipientUpdateAction.Remove) }, default))
             .Should().Equal(RecipientStoreOutcome.Removed);
         var session = h.Http(h.Alice);
 
         // Filtered by the removed DID: the empty answer, and the message store is not touched —
-        // so nothing is purged by it either.
+        // so nothing is removed by it either.
         h.ResetTraces();
         var status = h.StatusRequest(h.Alice, removed);
         (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 0, 0, live: false, recipientDid: removed);
@@ -502,15 +505,19 @@ public sealed class MessagePickupHandlerIdentityTests
         h.Store.Inner.MessageCount.Should().Be(4);
 
         // Unfiltered: the records of the DID still registered are delivered, in order; those of the
-        // removed DID are not, and are purged — for exactly that DID, under exactly this grant.
+        // removed DID are not, and are removed — exactly the leased records the check looked at,
+        // by id, under exactly this grant. The role does not purge the DID.
         h.ResetTraces();
         var logged = h.Fixture.PickupLogs.Count;
         var fetch = h.DeliveryRequest(h.Alice, 10);
         (await h.SendAsync(fetch, session)).ShouldBeNoReply();
 
         session.Sent.Should().ContainSingle().Which.ShouldBeDelivery(fetch, h.Mediator, h.Alice, null, new[] { kept1, kept2 });
-        h.Store.PurgedRecipients.Should().Equal((h.Alice, removed));
-        h.StoreTrace.Should().Equal("LeaseAsync", "PurgeRecipientAsync");
+        var removal = h.Store.Acknowledged.Should().ContainSingle().Subject;
+        removal.GrantPeerDid.Should().Be(h.Alice);
+        removal.Ids.Should().Equal(stale);
+        h.Store.PurgedRecipients.Should().BeEmpty();
+        h.StoreTrace.Should().Equal("LeaseAsync", "AcknowledgeAsync");
         h.Mediation.Reads.Should().Equal(("GetGrantAsync", h.Alice), ("FindGrantByRecipientDidAsync", h.Alice), ("FindGrantByRecipientDidAsync", removed));
         h.Store.Inner.MessageCount.Should().Be(2);
         (await h.DeliverableAsync(h.Alice)).Should().BeEmpty("the two delivered messages are under their lease, waiting for messages-received");
@@ -525,17 +532,17 @@ public sealed class MessagePickupHandlerIdentityTests
     }
 
     [Fact]
-    public async Task Every_unregistered_did_in_a_batch_is_checked_and_purged_whatever_the_others_answered()
+    public async Task Every_unregistered_did_in_a_batch_is_checked_and_its_leased_records_removed_whatever_the_others_answered()
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var gone1 = await h.NewDidAsync();
         var gone2 = await h.NewDidAsync();
         var kept = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, gone1, kept, gone2);
-        await h.QueueAsync(gone1, 10, 1);
+        var stale1 = await h.QueueAsync(gone1, 10, 1);
         var keptId1 = await h.QueueAsync(kept, 10, 2);
-        await h.QueueAsync(gone2, 10, 3);
-        await h.QueueAsync(gone1, 10, 4);
+        var stale2 = await h.QueueAsync(gone2, 10, 3);
+        var stale3 = await h.QueueAsync(gone1, 10, 4);
         var keptId2 = await h.QueueAsync(kept, 10, 5);
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(gone1, RecipientUpdateAction.Remove), new RecipientUpdate(gone2, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
@@ -550,38 +557,50 @@ public sealed class MessagePickupHandlerIdentityTests
             ("FindGrantByRecipientDidAsync", gone1),
             ("FindGrantByRecipientDidAsync", kept),
             ("FindGrantByRecipientDidAsync", gone2));
-        h.Store.PurgedRecipients.Should().BeEquivalentTo(new[] { (h.Alice, gone1), (h.Alice, gone2) });
+        // One removal, of the three leased records of the two DIDs that are gone, in lease order.
+        var removal = h.Store.Acknowledged.Should().ContainSingle().Subject;
+        removal.GrantPeerDid.Should().Be(h.Alice);
+        removal.Ids.Should().Equal(stale1, stale2, stale3);
+        h.Store.PurgedRecipients.Should().BeEmpty();
+        h.StoreTrace.Should().Equal("LeaseAsync", "AcknowledgeAsync");
         h.Store.Inner.MessageCount.Should().Be(2);
     }
 
-    [Fact]
-    public async Task A_batch_made_only_of_a_removed_dids_messages_delivers_none_of_them_and_what_follows_is_still_delivered()
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(5)]
+    public async Task A_batch_made_only_of_a_removed_dids_messages_delivers_none_of_them_and_the_same_request_delivers_what_follows(int staleCount)
     {
+        // A batch of two. The head of the queue is all stale — two, three or five records of a
+        // DID that is gone — and one message of a registered DID follows. A batch that comes to
+        // nothing does not end the request: it leases again, removing the leftovers round by round
+        // as it comes to them (each time exactly the leased ones, by id), and delivers what follows.
         await using var h = await MessagePickupHandlerHarness.CreateAsync(o => o.MaxDeliveryBatch = 2);
         var removed = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, removed);
-        var stale = new[] { await h.QueueAsync(removed, 10, 1), await h.QueueAsync(removed, 20, 2) };
-        var kept = await h.QueueAsync(h.Alice, 30, 3);
+        var stale = new List<string>();
+        for (var i = 0; i < staleCount; i++)
+            stale.Add(await h.QueueAsync(removed, 10 + i, (byte)i));
+        var kept = await h.QueueAsync(h.Alice, 30, 9);
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(removed, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
-        // The head of the queue is all stale. Whether the first request already delivers what
-        // follows or answers status first, nothing stale is ever delivered and the kept message
-        // arrives within two requests (the stale records cannot block the head for ever).
-        var delivered = new List<string>();
-        for (var attempt = 0; attempt < 2 && delivered.Count == 0; attempt++)
-        {
-            var fetched = await h.Fixture.FetchAsync(h.Alice, h.Mediator, session, 10);
-            if (fetched is { } batch)
-                delivered.AddRange(batch.Messages.Select(m => m.Id));
-        }
+        var fetch = h.DeliveryRequest(h.Alice, 10);
+        (await h.SendAsync(fetch, session)).ShouldBeNoReply();
 
-        delivered.Should().Equal(kept);
-        h.Store.PurgedRecipients.Should().Equal((h.Alice, removed));
+        session.Sent.Should().ContainSingle().Which.ShouldBeDelivery(fetch, h.Mediator, h.Alice, null, new[] { kept });
+        session.Attempts.Should().ContainSingle("nothing stale is ever put in a delivery");
+        h.Store.Acknowledged.Should().OnlyContain(a => a.GrantPeerDid == h.Alice);
+        h.Store.Acknowledged.Select(a => string.Join(",", a.Ids)).Should().Equal(stale.Chunk(2).Select(pair => string.Join(",", pair)));
+        h.Store.PurgedRecipients.Should().BeEmpty();
+        var rounds = (staleCount + 1 + 1) / 2;
+        h.StoreTrace.Where(call => call == "LeaseAsync").Should().HaveCount(rounds);
+        h.StoreTrace.Where(call => call == "AcknowledgeAsync").Should().HaveCount((staleCount + 1) / 2);
+        h.StoreTrace.Should().NotContain("GetStatusAsync", "a delivery was pushed");
+        h.Store.LeaseRequests.Select(r => r.Lease.Id).Distinct().Should().ContainSingle("one request, one lease, however many rounds");
         h.Store.Inner.MessageCount.Should().Be(1);
-        foreach (var id in stale)
-            session.Sent.Should().OnlyContain(m => m.Attachments!.All(a => a.Id != id));
     }
 
     [Fact]
@@ -603,7 +622,7 @@ public sealed class MessagePickupHandlerIdentityTests
         var t0 = h.Start.ToUnixTimeSeconds();
 
         // Alice: the DID is no longer hers, filtered or not. She gets her own message only, and
-        // her leftovers for the DID are purged under her key.
+        // her leftovers for the DID are removed — those records, by id, under her key.
         h.ResetTraces();
         var filtered = h.StatusRequest(h.Alice, moved);
         (await h.SendAsync(filtered, aliceSession)).ShouldBeStatus(filtered, h.Mediator, h.Alice, 0, 0, live: false, recipientDid: moved);
@@ -611,8 +630,12 @@ public sealed class MessagePickupHandlerIdentityTests
         var aliceFetch = h.DeliveryRequest(h.Alice, 10);
         (await h.SendAsync(aliceFetch, aliceSession)).ShouldBeNoReply();
         aliceSession.Sent.Should().ContainSingle().Which.ShouldBeDelivery(aliceFetch, h.Mediator, h.Alice, null, new[] { aliceOwn });
-        h.Store.PurgedRecipients.Should().Equal((h.Alice, moved));
+        var removal = h.Store.Acknowledged.Should().ContainSingle().Subject;
+        removal.GrantPeerDid.Should().Be(h.Alice);
+        removal.Ids.Should().Equal(old);
+        h.Store.PurgedRecipients.Should().BeEmpty("the DID is Bob's now: a purge by DID is not the role's to make");
         (await h.StoredAsync(h.Alice)).Should().Be(1);
+        (await h.StoredAsync(h.Bob)).Should().Be(1, "Bob's message for the same DID is under Bob's key and was not touched");
 
         // Alice cannot acknowledge Bob's message away either.
         var steal = h.MessagesReceived(h.Alice, new[] { fresh });

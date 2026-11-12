@@ -498,11 +498,11 @@ public sealed class MessagePickupLiveSessionLifecycleTests
         // parked just before it gives that lease back.
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.FakeStore!.OnRelease = async (grant, ids, ct) =>
+        fixture.FakeStore!.OnRelease = async (grant, ids, lease, ct) =>
         {
             parked.TrySetResult();
             await resume.Task.WaitAsync(MessagePickupLive.Deadline);
-            return await fixture.FakeStore.Inner.ReleaseAsync(grant, ids, ct);
+            return await fixture.FakeStore.Inner.ReleaseAsync(grant, ids, lease, ct);
         };
         var closed = ExpectOwnerRelease(fixture);
         var delivering = fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30)).AsTask();

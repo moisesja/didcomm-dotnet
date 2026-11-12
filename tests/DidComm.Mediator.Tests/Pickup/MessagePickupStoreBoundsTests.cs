@@ -132,7 +132,7 @@ public sealed class MessagePickupStoreBoundsTests
 
         (await TryAddAsync(store, Message("m1", size: 500))).Should().Be(EnqueueOutcome.DuplicateId, "a leased record still holds its id");
         (await TryAddAsync(store, Message("m2", recipient: R1, size: 500))).Should().Be(EnqueueOutcome.DuplicateId);
-        (await TryAddAsync(store, Message("m2", size: 500), lease: new MessageLease("other-socket", Far))).Should().Be(EnqueueOutcome.DuplicateId);
+        (await TryAddAsync(store, Message("m2", size: 500), lease: Lease("other-socket", Far))).Should().Be(EnqueueOutcome.DuplicateId);
 
         (await store.HeldAsync()).Should().Be(before, "a refusal changes nothing");
         (await store.ReleaseLeasesAsync("other-socket", None)).Should().Be(0, "a refused record leaves no lease behind");
@@ -166,11 +166,11 @@ public sealed class MessagePickupStoreBoundsTests
         await store.AddAsync(Message("leased"));
         (await store.LeaseIdsAsync(Take(owner: "socket"))).Should().Equal("leased");
         await store.AddAsync(Message("not-due", notBefore: T0.AddDays(1)));
-        await store.AddAsync(Message("pushed"), new MessageLease("socket", Far));
+        await store.AddAsync(Message("pushed"), Lease("socket", Far));
 
         (await store.LeaseIdsAsync(Take())).Should().BeEmpty("nothing is deliverable");
         (await TryAddAsync(store, Message("one-more"))).Should().Be(EnqueueOutcome.GrantMessageLimitReached);
-        (await TryAddAsync(store, Message("one-more"), lease: new MessageLease("socket", Far))).Should().Be(EnqueueOutcome.GrantMessageLimitReached);
+        (await TryAddAsync(store, Message("one-more"), lease: Lease("socket", Far))).Should().Be(EnqueueOutcome.GrantMessageLimitReached);
 
         store.MessageCount.Should().Be(3);
         (await store.ReleaseLeasesAsync("socket", None)).Should().Be(2, "the refused push left no lease behind");
@@ -183,7 +183,7 @@ public sealed class MessagePickupStoreBoundsTests
         await store.AddAsync(Message("leased", size: 30));
         (await store.LeaseIdsAsync(Take())).Should().Equal("leased");
         await store.AddAsync(Message("not-due", size: 30, notBefore: T0.AddDays(1)));
-        await store.AddAsync(Message("pushed", size: 30), new MessageLease("socket", Far));
+        await store.AddAsync(Message("pushed", size: 30), Lease("socket", Far));
 
         (await TryAddAsync(store, Message("one-more", size: 1))).Should().Be(EnqueueOutcome.GrantByteLimitReached);
         (await TryAddAsync(store, Message("b1", Bob, size: 11))).Should().Be(EnqueueOutcome.StoreLimitReached);
@@ -199,7 +199,7 @@ public sealed class MessagePickupStoreBoundsTests
         const int maxMessages = 12;
         const long maxBytes = 1_000;
         var store = NewStore(queueMessages: maxMessages, queueBytes: maxBytes);
-        var lease = new MessageLease("socket", T0.AddSeconds(60));
+        var lease = Lease("socket", T0.AddSeconds(60));
         var admitted = new List<string>();
         long admittedBytes = 0;
         var refused = new HashSet<EnqueueOutcome>();
@@ -286,19 +286,42 @@ public sealed class MessagePickupStoreBoundsTests
     }
 
     [Fact]
-    public async Task Expired_records_of_another_grant_count_against_the_store_wide_bounds_until_they_are_purged()
+    public async Task Expired_records_of_another_grant_never_keep_a_new_message_out_of_a_full_store()
     {
-        // The enqueue contract frees "records of the same grant that are expired at now", no others:
-        // an untouched grant's expired records are still retained, and every retained record counts.
+        // The enqueue contract: a record that is expired at the instant of the call does not count
+        // against the bounds, the grant's or the store's. An idle grant's expired records are swept
+        // when the store-wide bound would otherwise refuse a message; nobody has to schedule a purge.
         var expiresAt = T0.AddMinutes(5);
         var store = NewStore(queueMessages: 2, storeMessages: 2);
         await store.AddAsync(Message("a1", Alice, expiresAt: expiresAt));
         await store.AddAsync(Message("a2", Alice, expiresAt: expiresAt));
 
-        (await TryAddAsync(store, Message("b1", Bob), now: expiresAt)).Should().Be(EnqueueOutcome.StoreLimitReached);
+        // One tick before the expiry the store is simply full, and nothing is removed by the refusal.
+        (await TryAddAsync(store, Message("b0", Bob), now: expiresAt - Tick)).Should().Be(EnqueueOutcome.StoreLimitReached);
+        store.MessageCount.Should().Be(2);
 
-        (await store.PurgeExpiredAsync(expiresAt, None)).Should().Be(2);
         (await TryAddAsync(store, Message("b1", Bob), now: expiresAt)).Should().Be(EnqueueOutcome.Enqueued);
+        (store.MessageCount, store.TotalBytes).Should().Be((1, 10L), "Alice's two expired records were removed to make room, not merely ignored");
+        (await store.PurgeExpiredAsync(expiresAt, None)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_full_store_with_nothing_expired_stays_full_however_often_it_is_asked()
+    {
+        var store = NewStore(queueMessages: 2, storeMessages: 3);
+        await store.AddAsync(Message("a1", Alice, expiresAt: T0.AddMinutes(5)));
+        await store.AddAsync(Message("a2", Alice));
+        await store.AddAsync(Message("b1", Bob, expiresAt: T0.AddHours(1)));
+
+        for (var i = 0; i < 3; i++)
+            (await TryAddAsync(store, Message($"c{i}", Carol), now: T0.AddMinutes(1))).Should().Be(EnqueueOutcome.StoreLimitReached);
+        store.MessageCount.Should().Be(3);
+
+        // The earliest expiry passes: exactly that record goes, one new record fits, then full again.
+        (await TryAddAsync(store, Message("c3", Carol), now: T0.AddMinutes(5))).Should().Be(EnqueueOutcome.Enqueued);
+        (await TryAddAsync(store, Message("c4", Carol), now: T0.AddMinutes(5))).Should().Be(EnqueueOutcome.StoreLimitReached);
+        (await store.LeaseIdsAsync(Take(Alice, now: T0.AddMinutes(5)))).Should().Equal("a2");
+        (await store.LeaseIdsAsync(Take(Bob, now: T0.AddMinutes(5)))).Should().Equal("b1");
     }
 
     // ---- floods (the issue's adversarial acceptance) --------------------------------------

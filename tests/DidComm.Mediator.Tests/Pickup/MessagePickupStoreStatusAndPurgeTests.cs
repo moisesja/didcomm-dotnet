@@ -23,7 +23,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         await store.AddAsync(Message("leased", size: 2, receivedAt: T0.AddMinutes(2)));
         (await store.LeaseIdsAsync(Take(owner: "socket"))).Should().Equal("leased");
         await store.AddAsync(Message("waiting", size: 1, receivedAt: T0.AddMinutes(1)));
-        await store.AddAsync(Message("pushed", size: 4, receivedAt: T0.AddMinutes(3)), new MessageLease("socket", Far));
+        await store.AddAsync(Message("pushed", size: 4, receivedAt: T0.AddMinutes(3)), Lease("socket", Far));
         await store.AddAsync(Message("not-due", size: 8, receivedAt: T0.AddMinutes(4), notBefore: now + Tick));
         await store.AddAsync(Message("due-now", size: 16, receivedAt: T0.AddMinutes(5), notBefore: now));
         await store.AddAsync(Message("expired", size: 32, receivedAt: T0, expiresAt: now));
@@ -127,7 +127,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         await store.AddAsync(Message("r1-waiting", recipient: R1, size: 4));
         await store.AddAsync(Message("r1-not-due", recipient: R1, size: 8, notBefore: T0.AddDays(1)));
         await store.AddAsync(Message("r2-waiting", recipient: R2, size: 16));
-        await store.AddAsync(Message("r1-pushed", recipient: R1, size: 32), new MessageLease("socket", Far));
+        await store.AddAsync(Message("r1-pushed", recipient: R1, size: 32), Lease("socket", Far));
         await store.AddAsync(Message("bobs-r1", Bob, recipient: R1, size: 64));
 
         (await store.PurgeRecipientAsync(Alice, R1, None)).Should().Be(4);

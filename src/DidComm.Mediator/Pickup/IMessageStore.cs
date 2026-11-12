@@ -14,8 +14,9 @@ namespace DidComm.Mediator.Pickup;
 /// </para>
 /// <list type="bullet">
 /// <item><description><strong>Everything is confined to a grant.</strong> Each operation names a <c>grantPeerDid</c> — the DID subject of the recipient that enrolled (<c>MediationGrant.PeerDid</c>) — and touches only records stored under it. A message id means something only together with its grant: an id held under another grant is a plain miss, reported and handled exactly like an id nobody holds. Keys are bare DIDs of at most 2048 characters, compared ordinally; the store parses nothing.</description></item>
-/// <item><description><strong>A record is in exactly one place.</strong> It is stored once by <see cref="EnqueueAsync"/> and leaves by <see cref="AcknowledgeAsync"/> or a purge. A lease is a mark on the record (an owner token and an expiry instant), never a move: ending a lease — by <see cref="ReleaseAsync"/>, <see cref="ReleaseLeasesAsync"/> or the passing of its expiry — never copies, re-inserts or re-orders the record.</description></item>
-/// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due.</description></item>
+/// <item><description><strong>A record is in exactly one place.</strong> It is stored once by <see cref="EnqueueAsync"/> and leaves by <see cref="AcknowledgeAsync"/> or a purge. A lease is a mark on the record (the lease's id, an owner token and an expiry instant), never a move: ending a lease — by <see cref="ReleaseAsync"/>, <see cref="ReleaseLeasesAsync"/> or the passing of its expiry — never copies, re-inserts or re-orders the record.</description></item>
+/// <item><description><strong>A lease is given back only by its taker.</strong> <see cref="ReleaseAsync"/> names the lease it ends (<see cref="MessageLease.Id"/>) and leaves a record alone when it carries another lease by now — the first one ran out and somebody else took the record — so a late clean-up can never make a message that was just delivered deliverable again.</description></item>
+/// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due. A record that is expired at the instant of the call does not: expired records never keep a new message out.</description></item>
 /// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, not of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
 /// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>.</description></item>
 /// <item><description><strong>No throw after a partial change.</strong> A method that changes several records either throws before anything changed, or its return value is the truth.</description></item>
@@ -25,16 +26,18 @@ namespace DidComm.Mediator.Pickup;
 /// A method that throws is treated as a store fault: the handler sends no reply, a delivery to the
 /// queue is reported as <see cref="PickupDeliveryOutcome.Faulted"/>, the exception never leaves
 /// dispatch and only its type name is logged. An implementation must not take the protocol
-/// dispatcher, the handler registry, a protocol handler or <c>DidCommClient</c> in its constructor
-/// (that closes a dependency cycle).
+/// dispatcher, the handler registry, a protocol handler, <c>DidCommClient</c> or
+/// <see cref="MessagePickupQueue"/> in its constructor (that closes a dependency cycle).
 /// </para>
 /// <para>
 /// <strong>Removed DIDs and revoked grants.</strong> Nothing is delivered for a recipient DID that
 /// no longer belongs to the requesting peer's grant; the pickup role checks the registration when
-/// it delivers and calls <see cref="PurgeRecipientAsync"/> for a DID it finds unregistered. A host
-/// that revokes a grant (<c>IMediationStore.RevokeAsync</c>) calls <see cref="PurgeGrantAsync"/>
-/// to drop what was queued under it; until then those records are retained, never delivered, and
-/// count against the store-wide bounds.
+/// it delivers and removes the records it finds unregistered as they come up (a host that removes
+/// a DID can drop them at once with <see cref="PurgeRecipientAsync"/>). A host that revokes a grant
+/// (<c>IMediationStore.RevokeAsync</c>) calls <see cref="PurgeGrantAsync"/> to drop what was queued
+/// under it; until then those records are retained and count against the store-wide bounds. They
+/// are not delivered while the peer holds no grant — and are again if the same peer is granted
+/// mediation again, since records are kept under the peer's DID.
 /// </para>
 /// </remarks>
 public interface IMessageStore
@@ -43,8 +46,8 @@ public interface IMessageStore
     /// Store <paramref name="message"/> under its grant, at the end of the grant's arrival order —
     /// already leased when <paramref name="lease"/> is given (a live delivery: the record is
     /// admitted and marked in one step, so no <see cref="LeaseAsync"/> can take it in between).
-    /// Records of the same grant that are expired at <paramref name="now"/> do not count against
-    /// the bounds.
+    /// Records that are expired at <paramref name="now"/> do not count against the bounds, the
+    /// grant's or the store's.
     /// </summary>
     /// <param name="message">The record to store. Its <see cref="QueuedMessage.Id"/> is unique within the grant.</param>
     /// <param name="lease">The lease the record starts with, or <c>null</c> for a record that is simply waiting.</param>
@@ -80,15 +83,18 @@ public interface IMessageStore
     ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct);
 
     /// <summary>
-    /// End the lease on the records of <paramref name="grantPeerDid"/> with these ids, so they are
-    /// deliverable again at once, in their original position. Ids the grant does not hold are
-    /// ignored; a record that is not leased is left as it is.
+    /// Give back records taken under the lease <paramref name="leaseId"/>: the records of
+    /// <paramref name="grantPeerDid"/> with these ids that still carry that lease are deliverable
+    /// again at once, in their original position. Ids the grant does not hold are ignored, and so
+    /// is a record that is not leased or carries a different lease — it was taken again since, and
+    /// that lease is not this caller's to end.
     /// </summary>
     /// <param name="grantPeerDid">The grant the ids belong to.</param>
     /// <param name="messageIds">The ids to release.</param>
+    /// <param name="leaseId">The <see cref="MessageLease.Id"/> the records were taken under.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>How many leases were ended.</returns>
-    ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct);
+    ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct);
 
     /// <summary>
     /// End every lease whose <see cref="MessageLease.Owner"/> is <paramref name="leaseOwner"/>,
@@ -163,7 +169,19 @@ public sealed record QueuedMessage(
 /// </summary>
 /// <param name="Owner">An opaque token for the connection the messages were delivered over, so that all of its leases can be ended when it closes (<see cref="IMessageStore.ReleaseLeasesAsync"/>); <c>null</c> for a lease that ends by time only (a delivery over HTTP).</param>
 /// <param name="ExpiresAt">The first instant at which the lease no longer holds.</param>
-public sealed record MessageLease(string? Owner, DateTimeOffset ExpiresAt);
+public sealed record MessageLease(string? Owner, DateTimeOffset ExpiresAt)
+{
+    /// <summary>The expiry only: neither the owner token nor the lease id is printed, so a logged lease gives nothing away.</summary>
+    public override string ToString() => $"MessageLease {{ ExpiresAt = {ExpiresAt:O} }}";
+
+    /// <summary>
+    /// Identifies this lease among all leases ever taken: a fresh random token for every lease
+    /// created with <c>new</c> (a <c>with</c> copy is the same lease and keeps the id), unless set.
+    /// The taker passes it to <see cref="IMessageStore.ReleaseAsync"/> to give back exactly what it
+    /// took. Never on the wire.
+    /// </summary>
+    public string Id { get; init; } = Guid.NewGuid().ToString("N");
+}
 
 /// <summary>What <see cref="IMessageStore.LeaseAsync"/> is asked for.</summary>
 /// <param name="GrantPeerDid">The grant whose records are wanted.</param>

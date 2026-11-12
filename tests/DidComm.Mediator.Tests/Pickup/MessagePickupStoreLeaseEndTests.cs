@@ -235,7 +235,7 @@ public sealed class MessagePickupStoreLeaseEndTests
     {
         var store = NewStore();
         await store.AddAsync(Message("waiting", size: 1));
-        await store.AddAsync(Message("pushed", size: 2), new MessageLease("socket", T0.AddSeconds(60)));
+        await store.AddAsync(Message("pushed", size: 2), Lease("socket", T0.AddSeconds(60)));
         await store.AddAsync(Message("behind", size: 4));
 
         (await store.LeaseIdsAsync(Take(until: T0.AddSeconds(30)))).Should().Equal(new[] { "waiting", "behind" }, "the pushed record never was deliverable");
@@ -251,7 +251,7 @@ public sealed class MessagePickupStoreLeaseEndTests
         {
             var store = NewStore();
             await store.AddAsync(Message("before"));
-            await store.AddAsync(Message("pushed"), new MessageLease("socket", pushLeaseEnds));
+            await store.AddAsync(Message("pushed"), Lease("socket", pushLeaseEnds));
             await store.AddAsync(Message("after"));
             return store;
         }
@@ -317,7 +317,7 @@ public sealed class MessagePickupStoreLeaseEndTests
                 (await store.LeaseIdsAsync(Take(owner: "socket", until: T0.AddSeconds(1)))).Should().Contain("target");
                 break;
             case RecordState.LeasedFromBirth:
-                await store.AddAsync(Message("target", size: 50), new MessageLease("socket", Far));
+                await store.AddAsync(Message("target", size: 50), Lease("socket", Far));
                 break;
             case RecordState.NotYetDue:
                 await store.AddAsync(Message("target", size: 50, notBefore: T0.AddHours(1)));

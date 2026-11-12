@@ -28,7 +28,8 @@ namespace DidComm.Mediator.Pickup;
 /// bare DID — is answered like an empty queue (<c>status</c> echoing the value with
 /// <c>message_count: 0</c>), so the answer says nothing about other recipients. Registration is
 /// checked again when messages are delivered: what is queued for a DID that no longer belongs to
-/// the peer's grant is not delivered, and is removed.
+/// the peer's grant is not delivered, and is removed when an unfiltered <c>delivery-request</c>
+/// comes to it.
 /// </para>
 /// <para>
 /// <strong>Deliveries.</strong> A <c>delivery</c> carries up to the request's <c>limit</c>, capped
@@ -36,7 +37,12 @@ namespace DidComm.Mediator.Pickup;
 /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>: the handler pushes it through the request's
 /// return-route session with a size bound (<c>IReturnRouteSession.TrySendAsync(message,
 /// maxPackedBytes, ct)</c>) and, when the packed message is over the bound, takes the last message
-/// out and tries again. Over HTTP the pushed <c>delivery</c> is the response body. Delivered
+/// out and tries again. A message that is over the bound even alone (the peer's own DID document
+/// makes its envelopes that large) is not delivered and not removed: the request is answered
+/// <c>status</c> only if nothing else can be delivered — the message keeps the request's lease, so
+/// the same request goes on to what is queued behind it, and later requests pass it over until
+/// that lease ends and it is tried again. Over HTTP the pushed <c>delivery</c> is the response
+/// body. Delivered
 /// messages stay stored, under a lease, until a <c>messages-received</c> names them; a lease that
 /// runs out (<see cref="MessagePickupOptions.LeaseTimeout"/>), or whose WebSocket closes, makes
 /// them deliverable again, so a recipient may see a message more than once. A request that arrives
@@ -95,7 +101,7 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
             return null;
 
         // A session bound to another pair is not this peer's connection.
-        var session = PickupCoordinator.SessionFor(context.Session, peerDid, localDid);
+        var session = _pickup.SessionFor(context.Session, peerDid, localDid, message.Id);
 
         // (b) status-request → status.
         if (MessagePickup.TryParseStatusRequest(message, out var statusFilter))

@@ -231,6 +231,7 @@ internal sealed class MessagePickupHandlerHarness : IAsyncDisposable
         Store.Enqueued.Clear();
         Store.Acknowledged.Clear();
         Store.Released.Clear();
+        Store.ReleasedLeaseIds.Clear();
         Store.ReleasedOwners.Clear();
         Store.StatusRequests.Clear();
         Store.PurgedRecipients.Clear();
@@ -265,7 +266,7 @@ internal sealed class MessagePickupHandlerHarness : IAsyncDisposable
         var probe = new MessageLeaseRequest(grantPeerDid, null, int.MaxValue, long.MaxValue, now, new MessageLease(null, now.AddTicks(1)));
         var taken = await Store.Inner.LeaseAsync(probe, CancellationToken.None);
         var ids = taken.Select(m => m.Id).ToArray();
-        await Store.Inner.ReleaseAsync(grantPeerDid, ids, CancellationToken.None);
+        await Store.Inner.ReleaseAsync(grantPeerDid, ids, probe.Lease.Id, CancellationToken.None);
         return ids;
     }
 

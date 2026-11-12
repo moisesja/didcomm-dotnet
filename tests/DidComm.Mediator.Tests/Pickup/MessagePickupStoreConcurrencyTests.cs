@@ -191,7 +191,7 @@ public sealed class MessagePickupStoreConcurrencyTests(ITestOutputHelper output)
         {
             if (racer < pushers)
             {
-                (await store.EnqueueAsync(Message($"push-{racer}-{round}"), new MessageLease($"socket-{racer}", Far), T0, None)).Should().Be(EnqueueOutcome.Enqueued);
+                (await store.EnqueueAsync(Message($"push-{racer}-{round}"), Lease($"socket-{racer}", Far), T0, None)).Should().Be(EnqueueOutcome.Enqueued);
                 return 0;
             }
             return (await store.LeaseAsync(Take(max: 10, owner: "taker"), None)).Count;
@@ -299,7 +299,7 @@ public sealed class MessagePickupStoreConcurrencyTests(ITestOutputHelper output)
                                 NotBefore: shape == 0 ? notYetDue : null,
                                 ExpiresAt: shape == 1 ? expiredOnArrival : shape == 2 ? expiresMuchLater : null);
                             var live = shape == 3;
-                            var outcome = await store.EnqueueAsync(record, live ? new MessageLease(token, Far) : null, T0, None);
+                            var outcome = await store.EnqueueAsync(record, live ? Lease(token, Far) : null, T0, None);
                             if (outcome == EnqueueOutcome.Enqueued)
                             {
                                 Interlocked.Increment(ref admitted);
@@ -327,7 +327,7 @@ public sealed class MessagePickupStoreConcurrencyTests(ITestOutputHelper output)
                             var filter = random.Next(3) == 0 ? recipient : null;
                             var max = random.Next(1, 7);
                             long budget = random.Next(100, 1500);
-                            var leased = await store.LeaseAsync(new MessageLeaseRequest(grant, filter, max, budget, T0, new MessageLease(token, Far)), None);
+                            var leased = await store.LeaseAsync(new MessageLeaseRequest(grant, filter, max, budget, T0, Lease(token, Far)), None);
                             Interlocked.Add(ref leases, leased.Count);
                             long total = 0;
                             foreach (var record in leased)

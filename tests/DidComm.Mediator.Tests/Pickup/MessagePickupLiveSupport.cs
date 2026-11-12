@@ -291,7 +291,7 @@ internal sealed class MessagePickupLivePurgeStore : IMessageStore
 
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
 
-    public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, ct);
+    public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
 
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
 

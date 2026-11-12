@@ -27,6 +27,20 @@ internal static class MessagePickupStoreKit
 
     public static CancellationToken None => CancellationToken.None;
 
+    /// <summary>
+    /// The lease id every lease of these tests carries unless a test says otherwise, so that a
+    /// release by ids (which names the lease it gives back) ends whatever lease a test put on a
+    /// record. The tests about the lease id itself build their leases with distinct ids.
+    /// </summary>
+    public const string KitLeaseId = "kit-lease";
+
+    /// <summary>A lease with the shared <see cref="KitLeaseId"/>.</summary>
+    public static MessageLease Lease(string? owner, DateTimeOffset expiresAt) => new(owner, expiresAt) { Id = KitLeaseId };
+
+    /// <summary>Give back records taken under the shared <see cref="KitLeaseId"/>.</summary>
+    public static ValueTask<int> ReleaseAsync(this IMessageStore store, string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
+        => store.ReleaseAsync(grantPeerDid, messageIds, KitLeaseId, ct);
+
     /// <summary>A store whose bounds are out of the way unless the test sets them.</summary>
     public static InMemoryMessageStore NewStore(int queueMessages = 10_000, long queueBytes = 1L << 30, int? storeMessages = null, long? storeBytes = null)
         => new(new MessagePickupOptions
@@ -67,7 +81,7 @@ internal static class MessagePickupStoreKit
         string? recipient = null,
         string? owner = null,
         DateTimeOffset? until = null)
-        => new(grant, recipient, max, bytes, now ?? T0, new MessageLease(owner, until ?? Far));
+        => new(grant, recipient, max, bytes, now ?? T0, Lease(owner, until ?? Far));
 
     /// <summary>Enqueue and require that the record was admitted.</summary>
     public static async Task AddAsync(this IMessageStore store, QueuedMessage message, MessageLease? lease = null, DateTimeOffset? now = null)

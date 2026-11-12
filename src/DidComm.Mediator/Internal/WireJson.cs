@@ -29,7 +29,8 @@ internal static class WireJson
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentException or NotSupportedException)
         {
-            // A body assembled in code can hold what no JSON text can (a lone surrogate, a cycle).
+            // A body a host assembled or parsed lazily can hold what cannot be written back out (a
+            // cycle, or an escape such as an unpaired surrogate that only fails when it is read).
             // The receive path refuses such text before it gets here; this is the same answer for a
             // message a host built by hand. The cause is not attached: its text may quote the value.
             throw new MalformedMessageException("The message 'body' is not representable as JSON.");

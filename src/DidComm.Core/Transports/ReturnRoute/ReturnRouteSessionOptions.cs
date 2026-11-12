@@ -31,8 +31,10 @@ public sealed class ReturnRouteSessionOptions
     /// snapshot, key resolution or encryption; the place is freed when the push fails or when the
     /// writer takes its frame off the queue (the frame being sent is not counted). Default 16: each
     /// queued item is one packed message, so a socket never holds more than 16 of them besides the
-    /// one being sent; live delivery (message-pickup) pushes at most one unacknowledged delivery per
-    /// session, so this is slack, not a working set.
+    /// one being sent. Message-pickup live delivery pushes each arriving message as it comes, so
+    /// towards a peer that has stopped reading a session can hold that many packed deliveries (each
+    /// up to the pickup delivery budget, 1 MiB by default) until it closes: size this bound with
+    /// that product in mind.
     /// </summary>
     public int MaxPendingPushes { get; set; } = 16;
 

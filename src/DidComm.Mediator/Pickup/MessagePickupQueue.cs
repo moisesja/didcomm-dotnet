@@ -71,7 +71,9 @@ public sealed class MessagePickupQueue
     /// <remarks>
     /// A message addressed to several recipients is delivered by one call per recipient: each call
     /// stores its own record with its own id, acknowledged separately (FR-PICK-05). The payload
-    /// memory is kept as given, not copied: do not reuse the buffer.
+    /// memory is kept as given, not copied: do not reuse the buffer, and pass a buffer of the
+    /// payload's own size — the quota counts the payload's length, while a slice of a larger array
+    /// keeps the whole array alive.
     /// </remarks>
     /// <param name="recipientDid">The registered DID the message is for: a bare DID (the DID subject of a forward's <c>next</c>). A DID URL is not normalised; it is simply not registered.</param>
     /// <param name="payload">The encrypted message, exactly as it is to reach the recipient. Not empty.</param>
@@ -143,7 +145,7 @@ public enum PickupDeliveryOutcome
     /// <summary>Stored and pushed over the recipient's live connection; held (leased) until the recipient acknowledges it, the lease runs out or the connection closes — after which it is deliverable by <c>delivery-request</c>.</summary>
     PushedLive,
 
-    /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken.</summary>
+    /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent (the recipient may then see the message twice).</summary>
     Queued,
 
     /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID).</summary>

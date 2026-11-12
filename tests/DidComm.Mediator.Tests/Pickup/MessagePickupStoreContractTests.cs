@@ -204,7 +204,7 @@ public sealed class MessagePickupStoreContractTests
         Func<Task> act = method switch
         {
             "enqueue" => async () => await store.EnqueueAsync(Message("d"), null, T0, ct),
-            "enqueue-with-lease" => async () => await store.EnqueueAsync(Message("d"), new MessageLease(Owner, Far), T0, ct),
+            "enqueue-with-lease" => async () => await store.EnqueueAsync(Message("d"), Lease(Owner, Far), T0, ct),
             "lease" => async () => await store.LeaseAsync(Take(owner: Owner), ct),
             "acknowledge" => async () => await store.AcknowledgeAsync(Alice, new[] { "a", "c" }, ct),
             "release" => async () => await store.ReleaseAsync(Alice, new[] { "a", "b" }, ct),
@@ -249,7 +249,7 @@ public sealed class MessagePickupStoreContractTests
         const string id = "queue-id-that-must-not-be-printed";
         var payload = "payload-that-must-not-be-printed"u8.ToArray();
         var record = new QueuedMessage(id, grant, recipient, payload, T0, T0.AddSeconds(1), T0.AddHours(1));
-        var request = new MessageLeaseRequest(grant, recipient, 3, 1_000, T0, new MessageLease("owner-token", Far));
+        var request = new MessageLeaseRequest(grant, recipient, 3, 1_000, T0, Lease("owner-token", Far));
         var status = new QueueStatus(2, 64, T0, T0.AddSeconds(5));
 
         // However it gets into a log line: ToString, interpolation, or a structured-logging argument.

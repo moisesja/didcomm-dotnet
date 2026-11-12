@@ -407,7 +407,8 @@ public sealed class MessagePickupWebSocketTests
         (await mediator.AcknowledgeAsync(socket, wide, queued[0].Id!, queued[1].Id!)).MessageCount.Should().Be(0);
 
         // Live delivery: an arrival whose push would be over the budget for this recipient is not
-        // pushed; it is queued (JC-19), and nothing is written for it.
+        // pushed. The push only gives its lease back: the message is queued, and nothing is
+        // written for it.
         (await mediator.GoLiveAsync(socket, wide)).LiveDelivery.Should().BeTrue();
         var tooWide = await mediator.QueueAsync(wide, packedBytes: max, expected: PickupDeliveryOutcome.Queued);
         var status = await mediator.StatusAsync(socket, wide);
@@ -419,6 +420,156 @@ public sealed class MessagePickupWebSocketTests
         var push = await mediator.ReceiveAsync(socket, wide);
         push.Packed.Length.Should().BeLessThanOrEqualTo(budget);
         await mediator.ShouldBeRelayedAsync(wide, push.Delivery(thid: null).Should().ContainSingle().Subject, fits);
+        mediator.Store.MessageCount.Should().Be(2);
+
+        // The delivery-request that then meets the queued one finds that it does not fit even
+        // alone. It is answered with the status, and nothing is removed: the message is still
+        // there and counted, beside the pushed one that waits for its acknowledgement.
+        var fetch = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        var met = await mediator.AskAsync(socket, wide, fetch);
+        met.Packed.Length.Should().BeLessThanOrEqualTo(budget);
+        met.Status(fetch.Id).MessageCount.Should().Be(2);
+        mediator.Store.MessageCount.Should().Be(2);
+        (await mediator.AcknowledgeAsync(socket, wide, fits.Id!)).MessageCount.Should().Be(1);
+        mediator.Store.MessageCount.Should().Be(1);
+        mediator.Store.TotalBytes.Should().Be(tooWide.Payload.Length);
+        await mediator.CloseAsync(socket);
+    }
+
+    [Fact]
+    public async Task Over_a_socket_messages_the_recipients_envelope_cannot_carry_are_passed_over_by_the_request_that_meets_them_and_tried_once_more_on_the_next_socket()
+    {
+        // Two payloads at the admission bound for a 38-key recipient (over the budget even alone,
+        // see the HTTP twin), and a deliverable one behind them. Each keeps the lease of the request
+        // that met it — a lease that belongs to the socket's session — and that same request looks
+        // further and delivers what is behind them. When the socket closes its leases end: on the
+        // next socket the two are first in line again, are tried once more, and again the request
+        // that meets them delivers what is behind them. The clock never moves.
+        const int budget = 352 * Kibibyte;
+        const int small = 86 * Kibibyte;
+        await using var mediator = await PickupEndpointHost.StartAsync(pickup: o => o.MaxDeliveryBytes = budget, parkingStore: true);
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        await mediator.EnrolAsync(wide);
+        var max = mediator.Queue.MaxAdmissiblePayloadBytes;
+        var bigs = new[] { await mediator.QueueAsync(wide, packedBytes: max), await mediator.QueueAsync(wide, packedBytes: max) };
+        var behind = await mediator.QueueAsync(wide, packedBytes: small);
+
+        // One delivery-request on a socket: its answer, within the budget, and what the store
+        // handed out in each lease round the request made.
+        async Task<(PickupAnswer Answer, IReadOnlyList<IReadOnlyList<string>> Rounds)> FetchAsync(WebSocket socket)
+        {
+            var calls = mediator.Parking.Leased.Count;
+            var request = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+            var answer = await mediator.AskAsync(socket, wide, request);
+            answer.Packed.Length.Should().BeLessThanOrEqualTo(budget, "whatever is queued, a frame fits max_delivery_bytes");
+            answer.Message.Thid.Should().Be(request.Id);
+            return (answer, mediator.Parking.Leased.Skip(calls).ToList());
+        }
+
+        var first = await mediator.ConnectAsync();
+        using var disposeFirst = first;
+
+        // The first request meets the two, one after the other, each alone; neither fits. It looks
+        // further and delivers the message behind them. Nothing is removed.
+        var met = await FetchAsync(first);
+        met.Rounds.Should().HaveCount(3);
+        met.Rounds[0].Should().Equal(bigs[0].Id);
+        met.Rounds[1].Should().Equal(bigs[1].Id);
+        met.Rounds[2].Should().Equal(behind.Id);
+        await mediator.ShouldBeRelayedAsync(wide, met.Answer.Delivery(met.Answer.Message.Thid).Should().ContainSingle().Subject, behind);
+        mediator.Store.MessageCount.Should().Be(3);
+
+        // The second request: both are passed over and nothing else is deliverable. One round, a
+        // status, all three still counted. Then the delivered one is acknowledged.
+        var idle = await FetchAsync(first);
+        idle.Rounds.Should().ContainSingle().Which.Should().BeEmpty();
+        var counted = idle.Answer.Status(idle.Answer.Message.Thid!);
+        counted.MessageCount.Should().Be(3);
+        counted.TotalBytes.Should().Be(bigs[0].Payload.Length + bigs[1].Payload.Length + behind.Payload.Length);
+        (await mediator.AcknowledgeAsync(first, wide, behind.Id!)).MessageCount.Should().Be(2);
+
+        // The socket closes: the leases its requests took end with it (waited for: the server ends
+        // them on its own time). Nothing is removed.
+        var ended = mediator.Parking.OwnerReleases;
+        await mediator.CloseAsync(first);
+        (await ReturnRouteTestHost.WaitUntilAsync(() => mediator.Parking.OwnerReleases > ended, PickupEndpointHost.Timeout))
+            .Should().BeTrue("a lease kept on a socket ends when that socket closes, not by its timeout");
+        mediator.Store.MessageCount.Should().Be(2);
+
+        // On the next socket the two are first in line again: the request that meets them tries
+        // each once more and delivers the message that arrived behind them — in that one request.
+        var later = await mediator.QueueAsync(wide, packedBytes: small);
+        var (second, reopened) = await mediator.OpenAsync(wide);
+        using var disposeSecond = second;
+        reopened.MessageCount.Should().Be(3);
+        var again = await FetchAsync(second);
+        again.Rounds.Should().HaveCount(3);
+        again.Rounds[0].Should().Equal(new[] { bigs[0].Id }, "after the lease the message is at its original position and is tried again");
+        again.Rounds[1].Should().Equal(bigs[1].Id);
+        again.Rounds[2].Should().Equal(later.Id);
+        await mediator.ShouldBeRelayedAsync(wide, again.Answer.Delivery(again.Answer.Message.Thid).Should().ContainSingle().Subject, later);
+        (await mediator.AcknowledgeAsync(second, wide, later.Id!)).MessageCount.Should().Be(2);
+
+        // And the request after that: one round, nothing deliverable, a status.
+        var last = await FetchAsync(second);
+        last.Rounds.Should().ContainSingle().Which.Should().BeEmpty();
+        last.Answer.Status(last.Answer.Message.Thid!).MessageCount.Should().Be(2);
+
+        // Through all of it the mediator neither removed the two nor gave their leases back by id.
+        mediator.Parking.Acknowledged.Should().BeEquivalentTo(new[] { behind.Id, later.Id });
+        mediator.Parking.GivenBack.Should().NotContain(new[] { bigs[0].Id, bigs[1].Id });
+        mediator.Store.MessageCount.Should().Be(2);
+        mediator.Store.TotalBytes.Should().Be(bigs[0].Payload.Length + bigs[1].Payload.Length);
+
+        // What clears them is the host: a purge of the grant's messages.
+        (await mediator.Store.PurgeGrantAsync(wide.Did, default)).Should().Be(2);
+        (await mediator.StatusAsync(second, wide)).MessageCount.Should().Be(0);
+        await mediator.CloseAsync(second);
+    }
+
+    [Fact]
+    public async Task Over_a_socket_a_queue_of_small_big_small_delivers_both_small_ones_once_in_two_requests_and_keeps_the_big_one()
+    {
+        // The payloads are for a one-key DID the 38-key recipient registered: the small ones are
+        // about 1 KiB, so the batch estimate takes all three for the first request. The session
+        // refuses the batch of three and the batch of two; the first message goes alone. The second
+        // request meets the big one first; it does not fit even alone and keeps the request's
+        // lease, and the same request looks further and delivers the other small one. Nothing is
+        // acknowledged until the end, so every delivered message stays under its lease and none
+        // comes twice.
+        const int budget = 352 * Kibibyte;
+        await using var mediator = await PickupEndpointHost.StartAsync(pickup: o => o.MaxDeliveryBytes = budget);
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        var addressee = (await mediator.Host.CreatePeersAsync(1))[0];
+        await mediator.EnrolAsync(wide, wide.Did, addressee.Did);
+        var max = mediator.Queue.MaxAdmissiblePayloadBytes;
+        var first = await mediator.QueueAsync(addressee);
+        var big = await mediator.QueueAsync(addressee, packedBytes: max - 4 * Kibibyte);
+        var last = await mediator.QueueAsync(addressee);
+        var all = first.Payload.Length + big.Payload.Length + last.Payload.Length;
+        all.Should().BeLessThanOrEqualTo(max, "all three are within the batch byte budget, so the estimate takes them together");
+
+        var socket = await mediator.ConnectAsync();
+        using var _ = socket;
+        // Three requests at most: one per delivery, and the status that says nothing more can be
+        // fetched.
+        var steps = await mediator.DrainAsync(wide, request => mediator.AskAsync(socket, wide, request), budget, maxRequests: 3, acknowledge: false, left: 1);
+
+        var delivered = steps.SelectMany(step => step.Delivered).ToList();
+        delivered.Select(m => m.Id).Should().Equal(new[] { first.Id, last.Id }, "both small messages arrive, each once and in order; the big one never does");
+        await mediator.ShouldBeRelayedAsync(addressee, delivered[0], first);
+        await mediator.ShouldBeRelayedAsync(addressee, delivered[1], last);
+        steps.Take(2).SelectMany(step => step.Delivered).Should().HaveCount(2, "both are delivered within two requests: one per delivery; the message that does not fit costs none");
+        steps[^1].Status!.TotalBytes.Should().Be(all, "all three are still stored, and counted");
+        mediator.Store.MessageCount.Should().Be(3);
+
+        (await mediator.AcknowledgeAsync(socket, wide, first.Id!, last.Id!)).MessageCount.Should().Be(1);
+        mediator.Store.MessageCount.Should().Be(1, "the big one was not removed");
+        mediator.Store.TotalBytes.Should().Be(big.Payload.Length);
+
+        // What clears it is the host: a purge of that recipient DID's messages.
+        (await mediator.Store.PurgeRecipientAsync(wide.Did, addressee.Did, default)).Should().Be(1);
+        (await mediator.StatusAsync(socket, wide)).MessageCount.Should().Be(0);
         await mediator.CloseAsync(socket);
     }
 
@@ -755,6 +906,140 @@ public sealed class MessagePickupWebSocketTests
         (await mediator.AcknowledgeAsync(socket, recipient, all)).MessageCount.Should().Be(0);
         mediator.Store.MessageCount.Should().Be(0);
         await mediator.CloseAsync(socket);
+    }
+
+    // ---- a lease is given back only by its taker (two connections of one recipient) ----------
+
+    [Fact]
+    public async Task A_lease_given_back_late_by_a_socket_does_not_free_a_message_that_was_delivered_over_http_in_the_meantime()
+    {
+        // Socket A asks for a delivery and takes its return route away in the same message
+        // (return_route: none): the mediator leases the message, the session does not take the
+        // push, and the mediator gives A's lease back. That give-back is held at the store's door.
+        // While it waits, A's lease runs out and the recipient fetches the message over HTTP, under
+        // a new lease. When A's give-back finally runs it names A's lease, which is no longer on
+        // the record: the HTTP lease stands, and a third request inside it gets a status.
+        var lease = TimeSpan.FromSeconds(60);
+        await using var mediator = await PickupEndpointHost.StartAsync(pickup: o => o.LeaseTimeout = lease, parkingStore: true);
+        var recipient = mediator.Recipient;
+        await mediator.EnrolAsync(recipient);
+        var (socketA, _) = await mediator.OpenAsync(recipient);
+        using var disposeA = socketA;
+        var queued = await mediator.QueueAsync(recipient);
+
+        var parked = mediator.Parking.ParkNextRelease();
+        await SendDeliveryRequestTheSessionWillNotAnswerAsync(mediator, socketA, recipient);
+        var giveBack = await parked.Arrived.WaitAsync(PickupEndpointHost.Timeout);
+        giveBack.Ids.Should().Equal(queued.Id);
+        var leaseOfA = mediator.Parking.LeaseRequests.Should().ContainSingle().Subject.Lease;
+        leaseOfA.Owner.Should().NotBeNull("a lease taken over a socket belongs to the socket's session");
+        giveBack.LeaseId.Should().Be(leaseOfA.Id, "the mediator gives back the lease it took, by its id");
+
+        // A's lease runs out; the recipient fetches the message over HTTP.
+        mediator.Clock.Advance(lease);
+        var overHttp = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(recipient, overHttp)).Delivery(thid: overHttp.Id).Should().ContainSingle().Which.Id.Should().Be(queued.Id);
+
+        // Now A's give-back runs, to its end.
+        parked.Resume();
+        var endedByA = await parked.Finished.WaitAsync(PickupEndpointHost.Timeout);
+
+        // A third request inside the HTTP lease gets a status, not the message again: over HTTP…
+        var third = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(recipient, third)).Status(third.Id).MessageCount.Should().Be(1);
+        // …and on A, whose first frame since it opened is the answer to this request.
+        var onA = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(socketA, recipient, onA)).Status(onA.Id).MessageCount.Should().Be(1);
+        endedByA.Should().Be(0, "the record carried the HTTP request's lease by then, and that one is not A's to end");
+        mediator.Store.MessageCount.Should().Be(1);
+        await mediator.CloseAsync(socketA);
+    }
+
+    [Fact]
+    public async Task A_socket_evicted_while_it_gives_a_lease_back_cannot_free_the_message_once_it_was_delivered_over_http()
+    {
+        // As above, but what ends A's lease is the end of A's session: a newer socket of the same
+        // recipient evicts it (one session per peer) while A's give-back is held at the door. The
+        // session's end releases what A held, the recipient fetches the message over HTTP, and
+        // only then does A's own give-back run. The clock never moves.
+        await using var mediator = await PickupEndpointHost.StartAsync(sessions: s => s.MaxSessionsPerPeer = 1, parkingStore: true);
+        var recipient = mediator.Recipient;
+        await mediator.EnrolAsync(recipient);
+        var (socketA, _) = await mediator.OpenAsync(recipient);
+        using var disposeA = socketA;
+        var queued = await mediator.QueueAsync(recipient);
+
+        var parked = mediator.Parking.ParkNextRelease();
+        await SendDeliveryRequestTheSessionWillNotAnswerAsync(mediator, socketA, recipient);
+        (await parked.Arrived.WaitAsync(PickupEndpointHost.Timeout)).Ids.Should().Equal(queued.Id);
+
+        var (socketB, opened) = await mediator.OpenAsync(recipient);
+        using var disposeB = socketB;
+        opened.MessageCount.Should().Be(1);
+        (await ReturnRouteTestHost.ReceiveAsync(socketA, PickupEndpointHost.Timeout)).Type.Should().Be(WebSocketMessageType.Close, "the evicted peer is told with a close frame");
+
+        // Asked again until the session's end has released A's lease.
+        var (overHttp, answer) = await mediator.FetchUntilDeliveredAsync(recipient, request => mediator.AskAsync(recipient, request));
+        answer.Delivery(thid: overHttp.Id).Should().ContainSingle().Which.Id.Should().Be(queued.Id);
+
+        parked.Resume();
+        var endedByA = await parked.Finished.WaitAsync(PickupEndpointHost.Timeout);
+
+        // Inside the HTTP lease the message is not delivered again, over HTTP or on the new socket.
+        var third = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(recipient, third)).Status(third.Id).MessageCount.Should().Be(1);
+        var onB = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(socketB, recipient, onB)).Status(onB.Id).MessageCount.Should().Be(1);
+        endedByA.Should().Be(0, "A's lease was no longer on the record");
+        mediator.Store.MessageCount.Should().Be(1);
+
+        await socketA.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", default);
+        await socketB.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);
+    }
+
+    [Fact]
+    public async Task After_a_socket_that_was_given_a_message_closes_and_http_delivers_it_again_nothing_done_in_the_sockets_name_frees_it()
+    {
+        // The plain sequence: socket A is given the message and closes without acknowledging; the
+        // close releases A's lease and the recipient fetches the message over HTTP. What the real
+        // endpoints do for A after that cannot be held back from here, so it is replayed: the two
+        // ways the mediator ends a lease for a connection — by the lease's id, and by the session
+        // that owned it — are applied to the store with A's own lease, as the mediator would.
+        await using var mediator = await PickupEndpointHost.StartAsync(parkingStore: true);
+        var recipient = mediator.Recipient;
+        await mediator.EnrolAsync(recipient);
+        var queued = await mediator.QueueAsync(recipient);
+
+        var socketA = await mediator.ConnectAsync();
+        using var disposeA = socketA;
+        var onA = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(socketA, recipient, onA)).Delivery(thid: onA.Id).Should().ContainSingle().Which.Id.Should().Be(queued.Id);
+        var leaseOfA = mediator.Parking.LeaseRequests.Should().ContainSingle().Subject.Lease;
+        await mediator.CloseAsync(socketA);
+
+        var (overHttp, answer) = await mediator.FetchUntilDeliveredAsync(recipient, request => mediator.AskAsync(recipient, request));
+        answer.Delivery(thid: overHttp.Id).Should().ContainSingle().Which.Id.Should().Be(queued.Id);
+
+        var endedById = await mediator.Parking.ReleaseAsync(recipient.Did, new[] { queued.Id! }, leaseOfA.Id, default);
+        var endedByOwner = await mediator.Parking.ReleaseLeasesAsync(leaseOfA.Owner!, default);
+
+        var third = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(recipient, third)).Status(third.Id).MessageCount.Should().Be(1, "inside the HTTP lease the message is not delivered again");
+        endedById.Should().Be(0, "A's lease is not on the record any more");
+        endedByOwner.Should().Be(0, "A's session owns nothing any more");
+        mediator.Store.MessageCount.Should().Be(1);
+    }
+
+    /// <summary>
+    /// A <c>delivery-request</c> with <c>return_route: none</c> on a socket that is already a
+    /// session: the mediator leases what is deliverable, the session does not take the push, and
+    /// nothing is written back.
+    /// </summary>
+    private static async Task SendDeliveryRequestTheSessionWillNotAnswerAsync(PickupEndpointHost mediator, WebSocket socket, TestPeer peer)
+    {
+        var request = mediator.Prepare(MessagePickup.CreateDeliveryRequest(peer.Did, mediator.Mediator, 10), returnRoute: false);
+        ReturnRouteHeaderWriter.Write(request, ReturnRouteMode.None, thread: null);
+        await ReturnRouteTestHost.SendAsync(socket, await mediator.Host.AuthcryptAsync(peer, request));
     }
 
     // ---- malformed requests and logs --------------------------------------------------------

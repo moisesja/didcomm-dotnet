@@ -24,9 +24,11 @@ namespace DidComm.Mediator.Pickup;
 /// anything out to lock on.
 /// </para>
 /// <para>
-/// <strong>Expiry</strong> is applied when a grant is next touched (enqueue, lease, status) and by
-/// <see cref="PurgeExpiredAsync"/>; there is no timer. A lease that has run out is simply no longer
-/// honoured by the next <see cref="LeaseAsync"/>.
+/// <strong>Expiry</strong> is applied when a grant is next touched (enqueue, lease, status), when the
+/// store-wide bounds would otherwise refuse a message, and by <see cref="PurgeExpiredAsync"/>; there
+/// is no timer. Until one of those happens an expired record still occupies memory, so a host with
+/// many idle grants calls <see cref="MessagePickupQueue.PurgeExpiredAsync"/> now and then. A lease
+/// that has run out is simply no longer honoured by the next <see cref="LeaseAsync"/>.
 /// </para>
 /// </remarks>
 public sealed class InMemoryMessageStore : IMessageStore
@@ -43,6 +45,9 @@ public sealed class InMemoryMessageStore : IMessageStore
     private readonly long _maxStoreBytes;
     private int _count;
     private long _bytes;
+
+    // The earliest expiry any held record may have (never later than the truth; reset by a full sweep).
+    private DateTimeOffset _nextExpiry = DateTimeOffset.MaxValue;
 
     /// <summary>Create a store with the default bounds of <see cref="MessagePickupOptions"/>.</summary>
     public InMemoryMessageStore() : this(new MessagePickupOptions()) { }
@@ -96,6 +101,14 @@ public sealed class InMemoryMessageStore : IMessageStore
                 PurgeExpired(queue, now);
 
             var refusal = Refusal(queue, message.Id, size);
+            if (refusal == EnqueueOutcome.StoreLimitReached && now >= _nextExpiry)
+            {
+                // The store is full, and something in it may be expired: expired records never keep
+                // a new message out, whichever grant holds them. Sweep once and judge again.
+                PurgeExpiredEverywhere(now);
+                _grants.TryGetValue(message.GrantPeerDid, out queue);
+                refusal = Refusal(queue, message.Id, size);
+            }
             if (refusal is { } outcome)
             {
                 if (queue is not null)
@@ -115,8 +128,13 @@ public sealed class InMemoryMessageStore : IMessageStore
             queue.Bytes += size;
             _count++;
             _bytes += size;
-            if (message.ExpiresAt is { } expires && expires < queue.NextExpiry)
-                queue.NextExpiry = expires;
+            if (message.ExpiresAt is { } expires)
+            {
+                if (expires < queue.NextExpiry)
+                    queue.NextExpiry = expires;
+                if (expires < _nextExpiry)
+                    _nextExpiry = expires;
+            }
             if (lease is not null)
                 Mark(entry, lease);
             return new ValueTask<EnqueueOutcome>(EnqueueOutcome.Enqueued);
@@ -141,6 +159,8 @@ public sealed class InMemoryMessageStore : IMessageStore
             PurgeExpired(queue, request.Now);
             DropIfEmpty(request.GrantPeerDid, queue);
 
+            // A budget below zero means what zero means: the first deliverable record and no more.
+            var budget = Math.Max(0L, request.MaxPayloadBytes);
             List<QueuedMessage>? taken = null;
             long total = 0;
             for (var node = queue.Order.First; node is not null; node = node.Next)
@@ -157,7 +177,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
                 // skip to a smaller one. The first record is taken whatever its size.
                 long size = message.Payload.Length;
-                if (taken is not null && size > request.MaxPayloadBytes - total)
+                if (taken is not null && size > budget - total)
                     break;
 
                 Mark(entry, request.Lease);
@@ -196,9 +216,10 @@ public sealed class InMemoryMessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
+    public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(grantPeerDid);
+        ArgumentNullException.ThrowIfNull(leaseId);
         var ids = Copy(messageIds);
         ct.ThrowIfCancellationRequested();
 
@@ -209,7 +230,8 @@ public sealed class InMemoryMessageStore : IMessageStore
             var released = 0;
             foreach (var id in ids)
             {
-                if (queue.ById.TryGetValue(id, out var entry) && entry.LeaseExpiresAt != default)
+                // Only the lease named: a record taken again since carries another id and stays leased.
+                if (queue.ById.TryGetValue(id, out var entry) && string.Equals(entry.LeaseId, leaseId, StringComparison.Ordinal))
                 {
                     Unmark(entry);
                     released++;
@@ -231,6 +253,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 return new ValueTask<int>(0);
             foreach (var entry in entries)
             {
+                entry.LeaseId = null;
                 entry.LeaseOwner = null;
                 entry.LeaseExpiresAt = default;
             }
@@ -312,22 +335,31 @@ public sealed class InMemoryMessageStore : IMessageStore
         ct.ThrowIfCancellationRequested();
 
         lock (_gate)
+            return new ValueTask<int>(PurgeExpiredEverywhere(now));
+    }
+
+    // Callers hold _gate. Removes every expired record of every grant and resets the store-wide
+    // earliest-expiry mark, which keeps the sweep on a full store to the calls that can free something.
+    private int PurgeExpiredEverywhere(DateTimeOffset now)
+    {
+        var removed = 0;
+        var next = DateTimeOffset.MaxValue;
+        List<string>? emptied = null;
+        foreach (var (grantPeerDid, queue) in _grants)
         {
-            var removed = 0;
-            List<string>? emptied = null;
-            foreach (var (grantPeerDid, queue) in _grants)
-            {
-                removed += PurgeExpired(queue, now);
-                if (queue.ById.Count == 0)
-                    (emptied ??= new List<string>()).Add(grantPeerDid);
-            }
-            if (emptied is not null)
-            {
-                foreach (var grantPeerDid in emptied)
-                    _grants.Remove(grantPeerDid);
-            }
-            return new ValueTask<int>(removed);
+            removed += PurgeExpired(queue, now);
+            if (queue.ById.Count == 0)
+                (emptied ??= new List<string>()).Add(grantPeerDid);
+            else if (queue.NextExpiry < next)
+                next = queue.NextExpiry;
         }
+        if (emptied is not null)
+        {
+            foreach (var grantPeerDid in emptied)
+                _grants.Remove(grantPeerDid);
+        }
+        _nextExpiry = next;
+        return removed;
     }
 
     // Callers hold _gate. Why a record cannot be admitted, or null when it can: the id first, then
@@ -352,8 +384,10 @@ public sealed class InMemoryMessageStore : IMessageStore
         var ids = new string[messageIds.Count];
         for (var i = 0; i < ids.Length; i++)
         {
-            ArgumentNullException.ThrowIfNull(messageIds[i], nameof(messageIds));
-            ids[i] = messageIds[i];
+            // Read once: the copy is what is checked and what is used, whatever the caller's list does next.
+            var id = messageIds[i];
+            ArgumentNullException.ThrowIfNull(id, nameof(messageIds));
+            ids[i] = id;
         }
         return ids;
     }
@@ -426,6 +460,7 @@ public sealed class InMemoryMessageStore : IMessageStore
     private void Mark(Entry entry, MessageLease lease)
     {
         Unmark(entry);
+        entry.LeaseId = lease.Id;
         entry.LeaseExpiresAt = lease.ExpiresAt;
         entry.LeaseOwner = lease.Owner;
         if (lease.Owner is { } owner)
@@ -445,16 +480,18 @@ public sealed class InMemoryMessageStore : IMessageStore
             if (entries.Count == 0)
                 _owners.Remove(owner);
         }
+        entry.LeaseId = null;
         entry.LeaseOwner = null;
         entry.LeaseExpiresAt = default;
     }
 
-    // One stored record with its lease mark. LeaseExpiresAt == default means "not leased"; a lease
-    // whose expiry has passed is ignored by the readers and overwritten by the next Mark.
+    // One stored record with its lease mark. LeaseId == null means "not leased"; a lease whose
+    // expiry has passed is ignored by the readers and overwritten by the next Mark.
     private sealed class Entry(QueuedMessage message)
     {
         public QueuedMessage Message { get; } = message;
         public LinkedListNode<Entry>? Node { get; set; }
+        public string? LeaseId { get; set; }
         public string? LeaseOwner { get; set; }
         public DateTimeOffset LeaseExpiresAt { get; set; }
     }

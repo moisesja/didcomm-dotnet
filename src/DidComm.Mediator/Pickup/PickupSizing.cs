@@ -24,7 +24,9 @@ namespace DidComm.Mediator.Pickup;
 /// packed bytes and refuses a message over the budget
 /// (<c>IReturnRouteSession.TrySendAsync(message, maxPackedBytes, ct)</c>), and the batch is then
 /// trimmed. A peer whose own DID document makes its envelopes larger than the allowance (many
-/// keys with long ids) gets smaller batches.
+/// keys with long ids) gets smaller batches, and a message that does not fit such a peer's
+/// envelope even alone stays queued: a request that meets it leaves it leased and goes on to
+/// the messages behind it.
 /// </para>
 /// </remarks>
 internal sealed class PickupSizing
@@ -45,7 +47,8 @@ internal sealed class PickupSizing
     internal const int MaxThreadIdLength = 512;
 
     internal const string TooSmallMessage =
-        "The value is too small to carry any message: a delivery needs room for its envelope and its own headers before the first payload byte.";
+        "The delivery budget (MaxDeliveryBytes, or DidCommOptions.MaxReceiveBytes when it is not set) is too small to carry any message with this MaxDeliveryBatch: " +
+        "a delivery needs room for its envelope, its own headers and one descriptor per attachment before the first payload byte.";
 
     public PickupSizing(MessagePickupOptions options, int maxReceiveBytes)
     {

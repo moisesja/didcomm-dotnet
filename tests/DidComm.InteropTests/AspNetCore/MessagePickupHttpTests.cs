@@ -559,8 +559,9 @@ public sealed class MessagePickupHttpTests
         var ack = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { queued[0].Id!, queued[1].Id! });
         (await mediator.AskAsync(wide, ack)).Status(ack.Id).MessageCount.Should().Be(0);
 
-        // A single admitted message that this recipient's envelope can never carry within the
-        // budget (JC-19): answered with status, within the budget, and the message stays queued.
+        // A single admitted message that this recipient's envelope cannot carry within the budget:
+        // the request that meets it is answered with the status, within the budget, and nothing
+        // is removed — the message stays queued and counted.
         var tooWide = await mediator.QueueAsync(wide, packedBytes: max);
         var third = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
         var thirdResponse = await mediator.PostAsync(wide, third);
@@ -568,7 +569,350 @@ public sealed class MessagePickupHttpTests
         var status = (await mediator.AnswerAsync(wide, thirdResponse)).Status(third.Id);
         status.MessageCount.Should().Be(1);
         status.TotalBytes.Should().Be(tooWide.Payload.Length);
-        mediator.Store.MessageCount.Should().Be(1 + control.Length, "nothing is dropped: the undeliverable message stays, and so does the control pair awaiting its acknowledgement");
+        mediator.Store.MessageCount.Should().Be(1 + control.Length, "nothing is dropped: the message that did not fit stays, and so does the control pair awaiting its acknowledgement");
+    }
+
+    [Fact]
+    public async Task A_message_its_recipients_envelope_cannot_carry_is_passed_over_by_the_request_that_meets_it_which_delivers_what_is_behind_it()
+    {
+        // A recipient with 38 key-agreement keys (about 78 KiB of envelope against the 32 KiB the
+        // estimate allows for) and a payload at the admission bound: admitted, yet its delivery is
+        // over the budget even alone. Nothing is removed (a request framed otherwise, a larger
+        // budget or a smaller envelope may still deliver it) and it is not given back either: it
+        // keeps the lease of the request that met it, and that same request looks further and
+        // delivers what is queued behind it. A status is the answer only when nothing deliverable
+        // is left. After its lease the message is first in line again and is tried once more, by a
+        // request that again goes on to what is behind it.
+        const int budget = 352 * Kibibyte;
+        const int small = 86 * Kibibyte;
+        var lease = TimeSpan.FromSeconds(60);
+        await using var mediator = await PickupEndpointHost.StartAsync(
+            pickup: o =>
+            {
+                o.MaxDeliveryBytes = budget;
+                o.LeaseTimeout = lease;
+            },
+            parkingStore: true);
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        var narrow = mediator.Recipient;
+        await mediator.EnrolAsync(wide);
+        await mediator.EnrolAsync(narrow);
+        var max = mediator.Queue.MaxAdmissiblePayloadBytes;
+
+        // The control: a one-key recipient with the same two payload sizes gets both.
+        var controlBig = await mediator.QueueAsync(narrow, packedBytes: max);
+        var controlSmall = await mediator.QueueAsync(narrow, packedBytes: small);
+        var control = await mediator.DrainAsync(narrow, request => mediator.AskAsync(narrow, request), budget, maxRequests: 2, acknowledge: true);
+        control.SelectMany(step => step.Delivered).Select(m => m.Id).Should().Equal(controlBig.Id, controlSmall.Id);
+        mediator.Store.MessageCount.Should().Be(0);
+
+        var big = await mediator.QueueAsync(wide, packedBytes: max);
+        var behind = await mediator.QueueAsync(wide, packedBytes: small);
+
+        // One delivery-request of the many-key recipient: its answer, within the budget, and what
+        // the store handed out in each lease round the request made.
+        async Task<(PickupAnswer Answer, IReadOnlyList<IReadOnlyList<string>> Rounds)> FetchAsync()
+        {
+            var calls = mediator.Parking.Leased.Count;
+            var request = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+            var response = await mediator.PostAsync(wide, request);
+            response.Body.Length.Should().BeLessThanOrEqualTo(budget, "whatever is queued, the packed answer fits max_delivery_bytes");
+            var answer = await mediator.AnswerAsync(wide, response);
+            answer.Message.Thid.Should().Be(request.Id);
+            return (answer, mediator.Parking.Leased.Skip(calls).ToList());
+        }
+
+        static (int Count, long? Bytes) Counted(PickupAnswer answer)
+        {
+            var status = answer.Status(answer.Message.Thid!);
+            return (status.MessageCount, status.TotalBytes);
+        }
+
+        // First request: the big message is met alone and does not fit; the same request looks
+        // further and delivers the message behind it. Nothing removed.
+        var first = await FetchAsync();
+        first.Rounds.Should().HaveCount(2, "one round that came to nothing, one that delivered");
+        first.Rounds[0].Should().Equal(big.Id);
+        first.Rounds[1].Should().Equal(behind.Id);
+        var delivered = first.Answer.Delivery(first.Answer.Message.Thid).Should().ContainSingle().Subject;
+        await mediator.ShouldBeRelayedAsync(wide, delivered, behind);
+        mediator.Store.MessageCount.Should().Be(2);
+
+        // Second request, the clock where it was: the big one is passed over, nothing else is
+        // deliverable: one round, a status — and the big one is still counted.
+        var second = await FetchAsync();
+        second.Rounds.Should().ContainSingle().Which.Should().BeEmpty();
+        Counted(second.Answer).Should().Be((2, big.Payload.Length + behind.Payload.Length), "the message that did not fit is still stored, due and unexpired: it is counted");
+        var ack = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { delivered.Id });
+        var afterAck = (await mediator.AskAsync(wide, ack)).Status(ack.Id);
+        (afterAck.MessageCount, afterAck.TotalBytes).Should().Be((1, (long?)big.Payload.Length), "the recipient never learned the big one's id, so it cannot acknowledge it away");
+        mediator.Store.MessageCount.Should().Be(1);
+        mediator.Store.TotalBytes.Should().Be(big.Payload.Length);
+
+        // A lease period later, with a new message behind it: the big one is first in line again
+        // and is tried once more — by a request that goes on to deliver what is behind it.
+        var later = await mediator.QueueAsync(wide, packedBytes: small);
+        mediator.Clock.Advance(lease);
+        var third = await FetchAsync();
+        third.Rounds.Should().HaveCount(2);
+        third.Rounds[0].Should().Equal(new[] { big.Id }, "after its lease the message is at its original position and is tried again");
+        third.Rounds[1].Should().Equal(later.Id);
+        var deliveredLater = third.Answer.Delivery(third.Answer.Message.Thid).Should().ContainSingle().Subject;
+        await mediator.ShouldBeRelayedAsync(wide, deliveredLater, later);
+        var ackLater = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { deliveredLater.Id });
+        (await mediator.AskAsync(wide, ackLater)).Status(ackLater.Id).MessageCount.Should().Be(1);
+
+        // Another lease period later with nothing behind it: tried once more, then a status.
+        mediator.Clock.Advance(lease);
+        var fourth = await FetchAsync();
+        fourth.Rounds.Should().HaveCount(2);
+        fourth.Rounds[0].Should().Equal(big.Id);
+        fourth.Rounds[1].Should().BeEmpty();
+        Counted(fourth.Answer).Should().Be((1, big.Payload.Length));
+
+        // Through all of it the mediator neither removed the big message nor gave its lease back.
+        mediator.Parking.Acknowledged.Should().NotContain(big.Id);
+        mediator.Parking.GivenBack.Should().NotContain(big.Id);
+        mediator.Store.MessageCount.Should().Be(1);
+
+        // It is logged by the pickup classes — once at Warning, then quietly — and the lines name
+        // no one and no message.
+        var sensitive = wide.Kids.Append(wide.Did).Append(mediator.Mediator).Append(big.Id!).Append(behind.Id!).Append(later.Id!).ToArray();
+        mediator.Logs.OfPickup.Where(r => r.Level >= LogLevel.Warning).Should().ContainSingle("the first message that does not fit is what an operator needs to see");
+        mediator.Logs.OfPickup.Where(r => sensitive.Any(v => r.Rendered.Contains(v, StringComparison.Ordinal))).Select(r => r.Rendered).Should().BeEmpty();
+
+        // What clears it is the host: a purge of the recipient DID's messages.
+        (await mediator.Store.PurgeRecipientAsync(wide.Did, wide.Did, default)).Should().Be(1);
+        var last = MessagePickup.CreateStatusRequest(wide.Did, mediator.Mediator);
+        (await mediator.AskAsync(wide, last)).Status(last.Id).Should().Be(new PickupStatus(0, TotalBytes: 0, LiveDelivery: false));
+        mediator.Store.MessageCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_recipient_that_polls_once_per_lease_period_or_slower_gets_what_is_queued_behind_a_message_that_cannot_be_carried_in_that_same_poll()
+    {
+        // The recipient asks once per poll and stops at whatever comes back, as the protocol page
+        // describes; its polls are 61 seconds apart, the lease is 60. So every poll finds the
+        // message that does not fit first in line again. Each poll still brings what arrived
+        // behind it, in that one request; a status means nothing deliverable is left.
+        const int budget = 352 * Kibibyte;
+        const int small = 86 * Kibibyte;
+        await using var mediator = await PickupEndpointHost.StartAsync(
+            pickup: o =>
+            {
+                o.MaxDeliveryBytes = budget;
+                o.LeaseTimeout = TimeSpan.FromSeconds(60);
+            },
+            parkingStore: true);
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        await mediator.EnrolAsync(wide);
+        var big = await mediator.QueueAsync(wide, packedBytes: mediator.Queue.MaxAdmissiblePayloadBytes);
+
+        for (var poll = 0; poll < 3; poll++)
+        {
+            var fresh = await mediator.QueueAsync(wide, packedBytes: small);
+            var calls = mediator.Parking.Leased.Count;
+
+            var request = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+            var response = await mediator.PostAsync(wide, request);
+
+            response.Body.Length.Should().BeLessThanOrEqualTo(budget);
+            var delivered = (await mediator.AnswerAsync(wide, response)).Delivery(request.Id).Should().ContainSingle().Subject;
+            await mediator.ShouldBeRelayedAsync(wide, delivered, fresh);
+            mediator.Parking.Leased.Skip(calls).Select(round => round.Single()).Should().Equal(new[] { big.Id, fresh.Id }, "the message that does not fit is tried once, then the one behind it is delivered");
+            var ack = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { delivered.Id });
+            (await mediator.AskAsync(wide, ack)).Status(ack.Id).MessageCount.Should().Be(1, "only the message that does not fit is left, and it is counted");
+
+            mediator.Clock.Advance(TimeSpan.FromSeconds(61));
+        }
+
+        // A poll with nothing new behind it: a status, and the recipient rightly stops.
+        var idle = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        var status = (await mediator.AskAsync(wide, idle)).Status(idle.Id);
+        status.MessageCount.Should().Be(1);
+        status.TotalBytes.Should().Be(big.Payload.Length);
+        mediator.Parking.Acknowledged.Should().NotContain(big.Id);
+        mediator.Store.MessageCount.Should().Be(1);
+        (await mediator.Store.PurgeGrantAsync(wide.Did, default)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_message_that_cannot_be_carried_counts_against_the_grants_quota_until_it_expires()
+    {
+        // The message that does not fit is retained like any other: it counts against the grant's
+        // quota while it is passed over, and it leaves by its own expiry.
+        const int budget = 352 * Kibibyte;
+        const int small = 86 * Kibibyte;
+        await using var mediator = await PickupEndpointHost.StartAsync(o =>
+        {
+            o.MaxDeliveryBytes = budget;
+            o.MaxQueueMessages = 2;
+        });
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        await mediator.EnrolAsync(wide);
+        var max = mediator.Queue.MaxAdmissiblePayloadBytes;
+        var expires = mediator.Clock.Now.ToUnixTimeSeconds() + 300;
+
+        var big = await mediator.PackFromAliceAsync(wide, packedBytes: max);
+        (await mediator.Queue.DeliverAsync(wide.Did, big.Payload, new PickupDeliveryOptions(ExpiresTime: expires))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        var met = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(wide, met)).Status(met.Id).MessageCount.Should().Be(1, "it does not fit even alone: a status, and it stays");
+
+        // Passed over, and still one of the two messages the grant may hold.
+        var behind = await mediator.QueueAsync(wide, packedBytes: small);
+        await mediator.QueueAsync(wide, packedBytes: small, expected: PickupDeliveryOutcome.QueueFull);
+        var fetch = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(wide, fetch)).Delivery(fetch.Id).Should().ContainSingle().Which.Id.Should().Be(behind.Id);
+        var ack = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { behind.Id! });
+        (await mediator.AskAsync(wide, ack)).Status(ack.Id).MessageCount.Should().Be(1);
+        mediator.Store.MessageCount.Should().Be(1);
+
+        // Its expiry passes: it is no longer counted, and its place in the quota is free again.
+        mediator.Clock.Advance(TimeSpan.FromSeconds(301));
+        var afterExpiry = MessagePickup.CreateStatusRequest(wide.Did, mediator.Mediator);
+        (await mediator.AskAsync(wide, afterExpiry)).Status(afterExpiry.Id).Should().Be(new PickupStatus(0, TotalBytes: 0, LiveDelivery: false));
+        await mediator.QueueAsync(wide, packedBytes: small);
+        await mediator.QueueAsync(wide, packedBytes: small);
+        mediator.Store.MessageCount.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_queue_of_small_big_small_for_a_many_key_recipient_delivers_both_small_ones_once_in_two_requests_and_keeps_the_big_one(bool bigOneJoinsTheFirstBatch)
+    {
+        // false: every payload is for the recipient's own 38-key DID, so even a small one is 86 KiB
+        //        and the batch estimate never puts the big one beside it; the big one is met alone.
+        // true:  the payloads are for a one-key DID the recipient registered, so the small ones are
+        //        about 1 KiB and the estimate takes all three for the first request; the session
+        //        refuses the batch of three and the batch of two, and the first message goes alone.
+        // Either way: the first request delivers the first small message; the second meets the big
+        // one, which does not fit even alone and keeps that request's lease, looks further and
+        // delivers the other small one. Requests needed: one per delivery — a message that does
+        // not fit costs none — with the clock where it was.
+        const int budget = 352 * Kibibyte;
+        await using var mediator = await PickupEndpointHost.StartAsync(o => o.MaxDeliveryBytes = budget);
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        var max = mediator.Queue.MaxAdmissiblePayloadBytes;
+        TestPeer addressee;
+        int? smallSize;
+        int bigSize;
+        if (bigOneJoinsTheFirstBatch)
+        {
+            addressee = (await mediator.Host.CreatePeersAsync(1))[0];
+            await mediator.EnrolAsync(wide, wide.Did, addressee.Did);
+            smallSize = null;
+            bigSize = max - 4 * Kibibyte;
+        }
+        else
+        {
+            addressee = wide;
+            await mediator.EnrolAsync(wide);
+            smallSize = 86 * Kibibyte;
+            bigSize = max;
+        }
+
+        var first = await mediator.QueueAsync(addressee, packedBytes: smallSize);
+        var big = await mediator.QueueAsync(addressee, packedBytes: bigSize);
+        var last = await mediator.QueueAsync(addressee, packedBytes: smallSize);
+        var all = first.Payload.Length + big.Payload.Length + last.Payload.Length;
+        if (bigOneJoinsTheFirstBatch)
+            all.Should().BeLessThanOrEqualTo(max, "all three are within the batch byte budget, so the estimate takes them together");
+        else
+            (first.Payload.Length + big.Payload.Length).Should().BeGreaterThan(max, "the estimate never puts the big one in a batch with another");
+
+        var steps = await mediator.DrainAsync(wide, request => mediator.AskAsync(wide, request), budget, maxRequests: 2, acknowledge: true, left: 1);
+
+        var delivered = steps.SelectMany(step => step.Delivered).ToList();
+        delivered.Select(m => m.Id).Should().Equal(new[] { first.Id, last.Id }, "both small messages arrive, each once and in order; the big one never does");
+        await mediator.ShouldBeRelayedAsync(addressee, delivered[0], first);
+        await mediator.ShouldBeRelayedAsync(addressee, delivered[1], last);
+        steps.Count.Should().BeLessThanOrEqualTo(2, "one request per delivery; the message that does not fit costs none");
+        steps[^1].Status!.MessageCount.Should().Be(1, "the big one is still queued, and counted");
+        steps[^1].Status!.TotalBytes.Should().Be(big.Payload.Length);
+        mediator.Store.MessageCount.Should().Be(1, "the small ones were acknowledged; the big one was not removed");
+        mediator.Store.TotalBytes.Should().Be(big.Payload.Length);
+
+        // What clears it is the host: a purge of the grant's messages.
+        (await mediator.Store.PurgeGrantAsync(wide.Did, default)).Should().Be(1);
+        var after = MessagePickup.CreateStatusRequest(wide.Did, mediator.Mediator);
+        (await mediator.AskAsync(wide, after)).Status(after.Id).Should().Be(new PickupStatus(0, TotalBytes: 0, LiveDelivery: false));
+    }
+
+    [Fact]
+    public async Task A_message_too_large_for_a_request_on_a_long_thread_id_is_kept_and_delivered_by_an_ordinary_request_once_that_requests_lease_has_ended()
+    {
+        // "Does not fit even alone" is judged on the delivery built for the request at hand, and
+        // that delivery repeats the request's thread id — up to 512 characters the recipient
+        // chooses (a recipient_did filter is repeated too). For a recipient whose envelope is
+        // larger than the allowance (38 keys here) a payload can sit so close to the budget that
+        // its delivery fits on an ordinary thread and not on a long one. So the verdict of one
+        // request says nothing final about the message: it is never removed. It keeps the lease of
+        // the request that could not carry it, and when that lease has ended a request that can
+        // carry it delivers it.
+        const int budget = 352 * Kibibyte;
+        var lease = TimeSpan.FromSeconds(60);
+        await using var mediator = await PickupEndpointHost.StartAsync(
+            pickup: o =>
+            {
+                o.MaxDeliveryBytes = budget;
+                o.LeaseTimeout = lease;
+            },
+            parkingStore: true);
+        var wide = await mediator.CreateManyKeyPeerAsync(38);
+        await mediator.EnrolAsync(wide);
+
+        // Measure this recipient: one known payload and the size of its packed delivery.
+        var known = await mediator.QueueAsync(wide, packedBytes: 86 * Kibibyte);
+        var measure = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        var measured = await mediator.PostAsync(wide, measure);
+        (await mediator.AnswerAsync(wide, measured)).Delivery(measure.Id).Should().ContainSingle();
+        var ackKnown = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { known.Id! });
+        (await mediator.AskAsync(wide, ackKnown)).Status(ackKnown.Id).MessageCount.Should().Be(0);
+
+        // A payload whose delivery on an ordinary thread comes out about 320 bytes under the budget
+        // (a packed delivery grows by 16/9 of its payload). A 512-character thread instead of a
+        // 36-character one adds at least 600 bytes to it.
+        var size = known.Payload.Length + (int)((budget - 320L - measured.Body.Length) * 9 / 16);
+
+        // On an ordinary thread a message of that size is delivered, within the budget.
+        var plain = await mediator.QueueAsync(wide, packedBytes: size);
+        var ordinary = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        var ordinaryResponse = await mediator.PostAsync(wide, ordinary);
+        ordinaryResponse.Body.Length.Should().BeInRange(budget - 599, budget, "the delivery fits, and by less than a long thread id adds");
+        (await mediator.AnswerAsync(wide, ordinaryResponse)).Delivery(ordinary.Id).Should().ContainSingle().Which.Id.Should().Be(plain.Id);
+        var ackPlain = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { plain.Id! });
+        (await mediator.AskAsync(wide, ackPlain)).Status(ackPlain.Id).MessageCount.Should().Be(0);
+
+        // The same size again, asked for on a 512-character thread: too large for this request.
+        var again = await mediator.QueueAsync(wide, packedBytes: size);
+        var longThread = new string('t', 512);
+        var heavy = mediator.Raw(wide, MessagePickup.DeliveryRequestType, new JsonObject { ["limit"] = 10 }, thid: longThread);
+        var heavyResponse = await mediator.PostAsync(wide, heavy);
+        heavyResponse.Body.Length.Should().BeLessThanOrEqualTo(budget);
+        var status = (await mediator.AnswerAsync(wide, heavyResponse)).Status(longThread);
+        status.MessageCount.Should().Be(1, "an ordinary request delivers a message of this very size, so it is not one that can never be delivered");
+        status.TotalBytes.Should().Be(again.Payload.Length);
+        mediator.Store.MessageCount.Should().Be(1);
+
+        // It keeps that request's lease: an ordinary request inside it is not given the message.
+        var within = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        (await mediator.AskAsync(wide, within)).Status(within.Id).MessageCount.Should().Be(1);
+
+        // Once that lease has ended, an ordinary request delivers it, within the budget.
+        mediator.Clock.Advance(lease);
+        var after = MessagePickup.CreateDeliveryRequest(wide.Did, mediator.Mediator, 10);
+        var afterResponse = await mediator.PostAsync(wide, after);
+        afterResponse.Body.Length.Should().BeLessThanOrEqualTo(budget);
+        await mediator.ShouldBeRelayedAsync(wide, (await mediator.AnswerAsync(wide, afterResponse)).Delivery(after.Id).Should().ContainSingle().Subject, again);
+
+        // Nothing was ever removed by the mediator on its own: the only ids it asked the store to
+        // remove are the ones the recipient acknowledged.
+        mediator.Parking.Acknowledged.Should().BeEquivalentTo(new[] { known.Id, plain.Id });
+        mediator.Parking.GivenBack.Should().NotContain(again.Id, "a message that did not fit alone is not given back: it keeps the lease");
+        var ackAgain = MessagePickup.CreateMessagesReceived(wide.Did, mediator.Mediator, new[] { again.Id! });
+        (await mediator.AskAsync(wide, ackAgain)).Status(ackAgain.Id).MessageCount.Should().Be(0);
+        mediator.Store.MessageCount.Should().Be(0);
     }
 
     // ---- no session, no authcrypt (FR-PICK-01, JC-9) ----------------------------------------

@@ -124,7 +124,8 @@ public static class MessagePickup
     /// <param name="idGenerator">Optional id generator; the default is a UUID v4.</param>
     public static Message CreateDeliveryRequest(string from, string mediator, int limit, string? recipientDid = null, IMessageIdGenerator? idGenerator = null)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(limit);
+        if (limit < 0)
+            throw new ArgumentOutOfRangeException(nameof(limit), "The limit must not be negative.");
         RequireOptionalDid(recipientDid, nameof(recipientDid));
         return Start(DeliveryRequestType, from, mediator, idGenerator)
             .WithBody(PickupBodies.WriteDeliveryRequest(LimitMember, limit, recipientDid))
@@ -229,7 +230,7 @@ public static class MessagePickup
 
     /// <summary>Read a <c>status</c>.</summary>
     /// <param name="message">The message to inspect.</param>
-    /// <param name="status">The reported queue state. Integers beyond the 64-bit range are clamped.</param>
+    /// <param name="status">The reported queue state. <c>message_count</c> beyond the 32-bit range, and the other integers beyond the 64-bit range, are clamped.</param>
     /// <exception cref="MalformedMessageException">It is a <c>status</c> without <c>message_count</c>, or a member has the wrong JSON type, is negative, or (for <c>recipient_did</c>) is empty or over the bound.</exception>
     public static bool TryParseStatus(Message message, [NotNullWhen(true)] out PickupStatus? status)
     {
@@ -288,7 +289,9 @@ public static class MessagePickup
     /// <see cref="TryParseMessagesReceived(Message, out IReadOnlyList{string}?)"/> with a bound on
     /// the number of ids, as the mediator applies it (FR-PICK-10). A longer list is malformed, and
     /// it is refused from its length alone: before the body is re-read and before any entry is
-    /// decoded or allocated, so what sits beyond the bound is never looked at.
+    /// decoded, so what sits beyond the bound is never looked at. For a message as it arrives off
+    /// the wire nothing is allocated per entry either; a body a host assembled or parsed lazily
+    /// costs one small node per entry to count.
     /// </summary>
     internal static bool TryParseMessagesReceived(Message message, int maxIds, [NotNullWhen(true)] out IReadOnlyList<string>? messageIds)
     {

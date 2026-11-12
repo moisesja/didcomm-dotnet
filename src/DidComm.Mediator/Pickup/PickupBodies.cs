@@ -29,8 +29,8 @@ internal enum PickupTimeUnit
 /// <remarks>
 /// Every reader throws <see cref="MalformedMessageException"/> for a wrong shape and never quotes a
 /// wire value: the text names the member and the rule. A DID or id member is checked against the
-/// FR-API-09 bound (<see cref="MaxIdLength"/> UTF-16 code units, one length comparison) before
-/// anything else looks at it. Unknown members are ignored, and an explicit <c>null</c> for an
+/// FR-API-09 bound (<see cref="MaxIdLength"/> UTF-16 code units, one length comparison) as soon as
+/// it has been read as a string, before any DID parse or store lookup sees it. Unknown members are ignored, and an explicit <c>null</c> for an
 /// optional member reads as absent.
 /// </remarks>
 internal static class PickupBodies
@@ -145,8 +145,9 @@ internal static class PickupBodies
     /// <summary>
     /// The REQUIRED batch limit of a <c>delivery-request</c>, under <paramref name="limitMember"/>.
     /// An integer of any size is clamped to <see cref="int"/>; zero is valid (it asks for nothing);
-    /// a negative value, a non-zero fraction or a string is malformed. Reading it allocates nothing
-    /// that depends on its value.
+    /// a negative value, a non-zero fraction or a string is malformed. Reading it does no work that
+    /// depends on the number it spells (the text of a literal beyond 64 bits is copied once, within
+    /// the size of the message that carried it).
     /// </summary>
     public static int ReadLimit(JsonElement body, string limitMember, string message)
     {
@@ -245,13 +246,15 @@ internal static class PickupBodies
 
     private static byte[] ReadPayload(AttachmentData? data, string message)
     {
-        if (!string.IsNullOrEmpty(data?.Base64))
+        if (data?.Base64 is { } text)
         {
+            // Present but empty is zero bytes: what the builder writes for an empty payload.
+            if (text.Length == 0)
+                return Array.Empty<byte>();
             try
             {
                 // Lenient on receive: padding is tolerated, and so is the standard alphabet (the two
                 // alphabets differ only in '+' '/' against '-' '_', so accepting both is unambiguous).
-                var text = data.Base64;
                 if (text.AsSpan().IndexOfAny('+', '/') >= 0)
                     text = text.Replace('+', '-').Replace('/', '_');
                 return Base64Url.DecodeRelaxed(text);

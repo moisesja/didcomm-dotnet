@@ -115,16 +115,23 @@ internal sealed class PickupSessionTracker
     /// </summary>
     public void ReleaseLeasesInBackground(string ownerToken)
     {
-        _ = Task.Run(async () =>
+        // Unsafe queue: the closing thread's ExecutionContext (its AsyncLocals, an ambient request)
+        // does not flow into store code that runs after that thread has moved on.
+        ThreadPool.UnsafeQueueUserWorkItem(
+            static work => _ = work.Tracker.ReleaseLeasesAsync(work.OwnerToken),
+            (Tracker: this, OwnerToken: ownerToken),
+            preferLocal: false);
+    }
+
+    private async Task ReleaseLeasesAsync(string ownerToken)
+    {
+        try
         {
-            try
-            {
-                await _store.ReleaseLeasesAsync(ownerToken, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                MediatorLog.Write(_logger, LogLevel.Warning, "Message pickup: the leases of a closed session could not be released ({ExceptionType}); they end by timeout.", ex.GetType().Name);
-            }
-        });
+            await _store.ReleaseLeasesAsync(ownerToken, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            MediatorLog.Write(_logger, LogLevel.Warning, "Message pickup: the leases of a closed session could not be released ({ExceptionType}); they end by timeout.", ex.GetType().Name);
+        }
     }
 }

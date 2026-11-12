@@ -19,7 +19,12 @@ public sealed record PickupStatus(
     long? NewestReceivedTime = null,
     long? OldestReceivedTime = null,
     long? TotalBytes = null,
-    bool? LiveDelivery = null);
+    bool? LiveDelivery = null)
+{
+    /// <summary>The numbers and the flag only: the recipient DID is not printed, so a logged instance carries no wire identifier.</summary>
+    public override string ToString()
+        => $"PickupStatus {{ MessageCount = {MessageCount}, LongestWaitedSeconds = {LongestWaitedSeconds}, NewestReceivedTime = {NewestReceivedTime}, OldestReceivedTime = {OldestReceivedTime}, TotalBytes = {TotalBytes}, LiveDelivery = {LiveDelivery} }}";
+}
 
 /// <summary>
 /// One message carried by a <c>delivery</c>: an attachment <c>{"id": …, "data": {"base64": …}}</c>

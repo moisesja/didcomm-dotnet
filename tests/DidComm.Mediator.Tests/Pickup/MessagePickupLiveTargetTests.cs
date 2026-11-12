@@ -173,7 +173,7 @@ public sealed class MessagePickupLiveTargetTests
         var socket = fixture.Session(peer, mediator, live: true);
         await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket);
         socket.OnSend = (_, _) => ReturnRouteSendResult.NotSent;
-        fixture.FakeStore!.OnRelease = (_, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
+        fixture.FakeStore!.OnRelease = (_, _, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
 
         var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20));
 
