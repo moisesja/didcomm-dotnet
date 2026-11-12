@@ -711,7 +711,9 @@ How a request is handled (`CoordinateMediationHandler.HandleAsync` → `Mediatio
 The store (`InMemoryMediationStore`): one lock for every change, so "is this DID free?" and
 "register it" are one step; a concurrent index from recipient DID to its grant for the forward
 lookup, read without the lock; registration order kept per grant for stable paging; three bounds
-(`MaxGrants`, `MaxRecipientsPerGrant`, `MaxRecipients`). Ownership (one grant per recipient DID) is
+(`MaxGrants` 1 000, `MaxRecipientsPerGrant` 256, `MaxRecipients` 10 000 by default — modest, because
+the in-memory store is for samples, tests and small hosts; about 45 MB of keys in the worst case).
+Ownership (one grant per recipient DID) is
 the store's rule, not the policy's: a custom policy can only add refusals.
 
 Faults: a store, policy or identity that throws, or returns something unusable, never leaves the
@@ -726,8 +728,10 @@ Documented limits:
 - **A registration oracle toward enrolled peers.** `client_error` on an `add` tells a peer with a
   grant that another grant holds the DID. Unauthenticated callers learn nothing.
 - **Open enrolment fills the store.** The default policy grants any authcrypt sender and grants do
-  not expire. Self-made DIDs can exhaust `MaxGrants` and `MaxRecipients`; existing grants keep
-  working. A public mediator needs an allow-list or rate limit in its policy.
+  not expire on their own (owner decision: the protocol has no message that tells a recipient its
+  grant lapsed; a host ends a grant with `RevokeAsync`). Self-made DIDs can exhaust `MaxGrants` and
+  `MaxRecipients`; existing grants keep working. A public mediator needs an allow-list or rate
+  limit in its policy.
 - **Forward lookup.** One probe either way; a hit compares one key more than a miss (the same as
   `InMemoryForwardRecipientRegistry`).
 - **Revocation.** `RevokeAsync` stops new forwards for the grant's DIDs. A forward already admitted

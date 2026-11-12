@@ -73,8 +73,10 @@ follow. No existing package changes behaviour.
   A DID belongs to the first grant that registers it, and the check and the insert are one step
   under one lock, so two peers can never both get the same DID. The store reports what happened to
   each update as a `RecipientStoreOutcome`; the handler turns that into the protocol's `result`, so
-  a custom store never deals in wire values. Three bounds, all configurable: `MaxGrants` (10 000),
-  `MaxRecipientsPerGrant` (256), `MaxRecipients` (100 000). The lookup the forward path uses,
+  a custom store never deals in wire values. Three bounds, all configurable: `MaxGrants` (1 000),
+  `MaxRecipientsPerGrant` (256), `MaxRecipients` (10 000) — modest on purpose, since the in-memory
+  store is for samples, tests and small hosts; its keys take about 45 MB in the worst case at those
+  defaults. The lookup the forward path uses,
   `FindGrantByRecipientDidAsync`, is one probe that takes no lock and does the same work whether or
   not the DID is registered. `RevokeAsync` ends a grant and frees its DIDs. Only the in-memory store
   ships; a durable one is the host's (epic decision 1), and the interface's remarks state the
