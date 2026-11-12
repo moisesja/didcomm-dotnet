@@ -213,6 +213,33 @@ internal sealed class HandlerFakeIdentity : IMediatorIdentity
     }
 }
 
+/// <summary>
+/// A routing-DID list whose enumeration fails: at once, or after yielding its first entries (a
+/// cursor that died, a collection changed underneath the reader).
+/// </summary>
+internal sealed class HandlerFaultyDids(int yieldFirst, params string[] dids) : IReadOnlyList<string>
+{
+    public int Count => dids.Length + 1;
+
+    public string this[int index] => index < yieldFirst ? dids[index] : throw new HandlerBoomException(HandlerBoomException.Marker);
+
+    public IEnumerator<string> GetEnumerator()
+    {
+        if (yieldFirst == 0)
+            throw new HandlerBoomException(HandlerBoomException.Marker);
+        return Enumerate();
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+    private IEnumerator<string> Enumerate()
+    {
+        for (var i = 0; i < yieldFirst; i++)
+            yield return dids[i];
+        throw new HandlerBoomException(HandlerBoomException.Marker);
+    }
+}
+
 /// <summary>A return-route session that records what a handler pushed onto it (nothing is expected).</summary>
 internal sealed class HandlerFakeSession(string peerDid, string localDid) : IReturnRouteSession
 {

@@ -152,9 +152,42 @@ internal static class MediationBodies
         return dids;
     }
 
-    public static IReadOnlyList<RecipientUpdate> ReadUpdates(JsonElement body, string message)
+    /// <summary>
+    /// Refuse an <c>updates</c> list longer than <paramref name="maxEntries"/> from the body as it
+    /// arrived, before the body is re-read and before any entry is looked at: the entries are
+    /// counted, never decoded. A body without an <c>updates</c> array passes; the reader reports
+    /// that.
+    /// </summary>
+    public static void RequireUpdatesWithin(JsonObject? body, int maxEntries, string message)
+    {
+        if (body is null)
+            return;
+
+        int count;
+        try
+        {
+            if (!body.TryGetPropertyValue(Updates, out var node) || node is not JsonArray array)
+                return;
+            count = array.Count;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException)
+        {
+            // A body the node API cannot index (the same member name twice). Not a way round the
+            // bound: ReadUpdates applies it again from the array's length, before it allocates.
+            return;
+        }
+
+        if (count > maxEntries)
+            throw TooManyUpdates(maxEntries, message);
+    }
+
+    public static IReadOnlyList<RecipientUpdate> ReadUpdates(JsonElement body, string message, int maxEntries = int.MaxValue)
     {
         var array = RequireArray(body, Updates, message);
+        // The length is known without visiting the entries; nothing is allocated for a list that
+        // is over the bound, and no entry of it is read.
+        if (array.GetArrayLength() > maxEntries)
+            throw TooManyUpdates(maxEntries, message);
         var updates = new List<RecipientUpdate>(array.GetArrayLength());
         foreach (var entry in array.EnumerateArray())
         {
@@ -245,6 +278,9 @@ internal static class MediationBodies
         RecipientUpdateOutcome.Success => ResultSuccess,
         _ => throw new ArgumentOutOfRangeException(nameof(result)),
     };
+
+    private static MalformedMessageException TooManyUpdates(int maxEntries, string message)
+        => new($"{message} '{Updates}' has more than {maxEntries} entries.");
 
     private static JsonElement RequireMember(JsonElement body, string name, string message)
     {

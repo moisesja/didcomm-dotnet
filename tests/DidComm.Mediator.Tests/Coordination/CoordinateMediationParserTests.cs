@@ -377,6 +377,110 @@ public sealed class CoordinateMediationParserTests
         CoordinateMediation.TryParseMediateRequest(request).Should().BeTrue();
     }
 
+    // ---- the entry bound of recipient-update (FR-MED-08) ----------------------------------
+
+    [Fact]
+    public void The_entry_bound_accepts_up_to_the_limit_and_the_public_parser_has_none()
+    {
+        var three = """{"updates":[{"recipient_did":"did:example:a","action":"add"},{"recipient_did":"did:example:b","action":"add"},{"recipient_did":"did:example:c","action":"remove"}]}""";
+
+        CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", three), 3, out var atLimit).Should().BeTrue();
+        atLimit.Should().HaveCount(3);
+        CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", three), int.MaxValue, out var unbounded).Should().BeTrue();
+        unbounded.Should().HaveCount(3);
+        CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", """{"updates":[]}"""), 1, out var none).Should().BeTrue();
+        none.Should().BeEmpty();
+
+        var ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", three), 2, out _));
+        ex.Message.Should().Be("recipient-update 'updates' has more than 2 entries.");
+
+        // The bound is the mediator's; someone parsing with the public method gets every entry.
+        var many = "{\"updates\":[" + string.Join(",", Enumerable.Range(0, 3000).Select(i => $$"""{"recipient_did":"did:example:r{{i}}","action":"add"}""")) + "]}";
+        CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", many), out var all).Should().BeTrue();
+        all.Should().HaveCount(3000);
+
+        // Another message type is still "not mine", whatever the bound.
+        CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-query", three), 1, out var other).Should().BeFalse();
+        other.Should().BeNull();
+    }
+
+    public static TheoryData<string, string> PoisonBeyondTheBound => new()
+    {
+        { "an unknown action in the second entry", """{"updates":[{"recipient_did":"did:example:a","action":"add"},{"recipient_did":"did:example:SENTINEL","action":"SENTINEL-upsert"}]}""" },
+        { "an unknown action in the first entry too", """{"updates":[{"recipient_did":"did:example:SENTINEL","action":"SENTINEL-1"},{"recipient_did":"did:example:SENTINEL","action":"SENTINEL-2"}]}""" },
+        { "an entry that is not an object", """{"updates":[{"recipient_did":"did:example:a","action":"add"},7]}""" },
+        { "an entry without recipient_did", """{"updates":[{"recipient_did":"did:example:a","action":"add"},{"action":"add"}]}""" },
+        { "a recipient_did over the length bound", "{\"updates\":[{\"recipient_did\":\"did:example:a\",\"action\":\"add\"},{\"recipient_did\":\"did:example:SENTINEL" + new string('a', 2049) + "\",\"action\":\"add\"}]}" },
+        // Reading this entry back throws inside System.Text.Json, and so would re-reading the body
+        // as a whole: the count has to be taken before either.
+        { "an unpaired surrogate escape", """{"updates":[{"recipient_did":"did:example:a","action":"add"},{"recipient_did":"did:example:SENTINEL\ud800","action":"add"}]}""" },
+        { "an unpaired surrogate escape in a member name", """{"updates":[{"recipient_did":"did:example:a","action":"add"},{"SENTINEL\udc00":1}]}""" },
+    };
+
+    [Theory]
+    [MemberData(nameof(PoisonBeyondTheBound))]
+    public void An_oversized_list_is_refused_from_its_length_before_any_entry_is_read(string what, string body)
+    {
+        // Regression (PR #106 review): the bound used to be applied after the whole list had been
+        // decoded, so a list over the bound was reported by whatever was wrong with one of its
+        // entries, and every entry had been allocated by then. With a bound of 1 and two entries,
+        // the answer must be the count, whatever the entries hold. The body is parsed lazily, as
+        // System.Text.Json hands it over: the receive path would refuse the surrogate cases at
+        // unpack, so they are presented the way a host-built message can present them.
+        var message = new MessageBuilder().WithType(P + "/recipient-update").WithBody(JsonNode.Parse(body)!.AsObject()).Build();
+
+        var ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(message, 1, out _));
+
+        ex.Message.Should().Be("recipient-update 'updates' has more than 1 entries.", what);
+    }
+
+    [Fact]
+    public void Within_the_bound_a_bad_entry_is_still_reported_as_itself()
+    {
+        var ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(
+            Raw(P + "/recipient-update", """{"updates":[{"recipient_did":"did:example:a","action":"add"},{"recipient_did":"did:example:SENTINEL","action":"SENTINEL-upsert"}]}"""), 2, out _));
+        ex.Message.Should().Contain("'action'");
+
+        // And a list that is not a list is the reader's finding, bound or no bound.
+        ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", """{"updates":"SENTINEL"}"""), 1, out _));
+        ex.Message.Should().Contain("must be an array");
+        ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(Raw(P + "/recipient-update", null), 1, out _));
+        ex.Message.Should().Contain("missing");
+    }
+
+    [Fact]
+    public void A_body_that_names_updates_twice_cannot_slip_past_the_bound()
+    {
+        // The receive path refuses duplicate member names at unpack. A host that hands the parser
+        // its own JSON can still present them; the node API cannot index such a body, and the
+        // bound is then applied from the array the reader will use (the last one), before it
+        // allocates anything.
+        var entry = """{"recipient_did":"did:example:a","action":"add"}""";
+        var body = JsonNode.Parse($$"""{"updates":[{{entry}}],"updates":[{{entry}},{{entry}},{{entry}}]}""")!.AsObject();
+        var message = new MessageBuilder().WithType(P + "/recipient-update").WithBody(body).Build();
+
+        var ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(message, 1, out _));
+        ex.Message.Should().Be("recipient-update 'updates' has more than 1 entries.");
+
+        CoordinateMediation.TryParseRecipientUpdate(message, 3, out var updates).Should().BeTrue();
+        updates.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public void A_body_built_in_code_is_counted_like_one_read_from_text()
+    {
+        var body = new JsonObject
+        {
+            ["updates"] = new JsonArray(
+                new JsonObject { ["recipient_did"] = "did:example:a", ["action"] = "add" },
+                new JsonObject { ["recipient_did"] = "did:example:SENTINEL", ["action"] = "SENTINEL-upsert" }),
+        };
+        var message = new MessageBuilder().WithType(P + "/recipient-update").WithBody(body).Build();
+
+        Refused(() => CoordinateMediation.TryParseRecipientUpdate(message, 1, out _))
+            .Message.Should().Be("recipient-update 'updates' has more than 1 entries.");
+    }
+
     // ---- BareDid (FR-MED-05) --------------------------------------------------------------
 
     [Theory]

@@ -24,8 +24,10 @@ public sealed class CoordinateMediationOptions
 
     /// <summary>
     /// The largest number of entries one <c>recipient-update</c> may carry. A longer list is refused
-    /// as malformed before any entry is looked at, so one message cannot buy unbounded work.
-    /// Default 1024.
+    /// as malformed from its length alone: no entry is decoded, checked or allocated, and the store
+    /// and the policy are not called. What it bounds is the per-entry work (DID parsing, policy
+    /// calls, store operations, the size of the reply); the message itself was already parsed once
+    /// on receipt, within <c>DidCommOptions.MaxReceiveBytes</c>. Default 1024.
     /// </summary>
     public int MaxUpdatesPerMessage { get; set; } = 1024;
 

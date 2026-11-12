@@ -148,7 +148,8 @@ internal sealed class MediationCoordinator
         if (updates.Count == 0)
             return results;
 
-        // The grant first, so a peer without one costs no DID parse and no policy call.
+        // The grant first, so a peer without one costs no DID parse and no policy call. The list
+        // of the mediator's own DIDs is built in the same boundary: it fails with the guard.
         List<string>? own;
         try
         {
@@ -158,7 +159,7 @@ internal sealed class MediationCoordinator
         catch (Exception ex)
         {
             ThrowIfCancelled(ct);
-            Log(LogLevel.Error, "Coordinate-mediation update {MessageId}: {ExceptionType} from the store; every entry answered server_error.", LogId(messageId), ex.GetType().Name);
+            Log(LogLevel.Error, "Coordinate-mediation update {MessageId}: {ExceptionType} from the store or the identity provider; nothing applied, every entry answered server_error.", LogId(messageId), ex.GetType().Name);
             return Fill(results, updates, RecipientUpdateOutcome.ServerError);
         }
         if (own is null)
@@ -336,19 +337,15 @@ internal sealed class MediationCoordinator
     }
 
     // The DIDs that are this mediator: the one that decrypted the request, the routing DIDs it
-    // grants (configured, and those in the caller's grant) and the host's own identifiers.
+    // grants (those in the caller's grant, and the ones configured now, which may be newer than the
+    // grant) and the host's own identifiers. Nothing is caught here: this list is the input of a
+    // refusal, so if any part of it cannot be read the caller's fault boundary answers
+    // server_error and applies nothing. A list with a hole in it would let the missing DID through.
     private List<string> OwnDids(string localDid, MediationGrant grant, DidCommOptions options)
     {
         var own = new List<string> { localDid };
         AddSubjects(own, grant.RoutingDids);
-        try
-        {
-            AddSubjects(own, _identity.RoutingDids);
-        }
-        catch
-        {
-            // A faulting identity provider adds nothing here; a mediate-request reports it.
-        }
+        AddSubjects(own, _identity.RoutingDids);
         AddSubjects(own, options.OwnIdentifiers);
         return own;
     }

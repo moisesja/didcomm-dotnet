@@ -10,7 +10,10 @@ namespace DidComm.Mediator.Coordination;
 /// list is empty the grant carries the DID that decrypted the <c>mediate-request</c> — the mediator
 /// DID the recipient already addressed. Each entry must be a bare DID of at most 2048 characters
 /// whose DID document has a <c>DIDCommMessaging</c> service with an <c>http(s)</c> or <c>ws(s)</c>
-/// endpoint; a grant that could not be built from the list is not sent.
+/// endpoint; a grant that could not be built from the list is not sent. The list is also read for
+/// every <c>recipient-update</c>, to refuse the mediator's own DIDs as recipients: if reading it
+/// throws, that update is answered <c>server_error</c> for every entry and nothing is applied.
+/// Implementations are singletons and MUST be thread-safe.
 /// </remarks>
 public interface IMediatorIdentity
 {

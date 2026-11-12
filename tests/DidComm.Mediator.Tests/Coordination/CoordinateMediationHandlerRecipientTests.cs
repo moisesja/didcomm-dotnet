@@ -195,6 +195,124 @@ public sealed class CoordinateMediationHandlerRecipientTests
     }
 
     [Fact]
+    public async Task A_routing_did_configured_after_the_grant_was_issued_is_still_refused()
+    {
+        // Bob's grant names routing DID A. The mediator then starts granting B. B is in no grant
+        // of Bob's and need not be in OwnIdentifiers; it is still the mediator's, and still refused.
+        await using var fx = HandlerFixture.Create(fakeIdentity: true);
+        fx.Identity!.Get = () => new[] { "did:example:routing-a" };
+        var mediator = await fx.NewPeerAsync();
+        var bob = await fx.NewPeerAsync();
+        (await fx.EnrolAsync(bob.Did, mediator.Did)).Should().Equal("did:example:routing-a");
+
+        fx.Identity.Get = () => new[] { "did:example:routing-b" };
+
+        (await fx.UpdateAsync(bob.Did, mediator.Did, Add("did:example:routing-b"), Add("did:example:routing-a"), Add("did:example:bobs")))
+            .Should().Equal(Added("did:example:routing-b", ClientError), Added("did:example:routing-a", ClientError), Added("did:example:bobs", Success));
+        (await fx.Memory.FindGrantByRecipientDidAsync("did:example:routing-b", default)).Should().BeNull();
+        (await fx.Memory.FindGrantByRecipientDidAsync("did:example:routing-a", default)).Should().BeNull();
+    }
+
+    public static TheoryData<string> IdentityFaults => new() { "getter-throws", "enumerator-throws", "enumeration-throws-part-way" };
+
+    [Theory]
+    [MemberData(nameof(IdentityFaults))]
+    public async Task When_the_mediators_routing_dids_cannot_be_read_the_own_did_guard_fails_closed(string fault)
+    {
+        // Regression (PR #106 review): the list of the mediator's own DIDs was built with a
+        // best-effort catch around the identity provider, so a provider that threw left a hole in
+        // it and the mediator's current routing DID could be registered as a recipient — and the
+        // forward directory then accepted it. The list is the input of a refusal: if it cannot be
+        // read, nothing in the message is applied and every entry is answered server_error.
+        await using var fx = HandlerFixture.Create(fakeStore: true, fakePolicy: true, fakeIdentity: true);
+        fx.Identity!.Get = () => new[] { "did:example:routing-a" };
+        var mediator = await fx.NewPeerAsync();
+        var bob = await fx.NewPeerAsync();
+        await fx.EnrolAsync(bob.Did, mediator.Did);
+        await fx.UpdateAsync(bob.Did, mediator.Did, Add("did:example:bobs"));
+
+        // The mediator now grants B. With a healthy provider, adding B is refused.
+        fx.Identity.Get = () => new[] { "did:example:routing-b" };
+        (await fx.UpdateAsync(bob.Did, mediator.Did, Add("did:example:routing-b"))).Should().Equal(Added("did:example:routing-b", ClientError));
+
+        fx.Identity.Get = fault switch
+        {
+            "getter-throws" => () => throw new HandlerBoomException(HandlerBoomException.Marker),
+            "enumerator-throws" => () => new HandlerFaultyDids(yieldFirst: 0),
+            _ => () => new HandlerFaultyDids(yieldFirst: 1, "did:example:routing-zzz"),
+        };
+        fx.FakeStore!.ResetCalls();
+        var policyCalls = fx.Policy!.TotalCalls;
+
+        var updated = await fx.UpdateAsync(bob.Did, mediator.Did,
+            Add("did:example:routing-b"),   // the attack: the mediator's own, current routing DID
+            Add("did:example:innocent"),
+            Remove("did:example:bobs"),
+            Add("did:example:url#frag"));
+
+        updated.Should().Equal(
+            Added("did:example:routing-b", ServerError),
+            Added("did:example:innocent", ServerError),
+            Removed("did:example:bobs", ServerError),
+            Added("did:example:url#frag", ServerError));
+        fx.FakeStore.MutatingCalls.Should().Be(0, "nothing of the message reaches the store");
+        fx.Policy.TotalCalls.Should().Be(policyCalls);
+        (await fx.Memory.FindGrantByRecipientDidAsync("did:example:routing-b", default)).Should().BeNull("the forward directory must not accept the mediator's own routing DID");
+        (await fx.RegisteredAsync(bob.Did)).Should().Equal("did:example:bobs");
+
+        var line = fx.Logs.Handler.Should().ContainSingle(e => e.Level == LogLevel.Error).Which;
+        line.Exception.Should().BeNull();
+        line.Everything.Should().NotContain(HandlerBoomException.Marker).And.NotContain("did:");
+
+        // The provider recovers: B is refused as the mediator's own again, the rest is applied.
+        fx.Identity.Get = () => new[] { "did:example:routing-b" };
+        (await fx.UpdateAsync(bob.Did, mediator.Did, Add("did:example:routing-b"), Add("did:example:innocent")))
+            .Should().Equal(Added("did:example:routing-b", ClientError), Added("did:example:innocent", Success));
+    }
+
+    [Fact]
+    public async Task An_identity_provider_that_reports_no_routing_dids_is_not_a_fault()
+    {
+        // Null or empty means "none configured" (the grant then carries the addressed DID); the
+        // guard still covers the addressed DID and the grant's own routing DIDs.
+        await using var fx = HandlerFixture.Create(fakeIdentity: true);
+        var mediator = await fx.NewPeerAsync();
+        var bob = await fx.NewPeerAsync();
+        await fx.EnrolAsync(bob.Did, mediator.Did);
+
+        fx.Identity!.Get = () => null!;
+
+        (await fx.UpdateAsync(bob.Did, mediator.Did, Add(mediator.Did), Add("did:example:bobs")))
+            .Should().Equal(Added(mediator.Did, ClientError), Added("did:example:bobs", Success));
+    }
+
+    [Fact]
+    public async Task An_oversized_update_list_is_reported_as_oversized_whatever_its_entries_hold()
+    {
+        // Regression (PR #106 review), through dispatch: with a bound of 1 and two entries the
+        // second of which is malformed, the refusal is the count — the entry is never read.
+        await using var fx = HandlerFixture.Create(o => o.MaxUpdatesPerMessage = 1, fakeStore: true, fakePolicy: true);
+        var mediator = await fx.NewPeerAsync();
+        var bob = await fx.NewPeerAsync();
+        await fx.EnrolAsync(bob.Did, mediator.Did);
+        fx.FakeStore!.ResetCalls();
+        var overLong = "did:example:SENTINEL" + new string('a', 2049);
+
+        foreach (var second in new[] { ("did:example:SENTINEL", "SENTINEL-upsert"), (overLong, "add"), ("", "add") })
+        {
+            var message = Raw(CoordinateMediation.RecipientUpdateType, bob.Did, mediator.Did, UpdatesBody(("did:example:good", "add"), second));
+
+            var ex = (await FluentActions.Awaiting(() => fx.SendAsync(message, mediator.Did)).Should().ThrowAsync<MalformedMessageException>()).Which;
+
+            ex.Message.Should().Be("recipient-update 'updates' has more than 1 entries.");
+        }
+
+        fx.FakeStore.Calls.Should().BeEmpty();
+        fx.Policy!.Registrations.Should().BeEmpty();
+        fx.Memory.RecipientCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task The_policy_is_asked_once_per_add_and_never_for_removals_or_peers_without_a_grant()
     {
         await using var fx = HandlerFixture.Create(fakeStore: true, fakePolicy: true);

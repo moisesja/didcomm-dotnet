@@ -33,7 +33,8 @@ namespace DidComm.Mediator.Coordination;
 /// <c>success</c>; <c>no_change</c> (already registered by this peer); <c>client_error</c> (not a
 /// bare DID, held by another grant, a removal of something this peer does not hold, one of the
 /// mediator's own DIDs, refused by the policy, over the per-grant limit, or no grant);
-/// <c>server_error</c> (a store or policy fault, or the mediator-wide limit). Because the protocol
+/// <c>server_error</c> (a store, policy or identity-provider fault, or the mediator-wide limit; when
+/// the mediator's own DIDs cannot be read, every entry gets it and nothing is applied). Because the protocol
 /// fixes those values, a peer with a grant can learn that a DID is registered by someone else; a
 /// policy that demands proof of ownership removes that. <c>recipient-query</c> pages are clamped
 /// to <see cref="CoordinateMediationOptions.MaxPageSize"/> and always carry <c>pagination</c>.
@@ -101,12 +102,10 @@ public sealed class CoordinateMediationHandler : IProtocolHandler, IProtocolHand
         }
 
         // (c) recipient-update → recipient-update-response, one result per entry in input order.
-        if (CoordinateMediation.TryParseRecipientUpdate(message, out var updates))
+        //     The entry bound is part of the parse: a longer list is refused from its length,
+        //     before any entry is read.
+        if (CoordinateMediation.TryParseRecipientUpdate(message, _coordinator.MaxUpdatesPerMessage, out var updates))
         {
-            if (updates.Count > _coordinator.MaxUpdatesPerMessage)
-                throw new MalformedMessageException(
-                    $"recipient-update 'updates' has more than {_coordinator.MaxUpdatesPerMessage} entries.");
-
             var updated = await _coordinator.UpdateAsync(peerDid, localDid, updates, message.Id, context, ct).ConfigureAwait(false);
             return Reply(message, () => CoordinateMediation.CreateRecipientUpdateResponse(localDid, peerDid, updated, thid));
         }

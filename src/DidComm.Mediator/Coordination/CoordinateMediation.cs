@@ -242,11 +242,21 @@ public static class CoordinateMediation
     /// <param name="updates">The entries in wire order. Each <c>recipient_did</c> is a non-empty string of at most 2048 characters; whether it is a DID has not been checked.</param>
     /// <exception cref="MalformedMessageException">It is a <c>recipient-update</c> whose <c>updates</c> is missing or not an array, or an entry lacks a member, has an <c>action</c> other than <c>add</c>/<c>remove</c>, or a <c>recipient_did</c> that is not a string, is empty or is over the bound.</exception>
     public static bool TryParseRecipientUpdate(Message message, [NotNullWhen(true)] out IReadOnlyList<RecipientUpdate>? updates)
+        => TryParseRecipientUpdate(message, int.MaxValue, out updates);
+
+    /// <summary>
+    /// <see cref="TryParseRecipientUpdate(Message, out IReadOnlyList{RecipientUpdate}?)"/> with a
+    /// bound on the number of entries, as the mediator applies it (FR-MED-08). A longer list is
+    /// malformed, and it is refused from its length alone: before the body is re-read and before
+    /// any entry is decoded or allocated, so what sits beyond the bound is never looked at.
+    /// </summary>
+    internal static bool TryParseRecipientUpdate(Message message, int maxUpdates, [NotNullWhen(true)] out IReadOnlyList<RecipientUpdate>? updates)
     {
         updates = null;
         if (!IsType(message, RecipientUpdateUri))
             return false;
-        updates = MediationBodies.ReadUpdates(MediationBodies.ToElement(message.Body), "recipient-update");
+        MediationBodies.RequireUpdatesWithin(message.Body, maxUpdates, "recipient-update");
+        updates = MediationBodies.ReadUpdates(MediationBodies.ToElement(message.Body), "recipient-update", maxUpdates);
         return true;
     }
 
