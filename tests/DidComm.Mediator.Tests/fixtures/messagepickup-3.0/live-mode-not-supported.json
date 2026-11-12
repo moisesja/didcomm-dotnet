@@ -1,0 +1,1 @@
+{"id":"123456780","type":"https://didcomm.org/report-problem/2.0/problem-report","typ":"application/didcomm-plain+json","pthid":"123456780","body":{"code":"e.m.live-mode-not-supported","comment":"Connection does not support Live Delivery"}}
