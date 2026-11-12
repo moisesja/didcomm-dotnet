@@ -352,6 +352,350 @@
     {
       "member": "DidComm.Extensions.DependencyInjection!DidComm.Extensions.DependencyInjection.DidCommBuilder::UseInboundDispatch()",
       "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateDeny(System.String,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateGrant(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateMediateRequest(System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipient(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Mediator.Coordination.RecipientPagination,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientQuery(System.String,System.String,DidComm.Mediator.Coordination.RecipientQueryPaging,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientUpdate(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientUpdateResponse(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdateResult>,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::ResponseThreadId(DidComm.Messages.Message)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseDeny(DidComm.Messages.Message)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseGrant(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseMediateRequest(DidComm.Messages.Message)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipient(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&,DidComm.Mediator.Coordination.RecipientPagination&)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientQuery(DidComm.Messages.Message,DidComm.Mediator.Coordination.RecipientQueryPaging&)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientUpdate(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>&)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientUpdateResponse(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdateResult>&)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationBuilderExtensions",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationBuilderExtensions::AddCoordinateMediation(DidComm.Extensions.DependencyInjection.DidCommBuilder,System.Action`1<DidComm.Mediator.Coordination.CoordinateMediationOptions>)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationHandler",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationHandler::.ctor(DidComm.Mediator.Coordination.IMediationStore,DidComm.Mediator.Coordination.IMediationPolicy,DidComm.Mediator.Coordination.IMediatorIdentity,Microsoft.Extensions.Options.IOptions`1<DidComm.Mediator.Coordination.CoordinateMediationOptions>,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Coordination.CoordinateMediationHandler>)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationHandler::HandleAsync(DidComm.Messages.Message,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationHandler::prop:ProtocolUri",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationHandler::prop:Roles",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::.ctor()",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::Validate()",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:MaxGrants",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:MaxPageSize",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:MaxRecipients",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:MaxRecipientsPerGrant",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:MaxUpdatesPerMessage",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:RoutingDids",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediationOptions::prop:UseAsForwardRecipientRegistry",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.DefaultMediationPolicy",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.DefaultMediationPolicy::.ctor()",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.DefaultMediationPolicy::MayRegisterAsync(System.String,System.String,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.DefaultMediationPolicy::OnMediateRequestAsync(System.String,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationPolicy",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationPolicy::MayRegisterAsync(System.String,System.String,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationPolicy::OnMediateRequestAsync(System.String,DidComm.Protocols.ProtocolContext,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore::FindGrantByRecipientDidAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore::GetGrantAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore::GrantAsync(DidComm.Mediator.Coordination.MediationGrant,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore::ListRecipientsAsync(System.String,System.Int32,System.Int32,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore::RevokeAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediationStore::UpdateRecipientsAsync(System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediatorIdentity",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.IMediatorIdentity::prop:RoutingDids",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::.ctor()",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::.ctor(DidComm.Mediator.Coordination.CoordinateMediationOptions)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::FindGrantByRecipientDidAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::GetGrantAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::GrantAsync(DidComm.Mediator.Coordination.MediationGrant,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::ListRecipientsAsync(System.String,System.Int32,System.Int32,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::RevokeAsync(System.String,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::UpdateRecipientsAsync(System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::prop:GrantCount",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.InMemoryMediationStore::prop:RecipientCount",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant::.ctor(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant::prop:PeerDid",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant::prop:RoutingDids",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPage",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPage::.ctor(System.Collections.Generic.IReadOnlyList`1<System.String>,System.Int32)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPage::prop:Dids",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPage::prop:Total",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::.ctor(System.Int32,System.Int32,System.Int32)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::prop:Count",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::prop:Offset",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::prop:Remaining",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging::.ctor(System.Int32,System.Int32)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging::prop:Limit",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging::prop:Offset",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate::.ctor(System.String,DidComm.Mediator.Coordination.RecipientUpdateAction)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate::prop:Action",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate::prop:RecipientDid",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::.ctor(System.String,DidComm.Mediator.Coordination.RecipientUpdateAction,DidComm.Mediator.Coordination.RecipientUpdateOutcome)",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Action",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:RecipientDid",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Result",
+      "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     }
   ]
 }

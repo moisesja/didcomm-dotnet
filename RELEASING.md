@@ -28,6 +28,7 @@ A `v*` tag publishes all six packages plus their `.snupkg` symbol packages
 | `DidComm.Transports.Http` | HTTPS sender transport binding |
 | `DidComm.Transports.WebSocket` | WebSocket sender transport binding |
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
+| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 (mediator role), store and policy contracts |
 
 Tests and samples set `IsPackable=false`, so they are never published.
 

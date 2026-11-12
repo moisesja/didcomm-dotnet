@@ -6,6 +6,112 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Coordinate Mediation 3.0, mediator role: the new `DidComm.Mediator` package (FR-MED-01..06, FR-MED-08, #93, epic #88)
+
+An agent can now act as a mediator that recipients enrol with: a recipient asks for mediation, is
+told which mediator DID to publish as its endpoint, and registers the DIDs it wants forwards
+accepted for (didcomm.org [coordinate-mediation 3.0](https://didcomm.org/coordinate-mediation/3.0/),
+PRD §8b). This is the first piece of the mediator service and ships in a **new package,
+`DidComm.Mediator`** (namespace `DidComm.Mediator.Coordination`), which references `DidComm.Core` and
+`DidComm.Extensions.DependencyInjection` and nothing from ASP.NET Core. Message pickup (#94), the
+delivery pipeline (#95), the recipient-side client (#96) and the 2.0 compatibility handler (#99)
+follow. No existing package changes behaviour.
+
+- **`AddCoordinateMediation(configure?)`** on `DidCommBuilder` registers the handler and, unless the
+  host registered its own first, an in-memory store, a grant-everyone policy and the routing-DID
+  list from the options. Discover Features then discloses
+  `https://didcomm.org/coordinate-mediation/3.0` with `roles: ["mediator"]` (FR-MED-01).
+  - It also makes the store the forward recipient directory (`IForwardRecipientRegistry`), so
+    `AddRoutingMediator()` relays a forward exactly when its `next` is a registered recipient DID.
+    **Call it before `AddRoutingMediator()`.** A directory that is already registered makes the call
+    throw `InvalidOperationException`; one registered afterwards is caught, with the same exception,
+    when the handler is first built. Either way the mediator cannot end up silently dropping every
+    forward for the recipients it enrols. `CoordinateMediationOptions.UseAsForwardRecipientRegistry
+    = false` opts out for a host that keeps its own directory.
+  - Calling it more than once is harmless: nothing is registered twice and the option delegates
+    compose. Bad settings (a bound below 1, a routing DID that is not a bare DID of at most 2048
+    characters) throw `ArgumentException` at registration; the DID is not quoted.
+- **`CoordinateMediationHandler`** answers the three requests of the protocol (FR-MED-02..06):
+  - `mediate-request` → `mediate-grant` carrying `routing_did` as an array, or `mediate-deny`. A peer
+    that already holds a grant gets the same grant again with its registrations kept, and the
+    policy is not asked a second time. `mediate-deny` comes from the policy, or from a store that
+    cannot hold another grant. With no routing DID configured the grant carries the DID that
+    decrypted the request.
+  - `recipient-update` → `recipient-update-response` with one result per entry, in the order sent:
+    `success`; `no_change` (the peer already registered that DID); `client_error` (not a bare DID —
+    a DID URL is refused, never reduced to its DID — or held by another peer, or a removal of
+    something this peer does not hold, or one of the mediator's own DIDs, or refused by the policy,
+    or over the per-peer limit, or the peer has no grant); `server_error` (the store or the policy
+    failed, or the mediator-wide limit is reached).
+  - `recipient-query` → `recipient` with one page of the peer's own DIDs in registration order.
+    `limit` is clamped to `MaxPageSize` (default 100); zero or less gives an empty page; an offset
+    past the end gives an empty page with `remaining: 0`; without `paginate` the first page is
+    returned. `pagination` is always present.
+  - Replies go from the DID that decrypted the request to the peer, with `thid` set to the
+    request's `thid`, or its `id` when it has none (FR-MED-04). The reply is produced whether or not
+    the request opened a return-route session; the endpoint decides how it travels (FR-MED-03).
+- **Who counts as a peer (FR-MED-05).** Only a request with an authcrypt layer is acted on, and the
+  peer is the DID of the authcrypt sender key, never the plaintext `from`. A plaintext, anoncrypt,
+  signed-only or `anoncrypt(sign)` request is dropped before its body is read: nothing is granted
+  or changed and nothing is sent back. The rule is the one that decides whether a message may open
+  a return-route session, so the two cannot disagree.
+- **`CoordinateMediation`**: the seven message type URIs, a `Create…` builder for each message and a
+  strict `TryParse…` for each (FR-MED-02). A parser returns `false` for a different message type and
+  throws `MalformedMessageException` for the right type with a bad body: an unknown `action` or
+  `result`, a missing or non-array `updates`, a `paginate` without `limit` or `offset`, a string or
+  fractional or negative-offset paging value, a DID member that is not a string or is longer than
+  2048 characters. The text names the member and the rule and never quotes a value from the
+  message. A `routing_did` given as a single string (the 2.0 shape) is accepted; the library always
+  writes the array. `mediate-request` and `mediate-deny` are written with `body: {}` and accepted
+  without a body. Members the protocol does not define are ignored. Each builder takes an optional
+  `IMessageIdGenerator`.
+- **`IMediationStore`** and **`InMemoryMediationStore`**: grants and the DIDs registered under them.
+  A DID belongs to the first grant that registers it, and the check and the insert are one step
+  under one lock, so two peers can never both get the same DID. The store reports what happened to
+  each update as a `RecipientStoreOutcome`; the handler turns that into the protocol's `result`, so
+  a custom store never deals in wire values. Three bounds, all configurable: `MaxGrants` (10 000),
+  `MaxRecipientsPerGrant` (256), `MaxRecipients` (100 000). The lookup the forward path uses,
+  `FindGrantByRecipientDidAsync`, is one probe that takes no lock and does the same work whether or
+  not the DID is registered. `RevokeAsync` ends a grant and frees its DIDs. Only the in-memory store
+  ships; a durable one is the host's (epic decision 1), and the interface's remarks state the
+  contract it has to keep.
+- **`IMediationPolicy`** (default `DefaultMediationPolicy`: grant and allow everything): the host's
+  say in who gets mediation (`OnMediateRequestAsync`) and what they may register
+  (`MayRegisterAsync`) — an allow-list, a rate limit, or proof that the peer controls the DID. It is
+  a gate in front of the store, not a replacement for the store's one-owner rule.
+  `MediationDecision.Deny` is the zero value, so a decision nobody set denies.
+- **`IMediatorIdentity`**: where the granted routing DIDs come from; the default reads
+  `CoordinateMediationOptions.RoutingDids`.
+- **Bounds on one message (FR-MED-08).** A `recipient-update` may carry at most
+  `MaxUpdatesPerMessage` entries (default 1024); more is malformed. A `recipient_did` longer than
+  2048 characters is refused by a length check before anything parses it. A peer without a grant
+  costs one store read.
+- **Failures stay inside.** A store, policy or identity provider that throws, or returns something
+  unusable, never throws through the dispatcher: the affected `recipient-update` entries get
+  `server_error`, and a `mediate-request` or `recipient-query` gets no reply (the protocol defines
+  no error for them). The handler's log lines carry the message id (replaced when longer than 128
+  characters) and exception type names only — never a DID, a key id, a body value or exception
+  text. A logging provider that throws changes nothing.
+
+Things to know before running a mediator on this:
+
+- **The protocol asks for no proof that a peer controls the DID it registers.** The first peer to
+  register a DID gets it. Require proof in `MayRegisterAsync` if that matters to you.
+- **A peer with a grant can find out that a DID is registered by someone else** (`client_error` on
+  `add`; the protocol fixes the result values). Callers without a grant learn nothing.
+- **Open enrolment can be filled.** The default policy grants any authenticated sender and grants do
+  not expire, so self-made DIDs can use up `MaxGrants` and `MaxRecipients`. New peers are then
+  denied and new registrations fail; existing ones keep working. A public mediator should use an
+  allow-list or a rate limit.
+- **With no routing DID configured, the peer chooses which of the mediator's DIDs becomes its
+  `routing_did`** (the one it addressed), and nothing yet checks that DID's document for a usable
+  endpoint. Configure `RoutingDids`; the `AddMediator()` composition (#95) will require it.
+- **Revoking a grant stops new forwards, not ones already admitted.** A forward the forward handler
+  accepted before the revocation (for example one waiting on `delay_milli`) still reaches the sink.
+- `DidComm.Mediator` has no released version yet, so SDK package validation is off for it until the
+  first release names a baseline. The FR-DX-01 sample-coverage gate now scans seven assemblies; the
+  new package's members are allow-listed with a `TODO(#97)` marker until sample 11 demonstrates them.
+
 ### Added — return-route client side (FR-RR-07, FR-RR-09, #92, epic #88)
 
 This agent can now ask a peer to send messages back over the connection it used, and take them

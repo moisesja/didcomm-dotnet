@@ -18,6 +18,7 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator`, `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions`, `HttpResiliencePipelineFactory`, `UseHttpTransport()`. |
 | `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. |
+| `DidComm.Mediator` | The mediator service (Phase 7). So far the mediator role of Coordinate Mediation 3.0, namespace `DidComm.Mediator.Coordination` — public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums, `IMediationStore` / `InMemoryMediationStore`, `MediationGrant`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationBodies` (body codecs), `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `BareDid`, `ConfiguredMediatorIdentity`. References `DidComm.Core` and `DidComm.Extensions.DependencyInjection`; no ASP.NET Core. |
 
 ## Tests and tools
 
@@ -27,6 +28,10 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   `payloads`, `diddocs`, `secrets`, `schema`, `spec`; `FixtureCatalog`, `Runner/FixtureDispatcher`),
   plus the `AspNetCore`, `Routing`, `Transports`, `Protocols` and `Facade` suites, `DxCoverage`
   (public-API coverage and quickstart drift checks) and `Samples` (one smoke test per sample).
+- `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
+  builders, store, handler, DI, adversarial) and `fixtures/coordinate-mediation-3.0` (the
+  didcomm.org page examples normalized to valid JSON). The FR-MED-03 cases that need an HTTP
+  endpoint are in `tests/DidComm.InteropTests/AspNetCore/CoordinateMediationHttpTests.cs`.
 - `tests/DidComm.TestSupport`: shared helpers (`InMemorySecretsResolver`, `MultiRecipientPacker`,
   `EnvelopeReaderTestRunner`). Not shipped as a package.
 - `tools/FixtureGen`: generates didcomm-dotnet's own packed vectors into the interop fixtures
@@ -645,10 +650,92 @@ Known limitations:
   refused as `FutureDated`. Hosts that talk across machines should set `ExpiresClockSkew` to their
   expected clock offset.
 
+## Coordinate Mediation 3.0, mediator role (Phase 7, #93)
+
+The enrolment protocol of the mediator service (PRD §8b, FR-MED-01..06 and -08;
+https://didcomm.org/coordinate-mediation/3.0/): a recipient asks for mediation, gets the mediator's
+routing DIDs, and registers the DIDs it wants forwards accepted for. It lives in the new package
+`DidComm.Mediator`, namespace `DidComm.Mediator.Coordination`, and is a protocol handler like any
+other: it is reached through `ProtocolDispatcher` and knows nothing about transports.
+
+Wiring: `AddCoordinateMediation(configure?)` on `DidCommBuilder` registers, each as a `TryAdd` so a
+host registration made first wins:
+
+- `CoordinateMediationHandler` for `https://didcomm.org/coordinate-mediation/3.0` (through
+  `AddProtocol`), with `Roles = ["mediator"]`, so Discover Features discloses the PIURI with that
+  role;
+- `IMediationStore` → `InMemoryMediationStore`; `IMediationPolicy` → `DefaultMediationPolicy`;
+  `IMediatorIdentity` → the list in `CoordinateMediationOptions.RoutingDids`;
+- `CoordinateMediationOptions` through the Options pattern (repeated calls compose; the delegate
+  also runs once on a scratch instance so bad settings fail at registration);
+- `IForwardRecipientRegistry` → `MediationForwardRecipientRegistry`, an adapter that answers the
+  forward handler's "is `next` registered?" with one `IMediationStore.FindGrantByRecipientDidAsync`.
+  It must be the directory the container hands out: call `AddCoordinateMediation()` before
+  `AddRoutingMediator()`. A directory already registered throws at registration; one registered
+  afterwards throws when the handler is first built. `UseAsForwardRecipientRegistry = false` opts
+  out.
+
+How a request is handled (`CoordinateMediationHandler.HandleAsync` → `MediationCoordinator`):
+
+1. **Peer.** `ReturnRouteEligibility.TryGetPeer` — the same rule that opens a return-route session —
+   gives the peer (DID subject of the authcrypt sender key) and the local DID (DID subject of the
+   decrypting key). Without an authcrypt layer (plaintext, anoncrypt, signed-only,
+   `anoncrypt(sign)`) the message is dropped before its body is read: nothing applied, no reply, one
+   rate-limited log line with the id. FR-RR-08 replay admission has already run at the endpoint;
+   the handler does not repeat it.
+2. **Parse.** `CoordinateMediation.TryParse…` over `MediationBodies`. A malformed body from a peer
+   throws `MalformedMessageException` out of dispatch (the endpoint's 400); the text names the
+   member and the rule, never a value. A DID member over 2048 characters is refused by one length
+   comparison before anything parses it. More than `MaxUpdatesPerMessage` entries is malformed.
+3. **Act.**
+   - `mediate-request`: a peer that holds a grant gets the same grant again (the policy is not
+     asked). Otherwise `IMediationPolicy.OnMediateRequestAsync` decides; a grant is recorded with
+     the routing DIDs of `IMediatorIdentity`, or, when none are configured, the DID that decrypted
+     the request. A full store answers `mediate-deny`.
+   - `recipient-update`: one store read for the grant (none → every entry `client_error`), then per
+     entry: not a bare DID → `client_error` (a DID URL is never reduced to its DID); one of the
+     mediator's own DIDs → `client_error`; `IMediationPolicy.MayRegisterAsync` for an `add`. What
+     remains goes to `IMediationStore.UpdateRecipientsAsync` in one call, and the store's
+     `RecipientStoreOutcome` per entry is mapped to the wire `result`. Results are in input order.
+   - `recipient-query`: `limit` clamped to `MaxPageSize`, one `ListRecipientsAsync`, and a
+     `recipient` reply that always carries `pagination`.
+4. **Reply.** From the local DID to the peer, `thid` = the request's `thid`, else its `id`. The
+   handler returns the reply whether or not the inbound opened a session; the endpoint decides how
+   it travels (200 body, WebSocket push, or nothing).
+
+The store (`InMemoryMediationStore`): one lock for every change, so "is this DID free?" and
+"register it" are one step; a concurrent index from recipient DID to its grant for the forward
+lookup, read without the lock; registration order kept per grant for stable paging; three bounds
+(`MaxGrants`, `MaxRecipientsPerGrant`, `MaxRecipients`). Ownership (one grant per recipient DID) is
+the store's rule, not the policy's: a custom policy can only add refusals.
+
+Faults: a store, policy or identity that throws, or returns something unusable, never leaves the
+handler — `server_error` for the affected `recipient-update` entries, no reply for a
+`mediate-request` or `recipient-query` (the protocol has no error shape for them). When the dispatch
+token is cancelled, only `OperationCanceledException` leaves.
+
+Documented limits:
+
+- **No proof of DID ownership.** The protocol asks for none; the first peer to register a DID gets
+  it. `MayRegisterAsync` is where a host adds proof.
+- **A registration oracle toward enrolled peers.** `client_error` on an `add` tells a peer with a
+  grant that another grant holds the DID. Unauthenticated callers learn nothing.
+- **Open enrolment fills the store.** The default policy grants any authcrypt sender and grants do
+  not expire. Self-made DIDs can exhaust `MaxGrants` and `MaxRecipients`; existing grants keep
+  working. A public mediator needs an allow-list or rate limit in its policy.
+- **Forward lookup.** One probe either way; a hit compares one key more than a miss (the same as
+  `InMemoryForwardRecipientRegistry`).
+- **Revocation.** `RevokeAsync` stops new forwards for the grant's DIDs. A forward already admitted
+  by `ForwardHandler` (waiting on `delay_milli`) still reaches the sink; the delivery pipeline (#95)
+  has to check again before it queues or pushes.
+- **Not here yet:** the recipient role (#96), the 2.0 handler (#99, which reuses `MediationBodies`
+  and `MediationCoordinator`), and startup validation of routing DIDs against their DID documents
+  (FR-MED-07, #95).
+
 ## Phase 7: not built yet
 
-Phase 7 issues under epic #88 still open: Coordinate Mediation 3.0 with 2.0 compatibility
-(#93); Message Pickup (#94), whose live delivery consumes `IReturnRouteSessionRegistry.Find`, the
+Phase 7 issues under epic #88 still open: Coordinate Mediation 2.0 compatibility (#99); Message
+Pickup (#94), whose live delivery consumes `IReturnRouteSessionRegistry.Find`, the
 `SessionOpened` / `SessionClosed` events and `IReturnRouteSession.Closed`; the `DidComm.Mediator`
 package with the live-session -> queue -> direct-push pipeline and `MapDidCommMediator` (#95); the
 recipient-side client (#96); and sample 11 with the return-route cookbook sections (#97). The
