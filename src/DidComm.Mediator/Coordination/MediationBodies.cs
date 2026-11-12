@@ -177,7 +177,8 @@ internal static class MediationBodies
     public static RecipientQueryPaging? ReadPaginate(JsonElement body, string message)
     {
         RequireEmptyShape(body, message);
-        if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty(Paginate, out var paginate))
+        // Optional: absent, or an explicit null (serializers that write their unset members).
+        if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty(Paginate, out var paginate) || paginate.ValueKind == JsonValueKind.Null)
             return null;
         if (paginate.ValueKind != JsonValueKind.Object)
             throw new MalformedMessageException($"{message} '{Paginate}' must be a JSON object.");
@@ -201,7 +202,7 @@ internal static class MediationBodies
         }
 
         RecipientPagination? pagination = null;
-        if (body.TryGetProperty(Pagination, out var page))
+        if (body.TryGetProperty(Pagination, out var page) && page.ValueKind != JsonValueKind.Null)
         {
             if (page.ValueKind != JsonValueKind.Object)
                 throw new MalformedMessageException($"{message} '{Pagination}' must be a JSON object.");
