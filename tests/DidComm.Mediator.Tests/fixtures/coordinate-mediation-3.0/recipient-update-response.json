@@ -1,0 +1,1 @@
+{"id":"123456780","type":"https://didcomm.org/coordinate-mediation/3.0/recipient-update-response","typ":"application/didcomm-plain+json","body":{"updated":[{"recipient_did":"did:peer:0z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH","action":"add","result":"success"}]}}

@@ -992,3 +992,39 @@ Format per entry:
   per-finding disposition ("won't do: history is not rewritten; regular merge"), and do not retitle
   the PR or reshape its body for a squash. Checkpoint commits stay honest in their message instead
   (`wip(...)` naming what is and is not done).
+
+## L-054 — The inputs of a guard fail with the guard; never best-effort them.
+
+- **Lesson:** A check that refuses something ("is this one of our own DIDs?") is only as complete as
+  the list it compares against. Building that list with a catch-all around one of its sources makes
+  the check fail open: the source throws, the list is shorter, the forbidden value passes. Build a
+  refusal's inputs inside the fault boundary of the operation they protect, so a failure to read
+  them ends in the fail-closed answer (`server_error`, nothing applied), not in a smaller list.
+- **Why:** In #93, `MediationCoordinator.OwnDids` caught everything around `IMediatorIdentity.RoutingDids`
+  ("a faulting identity provider adds nothing here"). The PR #106 review showed that with a provider
+  that throws, a peer could register the mediator's current routing DID as a recipient, and the
+  forward directory then accepted it. My own adversarial pass had moved the list *into* the fault
+  boundary and still left the inner catch, because the tests only made the collaborator throw on
+  the paths where it was the subject, never where it was an input to another check.
+- **How to apply:** For every `catch` that continues, ask "what decision uses the value this catch
+  just skipped?" If the answer is a refusal, a bound or an authorization, the catch must end the
+  operation instead. In QA and adversarial briefs, list each collaborator against every path that
+  reads it, not only the path named after it, and make it throw on each.
+
+## L-055 — A bound is enforced before the work it bounds; prove it with poison beyond the limit.
+
+- **Lesson:** A "max N per message" option that is compared after the list has been parsed limits
+  what happens next, not the parsing. Apply the bound from the cheapest available count, before
+  allocating or decoding the entries, and say in the docs exactly which work it limits. The test
+  that proves the order is a list over the bound whose out-of-bound entry is itself invalid: the
+  refusal must be the count, not the entry's error.
+- **Why:** In #93 the handler checked `updates.Count > MaxUpdatesPerMessage` after
+  `TryParseRecipientUpdate` had re-read the body and allocated every entry, while the option's XML
+  doc said "refused before any entry is looked at". The PR #106 review reproduced it with a bound of
+  1 and a second entry carrying an invalid `action`: the action error came back. My limit test only
+  asserted "rejected, and no store or policy call", which the wrong order also satisfies.
+- **How to apply:** When adding a count or size bound, write the poisoned-beyond-the-limit test
+  first, and include a shape that would make the later stage throw outright (here an unpaired
+  surrogate escape, which breaks re-reading the body). Then read the doc sentence against the code
+  path from the public entry point (L-052) and keep only what holds.
+

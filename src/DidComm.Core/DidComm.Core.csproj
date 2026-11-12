@@ -39,6 +39,8 @@
     <InternalsVisibleTo Include="DidComm.AspNetCore" />
     <InternalsVisibleTo Include="DidComm.Extensions.DependencyInjection" />
     <InternalsVisibleTo Include="DidComm.Adapters.NetDid" />
+    <InternalsVisibleTo Include="DidComm.Mediator" />
+    <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
     <InternalsVisibleTo Include="DidComm.TestSupport" />
   </ItemGroup>
 
