@@ -26,7 +26,7 @@ public sealed class ReturnRouteSessionOptions
 
     /// <summary>
     /// Pushes one WebSocket session holds at once — being snapshotted and packed, or packed and
-    /// queued to its writer — before <see cref="IReturnRouteSession.TrySendAsync"/> answers
+    /// queued to its writer — before <see cref="IReturnRouteSession.TrySendAsync(DidComm.Messages.Message, CancellationToken)"/> answers
     /// <c>false</c>. A push takes its place before the snapshot, so one beyond the bound costs no
     /// snapshot, key resolution or encryption; the place is freed when the push fails or when the
     /// writer takes its frame off the queue (the frame being sent is not counted). Default 16: each

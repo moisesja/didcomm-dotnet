@@ -13,15 +13,17 @@ namespace DidComm.AspNetCore;
 /// <remarks>
 /// <para>
 /// One slot, guarded by one lock. A sender claims the slot BEFORE packing, so two concurrent
-/// callers pack at most once; if the winner's pack fails the slot is released, so the handler's
-/// returned reply can still use it.
+/// callers pack at most once; if the winner's pack fails — or its packed message is larger than
+/// the bound it passed (<see cref="ReturnRouteSendResult.TooLarge"/>) — the slot is released, so
+/// the handler's returned reply can still use it.
 /// </para>
 /// <para>
 /// The endpoint's last step, <see cref="TakeResponseAndClose"/>, closes the session and takes the
 /// response in one state transition (PA-2). A sender still packing at that moment (a handler's
 /// background task holding <c>context.Session</c>) finds the session closed when its pack
-/// completes and returns <c>false</c>: its bytes are never reported as sent and never reach the
-/// response.
+/// completes and returns <c>false</c> (from the size-bounded overload: never
+/// <see cref="ReturnRouteSendResult.Sent"/>): its bytes are never reported as sent and never reach
+/// the response.
 /// </para>
 /// </remarks>
 internal sealed class HttpReturnRouteSession : IReturnRouteSession
@@ -89,26 +91,31 @@ internal sealed class HttpReturnRouteSession : IReturnRouteSession
 
     /// <inheritdoc />
     public async ValueTask<bool> TrySendAsync(Message message, CancellationToken ct)
+        => await TrySendAsync(message, int.MaxValue, ct).ConfigureAwait(false) == ReturnRouteSendResult.Sent;
+
+    /// <inheritdoc />
+    public async ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxPackedBytes, 1);
         ct.ThrowIfCancellationRequested();
 
         // Cheap pre-check: a closed or already-filled session costs no snapshot and no crypto.
         lock (_gate)
         {
             if (_closed || _slot != SlotFree)
-                return false;
+                return ReturnRouteSendResult.NotSent;
         }
 
         var snapshot = SessionOutbound.TrySnapshotAndCheck(message, PeerDid, LocalDid, _logger);
         if (snapshot is null)
-            return false;
+            return ReturnRouteSendResult.NotSent;
 
         // Claim the one slot before packing: only the winner packs.
         lock (_gate)
         {
             if (_closed || _slot != SlotFree)
-                return false;
+                return ReturnRouteSendResult.NotSent;
             _slot = SlotClaimed;
         }
 
@@ -117,26 +124,37 @@ internal sealed class HttpReturnRouteSession : IReturnRouteSession
         {
             var packed = await SessionOutbound.TryPackAsync(_client, snapshot, PeerDid, LocalDid, _logger, ct).ConfigureAwait(false);
             if (packed is null)
-                return false;
+                return ReturnRouteSendResult.NotSent;
+
+            // FR-PICK-03: the bound is on the packed envelope, so it is checked on the very bytes
+            // the response would carry. Nothing is stored; the finally below releases the claim.
+            // Checked before the close is: a message over its bound is TooLarge even when the
+            // endpoint closed the session during the pack (the caller's next send is then NotSent).
+            if (packed.Length > maxPackedBytes)
+            {
+                SafeLog.Write(_logger, LogLevel.Debug, "Return-route message {MessageId} not sent: its packed envelope is {PackedBytes} bytes, over the caller's bound of {MaxPackedBytes}.", snapshot.Id, packed.Length, maxPackedBytes);
+                return ReturnRouteSendResult.TooLarge;
+            }
 
             lock (_gate)
             {
                 // PA-2: the endpoint already closed the session and took its (empty) response; these
                 // bytes would never be sent, so they are not reported as sent.
                 if (_closed)
-                    return false;
+                    return ReturnRouteSendResult.NotSent;
                 _response = packed;
                 _slot = SlotFilled;
                 committed = true;
             }
-            return true;
+            return ReturnRouteSendResult.Sent;
         }
         finally
         {
             if (!committed)
             {
-                // Pack failed, was cancelled, or lost to the close: release the claim so a later
-                // sender (the handler's returned reply) can still use the slot while the session is open.
+                // Pack failed, was over the caller's size bound, was cancelled, or lost to the close:
+                // release the claim so a later sender (the handler's returned reply) can still use
+                // the slot while the session is open.
                 lock (_gate)
                 {
                     if (_slot == SlotClaimed)
@@ -149,8 +167,9 @@ internal sealed class HttpReturnRouteSession : IReturnRouteSession
     /// <summary>
     /// Close the session and take its response in one state transition (PA-2): returns the packed
     /// message for the <c>200</c> body, or <c>null</c> for a <c>202</c>. After this call every
-    /// <see cref="TrySendAsync"/> — including one already packing — returns <c>false</c>, and
-    /// <see cref="Closed"/> is cancelled. Idempotent: a second call returns <c>null</c>.
+    /// <see cref="TrySendAsync(Message, CancellationToken)"/> — including one already packing —
+    /// returns <c>false</c> (from the size-bounded overload: never <see cref="ReturnRouteSendResult.Sent"/>),
+    /// and <see cref="Closed"/> is cancelled. Idempotent: a second call returns <c>null</c>.
     /// </summary>
     internal byte[]? TakeResponseAndClose()
     {

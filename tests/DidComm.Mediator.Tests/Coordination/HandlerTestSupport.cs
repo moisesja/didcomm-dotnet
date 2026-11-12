@@ -257,6 +257,13 @@ internal sealed class HandlerFakeSession(string peerDid, string localDid) : IRet
         Sent.Enqueue(message);
         return new ValueTask<bool>(true);
     }
+
+    /// <summary>Records the message like the unbounded send; the fake packs nothing, so no bound is ever exceeded.</summary>
+    public ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
+    {
+        Sent.Enqueue(message);
+        return new ValueTask<ReturnRouteSendResult>(ReturnRouteSendResult.Sent);
+    }
 }
 
 /// <summary>

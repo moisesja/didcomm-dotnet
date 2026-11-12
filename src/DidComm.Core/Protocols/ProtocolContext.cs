@@ -44,7 +44,7 @@ public sealed record ProtocolContext(
     /// only when the transport admitted the inbound under FR-RR-03 — encrypted with an authcrypt
     /// layer, carrying <c>return_route: all</c>, not a <c>forward</c>, FR-RR-08 replay-admitted —
     /// and bound this inbound's (peer, local DID) pair to it. A handler returns a reply or pushes
-    /// follow-ups through <see cref="IReturnRouteSession.TrySendAsync"/>; <c>null</c> means reply
+    /// follow-ups through <see cref="IReturnRouteSession.TrySendAsync(DidComm.Messages.Message, CancellationToken)"/>; <c>null</c> means reply
     /// out of band (<see cref="DidCommClient.SendAsync"/>) or not at all. Set by
     /// <see cref="ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, IReturnRouteSession?, CancellationToken)"/>;
     /// <c>null</c> from the other overloads.

@@ -242,5 +242,8 @@ public sealed class ReturnRouteDiTests
         public CancellationToken Closed => CancellationToken.None;
 
         public ValueTask<bool> TrySendAsync(Message message, CancellationToken ct) => ValueTask.FromResult(false);
+
+        public ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
+            => ValueTask.FromResult(ReturnRouteSendResult.NotSent);
     }
 }
