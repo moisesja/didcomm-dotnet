@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Mediator</RootNamespace>
+    <AssemblyName>DidComm.Mediator</AssemblyName>
+    <PackageId>DidComm.Mediator</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>Mediator service for didcomm-dotnet (PRD §8b/§8c, epic #88): Coordinate Mediation 3.0, mediator role — the mediate-request / recipient-update / recipient-query handler, the grant store contract with an in-memory implementation, and the pluggable mediation policy.</Description>
+    <!-- No released baseline exists on NuGet yet, so there is nothing for SDK Package Validation to
+         compare against. Remove this line (the repo-wide default is true) once the first version of
+         this package has shipped and PackageValidationBaselineVersion names it. -->
+    <EnablePackageValidation>false</EnablePackageValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
+</Project>

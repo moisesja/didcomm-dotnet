@@ -5,12 +5,12 @@ namespace DidComm.InteropTests.DxCoverage;
 
 /// <summary>
 /// The FR-DX-01 coverage computation, run once per test session and shared by the gate and the
-/// §14.4 matrix assertions: scans the six shipped assemblies' public surface, collects every
+/// §14.4 matrix assertions: scans the seven shipped assemblies' public surface, collects every
 /// reference the sample assemblies make into them, and intersects the two.
 /// </summary>
 public sealed class CoverageComputation
 {
-    /// <summary>The six shipped package assemblies whose public surface the gate measures.</summary>
+    /// <summary>The seven shipped package assemblies whose public surface the gate measures.</summary>
     public static readonly IReadOnlySet<string> ShippedAssemblies = new HashSet<string>(StringComparer.Ordinal)
     {
         "DidComm.Core",
@@ -19,6 +19,7 @@ public sealed class CoverageComputation
         "DidComm.Transports.WebSocket",
         "DidComm.Extensions.DependencyInjection",
         "DidComm.Adapters.NetDid",
+        "DidComm.Mediator",
     };
 
     private static readonly Lazy<CoverageComputation> LazyInstance = new(() => new CoverageComputation());
