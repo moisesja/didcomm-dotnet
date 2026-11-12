@@ -226,6 +226,40 @@ public sealed class CoordinateMediationDiTests
     }
 
     [Fact]
+    public void A_directory_registered_after_the_call_is_caught_when_the_handler_is_first_built()
+    {
+        // Registration-time checks cannot see the future. The handler's factory looks again.
+        using var sp = Build(b =>
+        {
+            b.AddCoordinateMediation();
+            b.Services.AddSingleton<IForwardRecipientRegistry>(new InMemoryForwardRecipientRegistry());
+        });
+
+        var act = () => sp.GetRequiredService<ProtocolDispatcher>();
+        act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("registered after AddCoordinateMediation()");
+        FluentActions.Invoking(() => sp.GetRequiredService<CoordinateMediationHandler>()).Should().Throw<InvalidOperationException>();
+
+        // Opted out on every call: the host's later directory is simply the directory.
+        using var optedOut = Build(b =>
+        {
+            b.AddCoordinateMediation(o => o.UseAsForwardRecipientRegistry = false);
+            b.Services.AddSingleton<IForwardRecipientRegistry>(new InMemoryForwardRecipientRegistry());
+        });
+        optedOut.GetRequiredService<ProtocolDispatcher>().Should().NotBeNull();
+        optedOut.GetRequiredService<IForwardRecipientRegistry>().Should().BeOfType<InMemoryForwardRecipientRegistry>();
+
+        // A host that removed the store-backed directory on purpose is not second-guessed.
+        using var removed = Build(b =>
+        {
+            b.AddCoordinateMediation();
+            var ours = b.Services.Single(d => d.ServiceType == typeof(IForwardRecipientRegistry));
+            b.Services.Remove(ours);
+            b.Services.AddSingleton<IForwardRecipientRegistry>(new InMemoryForwardRecipientRegistry());
+        });
+        removed.GetRequiredService<ProtocolDispatcher>().Should().NotBeNull();
+    }
+
+    [Fact]
     public void A_keyed_directory_registration_is_not_mistaken_for_the_directory()
     {
         using var sp = Build(

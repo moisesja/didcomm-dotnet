@@ -2,6 +2,7 @@ using DidComm.Extensions.DependencyInjection;
 using DidComm.Protocols.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace DidComm.Mediator.Coordination;
@@ -24,7 +25,10 @@ public static class CoordinateMediationBuilderExtensions
     /// <em>before</em> <c>AddRoutingMediator()</c>: the first directory registered wins. If one is
     /// already registered this method throws rather than leave the mediator silently dropping every
     /// forward for the recipients it enrols; a host that wants its own directory sets
-    /// <see cref="CoordinateMediationOptions.UseAsForwardRecipientRegistry"/> to <c>false</c>.
+    /// <see cref="CoordinateMediationOptions.UseAsForwardRecipientRegistry"/> to <c>false</c>. A
+    /// directory registered <em>after</em> this call cannot be seen here; it is caught when the
+    /// handler is first built (the first resolution of the protocol dispatcher), with the same
+    /// <see cref="InvalidOperationException"/>.
     /// </para>
     /// <para>
     /// Calling the method again is harmless: registrations are not duplicated and
@@ -62,7 +66,46 @@ public static class CoordinateMediationBuilderExtensions
         if (probe.UseAsForwardRecipientRegistry)
             UseStoreAsForwardRecipientRegistry(services);
 
+        // The handler is registered here, ahead of AddProtocol (whose own registration is a TryAdd),
+        // so that building it re-checks the directory: a registration made AFTER this call cannot be
+        // seen now, and would otherwise win silently.
+        services.TryAddSingleton(sp =>
+        {
+            VerifyForwardRecipientRegistry(services);
+            return new CoordinateMediationHandler(
+                sp.GetRequiredService<IMediationStore>(),
+                sp.GetRequiredService<IMediationPolicy>(),
+                sp.GetRequiredService<IMediatorIdentity>(),
+                sp.GetRequiredService<IOptions<CoordinateMediationOptions>>(),
+                sp.GetService<ILogger<CoordinateMediationHandler>>());
+        });
+
         return builder.AddProtocol<CoordinateMediationHandler>();
+    }
+
+    // Looks at registrations only; nothing is resolved, so it cannot close a dependency cycle.
+    // If this method made the store the directory, the directory the container will hand out (the
+    // last registration) must still be that one.
+    private static void VerifyForwardRecipientRegistry(IServiceCollection services)
+    {
+        var ours = false;
+        ServiceDescriptor? last = null;
+        foreach (var descriptor in services)
+        {
+            if (descriptor.ServiceType != typeof(IForwardRecipientRegistry) || descriptor.IsKeyedService)
+                continue;
+            last = descriptor;
+            ours |= descriptor.ImplementationType == typeof(MediationForwardRecipientRegistry);
+        }
+
+        if (ours && last!.ImplementationType != typeof(MediationForwardRecipientRegistry))
+        {
+            throw new InvalidOperationException(
+                "An IForwardRecipientRegistry was registered after AddCoordinateMediation() and replaces the mediation store as the forward " +
+                "recipient directory, so forwards for recipients enrolled through Coordinate Mediation would be dropped. Remove that " +
+                "registration; or, to keep your own directory, set CoordinateMediationOptions.UseAsForwardRecipientRegistry = false on every " +
+                "AddCoordinateMediation() call and have it consult IMediationStore.FindGrantByRecipientDidAsync.");
+        }
     }
 
     private static void UseStoreAsForwardRecipientRegistry(IServiceCollection services)

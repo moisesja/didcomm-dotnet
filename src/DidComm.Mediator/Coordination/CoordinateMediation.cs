@@ -22,7 +22,8 @@ namespace DidComm.Mediator.Coordination;
 /// <para>
 /// <strong>Parsers.</strong> A <c>TryParse…</c> method returns <c>false</c> when the message is not
 /// of that type, and throws <see cref="MalformedMessageException"/> when it is of that type but its
-/// body has the wrong shape. The exception text names the member and the rule and never quotes a
+/// body has the wrong shape (<c>mediate-request</c> and <c>mediate-deny</c> define no body members,
+/// so their parsers only answer the type question). The exception text names the member and the rule and never quotes a
 /// value from the message. A DID member longer than 2048 characters is refused before anything
 /// parses it (FR-API-09). Members the protocol does not define are ignored. Message types are
 /// matched as the handler registry matches them (FR-PROTO-01/02): ignoring case and <c>-</c>/<c>_</c>,
@@ -205,16 +206,13 @@ public static class CoordinateMediation
 
     // ---- parsers --------------------------------------------------------------------------
 
-    /// <summary>Whether <paramref name="message"/> is a well-formed <c>mediate-request</c>. An absent <c>body</c> is accepted.</summary>
+    /// <summary>
+    /// Whether <paramref name="message"/> is a <c>mediate-request</c>. The message defines no body
+    /// members, so there is nothing to refuse: an absent <c>body</c> (as in the protocol page's
+    /// example) and a <c>body</c> with members this version does not know are both accepted.
+    /// </summary>
     /// <param name="message">The message to inspect.</param>
-    /// <exception cref="MalformedMessageException">It is a <c>mediate-request</c> whose <c>body</c> is not an object.</exception>
-    public static bool TryParseMediateRequest(Message message)
-    {
-        if (!IsType(message, MediateRequestUri))
-            return false;
-        MediationBodies.RequireEmptyShape(MediationBodies.ToElement(message.Body), "mediate-request");
-        return true;
-    }
+    public static bool TryParseMediateRequest(Message message) => IsType(message, MediateRequestUri);
 
     /// <summary>
     /// Read a <c>mediate-grant</c>. <c>routing_did</c> may be an array (3.0) or a single string
@@ -232,16 +230,12 @@ public static class CoordinateMediation
         return true;
     }
 
-    /// <summary>Whether <paramref name="message"/> is a well-formed <c>mediate-deny</c>. An absent <c>body</c> is accepted.</summary>
+    /// <summary>
+    /// Whether <paramref name="message"/> is a <c>mediate-deny</c>. The message defines no body
+    /// members: an absent <c>body</c> and one with unknown members are both accepted.
+    /// </summary>
     /// <param name="message">The message to inspect.</param>
-    /// <exception cref="MalformedMessageException">It is a <c>mediate-deny</c> whose <c>body</c> is not an object.</exception>
-    public static bool TryParseDeny(Message message)
-    {
-        if (!IsType(message, MediateDenyUri))
-            return false;
-        MediationBodies.RequireEmptyShape(MediationBodies.ToElement(message.Body), "mediate-deny");
-        return true;
-    }
+    public static bool TryParseDeny(Message message) => IsType(message, MediateDenyUri);
 
     /// <summary>Read a <c>recipient-update</c>.</summary>
     /// <param name="message">The message to inspect.</param>

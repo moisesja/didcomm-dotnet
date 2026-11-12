@@ -145,6 +145,14 @@ public sealed class CoordinateMediationParserTests
     [InlineData("""{"paginate":{"limit":-99999999999,"offset":0}}""", int.MinValue, 0)]
     [InlineData("""{"paginate":{"limit":1,"offset":99999999999}}""", 1, int.MaxValue)]
     [InlineData("""{"paginate":{"limit":123456789012345678901234567,"offset":0}}""", int.MaxValue, 0)] // beyond Int64
+    [InlineData("""{"paginate":{"limit":100000000000000000000000000000,"offset":0}}""", int.MaxValue, 0)] // beyond System.Decimal
+    [InlineData("""{"paginate":{"limit":1e400,"offset":0}}""", int.MaxValue, 0)]         // an integer, however large
+    [InlineData("""{"paginate":{"limit":-1e400,"offset":0}}""", int.MinValue, 0)]
+    [InlineData("""{"paginate":{"limit":1.5e1,"offset":0}}""", 15, 0)]
+    [InlineData("""{"paginate":{"limit":2500e-2,"offset":0}}""", 25, 0)]
+    [InlineData("""{"paginate":{"limit":0e-5,"offset":-0.0}}""", 0, 0)]
+    [InlineData("""{"paginate":{"limit":2147483647,"offset":2147483647.0}}""", int.MaxValue, int.MaxValue)]
+    [InlineData("""{"paginate":{"limit":2147483648.0,"offset":0}}""", int.MaxValue, 0)]
     public void Paginate_integers_are_read_and_clamped(string body, int limit, int offset)
     {
         CoordinateMediation.TryParseRecipientQuery(Raw(P + "/recipient-query", body), out var paginate).Should().BeTrue();
@@ -277,8 +285,13 @@ public sealed class CoordinateMediationParserTests
                 { "recipient-query", """{"paginate":{"limit":null,"offset":0}}""" },
                 { "recipient-query", """{"paginate":{"limit":true,"offset":0}}""" },
                 { "recipient-query", """{"paginate":{"limit":[10],"offset":0}}""" },
-                { "recipient-query", """{"paginate":{"limit":1e400,"offset":0}}""" },
                 { "recipient-query", """{"paginate":{"limit":1e-3,"offset":0}}""" },
+                { "recipient-query", """{"paginate":{"limit":1e-999999,"offset":0}}""" },
+                { "recipient-query", """{"paginate":{"limit":1.00000000000000000000000000001,"offset":0}}""" },
+                { "recipient-query", """{"paginate":{"limit":0.00000000000000000000000000001,"offset":0}}""" },
+                { "recipient-query", """{"paginate":{"limit":123456789012345678901234567890.5,"offset":0}}""" },
+                { "recipient-query", """{"paginate":{"limit":15e-1,"offset":0}}""" },
+                { "recipient-query", """{"paginate":{"limit":10,"offset":-1e400}}""" },
                 { "recipient-query", """{"paginate":{"Limit":10,"Offset":0}}""" },
 
                 // recipient
@@ -345,6 +358,23 @@ public sealed class CoordinateMediationParserTests
         }).Build();
         var ex = Refused(() => CoordinateMediation.TryParseRecipientUpdate(message, out _));
         ex.Message.Length.Should().BeLessThan(200);
+    }
+
+    [Fact]
+    public void A_body_holding_an_unpaired_surrogate_escape_is_malformed_not_a_clr_exception()
+    {
+        // System.Text.Json parses an unpaired-surrogate escape lazily and only fails when the value
+        // is read back (InvalidOperationException). The receive path refuses such text at unpack; a
+        // host that builds a Message from its own JSON can still hand it to the parsers. Same
+        // answer either way, and nothing is quoted.
+        var body = JsonNode.Parse("""{"updates":[{"recipient_did":"did:example:SENTINEL\ud800","action":"add"}]}""")!.AsObject();
+        var message = new MessageBuilder().WithType(P + "/recipient-update").WithBody(body).Build();
+
+        Refused(() => CoordinateMediation.TryParseRecipientUpdate(message, out _));
+
+        // mediate-request defines no body members, so its body is never read at all.
+        var request = new MessageBuilder().WithType(P + "/mediate-request").WithBody(JsonNode.Parse("""{"x":"\ud800"}""")!.AsObject()).Build();
+        CoordinateMediation.TryParseMediateRequest(request).Should().BeTrue();
     }
 
     // ---- BareDid (FR-MED-05) --------------------------------------------------------------

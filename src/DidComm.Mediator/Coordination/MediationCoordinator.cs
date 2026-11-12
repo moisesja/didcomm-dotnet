@@ -30,8 +30,13 @@ internal enum MediateOutcome
 /// <remarks>
 /// Nothing here throws for a store, policy or identity fault: the fault is logged by exception type
 /// name and turned into the outcome the protocol allows (<c>server_error</c> entries, or no reply).
-/// Cancellation of the dispatch token is the exception and propagates. Log lines carry the message
-/// id (shortened when over <see cref="MaxLoggedIdLength"/> characters) and type or enum names only.
+/// That covers what those collaborators return as well as what they throw: every list a store or
+/// identity hands back is copied inside the fault boundary before it is used. The one thing that
+/// leaves is cancellation of the dispatch token, and it leaves as a plain
+/// <see cref="OperationCanceledException"/>: whatever a collaborator threw while the token was
+/// cancelled is replaced, so no driver's error text rides out on a hang-up. Log lines carry the
+/// message id (shortened when over <see cref="MaxLoggedIdLength"/> characters) and type or enum
+/// names only.
 /// </remarks>
 internal sealed class MediationCoordinator
 {
@@ -97,7 +102,7 @@ internal sealed class MediationCoordinator
             // (FR-MED-05: idempotent). The policy is for new grants only.
             var existing = await _store.GetGrantAsync(peerDid, ct).ConfigureAwait(false);
             if (existing is not null)
-                return (MediateOutcome.Granted, existing.RoutingDids);
+                return (MediateOutcome.Granted, existing.RoutingDids.ToArray());
 
             var decision = await _policy.OnMediateRequestAsync(peerDid, context, ct).ConfigureAwait(false);
             if (decision != MediationDecision.Grant)
@@ -105,7 +110,7 @@ internal sealed class MediationCoordinator
 
             // No configured routing DID: the DID the recipient addressed this request to.
             var configured = _identity.RoutingDids;
-            IReadOnlyList<string> routingDids = configured is { Count: > 0 } ? configured.ToArray() : new[] { localDid };
+            var routingDids = configured is { Count: > 0 } ? configured.ToArray() : new[] { localDid };
             foreach (var did in routingDids)
             {
                 if (!BareDid.IsBareDid(did))
@@ -124,10 +129,11 @@ internal sealed class MediationCoordinator
                 Log(level, "Coordinate-mediation request {MessageId} denied: the mediation store holds its maximum number of grants (FR-MED-08). {Count} such denials.", LogId(messageId), n);
                 return (MediateOutcome.Denied, Array.Empty<string>());
             }
-            return (MediateOutcome.Granted, granted.RoutingDids);
+            return (MediateOutcome.Granted, granted.RoutingDids.ToArray());
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex)
         {
+            ThrowIfCancelled(ct);
             Log(LogLevel.Error, "Coordinate-mediation request {MessageId} not answered: {ExceptionType} from the store, policy or identity; nothing granted by this request.", LogId(messageId), ex.GetType().Name);
             return (MediateOutcome.NoReply, Array.Empty<string>());
         }
@@ -145,20 +151,21 @@ internal sealed class MediationCoordinator
             return results;
 
         // The grant first, so a peer without one costs no DID parse and no policy call.
-        MediationGrant? grant;
+        List<string>? own;
         try
         {
-            grant = await _store.GetGrantAsync(peerDid, ct).ConfigureAwait(false);
+            var grant = await _store.GetGrantAsync(peerDid, ct).ConfigureAwait(false);
+            own = grant is null ? null : OwnDids(localDid, grant, context.Options);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex)
         {
+            ThrowIfCancelled(ct);
             Log(LogLevel.Error, "Coordinate-mediation update {MessageId}: {ExceptionType} from the store; every entry answered server_error.", LogId(messageId), ex.GetType().Name);
             return Fill(results, updates, RecipientUpdateOutcome.ServerError);
         }
-        if (grant is null)
+        if (own is null)
             return Fill(results, updates, RecipientUpdateOutcome.ClientError);
 
-        var own = OwnDids(localDid, grant, context.Options);
         var pending = new List<RecipientUpdate>(updates.Count);
         var pendingIndex = new List<int>(updates.Count);
         var policyFaults = 0;
@@ -189,8 +196,9 @@ internal sealed class MediationCoordinator
                 {
                     allowed = await _policy.MayRegisterAsync(peerDid, update.RecipientDid, context, ct).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (!ct.IsCancellationRequested)
+                catch (Exception ex)
                 {
+                    ThrowIfCancelled(ct);
                     policyFaults++;
                     policyFaultType ??= ex.GetType().Name;
                     results[i] = Result(update, RecipientUpdateOutcome.ServerError);
@@ -215,18 +223,19 @@ internal sealed class MediationCoordinator
 
         // One store call for the whole batch: the store applies it atomically and in order, and
         // decides ownership itself (one grant per DID, D5).
-        IReadOnlyList<RecipientStoreOutcome>? outcomes = null;
+        RecipientStoreOutcome[]? outcomes = null;
         try
         {
-            outcomes = await _store.UpdateRecipientsAsync(peerDid, pending, ct).ConfigureAwait(false);
-            if (outcomes is null || outcomes.Count != pending.Count)
-            {
+            var reported = await _store.UpdateRecipientsAsync(peerDid, pending, ct).ConfigureAwait(false);
+            if (reported is null || reported.Count != pending.Count)
                 Log(LogLevel.Error, "Coordinate-mediation update {MessageId}: the store returned a result list of the wrong length; affected entries answered server_error.", LogId(messageId));
-                outcomes = null;
-            }
+            else
+                outcomes = reported.ToArray();
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex)
         {
+            ThrowIfCancelled(ct);
+            outcomes = null;
             Log(LogLevel.Error, "Coordinate-mediation update {MessageId}: {ExceptionType} from the store; affected entries answered server_error.", LogId(messageId), ex.GetType().Name);
         }
 
@@ -249,25 +258,29 @@ internal sealed class MediationCoordinator
         var limit = paginate is null ? _options.MaxPageSize : Math.Clamp(paginate.Limit, 0, _options.MaxPageSize);
         var offset = Math.Max(0, paginate?.Offset ?? 0);
 
-        RecipientPage page;
+        string[] dids;
+        int total;
         try
         {
-            page = await _store.ListRecipientsAsync(peerDid, offset, limit, ct).ConfigureAwait(false);
+            var page = await _store.ListRecipientsAsync(peerDid, offset, limit, ct).ConfigureAwait(false);
             if (page?.Dids is null || page.Dids.Count > limit || page.Total < 0)
             {
                 Log(LogLevel.Error, "Coordinate-mediation query {MessageId} not answered: the store returned a page outside the requested bounds.", LogId(messageId));
                 return null;
             }
+            dids = page.Dids.ToArray();
+            total = page.Total;
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex)
         {
+            ThrowIfCancelled(ct);
             Log(LogLevel.Error, "Coordinate-mediation query {MessageId} not answered: {ExceptionType} from the store.", LogId(messageId), ex.GetType().Name);
             return null;
         }
 
-        var count = page.Dids.Count;
-        var remaining = (int)Math.Max(0L, (long)page.Total - offset - count);
-        return (page.Dids, new RecipientPagination(count, offset, remaining));
+        var count = dids.Length;
+        var remaining = (int)Math.Max(0L, (long)total - offset - count);
+        return (dids, new RecipientPagination(count, offset, remaining));
     }
 
     /// <summary>Write a log line; a throwing logging provider changes nothing.</summary>
@@ -293,6 +306,14 @@ internal sealed class MediationCoordinator
         => messageId is null ? "(none)"
             : messageId.Length <= MaxLoggedIdLength ? messageId
             : $"(id of {messageId.Length} characters)";
+
+    // Inside a fault boundary: when the dispatch token is cancelled, cancellation is what leaves,
+    // never the collaborator's own exception (a driver's "cancelled by user" error carries its text).
+    private static void ThrowIfCancelled(CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested)
+            throw new OperationCanceledException(ct);
+    }
 
     private static RecipientUpdateOutcome ToWire(RecipientStoreOutcome outcome) => outcome switch
     {

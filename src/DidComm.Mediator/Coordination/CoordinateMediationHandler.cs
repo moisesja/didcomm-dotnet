@@ -126,15 +126,15 @@ public sealed class CoordinateMediationHandler : IProtocolHandler, IProtocolHand
     }
 
     // Building a reply validates what goes on the wire (lengths, enum values). Values that fail
-    // came from a host store or identity, not from the peer, so the failure is a server fault:
-    // logged by type, no reply, never thrown through dispatch.
+    // came from a host store or identity, not from the peer, so any failure here is a server
+    // fault: logged by type, no reply, never thrown through dispatch.
     private Message? Reply(Message request, Func<Message> build)
     {
         try
         {
             return build();
         }
-        catch (ArgumentException ex)
+        catch (Exception ex)
         {
             _coordinator.Log(LogLevel.Error, "Coordinate-mediation message {MessageId} not answered: the reply could not be built ({ExceptionType}).", MediationCoordinator.LogId(request.Id), ex.GetType().Name);
             return null;

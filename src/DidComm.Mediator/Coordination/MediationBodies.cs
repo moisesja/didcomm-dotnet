@@ -119,13 +119,20 @@ internal static class MediationBodies
     /// <c>default</c> (<see cref="JsonValueKind.Undefined"/>) when the message has no body.
     /// </summary>
     public static JsonElement ToElement(JsonObject? body)
-        => body is null ? default : JsonSerializer.SerializeToElement(body);
-
-    /// <summary>A body that carries no members the protocol defines: absent or an object.</summary>
-    public static void RequireEmptyShape(JsonElement body, string message)
     {
-        if (body.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Object))
-            throw new MalformedMessageException($"{message} 'body' must be a JSON object when present.");
+        if (body is null)
+            return default;
+        try
+        {
+            return JsonSerializer.SerializeToElement(body);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            // A body assembled in code can hold what no JSON text can (a lone surrogate, a cycle).
+            // The receive path refuses such text before it gets here; this is the same answer for a
+            // message a host built by hand. The cause is not attached: its text may quote the value.
+            throw new MalformedMessageException("The message 'body' is not representable as JSON.");
+        }
     }
 
     public static IReadOnlyList<string> ReadRoutingDids(JsonElement body, string message)
@@ -176,7 +183,6 @@ internal static class MediationBodies
 
     public static RecipientQueryPaging? ReadPaginate(JsonElement body, string message)
     {
-        RequireEmptyShape(body, message);
         // Optional: absent, or an explicit null (serializers that write their unset members).
         if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty(Paginate, out var paginate) || paginate.ValueKind == JsonValueKind.Null)
             return null;
@@ -305,10 +311,11 @@ internal static class MediationBodies
             $"{message} '{Result}' must be one of \"{ResultClientError}\", \"{ResultServerError}\", \"{ResultNoChange}\", \"{ResultSuccess}\".");
     }
 
-    // An integer JSON number. A string ("10") or a number with a fractional part (1.5) is
-    // malformed; JSON does not distinguish 10 from 10.0 or 1e1, so those read as 10. A value beyond
-    // the 32-bit range is clamped: it can only mean "more than any page" or "past the end", and
-    // both are well defined.
+    // An integer JSON number, decided from the number's own text so that neither size nor
+    // precision can change the answer. A string ("10") or a number with a non-zero fractional part
+    // (1.5, 1e-3, 1.00000000000000000000000000001) is malformed; JSON does not distinguish 10 from
+    // 10.0 or 1e1, so those read as 10. An integer beyond the 32-bit range, however large, is
+    // clamped: it can only mean "more than any page" or "past the end", and both are well defined.
     private static int ReadInteger(JsonElement parent, string name, string parentName, string message)
     {
         if (!parent.TryGetProperty(name, out var value))
@@ -317,8 +324,101 @@ internal static class MediationBodies
             throw new MalformedMessageException($"{message} '{parentName}.{name}' must be an integer.");
         if (value.TryGetInt64(out var wide))
             return (int)Math.Clamp(wide, int.MinValue, int.MaxValue);
-        if (value.TryGetDecimal(out var number) && decimal.Truncate(number) == number)
-            return (int)Math.Clamp(number, int.MinValue, int.MaxValue);
+        if (TryReadIntegerText(value.GetRawText(), out var clamped))
+            return clamped;
         throw new MalformedMessageException($"{message} '{parentName}.{name}' must be an integer.");
+    }
+
+    /// <summary>
+    /// Read a JSON number literal (<c>-?digits[.digits][(e|E)[+-]digits]</c>) as an integer clamped
+    /// to <see cref="int"/>. <c>false</c> when the number has a non-zero fractional part. One pass
+    /// over the text, no big-number arithmetic: the digits are never multiplied out.
+    /// </summary>
+    internal static bool TryReadIntegerText(ReadOnlySpan<char> text, out int value)
+    {
+        value = 0;
+        var negative = text.Length > 0 && text[0] == '-';
+        if (negative)
+            text = text[1..];
+
+        var exponentAt = text.IndexOfAny('e', 'E');
+        var mantissa = exponentAt < 0 ? text : text[..exponentAt];
+        var pointAt = mantissa.IndexOf('.');
+        var whole = pointAt < 0 ? mantissa : mantissa[..pointAt];
+        var fraction = pointAt < 0 ? default : mantissa[(pointAt + 1)..];
+        if (whole.IsEmpty)
+            return false;
+
+        // The exponent, saturated: beyond this many places every digit of a real message has moved.
+        const int saturation = 100_000_000;
+        var exponent = 0;
+        if (exponentAt >= 0)
+        {
+            var digits = text[(exponentAt + 1)..];
+            var exponentNegative = digits.Length > 0 && digits[0] == '-';
+            if (digits.Length > 0 && digits[0] is '-' or '+')
+                digits = digits[1..];
+            if (digits.IsEmpty)
+                return false;
+            foreach (var c in digits)
+            {
+                if (c is < '0' or > '9')
+                    return false;
+                exponent = Math.Min(saturation, exponent * 10 + (c - '0'));
+            }
+            if (exponentNegative)
+                exponent = -exponent;
+        }
+
+        // Digit i of whole+fraction sits left of the decimal point when i < pointPosition (an
+        // integer digit) and right of it otherwise (a fractional digit, which must be zero).
+        var pointPosition = (long)whole.Length + exponent;
+        long magnitude = 0;
+        var index = 0L;
+        var overflow = false;
+        if (!Accumulate(whole, pointPosition, ref index, ref magnitude, ref overflow)
+            || !Accumulate(fraction, pointPosition, ref index, ref magnitude, ref overflow))
+        {
+            return false;
+        }
+
+        // Integer places the text does not spell out (1e40): zeros appended to a non-zero value.
+        if (!overflow && magnitude != 0)
+        {
+            for (var pad = index; pad < pointPosition && !overflow; pad++)
+            {
+                magnitude *= 10;
+                overflow = magnitude > int.MaxValue;
+            }
+        }
+
+        value = overflow
+            ? (negative ? int.MinValue : int.MaxValue)
+            : (int)(negative ? -magnitude : magnitude);
+        return true;
+    }
+
+    // Feeds one run of digits into the running integer. False for a non-digit or for a non-zero
+    // digit right of the decimal point. The magnitude stops growing once it is past int.MaxValue.
+    private static bool Accumulate(ReadOnlySpan<char> digits, long pointPosition, ref long index, ref long magnitude, ref bool overflow)
+    {
+        foreach (var c in digits)
+        {
+            if (c is < '0' or > '9')
+                return false;
+            var digit = c - '0';
+            if (index >= pointPosition)
+            {
+                if (digit != 0)
+                    return false;
+            }
+            else if (!overflow)
+            {
+                magnitude = magnitude * 10 + digit;
+                overflow = magnitude > int.MaxValue;
+            }
+            index++;
+        }
+        return true;
     }
 }
