@@ -1279,7 +1279,7 @@ public sealed class MessagePickupHttpTests
         (await mediator.Queue.DeliverAsync(unregistered, a.Payload)).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
         (await mediator.Queue.DeliverAsync(recipient.Did, new byte[mediator.Queue.MaxAdmissiblePayloadBytes + 1])).Outcome.Should().Be(PickupDeliveryOutcome.PayloadTooLarge);
 
-        // Malformed: each is the endpoint's uniform 400, and the endpoint logs the exception object.
+        // Malformed: each is the endpoint's uniform 400, and the endpoint logs the exception's type.
         var malformed = new[]
         {
             mediator.Raw(recipient, MessagePickup.DeliveryRequestType, Body($$"""{"limit": -1, "recipient_did": "{{unregistered}}"}"""), thread),
@@ -1312,11 +1312,11 @@ public sealed class MessagePickupHttpTests
         mediator.Logs.OfPickup.Where(r => Leaks(r.Rendered)).Select(r => r.Rendered).Should().BeEmpty(
             "pickup log lines carry the id of the request, type names and counts — never a DID, a recipient_did, an attachment id or a thread id");
 
-        // (2) …and the text of what they throw: the endpoint logs the exception object.
-        var logged = mediator.Logs.Records.Where(r => r.Exception is not null).ToList();
-        logged.Should().HaveCountGreaterThanOrEqualTo(malformed.Length, "each malformed request was logged with its exception");
-        logged.Where(r => Leaks(r.Exception!.ToString())).Select(r => r.Exception!.Message).Should().BeEmpty(
-            "a MalformedMessageException names the member and the rule, never a value");
+        // (2) …and what they throw: the endpoint writes the exception's type name, never the object
+        //     (#95 AD-5; it used to log the object, whose text a stranger can shape).
+        mediator.Logs.Records.Where(r => r.Exception is not null).Should().BeEmpty("no line carries an exception object");
+        mediator.Logs.Records.Count(r => r.Text.Contains("rejecting inbound envelope (MalformedMessageException", StringComparison.Ordinal))
+            .Should().BeGreaterThanOrEqualTo(malformed.Length, "each malformed request was logged by its type");
 
         // (3) The rest of the host (endpoint, dispatcher, client): pre-existing code, whose lines at
         //     Information or above are held to the same rule here. They are listed for the report.

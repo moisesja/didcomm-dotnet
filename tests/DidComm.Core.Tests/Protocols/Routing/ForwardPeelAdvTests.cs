@@ -220,7 +220,12 @@ public sealed class ForwardPeelAdvTests
 
     // ── DEFECT 1: the peel resolves DIDs on the shared pump ───────────────────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 1 (P2): a stranger's self-addressed forward whose inner layer names a DID that resolves slowly (signer kid / authcrypt skid) parks ForwardHandler's single pump inside DID resolution; every other forward waits behind it and, once the queue is full, is dropped as Dropped-Saturated. Un-skip to see it fail.")]
+    // ADV-1 DEFECT 1 (P2, fixed by #95 AD-1): the layer used to be opened on ForwardHandler's single
+    // pump, so a stranger's inner layer naming a slowly-resolving DID parked every relay and, once
+    // the queue was full, Bob's forwards were dropped as saturated. Layers addressed to the mediator
+    // are now opened inline, on the sender's own request and before any reservation: the stranger's
+    // request is what waits for the DID it chose.
+    [Fact]
     public async Task ADV1_D1_A_self_addressed_forward_whose_inner_layer_resolves_a_slow_DID_does_not_hold_up_other_recipients_forwards()
     {
         RaiseThreadPoolFloor();
@@ -228,11 +233,13 @@ public sealed class ForwardPeelAdvTests
         var poisoned = f.SelfAddressed(await f.SignedByTarpitAsync(Forward(Bob)));
 
         // The stranger's forward: anoncrypt to the mediator, no grant, no registered recipient
-        // needed — the inner unpack resolves the signer before anything else is checked.
-        await f.HandleAsync(poisoned, flush: false);
-        (await Task.WhenAny(f.Resolver.Entered.Task, Task.Delay(Rendezvous))).Should().BeSameAs(f.Resolver.Entered.Task, "the pump is now resolving the stranger's DID");
+        // needed — opening the inner layer resolves the signer before anything else is checked.
+        // Its own request thread (as the endpoint gives every request one): the signer lookup is
+        // sync-over-async, so the call blocks the thread that makes it.
+        var strangers = Task.Run(() => f.HandleAsync(poisoned, flush: false));
+        (await Task.WhenAny(f.Resolver.Entered.Task, Task.Delay(Rendezvous))).Should().BeSameAs(f.Resolver.Entered.Task, "the stranger's DID is being resolved");
 
-        // Alice's forwards for Bob arrive while the pump is parked.
+        // Alice's forwards for Bob arrive while that resolution is parked.
         var forBob1 = AsDecryptedByMediator(Forward(Bob));
         var forBob2 = AsDecryptedByMediator(Forward(Bob));
         await f.HandleAsync(forBob1, flush: false);
@@ -242,39 +249,22 @@ public sealed class ForwardPeelAdvTests
         {
             f.Outcomes.Counts.Should().NotContainKey(ForwardOutcomes.DroppedSaturated, "Bob's mail must not be dropped because a stranger's onion is being resolved");
             (await PollAsync(() => f.Sink.Count >= 2, TimeSpan.FromSeconds(5))).Should().BeTrue("Bob's forwards are relayed while the stranger's DID resolution is still pending");
+            strangers.IsCompleted.Should().BeFalse("the stranger's own request pays for opening what it sent");
+            f.Handler.Outstanding.Should().Be(0, "nothing is reserved for a layer still being opened");
         }
         finally
         {
             f.Resolver.Gate.TrySetResult();
         }
-    }
 
-    [Fact]
-    public async Task A_self_addressed_forward_whose_inner_layer_resolves_a_slow_DID_parks_the_pump_today()
-    {
-        // The reproduction of DEFECT 1 as it behaves now (a pin, so the fix has to change it): the pump
-        // is inside the stranger's DID resolution, Bob's first forward waits, the second is refused.
-        RaiseThreadPoolFloor();
-        await using var f = await Fixture.CreateAsync(capacity: 2);
-        await f.HandleAsync(f.SelfAddressed(await f.SignedByTarpitAsync(Forward(Bob))), flush: false);
-        (await Task.WhenAny(f.Resolver.Entered.Task, Task.Delay(Rendezvous))).Should().BeSameAs(f.Resolver.Entered.Task);
-
-        await f.HandleAsync(AsDecryptedByMediator(Forward(Bob)), flush: false);
-        await f.HandleAsync(AsDecryptedByMediator(Forward(Bob)), flush: false);
-
-        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedSaturated] = 1 });
-        f.Sink.Count.Should().Be(0, "the pump has not moved past the stranger's forward");
-        f.Resolver.Requested.Should().Contain(Tarpit);
-
-        f.Resolver.Gate.TrySetResult();
+        await strangers.WaitAsync(Flush);
         await f.Handler.FlushAsync(Flush);
-        f.Sink.Count.Should().Be(1, "once the resolution returns, Bob's queued forward is relayed (the stranger's signed-only layer is refused by the posture rule)");
-        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedSaturated] = 1, [ForwardOutcomes.DroppedNotEncrypted] = 1 });
+        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedNotEncrypted] = 1 }, "once resolved, the signed-only inner layer is refused by the posture rule");
     }
 
     // ── DEFECT 4: a stranger can make the peel count Faulted ──────────────────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 4 (P3): an inner layer whose signer (or authcrypt sender) DID does not resolve is the sender's mistake, yet the peel counts it as Faulted (DropReason.PeelFaulted maps to ForwardOutcomes.Faulted), so any stranger can raise the operator's fault metric at will; the same envelope sent as the outer layer is refused by the unpack (400) and never counted. Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D4_An_inner_layer_signed_by_a_DID_that_does_not_resolve_is_a_sender_caused_drop_not_a_fault()
     {
         await using var f = await Fixture.CreateAsync();
@@ -286,23 +276,9 @@ public sealed class ForwardPeelAdvTests
         f.Outcomes.Total.Should().Be(1);
     }
 
-    [Fact]
-    public async Task An_inner_layer_signed_by_a_DID_that_does_not_resolve_is_counted_Faulted_today()
-    {
-        // DEFECT 4 as it behaves now (pin).
-        await using var f = await Fixture.CreateAsync();
-
-        for (var i = 0; i < 3; i++)
-            await f.HandleAsync(f.SelfAddressed(await f.SignedByGhostAsync(Forward(Bob))));
-
-        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.Faulted] = 3 });
-        f.Logger.Warnings.Should().ContainSingle("the first is a Warning, the rest Debug").Which.Formatted.Should().Contain("DidResolutionException");
-        ForwardHandlerTests.AssertLogsCarryNoExceptionObjectAndNone(f.Logger, Fixture.GhostDid);
-    }
-
     // ── DEFECT 2: an outer layer's expiry is lost once the layer is opened ────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 2 (P3): after a self-addressed layer is opened, the relayed result carries only the innermost forward's expires_time; the expiry the opened (enclosing) layer asked for is dropped, while its delay is kept. FR-ROUTE-09: a payload whose enclosing forward's expires_time has passed MUST NOT be delivered. Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D2_The_expiry_of_an_opened_layer_still_bounds_the_relayed_payload()
     {
         await using var f = await Fixture.CreateAsync();
@@ -316,22 +292,9 @@ public sealed class ForwardPeelAdvTests
         result.ExpiresTime!.Value.Should().BeLessThanOrEqualTo(outerExpiry, "the relayed payload must not outlive the forward that enclosed it");
     }
 
-    [Fact]
-    public async Task The_expiry_of_an_opened_layer_is_dropped_today()
-    {
-        // DEFECT 2 as it behaves now (pin): the outer layer expires in a minute, the relayed result
-        // carries no expiry at all, so the queue keeps it for the mailbox age limit.
-        await using var f = await Fixture.CreateAsync();
-        var outer = ForwardMessage.Create(Mediator, Mediator, new[] { await f.AnoncryptAsync(Forward(Bob)) }, expiresTimeEpochSeconds: T0.AddMinutes(1).ToUnixTimeSeconds());
-
-        await f.HandleAsync(AsDecryptedByMediator(outer, Fixture.MediatorKid));
-
-        f.Sink.Results.Should().ContainSingle().Which.ExpiresTime.Should().BeNull();
-    }
-
     // ── DEFECT 3: the forward handler's log lines carry the id unbounded ──────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 3 (P3): ForwardHandler (incl. the new peel lines) writes the forward's message id raw; ids are not length-bounded (any length up to MaxReceiveBytes), while the #95 CHANGELOG/architecture claim 'message ids (bounded)' and the mediator package bounds them with MediatorLog.LogId (128). Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D3_A_forward_handler_drop_line_never_carries_more_than_a_bounded_id()
     {
         await using var f = await Fixture.CreateAsync();
@@ -346,19 +309,6 @@ public sealed class ForwardPeelAdvTests
 
         f.Logger.Warnings.Should().HaveCount(2);
         f.Logger.Entries.Should().OnlyContain(e => e.Formatted.Length < 4_096, "a stranger-chosen id is bounded before it is written (MediatorLog.LogId keeps 128 characters)");
-    }
-
-    [Fact]
-    public async Task A_forward_handler_drop_line_carries_a_200000_character_id_today()
-    {
-        // DEFECT 3 as it behaves now (pin): the whole id reaches a Warning line, first of its reason.
-        await using var f = await Fixture.CreateAsync();
-        var peeled = ForwardMessage.Create(Mediator, Mediator, new[] { "{\"not\":\"an envelope\"}" });
-        peeled.Id = new string('a', 200_000);
-
-        await f.HandleAsync(AsDecryptedByMediator(peeled, Fixture.MediatorKid));
-
-        f.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain(peeled.Id);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

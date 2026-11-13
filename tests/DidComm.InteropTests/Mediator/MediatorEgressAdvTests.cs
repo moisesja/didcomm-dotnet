@@ -32,11 +32,16 @@ public sealed class MediatorEgressAdvTests
 
     // ---- the single forward pump ------------------------------------------------------------
 
-    [Fact(Skip = "ADV-2 DEFECT 1 (P2): a stranger's forward addressed to the mediator itself runs an attacker-chosen DID resolution on the single forward pump (PeelAsync -> DidCommClient.UnpackAsync -> sync signer/sender lookup, no token), after the 202; every other forward waits behind it, and once 1 024 wait they are dropped as saturated. main has no peel: such a forward is dropped inline as unregistered.")]
+    // ADV-2 DEFECT 1 (P2, fixed by #95 AD-1): a stranger's forward addressed to the mediator itself
+    // used to be opened on the single forward pump, after the 202, so an attacker-chosen DID
+    // resolution held up every other relay. Layers addressed to the mediator are now opened inline,
+    // on the sender's own request: the stranger's POST is what waits for the DID it chose.
+    [Fact]
     public async Task A_strangers_forward_addressed_to_the_mediator_cannot_hold_up_other_senders_relays()
     {
         var resolver = new GatedDidResolverHandle();
         await using var mediator = await MediatorTestServer.StartAsync(o => o.PostConfigureServices = s => GatedDidResolverHandle.Install(s, resolver));
+        Task<(HttpStatusCode Status, string? ContentType, string Body)>? strangersPost = null;
         try
         {
             var bob = await mediator.NewPeerAsync();
@@ -49,7 +54,7 @@ public sealed class MediatorEgressAdvTests
             resolver.Gate(stranger.Did);
             var signed = await stranger.Client.PackSignedAsync(stranger.Note(mediator.Did), stranger.Did);
             var (selfAddressed, _) = await stranger.ForwardAsync(mediator.Did, next: mediator.Did, signed);
-            (await mediator.PostAsync(selfAddressed)).Status.Should().Be(HttpStatusCode.Accepted);
+            strangersPost = Task.Run(() => mediator.PostAsync(selfAddressed)); // its own request thread: the signer lookup blocks it
             await resolver.Entered.WaitAsync(Wait);
 
             // An ordinary relay from someone else, for an enrolled recipient.
@@ -59,11 +64,16 @@ public sealed class MediatorEgressAdvTests
 
             // Property: Bob's message is queued whatever the stranger's forward is waiting for.
             await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 1, "a stranger's forward must not hold every other relay behind a DID resolution it chose");
+            strangersPost.IsCompleted.Should().BeFalse("the stranger's own request pays for opening what it sent");
         }
         finally
         {
             resolver.Release();
         }
+
+        (await strangersPost!.WaitAsync(Wait)).Status.Should().Be(HttpStatusCode.Accepted, "once its DID resolves, the stranger still gets the uniform 202 and nothing more");
+        await mediator.FlushAsync();
+        mediator.Store.MessageCount.Should().Be(1, "the stranger's forward stored nothing");
     }
 
     [Fact]

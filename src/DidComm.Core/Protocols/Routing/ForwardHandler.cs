@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using DidComm.Consistency;
+using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using DidComm.Messages;
 using Microsoft.Extensions.Logging;
@@ -21,7 +22,8 @@ namespace DidComm.Protocols.Routing;
 /// <see cref="Facade.UnpackResult.RecipientKid"/>), refuse a forward whose own
 /// <c>expires_time</c> has passed (FR-ROUTE-09, judged on <c>DidCommOptions.Clock</c> with the
 /// FR-API-05 skew), reduce <c>body.next</c> to its DID subject and ask the
-/// <see cref="IForwardRecipientRegistry"/> — unless <c>next</c> is this mediator itself (see
+/// <see cref="IForwardRecipientRegistry"/>. A forward addressed to this mediator itself is opened
+/// here too, layer by layer, and the forward found inside is what is screened and looked up (see
 /// below). Any failure drops the forward with a log line that
 /// carries the message id only — no DID, no kid, no payload — and the handler returns
 /// <c>null</c>: a mediator sends nothing back toward the sender, no problem report, and
@@ -57,8 +59,9 @@ namespace DidComm.Protocols.Routing;
 /// acknowledgement or queued behind a slow sink never moves it.
 /// </para>
 /// <para>
-/// <strong>Logging contract.</strong> Every line carries the message id and, on a failure, the
-/// exception type name(s) only. No exception object — and so no exception message — is ever
+/// <strong>Logging contract.</strong> Every line carries the message id — bounded: an id longer
+/// than 128 characters is written as its length — and, on a failure, the exception type name(s)
+/// only. No exception object — and so no exception message — is ever
 /// handed to the logger: a resolution or sink fault can carry the next-hop DID in its text, and a
 /// console provider would print it. Any stranger can make the handler drop a forward, so each
 /// drop line is rate-limited per reason: the first occurrence and every 1000th are written at
@@ -72,8 +75,11 @@ namespace DidComm.Protocols.Routing;
 /// inconsistent or malformed), <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or
 /// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered),
 /// <c>Dropped-Saturated</c>, <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or
-/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a screening, processing or
-/// sink fault). A forward the sink returns from normally is the sink's to count: the mediator's own
+/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a fault of the mediator's
+/// own collaborators: the registry, the clock or the logger while screening, the processor or the
+/// sink on the pump). A layer addressed to the mediator that cannot be opened is the sender's mistake
+/// whatever the exception — <c>Dropped-Malformed</c>, or <c>Dropped-Expired</c> when the message
+/// inside has expired — never <c>Faulted</c>. A forward the sink returns from normally is the sink's to count: the mediator's own
 /// sink counts how it ended, a host's sink counts nothing.
 /// </para>
 /// <para>
@@ -83,14 +89,21 @@ namespace DidComm.Protocols.Routing;
 /// DID subject of <c>next</c> is the DID whose key decrypted the forward
 /// (<see cref="Facade.UnpackResult.RecipientKid"/>), the handler does not look it up in the
 /// registry — the mediator's own DIDs are never registered recipients (FR-MED-05), and they are
-/// public, so skipping the lookup tells a sender nothing — and admits it like any other forward
-/// (the same posture, expiry, bounds and acknowledgement rules). On the pump it opens the single
-/// attachment as it is, with the mediator's own client, and screens what is inside exactly as it
-/// screens an arriving forward: a <c>forward</c>, encrypted to a held key, not expired, its own
-/// <c>delay_milli</c> drawn then under the cap, its <c>next</c> a registered recipient. A forward
-/// inside that is again addressed to this mediator is opened in turn, at most
-/// <see cref="MaxSelfAddressedLayers"/> layers per received forward; one more is dropped as
-/// malformed. What is inside and is not a forward is dropped: a mediator is not the final recipient
+/// public, so skipping the lookup tells a sender nothing. It opens the single attachment as it is,
+/// with the mediator's own client, inline on the sender's request and before anything is reserved:
+/// the sender pays for opening what it built, exactly as it pays for the outer unpack, and the
+/// shared pump never runs a stranger's decryption or DID resolution. What is inside is screened
+/// exactly as an arriving forward is, at the same receipt instant: a <c>forward</c>, encrypted to a
+/// held key, not expired, its own <c>delay_milli</c> drawn under the cap, its <c>next</c> a
+/// registered recipient (the one registry lookup of the request). A forward inside that is again
+/// addressed to this mediator is opened in turn, at most <see cref="MaxSelfAddressedLayers"/> layers
+/// per received forward — so one request costs at most that many unpacks, each of a payload smaller
+/// than the last, the first bounded by <c>MaxReceiveBytes</c> — and one more is dropped as
+/// malformed. The forward found inside is then admitted with the received one's acknowledgement
+/// (both count against the byte budget) and the pump only processes and sinks it. The relayed
+/// payload must not outlive any layer it came out of: its <see cref="ForwardProcessingResult.ExpiresTime"/>
+/// is the earliest <c>expires_time</c> of the received forward and every layer opened (FR-ROUTE-09),
+/// for the expired-while-queued check and for the queue that stores it. What is inside and is not a forward is dropped: a mediator is not the final recipient
 /// of an application message. A hold asked for by an outer layer is kept: the relayed forward's
 /// not-before is the latest of its layers'. Only the DID that decrypted a layer counts as this
 /// mediator: a forward naming another of the mediator's DIDs as <c>next</c> is looked up, and
@@ -178,7 +191,6 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         Faulted,
         SelfLayersTooDeep,
         PeelMalformed,
-        PeelFaulted,
         InnerNotAForward,
         InnerPosture,
         InnerExpired,
@@ -190,15 +202,20 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     // The dispatcher-built ProtocolContext (an immutable record) is everything the detached work
     // needs: the UnpackResult, the options/clock and the facade. The request token is NOT stored.
     // Bytes is the plaintext UTF-8 charge the item holds against the byte budget until released.
-    // Delay/NotBefore are the delay_milli schedule fixed at admission (FR-ROUTE-10). SelfAddressed:
-    // the forward's next is the DID that decrypted it, so the pump opens it (FR-ROUTE-06).
+    // Delay/NotBefore are the delay_milli schedule fixed at admission (FR-ROUTE-10). Opened: when the
+    // received forward was addressed to this mediator itself, the forward found inside it — opened
+    // inline, on the request (FR-ROUTE-06) — which is what the pump processes; null otherwise. The
+    // context stays the received forward's: its acknowledgement, its id in the logs, the sink's view.
+    // OpenedExpiresTime: the earliest expires_time of the received forward and every layer opened,
+    // which bounds the relayed payload (FR-ROUTE-09).
     private sealed record WorkItem(
         ProtocolContext? Context,
         int Bytes,
         TimeSpan? Delay,
         DateTimeOffset? NotBefore,
         TaskCompletionSource? Barrier,
-        bool SelfAddressed = false);
+        Facade.UnpackResult? Opened = null,
+        long? OpenedExpiresTime = null);
 
     /// <summary>Create the handler with the default queue bound and shutdown grace.</summary>
     /// <param name="processor">The mediator's forward processor (pass-through / extra wraps / rewrap).</param>
@@ -278,7 +295,18 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             SingleReader = false, // the shutdown path may drain while the pump is in the sink
             SingleWriter = false,
         });
-        _pump = Task.Run(() => PumpAsync(_shutdownToken));
+        // The handler is a singleton that can be built lazily, on the first request: its pump must not
+        // carry that request's execution context (ambient AsyncLocal state, logging scopes, the
+        // current activity) into every forward it ever processes.
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            _pump = Task.Run(() => PumpAsync(_shutdownToken));
+        }
+        else
+        {
+            using (ExecutionContext.SuppressFlow())
+                _pump = Task.Run(() => PumpAsync(_shutdownToken));
+        }
     }
 
     /// <inheritdoc />
@@ -310,10 +338,13 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             ct.ThrowIfCancellationRequested();
         }
 
+        // The id goes into log lines bounded: ids are the sender's, of any length.
+        var logId = LogValues.Id(message.Id);
         int bytes;
         TimeSpan? delay;
         DateTimeOffset? notBefore;
-        bool selfAddressed;
+        Facade.UnpackResult? opened = null;
+        long? openedExpiresTime = null;
         try
         {
             // (a) A forward at all, and well formed. Malformed (missing next/attachments, next over
@@ -323,20 +354,20 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             {
                 if (!ForwardMessage.TryParse(message, out next, out _))
                 {
-                    Dropped(DropReason.NotAForward, "Forward {MessageId} dropped: not a forward message (FR-ROUTE-11).", message.Id);
+                    Dropped(DropReason.NotAForward, "Forward {MessageId} dropped: not a forward message (FR-ROUTE-11).", logId);
                     return null;
                 }
             }
             catch (MalformedMessageException ex)
             {
-                Dropped(DropReason.Malformed, "Forward {MessageId} dropped: malformed forward (FR-ROUTE-01/FR-API-09): {ExceptionType}.", message.Id, ex.GetType().Name);
+                Dropped(DropReason.Malformed, "Forward {MessageId} dropped: malformed forward (FR-ROUTE-01/FR-API-09): {ExceptionType}.", logId, ex.GetType().Name);
                 return null;
             }
 
             // (b) FR-ROUTE-11 posture: encrypted and decrypted with a held key.
             if (!context.Received.Encrypted || string.IsNullOrEmpty(context.Received.RecipientKid))
             {
-                Dropped(DropReason.Posture, "Forward {MessageId} dropped: plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.Posture, "Forward {MessageId} dropped: plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", logId);
                 return null;
             }
 
@@ -348,7 +379,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             var receivedAt = context.Options.Now();
             if (ForwardProcessingResult.IsExpiredAt(message.ExpiresTime, receivedAt, context.Options.ExpiresClockSkew))
             {
-                Dropped(DropReason.ExpiredInline, "Forward {MessageId} dropped: expired at relay time (FR-ROUTE-09).", message.Id);
+                Dropped(DropReason.ExpiredInline, "Forward {MessageId} dropped: expired at relay time (FR-ROUTE-09).", logId);
                 return null;
             }
 
@@ -360,7 +391,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             var subject = DidSubject.DidSubjectOf(next);
             if (subject is null)
             {
-                Dropped(DropReason.NextNotDid, "Forward {MessageId} dropped: next is not a DID or DID URL (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.NextNotDid, "Forward {MessageId} dropped: next is not a DID or DID URL (FR-ROUTE-11).", logId);
                 return null;
             }
 
@@ -373,13 +404,34 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 : InboundMessageSnapshot.CreateFallback(context.Received).Utf8ByteCount;
 
             // (f) A forward whose next is the DID that decrypted it is a rewrapped layer addressed to
-            //     this mediator itself (FR-ROUTE-06): opened on the pump, never looked up — the
-            //     mediator's own DIDs are public and never registered (FR-MED-05). Anything else
-            //     must name a registered recipient.
-            selfAddressed = IsSelfAddressed(subject, context.Received.RecipientKid);
-            if (!selfAddressed && !await _registry.IsRegisteredAsync(subject, ct).ConfigureAwait(false))
+            //     this mediator itself (FR-ROUTE-06). It is opened here, on the sender's own request
+            //     and before anything is reserved — the sender pays for opening what it sent, as it
+            //     paid for the outer unpack — and the forward found inside is screened like this
+            //     one. The mediator's own DID is never looked up (it is public and never registered,
+            //     FR-MED-05); the forward that is finally relayed is.
+            if (IsSelfAddressed(subject, context.Received.RecipientKid))
             {
-                Dropped(DropReason.NotRegistered, "Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11).", message.Id);
+                if (await OpenSelfAddressedAsync(context.Received, receivedAt, context.Options.ExpiresClockSkew, logId, ct).ConfigureAwait(false) is not { } inside)
+                    return null; // dropped and counted
+                opened = inside.Forward;
+                openedExpiresTime = inside.ExpiresTime;
+                subject = inside.Subject;
+                if (inside.NotBefore is { } later && (notBefore is not { } earlier || later > earlier))
+                    (delay, notBefore) = (inside.Delay, inside.NotBefore); // a hold an outer layer asked for is kept
+                // The opened forward is held with the received one: both count against the budget.
+                bytes = (int)Math.Min(int.MaxValue, (long)bytes + PlaintextBytes(inside.Forward));
+            }
+
+            // (g) The forward to relay must name a registered recipient: one constant-work lookup,
+            //     whether or not layers were opened to reach it.
+            if (!await _registry.IsRegisteredAsync(subject, ct).ConfigureAwait(false))
+            {
+                Dropped(
+                    opened is null ? DropReason.NotRegistered : DropReason.InnerNotRegistered,
+                    opened is null
+                        ? "Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11)."
+                        : "Forward {MessageId} dropped: the forward inside it names a next that is not a registered recipient (FR-ROUTE-11).",
+                    logId);
                 return null;
             }
         }
@@ -391,14 +443,14 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         catch (Exception ex)
         {
             // A registry (or logger / clock) fault must not become a 400 toward the sender.
-            Dropped(DropReason.ScreeningFault, "Forward {MessageId} dropped: inline screening failed with {ExceptionType}.", message.Id, ex.GetType().Name);
+            Dropped(DropReason.ScreeningFault, "Forward {MessageId} dropped: inline screening failed with {ExceptionType}.", logId, ex.GetType().Name);
             return null;
         }
 
         // Admit: reserve the slot and the bytes inline, so saturation is decided on the request
         // like every other drop. Everything that depends on the registration (processing, the
         // sink) happens on the pump, and only after the transport has acknowledged the inbound.
-        var item = new WorkItem(context, bytes, delay, notBefore, Barrier: null, selfAddressed);
+        var item = new WorkItem(context, bytes, delay, notBefore, Barrier: null, opened, openedExpiresTime);
         var reserved = false;
         var publishNow = false;
         var published = false;
@@ -422,7 +474,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
         if (!reserved)
         {
-            DropSaturated(message.Id);
+            DropSaturated(logId);
             return null;
         }
 
@@ -451,7 +503,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private async Task PublishWhenAcknowledgedAsync(WorkItem item)
     {
         var context = item.Context!;
-        var id = context.Received.Message.Id;
+        var id = LogValues.Id(context.Received.Message.Id);
         try
         {
             // The shutdown token, not the request token: a shutdown must release the reservation
@@ -552,27 +604,20 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private async Task ProcessOneAsync(WorkItem item, CancellationToken shutdown)
     {
         var context = item.Context!;
-        var id = context.Received.Message.Id;
+        var id = LogValues.Id(context.Received.Message.Id);
         // Which stage a fault came from decides its outcome: a processor that refuses the forward
         // as inconsistent or malformed ends a malformed forward; anything else is a fault.
         var processed = false;
         try
         {
-            var forward = context.Received;
-            var delay = item.Delay;
-            var notBefore = item.NotBefore;
-            if (item.SelfAddressed)
-            {
-                // Addressed to this mediator itself (FR-ROUTE-06): open it and relay the forward
-                // inside. A chain that ends in a drop has been counted and logged there.
-                if (await PeelAsync(context, delay, notBefore, shutdown).ConfigureAwait(false) is not { } inner)
-                    return;
-                (forward, delay, notBefore) = inner;
-            }
-
-            // The schedule was fixed when the forward was screened (FR-ROUTE-10); the processor
-            // does not re-read the clock.
-            var result = await _processor.ProcessAsync(forward, delay, notBefore, shutdown).ConfigureAwait(false);
+            // The schedule was fixed at admission (FR-ROUTE-10); the processor does not re-read the
+            // clock. An opened forward was screened inline; the pump only processes and sinks it.
+            var result = await _processor.ProcessAsync(item.Opened ?? context.Received, item.Delay, item.NotBefore, shutdown).ConfigureAwait(false);
+            // A payload taken out of layers addressed to this mediator must not outlive any of them:
+            // the earliest expiry of the received forward and every layer opened bounds it (FR-ROUTE-09),
+            // for the check below and for the queue that stores it.
+            if (item.Opened is not null)
+                result = result with { ExpiresTime = item.OpenedExpiresTime };
             processed = true;
 
             // FR-ROUTE-09 again: the time spent queued may have crossed the forward's expiry.
@@ -602,108 +647,97 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             Dropped(
                 reason,
                 "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
-                id, ex.GetType().Name, InnermostTypeName(ex));
+                id, ex.GetType().Name, LogValues.InnermostTypeName(ex));
         }
     }
 
     /// <summary>
-    /// Open a forward addressed to this mediator itself, and every such layer inside it, and screen
-    /// the forward found inside as an arriving forward is screened. Returns that forward with its
-    /// schedule, or <c>null</c> when the chain ended in a drop — counted and logged here, with the
-    /// received forward's id. Cancellation by the shutdown, and a fault that is not a refusal of the
-    /// unpack (the registry, the clock), leave to <see cref="ProcessOneAsync"/>.
+    /// Open a forward addressed to this mediator itself, and every such layer inside it, inline on
+    /// the sender's request, and screen the forward found inside as an arriving forward is screened
+    /// (all at the receipt instant). Returns that forward, the DID subject of its <c>next</c> and its
+    /// own schedule, or <c>null</c> when the chain ended in a drop — counted and logged here, with the
+    /// received forward's id. Cancellation of the request, and a fault that is not a refusal of the
+    /// unpack, leave to <see cref="HandleAsync"/>.
     /// </summary>
-    /// <param name="context">The received forward's context.</param>
-    /// <param name="delay">The received forward's resolved hold.</param>
-    /// <param name="notBefore">The received forward's not-before.</param>
-    /// <param name="shutdown">The handler's shutdown token.</param>
-    private async Task<(Facade.UnpackResult Forward, TimeSpan? Delay, DateTimeOffset? NotBefore)?> PeelAsync(
-        ProtocolContext context, TimeSpan? delay, DateTimeOffset? notBefore, CancellationToken shutdown)
+    /// <param name="received">The received forward (addressed to this mediator itself).</param>
+    /// <param name="receivedAt">The receipt reading of the clock.</param>
+    /// <param name="skew">The expiry skew.</param>
+    /// <param name="logId">The received forward's id, bounded.</param>
+    /// <param name="ct">The request's token.</param>
+    private async Task<(Facade.UnpackResult Forward, string Subject, TimeSpan? Delay, DateTimeOffset? NotBefore, long? ExpiresTime)?> OpenSelfAddressedAsync(
+        Facade.UnpackResult received, DateTimeOffset receivedAt, TimeSpan skew, string logId, CancellationToken ct)
     {
-        var id = context.Received.Message.Id;
-        var skew = context.Options.ExpiresClockSkew;
-
-        // The received forward may have expired while it waited for the pump.
-        if (ForwardProcessingResult.IsExpiredAt(context.Received.Message.ExpiresTime, context.Options.Now(), skew))
-        {
-            Dropped(DropReason.ExpiredWhileQueued, "Forward {MessageId} discarded: expired while queued (FR-ROUTE-09).", id);
-            return null;
-        }
-
-        var layer = context.Received;
+        var layer = received;
+        // The earliest expiry of every layer on the way in: each is checked here, and the earliest
+        // bounds the payload once it is relayed (FR-ROUTE-09).
+        var earliest = received.Message.ExpiresTime;
         for (var opened = 1; ; opened++)
         {
             if (opened > MaxSelfAddressedLayers)
             {
-                Dropped(DropReason.SelfLayersTooDeep, "Forward {MessageId} dropped: more than {MaxLayers} layers addressed to this mediator itself (FR-ROUTE-06).", id, MaxSelfAddressedLayers);
+                Dropped(DropReason.SelfLayersTooDeep, "Forward {MessageId} dropped: more than {MaxLayers} layers addressed to this mediator itself (FR-ROUTE-06).", logId, MaxSelfAddressedLayers);
                 return null;
             }
 
             Facade.UnpackResult inner;
             try
             {
-                inner = await _processor.PeelAsync(layer, shutdown).ConfigureAwait(false);
+                inner = await _processor.PeelAsync(layer, ct).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 throw;
             }
             catch (MalformedMessageException ex) when (ex.Expired)
             {
-                Dropped(DropReason.InnerExpired, "Forward {MessageId} dropped: the forward inside it has expired (FR-ROUTE-09).", id);
+                Dropped(DropReason.InnerExpired, "Forward {MessageId} dropped: the forward inside it has expired (FR-ROUTE-09).", logId);
                 return null;
             }
-            catch (DidResolutionException ex)
+            catch (Exception ex)
             {
-                Dropped(DropReason.PeelFaulted, "Forward {MessageId} not relayed: opening the message inside it failed with {ExceptionType} (FR-ROUTE-06).", id, ex.GetType().Name);
-                return null;
-            }
-            catch (DidCommException ex)
-            {
-                // Not one packed message, or not one this mediator can open: the sender's mistake.
-                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (FR-ROUTE-06).", id, ex.GetType().Name);
+                // Whatever stops a layer the sender built from opening is the sender's: its structure,
+                // a key this mediator does not hold, a DID that does not resolve (or a resolver that
+                // throws while trying — the sender chose which DIDs the layer makes us resolve). So
+                // it is a malformed forward, never a fault a stranger could raise at will; Faulted
+                // stays for the mediator's own collaborators (registry, clock, logger, processor, sink).
+                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (innermost: {InnerExceptionType}) (FR-ROUTE-06).", logId, ex.GetType().Name, LogValues.InnermostTypeName(ex));
                 return null;
             }
 
-            // What is inside is screened exactly as an arriving forward is (HandleAsync, (a)..(f)).
+            // What is inside is screened exactly as an arriving forward is ((a)..(d) of HandleAsync).
             string next;
             try
             {
                 if (!ForwardMessage.TryParse(inner.Message, out next, out _))
                 {
-                    Dropped(DropReason.InnerNotAForward, "Forward {MessageId} dropped: the message inside it is not a forward; a mediator is not its final recipient (FR-ROUTE-06).", id);
+                    Dropped(DropReason.InnerNotAForward, "Forward {MessageId} dropped: the message inside it is not a forward; a mediator is not its final recipient (FR-ROUTE-06).", logId);
                     return null;
                 }
             }
             catch (MalformedMessageException ex)
             {
-                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (FR-ROUTE-06).", id, ex.GetType().Name);
+                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (innermost: {InnerExceptionType}) (FR-ROUTE-06).", logId, ex.GetType().Name, LogValues.InnermostTypeName(ex));
                 return null;
             }
 
             if (!inner.Encrypted || string.IsNullOrEmpty(inner.RecipientKid))
             {
-                Dropped(DropReason.InnerPosture, "Forward {MessageId} dropped: the forward inside it is plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", id);
+                Dropped(DropReason.InnerPosture, "Forward {MessageId} dropped: the forward inside it is plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", logId);
                 return null;
             }
 
-            var now = context.Options.Now();
-            if (ForwardProcessingResult.IsExpiredAt(inner.Message.ExpiresTime, now, skew))
+            if (ForwardProcessingResult.IsExpiredAt(inner.Message.ExpiresTime, receivedAt, skew))
             {
-                Dropped(DropReason.InnerExpired, "Forward {MessageId} dropped: the forward inside it has expired (FR-ROUTE-09).", id);
+                Dropped(DropReason.InnerExpired, "Forward {MessageId} dropped: the forward inside it has expired (FR-ROUTE-09).", logId);
                 return null;
             }
-
-            // Its own hold, drawn now under the cap; a hold an outer layer asked for is kept.
-            var innerDelay = _processor.ResolveDelay(inner.Message);
-            var innerNotBefore = ForwardProcessor.NotBeforeOf(now, innerDelay);
-            if (innerNotBefore is { } later && (notBefore is not { } earlier || later > earlier))
-                (delay, notBefore) = (innerDelay, innerNotBefore);
+            if (inner.Message.ExpiresTime is { } expires && (earliest is not { } sooner || expires < sooner))
+                earliest = expires;
 
             var subject = DidSubject.DidSubjectOf(next);
             if (subject is null)
             {
-                Dropped(DropReason.InnerNextNotDid, "Forward {MessageId} dropped: the forward inside it names a next that is not a DID or DID URL (FR-ROUTE-11).", id);
+                Dropped(DropReason.InnerNextNotDid, "Forward {MessageId} dropped: the forward inside it names a next that is not a DID or DID URL (FR-ROUTE-11).", logId);
                 return null;
             }
 
@@ -713,15 +747,18 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 continue;
             }
 
-            if (!await _registry.IsRegisteredAsync(subject, shutdown).ConfigureAwait(false))
-            {
-                Dropped(DropReason.InnerNotRegistered, "Forward {MessageId} dropped: the forward inside it names a next that is not a registered recipient (FR-ROUTE-11).", id);
-                return null;
-            }
-
-            return (inner, delay, notBefore);
+            // Its own hold, drawn at receipt under the cap (the caller keeps an outer layer's later one).
+            var delay = _processor.ResolveDelay(inner.Message);
+            return (inner, subject, delay, ForwardProcessor.NotBeforeOf(receivedAt, delay), earliest);
         }
     }
+
+    /// <summary>The exact plaintext size of an unpacked message, as the unpack path recorded it (serialized once otherwise).</summary>
+    /// <param name="unpacked">The unpack outcome.</param>
+    private static int PlaintextBytes(Facade.UnpackResult unpacked)
+        => InboundMessageSnapshot.TryGetFor(unpacked.Message, out var snapshot)
+            ? snapshot.Utf8ByteCount
+            : InboundMessageSnapshot.CreateFallback(unpacked).Utf8ByteCount;
 
     /// <summary>
     /// Whether a forward is addressed to this mediator itself: the DID subject of its
@@ -733,14 +770,6 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private static bool IsSelfAddressed(string nextSubject, string? recipientKid)
         => DidSubject.DidSubjectOf(recipientKid) is { } decryptedBy
            && string.Equals(nextSubject, decryptedBy, StringComparison.Ordinal);
-
-    private static string InnermostTypeName(Exception exception)
-    {
-        var inner = exception;
-        while (inner.InnerException is { } next)
-            inner = next;
-        return inner.GetType().Name;
-    }
 
     /// <summary>
     /// Complete when every forward admitted before this call has been handed to the sink or
