@@ -248,6 +248,37 @@ public sealed class ForwardProcessor
     }
 
     /// <summary>
+    /// Open a forward addressed to this mediator itself — the receiver side of rewrapping
+    /// (FR-ROUTE-06; DIDComm v2.1 §Routing "Rewrapping": "the outer envelope is a forward message
+    /// where to is the receiver itself"): take its single attachment exactly as it is (no rewrap, no
+    /// extra routing keys) and unpack it with the mediator's own <see cref="DidCommClient"/>, which
+    /// holds the keys forwards to this mediator are encrypted to. The attachment rules are those of
+    /// <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>: one attachment, decodable, not
+    /// empty. The unpack applies every receive rule (size, FR-API-05 expiry, consistency).
+    /// </summary>
+    /// <param name="selfAddressed">The forward whose <c>next</c> is the DID that decrypted it.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ConsistencyException">Not a forward, more than one attachment, or an attachment with no data.</exception>
+    /// <exception cref="MalformedMessageException">The attachment is not valid base64url or decodes to no bytes; or the unpack refuses what is inside.</exception>
+    /// <exception cref="DidCommException">Any other refusal of the unpack (it cannot be decrypted with a held key, a key cannot be resolved, ...).</exception>
+    internal async Task<UnpackResult> PeelAsync(UnpackResult selfAddressed, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(selfAddressed);
+        if (!ForwardMessage.TryParse(selfAddressed.Message, out _, out var attachments))
+        {
+            throw new ConsistencyException(
+                $"Only a {ForwardConstants.ForwardTypeUri} addressed to this mediator can be opened.");
+        }
+        if (attachments.Count > 1)
+        {
+            throw new ConsistencyException(
+                $"Forward message carries {attachments.Count} attachments; a forward addressed to this mediator must carry exactly one packed message (FR-ROUTE-05).");
+        }
+        var inner = ExtractAttachmentBytes(attachments[0]);
+        return await _client.UnpackAsync(Encoding.UTF8.GetString(inner), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Run a transformation that re-embeds the onward payload in a fresh forward. The forward
     /// builder parses the payload as JSON and requires a non-empty <c>to</c>, and it reports both
     /// as <see cref="ArgumentException"/> — the right type for its own callers, but here both inputs
@@ -377,11 +408,13 @@ public sealed class ForwardProcessor
 
     private async Task<byte[]> RewrapToNextAsync(byte[] innerPacked, string nextHop, CancellationToken ct)
     {
-        // FR-ROUTE-06 rewrap: build a fresh forward whose attachment is the inbound payload, then
-        // anoncrypt it to the next hop. The fresh forward is self-addressed — to == next == the
-        // next hop — which signals "peel this layer and process the attachment locally": the next
-        // hop unwraps the rewrap and then handles the inner payload exactly as it would have under
-        // pass-through (so the constant-size onion stays deliverable). `next` can arrive as a DID
+        // FR-ROUTE-06 rewrap (DIDComm v2.1 §Routing "Rewrapping"): build a fresh forward whose
+        // attachment is the inbound payload, then anoncrypt it to the next hop. The fresh forward is
+        // addressed to the next hop itself — to == next == the next hop — so the next hop receives a
+        // double-packaged message: it opens this layer and handles what is inside, as its own
+        // message when it is the final recipient, or as a forward to relay when it is a mediator (a
+        // didcomm-dotnet mediator's ForwardHandler peels such a self-addressed layer). This mediator
+        // stays uncommitted to which the next hop is, and the onion keeps its size. `next` can arrive as a DID
         // URL — a fragment (outer onion layers carry the routing-key kid), a path or a query — so it
         // is reduced to its DID subject (PRD §4.3), the DID the handler found registered, for the
         // message headers and the keyAgreement lookup. A `next` with no DID part is malformed.

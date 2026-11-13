@@ -146,7 +146,7 @@ public sealed class MediatorRoutesQaTests
 
     // ---- two mediators, the first rewrapping -------------------------------------------------------
 
-    [Theory(Skip = "QA-2 DEFECT 2: a forward rewrapped by M1 (RewrapMode.ReanoncryptToNext) is self-addressed to M2 (next = M2's own DID) and M2's ForwardHandler drops it as Dropped-Unknown; a rewrapping first mediator breaks every multi-mediator route through a didcomm-dotnet mediator")]
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task A_two_mediator_route_delivers_when_the_first_mediator_rewraps(bool viaDirectPush)

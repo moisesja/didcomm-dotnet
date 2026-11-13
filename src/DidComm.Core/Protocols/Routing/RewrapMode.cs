@@ -17,7 +17,9 @@ public enum RewrapMode
     /// FR-ROUTE-06 rewrapping: the mediator re-anoncrypts the inner attachment into a new
     /// <c>forward</c> addressed to <c>body.next</c>, so the onion size stays constant. The
     /// outermost wrap is encrypted to the mediator's interpretation of <c>next</c>; the
-    /// onward recipient sees a double-wrapped message.
+    /// onward recipient sees a double-wrapped message. A next hop that is itself a didcomm-dotnet
+    /// mediator opens the fresh layer (its <c>next</c> is its own DID) and relays the forward inside
+    /// it (<see cref="ForwardHandler"/>).
     /// </summary>
     ReanoncryptToNext = 1,
 }
