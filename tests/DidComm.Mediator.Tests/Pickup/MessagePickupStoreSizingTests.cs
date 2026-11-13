@@ -167,9 +167,9 @@ public sealed class MessagePickupStoreSizingTests(ITestOutputHelper output)
     // ---- keeping the allowances honest: real packs ----------------------------------------
 
     /// <summary>Mints the longest ids the queue accepts (64 characters), so every attachment descriptor is as large as it gets.</summary>
-    private sealed class LongestIds : IMessageIdGenerator
+    private static class LongestIds
     {
-        public string NewId() => Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        public static string NewId() => Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
     }
 
     /// <summary>The bytes an encrypted pack encrypts: the plaintext message, serialised as the envelope writer serialises it.</summary>
@@ -246,7 +246,7 @@ public sealed class MessagePickupStoreSizingTests(ITestOutputHelper output)
                 o.MaxDeliveryBytes = maxDeliveryBytes;
                 o.MaxDeliveryBatch = batch;
             },
-            services: collection => collection.AddSingleton<IMessageIdGenerator>(new LongestIds()));
+            services: collection => collection.AddSingleton(new PickupIdSource(LongestIds.NewId)));
         var mediator = await NewLongestPeerAsync(fixture);
         var peer = await NewLongestPeerAsync(fixture);
         // The recipient DID only has to be registered, not resolved: a syntactically valid DID at the bound.

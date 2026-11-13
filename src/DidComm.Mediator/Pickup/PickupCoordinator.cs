@@ -49,7 +49,7 @@ internal readonly record struct PickupOutcome(PickupReply Reply, PickupStatusVie
 /// </summary>
 /// <remarks>
 /// <para>
-/// Nothing here throws for a store, registry, session or id-generator fault: the fault is logged by
+/// Nothing here throws for a store, registry, session or id-source fault: the fault is logged by
 /// exception type name and turned into "no reply" (a request) or
 /// <see cref="PickupDeliveryOutcome.Faulted"/> (a delivery). Whatever a store returns is copied and
 /// checked inside the fault boundary before it is used. Leases taken by a request that then fails
@@ -72,7 +72,7 @@ internal sealed class PickupCoordinator
     private readonly TimeSpan _leaseTimeout;
     private readonly int _maxAckIds;
     private readonly DidCommOptions _didCommOptions;
-    private readonly IMessageIdGenerator _ids;
+    private readonly Func<string> _newId;
     private readonly ILogger? _logger;
     private long _unauthenticated;
     private long _tooLarge;
@@ -85,7 +85,7 @@ internal sealed class PickupCoordinator
         IReturnRouteSessionRegistry sessions,
         MessagePickupOptions options,
         DidCommOptions didCommOptions,
-        IMessageIdGenerator? idGenerator,
+        Func<string>? newId,
         ILogger? logger)
     {
         ArgumentNullException.ThrowIfNull(store);
@@ -104,7 +104,8 @@ internal sealed class PickupCoordinator
         _didCommOptions = didCommOptions;
         _sizing = new PickupSizing(options, didCommOptions.MaxReceiveBytes);
         _tracker = new PickupSessionTracker(store, logger);
-        _ids = idGenerator ?? UuidV4MessageIdGenerator.Instance;
+        // The queue's own CSPRNG (FR-PICK-04), never the container's IMessageIdGenerator.
+        _newId = newId ?? PickupIds.NewRandomId;
         _logger = logger;
         Log(LogLevel.Information,
             "Message pickup: a delivery is at most {MaxDeliveryBytes} packed bytes and {MaxDeliveryBatch} messages; the largest message accepted into the queue is {MaxAdmissiblePayloadBytes} bytes.",
@@ -659,11 +660,13 @@ internal sealed class PickupCoordinator
         return null;
     }
 
+    // Whatever produced the id, it is checked before it is stored: a test seam can hand back
+    // anything, and an id goes on the wire as an attachment id.
     private string NewMessageId()
     {
-        var id = _ids.NewId();
+        var id = _newId();
         if (!IsUsableId(id, PickupSizing.MaxMintedIdLength))
-            throw new InvalidOperationException("The message id generator returned an id that cannot be used as an attachment id.");
+            throw new InvalidOperationException("The message id source returned an id that cannot be used as an attachment id.");
         return id;
     }
 
