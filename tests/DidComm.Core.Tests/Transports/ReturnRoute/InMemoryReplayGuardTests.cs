@@ -17,15 +17,11 @@ public sealed class InMemoryReplayGuardTests
 
     // These suites predate ReplayProtectionOptions.ClockSkew (#105) and run at ClockSkew = 0 unless a
     // test asks for a skew, so they are also the "ClockSkew = 0 reproduces the old rule" differential.
-    // The skew is set after construction, as a host that mutates its options later would set it, so a
-    // value Validate() refuses (negative, beyond int.MaxValue seconds) can still reach the arithmetic.
     private static InMemoryReplayGuard Guard(ReplayProtectionOptions? options = null, TimeSpan? skew = null)
     {
         options ??= new ReplayProtectionOptions();
-        options.ClockSkew = TimeSpan.Zero;
-        var guard = new InMemoryReplayGuard(options);
         options.ClockSkew = skew ?? TimeSpan.Zero;
-        return guard;
+        return new InMemoryReplayGuard(options);
     }
 
     private static long S(DateTimeOffset t) => t.ToUnixTimeSeconds();
@@ -79,13 +75,19 @@ public sealed class InMemoryReplayGuardTests
     }
 
     [Fact]
-    public void Negative_skew_set_after_validation_behaves_as_zero()
+    public void A_negative_skew_is_refused_and_a_later_change_to_the_options_has_no_effect()
     {
-        var g = Guard(skew: TimeSpan.FromSeconds(-30));
+        var refused = () => Guard(skew: TimeSpan.FromSeconds(-30));
+        refused.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("ClockSkew");
+
+        var options = new ReplayProtectionOptions { ClockSkew = TimeSpan.Zero };
+        var g = new InMemoryReplayGuard(options);
+        options.ClockSkew = TimeSpan.FromSeconds(-30);
+        options.Window = TimeSpan.FromSeconds(1);
 
         g.TryAdmit(Alice, "f1", S(T.AddSeconds(1)), T).Should().Be(ReplayAdmission.FutureDated);
         g.TryAdmit(Alice, "m1", S(T), T).Should().Be(ReplayAdmission.Admitted);
-        g.TryAdmit(Alice, "m1", S(T), T.AddSeconds(300)).Should().Be(ReplayAdmission.Duplicate);
+        g.TryAdmit(Alice, "m1", S(T), T.AddSeconds(300)).Should().Be(ReplayAdmission.Duplicate, "the guard kept the Window it was built with");
     }
 
     [Fact]

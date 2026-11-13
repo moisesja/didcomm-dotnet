@@ -147,19 +147,22 @@ public sealed class ReplayClockSkewTests
         }
     }
 
-    [Fact]
-    public void A_negative_skew_set_after_validation_is_clamped_and_leaves_no_gap()
+    [Theory]
+    [InlineData(-90)]
+    [InlineData(3600)]
+    public void Changing_ClockSkew_or_Window_after_construction_has_no_effect_and_leaves_no_gap(int changedTo)
     {
-        // Unclamped, a skew of -90 s would end retention at created + Window - 90 while age rejection
-        // starts only after created + Window: 90 seconds in which the replay is admitted again.
+        // The guard copies the validated settings. Read live, a negative skew would end retention
+        // before age rejection begins, and a raised Window would move age rejection past retention.
         var options = new ReplayProtectionOptions();
         var guard = new InMemoryReplayGuard(options);
-        options.ClockSkew = TimeSpan.FromSeconds(-90);
+        options.ClockSkew = TimeSpan.FromSeconds(changedTo);
+        options.Window = TimeSpan.FromSeconds(300 + Math.Abs(changedTo));
         var created = S(T);
         guard.TryAdmit(Alice, "m", created, T).Should().Be(ReplayAdmission.Admitted);
-        guard.TryAdmit(Alice, "early", created + 1, T).Should().Be(ReplayAdmission.FutureDated, "a negative skew behaves as zero");
+        guard.TryAdmit(Alice, "early", created + 61, T).Should().Be(ReplayAdmission.FutureDated, "still the 60 s it was built with");
 
-        for (var t = created; t <= created + 300 + 3; t++)
+        for (var t = created; t <= created + 360 + 3; t++)
         {
             var now = DateTimeOffset.FromUnixTimeSeconds(t);
             guard.TryAdmit(Noise, "n" + t, t, now);
@@ -168,23 +171,57 @@ public sealed class ReplayClockSkewTests
     }
 
     [Fact]
-    public void The_largest_skew_a_mutation_can_set_neither_overflows_nor_admits_a_replay()
+    public void The_largest_validated_settings_neither_overflow_nor_admit_a_replay()
     {
-        var options = new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(int.MaxValue), ClockSkew = TimeSpan.FromSeconds(int.MaxValue) };
-        var guard = new InMemoryReplayGuard(options);
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(int.MaxValue), ClockSkew = TimeSpan.FromSeconds(int.MaxValue) });
         var now = DateTimeOffset.MaxValue;
         var atBound = S(now) + int.MaxValue;
         guard.TryAdmit(Alice, "validated-max", atBound, now).Should().Be(ReplayAdmission.Admitted);
         guard.TryAdmit(Alice, "validated-max-plus1", atBound + 1, now).Should().Be(ReplayAdmission.FutureDated);
-
-        options.ClockSkew = TimeSpan.MaxValue;
-        var farthest = S(now) + (long)Math.Floor(TimeSpan.MaxValue.TotalSeconds);
-        guard.TryAdmit(Alice, "mutated-max", farthest, now).Should().Be(ReplayAdmission.Admitted);
         guard.TryAdmit(Noise, "purge", S(now), now).Should().Be(ReplayAdmission.Admitted);
         guard.TryAdmit(Alice, "validated-max", atBound, now).Should().Be(ReplayAdmission.Duplicate, "a wrapped expiry would have been purged");
-        guard.TryAdmit(Alice, "mutated-max", farthest, now).Should().Be(ReplayAdmission.Duplicate);
         guard.TryAdmit(Alice, "overflow", long.MaxValue, now).Should().Be(ReplayAdmission.FutureDated);
         guard.TryAdmit(Alice, "underflow", long.MinValue, DateTimeOffset.MinValue).Should().Be(ReplayAdmission.TooOld);
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(0, 2)]
+    [InlineData(60, 61)]
+    [InlineData(60, 300)]
+    [InlineData(60, 360)]
+    public void Clock_readings_that_reach_the_guard_out_of_order_never_readmit_a_purged_entry(int skewSeconds, int inversionSeconds)
+    {
+        // The race the red-team pass found: the endpoint reads the clock before the guard's lock, so a
+        // later reading (another sender's request) can purge first, and the replay, read earlier,
+        // arrives at the edge of its window after its entry is gone. Equally a host clock stepping back.
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions { ClockSkew = TimeSpan.FromSeconds(skewSeconds) });
+        var created = S(T);
+        guard.TryAdmit(Alice, "m", created, T).Should().Be(ReplayAdmission.Admitted);
+
+        // The replay read the clock at created + Window, the last second it is young enough at.
+        var replayReading = created + 300;
+        var purgeReading = replayReading + inversionSeconds;
+        guard.TryAdmit(Noise, "later", purgeReading, DateTimeOffset.FromUnixTimeSeconds(purgeReading)).Should().Be(ReplayAdmission.Admitted);
+
+        var replay = guard.TryAdmit(Alice, "m", created, DateTimeOffset.FromUnixTimeSeconds(replayReading));
+        replay.Should().Be(purgeReading > created + 300 + skewSeconds ? ReplayAdmission.TooOld : ReplayAdmission.Duplicate);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(60)]
+    public void A_reading_behind_the_latest_by_at_most_Window_plus_skew_still_admits_fresh_messages(int skewSeconds)
+    {
+        // The guarantee costs honest traffic nothing until the clock steps back by more than
+        // Window + ClockSkew: a fresh message stamped at the earlier reading is admitted.
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions { ClockSkew = TimeSpan.FromSeconds(skewSeconds) });
+        var latest = S(T);
+        guard.TryAdmit(Noise, "latest", latest, T).Should().Be(ReplayAdmission.Admitted);
+
+        var back = latest - 300 - skewSeconds;
+        guard.TryAdmit(Alice, "fresh", back, DateTimeOffset.FromUnixTimeSeconds(back)).Should().Be(ReplayAdmission.Admitted);
+        guard.TryAdmit(Alice, "fresh-one-second-further", back - 1, DateTimeOffset.FromUnixTimeSeconds(back - 1)).Should().Be(ReplayAdmission.TooOld);
     }
 
     [Fact]

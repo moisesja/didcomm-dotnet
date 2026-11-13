@@ -15,19 +15,22 @@ namespace DidComm.Transports.ReturnRoute;
 /// <c>created_time + Window + ClockSkew</c>. A message without <c>created_time</c> is
 /// <see cref="ReplayAdmission.MissingCreatedTime"/> unless
 /// <see cref="ReplayProtectionOptions.RequireCreatedTime"/> is off, in which case its entry expires
-/// at <c>now + Window</c>. <see cref="ReplayProtectionOptions.Window"/> and
-/// <see cref="ReplayProtectionOptions.ClockSkew"/> are read at call time, in whole seconds
-/// (floored), and the skew is clamped to zero or more (a negative skew would end retention before
-/// age rejection begins). The guard reads nothing from <c>DidCommOptions</c>: FR-API-05 expiry and
-/// its <c>ExpiresClockSkew</c> are the unpack path's, judged separately.
+/// at <c>now + Window</c>. The settings are validated and copied when the guard is built, so a later
+/// change to the options object has no effect; <see cref="ReplayProtectionOptions.Window"/> and
+/// <see cref="ReplayProtectionOptions.ClockSkew"/> count in whole seconds (floored). The guard reads
+/// nothing from <c>DidCommOptions</c>: FR-API-05 expiry and its <c>ExpiresClockSkew</c> are the
+/// unpack path's, judged separately.
 /// </para>
 /// <para>
 /// <strong>Retention property.</strong> An entry is kept until its expiry inclusive (the purge
 /// removes strictly earlier expiries) while age rejection starts once <c>now &gt; created_time +
 /// Window</c>, so there is no instant at which a captured request is neither remembered nor too old
-/// (FR-RR-08 (4)) — also for a <c>created_time</c> ahead of the clock. An entry stamped
-/// <c>now + ClockSkew</c>, the latest admitted, is kept <c>Window + 2 × ClockSkew</c> from its
-/// admission.
+/// (FR-RR-08 (4)) — also for a <c>created_time</c> ahead of the clock, and whatever order the clock
+/// readings arrive in: the guard remembers the latest instant it purged at, and refuses as
+/// <see cref="ReplayAdmission.TooOld"/> any timestamped message whose entry would already have
+/// expired by then (<c>created_time + Window + ClockSkew</c> earlier than that instant), because it
+/// may have been forgotten. An entry stamped <c>now + ClockSkew</c>, the latest admitted, is kept
+/// <c>Window + 2 × ClockSkew</c> from its admission.
 /// </para>
 /// <para>
 /// <strong>Data structure.</strong> One lock over a per-sender dictionary of <c>id → expiry</c>
@@ -45,15 +48,18 @@ namespace DidComm.Transports.ReturnRoute;
 /// the resulting bounds.
 /// </para>
 /// <para>
-/// <strong>Clock.</strong> Admission and retention both use the instant the caller passes
-/// (<c>DidCommOptions.Now()</c> at the endpoints and in the client's inbound consumer) — the guard
-/// trusts that clock exactly as FR-API-05 expiry does. A clock that moves backwards only keeps
-/// entries longer (a replay is still a <see cref="ReplayAdmission.Duplicate"/>, or
-/// <see cref="ReplayAdmission.FutureDated"/> once the step exceeds the skew). A clock that jumps
-/// forward past an entry's expiry purges it; if it then returns, a request created inside the
-/// restored window is admissible again. Keeping the host clock from stepping forward by more than
-/// <see cref="ReplayProtectionOptions.Window"/> plus <see cref="ReplayProtectionOptions.ClockSkew"/>
-/// and back is the host's part of FR-RR-08.
+/// <strong>Clock.</strong> Admission and retention use the instant the caller passes
+/// (<c>DidCommOptions.Now()</c> at the endpoints and in the client's inbound consumer), read before
+/// the guard's lock is taken, so two requests' readings can reach the lock out of order, and a host
+/// clock can step back. Neither re-admits a replay (the retention property above). A reading behind
+/// the latest purge instant by no more than <c>Window + ClockSkew</c> is judged normally: fresh
+/// messages are admitted, replays are <see cref="ReplayAdmission.Duplicate"/>,
+/// <see cref="ReplayAdmission.TooOld"/> or <see cref="ReplayAdmission.FutureDated"/>. The price of
+/// that guarantee: after the host clock steps back by more than <c>Window + ClockSkew</c> (or jumps
+/// forward that far and returns), in-scope messages stamped at the restored time are refused as
+/// <see cref="ReplayAdmission.TooOld"/> until the clock is back within <c>Window + ClockSkew</c> of
+/// the latest purge instant, or the guard is rebuilt (a process restart). Availability, never
+/// integrity: keeping the host clock from stepping back is the host's part of FR-RR-08.
 /// </para>
 /// <para>
 /// <strong>Logging.</strong> Only the flood-shaped outcomes are logged here —
@@ -66,28 +72,55 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
 {
     private const long LogEvery = 1000;
 
-    private readonly ReplayProtectionOptions _options;
+    // The validated settings, copied at construction (whole seconds for the two durations).
+    private readonly long _windowS;
+    private readonly long _skewS;
+    private readonly bool _requireCreatedTime;
+    private readonly int _maxEntries;
+    private readonly int _maxEntriesPerPeer;
+    private readonly int _maxMessageIdLength;
     private readonly ILogger<InMemoryReplayGuard>? _logger;
     private readonly object _gate = new();
     private readonly Dictionary<string, Bucket> _buckets = new(StringComparer.Ordinal);
     private readonly PriorityQueue<(string Peer, string Id), long> _expiry = new();
     private int _count;
+    // Under _gate: the latest instant (epoch seconds) the guard has purged at. Every entry whose
+    // expiry is earlier is gone; nothing admitted afterwards expires earlier (see TryAdmit).
+    private long _purgedAt = long.MinValue;
     private long _saturated;
     private long _tooLong;
 
     /// <summary>Create a guard; validates <paramref name="options"/>.</summary>
-    /// <param name="options">The replay settings, read at call time; <see cref="ReplayProtectionOptions.Validate"/> runs here.</param>
+    /// <param name="options">The replay settings; <see cref="ReplayProtectionOptions.Validate"/> runs here and the values are copied, so later changes to the object have no effect.</param>
     public InMemoryReplayGuard(ReplayProtectionOptions options)
         : this(options, logger: null) { }
 
     /// <summary>Create a guard with a logger; validates <paramref name="options"/>.</summary>
-    /// <param name="options">The replay settings, read at call time; <see cref="ReplayProtectionOptions.Validate"/> runs here.</param>
+    /// <param name="options">The replay settings; <see cref="ReplayProtectionOptions.Validate"/> runs here and the values are copied, so later changes to the object have no effect.</param>
     /// <param name="logger">Optional logger; lines carry counts only.</param>
     public InMemoryReplayGuard(ReplayProtectionOptions options, ILogger<InMemoryReplayGuard>? logger)
     {
         ArgumentNullException.ThrowIfNull(options);
-        options.Validate();
-        _options = options;
+        // Read each setting once, so the values validated are the values used (a concurrent change
+        // to the options object between Validate() and the copy could otherwise slip through).
+        var window = options.Window;
+        var skew = options.ClockSkew;
+        var snapshot = new ReplayProtectionOptions
+        {
+            Window = window,
+            ClockSkew = skew,
+            RequireCreatedTime = options.RequireCreatedTime,
+            MaxEntries = options.MaxEntries,
+            MaxEntriesPerPeer = options.MaxEntriesPerPeer,
+            MaxMessageIdLength = options.MaxMessageIdLength,
+        };
+        snapshot.Validate();
+        _windowS = (long)Math.Floor(window.TotalSeconds);
+        _skewS = (long)Math.Floor(skew.TotalSeconds);
+        _requireCreatedTime = snapshot.RequireCreatedTime;
+        _maxEntries = snapshot.MaxEntries;
+        _maxEntriesPerPeer = snapshot.MaxEntriesPerPeer;
+        _maxMessageIdLength = snapshot.MaxMessageIdLength;
         _logger = logger;
     }
 
@@ -119,47 +152,59 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
     {
         ArgumentException.ThrowIfNullOrEmpty(peerDidSubject);
         ArgumentException.ThrowIfNullOrEmpty(messageId);
-        if (messageId.Length > _options.MaxMessageIdLength)
+        if (messageId.Length > _maxMessageIdLength)
         {
-            RateLimited(ref _tooLong, "Replay admission refused: message id longer than MaxMessageIdLength ({MaxMessageIdLength}). Total refused: {Refused}.", _options.MaxMessageIdLength);
+            RateLimited(ref _tooLong, "Replay admission refused: message id longer than MaxMessageIdLength ({MaxMessageIdLength}). Total refused: {Refused}.", _maxMessageIdLength);
             return ReplayAdmission.MessageIdTooLong;
         }
 
         var nowS = now.ToUnixTimeSeconds();
-        var windowS = (long)Math.Floor(_options.Window.TotalSeconds);
-        // Clamped: the options are mutable after Validate(), and a negative skew would end retention
-        // (created + Window + skew) before age rejection begins (created + Window), re-admitting replays.
-        var skewS = (long)Math.Floor(Math.Max(0, _options.ClockSkew.TotalSeconds));
-
-        long expiresAt;
         if (createdTimeEpochSeconds is long created)
         {
-            if (created < nowS - windowS)
+            if (created < nowS - _windowS)
                 return ReplayAdmission.TooOld;
-            if (created > nowS + skewS)
+            if (created > nowS + _skewS)
                 return ReplayAdmission.FutureDated;
-            expiresAt = created + windowS + skewS;
         }
-        else if (_options.RequireCreatedTime)
+        else if (_requireCreatedTime)
         {
             return ReplayAdmission.MissingCreatedTime;
-        }
-        else
-        {
-            expiresAt = nowS + windowS;
         }
 
         bool saturated;
         lock (_gate)
         {
-            Purge(nowS);
+            // Purging at an instant earlier than one already purged at would remove nothing.
+            if (nowS > _purgedAt)
+            {
+                Purge(nowS);
+                _purgedAt = nowS;
+            }
+
+            long expiresAt;
+            if (createdTimeEpochSeconds is long stamped)
+            {
+                expiresAt = stamped + _windowS + _skewS;
+                // Its entry would already have been purged: it may have been admitted and forgotten.
+                // Reachable only with a reading behind _purgedAt (another request read the clock
+                // later but took the lock first, or the host clock stepped back); refusing it keeps
+                // the retention property whatever order the readings arrive in.
+                if (expiresAt < _purgedAt)
+                    return ReplayAdmission.TooOld;
+            }
+            else
+            {
+                // Timestamp-free (RequireCreatedTime off): remembered for Window from the latest
+                // purge instant, never from an earlier reading that the purge has overtaken.
+                expiresAt = _purgedAt + _windowS;
+            }
 
             var bucket = _buckets.GetValueOrDefault(peerDidSubject);
             if (bucket is not null && bucket.Ids.ContainsKey(messageId))
                 return ReplayAdmission.Duplicate;
 
-            saturated = _count >= _options.MaxEntries
-                || (bucket is not null && bucket.Ids.Count >= _options.MaxEntriesPerPeer);
+            saturated = _count >= _maxEntries
+                || (bucket is not null && bucket.Ids.Count >= _maxEntriesPerPeer);
             if (!saturated)
             {
                 if (bucket is null)
@@ -179,7 +224,7 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
         if (!saturated)
             return ReplayAdmission.Admitted;
 
-        RateLimited(ref _saturated, "Replay admission refused: the guard is saturated (MaxEntries {MaxEntries}, MaxEntriesPerPeer {MaxEntriesPerPeer}); nothing evicted. Total refused: {Refused}.", _options.MaxEntries, _options.MaxEntriesPerPeer);
+        RateLimited(ref _saturated, "Replay admission refused: the guard is saturated (MaxEntries {MaxEntries}, MaxEntriesPerPeer {MaxEntriesPerPeer}); nothing evicted. Total refused: {Refused}.", _maxEntries, _maxEntriesPerPeer);
         return ReplayAdmission.Saturated;
     }
 

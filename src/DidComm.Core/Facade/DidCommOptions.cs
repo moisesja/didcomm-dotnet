@@ -23,7 +23,8 @@ public sealed class DidCommOptions
 
     /// <summary>
     /// Tolerance applied when checking <see cref="Messages.Message.ExpiresTime"/> against the
-    /// current clock (FR-API-05), in whole seconds (a sub-second value counts as zero). Defaults to
+    /// current clock (FR-API-05), floored to whole seconds (so a positive sub-second value counts as
+    /// zero). Not validated: a negative value tightens expiry. Defaults to
     /// <see cref="TimeSpan.Zero"/> — strict expiry. The same allowance judges a <c>from_prior</c>
     /// JWT's <c>exp</c> / <c>nbf</c> (FR-ROT-05) and a forward's or queued payload's expiry
     /// (FR-ROUTE-09), so the checks cannot drift apart.

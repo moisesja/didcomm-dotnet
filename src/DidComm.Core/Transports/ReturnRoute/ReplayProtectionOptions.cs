@@ -3,7 +3,8 @@ namespace DidComm.Transports.ReturnRoute;
 /// <summary>
 /// Settings for the FR-RR-08 inbound replay guard. Configure through
 /// <c>services.AddOptions&lt;ReplayProtectionOptions&gt;().Configure(...)</c>; the
-/// <see cref="InMemoryReplayGuard"/> validates the instance it is built with.
+/// <see cref="InMemoryReplayGuard"/> validates the instance it is built with and copies its values,
+/// so changing the object afterwards has no effect.
 /// </summary>
 public sealed class ReplayProtectionOptions
 {
@@ -35,11 +36,12 @@ public sealed class ReplayProtectionOptions
     /// is kept <c>Window + ClockSkew</c> (6 minutes at the defaults); one stamped
     /// <c>now + ClockSkew</c>, the latest admitted, <c>Window + 2 × ClockSkew</c> (7 minutes) — so a
     /// sender that dates its messages ahead holds each of its entries that long. Size
-    /// <see cref="MaxEntries"/> to the accepted rate × (<see cref="Window"/> + <c>ClockSkew</c>).
+    /// <see cref="MaxEntries"/> to the honest accepted rate × (<see cref="Window"/> + <c>ClockSkew</c>);
+    /// a flood that dates every message ahead holds the budget for <c>Window + 2 × ClockSkew</c>.
     /// </para>
     /// <para>
-    /// Read by <see cref="InMemoryReplayGuard"/> on every call, on whichever side runs it: the
-    /// receive endpoints, and the client's inbound consumer for what arrives on a WebSocket session
+    /// Used by <see cref="InMemoryReplayGuard"/> (copied when it is built) on whichever side runs it:
+    /// the receive endpoints, and the client's inbound consumer for what arrives on a WebSocket session
     /// socket. One container has one value for both. A host-registered
     /// <see cref="IInboundReplayGuard"/> applies its own rule.
     /// </para>
@@ -50,7 +52,8 @@ public sealed class ReplayProtectionOptions
     /// Whether an in-scope message without <c>created_time</c> is refused
     /// (<see cref="ReplayAdmission.MissingCreatedTime"/>). Default <c>true</c> (FR-RR-08 (2)). When
     /// <c>false</c> such a message is admitted and remembered for <see cref="Window"/> from its arrival
-    /// (<see cref="ClockSkew"/> does not apply: there is no timestamp to be early) — the documented
+    /// (<see cref="ClockSkew"/> does not apply: there is no timestamp to be early; with clock readings
+    /// out of order, from the latest instant the guard has purged at) — the documented
     /// limitation being that an identical captured request is accepted again once the window has
     /// passed.
     /// </summary>
