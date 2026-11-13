@@ -89,7 +89,10 @@ public sealed class HttpTransportSingleAttemptAdv3Tests
         await using var sp = BuildTransport(o =>
         {
             o.MaxRetryAttempts = 3;
-            o.RequestTimeout = TimeSpan.FromMilliseconds(300);
+            // Long enough that the request reaches the hanging server even under the parallel test
+            // load (2-core CI runners); 300 ms sometimes expired before the connection was accepted,
+            // leaving zero requests recorded. The property under test is "one request, no retry".
+            o.RequestTimeout = TimeSpan.FromSeconds(3);
         });
         var transport = sp.GetRequiredService<IDidCommTransport>();
 
