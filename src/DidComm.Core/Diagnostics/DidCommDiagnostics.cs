@@ -48,8 +48,9 @@ public static class DidCommDiagnostics
     /// <remarks>
     /// <para>The instruments, all with a closed, low-cardinality set of tag values and never a DID:</para>
     /// <list type="bullet">
-    /// <item><description><c>didcomm.forward.outcomes</c> (counter, unit <c>{forward}</c>): one count per forward a
-    /// routing mediator receives, tagged <c>didcomm.forward.outcome</c> with how it ended:
+    /// <item><description><c>didcomm.forward.outcomes</c> (counter, unit <c>{forward}</c>): one count per forward that
+    /// reaches a routing mediator's forward handler (one refused earlier, at unpack, is not counted),
+    /// tagged <c>didcomm.forward.outcome</c> with how it ended:
     /// <c>Delivered-Live</c>, <c>Queued</c>, <c>Dropped-Malformed</c>, <c>Dropped-NotEncrypted</c>,
     /// <c>Dropped-Expired</c>, <c>Dropped-Unknown</c>, <c>Dropped-Saturated</c>,
     /// <c>Dropped-Unacknowledged</c>, <c>Dropped-Shutdown</c>, <c>Dropped-TooLarge</c>,

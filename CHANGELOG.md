@@ -89,7 +89,8 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   a route longer than eight forward layers is refused.
 - **Metrics** on the meter `didcomm-dotnet` (`DidCommDiagnostics.MeterName`, created through the
   container's `IMeterFactory` when there is one): `didcomm.forward.outcomes`, one count per forward
-  a routing mediator receives, tagged `didcomm.forward.outcome` (`Delivered-Live`, `Queued`,
+  that reaches a routing mediator's forward handler (one refused earlier, at unpack, is not
+  counted), tagged `didcomm.forward.outcome` (`Delivered-Live`, `Queued`,
   `Dropped-Malformed`, `Dropped-NotEncrypted`, `Dropped-Expired`, `Dropped-Unknown`,
   `Dropped-Saturated`, `Dropped-Unacknowledged`, `Dropped-Shutdown`, `Dropped-TooLarge`,
   `Dropped-Quota`, `Faulted`); `didcomm.mediator.direct_push.outcomes`, tagged

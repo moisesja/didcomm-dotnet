@@ -1228,7 +1228,7 @@ DID.
 
 | Instrument | Kind, unit | Tag | Values, source |
 | --- | --- | --- | --- |
-| `didcomm.forward.outcomes` | Counter, `{forward}` | `didcomm.forward.outcome` | `Delivered-Live`, `Queued`, `Dropped-Malformed`, `Dropped-NotEncrypted`, `Dropped-Expired`, `Dropped-Unknown`, `Dropped-Saturated`, `Dropped-Unacknowledged`, `Dropped-Shutdown`, `Dropped-TooLarge`, `Dropped-Quota`, `Faulted`; one per forward, from the handler or the sink (`ForwardMetrics`, in Core) |
+| `didcomm.forward.outcomes` | Counter, `{forward}` | `didcomm.forward.outcome` | `Delivered-Live`, `Queued`, `Dropped-Malformed`, `Dropped-NotEncrypted`, `Dropped-Expired`, `Dropped-Unknown`, `Dropped-Saturated`, `Dropped-Unacknowledged`, `Dropped-Shutdown`, `Dropped-TooLarge`, `Dropped-Quota`, `Faulted`; one per forward that reaches the handler (one refused at unpack is not counted), from the handler or the sink (`ForwardMetrics`, in Core) |
 | `didcomm.mediator.direct_push.outcomes` | Counter, `{message}` | `didcomm.push.outcome` | `Pushed`, `Push-Failed`, `Push-Skipped-Saturated`, `Push-Skipped-NoEndpoint`, `Push-Skipped-Scheme`, `Push-Skipped-Unregistered`, `Push-Skipped-Shutdown` |
 | `didcomm.mediator.queue.purged` | Counter, `{message}` | — | messages the scheduled purge removed |
 | `didcomm.replay.saturated`, `didcomm.replay.clock_behind_refusals` | ObservableCounter, `{message}` | — | `InMemoryReplayGuard.SaturationCount`, `ClockBehindRefusalCount` |
