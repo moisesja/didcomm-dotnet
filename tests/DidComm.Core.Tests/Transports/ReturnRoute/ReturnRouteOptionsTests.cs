@@ -106,6 +106,7 @@ public sealed class ReturnRouteOptionsTests
             (() => new ReturnRouteSessionOptions { MaxPendingPushes = -5858 }.Validate(), "MaxPendingPushes", new[] { "5858" }),
             (() => new ReturnRouteSessionOptions { MaxPendingNotifications = -4646 }.Validate(), "MaxPendingNotifications", new[] { "4646" }),
             (() => new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(-3737) }.Validate(), "Window", new[] { "3737", "01:02" }),
+            (() => new ReplayProtectionOptions { ClockSkew = TimeSpan.FromSeconds(-3838) }.Validate(), "ClockSkew", new[] { "3838", "01:03" }),
             (() => new ReplayProtectionOptions { MaxEntries = 9292, MaxEntriesPerPeer = 9393 }.Validate(), "MaxEntriesPerPeer", new[] { "9292", "9393" }),
             (() => new ReplayProtectionOptions { MaxMessageIdLength = -2828 }.Validate(), "MaxMessageIdLength", new[] { "2828" }),
         };
@@ -121,7 +122,7 @@ public sealed class ReturnRouteOptionsTests
     [Fact]
     public void Replay_options_are_validated_by_the_guard_ctor()
     {
-        var act = () => new InMemoryReplayGuard(new ReplayProtectionOptions { MaxEntries = 0 }, new DidComm.Facade.DidCommOptions());
+        var act = () => new InMemoryReplayGuard(new ReplayProtectionOptions { MaxEntries = 0 });
         act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("MaxEntries");
     }
 }

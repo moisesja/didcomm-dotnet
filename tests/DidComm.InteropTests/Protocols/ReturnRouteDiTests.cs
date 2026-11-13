@@ -131,6 +131,39 @@ public sealed class ReturnRouteDiTests
     }
 
     [Fact]
+    public void A_negative_replay_ClockSkew_throws_on_first_resolution()
+    {
+        var services = new ServiceCollection();
+        AddDidComm(services);
+        services.AddOptions<ReplayProtectionOptions>().Configure(o => o.ClockSkew = TimeSpan.FromSeconds(-1));
+        using var sp = services.BuildServiceProvider();
+
+        var resolve = () => sp.GetRequiredService<IInboundReplayGuard>();
+        resolve.Should().Throw<InvalidOperationException>().WithMessage("*ClockSkew*");
+    }
+
+    [Theory]
+    [InlineData(0, 1, ReplayAdmission.FutureDated)]
+    [InlineData(0, 0, ReplayAdmission.Admitted)]
+    [InlineData(120, 120, ReplayAdmission.Admitted)]
+    [InlineData(120, 121, ReplayAdmission.FutureDated)]
+    public void A_configured_replay_ClockSkew_reaches_the_guard_and_ExpiresClockSkew_does_not(int skewSeconds, int aheadSeconds, ReplayAdmission expected)
+    {
+        // ExpiresClockSkew is set to an hour throughout: it governs FR-API-05 expiry only (#105).
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+        var services = new ServiceCollection();
+        AddDidComm(services, o =>
+        {
+            o.Clock = () => now;
+            o.ExpiresClockSkew = TimeSpan.FromHours(1);
+        });
+        services.AddOptions<ReplayProtectionOptions>().Configure(o => o.ClockSkew = TimeSpan.FromSeconds(skewSeconds));
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<IInboundReplayGuard>().TryAdmit("did:example:alice", "m", now.ToUnixTimeSeconds() + aheadSeconds, now).Should().Be(expected);
+    }
+
+    [Fact]
     public void Invalid_session_options_throw_on_first_resolution()
     {
         var services = new ServiceCollection();

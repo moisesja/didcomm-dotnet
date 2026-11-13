@@ -206,7 +206,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
             var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Dispatch");
-            var replayGuard = admissionEndpoint.ResolveGuard(sp, coreOptions, logger);
+            var replayGuard = admissionEndpoint.ResolveGuard(sp, logger);
 
             var contentType = httpContext.Request.ContentType;
             if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
@@ -358,7 +358,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
             var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
-            var replayGuard = admissionEndpoint.ResolveGuard(sp, coreOptions, logger);
+            var replayGuard = admissionEndpoint.ResolveGuard(sp, logger);
 
             var contentType = httpContext.Request.ContentType;
             if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
@@ -602,7 +602,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
             var returnRoute = new WebSocketReturnRoute(
                 admissionEndpoint,
-                admissionEndpoint.ResolveGuard(sp, coreOptions, logger),
+                admissionEndpoint.ResolveGuard(sp, logger),
                 // The registry only matters when the switch can open sessions (never under STOMP).
                 receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? admissionEndpoint.ResolveRegistry(sp, logger) : null,
                 receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? InboundAdmissionEndpoint.ResolveSessionOptions(sp).MaxPendingPushes : 0);

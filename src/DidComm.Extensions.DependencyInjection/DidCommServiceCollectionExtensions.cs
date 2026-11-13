@@ -33,7 +33,7 @@ public static class DidCommServiceCollectionExtensions
     /// (FR-RR-03 / FR-RR-08): a singleton <see cref="IReturnRouteSessionRegistry"/>
     /// (<see cref="InMemoryReturnRouteSessionRegistry"/> over <see cref="ReturnRouteSessionOptions"/>)
     /// and a singleton <see cref="IInboundReplayGuard"/> (<see cref="InMemoryReplayGuard"/> over
-    /// <see cref="ReplayProtectionOptions"/> and <see cref="DidCommOptions"/>). Both validate their
+    /// <see cref="ReplayProtectionOptions"/>). Both validate their
     /// options on first resolution. Neither depends on the handler registry, the dispatcher, the
     /// facade or any handler, so a protocol handler may take either in its constructor without
     /// cycling the DI graph.
@@ -71,8 +71,8 @@ public static class DidCommServiceCollectionExtensions
         // registered its own implementation first keeps it. Both validate their options at
         // construction (fail fast on first resolution). Configure via
         // services.AddOptions<ReturnRouteSessionOptions>().Configure(...) and the replay sibling.
-        // Dependency walk (DI cycle rule): registry <- options + logger; guard <- options +
-        // DidCommOptions + logger. Neither reaches ProtocolHandlerRegistry, ProtocolDispatcher,
+        // Dependency walk (DI cycle rule): registry <- options + logger; guard <- options + logger.
+        // Neither reaches ProtocolHandlerRegistry, ProtocolDispatcher,
         // DidCommClient or any handler, so a handler may take either in its constructor and the
         // handler registry's IEnumerable<IProtocolHandler> walk cannot cycle.
         services.AddOptions<ReturnRouteSessionOptions>();
@@ -82,7 +82,6 @@ public static class DidCommServiceCollectionExtensions
             sp.GetService<ILogger<InMemoryReturnRouteSessionRegistry>>()));
         services.TryAddSingleton<IInboundReplayGuard>(sp => new InMemoryReplayGuard(
             sp.GetRequiredService<IOptions<ReplayProtectionOptions>>().Value,
-            sp.GetRequiredService<IOptions<DidCommOptions>>().Value,
             sp.GetService<ILogger<InMemoryReplayGuard>>()));
         services.TryAddSingleton<JoseCryptoProvider>();
         // Phase 5: a TransportRouter wraps whatever IDidCommTransport implementations the

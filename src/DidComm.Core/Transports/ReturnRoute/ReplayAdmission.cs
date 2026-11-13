@@ -17,7 +17,7 @@ public enum ReplayAdmission
     /// <summary><c>created_time</c> is older than <c>now − Window</c>.</summary>
     TooOld,
 
-    /// <summary><c>created_time</c> is later than <c>now + ExpiresClockSkew</c>.</summary>
+    /// <summary><c>created_time</c> is later than <c>now + </c><see cref="ReplayProtectionOptions.ClockSkew"/>.</summary>
     FutureDated,
 
     /// <summary>No <c>created_time</c> while <see cref="ReplayProtectionOptions.RequireCreatedTime"/> is on.</summary>

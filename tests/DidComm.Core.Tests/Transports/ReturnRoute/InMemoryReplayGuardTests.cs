@@ -15,8 +15,18 @@ public sealed class InMemoryReplayGuardTests
     private const string Alice = "did:example:alice";
     private const string Carol = "did:example:carol";
 
+    // These suites predate ReplayProtectionOptions.ClockSkew (#105) and run at ClockSkew = 0 unless a
+    // test asks for a skew, so they are also the "ClockSkew = 0 reproduces the old rule" differential.
+    // The skew is set after construction, as a host that mutates its options later would set it, so a
+    // value Validate() refuses (negative, beyond int.MaxValue seconds) can still reach the arithmetic.
     private static InMemoryReplayGuard Guard(ReplayProtectionOptions? options = null, TimeSpan? skew = null)
-        => new(options ?? new ReplayProtectionOptions(), new DidCommOptions { ExpiresClockSkew = skew ?? TimeSpan.Zero, Clock = () => T });
+    {
+        options ??= new ReplayProtectionOptions();
+        options.ClockSkew = TimeSpan.Zero;
+        var guard = new InMemoryReplayGuard(options);
+        options.ClockSkew = skew ?? TimeSpan.Zero;
+        return guard;
+    }
 
     private static long S(DateTimeOffset t) => t.ToUnixTimeSeconds();
 
@@ -69,7 +79,7 @@ public sealed class InMemoryReplayGuardTests
     }
 
     [Fact]
-    public void Negative_skew_behaves_as_zero()
+    public void Negative_skew_set_after_validation_behaves_as_zero()
     {
         var g = Guard(skew: TimeSpan.FromSeconds(-30));
 
@@ -193,7 +203,9 @@ public sealed class InMemoryReplayGuardTests
         a.Should().Throw<ArgumentException>();
         var b = () => g.TryAdmit(Alice, "", S(T), T);
         b.Should().Throw<ArgumentException>();
-        var c = () => new InMemoryReplayGuard(new ReplayProtectionOptions(), null!);
+        var c = () => new InMemoryReplayGuard(null!);
         c.Should().Throw<ArgumentNullException>();
+        var d = () => new InMemoryReplayGuard(null!, logger: null);
+        d.Should().Throw<ArgumentNullException>();
     }
 }

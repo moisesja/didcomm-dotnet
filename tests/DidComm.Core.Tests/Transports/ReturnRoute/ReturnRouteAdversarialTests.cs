@@ -119,8 +119,18 @@ public sealed class ReturnRouteAdversarialTests
 
     // ---- replay guard: window, retention, clock ------------------------------------------------
 
+    // These suites predate ReplayProtectionOptions.ClockSkew (#105) and run at ClockSkew = 0 unless a
+    // test asks for a skew, so they are also the "ClockSkew = 0 reproduces the old rule" differential.
+    // The skew is set after construction, as a host that mutates its options later would set it, so a
+    // value Validate() refuses (negative, beyond int.MaxValue seconds) can still reach the arithmetic.
     private static InMemoryReplayGuard Guard(ReplayProtectionOptions? options = null, TimeSpan? skew = null)
-        => new(options ?? new ReplayProtectionOptions(), new DidCommOptions { ExpiresClockSkew = skew ?? TimeSpan.Zero });
+    {
+        options ??= new ReplayProtectionOptions();
+        options.ClockSkew = TimeSpan.Zero;
+        var guard = new InMemoryReplayGuard(options);
+        options.ClockSkew = skew ?? TimeSpan.Zero;
+        return guard;
+    }
 
     [Theory]
     [InlineData(0)]
@@ -160,7 +170,7 @@ public sealed class ReturnRouteAdversarialTests
     }
 
     [Fact]
-    public void A_negative_ExpiresClockSkew_behaves_as_zero()
+    public void A_negative_ClockSkew_set_after_validation_behaves_as_zero()
     {
         var g = Guard(skew: TimeSpan.FromSeconds(-90));
         g.TryAdmit("did:example:a", "now", S(T), T).Should().Be(ReplayAdmission.Admitted);
@@ -185,9 +195,10 @@ public sealed class ReturnRouteAdversarialTests
     [Fact]
     public void The_largest_admissible_expiry_does_not_wrap()
     {
-        // created + Window + skew at its maximum: the latest clock, the widest window and skew the
-        // options allow. A wrap to a negative expiry would purge the entry on the next call and
-        // re-admit the replay.
+        // created + Window + skew at its maximum: the latest clock, the widest window Validate()
+        // allows and the largest skew a later mutation of the options can set (Validate() itself
+        // stops at int.MaxValue seconds). A wrap to a negative expiry would purge the entry on the
+        // next call and re-admit the replay.
         var options = new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(int.MaxValue) };
         var g = Guard(options, skew: TimeSpan.MaxValue);
         var now = DateTimeOffset.MaxValue;

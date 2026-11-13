@@ -559,6 +559,20 @@ internal sealed class PickupRecordingHandler : RecordingHandlerBase
 }
 
 /// <summary>
+/// A recording handler for Coordinate Mediation 3.0 — a mediator-service PIURI (FR-RR-08 scope b):
+/// registered on a recipient-side client, it records the mediator's <c>mediate-grant</c> and
+/// <c>recipient-update-response</c> pushed on a session socket.
+/// </summary>
+internal sealed class CoordinateMediationRecordingHandler : RecordingHandlerBase
+{
+    public const string ProtocolUri = "https://didcomm.org/coordinate-mediation/3.0";
+
+    public CoordinateMediationRecordingHandler(RecordingHandlerState state) : base(state) { }
+
+    protected override string Uri => ProtocolUri;
+}
+
+/// <summary>
 /// A recording handler for Message Pickup 4.0 — a mediator-service PIURI (FR-RR-08 scope b) whose
 /// <c>messages-received</c> acknowledgement is sent header-less (#92: the FR-RR-09 PIURI clause stamps it).
 /// </summary>

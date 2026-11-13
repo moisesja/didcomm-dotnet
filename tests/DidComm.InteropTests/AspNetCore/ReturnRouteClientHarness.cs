@@ -48,11 +48,15 @@ internal sealed class ReturnRouteClientHarness : IAsyncDisposable
     /// <param name="host">The server under test.</param>
     /// <param name="primaryHandler">The HTTP transport's primary handler; <c>null</c> sends to the TestServer.</param>
     /// <param name="configureHttp">Extra HTTP transport options.</param>
+    /// <param name="configureDidComm">Extra <c>AddDidComm</c> configuration (for example the client's own <c>ReplayProtectionOptions</c>).</param>
+    /// <param name="clockOffset">How far the client's clock is from the host's (a second machine whose clock runs ahead or behind); zero shares it.</param>
     /// <param name="holders">The peers whose private keys the client holds.</param>
     public static ReturnRouteClientHarness Create(
         ReturnRouteTestHost host,
         Func<HttpMessageHandler>? primaryHandler = null,
         Action<HttpTransportOptions>? configureHttp = null,
+        Action<DidCommBuilder>? configureDidComm = null,
+        TimeSpan clockOffset = default,
         params TestPeer[] holders)
     {
         var peers = holders.Length == 0 ? new[] { host.Alice } : holders;
@@ -73,7 +77,8 @@ internal sealed class ReturnRouteClientHarness : IAsyncDisposable
                 o.CircuitBreakerFailureThreshold = 100;
                 configureHttp?.Invoke(o);
             });
-            b.Configure(o => o.Clock = () => host.Clock.Now);
+            configureDidComm?.Invoke(b);
+            b.Configure(o => o.Clock = () => host.Clock.Now + clockOffset);
         });
         // Registered after UseHttpTransport, so this primary handler replaces its socket handler.
         services.AddHttpClient(HttpDidCommTransport.HttpClientName)
@@ -171,11 +176,13 @@ internal sealed class ReturnRouteWebSocketClientHarness : IAsyncDisposable
     /// <param name="host">The server under test.</param>
     /// <param name="configure">Extra WebSocket transport options (applied last).</param>
     /// <param name="configureDidComm">Extra <c>AddDidComm</c> configuration.</param>
+    /// <param name="clockOffset">How far the client's clock is from the host's (a second machine whose clock runs ahead or behind); zero shares it.</param>
     /// <param name="holders">The peers whose private keys the client holds.</param>
     public static ReturnRouteWebSocketClientHarness Create(
         ReturnRouteTestHost host,
         Action<WebSocketTransportOptions>? configure = null,
         Action<DidCommBuilder>? configureDidComm = null,
+        TimeSpan clockOffset = default,
         params TestPeer[] holders)
     {
         var peers = holders.Length == 0 ? new[] { host.Alice } : holders;
@@ -213,7 +220,7 @@ internal sealed class ReturnRouteWebSocketClientHarness : IAsyncDisposable
             // After AddBuiltInProtocols: last registration wins, so the client records ping-responses.
             b.AddProtocol<TrustPingRecordingHandler>();
             configureDidComm?.Invoke(b);
-            b.Configure(o => o.Clock = () => host.Clock.Now);
+            b.Configure(o => o.Clock = () => host.Clock.Now + clockOffset);
         });
         return new ReturnRouteWebSocketClientHarness(services.BuildServiceProvider(), host, recorder, connects);
     }

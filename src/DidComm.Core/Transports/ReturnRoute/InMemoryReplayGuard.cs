@@ -1,4 +1,3 @@
-using DidComm.Facade;
 using Microsoft.Extensions.Logging;
 
 namespace DidComm.Transports.ReturnRoute;
@@ -12,17 +11,23 @@ namespace DidComm.Transports.ReturnRoute;
 /// <para>
 /// <strong>Rules</strong> (FR-RR-08). A timestamped message is <see cref="ReplayAdmission.TooOld"/>
 /// when <c>created_time &lt; now − Window</c> and <see cref="ReplayAdmission.FutureDated"/> when
-/// <c>created_time &gt; now + ExpiresClockSkew</c>; otherwise its entry expires at
-/// <c>created_time + Window + ExpiresClockSkew</c>. A message without <c>created_time</c> is
+/// <c>created_time &gt; now + ClockSkew</c>; otherwise its entry expires at
+/// <c>created_time + Window + ClockSkew</c>. A message without <c>created_time</c> is
 /// <see cref="ReplayAdmission.MissingCreatedTime"/> unless
 /// <see cref="ReplayProtectionOptions.RequireCreatedTime"/> is off, in which case its entry expires
-/// at <c>now + Window</c>. The skew is read from <see cref="DidCommOptions.ExpiresClockSkew"/> at
-/// call time and clamped to zero or more; the arithmetic is the FR-API-05 expiry's (whole seconds).
+/// at <c>now + Window</c>. <see cref="ReplayProtectionOptions.Window"/> and
+/// <see cref="ReplayProtectionOptions.ClockSkew"/> are read at call time, in whole seconds
+/// (floored), and the skew is clamped to zero or more (a negative skew would end retention before
+/// age rejection begins). The guard reads nothing from <c>DidCommOptions</c>: FR-API-05 expiry and
+/// its <c>ExpiresClockSkew</c> are the unpack path's, judged separately.
 /// </para>
 /// <para>
 /// <strong>Retention property.</strong> An entry is kept until its expiry inclusive (the purge
-/// removes strictly earlier expiries) while age rejection starts at <c>now − Window</c>, so there
-/// is no instant at which a captured request is neither remembered nor too old (FR-RR-08 (4)).
+/// removes strictly earlier expiries) while age rejection starts once <c>now &gt; created_time +
+/// Window</c>, so there is no instant at which a captured request is neither remembered nor too old
+/// (FR-RR-08 (4)) — also for a <c>created_time</c> ahead of the clock. An entry stamped
+/// <c>now + ClockSkew</c>, the latest admitted, is kept <c>Window + 2 × ClockSkew</c> from its
+/// admission.
 /// </para>
 /// <para>
 /// <strong>Data structure.</strong> One lock over a per-sender dictionary of <c>id → expiry</c>
@@ -41,13 +46,14 @@ namespace DidComm.Transports.ReturnRoute;
 /// </para>
 /// <para>
 /// <strong>Clock.</strong> Admission and retention both use the instant the caller passes
-/// (<c>DidCommOptions.Now()</c> at the endpoints) — the guard trusts that clock exactly as FR-API-05
-/// expiry does. A clock that moves backwards only keeps entries longer (a replay is still a
-/// <see cref="ReplayAdmission.Duplicate"/>, or <see cref="ReplayAdmission.FutureDated"/> once the
-/// step exceeds the skew). A clock that jumps forward past an entry's expiry purges it; if it then
-/// returns, a request created inside the restored window is admissible again. Keeping the host clock
-/// from stepping forward by more than <see cref="ReplayProtectionOptions.Window"/> plus the skew and
-/// back is the host's part of FR-RR-08.
+/// (<c>DidCommOptions.Now()</c> at the endpoints and in the client's inbound consumer) — the guard
+/// trusts that clock exactly as FR-API-05 expiry does. A clock that moves backwards only keeps
+/// entries longer (a replay is still a <see cref="ReplayAdmission.Duplicate"/>, or
+/// <see cref="ReplayAdmission.FutureDated"/> once the step exceeds the skew). A clock that jumps
+/// forward past an entry's expiry purges it; if it then returns, a request created inside the
+/// restored window is admissible again. Keeping the host clock from stepping forward by more than
+/// <see cref="ReplayProtectionOptions.Window"/> plus <see cref="ReplayProtectionOptions.ClockSkew"/>
+/// and back is the host's part of FR-RR-08.
 /// </para>
 /// <para>
 /// <strong>Logging.</strong> Only the flood-shaped outcomes are logged here —
@@ -61,7 +67,6 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
     private const long LogEvery = 1000;
 
     private readonly ReplayProtectionOptions _options;
-    private readonly DidCommOptions _didCommOptions;
     private readonly ILogger<InMemoryReplayGuard>? _logger;
     private readonly object _gate = new();
     private readonly Dictionary<string, Bucket> _buckets = new(StringComparer.Ordinal);
@@ -71,22 +76,18 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
     private long _tooLong;
 
     /// <summary>Create a guard; validates <paramref name="options"/>.</summary>
-    /// <param name="options">The replay settings; <see cref="ReplayProtectionOptions.Validate"/> runs here.</param>
-    /// <param name="didCommOptions">The facade options, read at call time for <see cref="DidCommOptions.ExpiresClockSkew"/>.</param>
-    public InMemoryReplayGuard(ReplayProtectionOptions options, DidCommOptions didCommOptions)
-        : this(options, didCommOptions, logger: null) { }
+    /// <param name="options">The replay settings, read at call time; <see cref="ReplayProtectionOptions.Validate"/> runs here.</param>
+    public InMemoryReplayGuard(ReplayProtectionOptions options)
+        : this(options, logger: null) { }
 
     /// <summary>Create a guard with a logger; validates <paramref name="options"/>.</summary>
-    /// <param name="options">The replay settings; <see cref="ReplayProtectionOptions.Validate"/> runs here.</param>
-    /// <param name="didCommOptions">The facade options, read at call time for <see cref="DidCommOptions.ExpiresClockSkew"/>.</param>
+    /// <param name="options">The replay settings, read at call time; <see cref="ReplayProtectionOptions.Validate"/> runs here.</param>
     /// <param name="logger">Optional logger; lines carry counts only.</param>
-    public InMemoryReplayGuard(ReplayProtectionOptions options, DidCommOptions didCommOptions, ILogger<InMemoryReplayGuard>? logger)
+    public InMemoryReplayGuard(ReplayProtectionOptions options, ILogger<InMemoryReplayGuard>? logger)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(didCommOptions);
         options.Validate();
         _options = options;
-        _didCommOptions = didCommOptions;
         _logger = logger;
     }
 
@@ -126,7 +127,9 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
 
         var nowS = now.ToUnixTimeSeconds();
         var windowS = (long)Math.Floor(_options.Window.TotalSeconds);
-        var skewS = (long)Math.Floor(Math.Max(0, _didCommOptions.ExpiresClockSkew.TotalSeconds));
+        // Clamped: the options are mutable after Validate(), and a negative skew would end retention
+        // (created + Window + skew) before age rejection begins (created + Window), re-admitting replays.
+        var skewS = (long)Math.Floor(Math.Max(0, _options.ClockSkew.TotalSeconds));
 
         long expiresAt;
         if (createdTimeEpochSeconds is long created)

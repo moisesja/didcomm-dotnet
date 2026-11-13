@@ -274,11 +274,11 @@
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions,DidComm.Facade.DidCommOptions)",
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions,DidComm.Facade.DidCommOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Transports.ReturnRoute.InMemoryReplayGuard>)",
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Transports.ReturnRoute.InMemoryReplayGuard>)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
@@ -384,6 +384,10 @@
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::.ctor()",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:ClockSkew",
+      "reason": "TODO(#97): replay clock skew (#105): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::Validate()",
