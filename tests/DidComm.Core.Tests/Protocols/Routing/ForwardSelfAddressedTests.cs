@@ -263,6 +263,39 @@ public sealed class ForwardSelfAddressedTests
         f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedExpired] = 1 });
     }
 
+    // ── Expiry across the layers (AD-2) ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task The_earliest_expiry_of_every_opened_layer_bounds_the_relayed_payload()
+    {
+        // Received layer: expires T0+300. Middle layer (opened): T0+60. The forward inside: T0+600.
+        await using var f = await Fixture.CreateAsync();
+        var innermost = await f.AnoncryptAsync(Forward(Bob, expires: T0.AddSeconds(600).ToUnixTimeSeconds()));
+        var middle = await f.AnoncryptAsync(ForwardMessage.Create(Mediator, Mediator, new[] { innermost }, expiresTimeEpochSeconds: T0.AddSeconds(60).ToUnixTimeSeconds()));
+        var received = ForwardMessage.Create(Mediator, Mediator, new[] { middle }, expiresTimeEpochSeconds: T0.AddSeconds(300).ToUnixTimeSeconds());
+
+        await f.HandleAsync(AsDecryptedByMediator(received, Fixture.MediatorKid));
+
+        f.Sink.Results.Should().ContainSingle().Which.ExpiresTime.Should().Be(T0.AddSeconds(60).ToUnixTimeSeconds());
+    }
+
+    [Fact]
+    public async Task A_middle_layer_that_expires_while_the_acknowledgement_is_pending_ends_the_relay()
+    {
+        await using var f = await Fixture.CreateAsync();
+        var innermost = await f.AnoncryptAsync(Forward(Bob));
+        var middle = await f.AnoncryptAsync(ForwardMessage.Create(Mediator, Mediator, new[] { innermost }, expiresTimeEpochSeconds: T0.AddSeconds(60).ToUnixTimeSeconds()));
+        var gate = new TaskCompletionSource();
+
+        await f.HandleAsync(f.SelfAddressed(middle), gate.Task, flush: false);
+        f.Now = T0.AddSeconds(61);
+        gate.SetResult();
+        await f.Handler.FlushAsync(Flush);
+
+        f.Sink.Count.Should().Be(0);
+        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedExpired] = 1 });
+    }
+
     // ── Schedule ──────────────────────────────────────────────────────────────────────────
 
     [Fact]

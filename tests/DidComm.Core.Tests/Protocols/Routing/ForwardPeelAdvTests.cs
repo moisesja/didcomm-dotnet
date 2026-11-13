@@ -278,7 +278,7 @@ public sealed class ForwardPeelAdvTests
 
     // ── DEFECT 2: an outer layer's expiry is lost once the layer is opened ────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 2 (P3): after a self-addressed layer is opened, the relayed result carries only the innermost forward's expires_time; the expiry the opened (enclosing) layer asked for is dropped, while its delay is kept. FR-ROUTE-09: a payload whose enclosing forward's expires_time has passed MUST NOT be delivered. Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D2_The_expiry_of_an_opened_layer_still_bounds_the_relayed_payload()
     {
         await using var f = await Fixture.CreateAsync();
@@ -290,19 +290,6 @@ public sealed class ForwardPeelAdvTests
         var result = f.Sink.Results.Should().ContainSingle().Which;
         result.ExpiresTime.Should().NotBeNull("the opened layer asked for an expiry");
         result.ExpiresTime!.Value.Should().BeLessThanOrEqualTo(outerExpiry, "the relayed payload must not outlive the forward that enclosed it");
-    }
-
-    [Fact]
-    public async Task The_expiry_of_an_opened_layer_is_dropped_today()
-    {
-        // DEFECT 2 as it behaves now (pin): the outer layer expires in a minute, the relayed result
-        // carries no expiry at all, so the queue keeps it for the mailbox age limit.
-        await using var f = await Fixture.CreateAsync();
-        var outer = ForwardMessage.Create(Mediator, Mediator, new[] { await f.AnoncryptAsync(Forward(Bob)) }, expiresTimeEpochSeconds: T0.AddMinutes(1).ToUnixTimeSeconds());
-
-        await f.HandleAsync(AsDecryptedByMediator(outer, Fixture.MediatorKid));
-
-        f.Sink.Results.Should().ContainSingle().Which.ExpiresTime.Should().BeNull();
     }
 
     // ── DEFECT 3: the forward handler's log lines carry the id unbounded ──────────────────
