@@ -75,11 +75,14 @@ namespace DidComm.Protocols.Routing;
 /// <c>didcomm.forward.outcomes</c> counter of the <see cref="Diagnostics.DidCommDiagnostics.MeterName"/>
 /// meter: <c>Dropped-Malformed</c> (not a forward, malformed, or refused by the processor as
 /// inconsistent or malformed), <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or
-/// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered),
-/// <c>Dropped-Saturated</c>, <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or
-/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a fault of the mediator's
-/// own collaborators: the registry, the clock or the logger while screening, the processor or the
-/// sink on the pump). A layer addressed to the mediator that cannot be opened is the sender's mistake
+/// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered; or, when the
+/// processor rewraps, <c>next</c> cannot be reached: its DID resolves to no usable
+/// <c>keyAgreement</c> key, or its method is refused — <see cref="DidResolutionException"/> or
+/// <see cref="UnsupportedDidMethodException"/>), <c>Dropped-Saturated</c>,
+/// <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or the request was
+/// cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a fault of the mediator's own
+/// collaborators: the registry, the clock or the logger while screening, the processor or the sink
+/// on the pump — a resolver that throws anything else included). A layer addressed to the mediator that cannot be opened is the sender's mistake
 /// whatever the exception — <c>Dropped-Malformed</c>, or <c>Dropped-Expired</c> when the message
 /// inside has expired — never <c>Faulted</c>. A forward the sink returns from normally is the sink's to count: the mediator's own
 /// sink counts how it ended, a host's sink counts nothing.
@@ -97,11 +100,16 @@ namespace DidComm.Protocols.Routing;
 /// shared pump never runs a stranger's decryption or DID resolution. What is inside is screened
 /// exactly as an arriving forward is, at the same receipt instant: a <c>forward</c>, encrypted to a
 /// held key, not expired, its own <c>delay_milli</c> drawn under the cap, its <c>next</c> a
-/// registered recipient (the one registry lookup of the request). A forward inside that is again
-/// addressed to this mediator is opened in turn, at most <see cref="MaxSelfAddressedLayers"/> layers
-/// per received forward — so one request costs at most that many unpacks, each of a payload smaller
-/// than the last, the first bounded by <c>MaxReceiveBytes</c> — and one more is dropped as
-/// malformed. The forward found inside is then admitted with the received one's acknowledgement
+/// registered recipient (the one registry lookup of the request). A layer addressed to the mediator
+/// must be exactly an anoncrypt envelope around a plaintext message without <c>from_prior</c> — what
+/// a rewrapping mediator produces, and what a sender's forward layers are (FR-ROUTE-02); a plaintext,
+/// signed or authcrypt layer, a signature or another envelope inside, and <c>from_prior</c> are
+/// refused as malformed from their shape alone, before any DID is resolved. A forward inside that is
+/// again addressed to this mediator is opened in turn, at most <see cref="MaxSelfAddressedLayers"/>
+/// layers per received forward — so one request costs at most that many decryptions and no
+/// resolution of a DID the sender chose, every layer within <c>MaxReceiveBytes</c> (an opened layer
+/// is not necessarily smaller than the one it came out of: a <c>data.json</c> attachment is
+/// re-serialized) — and one more is dropped as malformed. The forward found inside is then admitted with the received one's acknowledgement
 /// (both count against the byte budget) and the pump only processes and sinks it. The relayed
 /// payload must not outlive any layer it came out of: its <see cref="ForwardProcessingResult.ExpiresTime"/>
 /// is the earliest <c>expires_time</c> of the received forward and every layer opened (FR-ROUTE-09),
@@ -199,6 +207,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         InnerExpired,
         InnerNextNotDid,
         InnerNotRegistered,
+        NextUnreachable,
         Count,
     }
 
@@ -609,7 +618,9 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         var context = item.Context!;
         var id = LogValues.Id(context.Received.Message.Id);
         // Which stage a fault came from decides its outcome: a processor that refuses the forward
-        // as inconsistent or malformed ends a malformed forward; anything else is a fault.
+        // as inconsistent or malformed ends a malformed forward, and one that cannot resolve the next
+        // hop (rewrap mode) ends a forward for a recipient that cannot be reached; anything else is a
+        // fault.
         var processed = false;
         try
         {
@@ -644,12 +655,21 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             // ConsistencyException, MalformedMessageException, DidResolutionException,
             // CryptoException, sink faults. Type names only — a DidResolutionException carries the
             // next-hop DID in its message, so the exception object never reaches the logger.
-            var reason = !processed && ex is ConsistencyException or MalformedMessageException
-                ? DropReason.ProcessorMalformed
-                : DropReason.Faulted;
+            var reason = processed ? DropReason.Faulted : ex switch
+            {
+                ConsistencyException or MalformedMessageException => DropReason.ProcessorMalformed,
+                // The only DID the processor resolves is the next hop's, to rewrap for it: a DID
+                // with no usable keyAgreement key, or of a refused method, is the recipient's (any
+                // granted peer may register any DID), not a fault of the mediator. A resolver that
+                // throws something else is a collaborator's fault.
+                DidResolutionException or UnsupportedDidMethodException => DropReason.NextUnreachable,
+                _ => DropReason.Faulted,
+            };
             Dropped(
                 reason,
-                "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
+                reason == DropReason.NextUnreachable
+                    ? "Forward {MessageId} dropped: the next hop cannot be reached: {ExceptionType} (innermost: {InnerExceptionType}) (FR-ROUTE-06)."
+                    : "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
                 id, ex.GetType().Name, LogValues.InnermostTypeName(ex));
         }
     }
@@ -674,6 +694,10 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         // The earliest expiry of every layer on the way in: each is checked here, and the earliest
         // bounds the payload once it is relayed (FR-ROUTE-09).
         var earliest = received.Message.ExpiresTime;
+        // The latest hold any opened layer asks for, each drawn at receipt under the cap — never their
+        // sum. The caller keeps the received layer's own hold if it ends later.
+        TimeSpan? latestDelay = null;
+        DateTimeOffset? latestNotBefore = null;
         for (var opened = 1; ; opened++)
         {
             if (opened > MaxSelfAddressedLayers)
@@ -744,15 +768,21 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 return null;
             }
 
+            // This layer's own hold — a self-addressed middle layer's too — drawn at receipt under the cap.
+            var delay = _processor.ResolveDelay(inner.Message);
+            if (ForwardProcessor.NotBeforeOf(receivedAt, delay) is { } notBefore
+                && (latestNotBefore is not { } later || notBefore > later))
+            {
+                (latestDelay, latestNotBefore) = (delay, notBefore);
+            }
+
             if (IsSelfAddressed(subject, inner.RecipientKid))
             {
                 layer = inner;
                 continue;
             }
 
-            // Its own hold, drawn at receipt under the cap (the caller keeps an outer layer's later one).
-            var delay = _processor.ResolveDelay(inner.Message);
-            return (inner, subject, delay, ForwardProcessor.NotBeforeOf(receivedAt, delay), earliest);
+            return (inner, subject, latestDelay, latestNotBefore, earliest);
         }
     }
 
@@ -986,7 +1016,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             or DropReason.SelfLayersTooDeep or DropReason.PeelMalformed or DropReason.InnerNotAForward => ForwardOutcomes.DroppedMalformed,
         DropReason.Posture or DropReason.InnerPosture => ForwardOutcomes.DroppedNotEncrypted,
         DropReason.ExpiredInline or DropReason.ExpiredWhileQueued or DropReason.InnerExpired => ForwardOutcomes.DroppedExpired,
-        DropReason.NextNotDid or DropReason.NotRegistered or DropReason.InnerNextNotDid or DropReason.InnerNotRegistered => ForwardOutcomes.DroppedUnknown,
+        DropReason.NextNotDid or DropReason.NotRegistered or DropReason.InnerNextNotDid or DropReason.InnerNotRegistered
+            or DropReason.NextUnreachable => ForwardOutcomes.DroppedUnknown,
         DropReason.Saturated => ForwardOutcomes.DroppedSaturated,
         DropReason.Unacknowledged => ForwardOutcomes.DroppedUnacknowledged,
         _ => ForwardOutcomes.Faulted,

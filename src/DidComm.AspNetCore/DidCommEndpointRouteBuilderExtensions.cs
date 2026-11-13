@@ -284,7 +284,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // request still answers 202 — never a 400 after dispatch (JC-13).
                     returned = await session.TrySendAsync(outcome.Reply, httpContext.RequestAborted).ConfigureAwait(false);
                     if (!returned && session.HasResponse)
-                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the handler's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", unpacked.Message.Id);
+                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the handler's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", LogValues.Id(unpacked.Message.Id));
                 }
                 LogOutcome(logger, outcome, returnedOnSession: returned);
 
@@ -422,7 +422,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // The callback is the host's own code: log by type name, answer 202, send nothing it
                 // may have pushed (a fault must not become a 500 or a partial response).
                 session?.TakeResponseAndClose();
-                SafeLog.Write(logger, LogLevel.Error, "Inbound {MessageId}: onReceive callback threw {ExceptionType} after a successful unpack; acknowledging with 202.", unpacked.Message.Id, ex.GetType().Name);
+                SafeLog.Write(logger, LogLevel.Error, "Inbound {MessageId}: onReceive callback threw {ExceptionType} after a successful unpack; acknowledging with 202.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name);
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
 
@@ -430,7 +430,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 if (session is null)
                 {
-                    SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: callback reply not returned: no return-route session for this request.", unpacked.Message.Id);
+                    SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: callback reply not returned: no return-route session for this request.", LogValues.Id(unpacked.Message.Id));
                 }
                 else
                 {
@@ -445,7 +445,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                         throw;
                     }
                     if (!returned && session.HasResponse)
-                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the callback's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", unpacked.Message.Id);
+                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the callback's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", LogValues.Id(unpacked.Message.Id));
                 }
             }
 
@@ -782,7 +782,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                         if (admission.SessionEligible && !stompNoticeLogged)
                         {
                             stompNoticeLogged = true;
-                            SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return_route all is not available under STOMP (FR-RR-05); no session is opened on this connection.", unpacked.Message.Id);
+                            SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return_route all is not available under STOMP (FR-RR-05); no session is opened on this connection.", LogValues.Id(unpacked.Message.Id));
                         }
                     }
                     else if (returnRoute.Registry is not null)

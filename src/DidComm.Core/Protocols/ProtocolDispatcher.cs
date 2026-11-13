@@ -1,6 +1,7 @@
 using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.Protocols.Routing;
 using DidComm.Protocols.Trace;
 using DidComm.Threading;
 using DidComm.Transports.ReturnRoute;
@@ -49,6 +50,9 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     private readonly TraceOptions? _traceOptions;
     private readonly ObserverDelivery? _observers;
     private readonly IInboundCorrelator[] _correlators;
+
+    // Occurrences of the FR-THR-04 rule 2 drop line (any sender can cause one per message).
+    private long _ackLoopViolations;
 
     /// <summary>
     /// Construct a dispatcher bound to a registry and thread-state store. This is the exact 1.2.0
@@ -223,7 +227,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
                 SafeLogWarning(
                     ex,
                     "Could not snapshot synthetic inbound message {MessageId}; correlation and observer delivery are skipped, but protocol dispatch continues.",
-                    received.Message?.Id);
+                    LogValues.Id(received.Message?.Id));
             }
         }
 
@@ -271,7 +275,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
                     SafeLogWarning(
                         ex,
                         "Observer enqueue threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected (FR-PROTO-12).",
-                        received.Message?.Id);
+                        LogValues.Id(received.Message?.Id));
                 }
             }
         }
@@ -290,7 +294,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
                 SafeLogWarning(
                     ex,
                     "IInboundCorrelator '{Correlator}' threw for inbound message {MessageId}; isolated — the dispatch outcome is unaffected.",
-                    correlator.GetType().FullName, received.Id);
+                    correlator.GetType().FullName, LogValues.Id(received.Id));
             }
         }
     }
@@ -323,7 +327,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         {
             _logger?.LogInformation(
                 "Trace 2.0: inbound message {MessageId} authorizes trace-report to {TraceUri}; POST integration deferred (FR-PROTO-11).",
-                received.Message.Id, traceUri);
+                LogValues.Id(received.Message.Id), traceUri);
         }
 
         // FR-THR-04 rule 3: a pure ACK that answers an ACK THIS agent requested on the thread must be
@@ -339,26 +343,33 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
                 ackThread.AckRequested = false;
                 _logger?.LogInformation(
                     "Consumed inbound pure-ACK answering our ACK request (FR-THR-04 rule 3); not dispatched. Message id: {MessageId}",
-                    received.Message.Id);
+                    LogValues.Id(received.Message.Id));
                 return new DispatchOutcome(DispatchResult.DroppedAsAckLoop, Reply: null, Handler: null);
             }
         }
 
         // FR-THR-04 rule 2 (defensive enforcement of a peer's violation): an inbound pure ACK that ALSO
         // requests an ACK would loop both peers forever. Drop it without invoking a handler.
+        // Any sender can cause this line once per message: the first and every 1000th at Warning, the
+        // rest at Debug.
         if (AckLoopGuard.IsPureAck(received.Message) && AckLoopGuard.RequestsAck(received.Message))
         {
-            _logger?.LogWarning(
-                "Dropped inbound pure-ACK that also requests an ACK (peer's FR-THR-04 rule 2 violation). Message id: {MessageId}",
-                received.Message.Id);
+            var level = RateLimitedLog.Level(ref _ackLoopViolations, LogLevel.Warning, out var violations);
+            _logger?.Log(
+                level,
+                "Dropped inbound pure-ACK that also requests an ACK (peer's FR-THR-04 rule 2 violation); {Count} so far. Message id: {MessageId}",
+                violations,
+                LogValues.Id(received.Message.Id));
             return new DispatchOutcome(DispatchResult.DroppedAsAckLoop, Reply: null, Handler: null);
         }
 
         if (!_registry.TryResolve(received.Message.Type, out var handler))
         {
+            // The type is not written: it is the sender's text (a valid type URI can carry line breaks
+            // and terminal escapes in its protocol name). It is on the handle span's message-type tag.
             _logger?.LogInformation(
-                "No protocol handler registered for inbound message type '{Type}' (FR-PROTO-03).",
-                received.Message.Type);
+                "No protocol handler registered for the type of inbound message {MessageId} (FR-PROTO-03).",
+                LogValues.Id(received.Message.Id));
             return new DispatchOutcome(DispatchResult.NoHandler, Reply: null, Handler: null);
         }
 

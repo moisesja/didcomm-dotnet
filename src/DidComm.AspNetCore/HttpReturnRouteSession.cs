@@ -1,3 +1,4 @@
+using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Transports.ReturnRoute;
@@ -132,7 +133,7 @@ internal sealed class HttpReturnRouteSession : IReturnRouteSession
             // endpoint closed the session during the pack (the caller's next send is then NotSent).
             if (packed.Length > maxPackedBytes)
             {
-                SafeLog.Write(_logger, LogLevel.Debug, "Return-route message {MessageId} not sent: its packed envelope is {PackedBytes} bytes, over the caller's bound of {MaxPackedBytes}.", snapshot.Id, packed.Length, maxPackedBytes);
+                SafeLog.Write(_logger, LogLevel.Debug, "Return-route message {MessageId} not sent: its packed envelope is {PackedBytes} bytes, over the caller's bound of {MaxPackedBytes}.", LogValues.Id(snapshot.Id), packed.Length, maxPackedBytes);
                 return ReturnRouteSendResult.TooLarge;
             }
 

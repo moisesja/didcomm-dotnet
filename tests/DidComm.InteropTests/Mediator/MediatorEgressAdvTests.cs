@@ -32,10 +32,11 @@ public sealed class MediatorEgressAdvTests
 
     // ---- the single forward pump ------------------------------------------------------------
 
-    // ADV-2 DEFECT 1 (P2, fixed by #95 AD-1): a stranger's forward addressed to the mediator itself
-    // used to be opened on the single forward pump, after the 202, so an attacker-chosen DID
-    // resolution held up every other relay. Layers addressed to the mediator are now opened inline,
-    // on the sender's own request: the stranger's POST is what waits for the DID it chose.
+    // ADV-2 DEFECT 1 (P2, fixed by #95 AD-1 and ADV-3 D2): a stranger's forward addressed to the
+    // mediator itself used to be opened on the single forward pump, after the 202, so an
+    // attacker-chosen DID resolution held up every other relay. Layers addressed to the mediator are
+    // now opened inline, on the sender's own request, and must be an anoncrypt envelope around a
+    // plaintext message: the stranger's signed note is refused before its signer is resolved.
     [Fact]
     public async Task A_strangers_forward_addressed_to_the_mediator_cannot_hold_up_other_senders_relays()
     {
@@ -54,26 +55,26 @@ public sealed class MediatorEgressAdvTests
             resolver.Gate(stranger.Did);
             var signed = await stranger.Client.PackSignedAsync(stranger.Note(mediator.Did), stranger.Did);
             var (selfAddressed, _) = await stranger.ForwardAsync(mediator.Did, next: mediator.Did, signed);
-            strangersPost = Task.Run(() => mediator.PostAsync(selfAddressed)); // its own request thread: the signer lookup blocks it
-            await resolver.Entered.WaitAsync(Wait);
+            strangersPost = Task.Run(() => mediator.PostAsync(selfAddressed));
+            (await strangersPost.WaitAsync(Wait)).Status.Should().Be(HttpStatusCode.Accepted, "answered at once: nothing in it is resolved");
 
             // An ordinary relay from someone else, for an enrolled recipient.
             var note = alice.Note(bob.Did);
             var (forward, _) = await alice.ForwardAsync(mediator.Did, bob.Did, await alice.AuthcryptAsync(note, bob.Did));
             (await mediator.PostAsync(forward)).Status.Should().Be(HttpStatusCode.Accepted);
 
-            // Property: Bob's message is queued whatever the stranger's forward is waiting for.
+            // Property: Bob's message is queued whatever the stranger's forward asked for.
             await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 1, "a stranger's forward must not hold every other relay behind a DID resolution it chose");
-            strangersPost.IsCompleted.Should().BeFalse("the stranger's own request pays for opening what it sent");
+            resolver.Entered.IsCompleted.Should().BeFalse("the stranger's DID is never resolved: a layer addressed to the mediator must be an anoncrypt of a plaintext");
         }
         finally
         {
             resolver.Release();
         }
 
-        (await strangersPost!.WaitAsync(Wait)).Status.Should().Be(HttpStatusCode.Accepted, "once its DID resolves, the stranger still gets the uniform 202 and nothing more");
         await mediator.FlushAsync();
         mediator.Store.MessageCount.Should().Be(1, "the stranger's forward stored nothing");
+        mediator.Outcomes.Should().Contain(ForwardOutcomes.DroppedMalformed);
     }
 
     [Fact]

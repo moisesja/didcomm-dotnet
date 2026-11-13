@@ -145,8 +145,8 @@ public sealed class ForwardPeelAdvTests
     [InlineData(Shape.InnerNextEmpty, null)]
     [InlineData(Shape.InnerNextNumber, null)]
     [InlineData(Shape.InnerTwoAttachments, ForwardOutcomes.DroppedMalformed)]
-    [InlineData(Shape.InnerPlaintext, ForwardOutcomes.DroppedNotEncrypted)]
-    [InlineData(Shape.InnerSignedOnly, ForwardOutcomes.DroppedNotEncrypted)]
+    [InlineData(Shape.InnerPlaintext, ForwardOutcomes.DroppedMalformed)]   // #95 ADV-3 D2: refused by the restricted unpack
+    [InlineData(Shape.InnerSignedOnly, ForwardOutcomes.DroppedMalformed)]  // #95 ADV-3 D2: refused before the signer is resolved
     [InlineData(Shape.InnerDelayExtreme, "sink")]
     [InlineData(Shape.InnerExpiresMinValue, ForwardOutcomes.DroppedExpired)]
     public async Task Each_hostile_shape_of_a_self_addressed_layer_ends_in_one_typed_outcome_never_a_fault(Shape shape, string? expected)
@@ -220,11 +220,12 @@ public sealed class ForwardPeelAdvTests
 
     // ── DEFECT 1: the peel resolves DIDs on the shared pump ───────────────────────────────
 
-    // ADV-1 DEFECT 1 (P2, fixed by #95 AD-1): the layer used to be opened on ForwardHandler's single
-    // pump, so a stranger's inner layer naming a slowly-resolving DID parked every relay and, once
-    // the queue was full, Bob's forwards were dropped as saturated. Layers addressed to the mediator
-    // are now opened inline, on the sender's own request and before any reservation: the stranger's
-    // request is what waits for the DID it chose.
+    // ADV-1 DEFECT 1 (P2, fixed by #95 AD-1 and ADV-3 D2): the layer used to be opened on
+    // ForwardHandler's single pump, so a stranger's inner layer naming a slowly-resolving DID parked
+    // every relay and, once the queue was full, Bob's forwards were dropped as saturated. Layers
+    // addressed to the mediator are now opened inline, on the sender's own request, and must be an
+    // anoncrypt envelope around a plaintext message: the stranger's signed inner layer is refused
+    // before its signer is resolved, so the slow DID is never asked for at all.
     [Fact]
     public async Task ADV1_D1_A_self_addressed_forward_whose_inner_layer_resolves_a_slow_DID_does_not_hold_up_other_recipients_forwards()
     {
@@ -233,33 +234,18 @@ public sealed class ForwardPeelAdvTests
         var poisoned = f.SelfAddressed(await f.SignedByTarpitAsync(Forward(Bob)));
 
         // The stranger's forward: anoncrypt to the mediator, no grant, no registered recipient
-        // needed — opening the inner layer resolves the signer before anything else is checked.
-        // Its own request thread (as the endpoint gives every request one): the signer lookup is
-        // sync-over-async, so the call blocks the thread that makes it.
-        var strangers = Task.Run(() => f.HandleAsync(poisoned, flush: false));
-        (await Task.WhenAny(f.Resolver.Entered.Task, Task.Delay(Rendezvous))).Should().BeSameAs(f.Resolver.Entered.Task, "the stranger's DID is being resolved");
+        // needed. Its own request thread (as the endpoint gives every request one).
+        await Task.Run(() => f.HandleAsync(poisoned, flush: false)).WaitAsync(Rendezvous);
 
-        // Alice's forwards for Bob arrive while that resolution is parked.
-        var forBob1 = AsDecryptedByMediator(Forward(Bob));
-        var forBob2 = AsDecryptedByMediator(Forward(Bob));
-        await f.HandleAsync(forBob1, flush: false);
-        await f.HandleAsync(forBob2, flush: false);
-
-        try
-        {
-            f.Outcomes.Counts.Should().NotContainKey(ForwardOutcomes.DroppedSaturated, "Bob's mail must not be dropped because a stranger's onion is being resolved");
-            (await PollAsync(() => f.Sink.Count >= 2, TimeSpan.FromSeconds(5))).Should().BeTrue("Bob's forwards are relayed while the stranger's DID resolution is still pending");
-            strangers.IsCompleted.Should().BeFalse("the stranger's own request pays for opening what it sent");
-            f.Handler.Outstanding.Should().Be(0, "nothing is reserved for a layer still being opened");
-        }
-        finally
-        {
-            f.Resolver.Gate.TrySetResult();
-        }
-
-        await strangers.WaitAsync(Flush);
+        // Alice's forwards for Bob.
+        await f.HandleAsync(AsDecryptedByMediator(Forward(Bob)), flush: false);
+        await f.HandleAsync(AsDecryptedByMediator(Forward(Bob)), flush: false);
         await f.Handler.FlushAsync(Flush);
-        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedNotEncrypted] = 1 }, "once resolved, the signed-only inner layer is refused by the posture rule");
+
+        f.Resolver.Requested.Should().NotContain(Tarpit, "a signed layer is refused before its signer is resolved");
+        f.Resolver.Entered.Task.IsCompleted.Should().BeFalse();
+        f.Sink.Count.Should().Be(2, "Bob's forwards are relayed");
+        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedMalformed] = 1 }, "the stranger's layer is not an anoncrypt of a plaintext");
     }
 
     // ── DEFECT 4: a stranger can make the peel count Faulted ──────────────────────────────

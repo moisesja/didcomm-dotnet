@@ -432,8 +432,11 @@ public sealed class ForwardHandlerTests
     [Fact]
     public async Task Processor_fault_in_the_pump_is_logged_and_never_escapes()
     {
-        // Rewrap mode over an empty key service: the pump's ProcessAsync throws DidResolutionException.
-        await using var h = new Harness(processorOptions: new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext));
+        // Rewrap mode over a key service that throws: the pump's ProcessAsync faults. (A next hop that
+        // resolves to no usable key is not a fault since #95 ADV-3 D4 — see the test below.)
+        await using var h = new Harness(
+            processorOptions: new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext),
+            keyService: new ThrowingKeyService(new InvalidOperationException("resolver down for " + Bob)));
         var forward = Forward(Bob);
 
         var outcome = await h.Dispatch(AsDecryptedByMediator(forward));
@@ -443,7 +446,7 @@ public sealed class ForwardHandlerTests
         outcome.Result.Should().Be(DispatchResult.NoReply);
         h.Sink.Count.Should().Be(0);
         var warning = h.Logger.Warnings.Should().ContainSingle().Which;
-        warning.Formatted.Should().Contain("not relayed").And.Contain(forward.Id).And.Contain("DidResolutionException").And.NotContain(Bob);
+        warning.Formatted.Should().Contain("not relayed").And.Contain(forward.Id).And.Contain("InvalidOperationException").And.NotContain(Bob);
         h.Handler.Outstanding.Should().Be(0);
     }
 
@@ -710,6 +713,7 @@ public sealed class ForwardHandlerTests
         // Rewrap mode over an empty key service: ProcessAsync throws DidResolutionException(nextDid, ...)
         // — an exception whose message carries the next-hop DID. A console provider prints
         // exception.ToString(), so the object must never reach the logger (review round 1, finding 2).
+        // Since #95 ADV-3 D4 the forward ends Dropped-Unknown ("the next hop cannot be reached").
         const string PrivateRecipient = "did:example:private-recipient-marker";
         await using var h = new Harness(processorOptions: new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext));
         h.Recipients.Register(PrivateRecipient);
@@ -721,7 +725,7 @@ public sealed class ForwardHandlerTests
         outcome.Result.Should().Be(DispatchResult.NoReply);
         h.Sink.Count.Should().Be(0);
         var warning = h.Logger.Warnings.Should().ContainSingle().Which;
-        warning.Formatted.Should().Contain("not relayed").And.Contain(forward.Id).And.Contain("DidResolutionException");
+        warning.Formatted.Should().Contain("the next hop cannot be reached").And.Contain(forward.Id).And.Contain("DidResolutionException");
         warning.State["ExceptionType"].Should().Be("DidResolutionException");
         AssertLogsCarryNoExceptionObjectAndNone(h.Logger, PrivateRecipient, "private-recipient");
     }
@@ -1162,7 +1166,8 @@ public sealed class ForwardHandlerTests
             TimeSpan? shutdownGrace = null,
             long byteBudget = ForwardHandler.DefaultByteBudget,
             ForwardMetrics? metrics = null,
-            IForwardSink? sink = null)
+            IForwardSink? sink = null,
+            DidComm.Resolution.IDidKeyService? keyService = null)
         {
             Options = new DidCommOptions { Clock = () => Now };
             configure?.Invoke(Options);
@@ -1171,7 +1176,7 @@ public sealed class ForwardHandlerTests
             Registry = new CountingRegistry(Recipients);
             var resolvedProcessorOptions = processorOptions ?? new ForwardProcessorOptions();
             Handler = new ForwardHandler(
-                NewProcessor(resolvedProcessorOptions, routingKeys: Provider, didCommOptions: Options),
+                NewProcessor(resolvedProcessorOptions, routingKeys: Provider, didCommOptions: Options, keyService: keyService),
                 sink ?? Sink, Registry, logger ?? Logger, capacity, shutdownGrace, byteBudget, metrics);
             var registry = new ProtocolHandlerRegistry();
             registry.Register(Handler);

@@ -167,15 +167,18 @@ public sealed class ForwardSelfAddressedTests
     }
 
     [Fact]
-    public async Task A_plaintext_forward_inside_is_dropped_as_not_encrypted()
+    public async Task A_plaintext_layer_inside_is_refused_as_malformed()
     {
+        // #95 ADV-3 D2: a layer addressed to the mediator must be an anoncrypt envelope around a
+        // plaintext message; a bare plaintext layer is refused as malformed by the restricted unpack
+        // (it used to be opened and then refused by the posture rule, as Dropped-NotEncrypted).
         await using var f = await Fixture.CreateAsync();
         var plaintext = await f.Client.PackPlaintextAsync(Forward(Bob));
 
         await f.HandleAsync(f.SelfAddressed(plaintext));
 
         f.Sink.Count.Should().Be(0);
-        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedNotEncrypted] = 1 });
+        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedMalformed] = 1 });
     }
 
     [Fact]

@@ -201,20 +201,49 @@ public sealed class ForwardHandlerOutcomeMetricsTests
         outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedMalformed] = 1 });
     }
 
-    [Fact]
-    public async Task Processor_fault_counts_as_faulted()
+    [Theory]
+    [InlineData(nameof(DidResolutionException))]
+    [InlineData(nameof(UnsupportedDidMethodException))]
+    public async Task A_next_hop_the_rewrap_cannot_resolve_counts_as_unknown_not_faulted(string failure)
     {
-        // Rewrap mode over an empty key service: DidResolutionException from the processor.
+        // #95 ADV-3 D4: the next hop's DID is the recipient's — any granted peer may register any DID —
+        // so one that resolves to no usable keyAgreement key, or is of a refused method, means the
+        // recipient cannot be reached: Dropped-Unknown, never a fault of the mediator. (This test
+        // used to pin the DidResolutionException case as Faulted.)
         using var meters = new TestMeterFactory();
         using var outcomes = ForwardOutcomeRecorder.For(meters);
         await using var h = new ForwardHandlerTests.Harness(
             processorOptions: new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext),
-            metrics: new ForwardMetrics(meters));
+            metrics: new ForwardMetrics(meters),
+            keyService: failure == nameof(DidResolutionException)
+                ? new EmptyKeyService() // no keyAgreement key: the processor throws DidResolutionException
+                : new ThrowingKeyService(new UnsupportedDidMethodException("web", Bob, "refused for this test")));
+
+        await h.Dispatch(AsDecryptedByMediator(Forward(Bob)));
+        await h.Handler.FlushAsync(Flush);
+
+        outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedUnknown] = 1 });
+        h.Logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Warning && e.Formatted.Contains("next hop cannot be reached: " + failure, StringComparison.Ordinal));
+        ForwardHandlerTests.AssertLogsCarryNoExceptionObjectAndNone(h.Logger, Bob);
+    }
+
+    [Fact]
+    public async Task Processor_fault_counts_as_faulted()
+    {
+        // Rewrap mode over a key service that throws something other than a resolution refusal: the
+        // mediator's own collaborator failed.
+        using var meters = new TestMeterFactory();
+        using var outcomes = ForwardOutcomeRecorder.For(meters);
+        await using var h = new ForwardHandlerTests.Harness(
+            processorOptions: new ForwardProcessorOptions(Mode: RewrapMode.ReanoncryptToNext),
+            metrics: new ForwardMetrics(meters),
+            keyService: new ThrowingKeyService(new InvalidOperationException("the resolver is down")));
 
         await h.Dispatch(AsDecryptedByMediator(Forward(Bob)));
         await h.Handler.FlushAsync(Flush);
 
         outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.Faulted] = 1 });
+        h.Logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Warning && e.Formatted.Contains("not relayed: InvalidOperationException", StringComparison.Ordinal));
     }
 
     [Fact]

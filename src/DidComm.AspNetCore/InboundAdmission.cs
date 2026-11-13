@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Json;
 using DidComm.Messages;
@@ -82,7 +83,7 @@ internal static class InboundAdmission
         }
         else if (header.Mode == ReturnRouteMode.All)
         {
-            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: return_route all cannot open a session ({Reason}, FR-RR-03).", messageId, why.ToString());
+            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: return_route all cannot open a session ({Reason}, FR-RR-03).", LogValues.Id(messageId), why.ToString());
         }
         var sessionEligible = peerDid is not null && header.Mode == ReturnRouteMode.All;
 
@@ -136,7 +137,7 @@ internal static class InboundAdmission
         }
         catch (Exception ex)
         {
-            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId}: return-route session not opened: the registry threw {ExceptionType}; dispatched without a session.", messageId, ex.GetType().Name);
+            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId}: return-route session not opened: the registry threw {ExceptionType}; dispatched without a session.", LogValues.Id(messageId), ex.GetType().Name);
             return false;
         }
 
@@ -148,7 +149,7 @@ internal static class InboundAdmission
             case SessionRegistrationOutcome.AlreadyRegistered:
                 return true;
             default:
-                SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return-route session refused ({Outcome}); dispatched without a session (FR-RR-03).", messageId, registration.Outcome.ToString());
+                SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return-route session refused ({Outcome}); dispatched without a session (FR-RR-03).", LogValues.Id(messageId), registration.Outcome.ToString());
                 return false;
         }
     }
@@ -224,9 +225,9 @@ internal sealed class InboundAdmissionEndpoint
     {
         var n = Interlocked.Increment(ref _malformedHeaders);
         if (n == 1 || n % WarnEvery == 0)
-            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01); {Count} such headers on this endpoint.", messageId, n);
+            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01); {Count} such headers on this endpoint.", LogValues.Id(messageId), n);
         else
-            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01).", messageId);
+            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: malformed return_route header treated as none (FR-RR-01).", LogValues.Id(messageId));
     }
 
     /// <summary>The session options (validated): the host's configured <see cref="ReturnRouteSessionOptions"/>, else the defaults.</summary>
@@ -252,9 +253,9 @@ internal sealed class InboundAdmissionEndpoint
         var index = (uint)slot < (uint)_drops.Length ? slot : GuardFaultSlot;
         var n = Interlocked.Increment(ref _drops[index]);
         if (n == 1 || n % WarnEvery == 0)
-            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId} dropped: replay admission {Admission} (FR-RR-08); {Count} such drops on this endpoint.", messageId, outcome, n);
+            SafeLog.Write(logger, LogLevel.Warning, "Inbound {MessageId} dropped: replay admission {Admission} (FR-RR-08); {Count} such drops on this endpoint.", LogValues.Id(messageId), outcome, n);
         else
-            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId} dropped: replay admission {Admission} (FR-RR-08).", messageId, outcome);
+            SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId} dropped: replay admission {Admission} (FR-RR-08).", LogValues.Id(messageId), outcome);
     }
 }
 
@@ -353,14 +354,14 @@ internal static class SessionOutbound
         }
         catch (Exception ex)
         {
-            SafeLog.Write(logger, LogLevel.Warning, "Return-route message {MessageId} not sent: snapshot failed with {ExceptionType}.", message.Id, ex.GetType().Name);
+            SafeLog.Write(logger, LogLevel.Warning, "Return-route message {MessageId} not sent: snapshot failed with {ExceptionType}.", LogValues.Id(message.Id), ex.GetType().Name);
             return null;
         }
 
         var refusal = ReturnRouteAddressing.Check(snapshot, peerDid, localDid);
         if (refusal != ReturnRouteSendRefusal.None)
         {
-            SafeLog.Write(logger, LogLevel.Warning, "Return-route message {MessageId} not sent: {Refusal} (FR-RR-03).", snapshot.Id, refusal.ToString());
+            SafeLog.Write(logger, LogLevel.Warning, "Return-route message {MessageId} not sent: {Refusal} (FR-RR-03).", LogValues.Id(snapshot.Id), refusal.ToString());
             return null;
         }
         return snapshot;
@@ -396,7 +397,7 @@ internal static class SessionOutbound
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            SafeLog.Write(logger, LogLevel.Warning, "Return-route message {MessageId} not sent: pack failed with {ExceptionType}.", snapshot.Id, ex.GetType().Name);
+            SafeLog.Write(logger, LogLevel.Warning, "Return-route message {MessageId} not sent: pack failed with {ExceptionType}.", LogValues.Id(snapshot.Id), ex.GetType().Name);
             return null;
         }
     }
