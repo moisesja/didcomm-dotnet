@@ -250,6 +250,101 @@ public sealed class DirectPushDispatcherTests
         PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
     }
 
+    // The deadline must end the push even when the callee ignores its token. A transport that only
+    // returns once the far end gives up (the ASP.NET Core TestServer client does exactly that while
+    // the server-side handler ignores RequestAborted) otherwise holds the worker, and the grant's
+    // turn, until the far end returns: the push "outlasts" DirectPushTimeout by however long that is.
+    [Fact]
+    public async Task A_push_whose_transport_ignores_the_cancellation_still_ends_at_its_deadline_and_gives_the_message_back()
+    {
+        var gate = new PushGate();
+        var lateSendReturned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fixture = PushFixture.Create(
+            async (_, _) =>
+            {
+                await gate.PassAsync(CancellationToken.None); // ignores the push's token
+                lateSendReturned.TrySetResult();
+                return new TransportResult(true, 202);
+            },
+            directory: _ => Inbox,
+            configure: o => o.DirectPushTimeout = TimeSpan.FromSeconds(7));
+        await fixture.EnrolAsync(Peer, Recipient);
+        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        await gate.WaitForArrivalsAsync(1, Wait);
+
+        fixture.Time.Advance(TimeSpan.FromSeconds(6));
+        fixture.Dispatcher.Outstanding.Should().Be(1, "one second before the deadline the push still runs");
+        fixture.Time.Advance(TimeSpan.FromSeconds(1));
+        await fixture.Dispatcher.WaitForIdleAsync(Wait); // without opening the gate
+
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
+        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
+        var now = fixture.Time.GetUtcNow();
+        (await fixture.Store.LeaseAsync(new MessageLeaseRequest(Peer, null, 10, int.MaxValue, now, new MessageLease("pickup", now + TimeSpan.FromMinutes(1))), CancellationToken.None))
+            .Should().ContainSingle("the push gave its lease back at the deadline, so a pickup gets the message now");
+
+        gate.Open();
+        await lateSendReturned.Task.WaitAsync(Wait);
+        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Failed }, "the abandoned send's late answer changes nothing");
+        fixture.Store.MessageCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_store_take_that_ignores_the_cancellation_ends_at_the_deadline_and_nothing_is_sent()
+    {
+        var parked = new TaskCompletionSource<QueuedMessage?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new ScriptedMessageStore
+        {
+            OnLeaseById = (_, _, _, _, _) =>
+            {
+                entered.TrySetResult();
+                return new ValueTask<QueuedMessage?>(parked.Task); // ignores the token
+            },
+        };
+        await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMessageStore>(store));
+        await fixture.EnrolAsync(Peer, Recipient);
+        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        await entered.Task.WaitAsync(Wait);
+
+        fixture.Time.Advance(TimeSpan.FromSeconds(30));
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
+        fixture.Router.Requests.Should().BeEmpty();
+        parked.SetException(new HandlerBoomException(HandlerBoomException.Marker)); // observed, never unobserved
+        NoLeaks(fixture);
+    }
+
+    [Fact]
+    public async Task A_give_back_that_ignores_the_cancellation_frees_the_worker_after_its_bound()
+    {
+        var parked = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new ScriptedMessageStore
+        {
+            OnRelease = (_, _, _, _) =>
+            {
+                entered.TrySetResult();
+                return new ValueTask<int>(parked.Task); // ignores the token
+            },
+        };
+        await using var fixture = PushFixture.Create(
+            (r, _) => Task.FromException<TransportResult>(PushFixture.TransportFailure(r, 500)),
+            directory: _ => Inbox,
+            services: s => s.AddSingleton<IMessageStore>(store));
+        await fixture.EnrolAsync(Peer, Recipient);
+        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        await entered.Task.WaitAsync(Wait);
+
+        fixture.Dispatcher.Outstanding.Should().Be(1, "the give-back holds the worker");
+        fixture.Time.Advance(TimeSpan.FromSeconds(30));
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
+        parked.SetResult(1);
+    }
+
     [Fact]
     public async Task A_cancellation_callback_that_throws_cannot_escape_the_push_deadline()
     {
