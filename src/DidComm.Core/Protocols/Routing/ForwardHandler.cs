@@ -313,7 +313,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
             // The processor's own resolution, so its MaxDelay cap applies before the one draw.
             delay = _processor.ResolveDelay(message);
-            notBefore = delay is TimeSpan d ? receivedAt + d : null;
+            notBefore = ForwardProcessor.NotBeforeOf(receivedAt, delay); // saturating: never throws near the end of time
 
             // (d) Registered recipient, by DID subject. Unknown → drop, no problem report (D4).
             var subject = DidSubject.DidSubjectOf(next);

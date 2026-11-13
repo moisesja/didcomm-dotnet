@@ -249,6 +249,41 @@ public sealed class ForwardDelayCapTests
         result.NotBefore.Should().Be(h.Now + result.Delay.Value, "the delay reported and the schedule come from the same single draw");
     }
 
+    // ── The not-before sum saturates (Q-5) ────────────────────────────────────────────────
+
+    [Fact]
+    public void NotBeforeOf_adds_the_hold_and_is_null_without_one()
+    {
+        ForwardProcessor.NotBeforeOf(Fixed, null).Should().BeNull();
+        ForwardProcessor.NotBeforeOf(Fixed, TimeSpan.Zero).Should().Be(Fixed);
+        ForwardProcessor.NotBeforeOf(Fixed, Cap).Should().Be(Fixed + Cap);
+        ForwardProcessor.NotBeforeOf(DateTimeOffset.MinValue, TimeSpan.FromSeconds(5)).Should().Be(DateTimeOffset.MinValue.AddSeconds(5));
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(1L)]
+    [InlineData(5_000L)]
+    [InlineData(int.MaxValue)]
+    public void NotBeforeOf_pins_to_the_end_of_time_instead_of_throwing(long holdMs)
+    {
+        var lastSecond = DateTimeOffset.MaxValue - TimeSpan.FromSeconds(1);
+        var expected = holdMs <= 1_000 ? lastSecond.AddMilliseconds(holdMs) : DateTimeOffset.MaxValue;
+
+        ForwardProcessor.NotBeforeOf(lastSecond, TimeSpan.FromMilliseconds(holdMs)).Should().Be(expected);
+        ForwardProcessor.NotBeforeOf(DateTimeOffset.MaxValue, TimeSpan.FromMilliseconds(holdMs)).Should().Be(DateTimeOffset.MaxValue);
+    }
+
+    [Fact]
+    public void NotBeforeOf_counts_the_room_left_in_a_positive_offsets_clock_reading()
+    {
+        // UTC six hours before the end of time, read in +05:00: the local reading has one hour left.
+        var reading = new DateTimeOffset(DateTime.MaxValue.AddHours(-1), TimeSpan.FromHours(5));
+
+        ForwardProcessor.NotBeforeOf(reading, TimeSpan.FromMinutes(30)).Should().Be(reading.AddMinutes(30));
+        ForwardProcessor.NotBeforeOf(reading, TimeSpan.FromHours(2)).Should().Be(DateTimeOffset.MaxValue, "the sum would not be representable in its own offset");
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────────────────
 
     private static Message Forward(string next) => ForwardMessage.Create(Mediator, next, new[] { Inner });

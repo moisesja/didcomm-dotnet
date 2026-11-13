@@ -17,7 +17,8 @@ public sealed record ForwardProcessingResult(
     /// <summary>
     /// The earliest moment the onward payload may be delivered (FR-ROUTE-10): the receipt time on
     /// the <see cref="Facade.DidCommOptions"/> clock plus <see cref="Delay"/>, resolved once so a
-    /// queue can store it as an absolute not-before. Receipt time means: <see cref="ForwardHandler"/>
+    /// queue can store it as an absolute not-before; pinned to <see cref="DateTimeOffset.MaxValue"/>
+    /// when the sum would run past the end of time. Receipt time means: <see cref="ForwardHandler"/>
     /// stamps it when the forward is admitted, inline on the request and before any queueing, so
     /// time spent waiting for the transport acknowledgement or queued behind a slow sink never
     /// moves it; the public <see cref="ForwardProcessor.ProcessAsync(Facade.UnpackResult, CancellationToken)"/>

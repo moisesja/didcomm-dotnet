@@ -298,7 +298,25 @@ public sealed class ForwardProcessor
     private (TimeSpan? Delay, DateTimeOffset? NotBefore) ResolveSchedule(Messages.Message message)
     {
         var delay = ResolveDelay(message);
-        return (delay, delay is TimeSpan d ? _didCommOptions.Now() + d : null);
+        return (delay, delay is null ? null : NotBeforeOf(_didCommOptions.Now(), delay));
+    }
+
+    /// <summary>
+    /// The absolute not-before of a hold (FR-ROUTE-10): <paramref name="receivedAt"/> plus
+    /// <paramref name="delay"/>, pinned to <see cref="DateTimeOffset.MaxValue"/> when the sum would
+    /// run past the end of time (a clock set close to it), so it never throws; <c>null</c> when
+    /// there is no hold. The one sum the handler and the public overloads use.
+    /// </summary>
+    /// <param name="receivedAt">The receipt reading of the mediator's clock.</param>
+    /// <param name="delay">The resolved hold (never negative), or <c>null</c>.</param>
+    internal static DateTimeOffset? NotBeforeOf(DateTimeOffset receivedAt, TimeSpan? delay)
+    {
+        if (delay is not { } hold)
+            return null;
+        // Both the UTC instant and the clock reading in receivedAt's own offset must stay
+        // representable; the larger of the two leaves the least room.
+        var room = DateTime.MaxValue.Ticks - Math.Max(receivedAt.UtcTicks, receivedAt.Ticks);
+        return hold.Ticks > room ? DateTimeOffset.MaxValue : receivedAt + hold;
     }
 
     /// <summary>
