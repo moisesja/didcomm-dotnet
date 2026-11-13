@@ -1550,11 +1550,11 @@
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.MediatorOptions::prop:DirectPushConcurrency",
+      "member": "DidComm.Mediator!DidComm.Mediator.MediatorOptions::prop:PushConcurrency",
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.MediatorOptions::prop:DirectPushTimeout",
+      "member": "DidComm.Mediator!DidComm.Mediator.MediatorOptions::prop:PushTimeout",
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {

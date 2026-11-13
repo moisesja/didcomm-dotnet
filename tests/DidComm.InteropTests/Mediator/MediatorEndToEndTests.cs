@@ -67,7 +67,7 @@ public sealed class MediatorEndToEndTests
     }
 
     [Fact]
-    public async Task Over_a_live_WebSocket_session_the_forward_is_pushed_to_Bob_and_never_queued_for_pickup()
+    public async Task Over_a_live_WebSocket_session_the_stored_forward_is_pushed_to_Bob_by_the_push_workers()
     {
         // The host keeps same-socket replies off and turns STOMP on globally: the mediator's socket
         // overrides both for itself (MapDidCommMediator).
