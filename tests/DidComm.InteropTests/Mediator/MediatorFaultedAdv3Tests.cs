@@ -15,28 +15,21 @@ public sealed class MediatorFaultedAdv3Tests
 {
     private const string Undeliverable = "did:example:adv3-registered-but-unresolvable";
 
-    // ADV-3 DEFECT 4 (P3; the outcome counter is new in #95): in RewrapMode.ReanoncryptToNext the
-    // pump resolves `next` to rewrap for it. Under the default IMediationPolicy any authenticated
-    // peer is granted mediation and may register any bare DID, so a stranger registers one with no
-    // usable DID document and sends forwards to it: each ends as `Faulted` (and an Error-class
-    // line), the outcome AD-3 reserved for the mediator's own collaborators.
-    [Fact(Skip = "ADV-3 DEFECT 4: in rewrap mode a stranger-registered recipient whose DID does not resolve makes every forward to it count Faulted")]
+    // ADV-3 DEFECT 4 (P3; the outcome counter is new in #95; fixed): in RewrapMode.ReanoncryptToNext
+    // the pump resolves `next` to rewrap for it. Under the default IMediationPolicy any authenticated
+    // peer is granted mediation and may register any bare DID, so a stranger registered one with no
+    // usable DID document and sent forwards to it: each ended as `Faulted`, the outcome AD-3 reserved
+    // for the mediator's own collaborators. A next hop that cannot be resolved now ends
+    // `Dropped-Unknown`: the recipient cannot be reached.
+    [Fact]
     public async Task ADV3_D4_A_strangers_own_unresolvable_recipient_is_never_counted_as_a_mediator_fault()
     {
         await using var mediator = await MediatorTestServer.StartAsync(o => o.Mediator = m => m.RewrapMode = RewrapMode.ReanoncryptToNext);
         await SendToSelfRegisteredUnresolvableAsync(mediator, count: 3);
 
         mediator.Outcomes.Should().NotContain(ForwardOutcomes.Faulted);
-    }
-
-    [Fact]
-    public async Task ADV3_D4_today_each_forward_to_it_counts_Faulted()
-    {
-        await using var mediator = await MediatorTestServer.StartAsync(o => o.Mediator = m => m.RewrapMode = RewrapMode.ReanoncryptToNext);
-        await SendToSelfRegisteredUnresolvableAsync(mediator, count: 3);
-
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.Faulted, ForwardOutcomes.Faulted, ForwardOutcomes.Faulted);
-        mediator.Logs.Records.Should().Contain(r => r.Level >= LogLevel.Warning && r.Text.Contains("DidResolutionException", StringComparison.Ordinal));
+        mediator.Outcomes.Should().Equal(ForwardOutcomes.DroppedUnknown, ForwardOutcomes.DroppedUnknown, ForwardOutcomes.DroppedUnknown);
+        mediator.Logs.Records.Should().Contain(r => r.Level == LogLevel.Warning && r.Text.Contains("next hop cannot be reached: DidResolutionException", StringComparison.Ordinal), "the line names the exception type only");
         mediator.LeakingLogLines(Undeliverable).Should().BeEmpty();
     }
 

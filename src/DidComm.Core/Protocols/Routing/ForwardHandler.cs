@@ -73,11 +73,14 @@ namespace DidComm.Protocols.Routing;
 /// <c>didcomm.forward.outcomes</c> counter of the <see cref="Diagnostics.DidCommDiagnostics.MeterName"/>
 /// meter: <c>Dropped-Malformed</c> (not a forward, malformed, or refused by the processor as
 /// inconsistent or malformed), <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or
-/// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered),
-/// <c>Dropped-Saturated</c>, <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or
-/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a fault of the mediator's
-/// own collaborators: the registry, the clock or the logger while screening, the processor or the
-/// sink on the pump). A layer addressed to the mediator that cannot be opened is the sender's mistake
+/// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered; or, when the
+/// processor rewraps, <c>next</c> cannot be reached: its DID resolves to no usable
+/// <c>keyAgreement</c> key, or its method is refused — <see cref="DidResolutionException"/> or
+/// <see cref="UnsupportedDidMethodException"/>), <c>Dropped-Saturated</c>,
+/// <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or the request was
+/// cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a fault of the mediator's own
+/// collaborators: the registry, the clock or the logger while screening, the processor or the sink
+/// on the pump — a resolver that throws anything else included). A layer addressed to the mediator that cannot be opened is the sender's mistake
 /// whatever the exception — <c>Dropped-Malformed</c>, or <c>Dropped-Expired</c> when the message
 /// inside has expired — never <c>Faulted</c>. A forward the sink returns from normally is the sink's to count: the mediator's own
 /// sink counts how it ended, a host's sink counts nothing.
@@ -201,6 +204,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         InnerExpired,
         InnerNextNotDid,
         InnerNotRegistered,
+        NextUnreachable,
         Count,
     }
 
@@ -611,7 +615,9 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         var context = item.Context!;
         var id = LogValues.Id(context.Received.Message.Id);
         // Which stage a fault came from decides its outcome: a processor that refuses the forward
-        // as inconsistent or malformed ends a malformed forward; anything else is a fault.
+        // as inconsistent or malformed ends a malformed forward, and one that cannot resolve the next
+        // hop (rewrap mode) ends a forward for a recipient that cannot be reached; anything else is a
+        // fault.
         var processed = false;
         try
         {
@@ -646,12 +652,21 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             // ConsistencyException, MalformedMessageException, DidResolutionException,
             // CryptoException, sink faults. Type names only — a DidResolutionException carries the
             // next-hop DID in its message, so the exception object never reaches the logger.
-            var reason = !processed && ex is ConsistencyException or MalformedMessageException
-                ? DropReason.ProcessorMalformed
-                : DropReason.Faulted;
+            var reason = processed ? DropReason.Faulted : ex switch
+            {
+                ConsistencyException or MalformedMessageException => DropReason.ProcessorMalformed,
+                // The only DID the processor resolves is the next hop's, to rewrap for it: a DID
+                // with no usable keyAgreement key, or of a refused method, is the recipient's (any
+                // granted peer may register any DID), not a fault of the mediator. A resolver that
+                // throws something else is a collaborator's fault.
+                DidResolutionException or UnsupportedDidMethodException => DropReason.NextUnreachable,
+                _ => DropReason.Faulted,
+            };
             Dropped(
                 reason,
-                "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
+                reason == DropReason.NextUnreachable
+                    ? "Forward {MessageId} dropped: the next hop cannot be reached: {ExceptionType} (innermost: {InnerExceptionType}) (FR-ROUTE-06)."
+                    : "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
                 id, ex.GetType().Name, LogValues.InnermostTypeName(ex));
         }
     }
@@ -998,7 +1013,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             or DropReason.SelfLayersTooDeep or DropReason.PeelMalformed or DropReason.InnerNotAForward => ForwardOutcomes.DroppedMalformed,
         DropReason.Posture or DropReason.InnerPosture => ForwardOutcomes.DroppedNotEncrypted,
         DropReason.ExpiredInline or DropReason.ExpiredWhileQueued or DropReason.InnerExpired => ForwardOutcomes.DroppedExpired,
-        DropReason.NextNotDid or DropReason.NotRegistered or DropReason.InnerNextNotDid or DropReason.InnerNotRegistered => ForwardOutcomes.DroppedUnknown,
+        DropReason.NextNotDid or DropReason.NotRegistered or DropReason.InnerNextNotDid or DropReason.InnerNotRegistered
+            or DropReason.NextUnreachable => ForwardOutcomes.DroppedUnknown,
         DropReason.Saturated => ForwardOutcomes.DroppedSaturated,
         DropReason.Unacknowledged => ForwardOutcomes.DroppedUnacknowledged,
         _ => ForwardOutcomes.Faulted,

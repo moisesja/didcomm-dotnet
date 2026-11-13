@@ -1162,7 +1162,8 @@ public sealed class ForwardHandlerTests
             TimeSpan? shutdownGrace = null,
             long byteBudget = ForwardHandler.DefaultByteBudget,
             ForwardMetrics? metrics = null,
-            IForwardSink? sink = null)
+            IForwardSink? sink = null,
+            DidComm.Resolution.IDidKeyService? keyService = null)
         {
             Options = new DidCommOptions { Clock = () => Now };
             configure?.Invoke(Options);
@@ -1171,7 +1172,7 @@ public sealed class ForwardHandlerTests
             Registry = new CountingRegistry(Recipients);
             var resolvedProcessorOptions = processorOptions ?? new ForwardProcessorOptions();
             Handler = new ForwardHandler(
-                NewProcessor(resolvedProcessorOptions, routingKeys: Provider, didCommOptions: Options),
+                NewProcessor(resolvedProcessorOptions, routingKeys: Provider, didCommOptions: Options, keyService: keyService),
                 sink ?? Sink, Registry, logger ?? Logger, capacity, shutdownGrace, byteBudget, metrics);
             var registry = new ProtocolHandlerRegistry();
             registry.Register(Handler);

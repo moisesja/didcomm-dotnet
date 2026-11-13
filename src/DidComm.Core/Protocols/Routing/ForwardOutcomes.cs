@@ -28,7 +28,7 @@ internal static class ForwardOutcomes
     /// <summary>Expired on arrival, while waiting in the handler, or when stored (handler or sink).</summary>
     internal const string DroppedExpired = "Dropped-Expired";
 
-    /// <summary><c>next</c> is not a DID, or not a registered recipient (handler or sink).</summary>
+    /// <summary><c>next</c> is not a DID, or not a registered recipient (handler or sink); or, in rewrap mode, its DID resolves to no usable <c>keyAgreement</c> key (handler).</summary>
     internal const string DroppedUnknown = "Dropped-Unknown";
 
     /// <summary>The handler's backlog was full (handler).</summary>
