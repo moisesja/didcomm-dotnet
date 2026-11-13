@@ -331,7 +331,7 @@ public sealed class ForwardPeelAdvTests
 
     // ── DEFECT 3: the forward handler's log lines carry the id unbounded ──────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 3 (P3): ForwardHandler (incl. the new peel lines) writes the forward's message id raw; ids are not length-bounded (any length up to MaxReceiveBytes), while the #95 CHANGELOG/architecture claim 'message ids (bounded)' and the mediator package bounds them with MediatorLog.LogId (128). Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D3_A_forward_handler_drop_line_never_carries_more_than_a_bounded_id()
     {
         await using var f = await Fixture.CreateAsync();
@@ -346,19 +346,6 @@ public sealed class ForwardPeelAdvTests
 
         f.Logger.Warnings.Should().HaveCount(2);
         f.Logger.Entries.Should().OnlyContain(e => e.Formatted.Length < 4_096, "a stranger-chosen id is bounded before it is written (MediatorLog.LogId keeps 128 characters)");
-    }
-
-    [Fact]
-    public async Task A_forward_handler_drop_line_carries_a_200000_character_id_today()
-    {
-        // DEFECT 3 as it behaves now (pin): the whole id reaches a Warning line, first of its reason.
-        await using var f = await Fixture.CreateAsync();
-        var peeled = ForwardMessage.Create(Mediator, Mediator, new[] { "{\"not\":\"an envelope\"}" });
-        peeled.Id = new string('a', 200_000);
-
-        await f.HandleAsync(AsDecryptedByMediator(peeled, Fixture.MediatorKid));
-
-        f.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain(peeled.Id);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

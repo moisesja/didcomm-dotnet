@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using DidComm.Consistency;
+using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using DidComm.Messages;
 using Microsoft.Extensions.Logging;
@@ -57,8 +58,9 @@ namespace DidComm.Protocols.Routing;
 /// acknowledgement or queued behind a slow sink never moves it.
 /// </para>
 /// <para>
-/// <strong>Logging contract.</strong> Every line carries the message id and, on a failure, the
-/// exception type name(s) only. No exception object — and so no exception message — is ever
+/// <strong>Logging contract.</strong> Every line carries the message id — bounded: an id longer
+/// than 128 characters is written as its length — and, on a failure, the exception type name(s)
+/// only. No exception object — and so no exception message — is ever
 /// handed to the logger: a resolution or sink fault can carry the next-hop DID in its text, and a
 /// console provider would print it. Any stranger can make the handler drop a forward, so each
 /// drop line is rate-limited per reason: the first occurrence and every 1000th are written at
@@ -310,6 +312,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             ct.ThrowIfCancellationRequested();
         }
 
+        // The id goes into log lines bounded: ids are the sender's, of any length.
+        var logId = LogValues.Id(message.Id);
         int bytes;
         TimeSpan? delay;
         DateTimeOffset? notBefore;
@@ -323,20 +327,20 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             {
                 if (!ForwardMessage.TryParse(message, out next, out _))
                 {
-                    Dropped(DropReason.NotAForward, "Forward {MessageId} dropped: not a forward message (FR-ROUTE-11).", message.Id);
+                    Dropped(DropReason.NotAForward, "Forward {MessageId} dropped: not a forward message (FR-ROUTE-11).", logId);
                     return null;
                 }
             }
             catch (MalformedMessageException ex)
             {
-                Dropped(DropReason.Malformed, "Forward {MessageId} dropped: malformed forward (FR-ROUTE-01/FR-API-09): {ExceptionType}.", message.Id, ex.GetType().Name);
+                Dropped(DropReason.Malformed, "Forward {MessageId} dropped: malformed forward (FR-ROUTE-01/FR-API-09): {ExceptionType}.", logId, ex.GetType().Name);
                 return null;
             }
 
             // (b) FR-ROUTE-11 posture: encrypted and decrypted with a held key.
             if (!context.Received.Encrypted || string.IsNullOrEmpty(context.Received.RecipientKid))
             {
-                Dropped(DropReason.Posture, "Forward {MessageId} dropped: plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.Posture, "Forward {MessageId} dropped: plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", logId);
                 return null;
             }
 
@@ -348,7 +352,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             var receivedAt = context.Options.Now();
             if (ForwardProcessingResult.IsExpiredAt(message.ExpiresTime, receivedAt, context.Options.ExpiresClockSkew))
             {
-                Dropped(DropReason.ExpiredInline, "Forward {MessageId} dropped: expired at relay time (FR-ROUTE-09).", message.Id);
+                Dropped(DropReason.ExpiredInline, "Forward {MessageId} dropped: expired at relay time (FR-ROUTE-09).", logId);
                 return null;
             }
 
@@ -360,7 +364,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             var subject = DidSubject.DidSubjectOf(next);
             if (subject is null)
             {
-                Dropped(DropReason.NextNotDid, "Forward {MessageId} dropped: next is not a DID or DID URL (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.NextNotDid, "Forward {MessageId} dropped: next is not a DID or DID URL (FR-ROUTE-11).", logId);
                 return null;
             }
 
@@ -379,7 +383,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             selfAddressed = IsSelfAddressed(subject, context.Received.RecipientKid);
             if (!selfAddressed && !await _registry.IsRegisteredAsync(subject, ct).ConfigureAwait(false))
             {
-                Dropped(DropReason.NotRegistered, "Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.NotRegistered, "Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11).", logId);
                 return null;
             }
         }
@@ -391,7 +395,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         catch (Exception ex)
         {
             // A registry (or logger / clock) fault must not become a 400 toward the sender.
-            Dropped(DropReason.ScreeningFault, "Forward {MessageId} dropped: inline screening failed with {ExceptionType}.", message.Id, ex.GetType().Name);
+            Dropped(DropReason.ScreeningFault, "Forward {MessageId} dropped: inline screening failed with {ExceptionType}.", logId, ex.GetType().Name);
             return null;
         }
 
@@ -422,7 +426,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
         if (!reserved)
         {
-            DropSaturated(message.Id);
+            DropSaturated(logId);
             return null;
         }
 
@@ -451,7 +455,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private async Task PublishWhenAcknowledgedAsync(WorkItem item)
     {
         var context = item.Context!;
-        var id = context.Received.Message.Id;
+        var id = LogValues.Id(context.Received.Message.Id);
         try
         {
             // The shutdown token, not the request token: a shutdown must release the reservation
@@ -552,7 +556,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private async Task ProcessOneAsync(WorkItem item, CancellationToken shutdown)
     {
         var context = item.Context!;
-        var id = context.Received.Message.Id;
+        var id = LogValues.Id(context.Received.Message.Id);
         // Which stage a fault came from decides its outcome: a processor that refuses the forward
         // as inconsistent or malformed ends a malformed forward; anything else is a fault.
         var processed = false;
@@ -602,7 +606,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             Dropped(
                 reason,
                 "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
-                id, ex.GetType().Name, InnermostTypeName(ex));
+                id, ex.GetType().Name, LogValues.InnermostTypeName(ex));
         }
     }
 
@@ -620,7 +624,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private async Task<(Facade.UnpackResult Forward, TimeSpan? Delay, DateTimeOffset? NotBefore)?> PeelAsync(
         ProtocolContext context, TimeSpan? delay, DateTimeOffset? notBefore, CancellationToken shutdown)
     {
-        var id = context.Received.Message.Id;
+        var id = LogValues.Id(context.Received.Message.Id);
         var skew = context.Options.ExpiresClockSkew;
 
         // The received forward may have expired while it waited for the pump.
@@ -733,14 +737,6 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private static bool IsSelfAddressed(string nextSubject, string? recipientKid)
         => DidSubject.DidSubjectOf(recipientKid) is { } decryptedBy
            && string.Equals(nextSubject, decryptedBy, StringComparison.Ordinal);
-
-    private static string InnermostTypeName(Exception exception)
-    {
-        var inner = exception;
-        while (inner.InnerException is { } next)
-            inner = next;
-        return inner.GetType().Name;
-    }
 
     /// <summary>
     /// Complete when every forward admitted before this call has been handed to the sink or
