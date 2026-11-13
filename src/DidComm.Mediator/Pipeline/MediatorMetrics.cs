@@ -17,7 +17,7 @@ internal static class PushOutcomes
     /// <summary>The push failed (a transport error, a non-2xx answer, the timeout, a store or client fault); the message stays queued.</summary>
     internal const string Failed = "Push-Failed";
 
-    /// <summary>The push backlog, its byte budget or the grant's share of it was full; the message stays queued.</summary>
+    /// <summary>The push backlog, or the grant's share of it, was full; the message stays queued.</summary>
     internal const string SkippedSaturated = "Push-Skipped-Saturated";
 
     /// <summary>No directory, no endpoint for the grant, or the directory failed; the message stays queued.</summary>
