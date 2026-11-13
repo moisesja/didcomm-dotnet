@@ -22,6 +22,14 @@ namespace DidComm.Transports.Http;
 /// return-route send, FR-RR-07): a final <c>200</c> with a DIDComm <c>Content-Type</c> then has its
 /// body read, capped and time-bounded, into <see cref="TransportResult.ResponsePayload"/>. Any other
 /// response body is never read.
+/// <para>
+/// Its own log lines carry the scheme and the status, never the endpoint URI: an endpoint can be a
+/// secret (a capability URL) or identify a recipient. The <see cref="IHttpClientFactory"/> request
+/// logging of the framework (categories <c>System.Net.Http.HttpClient.*</c>) writes the full URI at
+/// Information; filter those categories where endpoints must not reach the logs. A
+/// <see cref="TransportException"/>'s message names the endpoint, so log such an exception by its
+/// type.
+/// </para>
 /// </remarks>
 /// <example>
 /// Sends the packed envelope in <c>samples/04-MediatorAgent</c> and <c>samples/02-Cookbook</c> (section P).
@@ -104,7 +112,9 @@ public sealed class HttpDidCommTransport : IDidCommTransport
                 var status = (int)response.StatusCode;
                 if (status >= 200 && status < 300)
                 {
-                    _logger.LogDebug("HttpDidCommTransport POST {Uri} → {Status}", currentUri, status);
+                    // The scheme and the status only: an endpoint can be a host secret (a direct-push
+                    // capability URL) or name a recipient, so the URI never reaches a log line.
+                    _logger.LogDebug("HttpDidCommTransport POST over {Scheme} → {Status}", currentUri.Scheme, status);
                     // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and
                     // only when the request carries a cap, which the facade sets only for a send that
                     // asked for a return route. Otherwise the body is never touched.
