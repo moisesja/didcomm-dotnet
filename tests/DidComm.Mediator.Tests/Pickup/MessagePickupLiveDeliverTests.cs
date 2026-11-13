@@ -242,7 +242,8 @@ public sealed class MessagePickupLiveDeliverTests
         fixture.FakeMediation!.ResetCalls();
 
         (await fixture.Queue.DeliverAsync(longest, PickupFixture.Payload(20))).Outcome.Should().Be(Queued, "2048 characters is a DID (FR-API-09)");
-        fixture.FakeMediation.Calls.Should().Equal(nameof(IMediationStore.FindGrantByRecipientDidAsync));
+        // The lookup, and the registration check after the store (#95, JC-6).
+        fixture.FakeMediation.Calls.Should().Equal(nameof(IMediationStore.FindGrantByRecipientDidAsync), nameof(IMediationStore.FindGrantByRecipientDidAsync));
         fixture.FakeMediation.ResetCalls();
         fixture.FakeStore!.Calls.Clear();
 

@@ -35,11 +35,14 @@ namespace DidComm.Mediator.Pickup;
 /// <strong>Removed DIDs and revoked grants.</strong> Nothing is delivered for a recipient DID that
 /// no longer belongs to the requesting peer's grant; the pickup role checks the registration when
 /// it delivers and removes the records it finds unregistered as they come up (a host that removes
-/// a DID can drop them at once with <see cref="PurgeRecipientAsync"/>). A host that revokes a grant
-/// (<c>IMediationStore.RevokeAsync</c>) calls <see cref="PurgeGrantAsync"/> to drop what was queued
-/// under it; until then those records are retained and count against the store-wide bounds. They
-/// are not delivered while the peer holds no grant — and are again if the same peer is granted
-/// mediation again, since records are kept under the peer's DID.
+/// a DID can drop them at once with <see cref="PurgeRecipientAsync"/>). A host revokes a grant with
+/// <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>, which revokes it and then calls
+/// <see cref="PurgeGrantAsync"/>; a message being stored for the peer at that moment is removed
+/// again by the queue's own registration check. A host that revokes through
+/// <c>IMediationStore.RevokeAsync</c> alone calls <see cref="PurgeGrantAsync"/> itself; until then
+/// those records are retained and count against the store-wide bounds. They are not delivered while
+/// the peer holds no grant — and are again if the same peer is granted mediation again, since
+/// records are kept under the peer's DID.
 /// </para>
 /// </remarks>
 public interface IMessageStore

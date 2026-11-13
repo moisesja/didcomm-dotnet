@@ -127,6 +127,7 @@ internal sealed class MessagePickupLiveMediationStore : IMediationStore
 
     public Func<string, CancellationToken, ValueTask<MediationGrant?>>? OnFind { get; set; }
     public Func<string, CancellationToken, ValueTask<MediationGrant?>>? OnGetGrant { get; set; }
+    public Func<string, CancellationToken, ValueTask<bool>>? OnRevoke { get; set; }
 
     public ValueTask<MediationGrant?> GetGrantAsync(string peerDid, CancellationToken ct)
     {
@@ -143,7 +144,7 @@ internal sealed class MessagePickupLiveMediationStore : IMediationStore
     public ValueTask<bool> RevokeAsync(string peerDid, CancellationToken ct)
     {
         Calls.Enqueue(nameof(RevokeAsync));
-        return Inner.RevokeAsync(peerDid, ct);
+        return OnRevoke is { } hook ? hook(peerDid, ct) : Inner.RevokeAsync(peerDid, ct);
     }
 
     public ValueTask<IReadOnlyList<RecipientStoreOutcome>> UpdateRecipientsAsync(string peerDid, IReadOnlyList<RecipientUpdate> updates, CancellationToken ct)

@@ -94,6 +94,11 @@ public sealed class MessagePickupQueue
     /// <c>delivery</c> and held until acknowledged. Otherwise it waits for a <c>delivery-request</c>.
     /// </summary>
     /// <remarks>
+    /// After the message is stored, the registration is checked once more: when the recipient DID
+    /// no longer belongs to the grant it was stored under (the grant was revoked meanwhile), exactly
+    /// that record is removed again and nothing is pushed, so a revoke-and-purge that overlaps the
+    /// call leaves nothing behind. If that check fails, the message is kept and reported
+    /// <see cref="PickupDeliveryOutcome.Queued"/>, but not pushed live.
     /// A message addressed to several recipients is delivered by one call per recipient: each call
     /// stores its own record with its own id, acknowledged separately (FR-PICK-05). The payload
     /// memory is kept as given, not copied: do not reuse the buffer, and pass a buffer of the
@@ -164,7 +169,10 @@ public sealed class MessagePickupQueue
     /// <exception cref="ArgumentException"><paramref name="peerDid"/> is not a bare DID. The value is not quoted.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
     public ValueTask<GrantRevocation> RevokeAndPurgeAsync(string peerDid, CancellationToken ct = default)
-        => throw new NotImplementedException("#95 B6");
+    {
+        ArgumentNullException.ThrowIfNull(peerDid);
+        return Coordinator.RevokeAndPurgeAsync(peerDid, ct);
+    }
 }
 
 /// <summary>What <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/> did.</summary>
@@ -204,7 +212,7 @@ public enum PickupDeliveryOutcome
     /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent (the recipient may then see the message twice).</summary>
     Queued,
 
-    /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID).</summary>
+    /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID), or it stopped being registered to that grant while the message was being stored — a grant revoked meanwhile (<see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>) — and the record was removed again.</summary>
     NotRegistered,
 
     /// <summary>Not stored: the message's <c>expires_time</c> has passed.</summary>

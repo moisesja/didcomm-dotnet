@@ -355,6 +355,30 @@ internal sealed class PickupCoordinator
                     return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
             }
 
+            // The grant may have been revoked, and its records purged, between the lookup above and
+            // the enqueue (L-057): a purge that ran first cannot have removed this record. Look again,
+            // and when the DID no longer belongs to this grant remove exactly the record stored here.
+            switch (await RecheckRegistrationAsync(recipientDid, peerDid, ct).ConfigureAwait(false))
+            {
+                case Registration.Gone:
+                    if (await RemoveQuietlyAsync(peerDid, id!).ConfigureAwait(false))
+                    {
+                        Log(LogLevel.Information, "Message pickup: a message was not kept: its recipient DID stopped being registered while it was stored (a revoked grant or a removed DID).");
+                        return new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null);
+                    }
+                    // Could not be removed: it stays retained (and is reported so), under no lease.
+                    if (lease is not null)
+                        await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
+                    return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+                case Registration.Unknown:
+                    // The check failed: keep the record (never lose an accepted message; expiry or the
+                    // age limit reclaims it if it is never picked up), but push nothing live on an
+                    // unconfirmed registration.
+                    if (lease is not null)
+                        await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
+                    return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+            }
+
             if (target is null || lease is null)
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
 
@@ -404,6 +428,24 @@ internal sealed class PickupCoordinator
 
     /// <summary>See <see cref="MessagePickupQueue.PurgeExpiredAsync"/>.</summary>
     public ValueTask<int> PurgeExpiredAsync(CancellationToken ct) => _store.PurgeExpiredAsync(_didCommOptions.Now(), ct);
+
+    /// <summary>See <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>. Store faults propagate: a host API.</summary>
+    public async ValueTask<GrantRevocation> RevokeAndPurgeAsync(string peerDid, CancellationToken ct)
+    {
+        // Checked first, so a value that is not a bare DID is never handed to a store (and never quoted).
+        if (!BareDid.IsBareDid(peerDid))
+            throw new ArgumentException("The peer must be named by a bare DID of at most 2048 characters (no path, query or fragment).", nameof(peerDid));
+        ct.ThrowIfCancellationRequested();
+
+        // Revoke first: from here every delivery's re-check finds the DID unregistered and removes
+        // what it stored, so nothing stored after the purge below survives (L-057).
+        var revoked = await _mediation.RevokeAsync(peerDid, ct).ConfigureAwait(false);
+        var purged = await _store.PurgeGrantAsync(peerDid, ct).ConfigureAwait(false);
+        if (purged < 0)
+            throw new InvalidOperationException("The message store returned a purge count outside its contract.");
+        Log(LogLevel.Information, "Message pickup: a grant was revoked ({Revoked}) and {Purged} queued message(s) held under it were removed.", revoked, purged);
+        return new GrantRevocation(revoked, purged);
+    }
 
     /// <summary>Write a log line; a throwing logging provider changes nothing.</summary>
     public void Log(LogLevel level, string message, params object?[] args) => MediatorLog.Write(_logger, level, message, args);
@@ -712,6 +754,48 @@ internal sealed class PickupCoordinator
         if (first >= DateTimeOffset.MaxValue.ToUnixTimeSeconds())
             return DateTimeOffset.MaxValue;
         return DateTimeOffset.FromUnixTimeSeconds((long)first);
+    }
+
+    private enum Registration
+    {
+        Registered,
+        Gone,
+        Unknown,
+    }
+
+    // The post-enqueue check: does the recipient DID still belong to the grant the message was stored
+    // under? A store fault is Unknown (the caller keeps the record); cancellation of the caller's
+    // token leaves as itself, with the record kept, like any cancellation after the store.
+    private async ValueTask<Registration> RecheckRegistrationAsync(string recipientDid, string peerDid, CancellationToken ct)
+    {
+        try
+        {
+            var grant = await _mediation.FindGrantByRecipientDidAsync(recipientDid, ct).ConfigureAwait(false);
+            return string.Equals(grant?.PeerDid, peerDid, StringComparison.Ordinal) ? Registration.Registered : Registration.Gone;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            Log(LogLevel.Warning, "Message pickup: the registration check after storing a message failed with {ExceptionType}; the message is kept and not pushed live.", ex.GetType().Name);
+            return Registration.Unknown;
+        }
+    }
+
+    // Remove exactly the record this delivery stored (by its id, under its grant). Never throws,
+    // never cancelled: it is the clean-up of a delivery that already decided not to keep the
+    // message. True when the record is gone — removed here, or already removed by a purge or an
+    // acknowledgement; false when the store failed and the record may still be held.
+    private async ValueTask<bool> RemoveQuietlyAsync(string peerDid, string id)
+    {
+        try
+        {
+            await _store.AcknowledgeAsync(peerDid, new[] { id }, CancellationToken.None).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Error, "Message pickup: a message stored for a recipient that is no longer registered could not be removed ({ExceptionType}); it stays queued until it expires or the grant is purged.", ex.GetType().Name);
+            return false;
+        }
     }
 
     // On a path that is already failing or cleaning up: never throws, never cancelled. Only the
