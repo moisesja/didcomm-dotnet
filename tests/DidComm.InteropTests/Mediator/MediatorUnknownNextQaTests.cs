@@ -91,7 +91,7 @@ public sealed class MediatorUnknownNextQaTests
     public Task In_rewrap_mode_a_key_reference_next_of_a_registered_DID_is_delivered_to_that_DID()
         => RewrapDidUrlNextAsync("#key-1");
 
-    [Theory(Skip = "QA-2 DEFECT 3: in rewrap mode a next that is a DID URL with a path or query (admitted by the handler as its registered DID subject) faults in ForwardProcessor.RewrapToNextAsync, which strips only a fragment; the forward was answered 202 and is lost (Faulted) while pass-through delivers it")]
+    [Theory]
     [InlineData("?service=x")]
     [InlineData("/some/path")]
     public Task In_rewrap_mode_a_DID_URL_next_with_a_path_or_query_of_a_registered_DID_is_delivered_to_that_DID(string suffix)

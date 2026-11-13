@@ -272,11 +272,13 @@ public sealed class PickupRevokeAndPurgeTests
     }
 
     [Fact]
-    public async Task A_recheck_cancelled_by_the_caller_leaves_the_record_and_throws_cancellation()
+    public async Task A_recheck_cancelled_by_the_caller_keeps_the_record_and_reports_it_Queued()
     {
+        // #95 Q-6: once the record is stored, a cancellation ends in Queued, not in an exception —
+        // the caller's outcome must say the message is held.
         var mediation = new MessagePickupLiveMediationStore();
         await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton<IMediationStore>(mediation));
-        var (_, peer) = await fixture.EnrolledAsync();
+        var (mediator, peer) = await fixture.EnrolledAsync();
         using var cts = new CancellationTokenSource();
         var lookups = 0;
         mediation.OnFind = (did, ct) =>
@@ -289,9 +291,55 @@ public sealed class PickupRevokeAndPurgeTests
             return mediation.Inner.FindGrantByRecipientDidAsync(did, ct);
         };
 
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20), ct: cts.Token);
+
+        result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        result.MessageId.Should().NotBeNull();
+        fixture.Memory.MessageCount.Should().Be(1, "cancelling after the message was stored leaves it stored");
+        mediation.OnFind = null;
+        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle().Which.Id.Should().Be(result.MessageId);
+    }
+
+    [Fact]
+    public async Task A_live_push_cancelled_by_the_caller_keeps_the_record_reports_it_Queued_and_gives_back_the_lease()
+    {
+        await using var fixture = PickupFixture.Create(fakeStore: true);
+        var (mediator, peer) = await fixture.EnrolledAsync();
+        var socket = fixture.Session(peer, mediator, live: true);
+        await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket);
+        using var cts = new CancellationTokenSource();
+        socket.OnSend = (_, _) =>
+        {
+            cts.Cancel();
+            cts.Token.ThrowIfCancellationRequested();
+            return null;
+        };
+
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20), ct: cts.Token);
+
+        result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        fixture.FakeStore!.Released.Should().ContainSingle().Which.Ids.Should().Equal(result.MessageId);
+        socket.OnSend = null;
+        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle("deliverable at once by delivery-request").Which.Id.Should().Be(result.MessageId);
+    }
+
+    [Fact]
+    public async Task A_cancellation_before_anything_is_stored_still_throws_and_stores_nothing()
+    {
+        var mediation = new MessagePickupLiveMediationStore();
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton<IMediationStore>(mediation));
+        var (_, peer) = await fixture.EnrolledAsync();
+        using var cts = new CancellationTokenSource();
+        mediation.OnFind = (_, ct) =>
+        {
+            cts.Cancel();
+            ct.ThrowIfCancellationRequested();
+            return default;
+        };
+
         await FluentActions.Awaiting(async () => await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20), ct: cts.Token))
             .Should().ThrowAsync<OperationCanceledException>();
-        fixture.Memory.MessageCount.Should().Be(1, "cancelling after the message was stored leaves it stored");
+        fixture.FakeStore!.CountOf(nameof(IMessageStore.EnqueueAsync)).Should().Be(0);
     }
 
     [Fact]

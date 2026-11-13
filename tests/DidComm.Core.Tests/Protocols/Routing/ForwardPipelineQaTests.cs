@@ -289,11 +289,11 @@ public sealed class ForwardPipelineQaTests
         result.NotBefore.Should().BeNull();
     }
 
-    // QA-1 DEFECT 3: the public overload documents ConsistencyException, MalformedMessageException,
-    // DidResolutionException and CryptoException; with the clock near the end of time a delay hint
-    // makes `Now() + delay` (ForwardProcessor.ResolveSchedule) throw ArgumentOutOfRangeException.
-    // The coordinator saturates the same kind of sum (AgedOutAt); the processor does not.
-    [Fact(Skip = "QA-1 DEFECT 3: ForwardProcessor.ProcessAsync throws an undocumented ArgumentOutOfRangeException when Now()+delay passes DateTimeOffset.MaxValue (ForwardProcessor.cs:301)")]
+    // QA-1 DEFECT 3 (fixed, #95 Q-5): the public overload documents ConsistencyException,
+    // MalformedMessageException, DidResolutionException and CryptoException; with the clock near the
+    // end of time a delay hint made `Now() + delay` (ForwardProcessor.ResolveSchedule) throw
+    // ArgumentOutOfRangeException. The sum now saturates at DateTimeOffset.MaxValue.
+    [Fact]
     public async Task Public_overload_near_the_end_of_time_saturates_NotBefore_instead_of_throwing()
     {
         var nearEnd = DateTimeOffset.MaxValue - TimeSpan.FromSeconds(1);
@@ -304,20 +304,6 @@ public sealed class ForwardPipelineQaTests
         var result = await processor.ProcessAsync(AsDecryptedByMediator(WithDelay(Forward(Bob), 5_000)));
 
         result.NotBefore.Should().Be(DateTimeOffset.MaxValue);
-    }
-
-    [Fact]
-    public async Task Public_overload_near_the_end_of_time_today_throws_ArgumentOutOfRange()
-    {
-        // Pins the observed behaviour behind DEFECT 3 (kept green so a fix shows up as a change).
-        var nearEnd = DateTimeOffset.MaxValue - TimeSpan.FromSeconds(1);
-        var processor = NewProcessor(
-            new ForwardProcessorOptions { MaxDelay = Cap },
-            didCommOptions: new DidCommOptions { Clock = () => nearEnd });
-
-        var act = async () => await processor.ProcessAsync(AsDecryptedByMediator(WithDelay(Forward(Bob), 5_000)));
-
-        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 
     [Fact]
@@ -385,10 +371,11 @@ public sealed class ForwardPipelineQaTests
         h.Sink.Results.Select(r => r.Delay).Distinct().Count().Should().BeGreaterThan(1, "40 draws over 1 001 values are not all the same");
     }
 
-    // QA-1 DEFECT 3 (handler side): a valid, registered, unexpired forward is dropped as a
-    // screening fault ("Faulted") when the clock reads within the delay of DateTimeOffset.MaxValue,
-    // because `receivedAt + d` (ForwardHandler.cs:316) overflows inside the screening try.
-    [Fact(Skip = "QA-1 DEFECT 3: ForwardHandler drops a valid forward as Faulted when receivedAt+delay overflows DateTimeOffset.MaxValue (ForwardHandler.cs:316)")]
+    // QA-1 DEFECT 3 (handler side, fixed, #95 Q-5): a valid, registered, unexpired forward was
+    // dropped as a screening fault ("Faulted") when the clock read within the delay of
+    // DateTimeOffset.MaxValue, because `receivedAt + d` overflowed inside the screening try. The
+    // handler now uses the same saturating sum as the processor.
+    [Fact]
     public async Task Handler_near_the_end_of_time_relays_with_a_saturated_NotBefore()
     {
         await using var h = new ForwardHandlerTests.Harness(processorOptions: new ForwardProcessorOptions { MaxDelay = Cap });
@@ -398,21 +385,6 @@ public sealed class ForwardPipelineQaTests
         await h.Handler.FlushAsync(Flush);
 
         h.Sink.Results.Should().ContainSingle().Which.NotBefore.Should().Be(DateTimeOffset.MaxValue);
-    }
-
-    [Fact]
-    public async Task Handler_near_the_end_of_time_today_drops_the_forward_as_Faulted()
-    {
-        // Pins the observed behaviour behind DEFECT 3.
-        await using var h = new ForwardHandlerTests.Harness(processorOptions: new ForwardProcessorOptions { MaxDelay = Cap });
-        using var outcomes = ForwardOutcomeRecorder.For(h.Handler.Metrics.Meter);
-        h.Now = DateTimeOffset.MaxValue - TimeSpan.FromSeconds(1);
-
-        await h.Dispatch(AsDecryptedByMediator(WithDelay(Forward(Bob), 5_000)));
-        await h.Handler.FlushAsync(Flush);
-
-        h.Sink.Results.Should().BeEmpty();
-        outcomes[ForwardOutcomes.Faulted].Should().Be(1);
     }
 
     [Fact]
@@ -441,15 +413,17 @@ public sealed class ForwardPipelineQaTests
 
     // ── An attachment that decodes to nothing ─────────────────────────────────────────────
 
-    // QA-1 DEFECT 5: a `data.base64` of white space (or "==") passes the IsNullOrEmpty check and
-    // decodes to zero bytes. The processor relays an empty payload instead of refusing the forward as
-    // malformed; behind AddMediator() the sink then gets ArgumentException from
-    // MessagePickupQueue.DeliverAsync and counts a stranger's malformed forward as "Faulted" with an
-    // Error line (MediatorForwardSink.cs:140-143), not as Dropped-Malformed.
-    [Theory(Skip = "QA-1 DEFECT 5: a data.base64 that decodes to zero bytes is relayed as an empty payload instead of MalformedMessageException (ForwardProcessor.cs:276-285)")]
+    // QA-1 DEFECT 5 (fixed, #95 Q-7): a `data.base64` of white space (or "==") passes the
+    // IsNullOrEmpty check and decodes to zero bytes. The processor relayed an empty payload instead of
+    // refusing the forward as malformed; behind AddMediator() the sink then got ArgumentException from
+    // MessagePickupQueue.DeliverAsync and counted a stranger's malformed forward as "Faulted" with an
+    // Error line, not as Dropped-Malformed. The processor now refuses an empty payload.
+    [Theory]
     [InlineData(" ")]
     [InlineData("    ")]
     [InlineData("\n")]
+    [InlineData("==")]
+    [InlineData("=")]
     public async Task An_attachment_that_decodes_to_no_bytes_is_refused_as_malformed(string base64)
     {
         var processor = NewProcessor();
@@ -457,20 +431,6 @@ public sealed class ForwardPipelineQaTests
         var act = async () => await processor.ProcessAsync(AsDecryptedByMediator(WithBase64Attachment(base64)));
 
         await act.Should().ThrowAsync<MalformedMessageException>();
-    }
-
-    [Theory]
-    [InlineData(" ")]
-    [InlineData("    ")]
-    [InlineData("\n")]
-    public async Task An_attachment_that_decodes_to_no_bytes_is_today_relayed_empty(string base64)
-    {
-        // Pins the observed behaviour behind DEFECT 5.
-        var processor = NewProcessor();
-
-        var result = await processor.ProcessAsync(AsDecryptedByMediator(WithBase64Attachment(base64)));
-
-        result.OnwardPacked.Should().BeEmpty();
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

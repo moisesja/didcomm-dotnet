@@ -16,4 +16,11 @@ public sealed class MalformedMessageException : DidCommException
     /// <param name="message">Human-readable failure reason.</param>
     /// <param name="innerException">The underlying exception, if any.</param>
     public MalformedMessageException(string message, Exception innerException) : base(message, innerException) { }
+
+    /// <summary>
+    /// Set when the message was refused because its own <c>expires_time</c> has passed (FR-API-05),
+    /// so an internal caller can count the refusal as an expiry rather than a malformed message (the
+    /// mediator opening a forward addressed to itself, FR-ROUTE-06). Not part of the public contract.
+    /// </summary>
+    internal bool Expired { get; init; }
 }

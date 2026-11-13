@@ -229,35 +229,29 @@ public sealed class ForwardPipelineQaTests
 
     // ── cancellation after the message is stored ──────────────────────────────────────────
 
-    // QA-1 DEFECT 4 (P3): the handler shuts down while the queue is re-checking the registration of
-    // a message it has already stored. DeliverAsync keeps the record (documented) but leaves with
-    // OperationCanceledException; the sink re-throws it and the handler counts the forward as
-    // Dropped-Shutdown — while the message is in the queue and will be delivered. The forward
-    // outcome counter then disagrees with the queue, and the message is never handed to direct push.
-    [Fact(Skip = "QA-1 DEFECT 4: a forward stored before the handler's shutdown token fires is counted Dropped-Shutdown although it stays queued (PickupCoordinator.cs:401-409, MediatorForwardSink.cs:135-139)")]
+    // QA-1 DEFECT 4 (P3, fixed by #95 Q-6): the handler shuts down while the queue is re-checking the
+    // registration of a message it has already stored. DeliverAsync kept the record but left with
+    // OperationCanceledException; the sink re-threw it and the handler counted the forward as
+    // Dropped-Shutdown — while the message was in the queue and would be delivered — and the
+    // message was never handed to direct push. Now the stored message is reported Queued, counted
+    // Queued, and handed to direct push like any queued message; this fixture's push endpoint
+    // accepts it, so the push delivers and removes it (whether that has happened by the time the
+    // shutdown returns is a race, so the test waits for the push workers before it looks).
+    [Fact]
     public async Task A_shutdown_after_the_message_is_stored_counts_what_happened_to_it()
     {
-        var (fixture, mediation) = await ParkedOnRecheckAsync();
-        await using var _ = fixture;
-
-        fixture.Store.MessageCount.Should().Be(1);
-        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
-    }
-
-    [Fact]
-    public async Task A_shutdown_after_the_message_is_stored_is_today_counted_as_Dropped_Shutdown()
-    {
-        // Pins the behaviour behind DEFECT 4.
         var (fixture, _) = await ParkedOnRecheckAsync();
         await using var __ = fixture;
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.Store.MessageCount.Should().Be(1, "the record was stored and is kept");
-        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DroppedShutdown);
+        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
+        fixture.Store.MessageCount.Should().Be(0, "the direct push it was handed to delivered it");
     }
 
     // ── an attachment that decodes to nothing (DEFECT 5, mediator side) ───────────────────
 
-    [Fact(Skip = "QA-1 DEFECT 5: a forward whose data.base64 decodes to zero bytes is counted Faulted with an Error line instead of Dropped-Malformed (ForwardProcessor.cs:276-285, MediatorForwardSink.cs:140-143)")]
+    [Fact]
     public async Task A_forward_whose_attachment_decodes_to_nothing_is_dropped_as_malformed()
     {
         await using var fixture = PushFixture.Create();
@@ -267,21 +261,6 @@ public sealed class ForwardPipelineQaTests
 
         fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DroppedMalformed);
         PipelineLogs.Of<MediatorForwardSink>(fixture.Logs).Should().NotContain(e => e.Level == LogLevel.Error);
-    }
-
-    [Fact]
-    public async Task A_forward_whose_attachment_decodes_to_nothing_is_today_a_fault_logged_at_Error()
-    {
-        // Pins the behaviour behind DEFECT 5: any sender can write this Error line (rate-limited).
-        await using var fixture = PushFixture.Create();
-        await fixture.EnrolAsync(Peer, Recipient);
-
-        await RunAsync(fixture, WithBase64Attachment(Forward(Recipient, "e2e-empty"), " "));
-
-        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Faulted);
-        PipelineLogs.Of<MediatorForwardSink>(fixture.Logs).Should().ContainSingle()
-            .Which.Should().Match<HandlerLogEntry>(e => e.Level == LogLevel.Error && e.Everything.Contains(nameof(ArgumentException)));
-        fixture.Store.MessageCount.Should().Be(0);
     }
 
     // ── the public string overload, over a real anoncrypt envelope ────────────────────────

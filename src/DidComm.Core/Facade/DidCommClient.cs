@@ -993,7 +993,10 @@ public sealed partial class DidCommClient
             if (nowSeconds - skewSeconds > expires)
             {
                 throw new MalformedMessageException(
-                    $"Message expired at {expires} (epoch seconds); current clock {nowSeconds} exceeds it with skew={skewSeconds}s (FR-API-05).");
+                    $"Message expired at {expires} (epoch seconds); current clock {nowSeconds} exceeds it with skew={skewSeconds}s (FR-API-05).")
+                {
+                    Expired = true,
+                };
             }
         }
 

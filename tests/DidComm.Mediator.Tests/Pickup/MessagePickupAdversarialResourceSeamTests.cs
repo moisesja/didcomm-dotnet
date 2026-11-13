@@ -130,9 +130,10 @@ public sealed class MessagePickupAdversarialResourceSeamTests
             return outcome;
         };
 
-        var act = async () => await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 1), ct: cts.Token);
+        // #95 Q-6: stored before the cancellation, so reported Queued rather than thrown.
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 1), ct: cts.Token);
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
         live.Sent.Should().BeEmpty();
         fixture.Memory.MessageCount.Should().Be(1, "cancelling after the message was stored leaves it stored");
         (await MessagePickupAdversarialResource.FetchIdsAsync(fixture, peer, mediator)).Should().HaveCount(1, "the lease of a push that never happened is given back");

@@ -400,13 +400,23 @@ internal sealed class PickupCoordinator
         }
         catch (Exception ex)
         {
-            if (stored && lease is not null)
-                await ReleaseQuietlyAsync(peerDid!, new[] { id! }, lease.Id).ConfigureAwait(false);
+            if (stored)
+            {
+                // Once stored, the message is held whatever ends this call, and the answer says so:
+                // a cancellation here (a caller shutting down during the re-check or the live push)
+                // must not make a queued message look dropped (#95 Q-6). The live lease, if any, is
+                // given back so a delivery-request gets it.
+                if (lease is not null)
+                    await ReleaseQuietlyAsync(peerDid!, new[] { id! }, lease.Id).ConfigureAwait(false);
+                if (ct.IsCancellationRequested)
+                    Log(LogLevel.Information, "Message pickup: a delivery was cancelled after its message was stored; the message stays queued.");
+                else
+                    Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType} after it was stored; the message stays queued.", ex.GetType().Name);
+                return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+            }
             MediatorLog.ThrowIfCancelled(ct);
-            Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType}; retained: {Retained}.", ex.GetType().Name, stored);
-            return stored
-                ? new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid)
-                : new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
+            Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType}; nothing was stored.", ex.GetType().Name);
+            return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
         }
     }
 
@@ -764,8 +774,8 @@ internal sealed class PickupCoordinator
     }
 
     // The post-enqueue check: does the recipient DID still belong to the grant the message was stored
-    // under? A store fault is Unknown (the caller keeps the record); cancellation of the caller's
-    // token leaves as itself, with the record kept, like any cancellation after the store.
+    // under? A store fault is Unknown (the caller keeps the record); a cancellation of the caller's
+    // token leaves as itself, and the caller, having stored the record, reports it Queued.
     private async ValueTask<Registration> RecheckRegistrationAsync(string recipientDid, string peerDid, CancellationToken ct)
     {
         try

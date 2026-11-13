@@ -108,15 +108,19 @@ public sealed class MessagePickupQueue
     /// <param name="recipientDid">The registered DID the message is for: a bare DID (the DID subject of a forward's <c>next</c>). A DID URL is not normalised; it is simply not registered.</param>
     /// <param name="payload">The encrypted message, exactly as it is to reach the recipient. Not empty.</param>
     /// <param name="options">When the message is due and when it expires; <c>null</c> for "now" and "never".</param>
-    /// <param name="ct">Cancellation token. Cancelling after the message was stored leaves it stored.</param>
+    /// <param name="ct">Cancellation token. A cancellation before the message is stored throws and stores nothing; once the message is stored, the call reports <see cref="PickupDeliveryOutcome.Queued"/> instead of throwing (the message stays queued, under no lease).</param>
     /// <returns>
-    /// What happened. The message is retained exactly when the outcome is
+    /// What happened. The message was stored exactly when the outcome is
     /// <see cref="PickupDeliveryOutcome.PushedLive"/> or <see cref="PickupDeliveryOutcome.Queued"/>;
     /// then <see cref="PickupDeliveryResult.MessageId"/> and <see cref="PickupDeliveryResult.GrantPeerDid"/>
-    /// identify it (for <see cref="RemoveAsync"/>). None of this is for the message's sender.
+    /// identify it (for <see cref="RemoveAsync"/>). It is held from then on until the recipient
+    /// acknowledges it, it expires, or the host removes it — and a removal running at the same time
+    /// (an acknowledgement, <see cref="RevokeAndPurgeAsync"/>) can take it at any moment, even while
+    /// a live push of it is being sent: a push already in flight completes and is reported
+    /// <see cref="PickupDeliveryOutcome.PushedLive"/>. None of this is for the message's sender.
     /// </returns>
     /// <exception cref="ArgumentException"><paramref name="payload"/> is empty.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled. Nothing else is thrown: a store, registry or session fault is <see cref="PickupDeliveryOutcome.Faulted"/> (or <see cref="PickupDeliveryOutcome.Queued"/> when the message had already been stored).</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled before the message was stored. Nothing else is thrown: a store, registry or session fault is <see cref="PickupDeliveryOutcome.Faulted"/>, or <see cref="PickupDeliveryOutcome.Queued"/> when the message had already been stored.</exception>
     public ValueTask<PickupDeliveryResult> DeliverAsync(string recipientDid, ReadOnlyMemory<byte> payload, PickupDeliveryOptions? options = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(recipientDid);
@@ -210,7 +214,7 @@ public enum PickupDeliveryOutcome
     /// <summary>Stored and pushed over the recipient's live connection; held (leased) until the recipient acknowledges it, the lease runs out or the connection closes — after which it is deliverable by <c>delivery-request</c>.</summary>
     PushedLive,
 
-    /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent (the recipient may then see the message twice).</summary>
+    /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent, or the call failed or was cancelled after the message was stored (the recipient may then see the message twice).</summary>
     Queued,
 
     /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID), or it stopped being registered to that grant while the message was being stored — a grant revoked meanwhile (<see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>) — and the record was removed again.</summary>
