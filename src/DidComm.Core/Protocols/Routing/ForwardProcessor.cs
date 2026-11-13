@@ -163,7 +163,7 @@ public sealed class ForwardProcessor
     /// <param name="unpacked">The unpack outcome of the inbound envelope — envelope metadata included, so the FR-ROUTE-11 posture can be judged.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ConsistencyException">The message is not a <c>forward</c>; or the envelope was not encrypted (plaintext or signed-only); or it was not decrypted with a key this mediator holds (no <see cref="UnpackResult.RecipientKid"/>); or the forward carries more than one attachment or an attachment with no data (FR-ROUTE-05/11). None of these messages quote wire values.</exception>
-    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
+    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64 or decodes to no bytes, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
     /// <exception cref="DidResolutionException">Rewrap mode only: the next hop resolves to no usable <c>keyAgreement</c> key.</exception>
     /// <exception cref="CryptoException">Rewrap mode or extra routing keys: the onward envelope could not be built.</exception>
     public Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
@@ -275,6 +275,7 @@ public sealed class ForwardProcessor
 
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
         {
+            byte[] decoded;
             try
             {
                 // Relaxed decode: attachment data.base64 has no spec no-pad requirement (FR-ATT-02,
@@ -282,13 +283,18 @@ public sealed class ForwardProcessor
                 // re-parse strictly — so tolerate '=' padding rather than refuse a peer's forward.
                 // Genuinely-invalid base64 still maps to the documented malformed-input type (a raw
                 // FormatException must not escape ProcessAsync). (#24 + PR #38 review.)
-                return Base64Url.DecodeRelaxed(attachment.Data.Base64);
+                decoded = Base64Url.DecodeRelaxed(attachment.Data.Base64);
             }
             catch (FormatException ex)
             {
                 throw new MalformedMessageException(
                     "Forward attachment 'data.base64' is not valid base64url.", ex);
             }
+            // White space decodes to nothing: there is no packed message to relay, and an empty
+            // payload is not one (#95 Q-7). The sender's mistake, not the mediator's fault.
+            if (decoded.Length == 0)
+                throw new MalformedMessageException("Forward attachment 'data.base64' decodes to no bytes; there is no packed message to relay.");
+            return decoded;
         }
 
         throw new ConsistencyException(

@@ -257,7 +257,7 @@ public sealed class ForwardPipelineQaTests
 
     // ── an attachment that decodes to nothing (DEFECT 5, mediator side) ───────────────────
 
-    [Fact(Skip = "QA-1 DEFECT 5: a forward whose data.base64 decodes to zero bytes is counted Faulted with an Error line instead of Dropped-Malformed (ForwardProcessor.cs:276-285, MediatorForwardSink.cs:140-143)")]
+    [Fact]
     public async Task A_forward_whose_attachment_decodes_to_nothing_is_dropped_as_malformed()
     {
         await using var fixture = PushFixture.Create();
@@ -267,21 +267,6 @@ public sealed class ForwardPipelineQaTests
 
         fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DroppedMalformed);
         PipelineLogs.Of<MediatorForwardSink>(fixture.Logs).Should().NotContain(e => e.Level == LogLevel.Error);
-    }
-
-    [Fact]
-    public async Task A_forward_whose_attachment_decodes_to_nothing_is_today_a_fault_logged_at_Error()
-    {
-        // Pins the behaviour behind DEFECT 5: any sender can write this Error line (rate-limited).
-        await using var fixture = PushFixture.Create();
-        await fixture.EnrolAsync(Peer, Recipient);
-
-        await RunAsync(fixture, WithBase64Attachment(Forward(Recipient, "e2e-empty"), " "));
-
-        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Faulted);
-        PipelineLogs.Of<MediatorForwardSink>(fixture.Logs).Should().ContainSingle()
-            .Which.Should().Match<HandlerLogEntry>(e => e.Level == LogLevel.Error && e.Everything.Contains(nameof(ArgumentException)));
-        fixture.Store.MessageCount.Should().Be(0);
     }
 
     // ── the public string overload, over a real anoncrypt envelope ────────────────────────

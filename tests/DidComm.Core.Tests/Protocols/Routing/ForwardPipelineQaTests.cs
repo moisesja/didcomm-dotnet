@@ -413,15 +413,17 @@ public sealed class ForwardPipelineQaTests
 
     // ── An attachment that decodes to nothing ─────────────────────────────────────────────
 
-    // QA-1 DEFECT 5: a `data.base64` of white space (or "==") passes the IsNullOrEmpty check and
-    // decodes to zero bytes. The processor relays an empty payload instead of refusing the forward as
-    // malformed; behind AddMediator() the sink then gets ArgumentException from
-    // MessagePickupQueue.DeliverAsync and counts a stranger's malformed forward as "Faulted" with an
-    // Error line (MediatorForwardSink.cs:140-143), not as Dropped-Malformed.
-    [Theory(Skip = "QA-1 DEFECT 5: a data.base64 that decodes to zero bytes is relayed as an empty payload instead of MalformedMessageException (ForwardProcessor.cs:276-285)")]
+    // QA-1 DEFECT 5 (fixed, #95 Q-7): a `data.base64` of white space (or "==") passes the
+    // IsNullOrEmpty check and decodes to zero bytes. The processor relayed an empty payload instead of
+    // refusing the forward as malformed; behind AddMediator() the sink then got ArgumentException from
+    // MessagePickupQueue.DeliverAsync and counted a stranger's malformed forward as "Faulted" with an
+    // Error line, not as Dropped-Malformed. The processor now refuses an empty payload.
+    [Theory]
     [InlineData(" ")]
     [InlineData("    ")]
     [InlineData("\n")]
+    [InlineData("==")]
+    [InlineData("=")]
     public async Task An_attachment_that_decodes_to_no_bytes_is_refused_as_malformed(string base64)
     {
         var processor = NewProcessor();
@@ -429,20 +431,6 @@ public sealed class ForwardPipelineQaTests
         var act = async () => await processor.ProcessAsync(AsDecryptedByMediator(WithBase64Attachment(base64)));
 
         await act.Should().ThrowAsync<MalformedMessageException>();
-    }
-
-    [Theory]
-    [InlineData(" ")]
-    [InlineData("    ")]
-    [InlineData("\n")]
-    public async Task An_attachment_that_decodes_to_no_bytes_is_today_relayed_empty(string base64)
-    {
-        // Pins the observed behaviour behind DEFECT 5.
-        var processor = NewProcessor();
-
-        var result = await processor.ProcessAsync(AsDecryptedByMediator(WithBase64Attachment(base64)));
-
-        result.OnwardPacked.Should().BeEmpty();
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────
