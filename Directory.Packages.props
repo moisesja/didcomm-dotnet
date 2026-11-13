@@ -90,6 +90,8 @@
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.14" />
     <!-- Hosting (DidComm.Mediator: the mediator's hosted service, #95) -->
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.14" />
+    <!-- Test-only: DidComm.Mediator.Tests runs the mediator's hosted service under a real generic Host. -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
     <!-- Resilience (retry + timeout + circuit-breaker) for the Phase 5 HTTPS + WebSocket
          transports. Polly v8 is the .NET-idiomatic policy library and the user-confirmed
          Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no

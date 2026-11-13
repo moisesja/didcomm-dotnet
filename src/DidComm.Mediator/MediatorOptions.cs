@@ -16,14 +16,53 @@ namespace DidComm.Mediator;
 /// <see cref="Pickup"/> is a <see cref="MessagePickupOptions"/>), so nothing is set in two places.
 /// Assigning a property here has the same effect as configuring that role directly, and composes
 /// with the host's own <c>Configure&lt;T&gt;</c> calls in registration order: a property the
-/// <c>AddMediator()</c> delegate does not assign keeps the value set elsewhere.
+/// <c>AddMediator()</c> delegate does not assign keeps the value set elsewhere, and a
+/// <c>Configure&lt;T&gt;</c> registered after <c>AddMediator()</c> wins for the properties it sets.
 /// </para>
 /// <para>
 /// <strong>The configure delegate passed to <c>AddMediator()</c> may run several times, on
 /// different instances</strong> (once at registration to check the settings, and once per role
 /// when the container builds that role's options), so it must only assign values: no side
 /// effects, no reading back what an earlier run assigned, nothing that depends on how often it
-/// runs.
+/// runs. Adding to <see cref="CoordinateMediationOptions.RoutingDids"/> counts as assigning: each
+/// run adds to a different list.
+/// </para>
+/// <para>
+/// <strong>When the settings are checked.</strong> <c>AddMediator()</c> checks the values its
+/// delegate assigns (<see cref="Validate"/>) and refuses bad ones with
+/// <see cref="ArgumentException"/>. Each role checks its own effective settings when it is first
+/// built, and the mediator's hosted service checks all of them together, including the rules that
+/// span two roles, before the host starts listening. Settings are copied when each part is built:
+/// changing an options object afterwards changes nothing.
+/// </para>
+/// <para>
+/// <strong>Operating a mediator.</strong>
+/// </para>
+/// <list type="bullet">
+/// <item><description>Replay protection (<see cref="Replay"/>) admits each in-scope message once,
+/// from a bounded memory of what it has seen. Size <see cref="ReplayProtectionOptions.MaxEntries"/>
+/// to the accepted rate times (<see cref="ReplayProtectionOptions.Window"/> +
+/// <see cref="ReplayProtectionOptions.ClockSkew"/>): the default of 32 768 carries about 91
+/// messages a second. When it is full, new in-scope messages are refused; the mediator counts the
+/// refusals and reports them in its log.</description></item>
+/// <item><description>If the host clock steps back by more than
+/// <see cref="ReplayProtectionOptions.Window"/> + <see cref="ReplayProtectionOptions.ClockSkew"/>
+/// (6 minutes at the defaults), in-scope traffic is refused until the clock catches up or the
+/// process restarts. The refusals are counted and reported in the log.</description></item>
+/// <item><description>A live session whose peer stops reading holds up to
+/// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> packed deliveries, each at most
+/// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>; size <see cref="Sessions"/> with that in
+/// mind.</description></item>
+/// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
+/// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
+/// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
+/// <item><description>Direct push (<see cref="DirectPush"/>) makes one attempt per message. A
+/// recipient that relies on it must also pick up, or the messages a push could not deliver stay
+/// in its queue until they expire or reach the mailbox age limit.</description></item>
+/// </list>
+/// <para>
+/// <c>AddMediator()</c> describes what to put in front of the mediator's endpoint and how to set
+/// up enrolment.
 /// </para>
 /// </remarks>
 public sealed class MediatorOptions
@@ -63,14 +102,16 @@ public sealed class MediatorOptions
     /// <summary>
     /// Replay protection settings (FR-RR-08): the replay window, the clock skew and the bounds of
     /// the in-memory replay guard. They apply to every DIDComm endpoint of the host, not only the
-    /// mediator's.
+    /// mediator's, and reach a replay guard the host registers itself only if it reads
+    /// <c>IOptions&lt;ReplayProtectionOptions&gt;</c>.
     /// </summary>
     public ReplayProtectionOptions Replay { get; }
 
     /// <summary>
     /// Return-route session settings (FR-RR-03): how many live sessions a peer and the whole host
     /// may hold, and how many pushes may wait on one session. They apply to every DIDComm endpoint
-    /// of the host.
+    /// of the host, and reach a session registry the host registers itself only if it reads
+    /// <c>IOptions&lt;ReturnRouteSessionOptions&gt;</c>.
     /// </summary>
     public ReturnRouteSessionOptions Sessions { get; }
 
@@ -121,9 +162,16 @@ public sealed class MediatorOptions
     /// Check every setting: each role's own checks, the ranges listed on the pipeline settings, and
     /// that the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>), when set, is
     /// longer than <see cref="MaxForwardDelay"/> (otherwise a delayed message could age out before
-    /// it is due). Messages name the setting, never its value. Called by <c>AddMediator()</c> and
-    /// again when the mediator starts.
+    /// it is due). Messages name the setting, never its value. <c>AddMediator()</c> calls it on the
+    /// values its delegate assigns, and the mediator checks the values in effect again when it
+    /// starts.
     /// </summary>
+    /// <remarks>
+    /// The exception type is the one each role uses for its own settings: replay protection and
+    /// return-route sessions report a bad setting with <see cref="InvalidOperationException"/>,
+    /// everything else with <see cref="ArgumentException"/>. <c>AddMediator()</c> reports all of
+    /// them as <see cref="ArgumentException"/>, with the role's exception as the inner exception.
+    /// </remarks>
     /// <exception cref="ArgumentException">A Coordinate Mediation or Message Pickup setting is invalid, a pipeline setting is out of range, <see cref="RewrapMode"/> is not a defined value, or the mailbox age limit is not longer than <see cref="MaxForwardDelay"/>.</exception>
     /// <exception cref="InvalidOperationException">A replay protection or session setting is invalid (those roles report their settings this way).</exception>
     public void Validate()
@@ -132,7 +180,33 @@ public sealed class MediatorOptions
         Pickup.Validate();
         Replay.Validate();
         Sessions.Validate();
+        ValidatePipeline();
+    }
 
+    /// <summary>
+    /// The pipeline's own checks: the ranges of its settings and the rule between the mailbox age
+    /// limit and <see cref="MaxForwardDelay"/>. Messages name the setting, never its value.
+    /// </summary>
+    /// <exception cref="ArgumentException">A pipeline setting is out of range, <see cref="RewrapMode"/> is not a defined value, or the mailbox age limit is not longer than <see cref="MaxForwardDelay"/>.</exception>
+    internal void ValidatePipeline()
+    {
+        ValidatePipelineRanges();
+
+        if (Pickup.MaxMessageAge is { } maxMessageAge && maxMessageAge <= MaxForwardDelay)
+        {
+            throw new ArgumentException(
+                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)} must be longer than {nameof(MaxForwardDelay)}, or a delayed message could age out before it is due.",
+                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)}");
+        }
+    }
+
+    /// <summary>
+    /// The ranges of the pipeline settings alone, for a part that reads only those (the sub-objects
+    /// of the registered <c>IOptions&lt;MediatorOptions&gt;</c> are not the roles' settings in effect).
+    /// </summary>
+    /// <exception cref="ArgumentException">A pipeline setting is out of range or <see cref="RewrapMode"/> is not a defined value.</exception>
+    internal void ValidatePipelineRanges()
+    {
         if (!Enum.IsDefined(RewrapMode))
             throw new ArgumentException("The value is not a defined RewrapMode.", nameof(RewrapMode));
         if (MaxForwardDelay < TimeSpan.Zero || MaxForwardDelay > TimeSpan.FromMilliseconds(int.MaxValue))
@@ -143,13 +217,6 @@ public sealed class MediatorOptions
             throw new ArgumentException("The value must be at least 1 and at most 64.", nameof(DirectPushConcurrency));
         if (DirectPushTimeout <= TimeSpan.Zero || DirectPushTimeout > TimeSpan.FromMinutes(5))
             throw new ArgumentException("The value must be greater than zero and at most 5 minutes.", nameof(DirectPushTimeout));
-
-        if (Pickup.MaxMessageAge is { } maxMessageAge && maxMessageAge <= MaxForwardDelay)
-        {
-            throw new ArgumentException(
-                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)} must be longer than {nameof(MaxForwardDelay)}, or a delayed message could age out before it is due.",
-                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)}");
-        }
     }
 
     /// <summary>
@@ -171,4 +238,38 @@ public sealed class MediatorOptions
             pickup ?? new MessagePickupOptions(),
             replay ?? new ReplayProtectionOptions(),
             sessions ?? new ReturnRouteSessionOptions());
+
+    /// <summary>
+    /// The settings in effect, as one object: the role options the container built (which carry the
+    /// host's own <c>Configure&lt;T&gt;</c> calls as well as the <c>AddMediator()</c> delegate) and
+    /// the pipeline settings of <paramref name="pipeline"/>. Used to check the rules that span two
+    /// roles on the values that will actually run.
+    /// </summary>
+    /// <param name="pipeline">The mediator's own options, for the pipeline settings.</param>
+    /// <param name="cm">The Coordinate Mediation options in effect.</param>
+    /// <param name="pickup">The Message Pickup options in effect.</param>
+    /// <param name="replay">The replay protection options in effect.</param>
+    /// <param name="sessions">The return-route session options in effect.</param>
+    internal static MediatorOptions Effective(
+        MediatorOptions pipeline,
+        CoordinateMediationOptions cm,
+        MessagePickupOptions pickup,
+        ReplayProtectionOptions replay,
+        ReturnRouteSessionOptions sessions)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        ArgumentNullException.ThrowIfNull(cm);
+        ArgumentNullException.ThrowIfNull(pickup);
+        ArgumentNullException.ThrowIfNull(replay);
+        ArgumentNullException.ThrowIfNull(sessions);
+        return new MediatorOptions(cm, pickup, replay, sessions)
+        {
+            RewrapMode = pipeline.RewrapMode,
+            MaxForwardDelay = pipeline.MaxForwardDelay,
+            PurgeInterval = pipeline.PurgeInterval,
+            DirectPush = pipeline.DirectPush,
+            DirectPushConcurrency = pipeline.DirectPushConcurrency,
+            DirectPushTimeout = pipeline.DirectPushTimeout,
+        };
+    }
 }
