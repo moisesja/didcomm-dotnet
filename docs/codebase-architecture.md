@@ -29,7 +29,8 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   `ForwardHandlerOutcomeMetricsTests` and `ForwardHandlerDiTests`; the forward addressed to the
   mediator itself is `ForwardSelfAddressedTests`, rewrap's DID subject `ForwardRewrapNextTests`, the
   QA permutations of the forward core `ForwardPipelineQaTests`, and the adversarial ones
-  `ForwardPeelAdvTests` and `ForwardHandlerPumpContextTests` (with `Observability/LogValuesTests`).
+  `ForwardPeelAdvTests`, `ForwardPeelAdv3Tests` and `ForwardHandlerPumpContextTests` (with
+  `Observability/LogValuesTests` and `Transports/OutboundEndpointGuardAdv3Tests`).
 - `tests/DidComm.InteropTests`: fixture-driven conformance (`fixtures/` with `manifest`, `packed`,
   `payloads`, `diddocs`, `secrets`, `schema`, `spec`; `FixtureCatalog`, `Runner/FixtureDispatcher`),
   plus the `AspNetCore`, `Routing`, `Transports`, `Protocols` and `Facade` suites, `Mediator`
@@ -40,9 +41,11 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   `MediatorRewrapAndRoutingKeysTests`, `MediatorStartupTests`, `MediatorTwoHopTests` and
   `MediatorUnknownNextTests`; the QA permutations are the `*QaTests.cs` files with
   `QaMediatorSupport`, and the adversarial passes the `*AdvTests.cs` files
-  (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`); the
+  (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
+  `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`); the
   timing measurements run in the `QaSerialTiming` collection, alone and after the parallel tests;
-  `Transports/HttpTransportSingleAttemptTests` pins the single-attempt send), `DxCoverage` (public-API coverage of
+  `Transports/HttpTransportSingleAttemptTests` and `HttpTransportSingleAttemptAdv3Tests` pin the
+  single-attempt send), `DxCoverage` (public-API coverage of
   the eight shipped assemblies, and quickstart drift checks) and `Samples` (one smoke test per
   sample). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the same-socket / STOMP scoping of the
   mediator WebSocket endpoint against the public `MapDidCommWebSocket`.
@@ -52,7 +55,8 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   revoke-and-purge; `Pipeline`: `MediatorOptions`, `AddMediator()` DI and conflicts,
   `MediatorIdentity`, the forward sink, direct push, the hosted service and `RoutingDidValidator`,
   a real generic host, `MessageStoreLeaseByIdTests`, the QA permutations in the `*QaTests.cs`
-  files, and the adversarial `MediatorLifetimeAdvTests` and `OutboundGuardAdvTests`) with `fixtures/coordinate-mediation-3.0` and
+  files, and the adversarial `MediatorLifetimeAdvTests`, `OutboundGuardAdvTests` and
+  `DirectPushDeadlineAdv3Tests`) with `fixtures/coordinate-mediation-3.0` and
   `fixtures/messagepickup-3.0` (the didcomm.org page examples normalized to valid JSON). The cases
   that need a real endpoint are in `tests/DidComm.InteropTests/AspNetCore`:
   `CoordinateMediationHttpTests.cs` (FR-MED-03), `MessagePickupHttpTests.cs` and
@@ -218,42 +222,64 @@ the key that decrypted the forward (`UnpackResult.RecipientKid`), the handler do
 DID up (the mediator's own DIDs are never registered and are public). Instead
 `ForwardHandler.OpenSelfAddressedAsync` opens the layers **inline, on the sender's request, before
 any reservation**: `ForwardProcessor.PeelAsync` takes the single attachment as it is and unpacks it
-with the mediator's own client (every receive rule applies), and what is inside is screened as
-`HandleAsync` screens an arriving forward, at the same receipt reading: a forward, encrypted to a
-held key, not expired, `next` a DID. A forward inside that is again self-addressed is opened in
-turn, at most `MaxSelfAddressedLayers` (8, `MediatorEndpointExpander.MaxForwardLayers`) unpacks per
-received forward after the endpoint's own, each of a payload smaller than the last; one more layer
-is `Dropped-Malformed`. Only the decrypting DID counts as "itself": another DID of the mediator
+with the mediator's own client through `DidCommClient.UnpackAnoncryptedPlaintextAsync` — the
+receive rules (size, FR-API-05 expiry, consistency) with one restriction: the layer must be exactly
+an anoncrypt envelope around a plaintext message without `from_prior` (what rewrapping produces, and
+what a sender's forward layers are, FR-ROUTE-02). `EnvelopeReader` refuses any other shape — a
+plaintext or signed layer, an authcrypt layer, a signature or another envelope inside — from the
+envelope kind alone, with `MalformedMessageException`, and the facade refuses `from_prior`; no
+sender or signer lookup is supplied, so no DID the sender chose is ever resolved. What is inside is
+then screened as `HandleAsync` screens an arriving forward, at the same receipt reading: a forward,
+not expired, `next` a DID. A forward inside that is again self-addressed is opened in turn, at most
+`MaxSelfAddressedLayers` (8, `MediatorEndpointExpander.MaxForwardLayers`) decryptions per received
+forward after the endpoint's own, each layer within `MaxReceiveBytes` (an opened layer can be larger
+than its carrier, because a `data.json` attachment is re-serialized); one more layer is
+`Dropped-Malformed`. Only the decrypting DID counts as "itself": another DID of the mediator
 named as `next` is looked up and dropped as unknown. The forward found inside is then looked up in
 the registry (the request's one lookup) and admitted in the received forward's place: the work item
 carries it, the byte budget is charged with the received forward's plaintext plus its own, its
-`delay_milli` is drawn then under the cap and the received forward's hold is kept when it ends
-later (an intermediate self-addressed layer's `delay_milli` is not read), and its `expires_time`
+not-before is the latest of the holds asked for by the received forward and by every opened layer
+— each capped and drawn at the receipt reading, never added, so a chain is held at most the cap —
+and its `expires_time`
 on the relayed result is the earliest of the received forward's and every opened layer's — checked
 inline, again on the pump, and stored by the queue. So the sender pays for opening what it built,
 as for the outer unpack, and the pump never runs a stranger's decryption or DID resolution: it only
-processes and sinks the forward found inside. Whatever stops a layer from opening — its structure, a
-key the mediator does not hold, a DID that does not resolve, a resolver or secrets fault while
-trying — is `Dropped-Malformed` (`Dropped-Expired` when what is inside has expired), never
-`Faulted`. The received forward is counted once, by how the chain ended, and its id is the one
+processes and sinks the forward found inside. Whatever stops a layer from opening — its shape, its
+structure, a key the mediator does not hold, any other refusal of the unpack — is
+`Dropped-Malformed` (`Dropped-Expired` when what is inside has expired), never `Faulted`; a
+plaintext or signed-only layer inside is malformed too (the shape rule refuses it before the
+posture rule would). The received forward is counted once, by how the chain ended, and its id is the one
 logged. This was missing on `main` before #95, so a two-mediator route behind a rewrapping mediator
 never delivered; the first #95 version opened the layers on the pump, which let a stranger's slow
-DID stall every relay (adversarial finding AD-1).
+DID stall every relay (adversarial finding AD-1), and the next opened any envelope shape, resolving
+the sender DIDs an inner authcrypt or signed layer named (ADV-3).
 
-**Bounded ids and the pump's context (#95).** Every `ForwardHandler` line carries the message id
-through `LogValues.Id`: up to 128 characters as it is, a longer one as "(id of N characters)" —
-the rule `DidComm.AspNetCore` and `DidComm.Mediator` use too (on `main` the handler wrote ids raw).
+**Bounded ids, no message type, and the pump's context (#95).** Every message id on the receive
+path — `ForwardHandler`, `ProtocolDispatcher`, `InboundAdmission`, the return-route sessions, the
+endpoints, the mediator — goes through `LogValues.Id`: up to 128 characters as it is, a longer one
+as "(id of N characters)" (on `main` the handler and the dispatcher wrote ids raw). A stranger's
+message type is never written to a log line: the dispatcher's no-handler line names the bounded id
+only (the type stays on the `didcomm.handle` span's `didcomm.message.type` tag). Lines a stranger can repeat
+are rate-limited — the first and every 1000th at their level, Debug otherwise — where listed here:
+the handler's drop lines per reason, the mediator sink's drops, `InboundAdmission`'s malformed
+`return_route` and replay-refusal lines, and the dispatcher's FR-THR-04 rule-2 drop. Others are one
+line per message: the dispatcher's no-handler Information line, the endpoints' rejection lines for an
+envelope that cannot be unpacked, the consumed pure-ACK Information line and the opt-in Trace 2.0
+line.
 The pump is started with the execution context suppressed, so it carries no ambient state of
 whoever built the handler (an `AsyncLocal`, a request's activity).
 
 **Outcome counter and drop lines (#95).** Each forward the handler ends is counted once on
 `didcomm.forward.outcomes` (`ForwardMetrics`, tag `didcomm.forward.outcome`): `Dropped-Malformed`
 (not a forward, malformed, or refused by the processor as inconsistent or malformed),
-`Dropped-NotEncrypted`, `Dropped-Expired` (on arrival or while queued), `Dropped-Unknown`,
-`Dropped-Saturated`, `Dropped-Unacknowledged` (the acknowledgement was cancelled or faulted, or the
+`Dropped-NotEncrypted`, `Dropped-Expired` (on arrival or while queued), `Dropped-Unknown` (`next`
+not a DID or not registered, or, in rewrap mode, a next hop whose DID resolves to no usable
+`keyAgreement` key or is of a refused method — `DidResolutionException`,
+`UnsupportedDidMethodException`, logged "the next hop cannot be reached"), `Dropped-Saturated`, `Dropped-Unacknowledged` (the acknowledgement was cancelled or faulted, or the
 request was cancelled), `Dropped-Shutdown`, or `Faulted` (a fault of the mediator's own
 collaborators: the registry, clock or logger while screening, the processor or the sink on the
-pump — never a layer a sender built that fails to open). A
+pump, a resolver or key service that throws anything else — never a layer a sender built that fails
+to open). A
 forward the sink returns from normally is the sink's to count: the mediator's sink counts it, a
 host's own sink counts nothing. Any stranger can cause a drop, so the drop lines are rate-limited
 per reason (`RateLimitedLog`, Core's copy of the mediator's rule): the first and every 1000th at
@@ -524,7 +550,9 @@ Threat model (the CHANGELOG's #91 Security entry is the full list):
   unpack-rejection, handler-fault and callback-fault lines, on HTTP, in both WebSocket loops and
   for a malformed STOMP frame, log exception type names (and the bounded message id where there is
   one) — never the exception object, whose text can quote the peer's values (#95; before, they
-  logged the whole exception). These rejection lines are not rate-limited.
+  logged the whole exception). These rejection lines are not rate-limited; the malformed
+  `return_route` and replay-refusal lines are (the first and every 1000th at Warning). Every id is
+  bounded through `LogValues.Id` (#95).
 
 Known limitations (documented, not fixed; W-2..W-4 in the #91 plan; W-1, a server clock that
 jumps forward past an entry's retention and back re-admitting a request, is closed by #105 at the
