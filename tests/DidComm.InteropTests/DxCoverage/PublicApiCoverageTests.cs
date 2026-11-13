@@ -9,7 +9,7 @@ namespace DidComm.InteropTests.DxCoverage;
 
 /// <summary>
 /// The static half of the FR-DX-01 developer-experience gate: every public type and member of the
-/// seven shipped packages must be <b>referenced from compiled sample metadata/IL</b> under
+/// eight shipped packages must be <b>referenced from compiled sample metadata/IL</b> under
 /// <c>samples/</c>, and the §14.4 API → sample coverage matrix must hold (FR-DX-09). This gate is
 /// cheap and catches "not even referenced"; it deliberately does NOT claim runtime execution — a
 /// metadata reference (a local-variable type, an interface implementation) proves presence in
