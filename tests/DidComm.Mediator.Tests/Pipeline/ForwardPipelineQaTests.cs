@@ -234,7 +234,7 @@ public sealed class ForwardPipelineQaTests
     // OperationCanceledException; the sink re-throws it and the handler counts the forward as
     // Dropped-Shutdown — while the message is in the queue and will be delivered. The forward
     // outcome counter then disagrees with the queue, and the message is never handed to direct push.
-    [Fact(Skip = "QA-1 DEFECT 4: a forward stored before the handler's shutdown token fires is counted Dropped-Shutdown although it stays queued (PickupCoordinator.cs:401-409, MediatorForwardSink.cs:135-139)")]
+    [Fact]
     public async Task A_shutdown_after_the_message_is_stored_counts_what_happened_to_it()
     {
         var (fixture, mediation) = await ParkedOnRecheckAsync();
@@ -242,17 +242,6 @@ public sealed class ForwardPipelineQaTests
 
         fixture.Store.MessageCount.Should().Be(1);
         fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
-    }
-
-    [Fact]
-    public async Task A_shutdown_after_the_message_is_stored_is_today_counted_as_Dropped_Shutdown()
-    {
-        // Pins the behaviour behind DEFECT 4.
-        var (fixture, _) = await ParkedOnRecheckAsync();
-        await using var __ = fixture;
-
-        fixture.Store.MessageCount.Should().Be(1, "the record was stored and is kept");
-        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DroppedShutdown);
     }
 
     // ── an attachment that decodes to nothing (DEFECT 5, mediator side) ───────────────────

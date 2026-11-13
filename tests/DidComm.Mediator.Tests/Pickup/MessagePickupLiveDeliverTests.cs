@@ -804,9 +804,12 @@ public sealed class MessagePickupLiveDeliverTests
         }
         var payload = PickupFixture.Payload(25, 4);
 
-        var thrown = (await FluentActions.Awaiting(async () => await fixture.Queue.DeliverAsync(peer, payload, ct: cts.Token)).Should().ThrowAsync<OperationCanceledException>()).Which;
+        // #95 Q-6: once the message is stored, the call reports Queued — it does not throw, and
+        // never with a collaborator's own error.
+        var result = await fixture.Queue.DeliverAsync(peer, payload, ct: cts.Token);
 
-        thrown.Message.Should().NotContain(HandlerBoomException.Marker, "when the caller's token is cancelled, cancellation is what leaves — never a collaborator's own error");
+        result.Outcome.Should().Be(Queued, "the message was stored before the cancellation");
+        result.GrantPeerDid.Should().Be(peer);
         socket.Sent.Should().BeEmpty();
         fixture.Memory.MessageCount.Should().Be(1, "cancelling after the message was stored leaves it stored");
         fixture.FakeStore!.Enqueued.Should().ContainSingle().Which.Lease.Should().NotBeNull("it was admitted under a lease for the live session");
@@ -817,6 +820,8 @@ public sealed class MessagePickupLiveDeliverTests
         var released = fixture.FakeStore.Released.Should().ContainSingle().Subject;
         released.GrantPeerDid.Should().Be(peer);
         released.Ids.Should().Equal(held.Id);
+        result.MessageId.Should().Be(held.Id);
+        MessagePickupLive.QueueLogs(fixture, LogLevel.Error).Should().BeEmpty("a cancelled delivery of a stored message is not a fault");
     }
 
     [Fact]
@@ -832,18 +837,11 @@ public sealed class MessagePickupLiveDeliverTests
             return outcome;
         };
 
-        // The call may report the message as queued or report the cancellation; it may not do anything else.
-        PickupDeliveryResult? result = null;
-        try
-        {
-            result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(25), ct: cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-        }
+        // #95 Q-6: the message was stored, so the call reports it queued (it used to be allowed to
+        // report the cancellation instead).
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(25), ct: cts.Token);
 
-        if (result is { } reported)
-            reported.Outcome.Should().Be(Queued);
+        result.Outcome.Should().Be(Queued);
         fixture.Memory.MessageCount.Should().Be(1);
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle();
     }
