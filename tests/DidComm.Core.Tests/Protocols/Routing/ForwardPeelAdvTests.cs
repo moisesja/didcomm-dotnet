@@ -264,7 +264,7 @@ public sealed class ForwardPeelAdvTests
 
     // ── DEFECT 4: a stranger can make the peel count Faulted ──────────────────────────────
 
-    [Fact(Skip = "ADV-1 DEFECT 4 (P3): an inner layer whose signer (or authcrypt sender) DID does not resolve is the sender's mistake, yet the peel counts it as Faulted (DropReason.PeelFaulted maps to ForwardOutcomes.Faulted), so any stranger can raise the operator's fault metric at will; the same envelope sent as the outer layer is refused by the unpack (400) and never counted. Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D4_An_inner_layer_signed_by_a_DID_that_does_not_resolve_is_a_sender_caused_drop_not_a_fault()
     {
         await using var f = await Fixture.CreateAsync();
@@ -274,20 +274,6 @@ public sealed class ForwardPeelAdvTests
         f.Sink.Count.Should().Be(0);
         f.Outcomes.Counts.Keys.Should().NotContain(ForwardOutcomes.Faulted);
         f.Outcomes.Total.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task An_inner_layer_signed_by_a_DID_that_does_not_resolve_is_counted_Faulted_today()
-    {
-        // DEFECT 4 as it behaves now (pin).
-        await using var f = await Fixture.CreateAsync();
-
-        for (var i = 0; i < 3; i++)
-            await f.HandleAsync(f.SelfAddressed(await f.SignedByGhostAsync(Forward(Bob))));
-
-        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.Faulted] = 3 });
-        f.Logger.Warnings.Should().ContainSingle("the first is a Warning, the rest Debug").Which.Formatted.Should().Contain("DidResolutionException");
-        ForwardHandlerTests.AssertLogsCarryNoExceptionObjectAndNone(f.Logger, Fixture.GhostDid);
     }
 
     // ── DEFECT 2: an outer layer's expiry is lost once the layer is opened ────────────────

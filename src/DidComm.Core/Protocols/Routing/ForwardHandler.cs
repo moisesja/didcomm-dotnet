@@ -75,8 +75,11 @@ namespace DidComm.Protocols.Routing;
 /// inconsistent or malformed), <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or
 /// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered),
 /// <c>Dropped-Saturated</c>, <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or
-/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a screening, processing or
-/// sink fault). A forward the sink returns from normally is the sink's to count: the mediator's own
+/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a fault of the mediator's
+/// own collaborators: the registry, the clock or the logger while screening, the processor or the
+/// sink on the pump). A layer addressed to the mediator that cannot be opened is the sender's mistake
+/// whatever the exception — <c>Dropped-Malformed</c>, or <c>Dropped-Expired</c> when the message
+/// inside has expired — never <c>Faulted</c>. A forward the sink returns from normally is the sink's to count: the mediator's own
 /// sink counts how it ended, a host's sink counts nothing.
 /// </para>
 /// <para>
@@ -185,7 +188,6 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         Faulted,
         SelfLayersTooDeep,
         PeelMalformed,
-        PeelFaulted,
         InnerNotAForward,
         InnerPosture,
         InnerExpired,
@@ -673,15 +675,14 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 Dropped(DropReason.InnerExpired, "Forward {MessageId} dropped: the forward inside it has expired (FR-ROUTE-09).", logId);
                 return null;
             }
-            catch (DidResolutionException ex)
+            catch (Exception ex)
             {
-                Dropped(DropReason.PeelFaulted, "Forward {MessageId} not relayed: opening the message inside it failed with {ExceptionType} (FR-ROUTE-06).", logId, ex.GetType().Name);
-                return null;
-            }
-            catch (DidCommException ex)
-            {
-                // Not one packed message, or not one this mediator can open: the sender's mistake.
-                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (FR-ROUTE-06).", logId, ex.GetType().Name);
+                // Whatever stops a layer the sender built from opening is the sender's: its structure,
+                // a key this mediator does not hold, a DID that does not resolve (or a resolver that
+                // throws while trying — the sender chose which DIDs the layer makes us resolve). So
+                // it is a malformed forward, never a fault a stranger could raise at will; Faulted
+                // stays for the mediator's own collaborators (registry, clock, logger, processor, sink).
+                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (innermost: {InnerExceptionType}) (FR-ROUTE-06).", logId, ex.GetType().Name, LogValues.InnermostTypeName(ex));
                 return null;
             }
 
@@ -697,7 +698,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             }
             catch (MalformedMessageException ex)
             {
-                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (FR-ROUTE-06).", logId, ex.GetType().Name);
+                Dropped(DropReason.PeelMalformed, "Forward {MessageId} dropped: the message inside it could not be opened: {ExceptionType} (innermost: {InnerExceptionType}) (FR-ROUTE-06).", logId, ex.GetType().Name, LogValues.InnermostTypeName(ex));
                 return null;
             }
 
