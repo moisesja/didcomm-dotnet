@@ -178,6 +178,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                     continue;
                 if (entry.PassedOverUntil > request.Now)
                     continue;
+                if (request.ReceivedAtOrAfter is { } since && message.ReceivedAt < since)
+                    continue;
 
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
                 // skip to a smaller one. The first record is taken whatever its size.

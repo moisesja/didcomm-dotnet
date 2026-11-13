@@ -66,7 +66,8 @@ public interface IMessageStore
     /// Select the next deliverable records of a grant and mark them leased, in one step. Walks the
     /// grant's records in arrival order — only those for <see cref="MessageLeaseRequest.RecipientDid"/>
     /// when it is set — and takes each record that is not expired, is due and is not under a live
-    /// lease and is not passed over for now (<see cref="PassOverAsync"/>), until
+    /// lease and is not passed over for now (<see cref="PassOverAsync"/>) — and, when
+    /// <see cref="MessageLeaseRequest.ReceivedAtOrAfter"/> is set, was stored at or after it — until
     /// <see cref="MessageLeaseRequest.MaxMessages"/> are taken or the next one would
     /// carry the payload total past <see cref="MessageLeaseRequest.MaxPayloadBytes"/>. It stops
     /// there and does not look for a smaller record further on, so the result is always a prefix of
@@ -83,12 +84,10 @@ public interface IMessageStore
     /// grant holds it and, at <paramref name="now"/>, it is not expired, is due, is not under a live
     /// lease and is not passed over for now (<see cref="PassOverAsync"/>), mark it with the lease and
     /// return it; otherwise change nothing and return <c>null</c>. The same rules as
-    /// <see cref="LeaseAsync"/>, for a caller that must send exactly the record it was told about:
-    /// the mediator's live and direct pushes (FR-PICK-08/09) take the record they are about to push
-    /// this way and send the stored payload; a live push leaves it leased to the session until it is
-    /// acknowledged, a direct push removes it (<see cref="AcknowledgeAsync"/>), and a push that did
-    /// not deliver gives the lease back (<see cref="ReleaseAsync"/>). An expired record found here may be removed, as by any
-    /// time-dependent operation. Never throws after a partial change.
+    /// <see cref="LeaseAsync"/>, for a caller that must send exactly the record it was told about.
+    /// (The mediator's own pushes take the next record with <see cref="LeaseAsync"/>.) An expired
+    /// record found here may be removed, as by any time-dependent operation. Never throws after a
+    /// partial change.
     /// </summary>
     /// <param name="grantPeerDid">The grant the record is held under.</param>
     /// <param name="messageId">The record's id.</param>
@@ -245,6 +244,15 @@ public sealed record MessageLeaseRequest(
     DateTimeOffset Now,
     MessageLease Lease)
 {
+    /// <summary>
+    /// Only records stored at or after this instant (<see cref="QueuedMessage.ReceivedAt"/> on or
+    /// after it); <c>null</c>, the default, for any. The mediator's live push uses it so that a
+    /// session in live mode is pushed only what arrived after it turned live delivery on: what was
+    /// queued before is the recipient's to pick up (FR-PICK-06). A store that ignores it hands out
+    /// records the mediator then refuses as outside the contract.
+    /// </summary>
+    public DateTimeOffset? ReceivedAtOrAfter { get; init; }
+
     /// <summary>The numbers only: no DID is printed.</summary>
     public override string ToString()
         => $"MessageLeaseRequest {{ MaxMessages = {MaxMessages}, MaxPayloadBytes = {MaxPayloadBytes}, Now = {Now:O} }}";
