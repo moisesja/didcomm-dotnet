@@ -190,18 +190,29 @@ public sealed class HostedServiceQaTests
     // ── the forward settings in effect at start-up ────────────────────────────────────────
 
     [Fact]
-    public async Task A_host_ForwardProcessorOptions_registered_after_AddMediator_today_replaces_the_delay_cap_unnoticed()
+    public async Task A_host_ForwardProcessorOptions_registered_after_AddMediator_that_lifts_the_delay_cap_fails_start_up()
     {
-        // Same root cause as DEFECT 6: the start-up check validates MediatorOptions, not the
-        // forward settings the processor actually got. Here the one-hour cap (FR-PICK-10's MUST bound)
-        // is replaced by the library bound of about 24.8 days, and the mediator starts.
+        // L-020: this pinned "the one-hour cap (FR-PICK-10's MUST bound) is replaced by the library
+        // bound of about 24.8 days, and the mediator starts" (same root cause as DEFECT 6). Since Q-8
+        // the start-up checks the forward settings the processor actually got and refuses to start.
         await using var fixture = await HostedFixture.CreateAsync(after: s => s.AddSingleton(new ForwardProcessorOptions()));
+
+        var refusal = (await FluentActions.Awaiting(fixture.StartingAsync).Should().ThrowAsync<InvalidOperationException>()).Which;
+
+        refusal.Message.Should().Contain("MaxForwardDelay").And.Contain("FR-PICK-10");
+        fixture.Services.GetRequiredService<ForwardProcessorOptions>().MaxDelay.Should().BeNull("the host's options are what the processor would have run with");
+    }
+
+    [Fact]
+    public async Task With_the_mediators_own_forward_settings_the_processor_caps_the_delay()
+    {
+        await using var fixture = await HostedFixture.CreateAsync();
 
         await fixture.StartingAsync();
 
         var forward = ForwardMessage.Create("did:example:qa-m", "did:example:qa-r", new[] { """{"protected":"a","ciphertext":"x","iv":"","tag":"","recipients":[]}""" });
         forward.AdditionalHeaders = new Dictionary<string, JsonElement> { ["delay_milli"] = JsonDocument.Parse(long.MaxValue.ToString(CultureInfo.InvariantCulture)).RootElement.Clone() };
-        fixture.Services.GetRequiredService<ForwardProcessor>().ResolveDelay(forward).Should().Be(TimeSpan.FromMilliseconds(int.MaxValue));
+        fixture.Services.GetRequiredService<ForwardProcessor>().ResolveDelay(forward).Should().Be(TimeSpan.FromHours(1));
     }
 
     // ── the purge round ───────────────────────────────────────────────────────────────────

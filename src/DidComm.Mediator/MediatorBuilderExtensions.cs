@@ -29,7 +29,7 @@ public static class MediatorBuilderExtensions
     };
 
     private static readonly Func<IServiceProvider, object> s_noRecipientRoutingKeys =
-        static _ => new StaticRecipientRoutingKeyProvider(null);
+        static _ => new NoRecipientRoutingKeys();
 
     private static readonly Func<IServiceProvider, object> s_forwardSink =
         static sp => sp.GetRequiredService<MediatorForwardSink>();
