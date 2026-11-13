@@ -351,12 +351,6 @@ public sealed class ForwardProcessor
         return TimeSpan.FromMilliseconds(Math.Min(millis, capMs));
     }
 
-    private static string StripFragment(string didUrl)
-    {
-        var hash = didUrl.IndexOf('#');
-        return hash < 0 ? didUrl : didUrl[..hash];
-    }
-
     private async Task<byte[]> RewrapToNextAsync(byte[] innerPacked, string nextHop, CancellationToken ct)
     {
         // FR-ROUTE-06 rewrap: build a fresh forward whose attachment is the inbound payload, then
@@ -364,9 +358,11 @@ public sealed class ForwardProcessor
         // next hop — which signals "peel this layer and process the attachment locally": the next
         // hop unwraps the rewrap and then handles the inner payload exactly as it would have under
         // pass-through (so the constant-size onion stays deliverable). `next` can arrive as a DID
-        // URL with a fragment (outer onion layers carry the routing-key kid), so strip it to the
-        // bare DID for the message headers and the keyAgreement lookup.
-        var nextDid = StripFragment(nextHop);
+        // URL — a fragment (outer onion layers carry the routing-key kid), a path or a query — so it
+        // is reduced to its DID subject (PRD §4.3), the DID the handler found registered, for the
+        // message headers and the keyAgreement lookup. A `next` with no DID part is malformed.
+        var nextDid = DidSubject.DidSubjectOf(nextHop)
+            ?? throw new MalformedMessageException("Forward 'next' has no DID part; it cannot be rewrapped for the next hop (FR-ROUTE-01).");
         var freshForward = ForwardMessage.Create(
             mediator: nextDid, next: nextDid,
             packedPayloads: new[] { Encoding.UTF8.GetString(innerPacked) });
