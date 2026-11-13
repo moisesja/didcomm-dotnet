@@ -54,8 +54,13 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   as delivered and removes the message; anything else gives the message back to pickup at once.
   Only `http` and `https` endpoints are pushed to, because a WebSocket write gives no receipt, and a
   plain `http` endpoint also needs `"http"` in `HttpTransportOptions.AllowedSchemes` (the HTTP
-  transport sends to `https` only by default). One attempt per message, so a recipient that relies
-  on push must also pick up. The work is bounded and fair: a few workers (`DirectPushConcurrency`),
+  transport sends to `https` only by default). One attempt per message, and it is a single request:
+  one POST to exactly the directory's endpoint, no retry, no redirect followed (a 3xx is a failed
+  push), outside the HTTP transport's circuit breaker, so one recipient's failing endpoint stops
+  neither the pushes to the others nor the host's other HTTP sends. A recipient that relies on push
+  must also pick up, and should drop messages whose id it has already seen (see Security). The
+  push deadline holds even against a transport or store that ignores cancellation: the call is
+  abandoned and the message given back to pickup, and an abandoned send may still land later. The work is bounded and fair: a few workers (`DirectPushConcurrency`),
   at most 1 024 pushes waiting or running and 16 per grant, a deadline per push, and recipients
   served in turn with at most one push in flight each, so a slow recipient endpoint holds one
   worker, never all of them; a push beyond a bound is skipped and its message stays queued.
@@ -93,6 +98,15 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   `InMemoryReplayGuard.ClockBehindRefusalCount`; and `IMessageStore.LeaseByIdAsync`, which takes one
   record by id under the same rules as `LeaseAsync` (an interface member on an unreleased type: a
   custom store has to add it).
+- **A single-attempt send** (`DidComm.Core`): `SendPackedOptions { SingleAttempt }` and the overload
+  `DidCommClient.SendPackedAsync(packed, endpoint, mediaType, SendPackedOptions, ct)`, which sets the
+  new init-only `TransportRequest.SingleAttempt`. The HTTP transport then makes exactly one POST to
+  exactly that endpoint — no retry, no redirect followed (a 3xx is a `TransportException`), neither
+  counted nor refused by its circuit breaker — bounded by `RequestTimeout`; the outbound endpoint
+  guard and the connect-time address checks still apply. Other sends are unchanged (retries, 307
+  following, the breaker). Another transport may ignore the flag. `TransportRequest` is a released
+  record: the change is binary/API compatible; value equality now includes `SingleAttempt`
+  (instances built by 1.5.1-compiled code have `false` there, so their comparisons do not change).
 - **`DidCommServiceBuilder`** (`DidComm.Core`, namespace `DidComm.Resolution`) builds the
   `DIDCommMessaging` service entry a DID publishes: `ForEndpoint(uri)` for a DID reached directly,
   `ForMediator(mediatorDid)` for one reached through a mediator, then `WithId`, `WithRoutingKeys`,
@@ -128,7 +142,10 @@ Tests: `AddMediatorDiTests`, `MediatorOptionsTests`, `MediatorIdentityTests`,
 `MediatorUnknownNextTests` (the known/unknown `next` timing, run alone in a serial collection).
 Two independent QA passes added the `*QaTests` suites (component and end-to-end permutations);
 `MessageStoreLeaseByIdTests`, `ForwardSelfAddressedTests` and `ForwardRewrapNextTests` cover the
-fixes they led to.
+fixes they led to. Two adversarial passes added the `*AdvTests` suites (`ForwardPeelAdvTests`,
+`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
+`MediatorLifetimeAdvTests`, `OutboundGuardAdvTests`); `HttpTransportSingleAttemptTests`,
+`ForwardHandlerPumpContextTests` and `LogValuesTests` cover the fixes they led to.
 
 ### Changed — mediator service (#95)
 
@@ -186,18 +203,22 @@ fixes they led to.
 - Samples: the shared helper `PeerIdentityFactory` builds its `DIDCommMessaging` service entry
   through `DidCommServiceBuilder`; the DIDs it mints are unchanged.
 
-### Fixed — found by the #95 QA passes; present before #95 (#95)
+### Fixed — found by the #95 QA and adversarial passes; present before #95 (#95)
 
 - **A two-mediator route behind a rewrapping mediator now delivers** (FR-ROUTE-06, receiver side;
   on `main` since #90). Rewrapping hands the next hop a forward whose `next` is that hop itself
   (DIDComm v2.1 §Routing, "Rewrapping"); `ForwardHandler` looked its own DID up as a recipient and
-  dropped the forward. A forward whose `next` is the DID that decrypted it is now opened on the
-  handler's pump and the forward inside screened like an arriving one (a forward, encrypted to a
-  held key, not expired, `next` registered) and relayed. At most 8 such layers are opened per
-  received forward (one more is `Dropped-Malformed`); only the DID that decrypted a layer counts as
-  the mediator itself; anything inside that is not a forward is dropped (a mediator is not the
-  final recipient); the relayed not-before is the latest of the layers'; the received forward is
-  counted once.
+  dropped the forward. A forward whose `next` is the DID that decrypted it is now opened inline, on
+  the sender's own request and before anything is reserved — so the sender pays for opening what it
+  built and the shared forward pump never runs a stranger's decryption or DID resolution — and the
+  forward inside is screened like an arriving one (a forward, encrypted to a held key, not expired,
+  `next` registered) and relayed. At most 8 such layers are opened per received forward, each a
+  smaller payload than the last (one more is `Dropped-Malformed`); only the DID that decrypted a
+  layer counts as the mediator itself; anything inside that is not a forward is dropped (a mediator
+  is not the final recipient); a layer that cannot be opened, whatever the reason, is
+  `Dropped-Malformed` (or `Dropped-Expired`), never `Faulted`; the relayed forward keeps the
+  received forward's hold when it ends later, and its `expires_time` is the earliest of every layer
+  opened; the received forward is counted once.
 - **Rewrap mode addresses the DID subject of `next`** (FR-ROUTE-06; in 1.5.1). It dropped only a
   fragment, so a `next` given as a DID URL with a path or a query was resolved as it was; a `next`
   with no DID part is now `MalformedMessageException`.
@@ -217,6 +238,26 @@ fixes they led to.
   `IHttpClientFactory`'s own request logging (categories `System.Net.Http.HttpClient.*`) still
   writes the full URI at Information: filter those categories where endpoints must not reach the
   logs. A `TransportException`'s message names the endpoint; log it by type.
+- **A throwing logging provider no longer turns a delivered HTTP send into a failure** (in 1.5.1).
+  The HTTP transport's Debug line after a 2xx was unguarded, so a provider that threw made the
+  send fail after the recipient had it — a caller could send it again, and a direct push counted it
+  failed and left the message for a second delivery. The line is now guarded.
+- **The outbound endpoint guard classifies two more IPv6 forms** (in 1.5.1). The IPv4-translated
+  form `::ffff:0:a.b.c.d` (RFC 2765 / RFC 6052) is judged by the IPv4 address it embeds, and the
+  RFC 8215 local-use NAT64 prefix `64:ff9b:1::/48` is refused as a whole (where the IPv4 sits in it
+  depends on the prefix length a network chose). Before, both were treated as public, so a loopback
+  or metadata address could be reached through them.
+- **The receive endpoints no longer log a rejected message's exception text** (in 1.5.1). The HTTP
+  rejection path, both WebSocket receive loops, the callback overloads and the STOMP malformed-frame
+  line logged the whole exception, whose message can quote the sender's values (an id, a DID, a
+  line break), so a stranger could put text of its choosing into a Warning. They now log exception
+  type names, and the message id bounded to 128 characters where there is one.
+- **`ForwardHandler` writes message ids bounded** (on `main` since #90). It wrote a forward's id
+  raw, at any length; every line now carries it through one Core rule shared with
+  `DidComm.AspNetCore` and `DidComm.Mediator`: up to 128 characters as it is, a longer one as
+  "(id of N characters)".
+- **The forward pump starts without the caller's execution context** (on `main` since #90), so it
+  carries no ambient state (an `AsyncLocal`, an activity) of whoever first resolved the handler.
 
 ### Security — mediator service threat model and residuals (#95)
 
@@ -229,11 +270,13 @@ fixes they led to.
   a message the queue still holds for delivery, taken by id under the push's own lease just before
   it is sent, so an expired, aged-out, acknowledged or purged message is never pushed and a message
   a recipient is fetching is not sent twice; one push per message, after the 202 and off the
-  forward pump. Concurrency, backlog, per-grant jobs and the time of each push are bounded,
-  recipients are served in turn with one push in flight each, and a skipped push leaves the message
-  queued. Residuals: the HTTP transport's own retries run inside a push; its circuit breaker (one per
-  transport, so one per mediator) can be opened by a failing recipient endpoint and pause all of the
-  mediator's push traffic for its open duration (messages stay queued); anyone can make the mediator
+  forward pump, as one request to exactly that endpoint — no retry, no redirect followed (a
+  redirect could otherwise send the push to a host the directory never named), outside the HTTP
+  transport's circuit breaker (which one recipient's failing endpoint could otherwise open for every
+  send of the host). Concurrency, backlog, per-grant jobs and the time of each push are bounded —
+  the deadline holds even against a callee that ignores cancellation — recipients are served in
+  turn with one push in flight each, and a skipped push leaves the message queued. Residuals: a push
+  abandoned at its deadline may still land later (delivery is at-least-once); anyone can make the mediator
   post up to `MaxAdmissiblePayloadBytes` to a registered recipient's push endpoint, as they could
   post there directly; a directory that points at the mediator itself allows a bounded onion
   re-entry (a misconfiguration); `IHttpClientFactory`'s request logging writes push endpoints at
@@ -245,9 +288,11 @@ fixes they led to.
   accepted: a recipient offline longer than the limit loses those messages silently). Under open
   enrolment, self-made grants can still use up the store-wide bounds: use an allow-list or
   rate-limiting `IMediationPolicy` (an availability limit, like W-2). A forward is outside replay
-  admission (FR-RR-08), so a captured forward posted again is relayed again and can fill its
-  recipient's quota (residual). The delay cap cannot be lifted by a later registration: start-up
-  refuses forward settings without it.
+  admission (FR-RR-08), so a captured forward posted again is relayed again (residual): without
+  direct push the copies wait within the recipient's quota; with direct push on each replay is
+  pushed again, and since a delivered push frees its place, the quota does not limit how often —
+  recipients should drop messages whose id they have already seen. The delay cap cannot be lifted
+  by a later registration: start-up refuses forward settings without it.
 - **Timing on `next`.** The 202 is committed before the forward processor and the sink run, the
   inline recipient lookup does the same work either way, and the inline paths for a known and an
   unknown `next` differ by a queue reservation against a log line that is now rate-limited; the
@@ -259,15 +304,27 @@ fixes they led to.
   peer granted mediation again during the call loses what was stored for the new grant before the
   purge (deny it in the policy first); if the second lookup or the removal fails, the record stays
   until it expires or ages out.
-- **Logs.** Message ids (bounded), counts, setting values and exception type names only — never a
-  DID, a queue record id, an endpoint or exception text — and every line a stranger can trigger is
-  rate-limited per reason. The library's HTTP transport no longer logs the endpoint (Fixed, above).
+- **Logs.** Message ids (bounded to 128 characters), counts, setting values and exception type names
+  only — never a DID, a queue record id, an endpoint or exception text — on the mediator's lines,
+  the forward handler's and the receive endpoints' (Fixed, above). The mediator's own drop lines and
+  the forward handler's are rate-limited per reason; the receive endpoints' rejection lines are not
+  (a stranger can still make them grow, one line per rejected message, though never with text of its
+  choosing). The library's HTTP transport no longer logs the endpoint (Fixed, above).
 - **Start-up fails closed.** A routing DID that does not resolve, or whose endpoint or keys are
   unusable, stops the host from starting instead of advertising a mediator nobody can reach; so do
   forward settings in effect that are not the mediator's.
-- **Forwards addressed to the mediator itself.** Opening such a forward costs one decryption per
-  layer and is bounded at 8 layers per received forward; skipping the registry lookup for the
-  decrypting DID tells a sender nothing it could not read from the mediator's public DID document.
+- **Forwards addressed to the mediator itself.** They are opened inline, on the sender's request and
+  before any reservation, so the sender's own request waits for the decryptions and DID resolutions
+  its layers ask for, and the shared forward pump never does: a stranger's slow DID cannot hold up
+  other recipients' relays (the first #95 version opened them on the pump and could). One request
+  costs at most 8 unpacks after the endpoint's own, each of a smaller payload than the last;
+  a layer that fails to open is a malformed drop, so a stranger cannot raise the `Faulted` count;
+  skipping the registry lookup for the decrypting DID tells a sender nothing it could not read from
+  the mediator's public DID document, and the response does not tell a self-addressed `next` from
+  any other by status, headers, body or time within the tested tolerance.
+- **Not changed, for #98.** A captured, not-yet-sent authcrypted `live-delivery-change` sent first
+  on a fresh socket holds the victim's live session: the message is authenticated, the channel is
+  not bound to it (the same on `main`).
 - **Dependency graph.** Everything is a singleton; the sink, the push dispatcher and the metrics
   take nothing that leads back to the dispatcher, the handlers or the facade; `DidCommClient` and
   the directory are resolved on the first push; the hosted service resolves when it starts; the
@@ -1261,8 +1318,9 @@ replay admission.
   their plaintext bytes, so a slow sink cannot be used to park 1024 × `MaxReceiveBytes` in memory;
   beyond either bound the newest is dropped with a rate-limited warning) and is published to the
   pump only once `ProtocolContext.Acknowledged` has completed — the transport's signal that the
-  inbound was acknowledged on the wire — so neither `ForwardProcessor` nor the sink runs before
-  the sender holds the 202; a cancelled or faulted acknowledgement (client abort before the
+  inbound was acknowledged on the wire — so neither `ForwardProcessor`'s processing nor the sink
+  runs before the sender holds the 202 (since #95 a forward addressed to the mediator itself is
+  opened inline, before it, on the sender's request); a cancelled or faulted acknowledgement (client abort before the
   response was committed, a rejection after the handler ran) releases the reservation and drops
   the forward with a warning. The detached work runs on the handler's shutdown token, never the
   request's, so a client abort after the 202 cannot cancel the relay. The clock is read once per
