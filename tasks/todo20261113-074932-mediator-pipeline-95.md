@@ -68,8 +68,8 @@ Released (v1.5.1) and therefore binary-frozen: `ForwardProcessor`, `ForwardProce
 ## D. ASP.NET Core, integration, harness (engineer C)
 - [x] D1. Internal WebSocket core + InternalsVisibleTo (public overload unchanged, regression test).
 - [x] D2. `DidComm.Mediator.AspNetCore` package + `MapDidCommMediator` + DX gate shipped-assembly list.
-- [ ] D3. End-to-end suites in `tests/DidComm.InteropTests/Mediator/` (HTTP, WebSocket live, direct push, two mediators, expiry, delay + cap, age limit, unknown `next` + timing, rewrap / extra keys, acknowledgement ordering, startup failures, invitation, revoke-and-purge, log hygiene).
-- [ ] D4. `InteropCli mediator-pickup` verb + one cell per live leg (python, jvm), run locally.
+- [x] D3. End-to-end suites in `tests/DidComm.InteropTests/Mediator/` (HTTP, WebSocket live, direct push, two mediators, expiry, delay + cap, age limit, unknown `next` + timing, rewrap / extra keys, acknowledgement ordering, startup failures, invitation, revoke-and-purge, log hygiene).
+- [x] D4. `InteropCli mediator-pickup` verb + one cell per live leg (python, jvm), run locally.
 
 ## Progress log
 
@@ -77,14 +77,24 @@ Released (v1.5.1) and therefore binary-frozen: `ForwardProcessor`, `ForwardProce
 - Deviations reported by the engineers (accepted): `Push-Skipped-Shutdown` outcome added (every push job ends with one outcome); the push deadline also bounds the post-push removal (L-059); `AddMediator` registers its own recognisable default routing-key provider so the rewrap conflict check works on repeated calls; invalid replay/session settings surface from `AddMediator` as `ArgumentException` with the role's `InvalidOperationException` inside; the `ForwardHandler` registration is a cycle-guarded factory sharing the `ForwardMetrics` singleton; `DidCommServiceBuilder` routing keys are restricted to the two forms the sender's expander resolves (bare DID, DID + fragment), endpoint key order `uri, routingKeys, accept` (byte-identical did:peer:2 output); `MapDidCommMediator` parses both route patterns before mapping anything.
 
 ## E. QA and adversarial passes (independent agents; findings verified before fixing)
-- [ ] E1. QA, at least two independent agents (permutations listed in the brief).
+- [x] E1. **QA, two independent agents** (QA-1 component level `8f6021f`, 272 cases; QA-2 end to end over the real endpoints `b99be48`, 156 cases; merged `b3f63c6`; every defect kept as a skipped failing test plus a "today" pin). Engineer C's acceptance suites (`tests/DidComm.InteropTests/Mediator/`, 57 tests, `c975519`..`a872073`) and live legs (python 63/63, jvm 60/60 + 3 n/a) found no product defect. Confirmed defects and the fixes (all verified against the code before fixing):
+  - Q-1 (P2; QA-1 D1, QA-2 D1 and D5) **Direct push sends a message after its expiry or age limit, after a pickup acknowledged it, or after a purge when the peer was granted again**: the worker re-checked only the registration. Fix: the push takes exactly that record by id under its own lease through a new store operation (`IMessageStore.LeaseByIdAsync`; held, due, unexpired and not leased, else skipped), sends the stored payload, removes it on a 2xx and gives the lease back otherwise (L-057: the push names what it took). Jobs carry ids only.
+  - Q-2 (P2; QA-2 D2) **A rewrapping upstream mediator breaks every two-mediator route through a didcomm-dotnet mediator**: the spec's rewrapping gives the next hop a forward whose `next` is itself ("receivers also need to know about it"); our handler looked its own DID up in the recipient registry and dropped it. Present on `main`; exposed by #95. Fix toward the spec (L-050): a forward whose `next` is the DID that decrypted it is peeled and its inner forward handled, depth-bounded.
+  - Q-3 (P3; QA-2 D3) rewrap mode resolved a DID-URL `next` with a path or query without reducing it to its DID subject (main too). Fix: `DidSubjectOf`.
+  - Q-4 (P3; QA-1 D2) one slow grant could hold every push worker (16 jobs per grant, 4 workers, FIFO). Fix: per-grant queues served in turn, at most one push in flight per grant.
+  - Q-5 (P3; QA-1 D3) a clock near `DateTimeOffset.MaxValue` made `receivedAt + delay` throw (handler: dropped as Faulted; public `ProcessAsync`: undocumented throw). Main too. Fix: one saturating add.
+  - Q-6 (P3; QA-1 D4) a message already stored when the handler shut down was counted `Dropped-Shutdown`. Fix: once stored, `DeliverAsync` reports `Queued`.
+  - Q-7 (P3; QA-1 D5) an attachment decoding to zero bytes was relayed as an empty payload and counted `Faulted` at Error level (any sender). Fix: malformed in the processor.
+  - Q-8 (P3; QA-1 D6) forward settings reached by other routes (a host `Configure<MediatorOptions>` setting rewrap with a host routing-key provider, a host `ForwardProcessorOptions` registered later lifting the delay cap, a provider registered later, no recipient directory) were never checked. Fix: start-up checks on the effective settings.
+  - Q-9 (P3; QA-2 D4) the push endpoint (a host secret, maybe a capability URL) appeared in the HTTP transport's Debug line (main too, #92 follow-up 3); `IHttpClientFactory`'s own Information line also prints it. Fix: the transport's line carries the scheme only; the factory's line is documented in the operations guidance (filter `System.Net.Http.HttpClient.*`).
+  - Not changed (documented): a delayed message is never pushed live, even once due — PRD FR-PICK-08 (the target, amended by #94) says so, while the issue body's scope 2.4 mentioned a scheduler; replayed captured forwards can fill a recipient's quota (forward is outside replay admission by FR-RR-08); a host-registered `InMemoryMessageStore` keeps the quotas it was built with.
 - [ ] E2. Adversarial, at least one independent agent.
 
 ## F. Docs
-- [ ] F1. CHANGELOG `[Unreleased]`.
-- [ ] F2. PRD: §3.1, FR-ROUTE-09/10/11 acceptance, FR-MED-07, FR-PICK-03/04/09/10, §12 Phase 7.
-- [ ] F3. `docs/codebase-architecture.md` (new #95 section; extend the #90 and #94 sections; Packages / Tests tables; shrink "not built yet").
-- [ ] F4. README package list + DX paragraph, RELEASING table, XML docs, DX allowlists (`TODO(#97)`).
+- [x] F1. (first pass, `docs-95`; to be re-aligned after the QA fixes) CHANGELOG `[Unreleased]`.
+- [x] F2. (first pass, `docs-95`; to be re-aligned after the QA fixes) PRD: §3.1, FR-ROUTE-09/10/11 acceptance, FR-MED-07, FR-PICK-03/04/09/10, §12 Phase 7.
+- [x] F3. (first pass, `docs-95`; to be re-aligned after the QA fixes) `docs/codebase-architecture.md` (new #95 section; extend the #90 and #94 sections; Packages / Tests tables; shrink "not built yet").
+- [x] F4. (first pass, `docs-95`; to be re-aligned after the QA fixes) README package list + DX paragraph, RELEASING table, XML docs, DX allowlists (`TODO(#97)`).
 - [ ] F5. Review section below.
 
 ## Review
