@@ -145,7 +145,12 @@ public sealed class MediatorOptions
     /// endpoint, found through a registered <see cref="IRecipientEndpointDirectory"/> (FR-PICK-09).
     /// Default <c>false</c>. Each message gets one push attempt, in the background, after it is
     /// queued: an <c>http(s)</c> 2xx answer removes it from the queue; anything else leaves it there
-    /// for pickup, so a recipient that relies on push must also pick up now and then.
+    /// for pickup, so a recipient that relies on push must also pick up now and then. A push sends
+    /// only what the queue still holds for delivery when the push starts: it takes the message
+    /// under a lease of its own first, so a message that has expired, aged out, been acknowledged,
+    /// or is being fetched by the recipient is not pushed. A plain <c>http</c> endpoint also needs
+    /// <c>"http"</c> in <c>HttpTransportOptions.AllowedSchemes</c> (the HTTP transport sends to
+    /// <c>https</c> only by default).
     /// </summary>
     public bool DirectPush { get; set; }
 

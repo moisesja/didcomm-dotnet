@@ -181,7 +181,7 @@ public sealed class MediatorDeliveryModesQaTests
 
     // ---- FR-ROUTE-09 / FR-PICK-10 before a direct push --------------------------------------------
 
-    [Fact(Skip = "QA-2 DEFECT 1: a queued message whose forward expires_time passes while its direct-push job waits is still pushed (FR-ROUTE-09: never delivered or pushed once expired)")]
+    [Fact]
     public async Task A_message_whose_forward_expires_while_its_push_job_waits_is_never_pushed()
     {
         // One push worker, parked on Bob's endpoint by the first message; the second message's job
@@ -207,7 +207,7 @@ public sealed class MediatorDeliveryModesQaTests
         contents.Should().Equal(new[] { "first" }, "a message whose forward expired is never pushed (FR-ROUTE-09)");
     }
 
-    [Fact(Skip = "QA-2 DEFECT 1: a queued message that reaches the mailbox age limit while its direct-push job waits is still pushed (FR-PICK-10: aged-out records are never delivered)")]
+    [Fact]
     public async Task A_message_that_ages_out_while_its_push_job_waits_is_never_pushed()
     {
         await using var f = await QaPushFixture.StartAsync(m =>

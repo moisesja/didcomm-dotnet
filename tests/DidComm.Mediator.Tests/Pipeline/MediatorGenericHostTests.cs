@@ -79,6 +79,6 @@ public sealed class MediatorGenericHostTests
         await host.StopAsync().WaitAsync(Wait);
         await ((IAsyncDisposable)host).DisposeAsync().AsTask().WaitAsync(Wait);
 
-        dispatcher.TryEnqueue(new PushJob("did:example:p", "did:example:r", "id", new byte[] { 1 }, "fwd")).Should().BeFalse("the dispatcher was disposed with the container");
+        dispatcher.TryEnqueue(new PushJob("did:example:p", "did:example:r", "id", "fwd")).Should().BeFalse("the dispatcher was disposed with the container");
     }
 }

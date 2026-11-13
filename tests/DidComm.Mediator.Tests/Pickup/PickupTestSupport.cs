@@ -163,6 +163,9 @@ internal sealed class PickupFakeStore : IMessageStore
         return OnLease?.Invoke(request, ct) ?? Inner.LeaseAsync(request, ct);
     }
 
+    public ValueTask<QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, MessageLease lease, DateTimeOffset now, CancellationToken ct)
+        => Inner.LeaseByIdAsync(grantPeerDid, messageId, lease, now, ct);
+
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
     {
         Calls.Enqueue(nameof(AcknowledgeAsync));

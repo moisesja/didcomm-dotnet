@@ -1,5 +1,6 @@
 using System.Diagnostics.Metrics;
 using DidComm.Extensions.DependencyInjection;
+using DidComm.Facade;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
@@ -171,14 +172,7 @@ public static class MediatorBuilderExtensions
 
         // The pipeline's parts take nothing that leads back to the dispatcher, the handlers or the
         // facade (L-017): the push workers resolve the directory and DidCommClient on first use.
-        services.TryAddSingleton(sp => new DirectPushDispatcher(
-            sp,
-            sp.GetRequiredService<IOptions<MediatorOptions>>(),
-            sp.GetRequiredService<MessagePickupQueue>(),
-            sp.GetRequiredService<IMediationStore>(),
-            sp.GetRequiredService<MediatorMetrics>(),
-            sp.GetService<ILogger<DirectPushDispatcher>>(),
-            sp.GetService<TimeProvider>() ?? TimeProvider.System));
+        services.TryAddSingleton(BuildPushDispatcher);
         services.TryAddSingleton(sp => new MediatorForwardSink(
             sp.GetRequiredService<MessagePickupQueue>(),
             sp.GetRequiredService<DirectPushDispatcher>(),
@@ -202,6 +196,39 @@ public static class MediatorBuilderExtensions
             sp.GetService<ILogger<MediatorHostedService>>(),
             sp.GetService<TimeProvider>() ?? TimeProvider.System)));
         return builder;
+    }
+
+    [ThreadStatic]
+    private static bool t_buildingPushDispatcher;
+
+    // The dispatcher is built from the stores; a store that asks for the dispatcher (or the sink)
+    // back would re-enter this factory without end. Fail on the first re-entry instead.
+    private static DirectPushDispatcher BuildPushDispatcher(IServiceProvider sp)
+    {
+        if (t_buildingPushDispatcher)
+        {
+            throw new InvalidOperationException(
+                "AddMediator() found a circular dependency: an IMessageStore or IMediationStore (or something they depend on) takes the mediator's " +
+                "forward sink or push dispatcher in its constructor, and the push dispatcher is built from those stores. Resolve it from " +
+                "IServiceProvider when it is needed instead.");
+        }
+        t_buildingPushDispatcher = true;
+        try
+        {
+            return new DirectPushDispatcher(
+                sp,
+                sp.GetRequiredService<IOptions<MediatorOptions>>(),
+                sp.GetRequiredService<IMessageStore>(),
+                sp.GetRequiredService<IMediationStore>(),
+                sp.GetRequiredService<IOptions<DidCommOptions>>(),
+                sp.GetRequiredService<MediatorMetrics>(),
+                sp.GetService<ILogger<DirectPushDispatcher>>(),
+                sp.GetService<TimeProvider>() ?? TimeProvider.System);
+        }
+        finally
+        {
+            t_buildingPushDispatcher = false;
+        }
     }
 
     // An AddRoutingMediator() made before this call registered the forward options (or the handler)

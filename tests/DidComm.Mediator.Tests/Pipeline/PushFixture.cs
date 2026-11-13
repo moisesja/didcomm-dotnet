@@ -132,8 +132,22 @@ internal sealed class PushFixture : IAsyncDisposable
         var result = await Queue.DeliverAsync(recipientDid, payload);
         if (result.Outcome != PickupDeliveryOutcome.Queued || result.MessageId is null || result.GrantPeerDid is null)
             throw new InvalidOperationException($"Not queued ({result.Outcome}).");
-        return new PushJob(result.GrantPeerDid, recipientDid, result.MessageId, payload, forwardId);
+        return new PushJob(result.GrantPeerDid, recipientDid, result.MessageId, forwardId);
     }
+
+    /// <summary>A second dispatcher over this container's stores with explicit bounds (the test seam); the caller disposes it.</summary>
+    public DirectPushDispatcher NewDispatcher(int capacity, int perGrant)
+        => new(
+            Services,
+            Services.GetRequiredService<IOptions<MediatorOptions>>(),
+            Services.GetRequiredService<IMessageStore>(),
+            Mediation,
+            Services.GetRequiredService<IOptions<DidCommOptions>>(),
+            Services.GetRequiredService<MediatorMetrics>(),
+            Services.GetService<ILogger<DirectPushDispatcher>>(),
+            Time,
+            capacity,
+            perGrant);
 
     public static byte[] Payload(int size, byte seed = 7)
     {

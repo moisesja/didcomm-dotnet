@@ -100,7 +100,7 @@ public sealed class MediatorRevocationQaTests
         f.ShouldNotLeak(carol.Did);
     }
 
-    [Fact(Skip = "QA-2 DEFECT 5: a push job still waiting when RevokeAndPurgeAsync purged its message is sent anyway once the same peer is granted again and re-registers the DID (the worker's re-check consults only the registration, not whether the message is still held); RevokeAndPurgeAsync documents only a push 'already being sent' as completing")]
+    [Fact]
     public async Task A_waiting_push_job_of_a_purged_message_is_not_sent_after_the_peer_is_granted_again()
     {
         await using var f = await QaPushFixture.StartAsync(m => m.DirectPushConcurrency = 1);
