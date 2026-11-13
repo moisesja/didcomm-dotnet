@@ -118,7 +118,9 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   counted), tagged `didcomm.forward.outcome` (`Delivered-Live`, `Queued`,
   `Dropped-Malformed`, `Dropped-NotEncrypted`, `Dropped-Expired`, `Dropped-Unknown`,
   `Dropped-Saturated`, `Dropped-Unacknowledged`, `Dropped-Shutdown`, `Dropped-TooLarge`,
-  `Dropped-Quota`, `Faulted`); `didcomm.mediator.direct_push.outcomes`, tagged
+  `Dropped-Quota`, `Faulted` — `Dropped-Unknown` also counts a rewrap next hop that cannot be
+  reached, and `Faulted` is kept for faults of the mediator's own collaborators);
+  `didcomm.mediator.direct_push.outcomes`, tagged
   `didcomm.push.outcome` (`Pushed`, `Push-Failed`, `Push-Skipped-Saturated`,
   `Push-Skipped-NoEndpoint`, `Push-Skipped-Scheme`, `Push-Skipped-Unregistered`,
   `Push-Skipped-NotHeld`, `Push-Skipped-Shutdown`); `didcomm.mediator.queue.purged`; and, for the library's in-memory types,
@@ -211,14 +213,18 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
   dropped the forward. A forward whose `next` is the DID that decrypted it is now opened inline, on
   the sender's own request and before anything is reserved — so the sender pays for opening what it
   built and the shared forward pump never runs a stranger's decryption or DID resolution — and the
-  forward inside is screened like an arriving one (a forward, encrypted to a held key, not expired,
-  `next` registered) and relayed. At most 8 such layers are opened per received forward, each a
-  smaller payload than the last (one more is `Dropped-Malformed`); only the DID that decrypted a
-  layer counts as the mediator itself; anything inside that is not a forward is dropped (a mediator
-  is not the final recipient); a layer that cannot be opened, whatever the reason, is
-  `Dropped-Malformed` (or `Dropped-Expired`), never `Faulted`; the relayed forward keeps the
-  received forward's hold when it ends later, and its `expires_time` is the earliest of every layer
-  opened; the received forward is counted once.
+  forward inside is screened like an arriving one (a forward, not expired, `next` registered) and
+  relayed. Such a layer must be exactly an anoncrypt envelope around a plaintext message without
+  `from_prior` — what rewrapping produces and what a sender's forward layers are; an authcrypt
+  layer, a signature or another envelope inside, a plaintext or signed layer, and `from_prior` are
+  refused as `Dropped-Malformed` before any DID is resolved, so opening never resolves a DID the
+  sender chose. At most 8 such layers are opened per received forward, each within
+  `MaxReceiveBytes` (one more is `Dropped-Malformed`); only the DID that decrypted a layer counts as
+  the mediator itself; anything inside that is not a forward is dropped (a mediator is not the final
+  recipient); a layer that cannot be opened, whatever the reason, is `Dropped-Malformed` (or
+  `Dropped-Expired`), never `Faulted`; the relayed forward's not-before is the latest of the holds
+  of the received forward and every opened layer, each capped, never added, and its
+  `expires_time` the earliest of every layer opened; the received forward is counted once.
 - **Rewrap mode addresses the DID subject of `next`** (FR-ROUTE-06; in 1.5.1). It dropped only a
   fragment, so a `next` given as a DID URL with a path or a query was resolved as it was; a `next`
   with no DID part is now `MalformedMessageException`.
@@ -252,10 +258,18 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
   line logged the whole exception, whose message can quote the sender's values (an id, a DID, a
   line break), so a stranger could put text of its choosing into a Warning. They now log exception
   type names, and the message id bounded to 128 characters where there is one.
-- **`ForwardHandler` writes message ids bounded** (on `main` since #90). It wrote a forward's id
-  raw, at any length; every line now carries it through one Core rule shared with
-  `DidComm.AspNetCore` and `DidComm.Mediator`: up to 128 characters as it is, a longer one as
-  "(id of N characters)".
+- **Message ids are written bounded on the whole receive path, and a message type never** (in
+  1.5.1 for the dispatcher; on `main` since #90 / #91 for `ForwardHandler`, `InboundAdmission`, the
+  return-route sessions and the endpoints' return-route lines).
+  `ForwardHandler`, `ProtocolDispatcher`, `InboundAdmission` and the return-route sessions wrote
+  ids raw, at any length the receive limit allows; every line now writes them through one Core rule
+  shared with `DidComm.AspNetCore` and `DidComm.Mediator`: up to 128 characters as it is, a longer
+  one as "(id of N characters)". The dispatcher's no-handler Information line wrote the message
+  type as it arrived — a valid type URI can carry line breaks and terminal escapes in its protocol
+  name, so any stranger could forge a log line with one plaintext POST; it now names the bounded id
+  only (the type stays on the `didcomm.handle` span's tag). The dispatcher's Warning for a pure ACK
+  that also requests an ACK (a peer's FR-THR-04 rule-2 violation) is now rate-limited: the first and
+  every 1000th at Warning, the rest at Debug.
 - **The forward pump starts without the caller's execution context** (on `main` since #90), so it
   carries no ambient state (an `AsyncLocal`, an activity) of whoever first resolved the handler.
 
@@ -304,21 +318,32 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
   peer granted mediation again during the call loses what was stored for the new grant before the
   purge (deny it in the policy first); if the second lookup or the removal fails, the record stays
   until it expires or ages out.
-- **Logs.** Message ids (bounded to 128 characters), counts, setting values and exception type names
-  only — never a DID, a queue record id, an endpoint or exception text — on the mediator's lines,
-  the forward handler's and the receive endpoints' (Fixed, above). The mediator's own drop lines and
-  the forward handler's are rate-limited per reason; the receive endpoints' rejection lines are not
-  (a stranger can still make them grow, one line per rejected message, though never with text of its
-  choosing). The library's HTTP transport no longer logs the endpoint (Fixed, above).
+- **Logs.** Every message id on the receive path is written bounded to 128 characters ("(id of N
+  characters)" beyond), and a stranger's message type never reaches a log line; the mediator's, the
+  forward handler's and the receive endpoints' lines carry ids, counts, setting values and
+  exception type names — never a DID, a queue record id, an endpoint or exception text (Fixed,
+  above). Rate-limited, the first and every 1000th at their level and the rest at Debug: the forward
+  handler's drop lines (per reason), the mediator sink's drops, `InboundAdmission`'s
+  malformed-`return_route` and replay-refusal lines, and the dispatcher's FR-THR-04 rule-2 drop.
+  Not rate-limited — one line per message, so a stranger can make them grow, though never with text
+  of its choosing: the dispatcher's no-handler Information line, the endpoints' Warning for an
+  envelope that cannot be unpacked ("rejecting inbound envelope"), the consumed pure-ACK Information
+  line and the opt-in Trace 2.0 line. The library's HTTP transport no longer logs the endpoint
+  (Fixed, above).
 - **Start-up fails closed.** A routing DID that does not resolve, or whose endpoint or keys are
   unusable, stops the host from starting instead of advertising a mediator nobody can reach; so do
   forward settings in effect that are not the mediator's.
 - **Forwards addressed to the mediator itself.** They are opened inline, on the sender's request and
-  before any reservation, so the sender's own request waits for the decryptions and DID resolutions
-  its layers ask for, and the shared forward pump never does: a stranger's slow DID cannot hold up
-  other recipients' relays (the first #95 version opened them on the pump and could). One request
-  costs at most 8 unpacks after the endpoint's own, each of a smaller payload than the last;
-  a layer that fails to open is a malformed drop, so a stranger cannot raise the `Faulted` count;
+  before any reservation, so the sender's own request pays for its layers and the shared forward
+  pump never does (the first #95 version opened them on the pump, where a stranger's slow DID held
+  up other recipients' relays). Only an anoncrypt envelope around a plaintext message without
+  `from_prior` is opened, refused otherwise from its shape before any DID is resolved, so opening
+  resolves no DID the sender chose (the next version opened any shape and resolved the sender and
+  signer DIDs inner layers named). One request costs at most 8 decryptions after the endpoint's
+  own, every layer within `MaxReceiveBytes`; a chain of layers is held at most the delay cap (the
+  holds are not added); a layer that fails to open is a malformed drop, so a stranger cannot raise
+  the `Faulted` count, and neither can a recipient whose DID a rewrap cannot resolve
+  (`Dropped-Unknown`);
   skipping the registry lookup for the decrypting DID tells a sender nothing it could not read from
   the mediator's public DID document, and the response does not tell a self-addressed `next` from
   any other by status, headers, body or time within the tested tolerance.

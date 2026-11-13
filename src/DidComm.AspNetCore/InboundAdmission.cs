@@ -37,8 +37,10 @@ internal readonly record struct InboundAdmissionResult(
 /// messages. A message that is not admitted gets no session and no dispatch.
 /// </summary>
 /// <remarks>
-/// Log lines carry the message id and enum / exception type names only — never a DID, key id,
-/// thread id or message body — and no logger fault can change the decision.
+/// Log lines carry the message id (bounded to 128 characters, <c>LogValues.Id</c>) and enum /
+/// exception type names only — never a DID, key id, thread id or message body — and no logger
+/// fault can change the decision. The malformed-<c>return_route</c> and replay-refusal lines are
+/// rate-limited per endpoint: the first and every 1000th at Warning, the rest at Debug.
 /// </remarks>
 internal static class InboundAdmission
 {

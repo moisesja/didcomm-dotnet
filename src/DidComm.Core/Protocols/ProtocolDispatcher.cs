@@ -61,7 +61,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     /// </summary>
     /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
     /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
-    /// <param name="logger">Optional structured logger; warnings are emitted for FR-THR-04 rule 3 drops.</param>
+    /// <param name="logger">Optional structured logger: Information lines for a consumed pure ACK (FR-THR-04 rule 3) and for a message no handler is registered for (its bounded id, never its type), and a rate-limited Warning for a peer's FR-THR-04 rule-2 violation (the first and every 1000th; Debug otherwise).</param>
     /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11). Registered via <c>DidCommBuilder.EnableTracing(...)</c>; when supplied, every inbound message is checked against <see cref="TraceObserver.ShouldReport"/> and an authorised trace-report intent is logged at <c>Information</c>. HTTP POST integration is deferred.</param>
     public ProtocolDispatcher(
         ProtocolHandlerRegistry registry,
