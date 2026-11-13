@@ -20,7 +20,7 @@ namespace DidComm.InteropTests.Mediator;
 public sealed class MediatorPeelEndpointAdvTests
 {
     [Fact]
-    public async Task A_self_addressed_forward_is_not_opened_before_its_202_is_committed()
+    public async Task A_self_addressed_forward_is_not_relayed_before_its_202_is_committed()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
@@ -34,7 +34,7 @@ public sealed class MediatorPeelEndpointAdvTests
         var post = Task.Run(() => mediator.PostAsync(outer));
         await MediatorTestServer.WaitUntilAsync(() => mediator.Handler.Outstanding == 1, "admitted while the response is held");
         (await ReturnRouteTestHost.WaitUntilAsync(() => mediator.Store.MessageCount > 0 || mediator.Outcomes.Count > 0, TimeSpan.FromMilliseconds(200)))
-            .Should().BeFalse("the layer is opened on the pump, which never sees it before the 202 is committed");
+            .Should().BeFalse("the layer is opened inline, but the forward inside is processed and stored only after the 202 is committed");
 
         gate.SetResult();
         (await post.WaitAsync(MediatorTestServer.Timeout)).Status.Should().Be(HttpStatusCode.Accepted);

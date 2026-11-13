@@ -50,7 +50,7 @@ public sealed class MediatorReceiveLogsAdv3Tests
     // for every such message. Ids are now written through LogValues.Id; the pure-ACK drop line is a
     // Warning the first time and every 1000th, Debug otherwise.
     [Fact]
-    public async Task ADV3_D3_Every_line_a_stranger_triggers_carries_a_bounded_id_and_is_rate_limited()
+    public async Task ADV3_D3_Stranger_triggered_receive_lines_carry_bounded_ids_and_the_pure_ack_rule_2_drop_is_rate_limited()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
         var longId = new string('a', 200_000);
