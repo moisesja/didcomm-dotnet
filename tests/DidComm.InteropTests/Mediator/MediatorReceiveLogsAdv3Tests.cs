@@ -30,11 +30,11 @@ public sealed class MediatorReceiveLogsAdv3Tests
     private static readonly string HostileType =
         "https://didcomm.org/p\r\n2026-11-13 12:00:00 crit: " + Marker + " admin token rotated\r\n" + Escape + "[2J" + Escape + "[1;31m/1.0/m";
 
-    // ADV-3 DEFECT 3 (P3; on main too): ProtocolDispatcher writes "No protocol handler registered for
-    // inbound message type '{Type}'" at Information with the type exactly as it arrived — any
-    // length, CR, LF and escape characters included — for every message, never rate-limited. Through
-    // MapDidCommMediator any stranger reaches it with a plaintext POST.
-    [Fact(Skip = "ADV-3 DEFECT 3: the dispatcher logs a stranger's message type verbatim (CR/LF, escape sequences, any length) at Information, not rate-limited")]
+    // ADV-3 DEFECT 3 (P3; on main too; fixed): ProtocolDispatcher wrote "No protocol handler registered
+    // for inbound message type '{Type}'" at Information with the type exactly as it arrived — any
+    // length, CR, LF and escape characters included. Through MapDidCommMediator any stranger reaches it
+    // with a plaintext POST. The line now carries the bounded message id only, never the type.
+    [Fact]
     public async Task ADV3_D3_A_strangers_message_type_never_reaches_a_log_line()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
@@ -44,30 +44,12 @@ public sealed class MediatorReceiveLogsAdv3Tests
         mediator.Logs.CategorizedRecords.Should().NotContain(r => r.Text.Contains(Marker, StringComparison.Ordinal));
     }
 
+    // ADV-3 DEFECT 3 (same class; fixed): the dispatcher's pure-ACK lines and the admission's
+    // malformed return_route line carried the message id unbounded (ids are unreserved characters, so
+    // no line break, but of any length the receive limit allows), and the pure-ACK Warning was written
+    // for every such message. Ids are now written through LogValues.Id; the pure-ACK drop line is a
+    // Warning the first time and every 1000th, Debug otherwise.
     [Fact]
-    public async Task ADV3_D3_today_the_type_is_printed_verbatim_once_per_message_at_Information()
-    {
-        await using var mediator = await MediatorTestServer.StartAsync();
-
-        for (var i = 0; i < 3; i++)
-            (await PostPlaintextAsync(mediator, Plaintext($"adv3-type-{i}", HostileType))).Should().Be(HttpStatusCode.Accepted);
-
-        var lines = mediator.Logs.CategorizedRecords.Where(r => r.Text.Contains(Marker, StringComparison.Ordinal)).ToArray();
-        lines.Should().HaveCount(3, "one line per message: nothing rate-limits it");
-        lines.Should().OnlyContain(r => r.Level == LogLevel.Information && r.Category == "DidComm.Protocols.ProtocolDispatcher");
-
-        // What a console host prints: the CR, the forged line and the escape sequence reach the terminal.
-        var printed = RenderSimpleConsole(lines[0].Level, lines[0].Category, lines[0].Text);
-        printed.Should().Contain("\r");
-        printed.Should().Contain(Escape + "[2J");
-        printed.Should().Contain("2026-11-13 12:00:00 crit: " + Marker);
-    }
-
-    // ADV-3 DEFECT 3 (same class): the dispatcher's pure-ACK lines and the admission's malformed
-    // return_route line carry the message id unbounded (ids are unreserved characters, so no line
-    // break, but of any length the receive limit allows), and the pure-ACK Warning is written for
-    // every such message.
-    [Fact(Skip = "ADV-3 DEFECT 3: dispatcher and admission lines on the mediator endpoint carry a stranger's message id unbounded; the pure-ACK Warning is not rate-limited")]
     public async Task ADV3_D3_Every_line_a_stranger_triggers_carries_a_bounded_id_and_is_rate_limited()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
@@ -80,23 +62,6 @@ public sealed class MediatorReceiveLogsAdv3Tests
         mediator.Logs.CategorizedRecords.Should().NotContain(r => r.Text.Length > 4_096, "an id is written bounded (LogValues.Id keeps 128 characters)");
         mediator.Logs.CategorizedRecords.Count(r => r.Level >= LogLevel.Warning && r.Category == "DidComm.Protocols.ProtocolDispatcher")
             .Should().BeLessThanOrEqualTo(1, "a line any stranger can trigger is a Warning the first time and every 1000th, Debug otherwise");
-    }
-
-    [Fact]
-    public async Task ADV3_D3_today_a_200000_character_id_is_written_into_a_Warning_for_every_message()
-    {
-        await using var mediator = await MediatorTestServer.StartAsync();
-        var longId = new string('a', 200_000);
-
-        for (var i = 0; i < 3; i++)
-            (await PostPlaintextAsync(mediator, PureAckAskingForAck(longId + i))).Should().Be(HttpStatusCode.Accepted);
-        (await PostPlaintextAsync(mediator, Plaintext(longId + "rr", "https://didcomm.org/basicmessage/2.0/message", returnRoute: 42))).Should().Be(HttpStatusCode.Accepted);
-
-        mediator.Logs.CategorizedRecords
-            .Where(r => r.Level == LogLevel.Warning && r.Category == "DidComm.Protocols.ProtocolDispatcher" && r.Text.Contains(longId, StringComparison.Ordinal))
-            .Should().HaveCount(3);
-        mediator.Logs.CategorizedRecords
-            .Should().Contain(r => r.Level == LogLevel.Warning && r.Text.Contains("malformed return_route", StringComparison.Ordinal) && r.Text.Contains(longId, StringComparison.Ordinal));
     }
 
     [Theory]
