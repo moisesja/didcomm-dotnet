@@ -12,7 +12,7 @@ this harness runs nightly, on release, and on demand
 
 | Piece | Role |
 |---|---|
-| `tools/InteropCli` | The didcomm-dotnet side: `mint` / `pack` / `unpack` / `unwrap-forward` over the **real** `DidCommClient` + `UseNetDidResolver()` wiring (net-did composite resolver, did:key + did:peer). |
+| `tools/InteropCli` | The didcomm-dotnet side: `mint` / `pack` / `unpack` / `unwrap-forward` over the **real** `DidCommClient` + `UseNetDidResolver()` wiring (net-did composite resolver, did:key + did:peer), and `mediator-pickup`, which runs a real didcomm-dotnet mediator in process (see [Through a running didcomm-dotnet mediator](#through-a-running-didcomm-dotnet-mediator-95)). |
 | `python/interop_peer.py` | The didcomm-python side: same CLI shape, driving `didcomm==0.3.2` (sicpa-dlab/didcomm-python) directly. Pins in `python/requirements.txt`. |
 | `jvm/src/InteropPeer.java` | The didcomm-jvm side: same CLI shape, driving `org.didcommx:didcomm:0.3.2` — plain `javac`/`java`, jars pinned by version + SHA-256 in `jvm/fetch-deps.sh` (no Gradle/Maven). |
 | `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit 1 on any FAIL. A missing or empty `packed/didcomm-dotnet/` vector set hard-fails the leg — FR-IX-06 is a MUST, so an uninitialized fixtures submodule turns the leg red instead of silently shrinking the tally. The python leg exits 2 before running anything if its interpreter is outside CPython 3.9–3.12 (see Pinned versions). |
@@ -52,7 +52,7 @@ The §13.5 conformance matrix, as exercised live:
 | Content encryption | A256CBC-HS512 · A256GCM · XC20P |
 | Signing alg | EdDSA · ES256 · ES256K |
 | Recipients | single · 3 DIDs (mixed DID **methods** — two `did:peer:2` + one `did:key`; all three key-agreement keys are X25519, necessarily, since a single JWE carries a single `epk`, so recipient curves cannot be mixed within one envelope) · one DID with 3 `keyAgreement` keys (FR-ENC-19): addressed by bare DID, the envelope must carry all three kids and a device holding only the **last** key must decrypt (anoncrypt and authcrypt); addressed by the DID URL `<did>#key-2`, the envelope must carry that one kid and the key-2 device must decrypt (authcrypt) |
-| Routing | direct · 1 mediator · 2 mediators (real `forward` onion, both directions) |
+| Routing | direct · 1 mediator · 2 mediators (real `forward` onion, both directions) · through a running didcomm-dotnet mediator (pickup, inbound) |
 | DID method | `did:peer:2` · `did:key` |
 | Direction | inbound · outbound · published-vector verification (FR-IX-06) |
 
@@ -312,6 +312,44 @@ looks.
 counterpart fixes this, or the leg moves to a JDK that still carries secp256k1, this vector
 and both ES256K matrix cells MUST start passing — and these three `n/a` declarations must then
 be deleted. A green run with them still in place is a harness bug, not a pass.
+
+## Through a running didcomm-dotnet mediator (#95)
+
+The `1 mediator` / `2 mediators` cells peel each hop with `unwrap-forward`, the routing core
+alone. One more inbound cell per leg, **authcrypt via a running dotnet mediator (pickup)**, sends
+through the whole mediator service instead:
+
+1. The counterpart authcrypts a fresh payload for `dotnet-base` and wraps one forward for the
+   mediator `dotnet-medsvc` with its own routing code (`pack --route`).
+2. `InteropCli mediator-pickup --mediator dotnet-medsvc.json --recipient dotnet-base.json --in
+   <forward>` starts a real didcomm-dotnet mediator in process: Kestrel on `127.0.0.1` (an
+   ephemeral port), `AddMediator()` with `dotnet-medsvc`'s DID as the routing DID,
+   `MapDidCommMediator("/didcomm")`. Start-up runs the FR-MED-07 checks, which is why
+   `dotnet-medsvc` is minted with `--endpoint https://mediator.invalid/didcomm`: its DID document
+   must name an http(s)/ws(s) `DIDCommMessaging` endpoint, but nothing ever dials that address.
+3. The verb enrols `dotnet-base` (Coordinate Mediation 3.0 over HTTP, `return_route: all`:
+   `mediate-request`, then `recipient-update` adding its own DID), posts the counterpart's
+   forward to the endpoint byte for byte (it must answer `202`), picks the message up
+   (Message Pickup 3.0 `delivery-request`), prints the same `{message, metadata}` JSON as
+   `unpack`, acknowledges it and requires `status` to count 0 afterwards.
+4. The counterpart's `assert` checks the recovered plaintext and the authcrypt metadata, as for
+   every other cell.
+
+There is no outbound half: the mediator is didcomm-dotnet's, so the counterpart only sends
+through it. The cell fails when the forward is not for this mediator (the endpoint answers
+`400`), when its `next` is not the enrolled recipient (dropped, nothing is delivered before the
+timeout), or when anything is left queued after the acknowledgement.
+
+Executed 2026-11-13 on macOS arm64 (`didcomm-dotnet @ feat/mediator-pipeline-95`, CPython 3.12,
+JDK 25):
+
+| leg | new cell | leg totals |
+|---|---|---|
+| python (didcomm-python 0.3.2) | PASS | executed 63 · passed 63 · failed 0 · declared n/a 0 |
+| jvm (didcomm-jvm 0.3.2) | PASS | executed 60 · passed 60 · failed 0 · declared n/a 3 (the ES256K cells and vector, unchanged) |
+
+Every other cell gave the same result as in the tables above in the same runs; the totals are the earlier
+ones plus this cell.
 
 ## Pinned versions
 
