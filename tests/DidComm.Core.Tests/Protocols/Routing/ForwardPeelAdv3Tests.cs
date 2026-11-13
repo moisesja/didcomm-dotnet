@@ -36,12 +36,11 @@ public sealed class ForwardPeelAdv3Tests
 
     // ── Schedule across layers ─────────────────────────────────────────────────────────────
 
-    // ADV-3 DEFECT 1 (P3): ForwardHandler's remarks and PRD FR-ROUTE-06 say "a hold asked for by an
-    // outer layer is kept: the relayed forward's not-before is the latest of its layers'". Only the
-    // received layer's and the innermost forward's delay_milli are read: OpenSelfAddressedAsync
-    // continues past a self-addressed middle layer without resolving its delay, so a hold the sender
-    // put on that layer is silently dropped and the payload is due at once.
-    [Fact(Skip = "ADV-3 DEFECT 1: a self-addressed middle layer's delay_milli is ignored; the relayed not-before is not the latest of the layers'")]
+    // ADV-3 DEFECT 1 (P3, fixed): ForwardHandler's remarks and PRD FR-ROUTE-06 say "a hold asked for
+    // by an outer layer is kept: the relayed forward's not-before is the latest of its layers'". Only
+    // the received layer's and the innermost forward's delay_milli were read: a self-addressed middle
+    // layer's hold was silently dropped. Every opened layer's hold is now drawn and the latest kept.
+    [Fact]
     public async Task ADV3_D1_A_hold_asked_for_by_a_middle_layer_is_kept()
     {
         await using var f = Fixture.Create();
@@ -51,19 +50,6 @@ public sealed class ForwardPeelAdv3Tests
 
         var result = f.Sink.Results.Should().ContainSingle().Which;
         result.NotBefore.Should().Be(T0.AddMinutes(10), "the middle layer, addressed to this mediator, asked for a 10-minute hold");
-    }
-
-    [Fact]
-    public async Task ADV3_D1_today_a_middle_layers_hold_is_dropped_and_the_payload_is_due_at_once()
-    {
-        await using var f = Fixture.Create();
-        var received = await f.ThreeLayersAsync(middleDelayMs: 600_000);
-
-        await f.HandleAsync(received);
-
-        var result = f.Sink.Results.Should().ContainSingle().Which;
-        result.NotBefore.Should().BeNull();
-        result.Delay.Should().BeNull();
     }
 
     [Fact]

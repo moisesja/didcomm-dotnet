@@ -671,6 +671,10 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         // The earliest expiry of every layer on the way in: each is checked here, and the earliest
         // bounds the payload once it is relayed (FR-ROUTE-09).
         var earliest = received.Message.ExpiresTime;
+        // The latest hold any opened layer asks for, each drawn at receipt under the cap — never their
+        // sum. The caller keeps the received layer's own hold if it ends later.
+        TimeSpan? latestDelay = null;
+        DateTimeOffset? latestNotBefore = null;
         for (var opened = 1; ; opened++)
         {
             if (opened > MaxSelfAddressedLayers)
@@ -741,15 +745,21 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 return null;
             }
 
+            // This layer's own hold — a self-addressed middle layer's too — drawn at receipt under the cap.
+            var delay = _processor.ResolveDelay(inner.Message);
+            if (ForwardProcessor.NotBeforeOf(receivedAt, delay) is { } notBefore
+                && (latestNotBefore is not { } later || notBefore > later))
+            {
+                (latestDelay, latestNotBefore) = (delay, notBefore);
+            }
+
             if (IsSelfAddressed(subject, inner.RecipientKid))
             {
                 layer = inner;
                 continue;
             }
 
-            // Its own hold, drawn at receipt under the cap (the caller keeps an outer layer's later one).
-            var delay = _processor.ResolveDelay(inner.Message);
-            return (inner, subject, delay, ForwardProcessor.NotBeforeOf(receivedAt, delay), earliest);
+            return (inner, subject, latestDelay, latestNotBefore, earliest);
         }
     }
 
