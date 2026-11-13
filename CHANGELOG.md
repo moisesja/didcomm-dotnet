@@ -29,24 +29,52 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
 - **`MediatorOptions`**: the settings of each role as sub-objects — `CoordinateMediation`, `Pickup`,
   `Replay`, `Sessions`, the same types the roles read on their own — plus the pipeline's:
   `RewrapMode` (`PassThrough`), `MaxForwardDelay` (1 hour), `PurgeInterval` (5 minutes; 1 second to
-  24 hours), `DirectPush` (off), `DirectPushConcurrency` (4; 1 to 64), `DirectPushTimeout` (30
-  seconds; at most 5 minutes) and `Validate()`. The `AddMediator()` delegate reaches each role's own
-  options and composes with the host's `Configure<T>` calls in registration order; it may run
-  several times and must only assign values. The remarks of `AddMediator()` and `MediatorOptions`
-  carry the operations guidance: rate limiting in front of the endpoint, an allow-list or
-  rate-limiting mediation policy, replay sizing (about 91 in-scope messages a second at the
-  defaults), what a host clock stepping back does, the memory a stalled live session holds.
+  24 hours), `DirectPush` (off), `PushConcurrency` (4; 1 to 64) and `PushTimeout` (30 seconds; at
+  most 5 minutes) — the push workers and their per-push deadline, for live and direct pushes alike
+  — and `Validate()`. The `AddMediator()` delegate reaches each role's own options and composes with
+  the host's `Configure<T>` calls in registration order; it may run several times and must only
+  assign values. The remarks of `AddMediator()` and `MediatorOptions` carry the operations guidance:
+  rate limiting in front of the endpoint, an allow-list or rate-limiting mediation policy, replay
+  sizing (about 91 in-scope messages a second at the defaults), what a host clock stepping back
+  does, the memory a stalled live session holds, and why a recipient in live mode should still ask
+  for its queued messages after a reconnect or a slow period.
 - **The delivery pipeline** (FR-ROUTE-11, FR-PICK-09). The mediator's forward sink runs on the
-  forward handler's background pump, after the sender has its 202, and calls
+  forward handler's background pump, after the sender has its 202, and only stores: it calls
   `MessagePickupQueue.DeliverAsync` for the DID of `next`, with the forward's `delay_milli` as a
-  not-before time and its `expires_time`: a recipient with live delivery on gets the message pushed
-  at once, otherwise it waits for a `delivery-request`. Every other outcome (unknown recipient,
-  expired, too large, over quota, a fault) is a logged drop, counted, with nothing sent back to the
-  sender.
+  not-before time, its `expires_time` and `AllowLive: false`, and never waits on a recipient. A
+  stored message is counted `Queued`; a recipient with live delivery on then gets it pushed by the
+  push workers (below), otherwise it waits for a `delivery-request`. Every other outcome (unknown
+  recipient, expired, too large, over quota, a fault) is a logged drop, counted, with nothing sent
+  back to the sender.
+- **Live pushes on the push workers** (FR-PICK-08/09). A stored message that is already due is
+  handed to a small pool of background workers when its recipient has, at that moment, a live
+  session with live delivery on, or when direct push is on; the hand-over never blocks the pump. A
+  worker checks the registration again, then pushes the message over the recipient's newest live
+  session — taking exactly that stored message under a lease owned by the session and sending it as
+  a one-message `delivery` through the session's size-bounded send; the session keeps it leased
+  until `messages-received`, its close or `LeaseTimeout` — and, when no live session took it and
+  direct push is on, pushes it to the recipient's endpoint (below); otherwise it stays queued for
+  pickup. A message a `delivery-request` took first is pushed by neither path. **What a live
+  recipient can rely on:** every message stored, already due, while it is live is pushed to it, in
+  the order it was stored, one at a time — unless its push fails or reaches the deadline, in which
+  case that message, and any stored during the cooldown that follows a deadline, stays queued for
+  pickup; delivery is at-least-once. The work is bounded and fair: `PushConcurrency` workers, one
+  `PushTimeout` deadline per push that holds even against a session, transport or store that ignores
+  cancellation, recipients served in turn with at most one push in flight each, and a backlog sized
+  from the pickup quotas (`MaxQueueMessages` per grant, `MaxStoreMessages` in all), so a slow
+  recipient holds one worker, never all, and every message the queue stores can have its push; a
+  push beyond a bound (possible only with a host store that admits more than the pickup settings
+  say, or behind jobs of messages a pickup already removed) is skipped and its message stays queued.
+  A recipient whose push reaches the deadline has its pushes paused for 2 × `PushTimeout` (its
+  messages wait for pickup meanwhile), so a peer that stalls its own pushes holds a worker at most
+  once every three push timeouts. A push job holds a few bounded ids (two DIDs, the queue's record
+  id, the forward's id shortened for logs) and no payload. `MessagePickupQueue.DeliverAsync` called
+  by a host with `AllowLive: true`, the default, still pushes live itself, on the caller's thread.
 - **Direct push** (opt-in: `MediatorOptions.DirectPush` and a host `IRecipientEndpointDirectory`).
-  After a message is queued, and if it is already due, it is pushed in the background to the
-  endpoint the host's directory names for the recipient's grant — never one taken from the message
-  — through `DidCommClient.SendPackedAsync`, so the outbound endpoint guard always applies. Just
+  After a message is queued, if it is already due and no live session of the recipient took it, it
+  is pushed by the push workers to the endpoint the host's directory names for the recipient's
+  grant — never one taken from the message — through `DidCommClient.SendPackedAsync`, so the
+  outbound endpoint guard always applies. Just
   before sending, the push takes exactly that stored message under a lease of its own (new
   `IMessageStore.LeaseByIdAsync`), so it never sends a message that has expired or aged out, is
   being fetched by the recipient, or was acknowledged or purged meanwhile
@@ -60,10 +88,8 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   neither the pushes to the others nor the host's other HTTP sends. A recipient that relies on push
   must also pick up, and should drop messages whose id it has already seen (see Security). The
   push deadline holds even against a transport or store that ignores cancellation: the call is
-  abandoned and the message given back to pickup, and an abandoned send may still land later. The work is bounded and fair: a few workers (`DirectPushConcurrency`),
-  at most 1 024 pushes waiting or running and 16 per grant, a deadline per push, and recipients
-  served in turn with at most one push in flight each, so a slow recipient endpoint holds one
-  worker, never all of them; a push beyond a bound is skipped and its message stays queued.
+  abandoned and the message given back to pickup, and an abandoned send may still land later. The
+  bounds, the fairness and the cooldown are the push workers' (above).
 - **Start-up checks** (FR-MED-07). In a generic host (`WebApplication`, `Host`) a hosted service
   checks, before the server starts listening, that there is at least one routing DID and that each
   resolves to a document whose first `DIDCommMessaging` entry names an `http`, `https`, `ws` or
@@ -96,8 +122,8 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   the peer meanwhile is removed again); `MessagePickupOptions.MaxMessageAge` and
   `ForwardProcessorOptions.MaxDelay` (both under Changed, below);
   `InMemoryReplayGuard.ClockBehindRefusalCount`; and `IMessageStore.LeaseByIdAsync`, which takes one
-  record by id under the same rules as `LeaseAsync` (an interface member on an unreleased type: a
-  custom store has to add it).
+  record by id under the same rules as `LeaseAsync` — the mediator's live and direct pushes take
+  their message with it (an interface member on an unreleased type: a custom store has to add it).
 - **A single-attempt send** (`DidComm.Core`): `SendPackedOptions { SingleAttempt }` and the overload
   `DidCommClient.SendPackedAsync(packed, endpoint, mediaType, SendPackedOptions, ct)`, which sets the
   new init-only `TransportRequest.SingleAttempt`. The HTTP transport then makes exactly one POST to
@@ -115,18 +141,22 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
 - **Metrics** on the meter `didcomm-dotnet` (`DidCommDiagnostics.MeterName`, created through the
   container's `IMeterFactory` when there is one): `didcomm.forward.outcomes`, one count per forward
   that reaches a routing mediator's forward handler (one refused earlier, at unpack, is not
-  counted), tagged `didcomm.forward.outcome` (`Delivered-Live`, `Queued`,
-  `Dropped-Malformed`, `Dropped-NotEncrypted`, `Dropped-Expired`, `Dropped-Unknown`,
+  counted), tagged `didcomm.forward.outcome` (`Queued` — every stored forward, whatever happens to
+  its push —, `Dropped-Malformed`, `Dropped-NotEncrypted`, `Dropped-Expired`, `Dropped-Unknown`,
   `Dropped-Saturated`, `Dropped-Unacknowledged`, `Dropped-Shutdown`, `Dropped-TooLarge`,
   `Dropped-Quota`, `Faulted` — `Dropped-Unknown` also counts a rewrap next hop that cannot be
   reached, and `Faulted` is kept for faults of the mediator's own collaborators);
-  `didcomm.mediator.direct_push.outcomes`, tagged
-  `didcomm.push.outcome` (`Pushed`, `Push-Failed`, `Push-Skipped-Saturated`,
-  `Push-Skipped-NoEndpoint`, `Push-Skipped-Scheme`, `Push-Skipped-Unregistered`,
-  `Push-Skipped-NotHeld`, `Push-Skipped-Shutdown`); `didcomm.mediator.queue.purged`; and, for the library's in-memory types,
-  `didcomm.replay.saturated`, `didcomm.replay.clock_behind_refusals`,
+  `didcomm.mediator.push.outcomes`, one count per stored message handed to the push workers or
+  refused by them, tagged `didcomm.push.outcome` (`Pushed-Live`, `Pushed`, `Push-Failed`,
+  `Push-Skipped-Saturated`, `Push-Skipped-NoEndpoint`, `Push-Skipped-NoLiveSession`,
+  `Push-Skipped-Scheme`, `Push-Skipped-Unregistered`, `Push-Skipped-NotHeld`,
+  `Push-Skipped-Cooldown`, `Push-Skipped-Shutdown`); `didcomm.mediator.queue.purged`; and, for the
+  library's in-memory types, `didcomm.replay.saturated`, `didcomm.replay.clock_behind_refusals`,
   `didcomm.return_route.dropped_notifications`, `didcomm.mediator.queue.messages` and
-  `didcomm.mediator.queue.bytes`. No tag carries a DID.
+  `didcomm.mediator.queue.bytes`. No tag carries a DID. Earlier builds of this change named the push
+  settings `DirectPushConcurrency` / `DirectPushTimeout` and the push counter
+  `didcomm.mediator.direct_push.outcomes`, and counted a live push as a `Delivered-Live` forward;
+  none of these was released.
 - DX gate: `DidComm.Mediator.AspNetCore` joins the shipped-assembly list (eight assemblies); the new
   public members are allow-listed with a `TODO(#97)` marker until sample 11 demonstrates them, and
   the two `MessagePickupQueue` constructor entries follow its new signature.
@@ -147,7 +177,11 @@ Two independent QA passes added the `*QaTests` suites (component and end-to-end 
 fixes they led to. Two adversarial passes added the `*AdvTests` suites (`ForwardPeelAdvTests`,
 `MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
 `MediatorLifetimeAdvTests`, `OutboundGuardAdvTests`); `HttpTransportSingleAttemptTests`,
-`ForwardHandlerPumpContextTests` and `LogValuesTests` cover the fixes they led to.
+`ForwardHandlerPumpContextTests` and `LogValuesTests` cover the fixes they led to. The PR #109
+review's fixes added `LivePushTests` (`DidComm.Mediator.Tests/Pipeline`) and
+`MediatorLiveIsolationTests` (over the real endpoints: a live recipient whose key resolution stalls
+holds up no other recipient's storage or pickup), and a third adversarial pass on them added
+`LivePushAdv4Tests` and `MediatorLivePushAdv4Tests`.
 
 ### Changed — mediator service (#95)
 
@@ -201,7 +235,13 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
 - **`DidComm.AspNetCore`**: no public change. The body of the registry-aware
   `MapDidCommWebSocket(pattern)` moved into an internal core that `DidComm.Mediator.AspNetCore` calls
   with the mediator's receive options, through `InternalsVisibleTo`; ship the packages at one
-  version.
+  version. The WebSocket return-route session's bounded send looks at its token once more just
+  before handing the frame to the socket writer, so a send cancelled while it was packing queues
+  nothing (it throws `OperationCanceledException`, as `IReturnRouteSession` documents).
+- **`PickupDeliveryOptions.AllowLive` says what `true` costs.** With `true`, the default,
+  `MessagePickupQueue.DeliverAsync` pushes live itself, on the caller's thread, and packing that
+  `delivery` resolves the recipient's DID, so the call can take as long as the resolution.
+  `AddMediator()`'s pipeline passes `false` and pushes from its own workers.
 - Samples: the shared helper `PeerIdentityFactory` builds its `DIDCommMessaging` service entry
   through `DidCommServiceBuilder`; the DIDs it mints are unchanged.
 
@@ -272,6 +312,14 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
   every 1000th at Warning, the rest at Debug.
 - **The forward pump starts without the caller's execution context** (on `main` since #90), so it
   carries no ambient state (an `AsyncLocal`, an activity) of whoever first resolved the handler.
+- **A live lease can no longer be missed by a closing session** (on `main` since #94; found by a
+  code read in the PR #109 review's adversarial pass). A live push writes the session's leasing
+  flag and then reads its closed mark; the close writes the closed mark and then reads the leasing
+  flag, so that one of the two always sees the other and the close gives back every lease. Both
+  writes were volatile writes, which release/acquire ordering allows to move after the read that
+  follows them, so a lease could be left until its timeout. Both are now full fences
+  (`Interlocked.Exchange`). No deterministic test can force the reordering; the close and lease
+  tests still pass.
 
 ### Security — mediator service threat model and residuals (#95)
 
@@ -295,6 +343,32 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
   post there directly; a directory that points at the mediator itself allows a bounded onion
   re-entry (a misconfiguration); `IHttpClientFactory`'s request logging writes push endpoints at
   Information unless the host filters it (see Fixed, above).
+- **No recipient holds up the others** (PR #109 review). The forward pump only stores. Earlier
+  builds of this change made the live push on the pump, and packing a `delivery` resolves the
+  recipient's DID — a network method lets the recipient decide how long that takes — so one live
+  recipient whose DID resolved slowly left every other recipient's acknowledged forwards unstored,
+  and could get them dropped once the forward backlog filled. Live and direct pushes now run on the
+  push workers, per grant, one in flight each, under the push deadline. A third adversarial pass on
+  that design found two more gaps, both fixed: a per-grant backlog of 16 left part of a live
+  recipient's burst never pushed (the backlog is now sized from the pickup quotas), and grants
+  whose resolution stalls could hold every worker push after push (they are now paused for
+  2 × `PushTimeout` after a deadline). Residual: the workers are shared, so with K grants that stall
+  every push and W workers a healthy recipient's push can wait about ceil(K / W) × `PushTimeout`,
+  and once K reaches 3 × W the stalled grants, each back after its pause, can keep every worker busy
+  and that wait recurs; nothing is lost and pickup always works; an allow-list `IMediationPolicy`
+  closes it (grants are free under the default policy).
+- **Push jobs hold bounded values** (PR #109 review). A push job outlives the forward handler's
+  byte reservation. Earlier builds of this change kept the forward's id as it arrived, which the
+  message model does not bound: 16 jobs with 524 288-character ids kept 16 MiB alive while the store
+  counted only the payloads, up to about 1 GiB across the backlog those builds allowed. A job now
+  keeps two bare DIDs of at most 2 048 characters, the queue's record id (at most 64) and the
+  forward's id shortened for logs (at most 128), and refuses anything wider.
+- **A push abandoned at its deadline.** A direct push gives its lease back at once. A live push's
+  lease is the session's: it is given back when the abandoned send ends without the message going
+  out (at once for the library's WebSocket session, which honours the cancellation); a host session
+  that ignores the cancellation and reports the message sent later keeps it leased until
+  `messages-received`, its close or the lease timeout. An abandoned send may still reach the
+  recipient, which may then see the message twice (at-least-once).
 - **Filling a recipient's quota.** Delays are capped (residual, accepted by the owner: a sender can
   keep a recipient's quota occupied with messages it cannot see for at most `MaxForwardDelay` after
   it stops sending). Queue ids are 128-bit random, so they cannot be predicted from one grant to
@@ -310,11 +384,11 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
 - **Timing on `next`.** The 202 is committed before the forward processor and the sink run, the
   inline recipient lookup does the same work either way, and the inline paths for a known and an
   unknown `next` differ by a queue reservation against a log line that is now rate-limited; the
-  re-check and the direct push run after the 202.
+  re-check and the pushes run after the 202.
 - **Revocation race.** Closed for the pipeline: a forward admitted before `RevokeAndPurgeAsync` that
-  stores its record after the purge removes that record itself, and a direct push checks the
-  registration again and takes the record by id before sending, so it never sends what the purge
-  removed. Residuals: a delivery or push already being sent completes; a
+  stores its record after the purge removes that record itself, and a push, live or direct, checks
+  the registration again and takes the record by id before sending, so it never sends what the
+  purge removed. Residuals: a delivery or push already being sent completes; a
   peer granted mediation again during the call loses what was stored for the new grant before the
   purge (deny it in the policy first); if the second lookup or the removal fails, the record stays
   until it expires or ages out.
@@ -352,8 +426,8 @@ fixes they led to. Two adversarial passes added the `*AdvTests` suites (`Forward
   not bound to it (the same on `main`).
 - **Dependency graph.** Everything is a singleton; the sink, the push dispatcher and the metrics
   take nothing that leads back to the dispatcher, the handlers or the facade; `DidCommClient` and
-  the directory are resolved on the first push; the hosted service resolves when it starts; the
-  forward handler's factory is cycle-guarded.
+  the directory are resolved on the first direct push; the hosted service resolves when it starts;
+  the forward handler's factory is cycle-guarded.
 - **Endpoint composition.** Same-socket replies are on only for the mediator's WebSocket endpoint,
   with STOMP off there; sessions open only for authcrypt messages with `return_route: all` that
   passed replay admission (the #91 rules); HTTP keeps the real transport acknowledgement, and both
@@ -1389,8 +1463,8 @@ replay admission.
   ordinal hash probe whose work does not depend on whether the DID is present, and an unknown
   `next` is dropped silently (decision D4), so the response is not a registration oracle.
 - **`IForwardSink` / `NullForwardSink`**: where the handler hands a processed forward, off the
-  request path. The default drops it after logging the id; the mediator's sink (live push, queue,
-  direct push) is registered by `AddMediator()` (#95, above).
+  request path. The default drops it after logging the id; the mediator's sink (the queue, then a
+  live or direct push from its push workers) is registered by `AddMediator()` (#95, above).
 - **`ForwardProcessingResult.NotBefore`** — `delay_milli` resolved once at receipt to an absolute
   not-before on the `DidCommOptions` clock, for a queue to store (FR-ROUTE-10): `ForwardHandler`
   stamps it inline at admission, before any queueing, and hands the fixed schedule to the
