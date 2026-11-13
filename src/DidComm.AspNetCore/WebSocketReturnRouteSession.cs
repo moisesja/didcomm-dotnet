@@ -210,6 +210,10 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
             if (Mode != ReturnRouteMode.All)
                 return ReturnRouteSendResult.NotSent;
 
+            // A caller that gave up during the pack (a deadline it set) gets nothing queued: the last
+            // look at its token before the frame is handed to the writer, after the pack's own.
+            ct.ThrowIfCancellationRequested();
+
             // Never awaits the socket (JC-9). On success the slot passes to the queued frame, and the
             // writer gives it back when it dequeues the frame; a completed (closed) queue refuses.
             if (_queue.Writer.TryWrite(frame))

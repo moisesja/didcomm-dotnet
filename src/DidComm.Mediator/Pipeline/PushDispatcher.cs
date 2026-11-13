@@ -163,10 +163,17 @@ internal sealed record PushJob
 /// re-check, the live push and the direct push (the directory lookup is the host's own synchronous
 /// code: it cannot be interrupted, but its time counts). It is a timer whose callback cancels inside
 /// a <c>try</c>, never <c>CancelAfter</c>: a callback host code registered on the token must not take
-/// the process down. The deadline ends the push whether or not the session, the transport or the
+/// the process down. The deadline ends the job whether or not the session, the transport or the
 /// store honours the cancellation: a call still running then is abandoned (its result ignored, its
-/// fault observed), the push counts as failed and any lease is given back. An abandoned send may
-/// still reach the recipient later, so the recipient may see the message twice (delivery is
+/// fault observed) and the job counts as failed. What happens to the record then depends on who
+/// holds its lease. A direct push gives its own lease back at once. A live push's lease is the
+/// session's: it is given back when the abandoned send ends without the message going out — at
+/// once when the session honours the cancellation (the library's WebSocket session does, and
+/// queues nothing once the token is cancelled before the frame reaches its writer). A host session
+/// that ignores the cancellation and later reports the message sent keeps it: the record stays
+/// leased to that session, as for any live
+/// push, until <c>messages-received</c>, the session's close or the lease timeout. So an abandoned
+/// send may still reach the recipient, and the recipient may see the message twice (delivery is
 /// at-least-once); an abandoned take keeps the record until its lease ends. Giving a lease back is
 /// not cancelled by shutdown; the direct push's has a bound of its own of the same length.
 /// </para>
