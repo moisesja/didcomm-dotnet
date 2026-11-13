@@ -306,11 +306,12 @@ public sealed class ReplayClockSkewQaEndpointTests
     [Theory]
     [InlineData(-1)]   // the defaults: Window 300 s, ClockSkew 60 s → a 61 s step back
     [InlineData(0)]    // ClockSkew 0 (main's default behaviour) → a 1 s step back
-    public async Task Http_a_clock_step_back_of_ClockSkew_plus_one_after_a_purge_readmits_a_captured_request(int skewSeconds)
+    public async Task Http_a_clock_step_back_of_ClockSkew_plus_one_after_a_purge_refuses_the_captured_request(int skewSeconds)
     {
-        // DEFECT PROBE at the endpoint: ordinary forward time and other traffic purge the entry at
-        // created + Window + ClockSkew + 1; the host clock is then stepped back ClockSkew + 1 seconds
-        // (e.g. an NTP correction). The captured request is handled a second time.
+        // Was a defect probe (also on main): ordinary forward time and other traffic purge the entry
+        // at created + Window + ClockSkew + 1; the host clock is then stepped back ClockSkew + 1
+        // seconds (e.g. an NTP correction). The captured request used to be handled a second time; it
+        // is now refused as TooOld (its entry may have been forgotten).
         await using var host = await ReturnRouteTestHost.StartAsync(o =>
         {
             if (skewSeconds >= 0)
@@ -332,6 +333,8 @@ public sealed class ReplayClockSkewQaEndpointTests
 
         host.Recorder.Seen.Count(r => r.Message.Id == inbound.Id).Should().Be(1,
             "a captured request must reach the handler once; the replay after a {0} s clock step back got {1}", skew + 1, replay.Status);
+        replay.Status.Should().Be(HttpStatusCode.Accepted);
+        host.DropLines(inbound.Id).Should().ContainSingle().Which.Should().Contain(nameof(ReplayAdmission.TooOld));
     }
 
     [Theory]

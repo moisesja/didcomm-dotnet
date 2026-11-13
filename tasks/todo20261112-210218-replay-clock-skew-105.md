@@ -94,3 +94,11 @@ Build/verify (an item is done only when all three are green):
 - `dotnet test DidComm.sln -c Release --no-build`: DidComm.Core.Tests 2082/2082 (main: 1812), DidComm.Mediator.Tests 3033/3033 (main: 3029), DidComm.InteropTests 1015/1015 (main: 771 + the fixtures this checkout has; incl. the DX gates and the interop fixtures).
 - `dotnet pack DidComm.sln -c Release --no-build`: exit 0, seven packages (package validation against the 1.5.0 baseline passes; the changed types are unreleased).
 - `git diff --check`: clean.
+
+## PR #108 — review round 1 (reviewer comment of 2026-11-13T11:46Z against `a84165e`)
+
+Verdict: approve, no blocking finding; three non-blocking cleanups.
+
+- [x] R1-1. `ReplayAdmission.TooOld` documented only `created_time < now − Window`; it now also states the purge-instant case (`created_time + Window + ClockSkew` earlier than the latest purge instant) and that a large step back refuses even fresh messages.
+- [x] R1-2. Three regression names still said "readmits" while asserting refusal: the two core red-team tests and the endpoint step-back test (whose comment also still read "DEFECT PROBE"; it now also asserts the 202 and the `TooOld` drop line).
+- [x] R1-3. `ace0021` ("Plans", adding `tasks/todo20261112-pr107-rereview.md`) is the owner's commit, made the same way as `a2c6822` ("PR plans") on #94, which added the #106/#107 review records to `tasks/`. Per the owner's instruction it stays as is: not reverted, not rewritten (L-053).

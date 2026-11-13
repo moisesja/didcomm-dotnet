@@ -30,7 +30,7 @@ public sealed class ReplayClockSkewRedTeamTests
     [InlineData(0.0)]   // main's effective default (ExpiresClockSkew = 0)
     [InlineData(0.5)]   // floored to zero
     [InlineData(60.0)]  // the new default: needs a 61 s inversion
-    public void A_purge_at_a_later_now_followed_by_an_admission_at_an_earlier_now_readmits_the_message(double skewSeconds)
+    public void A_purge_at_a_later_now_followed_by_an_admission_at_an_earlier_now_refuses_the_replay(double skewSeconds)
     {
         var options = new ReplayProtectionOptions { ClockSkew = TimeSpan.FromSeconds(skewSeconds) };
         var skew = (long)Math.Floor(skewSeconds);
@@ -67,7 +67,7 @@ public sealed class ReplayClockSkewRedTeamTests
     // ClockSkew + 1 s used to make a message whose entry was purged in that last stretch admissible
     // again.
     [Fact]
-    public void A_normal_clock_that_steps_back_by_ClockSkew_plus_one_second_readmits_messages()
+    public void A_normal_clock_that_steps_back_by_ClockSkew_plus_one_second_does_not_readmit_a_purged_message()
     {
         var options = new ReplayProtectionOptions { ClockSkew = TimeSpan.Zero };
         var guard = new InMemoryReplayGuard(options);

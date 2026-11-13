@@ -14,7 +14,14 @@ public enum ReplayAdmission
     /// <summary>The same <c>(sender, message id)</c> was admitted within the retention.</summary>
     Duplicate,
 
-    /// <summary><c>created_time</c> is older than <c>now − Window</c>.</summary>
+    /// <summary>
+    /// <c>created_time</c> is older than <c>now − Window</c>; or, with a clock reading behind one the
+    /// guard has already purged at (concurrent readings out of order, or a host clock that stepped
+    /// back), <c>created_time + Window + ClockSkew</c> is earlier than that latest purge instant, so the
+    /// message may have been admitted and forgotten. After a step back of more than
+    /// <c>Window + ClockSkew</c> this refuses even a freshly stamped message until the clock catches up
+    /// (<see cref="InMemoryReplayGuard"/>, FR-RR-08 (4)).
+    /// </summary>
     TooOld,
 
     /// <summary><c>created_time</c> is later than <c>now + </c><see cref="ReplayProtectionOptions.ClockSkew"/>.</summary>
