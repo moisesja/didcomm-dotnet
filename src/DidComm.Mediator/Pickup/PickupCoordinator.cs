@@ -70,6 +70,7 @@ internal sealed class PickupCoordinator
     private readonly PickupSizing _sizing;
     private readonly int _maxDeliveryBatch;
     private readonly TimeSpan _leaseTimeout;
+    private readonly TimeSpan? _maxMessageAge;
     private readonly int _maxAckIds;
     private readonly DidCommOptions _didCommOptions;
     private readonly Func<string> _newId;
@@ -100,6 +101,7 @@ internal sealed class PickupCoordinator
         // Read once, after validation: a host that changes the options object later changes nothing here.
         _maxDeliveryBatch = options.MaxDeliveryBatch;
         _leaseTimeout = options.LeaseTimeout;
+        _maxMessageAge = options.MaxMessageAge;
         _maxAckIds = options.EffectiveMaxAckIds;
         _didCommOptions = didCommOptions;
         _sizing = new PickupSizing(options, didCommOptions.MaxReceiveBytes);
@@ -306,9 +308,15 @@ internal sealed class PickupCoordinator
         try
         {
             var now = _didCommOptions.Now();
+            // "Expired at admission" is the message's own expiry only: the age limit, counted from
+            // now, cannot have passed yet.
             var expiresAt = ExpiryInstant(options.ExpiresTime);
             if (expiresAt is { } at && now >= at)
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Expired, null, null);
+            // The mailbox age limit is folded into the record's expiry (FR-PICK-10): every expiry
+            // path of the store — lease selection, status, the sweeps, PurgeExpiredAsync — then
+            // applies it to waiting, leased and passed-over records alike, by time only.
+            var storedExpiry = Earliest(expiresAt, AgedOutAt(now));
 
             // A DID URL is not normalised into its DID, and an over-long value is never looked up.
             if (!BareDid.IsBareDid(recipientDid))
@@ -329,7 +337,7 @@ internal sealed class PickupCoordinator
             for (var attempt = 0; attempt < 2 && outcome == EnqueueOutcome.DuplicateId; attempt++)
             {
                 id = NewMessageId();
-                var record = new QueuedMessage(id, peerDid, recipientDid, payload, now, options.NotBefore, expiresAt);
+                var record = new QueuedMessage(id, peerDid, recipientDid, payload, now, options.NotBefore, storedExpiry);
                 outcome = await _store.EnqueueAsync(record, lease, now, ct).ConfigureAwait(false);
             }
 
@@ -672,6 +680,23 @@ internal sealed class PickupCoordinator
 
     private static bool IsUsableId(string? id, int maxLength)
         => !string.IsNullOrEmpty(id) && id.Length <= maxLength && UnreservedUriChars.IsUnreserved(id);
+
+    // The mailbox age limit as an instant on the mediator's clock: admission time plus the limit,
+    // with no skew (the clock that admits is the clock that sweeps). Saturating: a limit that would
+    // run past the end of time ends there (a clock set close to DateTimeOffset.MaxValue).
+    private DateTimeOffset? AgedOutAt(DateTimeOffset now)
+    {
+        if (_maxMessageAge is not { } age)
+            return null;
+        return age.Ticks >= DateTimeOffset.MaxValue.UtcTicks - now.UtcTicks
+            ? DateTimeOffset.MaxValue
+            : new DateTimeOffset(now.UtcTicks + age.Ticks, TimeSpan.Zero);
+    }
+
+    private static DateTimeOffset? Earliest(DateTimeOffset? first, DateTimeOffset? second)
+        => first is not { } a ? second
+            : second is not { } b ? a
+            : a <= b ? a : b;
 
     // FR-ROUTE-09 as an instant: expires_time counts whole seconds and is expired once
     // now - skew > expires, i.e. from the start of second (expires + skew + 1).

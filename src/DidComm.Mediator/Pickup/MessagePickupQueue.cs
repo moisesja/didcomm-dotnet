@@ -18,8 +18,12 @@ namespace DidComm.Mediator.Pickup;
 /// Records are kept in the <see cref="IMessageStore"/>; this class adds the rules around it: who a
 /// message belongs to (the grant its recipient DID is registered under, looked up when the message
 /// arrives), what may be retained (the size and quota bounds) and where it goes first (a live
-/// session, else the queue). To drop what is held for a DID or a grant, call the store's
-/// <see cref="IMessageStore.PurgeRecipientAsync"/> / <see cref="IMessageStore.PurgeGrantAsync"/>.
+/// session, else the queue). A message leaves the queue when its recipient acknowledges it, when it
+/// expires — its own <c>expires_time</c>, or the mailbox age limit
+/// (<see cref="MessagePickupOptions.MaxMessageAge"/>, 30 days by default) — or when the host
+/// removes it. To end a peer's mediation and drop everything held for it, call
+/// <see cref="RevokeAndPurgeAsync"/>; to drop what is held for one DID, the store's
+/// <see cref="IMessageStore.PurgeRecipientAsync"/>.
 /// </para>
 /// <para>
 /// Thread-safe. It takes no dependency on the protocol dispatcher, a handler or
@@ -173,8 +177,8 @@ public readonly record struct GrantRevocation(bool Revoked, int Purged)
 }
 
 /// <summary>When a message handed to <see cref="MessagePickupQueue.DeliverAsync"/> is due and when it expires.</summary>
-/// <param name="NotBefore">Do not deliver before this instant (a forward's <c>delay_milli</c>, FR-ROUTE-10); <c>null</c> for at once. A message that is not yet due is never pushed live: it is queued and can be picked up once due.</param>
-/// <param name="ExpiresTime">The message's <c>expires_time</c> in UTC epoch seconds (FR-ROUTE-09), judged with <c>DidCommOptions.ExpiresClockSkew</c> exactly as the forward path judges it; <c>null</c> for no expiry. An expired message is not accepted, and one that expires while queued is never delivered.</param>
+/// <param name="NotBefore">Do not deliver before this instant (a forward's <c>delay_milli</c>, FR-ROUTE-10); <c>null</c> for at once. A message that is not yet due is never pushed live: it is queued and can be picked up once due. One due only after the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>) ages out first and is never delivered.</param>
+/// <param name="ExpiresTime">The message's <c>expires_time</c> in UTC epoch seconds (FR-ROUTE-09), judged with <c>DidCommOptions.ExpiresClockSkew</c> exactly as the forward path judges it; <c>null</c> for no expiry of its own. An expired message is not accepted, and one that expires while queued is never delivered. The mailbox age limit applies either way.</param>
 /// <param name="AllowLive"><c>false</c> to queue the message even when the recipient has a live connection.</param>
 public sealed record PickupDeliveryOptions(DateTimeOffset? NotBefore = null, long? ExpiresTime = null, bool AllowLive = true)
 {
