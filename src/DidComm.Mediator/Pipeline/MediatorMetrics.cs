@@ -46,6 +46,12 @@ internal static class PushOutcomes
     /// </summary>
     internal const string SkippedNotHeld = "Push-Skipped-NotHeld";
 
+    /// <summary>
+    /// The recipient's pushes were paused: one of its pushes (live or direct) reached the deadline
+    /// shortly before, so its waiting and new pushes skip the workers for a cooldown; the message stays queued.
+    /// </summary>
+    internal const string SkippedCooldown = "Push-Skipped-Cooldown";
+
     /// <summary>The mediator was shutting down: the push was abandoned or never started; the message stays queued.</summary>
     internal const string SkippedShutdown = "Push-Skipped-Shutdown";
 }

@@ -109,7 +109,8 @@ internal sealed record PushJob
 /// <strong>What a live recipient can rely on.</strong> Every message stored while it has a live
 /// session with live delivery on is pushed to that session, in the order it was stored, one at a
 /// time — unless a push fails or reaches the deadline, in which case that message stays queued for
-/// pickup. Delivery is at-least-once: a
+/// pickup, and so do the ones stored during the cooldown that a deadline starts (below). Delivery is
+/// at-least-once: a
 /// pushed message stays leased to the session until <c>messages-received</c>, and goes back to the
 /// queue if the session closes or the lease times out first.
 /// </para>
@@ -120,6 +121,23 @@ internal sealed record PushJob
 /// worker at a time (for at most <see cref="MediatorOptions.PushTimeout"/> per push), never all of
 /// them: the other grants' pushes go on with the remaining workers. A grant's own pushes go out one
 /// after another, in the order they were handed over.
+/// </para>
+/// <para>
+/// <strong>Cooldown.</strong> The workers are shared, and a peer controls how long its own pushes
+/// take (its DID's resolution, its endpoint). So a grant whose push — live or direct — reaches the
+/// deadline is paused for <see cref="CooldownPushTimeouts"/> × <see cref="MediatorOptions.PushTimeout"/>
+/// (one minute at the defaults): its waiting jobs, and those handed over meanwhile, end at once with
+/// <c>Push-Skipped-Cooldown</c> and never take a worker, and their messages stay queued for pickup.
+/// A peer that stalls on purpose therefore holds a worker at most once every three push timeouts,
+/// not continuously. Two timeouts, not more: an honest recipient whose resolution was slow once (a
+/// cold cache) gets its live pushes back within a minute at the defaults, the same order as the
+/// lease timeout after which an unacknowledged push is delivered again anyway. The residual: with K
+/// grants that stall every push and W workers, a healthy recipient's push can still wait up to about
+/// ceil(K / W) × <see cref="MediatorOptions.PushTimeout"/> for a worker, and once K reaches 3 × W the
+/// stalled grants, each back after its cooldown, can keep every worker busy, so that wait recurs.
+/// Nothing is lost and pickup always works; a mediation policy that enrols only known peers closes
+/// it (grants are free under the default policy). A deadline reached while re-checking the
+/// registration (the host's own store) starts no cooldown.
 /// </para>
 /// <para>
 /// <strong>Direct push: it takes exactly the record it sends (L-057).</strong> The endpoint comes
@@ -177,6 +195,9 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     /// <summary>How much longer than the push deadline a direct push's lease on its record runs.</summary>
     internal static readonly TimeSpan LeaseMargin = TimeSpan.FromSeconds(30);
 
+    /// <summary>How many push timeouts a grant whose push reached the deadline is paused for.</summary>
+    internal const int CooldownPushTimeouts = 2;
+
     private static readonly TimeSpan ShutdownGrace = TimeSpan.FromSeconds(5);
 
     // One request to exactly the directory's endpoint: no retry, no redirect, no circuit breaker
@@ -193,6 +214,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     private readonly TimeProvider _time;
     private readonly bool _directPush;
     private readonly TimeSpan _timeout;
+    private readonly TimeSpan _cooldown;
     private readonly int _capacity;
     private readonly int _perGrant;
     private readonly object _gate = new();
@@ -200,6 +222,11 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     // have a waiting job and none running, in the order they are to be served.
     private readonly Dictionary<string, GrantLine> _grants = new(StringComparer.Ordinal);
     private readonly Queue<GrantLine> _ready = new();
+    // Under _gate: the grants paused after a deadline, until when (on _time). Entries are added only
+    // by a push that held a worker for a whole deadline, at most PushConcurrency per PushTimeout, and
+    // expired ones are dropped on each addition, so at most about (CooldownPushTimeouts + 1) x
+    // PushConcurrency are ever held.
+    private readonly Dictionary<string, DateTimeOffset> _cooldowns = new(StringComparer.Ordinal);
     // One count per entry put on _ready; a worker takes one, then a grant off _ready.
     private readonly SemaphoreSlim _readySignal = new(0);
     private readonly CancellationTokenSource _shutdown = new();
@@ -217,6 +244,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     private long _schemeLines;
     private long _directoryFaultLines;
     private long _storeFaultLines;
+    private long _cooldownLines;
 
     /// <summary>Create the dispatcher; its workers start here.</summary>
     /// <param name="services">The container, for the directory and the facade, resolved on the first direct push.</param>
@@ -287,6 +315,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         settings.ValidatePipelineRanges();
         _directPush = settings.DirectPush;
         _timeout = settings.PushTimeout;
+        _cooldown = TimeSpan.FromTicks(settings.PushTimeout.Ticks * CooldownPushTimeouts);
         var concurrency = settings.PushConcurrency;
 
         _services = services;
@@ -344,6 +373,10 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             {
                 refusal = PushOutcomes.SkippedShutdown;
             }
+            else if (IsCoolingLocked(job.GrantPeerDid))
+            {
+                refusal = PushOutcomes.SkippedCooldown;
+            }
             else
             {
                 _grants.TryGetValue(job.GrantPeerDid, out var line);
@@ -384,6 +417,10 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             var level = MediatorLog.RateLimited(ref _saturatedLines, out var n);
             MediatorLog.Write(_logger, level, "Push of forward {ForwardId} skipped: the push backlog is full; the message stays queued for pickup. {Count} such skips.", job.ForwardId, n);
         }
+        else if (refusal == PushOutcomes.SkippedCooldown)
+        {
+            MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} skipped: the recipient's pushes are paused after one reached the deadline; the message stays queued for pickup.", job.ForwardId);
+        }
         else
         {
             MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} skipped: the mediator is shutting down; the message stays queued for pickup.", job.ForwardId);
@@ -408,6 +445,16 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         {
             lock (_gate)
                 return _outstanding;
+        }
+    }
+
+    /// <summary>Test seam: the grants held in the cooldown table (expired ones included until the next addition).</summary>
+    internal int CooldownEntries
+    {
+        get
+        {
+            lock (_gate)
+                return _cooldowns.Count;
         }
     }
 
@@ -599,6 +646,11 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             // A session, transport or store fault, a non-2xx answer the transport turned into an
             // exception, the deadline. Type name only: a transport error names the URL.
             var reason = deadline.IsCancellationRequested ? "Timeout" : ex.GetType().Name;
+            // The peer may control this delay (its resolution, its endpoint): pause the grant so it
+            // cannot hold a shared worker push after push. Not for the registration check: that is
+            // the host's own store, the same for every grant.
+            if (deadline.IsCancellationRequested && !_shutdownToken.IsCancellationRequested && stage != Stage.Check)
+                StartCooldown(job, forwardId);
             _metrics.RecordPush(PushOutcomes.Failed);
             var level = MediatorLog.RateLimited(ref _failedLines, out var n);
             switch (stage)
@@ -621,6 +673,46 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             if (lease is not null)
                 await ReleaseQuietlyAsync(job, lease, forwardId).ConfigureAwait(false);
         }
+    }
+
+    // Under _gate: whether the grant is paused now; an entry that has run out is dropped.
+    private bool IsCoolingLocked(string grantPeerDid)
+    {
+        if (!_cooldowns.TryGetValue(grantPeerDid, out var until))
+            return false;
+        if (_time.GetUtcNow() < until)
+            return true;
+        _cooldowns.Remove(grantPeerDid);
+        return false;
+    }
+
+    // A push of this grant reached the deadline: pause the grant and end its waiting jobs now, so none
+    // of them takes a worker before the cooldown ends. The running job is the caller's; it ends
+    // through Finish as usual.
+    private void StartCooldown(PushJob job, string forwardId)
+    {
+        var discarded = 0;
+        lock (_gate)
+        {
+            var now = _time.GetUtcNow();
+            foreach (var (grant, until) in _cooldowns.ToArray())
+            {
+                if (until <= now)
+                    _cooldowns.Remove(grant);
+            }
+            _cooldowns[job.GrantPeerDid] = SaturatingAdd(now, _cooldown);
+            if (_grants.TryGetValue(job.GrantPeerDid, out var line))
+            {
+                discarded = line.Waiting.Count;
+                line.Waiting.Clear();
+                _outstanding -= discarded;
+            }
+        }
+
+        for (var i = 0; i < discarded; i++)
+            _metrics.RecordPush(PushOutcomes.SkippedCooldown);
+        var level = MediatorLog.RateLimited(ref _cooldownLines, out var n);
+        MediatorLog.Write(_logger, level, "Pushes paused for {Cooldown} for the recipient of forward {ForwardId}: its push reached the deadline. {Discarded} waiting pushes skipped; those messages, and any stored during the pause, stay queued for pickup. {Count} such pauses.", _cooldown, forwardId, discarded, n);
     }
 
     // Which step of a job was running, for its failure line.

@@ -186,7 +186,9 @@ public sealed class MediatorOptions
 
     /// <summary>
     /// How long one push (live or direct) may take before it is abandoned and the message left
-    /// queued for pickup. Default 30 seconds; greater than zero and at most 5 minutes.
+    /// queued for pickup. Default 30 seconds; greater than zero and at most 5 minutes. A recipient
+    /// whose push reaches it has its pushes paused for twice as long (its messages wait for pickup
+    /// meanwhile), so a recipient that stalls its own pushes cannot hold a push worker continuously.
     /// </summary>
     public TimeSpan PushTimeout { get; set; } = TimeSpan.FromSeconds(30);
 

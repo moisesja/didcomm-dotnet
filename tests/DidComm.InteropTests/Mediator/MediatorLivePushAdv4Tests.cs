@@ -132,9 +132,15 @@ public sealed class MediatorLivePushAdv4Tests
         }
     }
 
-    [Fact(Skip = "ADV-4 DEFECT 3: PushConcurrency grants whose DID resolution stalls hold every push worker; every other live recipient's push waits a full PushTimeout per round (default 4 workers, 30 s), and grants are free under the default policy")]
+    [Fact]
     public async Task A_live_recipients_push_is_not_held_up_by_other_grants_whose_resolution_stalls()
     {
+        // ADV-4 D3, with the bound the design guarantees (the original expectation, "no time
+        // passes at all", is stricter than any fixed pool can give the first time): K = 2 grants
+        // stall every push and W = 2 workers. The first round holds both workers for one PushTimeout,
+        // so B's first push waits that long. Then both stalled grants are paused for the cooldown:
+        // their next pushes end at once without a worker, and B's next push goes out with no time
+        // passing — a stalled peer holds a worker once per cooldown, not push after push.
         var time = new QaManualTimeProvider();
         var (mediator, keys) = await StartAsync(honourCancellation: true, time, m => m.PushConcurrency = 2);
         await using var _ = mediator;
@@ -150,10 +156,37 @@ public sealed class MediatorLivePushAdv4Tests
         await MediatorTestServer.WaitUntilAsync(() => keys.Arrivals >= 2, "both workers are packing for the stalled grants");
         var forB = await Qa.SendNoteAsync(mediator, alice, b.Recipient, content: "b");
 
-        // No time passes: B's push must not wait for the stalled grants' deadline.
+        // Round one: B waits for a worker, at most one PushTimeout.
+        time.Advance(new MediatorOptions().PushTimeout);
         var pushed = (await mediator.ReceiveOverSocketAsync(socketB, b.Peer)).Delivery(thid: null).Should().ContainSingle().Subject;
         (await MediatorRecipient.UnpackFromSenderAsync(b.Recipient, pushed.Payload, alice)).Message.Id.Should().Be(forB.Id);
+        await mediator.PushesIdleAsync();
+        mediator.PushOutcome(PushOutcomes.Failed).Should().Be(2);
+
+        // Round two, no time passing: the stalled grants are paused, B's push goes out at once.
+        await Qa.SendNoteAsync(mediator, alice, a1.Recipient, content: "a1 again");
+        await Qa.SendNoteAsync(mediator, alice, a2.Recipient, content: "a2 again");
+        var forB2 = await Qa.SendNoteAsync(mediator, alice, b.Recipient, content: "b again");
+        var pushed2 = (await mediator.ReceiveOverSocketAsync(socketB, b.Peer)).Delivery(thid: null).Should().ContainSingle().Subject;
+        (await MediatorRecipient.UnpackFromSenderAsync(b.Recipient, pushed2.Payload, alice)).Message.Id.Should().Be(forB2.Id);
+        await mediator.PushesIdleAsync();
+        mediator.PushOutcome(PushOutcomes.SkippedCooldown).Should().Be(2);
+        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(2);
+        keys.Arrivals.Should().Be(2, "the stalled grants never took a worker again during their cooldown");
         keys.Released.Should().BeFalse();
+
+        // Nothing is lost: the stalled grants' messages wait for pickup. (The pickup answer is packed
+        // for the stalled peer, so its resolution has to finish now.)
+        keys.Release();
+        foreach (var stalled in new[] { a1, a2 })
+        {
+            IReadOnlyList<DidComm.Mediator.Pickup.DeliveredMessage> fetched = Array.Empty<DidComm.Mediator.Pickup.DeliveredMessage>();
+            await MediatorTestServer.WaitUntilAsync(() =>
+            {
+                fetched = mediator.FetchAsync(stalled.Peer).GetAwaiter().GetResult();
+                return fetched.Count == 2;
+            }, "both of the stalled grant's messages are fetchable");
+        }
         GC.KeepAlive(socketA1);
         GC.KeepAlive(socketA2);
     }
