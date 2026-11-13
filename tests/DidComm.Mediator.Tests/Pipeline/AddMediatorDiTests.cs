@@ -194,6 +194,34 @@ public sealed class AddMediatorDiTests
     }
 
     [Fact]
+    public void A_host_forward_sink_registered_first_is_refused()
+    {
+        var services = Collection(s => s.AddSingleton<IForwardSink, NullForwardSink>());
+
+        var act = () => services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            b.AddMediator(o => o.CoordinateMediation.RoutingDids.Add(Mediator1));
+        });
+
+        act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("IForwardSink");
+    }
+
+    [Fact]
+    public async Task The_forward_sink_in_effect_is_the_mediator_sink_and_survives_repeated_calls()
+    {
+        await using var sp = Build(b =>
+        {
+            b.AddMediator(o => o.CoordinateMediation.RoutingDids.Add(Mediator1));
+            b.AddMediator();
+        });
+
+        sp.GetRequiredService<IForwardSink>().Should().BeOfType<MediatorForwardSink>()
+            .Which.Should().BeSameAs(sp.GetRequiredService<MediatorForwardSink>());
+    }
+
+    [Fact]
     public async Task AddRoutingMediator_after_AddMediator_changes_nothing()
     {
         await using var sp = Build(b =>
@@ -380,8 +408,34 @@ public sealed class AddMediatorDiTests
         {
             sp.GetRequiredService<ProtocolDispatcher>();
             sp.GetRequiredService<ForwardHandler>();
-            sp.GetRequiredService<IForwardSink>();
+            sp.GetRequiredService<IForwardSink>().Should().BeOfType<MediatorForwardSink>();
+            sp.GetRequiredService<DirectPushDispatcher>();
             sp.GetRequiredService<DidCommClient>();
         }).WaitAsync(Timeout);
+    }
+
+    [Fact]
+    public async Task With_direct_push_on_the_graph_resolves_and_a_directory_taking_the_dispatcher_is_not_built_early()
+    {
+        await using var sp = Build(
+            b => b.AddMediator(o =>
+            {
+                o.CoordinateMediation.RoutingDids.Add(Mediator1);
+                o.DirectPush = true;
+            }),
+            before: s => s.AddSingleton<IRecipientEndpointDirectory, DirectoryTakingTheDispatcher>());
+
+        await Task.Run(() =>
+        {
+            sp.GetRequiredService<ProtocolDispatcher>();
+            sp.GetRequiredService<IForwardSink>();
+        }).WaitAsync(Timeout);
+
+        await Task.Run(() => sp.GetRequiredService<IRecipientEndpointDirectory>()).WaitAsync(Timeout);
+    }
+
+    private sealed class DirectoryTakingTheDispatcher(ProtocolDispatcher dispatcher) : IRecipientEndpointDirectory
+    {
+        public Uri? Find(string grantPeerDid) => dispatcher is null ? null : null;
     }
 }

@@ -1,10 +1,13 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using DidComm.Extensions.DependencyInjection;
+using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Tests.Coordination;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
+using DidComm.Messages;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using NetCrypto;
 using NetDid.Core;
@@ -229,6 +232,50 @@ internal sealed class ScriptedTransportRouter(Func<TransportRequest, Cancellatio
     {
         Requests.Enqueue(request);
         return send(request, ct);
+    }
+}
+
+/// <summary>An <see cref="IMediationStore"/> over the real in-memory store whose recipient lookup a test can replace (to make it throw or park).</summary>
+internal sealed class ScriptedMediationStore : IMediationStore
+{
+    private readonly InMemoryMediationStore _inner = new(new CoordinateMediationOptions());
+
+    public Func<string, CancellationToken, ValueTask<MediationGrant?>>? OnFind { get; set; }
+
+    public ValueTask<MediationGrant?> GetGrantAsync(string peerDid, CancellationToken ct) => _inner.GetGrantAsync(peerDid, ct);
+    public ValueTask<MediationGrant?> GrantAsync(MediationGrant grant, CancellationToken ct) => _inner.GrantAsync(grant, ct);
+    public ValueTask<bool> RevokeAsync(string peerDid, CancellationToken ct) => _inner.RevokeAsync(peerDid, ct);
+    public ValueTask<IReadOnlyList<RecipientStoreOutcome>> UpdateRecipientsAsync(string peerDid, IReadOnlyList<RecipientUpdate> updates, CancellationToken ct) => _inner.UpdateRecipientsAsync(peerDid, updates, ct);
+    public ValueTask<RecipientPage> ListRecipientsAsync(string peerDid, int offset, int limit, CancellationToken ct) => _inner.ListRecipientsAsync(peerDid, offset, limit, ct);
+
+    public ValueTask<MediationGrant?> FindGrantByRecipientDidAsync(string recipientDid, CancellationToken ct)
+        => OnFind is { } hook ? hook(recipientDid, ct) : _inner.FindGrantByRecipientDidAsync(recipientDid, ct);
+}
+
+/// <summary>A live (WebSocket-like) return-route session that takes every message and records it.</summary>
+internal sealed class LiveTestSession(string peerDid, string localDid) : IReturnRouteSession
+{
+    private readonly CancellationTokenSource _closed = new();
+
+    public ConcurrentQueue<Message> Sent { get; } = new();
+    public string PeerDid { get; } = peerDid;
+    public string LocalDid { get; } = localDid;
+    public ReturnRouteMode Mode => ReturnRouteMode.All;
+    public string? Thread => null;
+    public ReturnRouteTransport Transport => ReturnRouteTransport.WebSocket;
+    public bool IsLive => true;
+    public CancellationToken Closed => _closed.Token;
+
+    public ValueTask<bool> TrySendAsync(Message message, CancellationToken ct)
+    {
+        Sent.Enqueue(message);
+        return ValueTask.FromResult(true);
+    }
+
+    public ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
+    {
+        Sent.Enqueue(message);
+        return ValueTask.FromResult(ReturnRouteSendResult.Sent);
     }
 }
 

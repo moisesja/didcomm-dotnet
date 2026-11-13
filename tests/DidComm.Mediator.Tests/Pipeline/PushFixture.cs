@@ -1,5 +1,6 @@
 using DidComm.Exceptions;
 using DidComm.Extensions.DependencyInjection;
+using DidComm.Facade;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
@@ -8,6 +9,7 @@ using DidComm.TestSupport;
 using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Diagnostics.Metrics;
 
 namespace DidComm.Mediator.Tests.Pipeline;
@@ -44,6 +46,11 @@ internal sealed class PushFixture : IAsyncDisposable
     public MessagePickupQueue Queue => Services.GetRequiredService<MessagePickupQueue>();
     public IMediationStore Mediation => Services.GetRequiredService<IMediationStore>();
     public InMemoryMessageStore Store => (InMemoryMessageStore)Services.GetRequiredService<IMessageStore>();
+    public MediatorForwardSink Sink => Services.GetRequiredService<MediatorForwardSink>();
+    public DidCommOptions Options => Services.GetRequiredService<IOptions<DidCommOptions>>().Value;
+
+    /// <summary>Every forward outcome recorded, in order.</summary>
+    public IReadOnlyList<string?> ForwardOutcomeLog => Recorder.TagValues("didcomm.forward.outcomes", "didcomm.forward.outcome");
 
     /// <summary>The number of pushes recorded with <paramref name="outcome"/>.</summary>
     public long Pushes(string outcome) => Recorder.Sum(MediatorMetrics.DirectPushOutcomesInstrument, MediatorMetrics.PushOutcomeTag, outcome);
@@ -56,12 +63,18 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <param name="configure">More mediator settings (direct push is already on).</param>
     /// <param name="services">More registrations, made before <c>AddDidComm</c>.</param>
     /// <param name="blockPrivateNetworks">The SSRF guard's switch; off by default so the scripted endpoints need no DNS.</param>
+    /// <param name="didComm">More facade settings; the facade clock is already the manual clock.</param>
+    /// <param name="secrets">The private keys the container holds; an empty set when not given.</param>
+    /// <param name="mediatorDid">The routing DID.</param>
     public static PushFixture Create(
         Func<TransportRequest, CancellationToken, Task<TransportResult>>? send = null,
         Func<string, Uri?>? directory = null,
         Action<MediatorOptions>? configure = null,
         Action<IServiceCollection>? services = null,
-        bool blockPrivateNetworks = false)
+        bool blockPrivateNetworks = false,
+        Action<DidCommOptions>? didComm = null,
+        InMemorySecretsResolver? secrets = null,
+        string mediatorDid = MediatorDid)
     {
         var time = new ManualTimeProvider();
         var meters = new TestMeterFactory();
@@ -81,11 +94,16 @@ internal sealed class PushFixture : IAsyncDisposable
         collection.AddDidComm(b =>
         {
             b.UseNetDidResolver();
-            b.UseSecretsResolver(new InMemorySecretsResolver());
-            b.Configure(o => o.OutboundEndpointPolicy.BlockPrivateNetworks = blockPrivateNetworks);
+            b.UseSecretsResolver(secrets ?? new InMemorySecretsResolver());
+            b.Configure(o =>
+            {
+                o.OutboundEndpointPolicy.BlockPrivateNetworks = blockPrivateNetworks;
+                o.Clock = time.GetUtcNow;
+                didComm?.Invoke(o);
+            });
             b.AddMediator(o =>
             {
-                o.CoordinateMediation.RoutingDids.Add(MediatorDid);
+                o.CoordinateMediation.RoutingDids.Add(mediatorDid);
                 o.DirectPush = true;
                 configure?.Invoke(o);
             });
@@ -96,7 +114,7 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <summary>Enrol <paramref name="peerDid"/> (straight through the store) and register <paramref name="recipientDids"/> under its grant.</summary>
     public async Task EnrolAsync(string peerDid, params string[] recipientDids)
     {
-        var grant = await Mediation.GrantAsync(new MediationGrant(peerDid, new[] { MediatorDid }), CancellationToken.None)
+        var grant = await Mediation.GrantAsync(new MediationGrant(peerDid, Services.GetRequiredService<IMediatorIdentity>().RoutingDids), CancellationToken.None)
             ?? throw new InvalidOperationException("The mediation store is full.");
         _ = grant;
         if (recipientDids.Length > 0)

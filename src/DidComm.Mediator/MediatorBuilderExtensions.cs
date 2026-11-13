@@ -29,6 +29,9 @@ public static class MediatorBuilderExtensions
     private static readonly Func<IServiceProvider, object> s_noRecipientRoutingKeys =
         static _ => new StaticRecipientRoutingKeyProvider(null);
 
+    private static readonly Func<IServiceProvider, object> s_forwardSink =
+        static sp => sp.GetRequiredService<MediatorForwardSink>();
+
     /// <summary>
     /// Make this agent a complete mediator (FR-MED-07, FR-PICK-09/10): Coordinate Mediation 3.0,
     /// the routing mediator that relays forwards, Message Pickup 3.0, the built-in protocols (Trust
@@ -109,7 +112,7 @@ public static class MediatorBuilderExtensions
     /// <returns>The same builder, for chaining.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentException">A setting is invalid (<see cref="MediatorOptions.Validate"/>; every invalid setting is reported this way, including the replay protection and session settings); no routing DID is configured and nothing else can supply one (no registered <see cref="IMediatorIdentity"/> and no other configuration of <see cref="CoordinateMediationOptions"/>); or <see cref="MediatorOptions.RewrapMode"/> is <see cref="RewrapMode.ReanoncryptToNext"/> while the host registered an <see cref="IRecipientRoutingKeyProvider"/>, whose routing keys would then be ignored.</exception>
-    /// <exception cref="InvalidOperationException"><c>AddRoutingMediator()</c> was already called on this collection, or another registration conflicts with the mediator's (see <c>AddCoordinateMediation()</c>).</exception>
+    /// <exception cref="InvalidOperationException"><c>AddRoutingMediator()</c> was already called on this collection, an <see cref="IForwardSink"/> is already registered, or another registration conflicts with the mediator's (see <c>AddCoordinateMediation()</c>).</exception>
     public static DidCommBuilder AddMediator(this DidCommBuilder builder, Action<MediatorOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -130,6 +133,7 @@ public static class MediatorBuilderExtensions
 
         // Conflicts, before anything is added: a refused call leaves the collection as it was.
         RejectEarlierRoutingMediator(services);
+        RejectForeignSink(services);
         RejectRewrapWithRoutingKeyProvider(services, probe);
         RequireRoutingDids(services, probe);
 
@@ -172,6 +176,13 @@ public static class MediatorBuilderExtensions
             sp.GetRequiredService<MediatorMetrics>(),
             sp.GetService<ILogger<DirectPushDispatcher>>(),
             sp.GetService<TimeProvider>() ?? TimeProvider.System));
+        services.TryAddSingleton(sp => new MediatorForwardSink(
+            sp.GetRequiredService<MessagePickupQueue>(),
+            sp.GetRequiredService<DirectPushDispatcher>(),
+            sp.GetRequiredService<ForwardMetrics>(),
+            sp.GetRequiredService<IOptions<MediatorOptions>>(),
+            sp.GetService<ILogger<MediatorForwardSink>>()));
+        services.TryAdd(ServiceDescriptor.Singleton(typeof(IForwardSink), s_forwardSink));
 
         // Validates the settings this call can see; its TryAdds of the options and the defaults
         // registered above are no-ops.
@@ -212,6 +223,23 @@ public static class MediatorBuilderExtensions
                 "AddRoutingMediator() was called before AddMediator(), which configures the routing mediator itself (the forward settings come from " +
                 "MediatorOptions.RewrapMode and MaxForwardDelay). Remove the AddRoutingMediator() call; register an IRecipientRoutingKeyProvider " +
                 "before AddMediator() for per-recipient routing keys.");
+        }
+    }
+
+    // The sink is the pipeline: a host's own sink would take every forward away from the queue
+    // without a word. One registered after this call is caught when the mediator starts.
+    private static void RejectForeignSink(IServiceCollection services)
+    {
+        foreach (var descriptor in services)
+        {
+            if (descriptor.ServiceType != typeof(IForwardSink) || descriptor.IsKeyedService)
+                continue;
+            if (ReferenceEquals(descriptor.ImplementationFactory, s_forwardSink))
+                continue;
+            throw new InvalidOperationException(
+                "An IForwardSink is already registered, and AddMediator() relays every forward through its own sink (the pickup queue, live " +
+                "delivery and direct push). Remove that registration; to push messages to recipients' own endpoints, register an " +
+                "IRecipientEndpointDirectory and set MediatorOptions.DirectPush = true.");
         }
     }
 
