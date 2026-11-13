@@ -50,9 +50,10 @@ namespace DidComm.Protocols.Routing;
 /// </para>
 /// <para>
 /// <strong>Schedule fixed at receipt.</strong> The clock is read once per forward, inline: the
-/// same instant judges the relay-time expiry and, with <c>delay_milli</c> sampled right there,
-/// becomes <see cref="ForwardProcessingResult.NotBefore"/> (FR-ROUTE-10). Time spent waiting for
-/// the acknowledgement or queued behind a slow sink never moves it.
+/// same instant judges the relay-time expiry and, with <c>delay_milli</c> resolved right there under
+/// the processor's <see cref="ForwardProcessorOptions.MaxDelay"/>, becomes
+/// <see cref="ForwardProcessingResult.NotBefore"/> (FR-ROUTE-10). Time spent waiting for the
+/// acknowledgement or queued behind a slow sink never moves it.
 /// </para>
 /// <para>
 /// <strong>Logging contract.</strong> Every line carries the message id and, on a failure, the
@@ -249,7 +250,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 return null;
             }
 
-            delay = ForwardProcessor.ExtractDelay(message);
+            // The processor's own resolution, so its MaxDelay cap applies before the one draw.
+            delay = _processor.ResolveDelay(message);
             notBefore = delay is TimeSpan d ? receivedAt + d : null;
 
             // (d) Registered recipient, by DID subject. Unknown → drop, no problem report (D4).

@@ -44,12 +44,14 @@ namespace DidComm.Protocols.Routing;
 /// <strong>Scheduling hints.</strong> <c>expires_time</c> is propagated; <c>delay_milli</c> is
 /// resolved to <see cref="ForwardProcessingResult.Delay"/> and, on the processor's
 /// <see cref="DidCommOptions"/> clock, to the absolute <see cref="ForwardProcessingResult.NotBefore"/>
-/// (FR-ROUTE-10). The public <c>ProcessAsync</c> overloads resolve the schedule when they are
-/// called — hosts such as <c>samples/04-MediatorAgent</c> call them at receipt, so that is the
-/// receipt time. <see cref="ForwardHandler"/> resolves it itself, inline at admission and before
-/// any queueing, and hands the fixed schedule to the internal overload, so a forward that waits
-/// behind a slow sink keeps the not-before it was given on arrival. The three-argument
-/// constructor uses the system clock.
+/// (FR-ROUTE-10). The hold honoured is at most <see cref="ForwardProcessorOptions.MaxDelay"/>: a
+/// longer positive hint is shortened to it, and for a negative hint the magnitude is limited to it
+/// before the one random draw. The public <c>ProcessAsync</c> overloads resolve the schedule when
+/// they are called — hosts such as <c>samples/04-MediatorAgent</c> call them at receipt, so that is
+/// the receipt time. <see cref="ForwardHandler"/> resolves it through the same processor, inline at
+/// admission and before any queueing, and hands the fixed schedule to the internal overload, so a
+/// forward that waits behind a slow sink keeps the not-before it was given on arrival. The
+/// three-argument constructor uses the system clock.
 /// </para>
 /// </remarks>
 /// <example>
@@ -61,6 +63,7 @@ public sealed class ForwardProcessor
     private readonly IDidKeyServiceForFacadeOnlyAlias _keyService; // alias so the public ctor reads cleanly.
     private readonly JoseCryptoProvider _cryptoProvider;
     private readonly ForwardProcessorOptions _options;
+    private readonly TimeSpan? _maxDelay;
     private readonly IRecipientRoutingKeyProvider _routingKeys;
     private readonly DidCommOptions _didCommOptions;
 
@@ -127,6 +130,7 @@ public sealed class ForwardProcessor
         _client = client;
         _keyService = new KeyServiceAdapter(keyService);
         _options = options;
+        _maxDelay = options.MaxDelay; // validated above; read once (L-060)
         _routingKeys = routingKeys;
         _didCommOptions = didCommOptions;
         _cryptoProvider = cryptoProvider;
@@ -173,7 +177,7 @@ public sealed class ForwardProcessor
     /// of <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>; only the schedule differs.
     /// </summary>
     /// <param name="unpacked">The unpack outcome of the inbound envelope.</param>
-    /// <param name="delay">The resolved <c>delay_milli</c> hint (<see cref="ExtractDelay"/>), or <c>null</c> when absent.</param>
+    /// <param name="delay">The resolved <c>delay_milli</c> hint (<see cref="ResolveDelay"/>), or <c>null</c> when absent.</param>
     /// <param name="notBefore">Receipt time plus <paramref name="delay"/>, or <c>null</c> when there is no delay.</param>
     /// <param name="ct">Cancellation token.</param>
     internal Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, TimeSpan? delay, DateTimeOffset? notBefore, CancellationToken ct)
@@ -293,37 +297,58 @@ public sealed class ForwardProcessor
 
     private (TimeSpan? Delay, DateTimeOffset? NotBefore) ResolveSchedule(Messages.Message message)
     {
-        var delay = ExtractDelay(message);
+        var delay = ResolveDelay(message);
         return (delay, delay is TimeSpan d ? _didCommOptions.Now() + d : null);
     }
 
     /// <summary>
-    /// Resolve the forward's <c>delay_milli</c> header to a hold (FR-ROUTE-10): absent, non-integer
-    /// or non-numeric → <c>null</c>; a negative value is sampled uniformly in <c>[0, |n|]</c>; either
-    /// way the hold is capped at <see cref="int.MaxValue"/> milliseconds. Never throws. Shared with
-    /// <see cref="ForwardHandler"/>, which samples it once at admission.
+    /// Resolve the forward's <c>delay_milli</c> header to the hold this processor honours: the one
+    /// draw, under <see cref="ForwardProcessorOptions.MaxDelay"/> (see
+    /// <see cref="ExtractDelay(Messages.Message, TimeSpan?)"/>). <see cref="ForwardHandler"/> calls
+    /// it once per forward, inline at admission; the public overloads call it on the request they
+    /// serve. Never throws.
     /// </summary>
     /// <param name="message">The inbound forward.</param>
-    internal static TimeSpan? ExtractDelay(Messages.Message message)
+    internal TimeSpan? ResolveDelay(Messages.Message message) => ExtractDelay(message, _maxDelay);
+
+    /// <summary>
+    /// Resolve the forward's <c>delay_milli</c> header to a hold (FR-ROUTE-10): absent, non-integer
+    /// or non-numeric → <c>null</c>. The cap is <paramref name="maxDelay"/> in whole milliseconds
+    /// (floored, within <c>[0, int.MaxValue]</c>), or <see cref="int.MaxValue"/> milliseconds when it
+    /// is <c>null</c>. A non-negative value is held for <c>min(n, cap)</c>. A negative value asks for
+    /// a random hold of up to <c>|n|</c>: <c>|n|</c> is limited to the cap first, and only then is the
+    /// one uniform draw in <c>[0, min(|n|, cap)]</c> made — clamping after the draw would put most
+    /// of the probability exactly on the cap. All arithmetic is in <see cref="long"/>; never throws.
+    /// </summary>
+    /// <param name="message">The inbound forward.</param>
+    /// <param name="maxDelay">The longest hold honoured; <c>null</c> for the library bound of <see cref="int.MaxValue"/> milliseconds.</param>
+    internal static TimeSpan? ExtractDelay(Messages.Message message, TimeSpan? maxDelay)
     {
         if (message.AdditionalHeaders is null) return null;
         if (!message.AdditionalHeaders.TryGetValue("delay_milli", out var element)) return null;
         if (element.ValueKind != System.Text.Json.JsonValueKind.Number) return null;
         if (!element.TryGetInt64(out var millis)) return null;
 
-        // Spec: a negative value is randomized between 0 and |n|, uniform. Guard against
-        // overflow: long.MinValue has no positive magnitude, and |n| can exceed int range — the
-        // hold is capped at int.MaxValue ms (~24.8 days), far longer than any sane relay delay.
+        // The cap in whole milliseconds. Integer division floors a positive TimeSpan; a negative one
+        // (refused by Validate, but this method is static) clamps to zero. int.MaxValue ms (~24.8
+        // days) is the library's hard bound: a hostile hint past ~2^53 ms overflows TimeSpan, and one
+        // past the year 9999 overflows the NotBefore addition — neither may throw out of here.
+        long capMs = maxDelay is { } cap
+            ? Math.Clamp(cap.Ticks / TimeSpan.TicksPerMillisecond, 0L, int.MaxValue)
+            : int.MaxValue;
+
         if (millis < 0)
         {
+            // Spec: a negative value is randomized between 0 and |n|, uniform. long.MinValue has no
+            // positive magnitude. Clamp |n| to the cap BEFORE the draw, so the draw is uniform over
+            // the range actually honoured; int.MaxValue - 1 keeps the exclusive upper bound in range.
             var magnitude = millis == long.MinValue ? long.MaxValue : -millis;
-            var cappedInclusiveMax = Math.Min(magnitude, int.MaxValue - 1);
-            var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)cappedInclusiveMax + 1);
+            var inclusiveMax = Math.Min(Math.Min(magnitude, capMs), int.MaxValue - 1L);
+            var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)inclusiveMax + 1);
             return TimeSpan.FromMilliseconds(sample);
         }
-        // The same cap on the positive side: a hostile hint past ~2^53 ms overflows TimeSpan, and
-        // one past the year 9999 overflows the NotBefore addition — neither may throw out of here.
-        return TimeSpan.FromMilliseconds(Math.Min(millis, int.MaxValue));
+
+        return TimeSpan.FromMilliseconds(Math.Min(millis, capMs));
     }
 
     private static string StripFragment(string didUrl)
