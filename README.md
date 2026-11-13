@@ -149,7 +149,7 @@ package per transport and integration. The badge at the top of this file shows t
 | `DidComm.AspNetCore` | `MapDidCommEndpoint` / `MapDidCommWebSocket` / `MapDidCommOobEndpoint` receive endpoints |
 | `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | Sender-side transport bindings |
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
-| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 (mediator role), store and policy contracts |
+| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts |
 
 ```bash
 dotnet add package DidComm.Core
@@ -197,7 +197,7 @@ repo publishes.
 | `DidComm.Transports.Http` | HTTPS sender (FR-TRN-04..08): `IHttpClientFactory`-backed POST, manual 307 follow + 301/308 refusal, Polly retry / circuit-breaker / timeout |
 | `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events |
 | `DidComm.AspNetCore` | Minimal-API extensions: `MapDidCommEndpoint` (HTTP receive, FR-TRN-07), `MapDidCommWebSocket` (WS receive with frame reassembly, FR-TRN-09/10), `MapDidCommOobEndpoint` (short-form OOB retrieval); `MaxReceiveBytes` ⇒ 413 / 1009 (FR-API-06) |
-| `DidComm.Mediator` | Mediator service (PRD §8b): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08) |
+| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10) |
 | `DidComm.TestSupport` *(not shipped)* | `InMemorySecretsResolver` for tests and samples — deliberately kept out of `DidComm.Core` per DD-02 |
 
 The spec's built-in protocols live **inside `DidComm.Core`**, not in separate `DidComm.Protocols.*`
@@ -367,7 +367,7 @@ didcomm-dotnet/
 │   ├── DidComm.Transports.Http/                   # Polly-backed HTTPS sender (FR-TRN-04..08)
 │   ├── DidComm.Transports.WebSocket/              # WebSocket sender with pool + reconnect (FR-TRN-09..11)
 │   ├── DidComm.AspNetCore/                        # MapDidCommEndpoint / MapDidCommWebSocket / MapDidCommOobEndpoint
-│   └── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 (mediator role), store + policy contracts
+│   └── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 + Message Pickup 3.0 (mediator role), store + policy contracts
 ├── tests/
 │   ├── DidComm.Core.Tests/                        # unit tests
 │   ├── DidComm.InteropTests/                      # Appendix C vectors + Appendix B resolution + facade round-trip + rotation + routing + transports + sample smoke tests

@@ -1,0 +1,1 @@
+{"id":"123456780","type":"https://didcomm.org/messagepickup/3.0/delivery-request","typ":"application/didcomm-plain+json","body":{"limit":10,"recipient_did":"did:example:alice"},"return_route":"all"}

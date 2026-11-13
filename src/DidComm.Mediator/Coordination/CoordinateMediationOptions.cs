@@ -6,6 +6,12 @@ namespace DidComm.Mediator.Coordination;
 /// Settings of the Coordinate Mediation mediator role: the routing DIDs it grants, the page size of
 /// <c>recipient-query</c>, and the bounds of the in-memory store (FR-MED-06/08).
 /// </summary>
+/// <remarks>
+/// The in-memory store is meant for samples, tests and small hosts, so its default bounds are
+/// modest: 1 000 grants and 10 000 registered DIDs in all. Each key is at most 2048 characters, so
+/// the store's keys take about 45 MB in the worst case at the defaults (11 000 keys of 4 KiB). A
+/// host that needs more raises the bounds, or registers its own <see cref="IMediationStore"/>.
+/// </remarks>
 public sealed class CoordinateMediationOptions
 {
     /// <summary>
@@ -34,9 +40,9 @@ public sealed class CoordinateMediationOptions
     /// <summary>
     /// The largest number of grants <see cref="InMemoryMediationStore"/> holds. A
     /// <c>mediate-request</c> from a new peer beyond it is answered <c>mediate-deny</c>.
-    /// Default 10 000.
+    /// Default 1 000.
     /// </summary>
-    public int MaxGrants { get; set; } = 10_000;
+    public int MaxGrants { get; set; } = 1_000;
 
     /// <summary>
     /// The largest number of DIDs registered under one grant in <see cref="InMemoryMediationStore"/>.
@@ -47,9 +53,9 @@ public sealed class CoordinateMediationOptions
     /// <summary>
     /// The largest number of DIDs registered across all grants in
     /// <see cref="InMemoryMediationStore"/>. An <c>add</c> beyond it is answered
-    /// <c>server_error</c>. Default 100 000.
+    /// <c>server_error</c>. Default 10 000.
     /// </summary>
-    public int MaxRecipients { get; set; } = 100_000;
+    public int MaxRecipients { get; set; } = 10_000;
 
     /// <summary>
     /// Whether <c>AddCoordinateMediation()</c> also makes the store the mediator's forward

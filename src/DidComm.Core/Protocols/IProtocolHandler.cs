@@ -30,7 +30,7 @@ namespace DidComm.Protocols;
 /// concerned. A reply returned on the inbound's return-route session (the HTTP <c>200</c> body
 /// or a WebSocket push, <see cref="ProtocolContext.Session"/>) passes a separate transport gate —
 /// it MUST be from the DID that decrypted the inbound to exactly the authenticated peer, see
-/// <see cref="Transports.ReturnRoute.IReturnRouteSession.TrySendAsync"/> — but that is a delivery
+/// <see cref="Transports.ReturnRoute.IReturnRouteSession.TrySendAsync(Message, CancellationToken)"/> — but that is a delivery
 /// constraint, not an identity-binding policy.
 /// </para>
 /// </remarks>

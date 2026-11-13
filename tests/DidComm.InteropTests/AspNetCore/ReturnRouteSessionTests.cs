@@ -23,7 +23,7 @@ namespace DidComm.InteropTests.AspNetCore;
 /// session's bounded writer queue, single writer, downgrade, eviction close and fault handling
 /// against a fake socket whose sends can be parked.
 /// </summary>
-public sealed class ReturnRouteSessionTests : IAsyncLifetime
+public sealed partial class ReturnRouteSessionTests : IAsyncLifetime
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 

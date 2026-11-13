@@ -11,7 +11,8 @@ namespace DidComm.Mediator.Coordination;
 /// <strong>Bounds.</strong> At most <see cref="CoordinateMediationOptions.MaxGrants"/> grants, at
 /// most <see cref="CoordinateMediationOptions.MaxRecipientsPerGrant"/> DIDs under one grant and at
 /// most <see cref="CoordinateMediationOptions.MaxRecipients"/> DIDs in all. Each key is at most
-/// 2048 characters (FR-API-09), so the worst case is about 4 KiB per grant and per registration.
+/// 2048 characters (FR-API-09), so the worst case is about 4 KiB per grant and per registration:
+/// about 45 MB of keys at the default bounds (1 000 grants, 10 000 DIDs).
 /// Grants do not expire: with a policy that grants anyone, self-made DIDs can fill the store, after
 /// which new peers are denied and new registrations fail while existing ones keep working. A
 /// mediator open to the public should put an allow-list or a rate limit in its

@@ -18,7 +18,7 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator`, `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions`, `HttpResiliencePipelineFactory`, `UseHttpTransport()`. |
 | `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. |
-| `DidComm.Mediator` | The mediator service (Phase 7). So far the mediator role of Coordinate Mediation 3.0, namespace `DidComm.Mediator.Coordination` — public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums, `IMediationStore` / `InMemoryMediationStore`, `MediationGrant`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationBodies` (body codecs), `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `BareDid`, `ConfiguredMediatorIdentity`. References `DidComm.Core` and `DidComm.Extensions.DependencyInjection`; no ASP.NET Core. |
+| `DidComm.Mediator` | The mediator service (Phase 7). So far two mediator roles. **Coordinate Mediation 3.0**, namespace `DidComm.Mediator.Coordination` — public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums, `IMediationStore` / `InMemoryMediationStore`, `MediationGrant`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationBodies` (body codecs), `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `BareDid`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`, `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupBodies` (body and attachment codecs), `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live flag and lease owner per live session), `PickupSizing` (the delivery byte budget). Shared by both roles, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule), `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). References `DidComm.Core` and `DidComm.Extensions.DependencyInjection`; no ASP.NET Core. |
 
 ## Tests and tools
 
@@ -29,9 +29,13 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   plus the `AspNetCore`, `Routing`, `Transports`, `Protocols` and `Facade` suites, `DxCoverage`
   (public-API coverage and quickstart drift checks) and `Samples` (one smoke test per sample).
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
-  builders, store, handler, DI, adversarial) and `fixtures/coordinate-mediation-3.0` (the
-  didcomm.org page examples normalized to valid JSON). The FR-MED-03 cases that need an HTTP
-  endpoint are in `tests/DidComm.InteropTests/AspNetCore/CoordinateMediationHttpTests.cs`.
+  builders, store, handler, DI, adversarial; `Pickup`: wire format, store, sizing, handler decision
+  table, identities, faults, logs, live delivery, DI) with `fixtures/coordinate-mediation-3.0` and
+  `fixtures/messagepickup-3.0` (the didcomm.org page examples normalized to valid JSON). The cases
+  that need a real endpoint are in `tests/DidComm.InteropTests/AspNetCore`:
+  `CoordinateMediationHttpTests.cs` (FR-MED-03), `MessagePickupHttpTests.cs` and
+  `MessagePickupWebSocketTests.cs` (FR-PICK over HTTP and WebSocket), and
+  `ReturnRouteSessionTests.BoundedSend.cs` (the size-bounded session send).
 - `tests/DidComm.TestSupport`: shared helpers (`InMemorySecretsResolver`, `MultiRecipientPacker`,
   `EnvelopeReaderTestRunner`). Not shipped as a package.
 - `tools/FixtureGen`: generates didcomm-dotnet's own packed vectors into the interop fixtures
@@ -105,7 +109,7 @@ come through these endpoints: the WebSocket transport's receive loop hands them 
 
 `DidComm.Core/Protocols/Routing` holds the mediator-side core: `forward` is an ordinary registered
 protocol handler, and everything that depends on who the recipient is runs detached from the
-request. There is no `DidComm.Mediator` package yet (see "Phase 7: not built yet").
+request. The roles a recipient talks to live in `DidComm.Mediator` (Coordinate Mediation, Message Pickup; sections below); the pipeline that joins them to this handler is #95 (see "Phase 7: not built yet").
 
 Wiring: `DidCommBuilder.AddRoutingMediator(ForwardProcessorOptions?)`, not part of
 `AddBuiltInProtocols`. It validates the options, `TryAdd`s `ForwardProcessorOptions`,
@@ -270,6 +274,10 @@ registry events and does not count against the bounds):
 - One slot. A sender claims it under the lock before packing, so concurrent senders pack at most
   once; a failed or cancelled pack releases it; a successful pack fills it. Every later
   `TrySendAsync` returns `false`: a handler that pushed and also returned a reply sends the push.
+- Size-bounded send (#94): `TrySendAsync(message, maxPackedBytes, ct)` is the real method and the
+  two-argument one calls it with `int.MaxValue`. The packed bytes are compared with the bound
+  right after the pack; over it the answer is `TooLarge`, nothing is stored and the claim is
+  released like a failed pack, so a smaller message can still take the slot.
 - The endpoint's last step, `TakeResponseAndClose()`, closes the session, cancels `Closed` and
   takes the packed bytes in one transition; a pack that completes afterwards returns `false` and
   is never sent.
@@ -302,6 +310,8 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
   snapshot or pack, a downgrade or close during the pack, a refused write, cancellation); a queued
   frame keeps it until the writer dequeues the frame, sent or discarded. So pushes reserved plus
   frames queued never exceed `MaxPendingPushes`; the frame inside the socket send is not counted.
+  The size-bounded overload (#94) compares the packed frame with the caller's bound before the
+  write: over it the answer is `TooLarge`, nothing is queued and the slot goes back.
   It never blocks the handler. The writer task is the only code that sends on or close-outputs the
   socket, and its "may I send?" check and the start of `SendAsync` share a lock with `ApplyHeader`
   and `RequestClose`, so nothing starts after a downgrade or a close was applied (a send already
@@ -711,7 +721,9 @@ How a request is handled (`CoordinateMediationHandler.HandleAsync` → `Mediatio
 The store (`InMemoryMediationStore`): one lock for every change, so "is this DID free?" and
 "register it" are one step; a concurrent index from recipient DID to its grant for the forward
 lookup, read without the lock; registration order kept per grant for stable paging; three bounds
-(`MaxGrants`, `MaxRecipientsPerGrant`, `MaxRecipients`). Ownership (one grant per recipient DID) is
+(`MaxGrants` 1 000, `MaxRecipientsPerGrant` 256, `MaxRecipients` 10 000 by default — modest, because
+the in-memory store is for samples, tests and small hosts; about 45 MB of keys in the worst case).
+Ownership (one grant per recipient DID) is
 the store's rule, not the policy's: a custom policy can only add refusals.
 
 Faults: a store, policy or identity that throws, or returns something unusable, never leaves the
@@ -726,8 +738,10 @@ Documented limits:
 - **A registration oracle toward enrolled peers.** `client_error` on an `add` tells a peer with a
   grant that another grant holds the DID. Unauthenticated callers learn nothing.
 - **Open enrolment fills the store.** The default policy grants any authcrypt sender and grants do
-  not expire. Self-made DIDs can exhaust `MaxGrants` and `MaxRecipients`; existing grants keep
-  working. A public mediator needs an allow-list or rate limit in its policy.
+  not expire on their own (owner decision: the protocol has no message that tells a recipient its
+  grant lapsed; a host ends a grant with `RevokeAsync`). Self-made DIDs can exhaust `MaxGrants` and
+  `MaxRecipients`; existing grants keep working. A public mediator needs an allow-list or rate
+  limit in its policy.
 - **Forward lookup.** One probe either way; a hit compares one key more than a miss (the same as
   `InMemoryForwardRecipientRegistry`).
 - **Revocation.** `RevokeAsync` stops new forwards for the grant's DIDs. A forward already admitted
@@ -737,11 +751,153 @@ Documented limits:
   and `MediationCoordinator`), and startup validation of routing DIDs against their DID documents
   (FR-MED-07, #95).
 
+## Message Pickup 3.0, mediator role (Phase 7, #94)
+
+Source: https://didcomm.org/messagepickup/3.0/ ; PRD §8c FR-PICK-01..10. It lives in
+`DidComm.Mediator`, namespace `DidComm.Mediator.Pickup`, beside Coordinate Mediation, and is a
+protocol handler like any other: no transport code, no ASP.NET Core.
+
+Wiring: `DidCommBuilder.AddMessagePickup(configure?)` (`MessagePickupBuilderExtensions`):
+
+- Options through `AddOptions<MessagePickupOptions>().Configure(...)`; the delegate is also run once
+  on a scratch instance, so bad settings fail at registration.
+- `TryAddSingleton` for `IMessageStore` (`InMemoryMessageStore`), `MessagePickupQueue` and
+  `MessagePickupHandler`, then `AddProtocol<MessagePickupHandler>()`. Discover Features discloses
+  `https://didcomm.org/messagepickup/3.0` with `roles: ["mediator"]`.
+- The queue's factory needs an `IMediationStore` (`AddCoordinateMediation()` in either order, or
+  the host's own) and throws `InvalidOperationException` naming the fix when there is none. It
+  takes the session registry `AddDidComm` registers. Nothing in the graph takes the dispatcher, the
+  handler registry, a handler or `DidCommClient`, so a forward sink may take `MessagePickupQueue`.
+
+The pieces:
+
+- `MessagePickup`: type URIs, six builders, six strict parsers (both roles). Bodies and attachments
+  go through `PickupBodies`, which is version-neutral: the limit's member name and the time unit
+  are parameters, so Pickup 4.0 (#100) reuses it.
+- `IMessageStore` / `InMemoryMessageStore`: records keyed by (grant peer DID, message id), in
+  arrival order per grant. A lease is a mark on the record (lease id, owner token, expiry instant);
+  nothing is moved or copied when a lease ends. Time is passed in; the store reads no clock.
+- `PickupCoordinator` (internal): the role without the wire format — authorisation, status,
+  lease → check → push → trim, acknowledgement, the live flag, and the pipeline's `DeliverAsync`.
+  One instance, owned by `MessagePickupQueue` and shared with every handler over it, so a 4.0
+  handler shares leases, live flags and log counters.
+- `PickupSessionTracker` (internal): one `PickupSessionState` per live session, held in a
+  `ConditionalWeakTable` keyed by the session object (no bound of its own; it cannot outlive the
+  session). It carries the live-delivery framing (set by the handler that turned live mode on), a
+  random owner token for the session's leases, and a hook on `IReturnRouteSession.Closed`.
+- `PickupSizing` (internal): the byte arithmetic of `max_delivery_bytes`.
+- `MessagePickupQueue` (public): `DeliverAsync`, `RemoveAsync`, `PurgeExpiredAsync`,
+  `MaxAdmissiblePayloadBytes` — what #95's sink and a host call.
+
+`MessagePickupHandler.HandleAsync`, in order:
+
+1. **Peer.** `MediatorPeer.TryGet` (the rule of `ReturnRouteEligibility.TryGetPeer`): no authcrypt
+   layer → dropped before the type or body is read, one rate-limited line with the id.
+2. **Session.** `context.Session` is used only when it is bound to exactly this (peer, local) pair;
+   a session that throws when asked is treated as absent.
+3. **Parse** by type; the `message_id_list` bound is part of the parse (counted before any entry
+   is read). A request thread id over 512 characters is malformed. Types the mediator does not
+   act on are ignored.
+4. **Authorise.** No filter: the peer needs a grant (`GetGrantAsync`). With `recipient_did`: it must
+   be a bare DID and `FindGrantByRecipientDidAsync(did).PeerDid` must equal the peer. Anything else
+   is answered as an empty queue and the message store is not read.
+5. **Act**, then reply with `status` (returned as the handler's reply), or push a `delivery`
+   through the session and return nothing, or return the live-mode problem report.
+
+A `delivery-request`, step by step (`PickupCoordinator.LeaseAndPushAsync`):
+
+1. `limit` is clamped to `MaxDeliveryBatch`; 0, an unowned scope or no session → `status`, nothing
+   leased.
+2. `IMessageStore.LeaseAsync`: the FIFO prefix of deliverable records (due, not expired, not under
+   a live lease), at most the clamped count and at most `BatchPayloadBudget` payload bytes, marked
+   with a new lease — owned by the session's token over a WebSocket, by nobody over HTTP.
+3. What the store returned is copied and checked (the peer's grant key, the count, the filter,
+   usable ids); one wrong record and nothing is delivered.
+4. Unfiltered batches: every distinct recipient DID is looked up again; the leased records of a
+   DID no longer registered to the peer are removed by id (`AcknowledgeAsync` — exactly the
+   records this check looked at) and leave the batch. A registry answer that names no usable peer
+   is a fault of the check: nothing is removed.
+5. `session.TrySendAsync(delivery, MaxDeliveryBytes, ct)`. `Sent` → done (over HTTP the pushed
+   message is the 200 body). `TooLarge` with more than one message → the last one is released and
+   the rest sent again. `TooLarge` with one message → `IMessageStore.PassOverAsync`: the record
+   gives up the lease and is left out of every lease until `now + LeaseTimeout × 2^PassOvers`
+   (the store keeps the count on the record). Nothing is removed. `NotSent` → no reply.
+6. A batch that came to nothing (its head was passed over, or all of it was unregistered
+   leftovers) → the request leases again and goes on with what is queued behind; `status` is the
+   answer only when a lease round returns nothing. One request does at most 2 × `MaxDeliveryBatch`
+   lease rounds and 2 × `MaxDeliveryBatch` sends.
+7. On every exit, including a fault or cancellation, whatever is still held under this request's
+   lease is released (`ReleaseAsync` names the lease id, with `CancellationToken.None`). Records
+   passed over in step 5 are under no lease any more.
+
+Why the pass-over mark is the record's and not a lease: the work bound of step 6 restarts with
+every request, so whatever a request learned must outlive it — and its lease, and its connection —
+or a queue with more unfit records than one request can try would meet every later request with the
+same records first. The doubling makes the periods outgrow any polling interval.
+
+A new message (`MessagePickupQueue.DeliverAsync`, the pipeline's call): size bound first
+(`MaxAdmissiblePayloadBytes`, before any lookup) → expiry → `FindGrantByRecipientDidAsync` → the
+live target, if any → `EnqueueAsync`, already leased to that session when there is one → the push
+(a `delivery` with one attachment and no `thid`, size-bounded). Pushed → `PushedLive`; not taken →
+the lease is released at once and the outcome is `Queued`. The live target is the newest session
+`IReturnRouteSessionRegistry.Find(peer)` returns that has the flag on, `Mode == All`, and whose own
+`PeerDid` is the peer.
+
+The byte budget: a payload of `n` bytes is base64url text in the `delivery` JSON and that JSON is
+base64url again as the envelope's ciphertext, so the packed size is about 16/9 of the payload.
+`PickupSizing` sets aside 32 KiB for the envelope, 8 KiB for the `delivery` without attachments and
+96 bytes per attachment, and derives one number, `BatchPayloadBudget` (564 525 bytes at 1 MiB with
+a batch of 10). It is the byte budget of every lease and, capped by `MaxReceiveBytes`, the largest
+payload admitted — so an admitted payload always fits alone. The estimate only picks the batch;
+the guarantee is the session measuring the packed bytes.
+
+Session lifecycle: `PickupSessionState` hooks `Closed` once (`UnsafeRegister`). When it fires the
+state is marked closed and live delivery is off. If the session ever took a lease
+(`MarkLeasing`, set before the store call that records one), its owner token joins the tracker's
+clean-up backlog: one worker, started on the thread pool without the closing thread's execution
+context, calls `ReleaseLeasesAsync(ownerToken)` for one token at a time. The backlog holds at most
+`PickupSessionTracker.MaxPendingReleases` (1 024) tokens, the one in flight included; a close that
+finds it full is dropped (counted, logged) and its leases end by timeout. So neither the number of
+store calls in flight (one) nor the number waiting is set by how fast connections come and go, and
+a peer that only opens connections and toggles live mode costs the store nothing. Every path that
+takes a session-owned lease checks the closed mark again afterwards, so a lease recorded after the
+release ran is released too. HTTP sessions are never tracked: their leases end by time only.
+
+Faults: a message store, mediation store, registry, session or id generator that throws, or
+returns something outside its contract, never leaves the role — a request gets no reply, a
+delivery reports `Faulted` (or `Queued` when the message was already stored). When the caller's
+token is cancelled, only `OperationCanceledException` leaves.
+
+Documented limits:
+
+- **At-least-once.** A lease that ran out, or a connection that closed mid-delivery, makes a
+  message deliverable again; recipients acknowledge by id.
+- **Live deliveries must be acknowledged.** They stay stored and counted until `messages-received`;
+  a recipient that never acknowledges fills its quota.
+- **Many-key recipients.** An envelope larger than the allowance means trimmed batches. A message
+  that does not fit alone is never delivered and never removed by the role: it is passed over,
+  tried again at intervals that double, and stays stored and counted until it expires or is
+  purged — so `message_count` does not reach zero while it exists.
+- **Not-yet-due messages** count against the quota but are not reported by `status`; a sender
+  asking for long delays can use a recipient's quota up unseen. The pipeline (#95) must bound the
+  delay it accepts.
+- **A live session whose peer stops reading** can hold up to `MaxPendingPushes` packed deliveries.
+- **Revoked grants.** Their leftovers are not delivered while the peer has no grant, but stay
+  stored until the host calls `IMessageStore.PurgeGrantAsync` (the mediation store raises no
+  change notification) — and are delivered again if the same peer is granted mediation again.
+- **Lazy expiry.** Memory of expired records comes back when their grant is next touched, when the
+  store runs full, or on `PurgeExpiredAsync`.
+- **Open enrolment.** Self-made grants can use up the store-wide bounds; what is held stays
+  deliverable.
+- **No session, no delivery.** Over the library endpoints a request without `return_route: all`
+  gets nothing; over a WebSocket the endpoint needs `AllowSameSocketReplies`.
+
 ## Phase 7: not built yet
 
-Phase 7 issues under epic #88 still open: Coordinate Mediation 2.0 compatibility (#99); Message
-Pickup (#94), whose live delivery consumes `IReturnRouteSessionRegistry.Find`, the
-`SessionOpened` / `SessionClosed` events and `IReturnRouteSession.Closed`; the `DidComm.Mediator`
-package with the live-session -> queue -> direct-push pipeline and `MapDidCommMediator` (#95); the
-recipient-side client (#96); and sample 11 with the return-route cookbook sections (#97). The
-default sink drops every forward; a real relay is #95's.
+Phase 7 issues under epic #88 still open: the separate replay clock skew (#105); the delivery
+pipeline — a forward sink that calls `MessagePickupQueue.DeliverAsync`, the optional direct push,
+`AddMediator()` and, in a new `DidComm.Mediator.AspNetCore` package, `MapDidCommMediator` (#95);
+the recipient-side client (#96); sample 11 with the cookbook sections (#97); Coordinate Mediation
+2.0 compatibility (#99); the interop and adversarial gate (#98); and Message Pickup 4.0 (#100),
+a second thin handler over the same `MessagePickupQueue`. Until #95 the default sink drops every
+forward, so nothing reaches the pickup queue except through `DeliverAsync`.

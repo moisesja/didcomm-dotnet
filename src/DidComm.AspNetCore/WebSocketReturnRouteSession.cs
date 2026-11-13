@@ -16,12 +16,14 @@ namespace DidComm.AspNetCore;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Push capacity is reserved before any work: <see cref="TrySendAsync"/> takes one of
-/// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> slots (a lock-free decrement that never
-/// goes below zero) before the snapshot, and answers <c>false</c> at once when none is free — no
-/// snapshot, no key resolution, no encryption. The slot is given back on every path that does not
-/// queue a frame (refused addressing, failed snapshot or pack, a downgrade or close that landed
-/// during the pack, a refused write, cancellation or an exception); a queued frame keeps it until the
+/// Push capacity is reserved before any work: a send
+/// (<see cref="TrySendAsync(Message, int, CancellationToken)"/>, which the two-argument overload
+/// calls) takes one of <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> slots (a lock-free
+/// decrement that never goes below zero) before the snapshot, and is refused at once when none is
+/// free — no snapshot, no key resolution, no encryption. The slot is given back on every path that
+/// does not queue a frame (refused addressing, failed snapshot or pack, a packed frame over the
+/// caller's size bound, a downgrade or close that landed during the pack, a refused write,
+/// cancellation or an exception); a queued frame keeps it until the
 /// writer takes the frame off the queue, whether it then sends or discards it. So at any moment the
 /// pushes being snapshotted or packed plus the frames queued number at most
 /// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/>; the one frame the writer is sending is
@@ -35,7 +37,8 @@ namespace DidComm.AspNetCore;
 /// </para>
 /// <para>
 /// On close for any reason queued pushes are discarded — <c>true</c> from
-/// <see cref="TrySendAsync"/> meant queued, not delivered. A push dequeued while the session is
+/// <see cref="TrySendAsync(Message, CancellationToken)"/> (<see cref="ReturnRouteSendResult.Sent"/>
+/// from the size-bounded overload) meant queued, not delivered. A push dequeued while the session is
 /// downgraded (<c>none</c> / <c>thread</c>) is not sent either. The writer's "may I send?" check and
 /// the start of the send happen under one send gate that <see cref="ApplyHeader"/> and
 /// <see cref="RequestClose"/> also take, so once either has returned no send begins: nothing is
@@ -164,17 +167,22 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
 
     /// <inheritdoc />
     public async ValueTask<bool> TrySendAsync(Message message, CancellationToken ct)
+        => await TrySendAsync(message, int.MaxValue, ct).ConfigureAwait(false) == ReturnRouteSendResult.Sent;
+
+    /// <inheritdoc />
+    public async ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxPackedBytes, 1);
         ct.ThrowIfCancellationRequested();
 
         // A downgraded or closed session costs nothing; a full one costs no snapshot and no crypto.
         if (Mode != ReturnRouteMode.All)
-            return false;
+            return ReturnRouteSendResult.NotSent;
         if (!TryReservePushSlot())
         {
             SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session has no free push slot.", message.Id);
-            return false;
+            return ReturnRouteSendResult.NotSent;
         }
 
         var slotHeld = true;
@@ -182,21 +190,34 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
         {
             var snapshot = SessionOutbound.TrySnapshotAndCheck(message, PeerDid, LocalDid, _logger);
             if (snapshot is null)
-                return false;
+                return ReturnRouteSendResult.NotSent;
 
             var frame = await SessionOutbound.TryPackAsync(_client, snapshot, PeerDid, LocalDid, _logger, ct).ConfigureAwait(false);
-            if (frame is null || Mode != ReturnRouteMode.All)
-                return false;
+            if (frame is null)
+                return ReturnRouteSendResult.NotSent;
+
+            // FR-PICK-03: the bound is on the packed envelope, so it is checked on the very bytes
+            // the writer would send. Nothing is queued; the finally below gives the slot back.
+            // Checked before the mode is read again: a frame over its bound is TooLarge even when
+            // a downgrade or close landed during the pack (the caller's next send is then NotSent).
+            if (frame.Length > maxPackedBytes)
+            {
+                SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: its packed envelope is {PackedBytes} bytes, over the caller's bound of {MaxPackedBytes}.", snapshot.Id, frame.Length, maxPackedBytes);
+                return ReturnRouteSendResult.TooLarge;
+            }
+
+            if (Mode != ReturnRouteMode.All)
+                return ReturnRouteSendResult.NotSent;
 
             // Never awaits the socket (JC-9). On success the slot passes to the queued frame, and the
             // writer gives it back when it dequeues the frame; a completed (closed) queue refuses.
             if (_queue.Writer.TryWrite(frame))
             {
                 slotHeld = false;
-                return true;
+                return ReturnRouteSendResult.Sent;
             }
             SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session's writer queue is full or closed.", snapshot.Id);
-            return false;
+            return ReturnRouteSendResult.NotSent;
         }
         finally
         {

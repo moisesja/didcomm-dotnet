@@ -241,9 +241,9 @@ public sealed class InMemoryMediationStoreTests(ITestOutputHelper output)
     public void Default_bounds_are_the_documented_ones_and_bad_bounds_are_refused()
     {
         var defaults = new CoordinateMediationOptions();
-        defaults.MaxGrants.Should().Be(10_000);
+        defaults.MaxGrants.Should().Be(1_000);
         defaults.MaxRecipientsPerGrant.Should().Be(256);
-        defaults.MaxRecipients.Should().Be(100_000);
+        defaults.MaxRecipients.Should().Be(10_000);
         defaults.MaxPageSize.Should().Be(100);
         defaults.MaxUpdatesPerMessage.Should().Be(1024);
         defaults.UseAsForwardRecipientRegistry.Should().BeTrue();

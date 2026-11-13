@@ -6,6 +6,171 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Message Pickup 3.0, mediator role: queue, deliveries, acknowledgements, live mode (FR-PICK-01..10, #94, epic #88)
+
+A mediator can now hold messages for the recipients enrolled with it and hand them over when they
+ask (didcomm.org [messagepickup 3.0](https://didcomm.org/messagepickup/3.0/), PRD §8c). It is the
+second piece of the mediator service, in the `DidComm.Mediator` package under the namespace
+`DidComm.Mediator.Pickup`, still without any ASP.NET Core reference. What puts forwarded messages
+into the queue — the delivery pipeline — is #95; the recipient-side client is #96; Pickup 4.0 is
+#100 and reuses the internals built here.
+
+- **`AddMessagePickup(configure?)`** on `DidCommBuilder` registers `MessagePickupHandler`,
+  `MessagePickupQueue` and, unless the host registered its own first, `InMemoryMessageStore`.
+  Discover Features then discloses `https://didcomm.org/messagepickup/3.0` with
+  `roles: ["mediator"]` (FR-PICK-01). It needs the mediation registry: call
+  `AddCoordinateMediation()` too, before or after; without an `IMediationStore` the first use throws
+  `InvalidOperationException` naming the fix. Over a WebSocket the receive endpoint must have
+  `AllowSameSocketReplies` on, or pickup stays silent there. Bad settings throw `ArgumentException`
+  at registration.
+- **`MessagePickupHandler`** answers the four requests of the protocol:
+  - `status-request` → `status` with `message_count`, `total_bytes`, `live_delivery`, the
+    `recipient_did` of the request when it had one, and — when something is waiting —
+    `longest_waited_seconds`, `newest_received_time` and `oldest_received_time` in whole UTC epoch
+    seconds (FR-PICK-02). Delivered-but-unacknowledged messages are still counted; messages that
+    are not yet due are not.
+  - `delivery-request` → one `delivery` whose attachments carry the queued messages byte for byte,
+    in arrival order, at most `limit` of them and at most `MaxDeliveryBatch` (default 10); or
+    `status` when nothing is waiting or `limit` is 0 (FR-PICK-03). Attachment data is base64url
+    without padding. A negative, fractional or non-numeric `limit` is malformed; one of any size is
+    clamped.
+  - `messages-received` → the listed messages are removed and a `status` comes back (FR-PICK-04).
+    Ids the peer's grant does not hold are ignored, never reported and never echoed.
+  - `live-delivery-change` → `status` showing the new state; or, when `true` arrives on a connection
+    that cannot push (HTTP, or no session), the Report Problem 2.0 message with code
+    `e.m.live-mode-not-supported` and comment `Connection does not support Live Delivery`
+    (FR-PICK-07). `false` there is simply answered `status`.
+  - Replies carry `thid` = the request's `thid`, or its `id` when it has none — on `status` too,
+    which the 3.0 page does not show and 4.0 requires. The problem report carries it as `pthid`.
+- **Who may see what (FR-PICK-01/02).** Only a request with an authcrypt layer is acted on; the
+  peer is the DID of the authcrypt sender key, never the plaintext `from`. Anything else is
+  dropped before its type or body is read: nothing removed, nothing changed, no reply, one
+  rate-limited log line with the message id. A peer sees what is held under its own mediation grant
+  and nothing else. A `recipient_did` it has not registered — another peer's, nobody's, or a DID
+  URL — is answered exactly like an empty queue, so the reply says nothing about other recipients.
+- **A delivery stays within a byte budget (FR-PICK-03).** `MessagePickupOptions.MaxDeliveryBytes`
+  (default: `DidCommOptions.MaxReceiveBytes`, 1 MiB) is the largest packed `delivery` the mediator
+  sends. A batch is chosen by arithmetic (a delivered message is base64-encoded twice, so the
+  packed size is about 16/9 of the payload plus fixed allowances) and then checked on the real
+  bytes: the handler pushes the `delivery` through the session with a size bound, and when the
+  packed message is over it, takes the last message out and sends again. A message that could not
+  be delivered alone within the budget is not accepted into the queue in the first place:
+  `MessagePickupQueue.MaxAdmissiblePayloadBytes` is 564 525 bytes (about 551 KiB) at the defaults,
+  and is logged when the role is first used. Five 300 KiB messages therefore travel one per
+  `delivery`, over HTTP and over a WebSocket.
+- **Leases (FR-PICK-04).** A delivered message is not deleted and not delivered again until its
+  lease ends: by `messages-received` (removed), after `LeaseTimeout` (default 60 s), or — over a
+  WebSocket — when the connection closes. It is always the same stored record with the same id;
+  nothing is copied or moved. Delivery is therefore at-least-once: a recipient can see a message a
+  second time and acknowledges by id.
+- **Live mode (FR-PICK-06/08).** After `live-delivery-change{true}` on a WebSocket session, a
+  message arriving for that recipient is pushed as a `delivery` with one attachment and no `thid`,
+  and kept under a lease until acknowledged. The flag belongs to the connection and ends with it
+  (the session's own `Closed` signal, not the registry's notifications); a new connection starts
+  with live mode off. Messages already queued are not pushed. With several live connections of one
+  recipient, the newest gets the push.
+- **`MessagePickupQueue`** is what a delivery pipeline (and a host) calls:
+  `DeliverAsync(recipientDid, payload, options?)` looks up the grant the DID is registered under,
+  stores the message under it and reports `PushedLive`, `Queued`, `NotRegistered`, `Expired`,
+  `PayloadTooLarge`, `QueueFull` or `Faulted` — an outcome, never an exception, and never something
+  to show the message's sender (FR-PICK-09). `RemoveAsync` takes a message out again (for a
+  pipeline that delivered it another way) and `PurgeExpiredAsync` drops what has expired. One call
+  per recipient gives each its own record and id (FR-PICK-05).
+- **`IMessageStore`** and **`InMemoryMessageStore`**: the queue's storage. Every operation is
+  confined to one grant, and a message id means something only under its grant, so one recipient
+  can never acknowledge or probe another's messages. Enqueue is one check-and-insert against the
+  bounds; leasing is one select-and-mark; a lease is a mark with its own id, and giving messages
+  back names that id, so a late clean-up cannot undo a lease someone else has taken since. A
+  message that could not be delivered for now is passed over: a second mark, with no owner, that
+  only time ends. Time is passed in by the caller. Only the in-memory store ships; the interface's remarks state the
+  contract a durable one has to keep.
+- **Bounds (FR-PICK-10).** Per grant: `MaxQueueMessages` (100) and `MaxQueueBytes` (8 MiB). For the
+  in-memory store as a whole: `MaxStoreMessages` (5 000) and `MaxStoreBytes` (128 MiB) — modest on
+  purpose, the in-memory store being for samples, tests and small hosts; about 170 MiB in the worst
+  case at the defaults. Waiting, delivered-but-unacknowledged, live-pushed and not-yet-due messages
+  all count; expired ones never keep a new message out. A `messages-received` may carry at most
+  `MaxAckIds` ids (default: batch × 10); a longer list is malformed and is refused from its length
+  before any entry is read. A `recipient_did` or id longer than 2048 characters is refused by a
+  length check.
+- **Removed DIDs and revoked grants.** Registration is checked when messages are delivered: what is
+  queued for a DID that no longer belongs to the peer's grant is not delivered, and is removed as
+  an unfiltered `delivery-request` comes to it (exactly the records that request looked at). A peer
+  whose grant was revoked gets an empty `status`. The store has `PurgeRecipientAsync` and
+  `PurgeGrantAsync` for the host: **after `IMediationStore.RevokeAsync`, call `PurgeGrantAsync`**,
+  or the revoked grant's leftovers stay in memory — not delivered while the peer has no grant, and
+  delivered again if the same peer is granted mediation again.
+- **Failures stay inside.** A message store, mediation store, session registry, session or id
+  generator that throws, or returns something outside its contract, never throws through the
+  dispatcher: the request gets no reply, the leases it took are released, and a delivery to the
+  queue reports `Faulted`. Log lines carry the request's message id (replaced when longer than 128
+  characters), exception type names and counts — never a DID, a `recipient_did`, a queue message
+  id, a thread id or exception text. A malformed body from an authenticated peer is a
+  `MalformedMessageException` whose text names the member and the rule only.
+- **`MessagePickup`**: the six message type URIs, a `Create…` builder and a strict `TryParse…` for
+  each message, for both sides of the protocol. The `delivery` parser decodes attachment data
+  leniently (padded or not, either base64 alphabet, or `data.json`) and does not inspect the
+  payload.
+
+Things to know before running a mediator on this:
+
+- **Acknowledge live deliveries.** A pushed message stays stored and counted until
+  `messages-received` names it (the Pickup 4.0 rule, applied under 3.0 where the page is silent). A
+  recipient that never acknowledges fills its own quota, and further messages for it are refused.
+- **A recipient whose DID document lists many keys gets smaller batches.** Each key adds an entry
+  to the envelope. When the envelope outgrows the allowance (about 32 KiB), batches are trimmed.
+  A message that does not fit such a recipient even alone is neither delivered nor removed: the
+  request passes it over (a warning in the log) and goes on to what is queued behind it. Passing
+  over is a mark the store keeps on the message itself (`IMessageStore.PassOverAsync`,
+  `QueuedMessage.PassOvers`): the message is left out for `LeaseTimeout` the first time and for
+  twice as long each time it is tried again and still does not fit. Because the mark is not a
+  lease, it survives lease expiry and reconnects, so however many such messages there are and
+  however rarely the recipient asks, its requests get past them to what can be delivered. Such a
+  message stays stored, counted in `status` and in the quota, until it expires or the host purges
+  it — so a recipient should not loop on `message_count` alone. Raise `MaxDeliveryBytes` (and the
+  recipients' `MaxReceiveBytes`) if you serve such recipients.
+- **One request does a bounded amount of work.** At most 2 × `MaxDeliveryBatch` lease rounds and as
+  many packs, whatever the queue holds; a request that runs out answers `status` and the next one
+  continues.
+- **Messages that are not yet due use quota without showing in `status`.** A sender that asks for a
+  long delay (`delay_milli`, up to about 25 days) can therefore fill a recipient's quota with
+  messages the recipient cannot see or fetch until they come due. Nothing in this release puts
+  forwards into the queue; the delivery pipeline (#95) has to bound the delay it accepts.
+- **A live connection whose peer stops reading** can hold up to `MaxPendingPushes` packed
+  deliveries (16 by default, each up to `MaxDeliveryBytes`) until it closes.
+- **Clean-up after a closed connection is bounded.** Ending the leases of a closed WebSocket is a
+  store call made in the background, one at a time, from a backlog of at most 1 024 connections;
+  a connection that never took a lease queues nothing. When the backlog is full (a store that
+  cannot keep up with connection churn) further closes are not queued: their leases end by
+  `LeaseTimeout` instead. Closing never waits for the store.
+- **A request without a return-route session gets nothing over the library endpoints.** A
+  `delivery-request` that arrives without `return_route: all` leases nothing; the handler's
+  `status` reply is logged, not sent.
+- **`messages-received` and `live-delivery-change` need no grant.** Both touch only the caller's own
+  state (its own key in the store, its own connection).
+- **Expiry is lazy.** Expired messages are never delivered or counted, but their memory is only
+  given back when their grant is next touched, when the store runs full, or when the host calls
+  `MessagePickupQueue.PurgeExpiredAsync`.
+
+### Added — a size-bounded send on return-route sessions (FR-RR-04/05, #94)
+
+- **`IReturnRouteSession.TrySendAsync(message, maxPackedBytes, ct)`** returns
+  `ReturnRouteSendResult.Sent`, `NotSent` or `TooLarge`. The bound is compared with the packed
+  envelope — the bytes the HTTP response or the WebSocket frame would carry — after packing, so it
+  is exact. A message over the bound is neither held nor queued, and the HTTP slot or WebSocket
+  push slot it took is given back, so a smaller message can follow on the same session. The
+  two-argument `TrySendAsync` is unchanged (it is the bounded send with no bound). Message Pickup
+  uses it to keep every `delivery` within `MaxDeliveryBytes`: the component that packs is the one
+  that measures. `IReturnRouteSession` has not been released yet, so the new member is a plain
+  interface member; a custom implementation has to add it.
+
+### Changed — default bounds of the in-memory mediation store (#93 follow-up, owner decision)
+
+- `CoordinateMediationOptions.MaxGrants` is now 1 000 (was 10 000) and `MaxRecipients` 10 000 (was
+  100 000): the in-memory stores are for samples, tests and small hosts, so their defaults are
+  modest. Worst-case key memory at the defaults is about 45 MB instead of about 450 MB.
+  `MaxRecipientsPerGrant` (256), `MaxUpdatesPerMessage` (1024) and `MaxPageSize` (100) are
+  unchanged. Neither value has shipped in a release.
+
 ### Added — Coordinate Mediation 3.0, mediator role: the new `DidComm.Mediator` package (FR-MED-01..06, FR-MED-08, #93, epic #88)
 
 An agent can now act as a mediator that recipients enrol with: a recipient asks for mediation, is
@@ -13,9 +178,9 @@ told which mediator DID to publish as its endpoint, and registers the DIDs it wa
 accepted for (didcomm.org [coordinate-mediation 3.0](https://didcomm.org/coordinate-mediation/3.0/),
 PRD §8b). This is the first piece of the mediator service and ships in a **new package,
 `DidComm.Mediator`** (namespace `DidComm.Mediator.Coordination`), which references `DidComm.Core` and
-`DidComm.Extensions.DependencyInjection` and nothing from ASP.NET Core. Message pickup (#94), the
-delivery pipeline (#95), the recipient-side client (#96) and the 2.0 compatibility handler (#99)
-follow. No existing package changes behaviour.
+`DidComm.Extensions.DependencyInjection` and nothing from ASP.NET Core. Message pickup is the
+entry above (#94); the delivery pipeline (#95), the recipient-side client (#96) and the 2.0
+compatibility handler (#99) follow. No existing package changes behaviour.
 
 - **`AddCoordinateMediation(configure?)`** on `DidCommBuilder` registers the handler and, unless the
   host registered its own first, an in-memory store, a grant-everyone policy and the routing-DID
@@ -73,8 +238,10 @@ follow. No existing package changes behaviour.
   A DID belongs to the first grant that registers it, and the check and the insert are one step
   under one lock, so two peers can never both get the same DID. The store reports what happened to
   each update as a `RecipientStoreOutcome`; the handler turns that into the protocol's `result`, so
-  a custom store never deals in wire values. Three bounds, all configurable: `MaxGrants` (10 000),
-  `MaxRecipientsPerGrant` (256), `MaxRecipients` (100 000). The lookup the forward path uses,
+  a custom store never deals in wire values. Three bounds, all configurable: `MaxGrants` (1 000),
+  `MaxRecipientsPerGrant` (256), `MaxRecipients` (10 000) — modest on purpose, since the in-memory
+  store is for samples, tests and small hosts; its keys take about 45 MB in the worst case at those
+  defaults. The lookup the forward path uses,
   `FindGrantByRecipientDidAsync`, is one probe that takes no lock and does the same work whether or
   not the DID is registered. `RevokeAsync` ends a grant and frees its DIDs. Only the in-memory store
   ships; a durable one is the host's (epic decision 1), and the interface's remarks state the
