@@ -27,7 +27,7 @@ namespace DidComm.InteropTests.Mediator;
 [Xunit.CollectionDefinition(Name, DisableParallelization = true)]
 public sealed class QaSerialTiming
 {
-    public const string Name = "QA-2 serial timing";
+    public const string Name = "Mediator serial timing (#95)";
 }
 
 /// <summary>

@@ -1030,6 +1030,10 @@
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::LeaseByIdAsync(System.String,System.String,DidComm.Mediator.Pickup.MessageLease,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
       "member": "DidComm.Mediator!DidComm.Mediator.Pickup.IMessageStore::PassOverAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,System.DateTimeOffset,System.Threading.CancellationToken)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
@@ -1080,6 +1084,10 @@
     {
       "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::LeaseAsync(DidComm.Mediator.Pickup.MessageLeaseRequest,System.Threading.CancellationToken)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::LeaseByIdAsync(System.String,System.String,DidComm.Mediator.Pickup.MessageLease,System.DateTimeOffset,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
       "member": "DidComm.Mediator!DidComm.Mediator.Pickup.InMemoryMessageStore::PassOverAsync(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,System.DateTimeOffset,System.Threading.CancellationToken)",

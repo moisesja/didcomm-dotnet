@@ -12,7 +12,10 @@ namespace DidComm.InteropTests.Mediator;
 /// <summary>
 /// #95 acceptance, "unknown <c>next</c> → 202, nothing queued, no outbound message; timing equal to
 /// the known-recipient path within the existing timing-test tolerance" (FR-ROUTE-11, D4).
+/// The class runs in the serial timing collection: under the parallel test load (2-core CI
+/// runners) the medians measure contention, not the mediator.
 /// </summary>
+[Collection(QaSerialTiming.Name)]
 public sealed class MediatorUnknownNextTests
 {
     [Fact]
