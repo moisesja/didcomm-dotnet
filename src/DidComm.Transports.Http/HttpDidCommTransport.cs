@@ -219,8 +219,8 @@ public sealed class HttpDidCommTransport : IDidCommTransport
     }
 
     /// <summary>
-    /// The 2xx answer: one Debug line, then the in-band body when one was asked for (FR-RR-07),
-    /// else accepted.
+    /// The 2xx answer: one Debug line (a throwing logging provider changes nothing), then the
+    /// in-band body when one was asked for (FR-RR-07), else accepted.
     /// </summary>
     /// <param name="response">The 2xx response.</param>
     /// <param name="status">Its status code.</param>
@@ -230,8 +230,17 @@ public sealed class HttpDidCommTransport : IDidCommTransport
     private async Task<TransportResult> AcceptedAsync(HttpResponseMessage response, int status, Uri uri, TransportRequest request, CancellationToken ct)
     {
         // The scheme and the status only: an endpoint can be a host secret (a direct-push
-        // capability URL) or name a recipient, so the URI never reaches a log line.
-        _logger.LogDebug("HttpDidCommTransport POST over {Scheme} → {Status}", uri.Scheme, status);
+        // capability URL) or name a recipient, so the URI never reaches a log line. Guarded: the
+        // request was delivered, and a logging provider that throws (host code) must not turn that
+        // into a failure, which a caller would retry or a push would count as a failed delivery.
+        try
+        {
+            _logger.LogDebug("HttpDidCommTransport POST over {Scheme} → {Status}", uri.Scheme, status);
+        }
+        catch
+        {
+            // Logging providers are host code; they must not change the send's outcome.
+        }
 
         // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and only when
         // the request carries a cap, which the facade sets only for a send that asked for a return

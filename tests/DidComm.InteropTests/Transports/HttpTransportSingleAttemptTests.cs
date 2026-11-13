@@ -177,6 +177,40 @@ public sealed class HttpTransportSingleAttemptTests
         handler.Requests.Should().HaveCount(1);
     }
 
+    // AD-7 (#95; root cause also on main): the 2xx Debug line was outside any guard, so a logging
+    // provider that throws turned a delivered send into an exception — a retried send, or a
+    // delivered push counted as failed and delivered again by pickup.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_throwing_logging_provider_never_turns_a_2xx_into_a_failure(bool singleAttempt)
+    {
+        var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)));
+        var transport = Build(handler, logger: new ThrowingLogger());
+
+        var result = await transport.SendAsync(singleAttempt ? Single() : Normal(), default);
+
+        result.Accepted.Should().BeTrue();
+        handler.Requests.Should().HaveCount(1, "a delivered send is not re-sent because a log call threw");
+    }
+
+    [Fact]
+    public async Task A_throwing_logging_provider_never_turns_a_200_with_an_in_band_reply_into_a_failure()
+    {
+        var handler = new Handler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[] { 0x7b, 0x7d }) };
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/didcomm-encrypted+json");
+            return Task.FromResult(response);
+        });
+        var transport = Build(handler, logger: new ThrowingLogger());
+
+        var result = await transport.SendAsync(Normal() with { MaxResponseBytes = 1024 }, default);
+
+        result.Accepted.Should().BeTrue();
+        result.ResponsePayload!.Value.ToArray().Should().Equal(0x7b, 0x7d);
+    }
+
     private static TransportRequest Normal() => new(Endpoint, new byte[] { 0x7b, 0x7d }, "application/didcomm-encrypted+json");
 
     private static TransportRequest Single() => Normal() with { SingleAttempt = true };

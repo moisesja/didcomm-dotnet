@@ -148,7 +148,7 @@ public sealed class MediatorEgressAdvTests
         mediator.Store.MessageCount.Should().Be(1, "a push that did not reach the directory's endpoint is not a delivery");
     }
 
-    [Fact(Skip = "ADV-2 DEFECT 6 (P3): HttpDidCommTransport logs the 2xx at Debug outside any guard (HttpDidCommTransport.cs:117; main:107 the same), so a logging provider that throws turns every delivered push into Push-Failed: the lease is given back and the message, already delivered, is delivered again by pickup. Every other mediator log call is guarded (MediatorLog.Write, SafeLog). main has no direct push.")]
+    [Fact]
     public async Task A_throwing_logging_provider_does_not_turn_a_delivered_push_into_a_failure_and_a_second_delivery()
     {
         await using var fixture = await EgressFixture.StartAsync(builder => builder.Logging.AddProvider(new ThrowingLoggerProvider(typeof(HttpDidCommTransport).FullName!)));
