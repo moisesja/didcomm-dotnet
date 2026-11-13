@@ -157,7 +157,7 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
         if (effective.DirectPush && !IsRegistered(typeof(IRecipientEndpointDirectory)))
         {
             MediatorLog.Write(_logger, LogLevel.Warning,
-                "Direct push is on but no IRecipientEndpointDirectory is registered: nothing will be pushed, and every message waits for pickup. Register one before AddMediator().");
+                "Direct push is on but no IRecipientEndpointDirectory is registered: nothing will be pushed to an endpoint, and every message not pushed live waits for pickup. Register one before AddMediator().");
         }
 
         // (8) The out-of-band invitation, from the primary routing DID, now that it is known good.

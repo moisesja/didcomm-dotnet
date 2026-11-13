@@ -11,8 +11,9 @@ using Microsoft.Extensions.Options;
 namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
-/// A stored message to push straight to its recipient's endpoint (FR-PICK-09). It names the record
-/// only: the payload that is sent is the one the store holds when the push takes the record.
+/// A stored message to push to its recipient: over the recipient's live connection, or straight to
+/// its endpoint (FR-PICK-08/09). It names the record only: the payload that is sent is the one the
+/// store holds when the push takes the record.
 /// </summary>
 /// <remarks>
 /// A job outlives the forward that produced it (it can wait in the backlog long after the forward
@@ -26,9 +27,9 @@ namespace DidComm.Mediator.Pipeline;
 internal sealed record PushJob
 {
     /// <summary>Create a job; the forward's id is kept in its bounded log form.</summary>
-    /// <param name="grantPeerDid">The grant the message is held under: the key the endpoint directory is asked with, and the store's key for the record. A bare DID.</param>
+    /// <param name="grantPeerDid">The grant the message is held under: the peer whose live session gets a live push, the key the endpoint directory is asked with, and the store's key for the record. A bare DID.</param>
     /// <param name="recipientDid">The registered recipient DID the message is for; re-checked against the grant before the push. A bare DID.</param>
-    /// <param name="messageId">The store's id of the record to take, send and remove.</param>
+    /// <param name="messageId">The store's id of the record to take and send.</param>
     /// <param name="forwardId">The id of the forward that carried it, for log lines only; any length (it is bounded here).</param>
     /// <exception cref="ArgumentException">A DID is longer than <see cref="Consistency.IdentifierLimits.MaxDidLength"/>, or the record id longer than <see cref="PickupSizing.MaxMintedIdLength"/>.</exception>
     public PushJob(string grantPeerDid, string recipientDid, string messageId, string? forwardId)
@@ -66,41 +67,57 @@ internal sealed record PushJob
 }
 
 /// <summary>
-/// Pushes stored messages straight to their recipients' own endpoints when
-/// <see cref="MediatorOptions.DirectPush"/> is on (FR-PICK-09, JC-4, JC-5), on a few background
-/// workers, after the message has been stored and the forward acknowledged — never on the request
-/// or on the forward pump.
+/// Pushes stored messages to their recipients on a few background workers, after the message has
+/// been stored and the forward acknowledged — never on the request or on the forward pump
+/// (FR-PICK-08/09, D6, JC-4, JC-5). It runs whenever <c>AddMediator()</c> is used: live pushes need
+/// it whether or not <see cref="MediatorOptions.DirectPush"/> is on.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>Bounded.</strong> At most <see cref="MediatorOptions.DirectPushConcurrency"/> pushes run
-/// at once; at most <see cref="MaxBacklog"/> jobs wait or run; and one grant may hold at most
+/// <strong>In the delivery order (D6).</strong> A job first checks that the recipient DID is still
+/// registered under the grant (<c>Push-Skipped-Unregistered</c> otherwise), then tries, in turn:
+/// (1) a <strong>live push</strong> over the peer's live connection
+/// (<see cref="PickupCoordinator.TryPushLiveAsync"/>: the newest live session of the peer with live
+/// delivery on takes the record by id under a lease of its own and sends it as a one-message
+/// <c>delivery</c>; taken by the session, it stays leased until <c>messages-received</c>, the
+/// session's close or the lease timeout — <c>Pushed-Live</c>); (2) when the peer has no such
+/// session, or the session did not take it, and direct push is on, a <strong>direct push</strong>
+/// to the recipient's own endpoint (below); (3) otherwise the message simply stays queued for
+/// pickup (<c>Push-Failed</c> when a live session did not take it, <c>Push-Skipped-NoLiveSession</c>
+/// when there was none). A record the queue no longer holds for delivery — a <c>delivery-request</c>
+/// took it first, it was acknowledged, expired, aged out or purged — is not pushed by either path
+/// (<c>Push-Skipped-NotHeld</c>): no message is sent twice and none is lost. The live push packs a
+/// <c>delivery</c> for the peer, which resolves the peer's DID; the peer controls how long that
+/// takes, which is why it runs here, bounded, and not on the forward pump: one recipient that is
+/// slow to resolve never holds up the storing of other recipients' messages.
+/// </para>
+/// <para>
+/// <strong>Bounded.</strong> At most <see cref="MediatorOptions.PushConcurrency"/> pushes run at
+/// once; at most <see cref="MaxBacklog"/> jobs wait or run; and one grant may hold at most
 /// <see cref="MaxPerGrant"/> of them, so one recipient cannot take the whole backlog. A job names a
-/// stored record and pins no payload. <see cref="TryEnqueue"/> never blocks: a job beyond either
-/// bound is refused (<c>Push-Skipped-Saturated</c>) and its message simply stays in the queue for
-/// pickup. Every job is a message already admitted under the queue's quota, so the work is bounded
-/// by what the mediator stored, 1:1.
+/// stored record and pins no payload, and holds bounded values only (<see cref="PushJob"/>).
+/// <see cref="TryEnqueue"/> never blocks: a job beyond either bound is refused
+/// (<c>Push-Skipped-Saturated</c>) and its message simply stays in the queue for pickup. Every job is
+/// a message already admitted under the queue's quota, so the work is bounded by what the mediator
+/// stored, 1:1.
 /// </para>
 /// <para>
 /// <strong>Fair.</strong> Each grant's jobs wait in their own first-in, first-out line, and the
 /// grants that have work are served in turn, with at most one push in flight per grant. A recipient
-/// whose endpoint is slow or hangs therefore holds one worker at a time (for at most
-/// <see cref="MediatorOptions.DirectPushTimeout"/> per push), never all of them: the other grants'
-/// pushes go on with the remaining workers. A grant's own pushes go out one after another, in the
-/// order they were handed over.
+/// that is slow to take a push (a slow endpoint, a DID that is slow to resolve) therefore holds one
+/// worker at a time (for at most <see cref="MediatorOptions.PushTimeout"/> per push), never all of
+/// them: the other grants' pushes go on with the remaining workers. A grant's own pushes go out one
+/// after another, in the order they were handed over.
 /// </para>
 /// <para>
-/// <strong>Per push: it takes exactly the record it sends (L-057).</strong> The endpoint comes only
-/// from the host's <see cref="IRecipientEndpointDirectory"/> (absent, <c>null</c> or a throw:
+/// <strong>Direct push: it takes exactly the record it sends (L-057).</strong> The endpoint comes
+/// only from the host's <see cref="IRecipientEndpointDirectory"/> (absent, <c>null</c> or a throw:
 /// skipped), and only an absolute <c>http</c> or <c>https</c> endpoint is pushed to: a WebSocket
-/// write gives no receipt. The registration is checked again (a recipient removed or a grant revoked
-/// since the message was stored is not pushed to). Then the push takes the record itself, by id,
-/// under a lease of its own (<see cref="IMessageStore.LeaseByIdAsync"/>, judged on
-/// <c>DidCommOptions.Clock</c>): a record the store no longer holds, or holds expired, aged out, not
-/// yet due, leased to a pickup or passed over, is not pushed (<c>Push-Skipped-NotHeld</c>), so an
-/// expired or aged-out message is never pushed (FR-ROUTE-09, FR-PICK-10), one a recipient is fetching
-/// or has acknowledged is not sent twice, and one a purge removed is not sent after the peer is
-/// granted again. The stored payload goes out through <see cref="DidCommClient.SendPackedAsync(ReadOnlyMemory{byte}, Uri, string, SendPackedOptions, CancellationToken)"/>,
+/// write gives no receipt. The push takes the record itself, by id, under a lease of its own
+/// (<see cref="IMessageStore.LeaseByIdAsync"/>, judged on <c>DidCommOptions.Clock</c>), so an
+/// expired or aged-out message is never pushed (FR-ROUTE-09, FR-PICK-10), one a recipient is
+/// fetching or has acknowledged is not sent twice, and one a purge removed is not sent after the
+/// peer is granted again. The stored payload goes out through <see cref="DidCommClient.SendPackedAsync(ReadOnlyMemory{byte}, Uri, string, SendPackedOptions, CancellationToken)"/>,
 /// which always applies the outbound endpoint guard, as a single attempt
 /// (<see cref="SendPackedOptions.SingleAttempt"/>): exactly one POST to exactly the directory's
 /// endpoint, with no retry, no redirect followed and outside the HTTP transport's circuit breaker,
@@ -108,25 +125,26 @@ internal sealed record PushJob
 /// sends. Only an accepted answer with an HTTP 2xx status counts as delivered (a redirect is a
 /// failure); the record is then removed. Anything else gives the lease back at once, and the
 /// message waits for pickup: one attempt per message. The lease runs
-/// <see cref="MediatorOptions.DirectPushTimeout"/> plus <see cref="LeaseMargin"/>, so a record whose
+/// <see cref="MediatorOptions.PushTimeout"/> plus <see cref="LeaseMargin"/>, so a record whose
 /// push never finishes goes back to pickup after that.
 /// </para>
 /// <para>
-/// <strong>Deadline.</strong> One per push, <see cref="MediatorOptions.DirectPushTimeout"/>, over the
-/// re-check, the take, the send and the removal (the directory lookup is the host's own synchronous
-/// code and is not bounded: a slow directory delays only pushes). It is a timer whose callback
-/// cancels inside a <c>try</c>, never <c>CancelAfter</c>: a callback host code registered on the
-/// token must not take the process down. The deadline ends the push whether or not the transport
-/// or the store honours the cancellation: a call still running then is abandoned (its result
-/// ignored, its fault observed), the push counts as failed and the lease is given back. An
-/// abandoned send may still reach the endpoint later, so the recipient may see the message twice
-/// (delivery is at-least-once); an abandoned take keeps the record until its lease ends. Giving a
-/// lease back is not cancelled by shutdown; it has a bound of its own of the same length.
+/// <strong>Deadline.</strong> One per job, <see cref="MediatorOptions.PushTimeout"/>, over the
+/// re-check, the live push and the direct push (the directory lookup is the host's own synchronous
+/// code: it cannot be interrupted, but its time counts). It is a timer whose callback cancels inside
+/// a <c>try</c>, never <c>CancelAfter</c>: a callback host code registered on the token must not take
+/// the process down. The deadline ends the push whether or not the session, the transport or the
+/// store honours the cancellation: a call still running then is abandoned (its result ignored, its
+/// fault observed), the push counts as failed and any lease is given back. An abandoned send may
+/// still reach the recipient later, so the recipient may see the message twice (delivery is
+/// at-least-once); an abandoned take keeps the record until its lease ends. Giving a lease back is
+/// not cancelled by shutdown; the direct push's has a bound of its own of the same length.
 /// </para>
 /// <para>
-/// <strong>Dependencies (L-017).</strong> The directory and <see cref="DidCommClient"/> are resolved
-/// from the container on the first push and kept, never at construction, so nothing here can close
-/// a cycle through the facade, the transports or the dispatcher, and nothing is built when direct
+/// <strong>Dependencies (L-017).</strong> The pickup queue (for the live push), the stores, the
+/// counter and the settings. The directory and <see cref="DidCommClient"/> are resolved from the
+/// container on the first direct push and kept, never at construction, so nothing here can close a
+/// cycle through the facade, the transports or the dispatcher, and nothing is built when direct
 /// push is off.
 /// </para>
 /// <para>
@@ -142,7 +160,7 @@ internal sealed record PushJob
 /// workers.
 /// </para>
 /// </remarks>
-internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
+internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
 {
     /// <summary>Jobs waiting or running, at most (the forward handler's own backlog bound).</summary>
     internal const int MaxBacklog = ForwardHandler.DefaultCapacity;
@@ -150,7 +168,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     /// <summary>Jobs one grant may have waiting or running, at most.</summary>
     internal const int MaxPerGrant = 16;
 
-    /// <summary>How much longer than the push deadline a push's lease on its record runs.</summary>
+    /// <summary>How much longer than the push deadline a direct push's lease on its record runs.</summary>
     internal static readonly TimeSpan LeaseMargin = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan ShutdownGrace = TimeSpan.FromSeconds(5);
@@ -160,19 +178,20 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     private static readonly SendPackedOptions SingleAttempt = new() { SingleAttempt = true };
 
     private readonly IServiceProvider _services;
+    private readonly PickupCoordinator _pickup;
     private readonly IMessageStore _store;
     private readonly IMediationStore _mediation;
     private readonly DidCommOptions _didComm;
     private readonly MediatorMetrics _metrics;
     private readonly ILogger? _logger;
     private readonly TimeProvider _time;
-    private readonly bool _enabled;
+    private readonly bool _directPush;
     private readonly TimeSpan _timeout;
     private readonly int _capacity;
     private readonly int _perGrant;
     private readonly object _gate = new();
-    // Under _gate: each grant's waiting jobs in arrival order and whether one of its pushes runs;
-    // the grants that have a waiting job and none running, in the order they are to be served.
+    // Under _gate: each grant's waiting jobs in arrival order and its running one; the grants that
+    // have a waiting job and none running, in the order they are to be served.
     private readonly Dictionary<string, GrantLine> _grants = new(StringComparer.Ordinal);
     private readonly Queue<GrantLine> _ready = new();
     // One count per entry put on _ready; a worker takes one, then a grant off _ready.
@@ -188,57 +207,63 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     private bool _directoryResolved;
     private long _saturatedLines;
     private long _failedLines;
+    private long _liveFailedLines;
     private long _schemeLines;
     private long _directoryFaultLines;
     private long _storeFaultLines;
 
-    /// <summary>Create the dispatcher; its workers start here when direct push is on.</summary>
-    /// <param name="services">The container, for the directory and the facade, resolved on the first push.</param>
+    /// <summary>Create the dispatcher; its workers start here.</summary>
+    /// <param name="services">The container, for the directory and the facade, resolved on the first direct push.</param>
     /// <param name="options">The mediator settings; copied here.</param>
-    /// <param name="store">The message store: the push takes, removes or gives back the record it sends.</param>
+    /// <param name="queue">The pickup queue: its live sessions and leases are the ones a live push uses.</param>
+    /// <param name="store">The message store: a direct push takes, removes or gives back the record it sends.</param>
     /// <param name="mediation">The grant store, to check the registration again before a push.</param>
     /// <param name="didCommOptions">Supplies the clock the store judges the record by.</param>
-    /// <param name="metrics">The direct-push counter.</param>
+    /// <param name="metrics">The push counter.</param>
     /// <param name="logger">Optional logger.</param>
     /// <param name="timeProvider">The clock behind the per-push deadline.</param>
-    public DirectPushDispatcher(
+    public PushDispatcher(
         IServiceProvider services,
         IOptions<MediatorOptions> options,
+        MessagePickupQueue queue,
         IMessageStore store,
         IMediationStore mediation,
         IOptions<DidCommOptions> didCommOptions,
         MediatorMetrics metrics,
-        ILogger<DirectPushDispatcher>? logger,
+        ILogger<PushDispatcher>? logger,
         TimeProvider timeProvider)
-        : this(services, options, store, mediation, didCommOptions, metrics, logger, timeProvider, MaxBacklog, MaxPerGrant)
+        : this(services, options, queue, store, mediation, didCommOptions, metrics, logger, timeProvider, MaxBacklog, MaxPerGrant)
     {
     }
 
     /// <summary>Test seam: the dispatcher with explicit bounds.</summary>
     /// <param name="services">The container.</param>
     /// <param name="options">The mediator settings.</param>
+    /// <param name="queue">The pickup queue.</param>
     /// <param name="store">The message store.</param>
     /// <param name="mediation">The grant store.</param>
     /// <param name="didCommOptions">Supplies the clock the store judges the record by.</param>
-    /// <param name="metrics">The direct-push counter.</param>
+    /// <param name="metrics">The push counter.</param>
     /// <param name="logger">Optional logger.</param>
     /// <param name="timeProvider">The clock behind the per-push deadline.</param>
     /// <param name="capacity">Jobs waiting or running, at most.</param>
     /// <param name="perGrant">Jobs one grant may have waiting or running, at most.</param>
-    internal DirectPushDispatcher(
+    internal PushDispatcher(
         IServiceProvider services,
         IOptions<MediatorOptions> options,
+        MessagePickupQueue queue,
         IMessageStore store,
         IMediationStore mediation,
         IOptions<DidCommOptions> didCommOptions,
         MediatorMetrics metrics,
-        ILogger<DirectPushDispatcher>? logger,
+        ILogger<PushDispatcher>? logger,
         TimeProvider timeProvider,
         int capacity,
         int perGrant)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(queue);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(mediation);
         ArgumentNullException.ThrowIfNull(didCommOptions);
@@ -250,11 +275,12 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         // Read once, after validation: a host that changes the options object later changes nothing here.
         var settings = options.Value;
         settings.ValidatePipelineRanges();
-        _enabled = settings.DirectPush;
-        _timeout = settings.DirectPushTimeout;
-        var concurrency = settings.DirectPushConcurrency;
+        _directPush = settings.DirectPush;
+        _timeout = settings.PushTimeout;
+        var concurrency = settings.PushConcurrency;
 
         _services = services;
+        _pickup = queue.Coordinator;
         _store = store;
         _mediation = mediation;
         _didComm = didCommOptions.Value;
@@ -264,12 +290,6 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         _capacity = capacity;
         _perGrant = perGrant;
         _shutdownToken = _shutdown.Token;
-
-        if (!_enabled)
-        {
-            _workers = Array.Empty<Task>();
-            return;
-        }
 
         // The workers must not carry the context of whoever happened to build this singleton (a
         // request's activity, its async-locals): start them with the flow suppressed.
@@ -286,21 +306,19 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>Whether direct push is on (workers running).</summary>
-    public bool Enabled => _enabled;
+    /// <summary>Whether direct push is on: a job not pushed live then goes to the recipient's endpoint.</summary>
+    public bool DirectPushEnabled => _directPush;
 
     /// <summary>
-    /// Hand a stored message to the push workers. Never blocks and never throws: when direct push
-    /// is off it returns <c>false</c> and records nothing; when a bound is reached, or the
-    /// dispatcher is shutting down, the job is refused and counted, and the message stays queued.
+    /// Hand a stored message to the push workers. Never blocks and never throws: when a bound is
+    /// reached, or the dispatcher is shutting down, the job is refused and counted, and the message
+    /// stays queued.
     /// </summary>
     /// <param name="job">The stored message.</param>
     /// <returns><c>true</c> when a worker will push it.</returns>
     public bool TryEnqueue(PushJob job)
     {
         ArgumentNullException.ThrowIfNull(job);
-        if (!_enabled)
-            return false;
 
         string refusal;
         var signal = false;
@@ -348,11 +366,11 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         if (refusal == PushOutcomes.SkippedSaturated)
         {
             var level = MediatorLog.RateLimited(ref _saturatedLines, out var n);
-            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the push backlog is full; the message stays queued for pickup. {Count} such skips.", job.ForwardId, n);
+            MediatorLog.Write(_logger, level, "Push of forward {ForwardId} skipped: the push backlog is full; the message stays queued for pickup. {Count} such skips.", job.ForwardId, n);
         }
         else
         {
-            MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} skipped: the mediator is shutting down; the message stays queued for pickup.", job.ForwardId);
+            MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} skipped: the mediator is shutting down; the message stays queued for pickup.", job.ForwardId);
         }
         return false;
     }
@@ -440,45 +458,15 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         }
         catch (Exception ex)
         {
-            MediatorLog.Write(_logger, LogLevel.Error, "Direct push worker stopped with {ExceptionType}.", ex.GetType().Name);
+            MediatorLog.Write(_logger, LogLevel.Error, "Push worker stopped with {ExceptionType}.", ex.GetType().Name);
         }
     }
 
+    // One job, one outcome: the re-check, then the live push, then the direct push when it is on.
     private async Task PushOneAsync(PushJob job)
     {
         var forwardId = job.ForwardId;
-
-        // Where to: only the host's directory, never anything the message says (JC-5).
-        Uri? endpoint;
-        try
-        {
-            endpoint = Directory()?.Find(job.GrantPeerDid);
-        }
-        catch (Exception ex)
-        {
-            _metrics.RecordPush(PushOutcomes.SkippedNoEndpoint);
-            var level = MediatorLog.RateLimited(ref _directoryFaultLines, out var n);
-            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the endpoint directory failed with {ExceptionType}; the message stays queued for pickup. {Count} such faults.", forwardId, ex.GetType().Name, n);
-            return;
-        }
-
-        if (endpoint is null)
-        {
-            _metrics.RecordPush(PushOutcomes.SkippedNoEndpoint);
-            MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} skipped: no endpoint for the recipient; the message stays queued for pickup.", forwardId);
-            return;
-        }
-
-        if (!endpoint.IsAbsoluteUri
-            || !(string.Equals(endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-                 || string.Equals(endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
-        {
-            _metrics.RecordPush(PushOutcomes.SkippedScheme);
-            var level = MediatorLog.RateLimited(ref _schemeLines, out var n);
-            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the directory's endpoint is not an absolute http or https URI (a WebSocket write gives no receipt); the message stays queued for pickup. {Count} such skips.", forwardId, n);
-            return;
-        }
-
+        var stage = Stage.Check;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_shutdownToken);
         using var timer = _time.CreateTimer(static state => CancelQuietly((CancellationTokenSource)state!), deadline, _timeout, Timeout.InfiniteTimeSpan);
         MessageLease? lease = null;
@@ -489,7 +477,71 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             if (!string.Equals(grant?.PeerDid, job.GrantPeerDid, StringComparison.Ordinal))
             {
                 _metrics.RecordPush(PushOutcomes.SkippedUnregistered);
-                MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} skipped: the recipient is no longer registered under the grant.", forwardId);
+                MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} skipped: the recipient is no longer registered under the grant.", forwardId);
+                return;
+            }
+
+            // (1) Live: the peer's live session takes exactly this record, under its own lease.
+            stage = Stage.Live;
+            var live = await BoundedAsync(_pickup.TryPushLiveAsync(job.GrantPeerDid, job.MessageId, deadline.Token).AsTask(), deadline.Token).ConfigureAwait(false);
+            switch (live)
+            {
+                case LivePushResult.Sent:
+                    _metrics.RecordPush(PushOutcomes.PushedLive);
+                    MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId}: delivered over the recipient's live connection.", forwardId);
+                    return;
+                case LivePushResult.NotHeld:
+                    _metrics.RecordPush(PushOutcomes.SkippedNotHeld);
+                    MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} skipped: the queue no longer holds the message for delivery (expired, aged out, picked up or being picked up, or removed).", forwardId);
+                    return;
+            }
+
+            // (2) Direct, when it is on; (3) otherwise the message stays queued for pickup.
+            if (!_directPush)
+            {
+                if (live == LivePushResult.NotSent)
+                {
+                    _metrics.RecordPush(PushOutcomes.Failed);
+                    var level = MediatorLog.RateLimited(ref _liveFailedLines, out var n);
+                    MediatorLog.Write(_logger, level, "Live push of forward {ForwardId} not delivered: the recipient's live connection did not take it; the message stays queued for pickup. {Count} such failures.", forwardId, n);
+                }
+                else
+                {
+                    _metrics.RecordPush(PushOutcomes.SkippedNoLiveSession);
+                    MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} skipped: the recipient no longer has a live connection with live delivery on; the message stays queued for pickup.", forwardId);
+                }
+                return;
+            }
+
+            // Where to: only the host's directory, never anything the message says (JC-5).
+            stage = Stage.Direct;
+            Uri? endpoint;
+            try
+            {
+                endpoint = Directory()?.Find(job.GrantPeerDid);
+            }
+            catch (Exception ex)
+            {
+                _metrics.RecordPush(PushOutcomes.SkippedNoEndpoint);
+                var level = MediatorLog.RateLimited(ref _directoryFaultLines, out var n);
+                MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the endpoint directory failed with {ExceptionType}; the message stays queued for pickup. {Count} such faults.", forwardId, ex.GetType().Name, n);
+                return;
+            }
+
+            if (endpoint is null)
+            {
+                _metrics.RecordPush(PushOutcomes.SkippedNoEndpoint);
+                MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} skipped: no endpoint for the recipient; the message stays queued for pickup.", forwardId);
+                return;
+            }
+
+            if (!endpoint.IsAbsoluteUri
+                || !(string.Equals(endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+            {
+                _metrics.RecordPush(PushOutcomes.SkippedScheme);
+                var level = MediatorLog.RateLimited(ref _schemeLines, out var n);
+                MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the directory's endpoint is not an absolute http or https URI (a WebSocket write gives no receipt); the message stays queued for pickup. {Count} such skips.", forwardId, n);
                 return;
             }
 
@@ -518,29 +570,49 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             }
 
             _metrics.RecordPush(PushOutcomes.Failed);
-            var level = MediatorLog.RateLimited(ref _failedLines, out var n);
-            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} not delivered: the endpoint did not accept it (HTTP {StatusCode}); the message stays queued for pickup. {Count} such failures.", forwardId, result.HttpStatusCode, n);
+            var failedLevel = MediatorLog.RateLimited(ref _failedLines, out var failures);
+            MediatorLog.Write(_logger, failedLevel, "Direct push of forward {ForwardId} not delivered: the endpoint did not accept it (HTTP {StatusCode}); the message stays queued for pickup. {Count} such failures.", forwardId, result.HttpStatusCode, failures);
         }
         catch (OperationCanceledException) when (_shutdownToken.IsCancellationRequested)
         {
             _metrics.RecordPush(PushOutcomes.SkippedShutdown);
-            MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} abandoned: the mediator is shutting down; the message stays queued for pickup.", forwardId);
+            MediatorLog.Write(_logger, LogLevel.Debug, "Push of forward {ForwardId} abandoned: the mediator is shutting down; the message stays queued for pickup.", forwardId);
         }
         catch (Exception ex)
         {
-            // A transport error, a non-2xx answer the transport turned into an exception, the
-            // deadline, a store or facade fault. Type name only: a transport error names the URL.
+            // A session, transport or store fault, a non-2xx answer the transport turned into an
+            // exception, the deadline. Type name only: a transport error names the URL.
             var reason = deadline.IsCancellationRequested ? "Timeout" : ex.GetType().Name;
             _metrics.RecordPush(PushOutcomes.Failed);
             var level = MediatorLog.RateLimited(ref _failedLines, out var n);
-            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} failed ({ExceptionType}); the message stays queued for pickup. {Count} such failures.", forwardId, reason, n);
+            switch (stage)
+            {
+                case Stage.Live:
+                    MediatorLog.Write(_logger, level, "Live push of forward {ForwardId} failed ({ExceptionType}); the message stays queued for pickup. {Count} such failures.", forwardId, reason, n);
+                    break;
+                case Stage.Direct:
+                    MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} failed ({ExceptionType}); the message stays queued for pickup. {Count} such failures.", forwardId, reason, n);
+                    break;
+                default:
+                    MediatorLog.Write(_logger, level, "Push of forward {ForwardId} failed ({ExceptionType}) checking the registration; the message stays queued for pickup. {Count} such failures.", forwardId, reason, n);
+                    break;
+            }
         }
         finally
         {
-            // Not delivered: give the record back at once so a pickup gets it now, not when the lease ends.
+            // A direct push that did not deliver: give the record back at once so a pickup gets it
+            // now, not when the lease ends. (A live push gives its own lease back.)
             if (lease is not null)
                 await ReleaseQuietlyAsync(job, lease, forwardId).ConfigureAwait(false);
         }
+    }
+
+    // Which step of a job was running, for its failure line.
+    private enum Stage
+    {
+        Check,
+        Live,
+        Direct,
     }
 
     // After a delivered push: remove exactly the record that was sent. A failure leaves it under the
@@ -577,9 +649,10 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         }
     }
 
-    // The deadline ends the wait whether or not the callee honours its token (L-059): a transport or
-    // a store that ignores cancellation must not hold a worker, and its grant's turn, past the
-    // deadline. The abandoned call goes on by itself; its result is ignored and its fault observed.
+    // The deadline ends the wait whether or not the callee honours its token (L-059): a session, a
+    // transport or a store that ignores cancellation must not hold a worker, and its grant's turn,
+    // past the deadline. The abandoned call goes on by itself; its result is ignored and its fault
+    // observed.
     private static async Task<T> BoundedAsync<T>(Task<T> work, CancellationToken token)
     {
         try
@@ -596,8 +669,8 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     private static DateTimeOffset SaturatingAdd(DateTimeOffset instant, TimeSpan span)
         => span.Ticks >= (DateTimeOffset.MaxValue - instant).Ticks ? DateTimeOffset.MaxValue : instant + span;
 
-    // Resolved on the first push and kept (L-017): never at construction. A directory that is not
-    // registered is remembered as absent.
+    // Resolved on the first direct push and kept (L-017): never at construction. A directory that
+    // is not registered is remembered as absent.
     private IRecipientEndpointDirectory? Directory()
     {
         if (Volatile.Read(ref _directoryResolved))
@@ -689,7 +762,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             _metrics.RecordPush(PushOutcomes.SkippedShutdown);
         idle?.TrySetResult();
         if (discarded > 0)
-            MediatorLog.Write(_logger, LogLevel.Information, "Direct push stopped: {Discarded} waiting pushes discarded; their messages stay queued for pickup.", discarded);
+            MediatorLog.Write(_logger, LogLevel.Information, "Pushes stopped: {Discarded} waiting pushes discarded; their messages stay queued for pickup.", discarded);
     }
 
     // One grant's line, touched only under _gate.
@@ -717,15 +790,13 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     public async ValueTask DisposeAsync()
     {
         Stop();
-        if (_workers.Length == 0)
-            return;
         try
         {
             await Task.WhenAll(_workers).WaitAsync(ShutdownGrace).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            MediatorLog.Write(_logger, LogLevel.Warning, "Direct push workers did not stop within {Grace}; their messages stay queued for pickup.", ShutdownGrace);
+            MediatorLog.Write(_logger, LogLevel.Warning, "Push workers did not stop within {Grace}; their messages stay queued for pickup.", ShutdownGrace);
         }
         catch
         {

@@ -109,6 +109,10 @@ public static class MediatorBuilderExtensions
     /// <item><description>A live session whose peer stops reading holds up to
     /// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> packed deliveries, each at most
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>.</description></item>
+    /// <item><description>Every relayed message is stored first; live and direct pushes follow on
+    /// background workers (<see cref="MediatorOptions.PushConcurrency"/>), at most one at a time per
+    /// recipient and 16 waiting or in flight, so a recipient that is slow to take a push holds up no
+    /// one else. A message that cannot be pushed stays queued for pickup.</description></item>
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
     /// <item><description>Direct push makes one attempt per message, one POST to exactly the
@@ -187,7 +191,7 @@ public static class MediatorBuilderExtensions
         services.TryAddSingleton(BuildPushDispatcher);
         services.TryAddSingleton(sp => new MediatorForwardSink(
             sp.GetRequiredService<MessagePickupQueue>(),
-            sp.GetRequiredService<DirectPushDispatcher>(),
+            sp.GetRequiredService<PushDispatcher>(),
             sp.GetRequiredService<ForwardMetrics>(),
             sp.GetRequiredService<IOptions<MediatorOptions>>(),
             sp.GetService<ILogger<MediatorForwardSink>>()));
@@ -215,7 +219,7 @@ public static class MediatorBuilderExtensions
 
     // The dispatcher is built from the stores; a store that asks for the dispatcher (or the sink)
     // back would re-enter this factory without end. Fail on the first re-entry instead.
-    private static DirectPushDispatcher BuildPushDispatcher(IServiceProvider sp)
+    private static PushDispatcher BuildPushDispatcher(IServiceProvider sp)
     {
         if (t_buildingPushDispatcher)
         {
@@ -227,14 +231,15 @@ public static class MediatorBuilderExtensions
         t_buildingPushDispatcher = true;
         try
         {
-            return new DirectPushDispatcher(
+            return new PushDispatcher(
                 sp,
                 sp.GetRequiredService<IOptions<MediatorOptions>>(),
+                sp.GetRequiredService<MessagePickupQueue>(),
                 sp.GetRequiredService<IMessageStore>(),
                 sp.GetRequiredService<IMediationStore>(),
                 sp.GetRequiredService<IOptions<DidCommOptions>>(),
                 sp.GetRequiredService<MediatorMetrics>(),
-                sp.GetService<ILogger<DirectPushDispatcher>>(),
+                sp.GetService<ILogger<PushDispatcher>>(),
                 sp.GetService<TimeProvider>() ?? TimeProvider.System);
         }
         finally

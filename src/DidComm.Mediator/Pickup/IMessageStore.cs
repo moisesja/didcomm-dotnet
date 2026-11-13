@@ -84,9 +84,10 @@ public interface IMessageStore
     /// lease and is not passed over for now (<see cref="PassOverAsync"/>), mark it with the lease and
     /// return it; otherwise change nothing and return <c>null</c>. The same rules as
     /// <see cref="LeaseAsync"/>, for a caller that must send exactly the record it was told about:
-    /// the mediator's direct push (FR-PICK-09) takes the record it is about to push this way, sends
-    /// the stored payload, and then removes it (<see cref="AcknowledgeAsync"/>) or gives the lease
-    /// back (<see cref="ReleaseAsync"/>). An expired record found here may be removed, as by any
+    /// the mediator's live and direct pushes (FR-PICK-08/09) take the record they are about to push
+    /// this way and send the stored payload; a live push leaves it leased to the session until it is
+    /// acknowledged, a direct push removes it (<see cref="AcknowledgeAsync"/>), and a push that did
+    /// not deliver gives the lease back (<see cref="ReleaseAsync"/>). An expired record found here may be removed, as by any
     /// time-dependent operation. Never throws after a partial change.
     /// </summary>
     /// <param name="grantPeerDid">The grant the record is held under.</param>

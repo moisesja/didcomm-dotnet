@@ -6,24 +6,34 @@ using DidComm.Transports.ReturnRoute;
 namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
-/// The closed vocabulary of the <c>didcomm.mediator.direct_push.outcomes</c> counter: one value per
-/// message the forward sink handed to direct push (or that direct push refused to take).
+/// The closed vocabulary of the <c>didcomm.mediator.push.outcomes</c> counter: exactly one value per
+/// stored message the forward sink handed to the push workers (or that they refused to take).
 /// </summary>
 internal static class PushOutcomes
 {
-    /// <summary>The recipient's endpoint answered with a 2xx status; the queued copy was removed.</summary>
+    /// <summary>The recipient's live session took the <c>delivery</c>; the record stays leased to the session until acknowledged.</summary>
+    internal const string PushedLive = "Pushed-Live";
+
+    /// <summary>Direct push: the recipient's endpoint answered with a 2xx status; the queued copy was removed.</summary>
     internal const string Pushed = "Pushed";
 
-    /// <summary>The push failed (a transport error, a non-2xx answer, the timeout, a store or client fault); the message stays queued.</summary>
+    /// <summary>
+    /// The last push tried did not deliver, and the message stays queued: a live session that did
+    /// not take the <c>delivery</c> (with direct push off), or a direct push that failed (a transport
+    /// error, a non-2xx answer); or the deadline, a store, session or client fault ended the push.
+    /// </summary>
     internal const string Failed = "Push-Failed";
 
     /// <summary>The push backlog, or the grant's share of it, was full; the message stays queued.</summary>
     internal const string SkippedSaturated = "Push-Skipped-Saturated";
 
-    /// <summary>No directory, no endpoint for the grant, or the directory failed; the message stays queued.</summary>
+    /// <summary>Direct push: no live session, and no directory, no endpoint for the grant, or the directory failed; the message stays queued.</summary>
     internal const string SkippedNoEndpoint = "Push-Skipped-NoEndpoint";
 
-    /// <summary>The directory named an endpoint that is not absolute <c>http</c> or <c>https</c>; the message stays queued.</summary>
+    /// <summary>Direct push is off and the recipient no longer had a live session with live delivery on when the push ran; the message stays queued.</summary>
+    internal const string SkippedNoLiveSession = "Push-Skipped-NoLiveSession";
+
+    /// <summary>Direct push: the directory named an endpoint that is not absolute <c>http</c> or <c>https</c>; the message stays queued.</summary>
     internal const string SkippedScheme = "Push-Skipped-Scheme";
 
     /// <summary>The recipient DID was no longer registered under the grant when the push was about to run.</summary>
@@ -42,16 +52,16 @@ internal static class PushOutcomes
 
 /// <summary>
 /// The mediator pipeline's instruments on the <see cref="DidCommDiagnostics.MeterName"/> meter: the
-/// direct-push outcomes, the purged-message counter, and observable views of the in-memory replay
+/// push outcomes, the purged-message counter, and observable views of the in-memory replay
 /// guard, session registry and message store. Thread-safe; recording never throws. Tags are a
 /// closed vocabulary and never carry a DID.
 /// </summary>
 internal sealed class MediatorMetrics : IDisposable
 {
-    /// <summary>Counter of direct-push outcomes, tagged <see cref="PushOutcomeTag"/>.</summary>
-    internal const string DirectPushOutcomesInstrument = "didcomm.mediator.direct_push.outcomes";
+    /// <summary>Counter of push outcomes (live and direct), tagged <see cref="PushOutcomeTag"/>.</summary>
+    internal const string PushOutcomesInstrument = "didcomm.mediator.push.outcomes";
 
-    /// <summary>The direct-push counter's single tag key; values from <see cref="PushOutcomes"/>.</summary>
+    /// <summary>The push counter's single tag key; values from <see cref="PushOutcomes"/>.</summary>
     internal const string PushOutcomeTag = "didcomm.push.outcome";
 
     /// <summary>Counter of messages the scheduled purge removed from the pickup queue.</summary>
@@ -91,14 +101,14 @@ internal sealed class MediatorMetrics : IDisposable
             _ownsMeter = true;
         }
 
-        _pushes = Meter.CreateCounter<long>(DirectPushOutcomesInstrument, unit: "{message}");
+        _pushes = Meter.CreateCounter<long>(PushOutcomesInstrument, unit: "{message}");
         _purged = Meter.CreateCounter<long>(QueuePurgedInstrument, unit: "{message}");
     }
 
     /// <summary>The meter the instruments belong to.</summary>
     public Meter Meter { get; }
 
-    /// <summary>Count one direct-push outcome.</summary>
+    /// <summary>Count one push outcome.</summary>
     /// <param name="outcome">A <see cref="PushOutcomes"/> value.</param>
     public void RecordPush(string outcome)
     {

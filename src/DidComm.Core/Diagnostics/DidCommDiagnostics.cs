@@ -51,12 +51,13 @@ public static class DidCommDiagnostics
     /// <item><description><c>didcomm.forward.outcomes</c> (counter, unit <c>{forward}</c>): one count per forward that
     /// reaches a routing mediator's forward handler (one refused earlier, at unpack, is not counted),
     /// tagged <c>didcomm.forward.outcome</c> with how it ended:
-    /// <c>Delivered-Live</c>, <c>Queued</c>, <c>Dropped-Malformed</c>, <c>Dropped-NotEncrypted</c>,
+    /// <c>Queued</c>, <c>Dropped-Malformed</c>, <c>Dropped-NotEncrypted</c>,
     /// <c>Dropped-Expired</c>, <c>Dropped-Unknown</c>, <c>Dropped-Saturated</c>,
     /// <c>Dropped-Unacknowledged</c>, <c>Dropped-Shutdown</c>, <c>Dropped-TooLarge</c>,
     /// <c>Dropped-Quota</c> or <c>Faulted</c>.</description></item>
-    /// <item><description><c>didcomm.mediator.direct_push.outcomes</c> (counter): one count per direct push a
-    /// mediator attempts or skips, tagged <c>didcomm.push.outcome</c> (<c>Pushed</c>,
+    /// <item><description><c>didcomm.mediator.push.outcomes</c> (counter): one count per stored message a
+    /// mediator hands to its push workers, tagged <c>didcomm.push.outcome</c> with how the push
+    /// ended (<c>Pushed-Live</c> over the recipient's live connection, <c>Pushed</c> to its endpoint,
     /// <c>Push-Failed</c>, or a <c>Push-Skipped-</c> reason).</description></item>
     /// <item><description><c>didcomm.mediator.queue.purged</c> (counter): expired and aged-out messages
     /// removed from the pickup queue by the periodic purge.</description></item>

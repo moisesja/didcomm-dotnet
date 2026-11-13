@@ -13,10 +13,7 @@ internal static class ForwardOutcomes
     /// <summary>The counter's single tag key.</summary>
     internal const string OutcomeTag = "didcomm.forward.outcome";
 
-    /// <summary>Stored and pushed over the recipient's live connection (sink).</summary>
-    internal const string DeliveredLive = "Delivered-Live";
-
-    /// <summary>Stored for pickup (sink).</summary>
+    /// <summary>Stored in the recipient's queue (sink); a push, live or direct, may follow, counted on its own instrument.</summary>
     internal const string Queued = "Queued";
 
     /// <summary>Not a well-formed forward, or the processor found it inconsistent or malformed (handler).</summary>

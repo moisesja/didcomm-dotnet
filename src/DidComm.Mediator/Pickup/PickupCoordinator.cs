@@ -23,6 +23,22 @@ internal enum PickupReply
     LiveModeNotSupported,
 }
 
+/// <summary>What <see cref="PickupCoordinator.TryPushLiveAsync"/> did with one stored message.</summary>
+internal enum LivePushResult
+{
+    /// <summary>The peer has no live session with live delivery on: nothing was taken or sent.</summary>
+    NoSession,
+
+    /// <summary>The store did not hand the record out (gone, expired, not yet due, leased, passed over): nothing was sent.</summary>
+    NotHeld,
+
+    /// <summary>The session took the <c>delivery</c>; the record stays leased to it until acknowledged, closed or timed out.</summary>
+    Sent,
+
+    /// <summary>The session did not take it (no free push slot, too large, downgraded or closing); the lease was given back.</summary>
+    NotSent,
+}
+
 /// <summary>The queue state a <c>status</c> reports, before a protocol version puts it into its own units and member names.</summary>
 /// <param name="Queue">What the store reports for the scope.</param>
 /// <param name="Now">The instant the state was read at.</param>
@@ -418,6 +434,81 @@ internal sealed class PickupCoordinator
             Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType}; nothing was stored.", ex.GetType().Name);
             return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="grantPeerDid"/> has, right now, the live session a live push would go
+    /// to (the newest of its sessions with live delivery on). Synchronous and cheap; the answer may
+    /// be stale by the time a push runs, which is why <see cref="TryPushLiveAsync"/> looks again.
+    /// </summary>
+    /// <param name="grantPeerDid">The grant's peer DID.</param>
+    public bool HasLiveTarget(string grantPeerDid) => FindLiveTarget(grantPeerDid) is not null;
+
+    /// <summary>
+    /// Push one stored message, named by id, over its peer's live connection (FR-PICK-08/09, step 1
+    /// of the delivery order). The mediator's push workers call this, never the forward pump: the
+    /// send packs a <c>delivery</c> for the peer, which resolves the peer's DID, and the peer
+    /// controls how long that takes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The target is the one <see cref="DeliverAsync"/> would use: the newest live session of the
+    /// peer whose own peer DID matches, in <c>return_route: all</c>, with live delivery on. The
+    /// record is taken by id under a lease owned by that session
+    /// (<see cref="IMessageStore.LeaseByIdAsync"/>, for <see cref="MessagePickupOptions.LeaseTimeout"/>),
+    /// so a record that is expired, aged out, not yet due, leased, passed over, acknowledged or
+    /// purged is not taken and nothing is sent; then it goes out as a one-message <c>delivery</c> in
+    /// the session's framing, bounded by <c>max_delivery_bytes</c>. Taken by the session, the
+    /// record stays leased to it until <c>messages-received</c>, the session's close or the lease
+    /// timeout, exactly as for any live push. Anything else — not taken, too large, the session
+    /// closing, a fault, a cancellation — gives the lease back at once, so a
+    /// <c>delivery-request</c> gets the message.
+    /// </para>
+    /// <para>
+    /// The caller bounds the call; giving the lease back is never cancelled and happens however
+    /// the send ends, even after the caller stopped waiting. A send the caller gave up on may still
+    /// reach the peer (delivery is at-least-once). Faults and cancellation propagate after the
+    /// lease is given back.
+    /// </para>
+    /// </remarks>
+    /// <param name="grantPeerDid">The grant the record is held under; its peer gets the push.</param>
+    /// <param name="messageId">The record's id.</param>
+    /// <param name="ct">Cancellation token: the push's deadline.</param>
+    /// <returns>What happened; see <see cref="LivePushResult"/>.</returns>
+    public async ValueTask<LivePushResult> TryPushLiveAsync(string grantPeerDid, string messageId, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        // The framing is read once: it is cleared when live delivery is turned off or the session closes.
+        if (FindLiveTarget(grantPeerDid) is not { } target || target.State.LiveDelivery is not { } build)
+            return LivePushResult.NoSession;
+        var (session, state) = target;
+
+        var now = _didCommOptions.Now();
+        var lease = new MessageLease(state.OwnerToken, now + _leaseTimeout);
+        // Before the lease exists: the session's close then knows there may be leases to end.
+        state.MarkLeasing();
+        var record = await _store.LeaseByIdAsync(grantPeerDid, messageId, lease, now, ct).ConfigureAwait(false);
+        if (record is null)
+            return LivePushResult.NotHeld;
+
+        var delivered = false;
+        try
+        {
+            if (!state.IsClosed)
+            {
+                var delivery = build(session.LocalDid, grantPeerDid, new DeliveredMessage(record.Id, record.Payload));
+                var sent = await session.TrySendAsync(delivery, _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
+                // Looked at again once the lease is in use: a session that closed meanwhile may have
+                // run its clean-up before the lease existed.
+                delivered = sent == ReturnRouteSendResult.Sent && !state.IsClosed;
+            }
+        }
+        finally
+        {
+            if (!delivered)
+                await ReleaseQuietlyAsync(grantPeerDid, new[] { messageId }, lease.Id).ConfigureAwait(false);
+        }
+        return delivered ? LivePushResult.Sent : LivePushResult.NotSent;
     }
 
     /// <summary>See <see cref="MessagePickupQueue.RemoveAsync"/>.</summary>

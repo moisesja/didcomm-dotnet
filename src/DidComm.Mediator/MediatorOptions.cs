@@ -53,6 +53,13 @@ namespace DidComm.Mediator;
 /// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> packed deliveries, each at most
 /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>; size <see cref="Sessions"/> with that in
 /// mind.</description></item>
+/// <item><description>A forwarded message is always stored first; a recipient with live delivery
+/// on gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
+/// <see cref="PushTimeout"/>), so a recipient that is slow to take a push holds up no one else's
+/// messages. Each recipient's pushes go one at a time, with at most 16 waiting or in flight: a message beyond
+/// that, or one whose push fails, stays queued, and a recipient in live mode should still ask for
+/// its queued messages (a <c>status-request</c> shows them) after a reconnect or a
+/// burst.</description></item>
 /// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
@@ -165,17 +172,20 @@ public sealed class MediatorOptions
     public bool DirectPush { get; set; }
 
     /// <summary>
-    /// How many direct pushes may run at the same time. Default 4; from 1 to 64. Recipients take
-    /// turns, with at most one push in flight per mediation grant, so a recipient whose endpoint is
-    /// slow holds one of them at a time, never all.
+    /// How many pushes may run at the same time: live pushes over a recipient's WebSocket
+    /// connection and, when <see cref="DirectPush"/> is on, direct pushes to its endpoint. Default 4;
+    /// from 1 to 64. Pushes run in the background, never on the forward pump, so a recipient that is
+    /// slow to take a push (a slow endpoint, or a DID that is slow to resolve) never holds up the
+    /// storing of other recipients' messages. Recipients take turns, with at most one push in flight
+    /// per mediation grant, so a slow recipient holds one of them at a time, never all.
     /// </summary>
-    public int DirectPushConcurrency { get; set; } = 4;
+    public int PushConcurrency { get; set; } = 4;
 
     /// <summary>
-    /// How long one direct push may take before it is abandoned and the message left queued.
-    /// Default 30 seconds; greater than zero and at most 5 minutes.
+    /// How long one push (live or direct) may take before it is abandoned and the message left
+    /// queued for pickup. Default 30 seconds; greater than zero and at most 5 minutes.
     /// </summary>
-    public TimeSpan DirectPushTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan PushTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Check every setting: each role's own checks, the ranges listed on the pipeline settings, and
@@ -232,10 +242,10 @@ public sealed class MediatorOptions
             throw new ArgumentException("The value must be zero or more and at most int.MaxValue milliseconds.", nameof(MaxForwardDelay));
         if (PurgeInterval < TimeSpan.FromSeconds(1) || PurgeInterval > TimeSpan.FromHours(24))
             throw new ArgumentException("The value must be at least 1 second and at most 24 hours.", nameof(PurgeInterval));
-        if (DirectPushConcurrency < 1 || DirectPushConcurrency > 64)
-            throw new ArgumentException("The value must be at least 1 and at most 64.", nameof(DirectPushConcurrency));
-        if (DirectPushTimeout <= TimeSpan.Zero || DirectPushTimeout > TimeSpan.FromMinutes(5))
-            throw new ArgumentException("The value must be greater than zero and at most 5 minutes.", nameof(DirectPushTimeout));
+        if (PushConcurrency < 1 || PushConcurrency > 64)
+            throw new ArgumentException("The value must be at least 1 and at most 64.", nameof(PushConcurrency));
+        if (PushTimeout <= TimeSpan.Zero || PushTimeout > TimeSpan.FromMinutes(5))
+            throw new ArgumentException("The value must be greater than zero and at most 5 minutes.", nameof(PushTimeout));
     }
 
     /// <summary>
@@ -287,8 +297,8 @@ public sealed class MediatorOptions
             MaxForwardDelay = pipeline.MaxForwardDelay,
             PurgeInterval = pipeline.PurgeInterval,
             DirectPush = pipeline.DirectPush,
-            DirectPushConcurrency = pipeline.DirectPushConcurrency,
-            DirectPushTimeout = pipeline.DirectPushTimeout,
+            PushConcurrency = pipeline.PushConcurrency,
+            PushTimeout = pipeline.PushTimeout,
         };
     }
 }
