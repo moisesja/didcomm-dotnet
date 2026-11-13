@@ -190,6 +190,23 @@ public sealed class MediatorOptions
     /// <exception cref="ArgumentException">A pipeline setting is out of range, <see cref="RewrapMode"/> is not a defined value, or the mailbox age limit is not longer than <see cref="MaxForwardDelay"/>.</exception>
     internal void ValidatePipeline()
     {
+        ValidatePipelineRanges();
+
+        if (Pickup.MaxMessageAge is { } maxMessageAge && maxMessageAge <= MaxForwardDelay)
+        {
+            throw new ArgumentException(
+                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)} must be longer than {nameof(MaxForwardDelay)}, or a delayed message could age out before it is due.",
+                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)}");
+        }
+    }
+
+    /// <summary>
+    /// The ranges of the pipeline settings alone, for a part that reads only those (the sub-objects
+    /// of the registered <c>IOptions&lt;MediatorOptions&gt;</c> are not the roles' settings in effect).
+    /// </summary>
+    /// <exception cref="ArgumentException">A pipeline setting is out of range or <see cref="RewrapMode"/> is not a defined value.</exception>
+    internal void ValidatePipelineRanges()
+    {
         if (!Enum.IsDefined(RewrapMode))
             throw new ArgumentException("The value is not a defined RewrapMode.", nameof(RewrapMode));
         if (MaxForwardDelay < TimeSpan.Zero || MaxForwardDelay > TimeSpan.FromMilliseconds(int.MaxValue))
@@ -200,13 +217,6 @@ public sealed class MediatorOptions
             throw new ArgumentException("The value must be at least 1 and at most 64.", nameof(DirectPushConcurrency));
         if (DirectPushTimeout <= TimeSpan.Zero || DirectPushTimeout > TimeSpan.FromMinutes(5))
             throw new ArgumentException("The value must be greater than zero and at most 5 minutes.", nameof(DirectPushTimeout));
-
-        if (Pickup.MaxMessageAge is { } maxMessageAge && maxMessageAge <= MaxForwardDelay)
-        {
-            throw new ArgumentException(
-                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)} must be longer than {nameof(MaxForwardDelay)}, or a delayed message could age out before it is due.",
-                $"{nameof(Pickup)}.{nameof(MessagePickupOptions.MaxMessageAge)}");
-        }
     }
 
     /// <summary>

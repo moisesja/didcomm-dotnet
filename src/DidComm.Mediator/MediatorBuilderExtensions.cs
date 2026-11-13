@@ -7,6 +7,7 @@ using DidComm.Protocols.Routing;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace DidComm.Mediator;
@@ -159,6 +160,18 @@ public static class MediatorBuilderExtensions
         services.TryAdd(ServiceDescriptor.Singleton(typeof(ForwardProcessorOptions), s_forwardProcessorOptions));
         services.TryAdd(ServiceDescriptor.Singleton(typeof(IRecipientRoutingKeyProvider), s_noRecipientRoutingKeys));
         services.TryAddSingleton(sp => new ForwardMetrics(sp.GetService<IMeterFactory>()));
+        services.TryAddSingleton(sp => new MediatorMetrics(sp.GetService<IMeterFactory>()));
+
+        // The pipeline's parts take nothing that leads back to the dispatcher, the handlers or the
+        // facade (L-017): the push workers resolve the directory and DidCommClient on first use.
+        services.TryAddSingleton(sp => new DirectPushDispatcher(
+            sp,
+            sp.GetRequiredService<IOptions<MediatorOptions>>(),
+            sp.GetRequiredService<MessagePickupQueue>(),
+            sp.GetRequiredService<IMediationStore>(),
+            sp.GetRequiredService<MediatorMetrics>(),
+            sp.GetService<ILogger<DirectPushDispatcher>>(),
+            sp.GetService<TimeProvider>() ?? TimeProvider.System));
 
         // Validates the settings this call can see; its TryAdds of the options and the defaults
         // registered above are no-ops.
