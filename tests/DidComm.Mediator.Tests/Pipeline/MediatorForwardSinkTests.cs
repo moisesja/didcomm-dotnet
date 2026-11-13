@@ -75,6 +75,11 @@ public sealed class MediatorForwardSinkTests
         SinkLines(fixture).Should().ContainSingle().Which.Level.Should().Be(LogLevel.Debug);
         fixture.PushOutcomeLog.Should().BeEmpty("direct push is off");
         NoLeaks(fixture);
+
+        var now = fixture.Time.GetUtcNow();
+        var record = (await fixture.Store.LeaseAsync(new MessageLeaseRequest(Peer, null, 10, int.MaxValue, now, new MessageLease("test-owner", now + TimeSpan.FromMinutes(1))), CancellationToken.None))
+            .Should().ContainSingle().Which;
+        PipelineLogs.Leaking(fixture.Logs, record.Id).Should().BeEmpty("the queue's record id is never logged");
     }
 
     [Fact]

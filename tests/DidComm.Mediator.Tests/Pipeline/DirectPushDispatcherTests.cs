@@ -51,6 +51,30 @@ public sealed class DirectPushDispatcherTests
     }
 
     [Fact]
+    public async Task A_removal_that_hangs_after_a_2xx_is_cut_by_the_deadline_and_the_copy_stays_queued()
+    {
+        var store = new ScriptedMessageStore();
+        var removing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.OnAcknowledge = async (_, _, ct) =>
+        {
+            removing.TrySetResult();
+            await Task.Delay(System.Threading.Timeout.Infinite, ct);
+            return 0;
+        };
+        await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMessageStore>(store));
+        await fixture.EnrolAsync(Peer, Recipient);
+
+        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        await removing.Task.WaitAsync(Wait);
+        fixture.Dispatcher.Outstanding.Should().Be(1, "the removal holds the worker until the deadline");
+        fixture.Time.Advance(TimeSpan.FromSeconds(30));
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
+        store.Inner.MessageCount.Should().Be(1, "the delivered copy stays queued; delivery is at-least-once");
+    }
+
+    [Fact]
     public async Task A_2xx_push_whose_copy_was_already_acknowledged_still_counts_as_pushed()
     {
         await using var fixture = PushFixture.Create(directory: _ => Inbox);

@@ -48,7 +48,9 @@ internal sealed record PushJob(string GrantPeerDid, string RecipientDid, string 
 /// The registration is checked again (a recipient removed or a grant revoked since the message was
 /// stored is not pushed to), then the payload goes out through
 /// <see cref="DidCommClient.SendPackedAsync"/>, which always applies the outbound endpoint guard,
-/// under a per-push deadline of <see cref="MediatorOptions.DirectPushTimeout"/>. Only an accepted
+/// under a per-push deadline of <see cref="MediatorOptions.DirectPushTimeout"/> that covers the
+/// re-check, the send and the removal (the directory lookup is the host's own, synchronous code and
+/// is not bounded: a slow directory delays only pushes). Only an accepted
 /// answer with an HTTP 2xx status counts as delivered; the queued copy is then removed. Anything
 /// else leaves the message queued: one attempt per message.
 /// </para>
@@ -379,11 +381,13 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
                 var removed = false;
                 try
                 {
-                    removed = await _queue.RemoveAsync(job.GrantPeerDid, job.MessageId, _shutdownToken).ConfigureAwait(false);
+                    // Under the same deadline: a store that hangs must not hold a worker for good.
+                    removed = await _queue.RemoveAsync(job.GrantPeerDid, job.MessageId, deadline.Token).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (_shutdownToken.IsCancellationRequested)
+                catch (OperationCanceledException)
                 {
-                    // Shutting down after the delivery: the copy stays queued (delivery is at-least-once).
+                    // The deadline or a shutdown after the delivery: the copy stays queued until the
+                    // recipient acknowledges it or it expires (delivery is at-least-once).
                 }
                 MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId}: delivered (HTTP {StatusCode}); queued copy removed: {Removed}.", forwardId, result.HttpStatusCode, removed);
                 return;
