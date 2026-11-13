@@ -73,8 +73,12 @@ public static class MediatorBuilderExtensions
     /// </para>
     /// <para>
     /// <strong>Start-up.</strong> In a generic host (<c>WebApplication</c>, <c>Host</c>) a hosted
-    /// service checks the routing DIDs and every setting before the server starts listening,
-    /// builds the out-of-band invitation, and removes expired and aged-out messages every
+    /// service checks the routing DIDs and every setting before the server starts listening —
+    /// including the forward settings in effect, so a <c>ForwardProcessorOptions</c> or a routing-key
+    /// provider registered after this call that would lift the delay cap, change the re-wrap mode or
+    /// be ignored by re-wrapping, or a forward recipient directory left at the routing mediator's
+    /// empty default, fails start-up — builds the out-of-band invitation, and removes expired and
+    /// aged-out messages every
     /// <see cref="MediatorOptions.PurgeInterval"/>. Outside a generic host nothing starts: each
     /// part checks its own settings when it is first used, but the routing DIDs are not checked
     /// against their DID documents, no invitation is built (the invitation endpoint answers
@@ -108,7 +112,12 @@ public static class MediatorBuilderExtensions
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
     /// <item><description>Direct push makes one attempt per message: a recipient that relies on it
-    /// must also pick up.</description></item>
+    /// must also pick up. A plain <c>http</c> push endpoint needs <c>"http"</c> in
+    /// <c>HttpTransportOptions.AllowedSchemes</c>.</description></item>
+    /// <item><description>Push endpoints can be secrets (capability URLs). The library's own log lines
+    /// never carry them, but <c>IHttpClientFactory</c>'s request logging writes the full URI at
+    /// Information: filter the <c>System.Net.Http.HttpClient.*</c> categories. A
+    /// <c>TransportException</c>'s message names the endpoint; log it by type.</description></item>
     /// </list>
     /// </remarks>
     /// <param name="builder">The DIDComm builder.</param>

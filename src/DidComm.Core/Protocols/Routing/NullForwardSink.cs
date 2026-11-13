@@ -22,7 +22,7 @@ public sealed class NullForwardSink : IForwardSink
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(context);
         _logger?.LogInformation(
-            "Forward {MessageId} accepted by NullForwardSink and dropped; register an IForwardSink (DidComm.Mediator, #95) to relay.",
+            "Forward {MessageId} accepted by NullForwardSink and dropped; use AddMediator() (DidComm.Mediator), or register an IForwardSink, to relay.",
             context.Received.Message.Id);
         return Task.CompletedTask;
     }
