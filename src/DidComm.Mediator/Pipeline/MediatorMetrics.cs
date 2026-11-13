@@ -29,6 +29,13 @@ internal static class PushOutcomes
     /// <summary>The recipient DID was no longer registered under the grant when the push was about to run.</summary>
     internal const string SkippedUnregistered = "Push-Skipped-Unregistered";
 
+    /// <summary>
+    /// The queue no longer held the message for delivery when the push was about to take it:
+    /// expired or aged out, not yet due, leased to a pickup, passed over, acknowledged or purged.
+    /// Nothing was sent; whatever the queue still holds stays for pickup.
+    /// </summary>
+    internal const string SkippedNotHeld = "Push-Skipped-NotHeld";
+
     /// <summary>The mediator was shutting down: the push was abandoned or never started; the message stays queued.</summary>
     internal const string SkippedShutdown = "Push-Skipped-Shutdown";
 }

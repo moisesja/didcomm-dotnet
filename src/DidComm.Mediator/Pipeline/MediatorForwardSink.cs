@@ -158,7 +158,7 @@ internal sealed class MediatorForwardSink : IForwardSink
                 MediatorLog.Write(_logger, LogLevel.Debug, "Forward {ForwardId} is not due yet: not pushed directly; it waits in the queue.", forwardId);
                 return;
             }
-            _pushes.TryEnqueue(new PushJob(grantPeerDid, subject, messageId, result.OnwardPacked, context.Received.Message.Id));
+            _pushes.TryEnqueue(new PushJob(grantPeerDid, subject, messageId, context.Received.Message.Id));
         }
         catch (Exception ex)
         {

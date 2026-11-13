@@ -166,68 +166,107 @@ public sealed class AddMediatorQaTests
         sp.GetRequiredService<ForwardProcessorOptions>().MaxDelay.Should().Be(TimeSpan.FromHours(2), "the composed cap is the one the processor gets");
     }
 
-    // ── the rewrap / routing-key-provider rule by other routes ───────────────────────────
+    // ── the forward settings reached by other routes (QA-1 DEFECT 6, fixed by Q-8) ────────
 
     // QA-1 DEFECT 6 (P3): the rule "RewrapMode.ReanoncryptToNext excludes a host
-    // IRecipientRoutingKeyProvider" is checked only against AddMediator()'s own delegate and the
-    // registrations made before it. Set through Configure<MediatorOptions> (which the
-    // ForwardProcessorOptions factory reads), or with the provider registered after AddMediator(),
-    // nothing refuses: the mediator starts and silently ignores the host's routing keys. The
-    // start-up check covers the cross-role age/delay rule on the values in effect but not this one.
-    [Fact(Skip = "QA-1 DEFECT 6: RewrapMode=ReanoncryptToNext set through Configure<MediatorOptions> with a host IRecipientRoutingKeyProvider is never refused; the provider is silently ignored (MediatorBuilderExtensions.cs:140,259-274; MediatorHostedService.cs:125-132)")]
+    // IRecipientRoutingKeyProvider" was checked only against AddMediator()'s own delegate and the
+    // registrations made before it, and nothing checked the forward settings or the forward
+    // directory in effect. The mediator's start-up now refuses each of these routes (Q-8). L-020:
+    // the "today" pins that asserted a start and a silently ignored provider or dropped forwards
+    // are turned into refusal tests.
+    [Fact]
     public async Task Rewrap_set_through_a_host_Configure_with_a_host_routing_key_provider_fails_start_up()
     {
         await using var fixture = await HostedFixture.CreateAsync(
             before: s => s.AddSingleton<IRecipientRoutingKeyProvider>(new QaRoutingKeyProvider()),
             after: s => s.Configure<MediatorOptions>(o => o.RewrapMode = RewrapMode.ReanoncryptToNext));
 
-        await FluentActions.Awaiting(fixture.StartingAsync).Should().ThrowAsync<Exception>();
+        await RefusedAsync(fixture, "IRecipientRoutingKeyProvider");
     }
 
     [Fact]
-    public async Task Rewrap_set_through_a_host_Configure_with_a_host_routing_key_provider_today_starts_and_ignores_the_provider()
+    public async Task Rewrap_in_the_delegate_with_a_provider_registered_after_AddMediator_fails_start_up()
     {
-        // Pins the behaviour behind DEFECT 6.
-        var provider = new QaRoutingKeyProvider();
-        await using var fixture = await HostedFixture.CreateAsync(
-            before: s => s.AddSingleton<IRecipientRoutingKeyProvider>(provider),
-            after: s => s.Configure<MediatorOptions>(o => o.RewrapMode = RewrapMode.ReanoncryptToNext));
-
-        await fixture.StartingAsync();
-
-        fixture.Services.GetRequiredService<ForwardProcessorOptions>().Mode.Should().Be(RewrapMode.ReanoncryptToNext);
-        fixture.Services.GetRequiredService<IRecipientRoutingKeyProvider>().Should().BeSameAs(provider);
-    }
-
-    [Fact]
-    public async Task Rewrap_in_the_delegate_with_a_provider_registered_after_AddMediator_today_starts_and_ignores_the_provider()
-    {
-        // Same root cause as DEFECT 6, the other route: the provider comes after the call.
-        var provider = new QaRoutingKeyProvider();
         await using var fixture = await HostedFixture.CreateAsync(
             configure: o => o.RewrapMode = RewrapMode.ReanoncryptToNext,
-            after: s => s.AddSingleton<IRecipientRoutingKeyProvider>(provider));
+            after: s => s.AddSingleton<IRecipientRoutingKeyProvider>(new QaRoutingKeyProvider()));
+
+        await RefusedAsync(fixture, "IRecipientRoutingKeyProvider");
+    }
+
+    [Fact]
+    public async Task Pass_through_with_a_provider_registered_after_AddMediator_starts_and_uses_it()
+    {
+        var provider = new QaRoutingKeyProvider();
+        await using var fixture = await HostedFixture.CreateAsync(after: s => s.AddSingleton<IRecipientRoutingKeyProvider>(provider));
 
         await fixture.StartingAsync();
 
         fixture.Services.GetRequiredService<IRecipientRoutingKeyProvider>().Should().BeSameAs(provider);
-        fixture.Services.GetRequiredService<ForwardProcessorOptions>().Mode.Should().Be(RewrapMode.ReanoncryptToNext);
     }
 
     [Fact]
-    public async Task A_mediator_whose_grant_store_is_not_the_forward_directory_today_starts_and_drops_every_forward()
+    public async Task A_mediator_whose_grant_store_is_not_the_forward_directory_and_no_other_directory_fails_start_up()
     {
-        // Same family as DEFECT 6: start-up checks that the sink is the mediator's, not that the
-        // forward directory is. With UseAsForwardRecipientRegistry = false and no directory of the
-        // host's, AddRoutingMediator's empty in-memory directory is used: every forward to an enrolled
-        // recipient is dropped as unknown, and nothing says so.
+        // With UseAsForwardRecipientRegistry = false and no directory of the host's, AddRoutingMediator's
+        // empty in-memory directory would drop every forward to an enrolled recipient as unknown.
         await using var fixture = await HostedFixture.CreateAsync(configure: o => o.CoordinateMediation.UseAsForwardRecipientRegistry = false);
-        await fixture.StartingAsync();
-        await fixture.EnrolAsync("did:example:qa-enrolled-peer", "did:example:qa-enrolled-recipient");
 
-        var registry = fixture.Services.GetRequiredService<IForwardRecipientRegistry>();
-        registry.Should().BeOfType<InMemoryForwardRecipientRegistry>();
-        (await registry.IsRegisteredAsync("did:example:qa-enrolled-recipient", CancellationToken.None)).Should().BeFalse();
+        await RefusedAsync(fixture, "forward recipient directory");
+        fixture.Services.GetRequiredService<IForwardRecipientRegistry>().Should().BeOfType<InMemoryForwardRecipientRegistry>();
+    }
+
+    [Fact]
+    public async Task A_host_forward_directory_with_the_grant_store_not_used_starts()
+    {
+        var directory = new QaForwardDirectory();
+        await using var fixture = await HostedFixture.CreateAsync(
+            configure: o => o.CoordinateMediation.UseAsForwardRecipientRegistry = false,
+            before: s => s.AddSingleton<IForwardRecipientRegistry>(directory));
+
+        await fixture.StartingAsync();
+
+        fixture.Services.GetRequiredService<IForwardRecipientRegistry>().Should().BeSameAs(directory);
+    }
+
+    public static TheoryData<string, ForwardProcessorOptions> LaterForwardOptions => new()
+    {
+        { "no cap", new ForwardProcessorOptions(RewrapMode.PassThrough) },
+        { "a longer cap", new ForwardProcessorOptions(RewrapMode.PassThrough) { MaxDelay = TimeSpan.FromHours(1) + TimeSpan.FromTicks(1) } },
+        { "another mode", new ForwardProcessorOptions(RewrapMode.ReanoncryptToNext) { MaxDelay = TimeSpan.FromHours(1) } },
+    };
+
+    [Theory]
+    [MemberData(nameof(LaterForwardOptions))]
+    public async Task Forward_settings_registered_after_AddMediator_that_differ_from_the_mediators_fail_start_up(string because, ForwardProcessorOptions later)
+    {
+        await using var fixture = await HostedFixture.CreateAsync(after: s => s.AddSingleton(later));
+
+        var refusal = await RefusedAsync(fixture, "ForwardProcessorOptions");
+        refusal.Message.Should().NotBeNullOrEmpty(because);
+    }
+
+    [Fact]
+    public async Task Forward_settings_registered_after_AddMediator_with_a_shorter_cap_and_the_same_mode_start()
+    {
+        // A stricter cap still meets the FR-PICK-10 bound.
+        await using var fixture = await HostedFixture.CreateAsync(after: s => s.AddSingleton(new ForwardProcessorOptions(RewrapMode.PassThrough) { MaxDelay = TimeSpan.FromMinutes(1) }));
+
+        await fixture.StartingAsync();
+    }
+
+    private static async Task<InvalidOperationException> RefusedAsync(HostedFixture fixture, string names)
+    {
+        var refusal = (await FluentActions.Awaiting(fixture.StartingAsync).Should().ThrowAsync<InvalidOperationException>()).Which;
+        refusal.Message.Should().Contain(names);
+        foreach (var did in fixture.Dids)
+            refusal.Message.Should().NotContain(did);
+        return refusal;
+    }
+
+    private sealed class QaForwardDirectory : IForwardRecipientRegistry
+    {
+        public ValueTask<bool> IsRegisteredAsync(string recipientDid, CancellationToken ct) => ValueTask.FromResult(false);
     }
 
     // ── DI cycles fail fast and never hang ────────────────────────────────────────────────
@@ -315,6 +354,9 @@ public sealed class AddMediatorQaTests
         private readonly InMemoryMessageStore _inner = new();
         public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct) => _inner.EnqueueAsync(message, lease, now, ct);
         public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => _inner.LeaseAsync(request, ct);
+        public ValueTask<QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, MessageLease lease, DateTimeOffset now, CancellationToken ct)
+            => _inner.LeaseByIdAsync(grantPeerDid, messageId, lease, now, ct);
+
         public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => _inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
         public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => _inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
         public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => _inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);

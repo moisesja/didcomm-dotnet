@@ -27,7 +27,11 @@ namespace DidComm.Mediator.Pipeline;
 /// effect is the mediator's; every protocol handler is built (so a pickup queue whose delivery
 /// budget cannot carry any message fails now, and the admissible size is logged); the replay guard
 /// and the session registry are built (so their settings are checked now); all settings are
-/// checked together on the values in effect; each routing DID passes FR-MED-07
+/// checked together on the values in effect; the forward settings in effect are the mediator's (the
+/// delay cap of <see cref="MediatorOptions.MaxForwardDelay"/> and <see cref="MediatorOptions.RewrapMode"/>
+/// on the <c>ForwardProcessorOptions</c> handed out, no host routing-key provider with re-wrapping,
+/// and a forward recipient directory that is not the routing mediator's empty default) whichever way
+/// the container was composed; each routing DID passes FR-MED-07
 /// (<see cref="RoutingDidValidator"/>); the out-of-band invitation is built from the first routing
 /// DID; the observable instruments are registered; one Information line names counts and settings,
 /// never a DID.
@@ -131,6 +135,10 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
             _services.GetRequiredService<IOptions<ReturnRouteSessionOptions>>().Value);
         effective.Validate();
         PurgeInterval = effective.PurgeInterval;
+
+        // (5b) The forward settings in effect: routes around AddMediator()'s own checks (a host
+        //      Configure<MediatorOptions>, registrations made after the call) are caught here.
+        CheckForwardSettings(effective);
 
         // (6) FR-MED-07: each routing DID is reachable the way senders reach it.
         var serviceResolver = _services.GetService<IServiceEndpointResolver>()
@@ -320,6 +328,39 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
             _replayGuard = _services.GetService<IInboundReplayGuard>() as InMemoryReplayGuard;
             _sessionRegistry = _services.GetService<IReturnRouteSessionRegistry>() as InMemoryReturnRouteSessionRegistry;
             _resolved = true;
+        }
+    }
+
+    // The relay must run with the mediator's settings, whichever way the container was composed.
+    // Every check reads what the container hands out, never a registration.
+    private void CheckForwardSettings(MediatorOptions effective)
+    {
+        var forward = _services.GetRequiredService<ForwardProcessorOptions>();
+        if (forward.MaxDelay is not { } cap || cap > effective.MaxForwardDelay)
+        {
+            throw new InvalidOperationException(
+                "AddMediator(): the forward settings in effect (ForwardProcessorOptions) do not cap delay_milli at MediatorOptions.MaxForwardDelay, " +
+                "so a sender could hold a recipient's quota with messages it cannot see for longer than the mediator allows (FR-PICK-10). " +
+                "A ForwardProcessorOptions was registered after AddMediator(); remove it and set MediatorOptions.MaxForwardDelay instead.");
+        }
+        if (forward.Mode != effective.RewrapMode)
+        {
+            throw new InvalidOperationException(
+                "AddMediator(): the forward settings in effect (ForwardProcessorOptions) re-wrap differently from MediatorOptions.RewrapMode. " +
+                "A ForwardProcessorOptions was registered after AddMediator(); remove it and set MediatorOptions.RewrapMode instead.");
+        }
+        if (effective.RewrapMode == RewrapMode.ReanoncryptToNext && _services.GetService<IRecipientRoutingKeyProvider>() is not NoRecipientRoutingKeys)
+        {
+            throw new InvalidOperationException(
+                "AddMediator(): MediatorOptions.RewrapMode is ReanoncryptToNext and an IRecipientRoutingKeyProvider is registered; re-wrapping never adds " +
+                "the recipient's extra routing keys, so they would be ignored. Choose one: remove the provider, or keep RewrapMode.PassThrough.");
+        }
+        if (_services.GetService<IForwardRecipientRegistry>() is InMemoryForwardRecipientRegistry)
+        {
+            throw new InvalidOperationException(
+                "AddMediator(): the forward recipient directory in effect is the routing mediator's empty default, so every forward would be dropped " +
+                "as unknown. Keep CoordinateMediationOptions.UseAsForwardRecipientRegistry = true (the default), or register a directory of your " +
+                "own, consulting IMediationStore.FindGrantByRecipientDidAsync, before AddMediator().");
         }
     }
 

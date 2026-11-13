@@ -92,7 +92,7 @@ public sealed class AddMediatorDiTests
         forward.Mode.Should().Be(RewrapMode.ReanoncryptToNext);
         forward.MaxDelay.Should().Be(TimeSpan.FromMinutes(10));
         forward.ExtraRecipientRoutingKeys.Should().BeNull();
-        sp.GetRequiredService<IRecipientRoutingKeyProvider>().Should().BeOfType<StaticRecipientRoutingKeyProvider>();
+        sp.GetRequiredService<IRecipientRoutingKeyProvider>().Should().BeOfType<NoRecipientRoutingKeys>("the mediator registers its own empty default, which start-up can tell from a host provider");
     }
 
     [Fact]
