@@ -384,6 +384,33 @@ internal sealed class PipelinePeers : IAsyncDisposable
         return peer;
     }
 
+    /// <summary>Like <see cref="NewAsync"/>, with a service entry built by hand (one the library's builder would refuse, such as an unsupported scheme).</summary>
+    public async Task<PeerIdentity> NewWithServiceEntryAsync(NetDid.Core.Model.Service serviceEntry, bool holdSecrets = true)
+    {
+        var peer = await PeerIdentityFactory.CreateWithServiceEntryAsync(
+            _minter.GetRequiredService<IDidManager>(),
+            _minter.GetRequiredService<IKeyGenerator>(),
+            _minter.GetRequiredService<ICryptoProvider>(),
+            serviceEntry);
+        if (holdSecrets)
+        {
+            foreach (var jwk in peer.Privates)
+                Secrets.Add(jwk);
+        }
+        return peer;
+    }
+
+    /// <summary>A <c>DIDCommMessaging</c> service entry with exactly this <c>uri</c>, unchecked.</summary>
+    public static NetDid.Core.Model.Service RawDidCommService(string uri) => new()
+    {
+        Id = "#didcomm",
+        Type = "DIDCommMessaging",
+        ServiceEndpoint = NetDid.Core.Model.ServiceEndpointValue.FromMap(new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["uri"] = System.Text.Json.JsonSerializer.SerializeToElement(uri),
+        }),
+    };
+
     public ValueTask DisposeAsync() => _minter.DisposeAsync();
 }
 

@@ -46,11 +46,38 @@ public static class PeerIdentityFactory
     /// <param name="keyGenerator">A key generator (NetCrypto). Same DI container.</param>
     /// <param name="cryptoProvider">A crypto provider (NetCrypto). Same DI container.</param>
     /// <param name="service">OPTIONAL <c>DIDCommMessaging</c> service to embed in the DID — set it when the identity must be reachable (its inbox URL, or a mediator route). Omitted, the DID carries keys only.</param>
-    public static async Task<PeerIdentity> CreateAsync(
+    public static Task<PeerIdentity> CreateAsync(
         IDidManager manager,
         IKeyGenerator keyGenerator,
         ICryptoProvider cryptoProvider,
         DidCommServiceSpec? service = null)
+        => CreateCoreAsync(manager, keyGenerator, cryptoProvider, service is null ? null : BuildDidCommService(service));
+
+    /// <summary>
+    /// Mint a new identity exactly like <see cref="CreateAsync"/>, but embed a service entry the
+    /// caller built itself instead of one described by a <see cref="DidCommServiceSpec"/>. For
+    /// tests that need a DID whose service the library's <see cref="DidCommServiceBuilder"/> would
+    /// refuse to build (an unsupported scheme, for instance); samples use <see cref="CreateAsync"/>.
+    /// </summary>
+    /// <param name="manager">net-did's DID manager.</param>
+    /// <param name="keyGenerator">A key generator (NetCrypto).</param>
+    /// <param name="cryptoProvider">A crypto provider (NetCrypto).</param>
+    /// <param name="serviceEntry">The service entry to embed, as is.</param>
+    public static Task<PeerIdentity> CreateWithServiceEntryAsync(
+        IDidManager manager,
+        IKeyGenerator keyGenerator,
+        ICryptoProvider cryptoProvider,
+        Service serviceEntry)
+    {
+        ArgumentNullException.ThrowIfNull(serviceEntry);
+        return CreateCoreAsync(manager, keyGenerator, cryptoProvider, serviceEntry);
+    }
+
+    private static async Task<PeerIdentity> CreateCoreAsync(
+        IDidManager manager,
+        IKeyGenerator keyGenerator,
+        ICryptoProvider cryptoProvider,
+        Service? serviceEntry)
     {
         ArgumentNullException.ThrowIfNull(manager);
         ArgumentNullException.ThrowIfNull(keyGenerator);
@@ -70,7 +97,7 @@ public static class PeerIdentityFactory
                 new PeerKeyPurpose(kxSigner, PeerPurpose.KeyAgreement),
                 new PeerKeyPurpose(authSigner, PeerPurpose.Authentication),
             },
-            Services = service is null ? null : new[] { BuildDidCommService(service) },
+            Services = serviceEntry is null ? null : new[] { serviceEntry },
         };
 
         var result = await manager.CreateAsync(options).ConfigureAwait(false);

@@ -49,27 +49,32 @@ Released (v1.5.1) and therefore binary-frozen: `ForwardProcessor`, `ForwardProce
 - **Clock.** Aging is judged by each caller's reading; a request read just before a sweep can still deliver a just-aged record (reading skew only, never resurrection: removal is by the lock holder; L-060). Settings are copied at construction everywhere.
 
 ## A. Contract stubs (one commit)
-- [ ] A0. Stubs compiling with `NotImplementedException` bodies for every new public/internal member above; this plan file.
+- [x] A0. Stubs compiling with `NotImplementedException` bodies for every new public/internal member above; this plan file.
 
 ## B. Core and queue (engineer A)
-- [ ] B1. Delay cap (`ForwardProcessorOptions.MaxDelay`, `ExtractDelay` clamp before the draw).
-- [ ] B2. Forward outcome metrics in Core + per-reason rate-limited drop logs in `ForwardHandler`.
-- [ ] B3. `DidCommServiceBuilder` + `PeerIdentityFactory` delegates to it.
-- [ ] B4. Random queue ids + test-seam migration.
-- [ ] B5. Mailbox age limit (fold into `ExpiresAt`); #94 tests that pinned "no expiry ⇒ `ExpiresAt == null`" updated per L-020.
-- [ ] B6. Post-enqueue re-check + `RevokeAndPurgeAsync`.
+- [x] B1. Delay cap (`ForwardProcessorOptions.MaxDelay`, `ExtractDelay` clamp before the draw).
+- [x] B2. Forward outcome metrics in Core + per-reason rate-limited drop logs in `ForwardHandler`.
+- [x] B3. `DidCommServiceBuilder` + `PeerIdentityFactory` delegates to it.
+- [x] B4. Random queue ids + test-seam migration.
+- [x] B5. Mailbox age limit (fold into `ExpiresAt`); #94 tests that pinned "no expiry ⇒ `ExpiresAt == null`" updated per L-020.
+- [x] B6. Post-enqueue re-check + `RevokeAndPurgeAsync`.
 
 ## C. Pipeline (engineer B)
-- [ ] C1. `MediatorOptions` (projection), `MediatorIdentity`, `AddMediator()` registration and conflict checks.
-- [ ] C2. `MediatorForwardSink`.
-- [ ] C3. `DirectPushDispatcher`.
-- [ ] C4. `MediatorHostedService`, `RoutingDidValidator`, metrics.
+- [x] C1. `MediatorOptions` (projection), `MediatorIdentity`, `AddMediator()` registration and conflict checks.
+- [x] C2. `MediatorForwardSink`.
+- [x] C3. `DirectPushDispatcher`.
+- [x] C4. `MediatorHostedService`, `RoutingDidValidator`, metrics.
 
 ## D. ASP.NET Core, integration, harness (engineer C)
-- [ ] D1. Internal WebSocket core + InternalsVisibleTo (public overload unchanged, regression test).
-- [ ] D2. `DidComm.Mediator.AspNetCore` package + `MapDidCommMediator` + DX gate shipped-assembly list.
+- [x] D1. Internal WebSocket core + InternalsVisibleTo (public overload unchanged, regression test).
+- [x] D2. `DidComm.Mediator.AspNetCore` package + `MapDidCommMediator` + DX gate shipped-assembly list.
 - [ ] D3. End-to-end suites in `tests/DidComm.InteropTests/Mediator/` (HTTP, WebSocket live, direct push, two mediators, expiry, delay + cap, age limit, unknown `next` + timing, rewrap / extra keys, acknowledgement ordering, startup failures, invitation, revoke-and-purge, log hygiene).
 - [ ] D4. `InteropCli mediator-pickup` verb + one cell per live leg (python, jvm), run locally.
+
+## Progress log
+
+- A0 skeleton `22fd0ac`. Engineers A (`eng-a-95`: B1 `e0c667e`, B2 `ed30207`, B3 `21f35de`, B4 `14e5c27`, B5 `e975f2c`, B6 `b067d4c`), B (`eng-b-95`: C1 `282823a`, C3 `c837e87`, C2 `ae75936`, C4 `fac4131`, fix `c17a928`) and C (`eng-c-95`: D1 `f745e88`, D2 `4f0a654`) worked in parallel worktrees; merged without conflicts into the feature branch (`3194658`).
+- Deviations reported by the engineers (accepted): `Push-Skipped-Shutdown` outcome added (every push job ends with one outcome); the push deadline also bounds the post-push removal (L-059); `AddMediator` registers its own recognisable default routing-key provider so the rewrap conflict check works on repeated calls; invalid replay/session settings surface from `AddMediator` as `ArgumentException` with the role's `InvalidOperationException` inside; the `ForwardHandler` registration is a cycle-guarded factory sharing the `ForwardMetrics` singleton; `DidCommServiceBuilder` routing keys are restricted to the two forms the sender's expander resolves (bare DID, DID + fragment), endpoint key order `uri, routingKeys, accept` (byte-identical did:peer:2 output); `MapDidCommMediator` parses both route patterns before mapping anything.
 
 ## E. QA and adversarial passes (independent agents; findings verified before fixing)
 - [ ] E1. QA, at least two independent agents (permutations listed in the brief).

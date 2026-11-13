@@ -56,6 +56,8 @@ internal sealed class HostedFixture : IAsyncDisposable
     /// <param name="after">Registrations made after <c>AddDidComm</c>.</param>
     /// <param name="routingDid">Overrides the routing DID put into the settings; empty string for none.</param>
     /// <param name="mintMediator">Whether to mint a did:peer for the mediator at all.</param>
+    /// <param name="noService">Mint the mediator's DID without any service.</param>
+    /// <param name="rawServiceUri">Mint the mediator's DID with a hand-built service whose <c>uri</c> is exactly this (one the library's builder would refuse).</param>
     public static async Task<HostedFixture> CreateAsync(
         DidCommServiceSpec? service = null,
         bool holdSecrets = true,
@@ -65,10 +67,13 @@ internal sealed class HostedFixture : IAsyncDisposable
         Action<IServiceCollection>? after = null,
         string? routingDid = null,
         bool mintMediator = true,
-        bool noService = false)
+        bool noService = false,
+        string? rawServiceUri = null)
     {
         var peers = new PipelinePeers();
-        var mediator = mintMediator ? await peers.NewAsync(noService ? null : service ?? HttpsService, holdSecrets) : null;
+        var mediator = !mintMediator ? null
+            : rawServiceUri is not null ? await peers.NewWithServiceEntryAsync(PipelinePeers.RawDidCommService(rawServiceUri), holdSecrets)
+            : await peers.NewAsync(noService ? null : service ?? HttpsService, holdSecrets);
         var did = routingDid ?? mediator?.Did ?? throw new InvalidOperationException("A routing DID is needed.");
         var time = new ManualTimeProvider();
         var meters = new TestMeterFactory();

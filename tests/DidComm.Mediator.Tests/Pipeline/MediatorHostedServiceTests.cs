@@ -180,7 +180,7 @@ public sealed class MediatorHostedServiceTests
     [Fact]
     public async Task An_unsupported_scheme_fails_start_up()
     {
-        await using var fixture = await HostedFixture.CreateAsync(new DidCommServiceSpec("ftp://mediator-host.example/didcomm"));
+        await using var fixture = await HostedFixture.CreateAsync(rawServiceUri: "ftp://mediator-host.example/didcomm");
 
         (await StartFailsAsync(fixture)).Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("index 0").And.NotContain("mediator-host");
     }
