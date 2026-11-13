@@ -229,19 +229,24 @@ public sealed class ForwardPipelineQaTests
 
     // ── cancellation after the message is stored ──────────────────────────────────────────
 
-    // QA-1 DEFECT 4 (P3): the handler shuts down while the queue is re-checking the registration of
-    // a message it has already stored. DeliverAsync keeps the record (documented) but leaves with
-    // OperationCanceledException; the sink re-throws it and the handler counts the forward as
-    // Dropped-Shutdown — while the message is in the queue and will be delivered. The forward
-    // outcome counter then disagrees with the queue, and the message is never handed to direct push.
+    // QA-1 DEFECT 4 (P3, fixed by #95 Q-6): the handler shuts down while the queue is re-checking the
+    // registration of a message it has already stored. DeliverAsync kept the record but left with
+    // OperationCanceledException; the sink re-threw it and the handler counted the forward as
+    // Dropped-Shutdown — while the message was in the queue and would be delivered — and the
+    // message was never handed to direct push. Now the stored message is reported Queued, counted
+    // Queued, and handed to direct push like any queued message; this fixture's push endpoint
+    // accepts it, so the push delivers and removes it (whether that has happened by the time the
+    // shutdown returns is a race, so the test waits for the push workers before it looks).
     [Fact]
     public async Task A_shutdown_after_the_message_is_stored_counts_what_happened_to_it()
     {
-        var (fixture, mediation) = await ParkedOnRecheckAsync();
-        await using var _ = fixture;
+        var (fixture, _) = await ParkedOnRecheckAsync();
+        await using var __ = fixture;
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.Store.MessageCount.Should().Be(1);
         fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
+        fixture.Store.MessageCount.Should().Be(0, "the direct push it was handed to delivered it");
     }
 
     // ── an attachment that decodes to nothing (DEFECT 5, mediator side) ───────────────────
