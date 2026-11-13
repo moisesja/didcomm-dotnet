@@ -88,7 +88,7 @@ public sealed class MediatorEgressAdvTests
 
     // ---- direct push through the real HTTP transport ----------------------------------------
 
-    [Fact(Skip = "ADV-2 DEFECT 2 (P3): 'one attempt per message' (PRD FR-PICK-09, MediatorOptions.DirectPush, docs/codebase-architecture.md) is false with the HTTP transport's defaults: the transport's Polly retry re-sends a push answered 5xx/408 MaxRetryAttempts (3) more times, 4 POSTs per message; with 307 hops (MaxRedirectHops 5, each hop retried) up to 24. main has no direct push.")]
+    [Fact]
     public async Task One_accepted_message_costs_its_recipients_endpoint_one_request_with_the_default_transport()
     {
         await using var fixture = await EgressFixture.StartAsync();
@@ -105,7 +105,7 @@ public sealed class MediatorEgressAdvTests
         inbox.Count("/bob").Should().Be(1, "the documented contract is one push attempt per message");
     }
 
-    [Fact(Skip = "ADV-2 DEFECT 3 (P2): the HTTP transport has one circuit breaker for every endpoint, so an enrolled peer whose own push endpoint answers 5xx (2 messages with the default retries, 5 without) opens it for 30 s and every other recipient's push fails without a request (Push-Failed, BrokenCircuitException), as does every other HTTP send of the host; the peer can keep it open by sending itself a message every 30 s. main has no direct push (no remote party drives egress).")]
+    [Fact]
     public async Task A_failing_recipient_endpoint_does_not_stop_pushes_to_other_recipients()
     {
         await using var fixture = await EgressFixture.StartAsync();
@@ -130,7 +130,7 @@ public sealed class MediatorEgressAdvTests
         mediator.PushOutcome(PushOutcomes.Pushed).Should().Be(1);
     }
 
-    [Fact(Skip = "ADV-2 DEFECT 4 (P3): a 307 from the directory's endpoint makes the mediator POST the stored payload to a host the directory never named (any public URL in Location, re-pinned by the SSRF guard), count it Pushed and remove the queued copy; IRecipientEndpointDirectory says the endpoint 'always comes from here'. main has no direct push.")]
+    [Fact]
     public async Task A_push_reaches_only_the_endpoint_the_directory_named()
     {
         await using var fixture = await EgressFixture.StartAsync();
@@ -148,7 +148,7 @@ public sealed class MediatorEgressAdvTests
         mediator.Store.MessageCount.Should().Be(1, "a push that did not reach the directory's endpoint is not a delivery");
     }
 
-    [Fact(Skip = "ADV-2 DEFECT 6 (P3): HttpDidCommTransport logs the 2xx at Debug outside any guard (HttpDidCommTransport.cs:117; main:107 the same), so a logging provider that throws turns every delivered push into Push-Failed: the lease is given back and the message, already delivered, is delivered again by pickup. Every other mediator log call is guarded (MediatorLog.Write, SafeLog). main has no direct push.")]
+    [Fact]
     public async Task A_throwing_logging_provider_does_not_turn_a_delivered_push_into_a_failure_and_a_second_delivery()
     {
         await using var fixture = await EgressFixture.StartAsync(builder => builder.Logging.AddProvider(new ThrowingLoggerProvider(typeof(HttpDidCommTransport).FullName!)));

@@ -33,7 +33,7 @@ public sealed class MediatorLifetimeAdvTests
 
     // ---- a dependency that never returns ----------------------------------------------------
 
-    [Fact(Skip = "ADV-2 DEFECT 5 (P3): the per-push deadline only cancels a token, so a store (or mediation store, or transport) that never returns and ignores the token holds its push worker forever: the job never ends with an outcome, its grant never pushes again, and with DirectPushConcurrency such grants every push stops (DirectPushDispatcher.cs:413/425/434/477/496 await without WaitAsync; RoutingDidValidator abandons a hung check with WaitAsync). main has no direct push.")]
+    [Fact]
     public async Task A_store_that_never_returns_from_the_take_holds_a_worker_only_until_the_push_deadline()
     {
         var store = new ScriptedMessageStore();

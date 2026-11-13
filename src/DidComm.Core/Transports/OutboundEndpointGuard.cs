@@ -135,8 +135,11 @@ public sealed class OutboundEndpointGuard
     /// IPv4 link-local <c>169.254/16</c> (which includes the <c>169.254.169.254</c> cloud-metadata
     /// address), RFC 1918 private ranges, RFC 6598 CGNAT <c>100.64/10</c>, the unspecified address,
     /// multicast/reserved, IPv6 loopback/link-local/site-local/multicast, and unique-local
-    /// <c>fc00::/7</c>. IPv4-mapped IPv6 addresses are unwrapped first so they cannot dodge the IPv4
-    /// rules.
+    /// <c>fc00::/7</c>, Teredo <c>2001::/32</c> and the RFC 8215 local-use NAT64 prefix
+    /// <c>64:ff9b:1::/48</c> as a whole. IPv6 forms that embed an IPv4 target are classified by
+    /// that target: IPv4-mapped <c>::ffff:a.b.c.d</c>, IPv4-translated <c>::ffff:0:a.b.c.d</c>
+    /// (RFC 2765/6052), IPv4-compatible <c>::a.b.c.d</c>, 6to4 <c>2002::/16</c> and the well-known
+    /// NAT64 prefix <c>64:ff9b::/96</c>, so they cannot dodge the IPv4 rules.
     /// </summary>
     /// <param name="address">The address to classify.</param>
     /// <returns><c>true</c> when the address must not be a DIDComm send target by default.</returns>
@@ -175,9 +178,16 @@ public sealed class OutboundEndpointGuard
             // Teredo 2001:0000::/32 tunnels to an arbitrary IPv4 endpoint — treat as reserved.
             if (v6[0] == 0x20 && v6[1] == 0x01 && v6[2] == 0x00 && v6[3] == 0x00)
                 return true;
+            // RFC 8215 local-use NAT64 prefix 64:ff9b:1::/48 — reserved as a whole. It is not
+            // globally routable (a domain's own translator serves it), and where the IPv4 sits in
+            // an address depends on the prefix length that domain chose inside the /48 (RFC 6052
+            // §2.2: /48, /56, /64 or /96), so reading one position would let another hide a
+            // loopback or metadata target.
+            if (v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xFF && v6[3] == 0x9B && v6[4] == 0x00 && v6[5] == 0x01)
+                return true;
             // The IsIPv4MappedToIPv6 unwrap at the top only catches ::ffff:0:0/96. Other IPv6 forms
-            // also embed an IPv4 target: IPv4-compatible ::/96 (e.g. ::a9fe:a9fe), 6to4 2002::/16, and
-            // NAT64 64:ff9b::/96. Re-run the IPv4 classification on the embedded address so a loopback
+            // also embed an IPv4 target: IPv4-translated ::ffff:0:0:0/96, IPv4-compatible ::/96
+            // (e.g. ::a9fe:a9fe), 6to4 2002::/16, and NAT64 64:ff9b::/96. Re-run the IPv4 classification on the embedded address so a loopback
             // / metadata / RFC 1918 v4 can't hide inside an IPv6 literal.
             if (TryExtractEmbeddedIPv4(v6, out var embedded) && IsPrivateOrReserved(embedded))
                 return true;
@@ -206,6 +216,14 @@ public sealed class OutboundEndpointGuard
         if (v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xFF && v6[3] == 0x9B &&
             v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
             v6[8] == 0 && v6[9] == 0 && v6[10] == 0 && v6[11] == 0)
+        {
+            embedded = new IPAddress(new[] { v6[12], v6[13], v6[14], v6[15] });
+            return true;
+        }
+        // IPv4-translated ::ffff:0:0:0/96 (RFC 2765 SIIT, RFC 6052): ::ffff:0:a.b.c.d — the low 32
+        // bits. Not the IPv4-mapped ::ffff:0:0/96 form, which the caller unwraps first.
+        if (v6[0] == 0 && v6[1] == 0 && v6[2] == 0 && v6[3] == 0 && v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
+            v6[8] == 0xFF && v6[9] == 0xFF && v6[10] == 0 && v6[11] == 0)
         {
             embedded = new IPAddress(new[] { v6[12], v6[13], v6[14], v6[15] });
             return true;

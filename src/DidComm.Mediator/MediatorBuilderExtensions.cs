@@ -111,9 +111,12 @@ public static class MediatorBuilderExtensions
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>.</description></item>
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
-    /// <item><description>Direct push makes one attempt per message: a recipient that relies on it
+    /// <item><description>Direct push makes one attempt per message, one POST to exactly the
+    /// directory's endpoint with no retry and no redirect followed: a recipient that relies on it
     /// must also pick up. A plain <c>http</c> push endpoint needs <c>"http"</c> in
-    /// <c>HttpTransportOptions.AllowedSchemes</c>.</description></item>
+    /// <c>HttpTransportOptions.AllowedSchemes</c>. Forwards are outside replay protection, so with
+    /// direct push on each replay of a captured forward is pushed again; recipients should drop
+    /// messages whose id they have already seen.</description></item>
     /// <item><description>Push endpoints can be secrets (capability URLs). The library's own log lines
     /// never carry them, but <c>IHttpClientFactory</c>'s request logging writes the full URI at
     /// Information: filter the <c>System.Net.Http.HttpClient.*</c> categories. A
