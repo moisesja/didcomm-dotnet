@@ -34,7 +34,7 @@ public sealed class OutboundGuardAdvTests
         FluentActions.Invoking(() => guard.Validate(new Uri(endpoint))).Should().Throw<TransportException>(endpoint);
     }
 
-    [Theory(Skip = "ADV-2 DEFECT 7 (P3): IsPrivateOrReserved misses the IPv4-translated form ::ffff:0:a.b.c.d (RFC 2765/6052 SIIT, ::ffff:0:0:0/96) and the local-use NAT64 prefix 64:ff9b:1::/48 (RFC 8215): 169.254.169.254 and 127.0.0.1 written that way are 'public' (OutboundEndpointGuard.cs:147-184). Reachable only where a SIIT/NAT64 translator serves the prefix. main has the same guard (unchanged by #95).")]
+    [Theory]
     [InlineData("http://[::ffff:0:a9fe:a9fe]/")]
     [InlineData("http://[::ffff:0:7f00:1]/")]
     [InlineData("http://[64:ff9b:1::a9fe:a9fe]/")]
