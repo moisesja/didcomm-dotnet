@@ -149,7 +149,8 @@ package per transport and integration. The badge at the top of this file shows t
 | `DidComm.AspNetCore` | `MapDidCommEndpoint` / `MapDidCommWebSocket` / `MapDidCommOobEndpoint` receive endpoints |
 | `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | Sender-side transport bindings |
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
-| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts |
+| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline |
+| `DidComm.Mediator.AspNetCore` | `MapDidCommMediator`: the mediator's HTTP, WebSocket and out-of-band invitation endpoints |
 
 ```bash
 dotnet add package DidComm.Core
@@ -197,7 +198,8 @@ repo publishes.
 | `DidComm.Transports.Http` | HTTPS sender (FR-TRN-04..08): `IHttpClientFactory`-backed POST, manual 307 follow + 301/308 refusal, Polly retry / circuit-breaker / timeout |
 | `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events |
 | `DidComm.AspNetCore` | Minimal-API extensions: `MapDidCommEndpoint` (HTTP receive, FR-TRN-07), `MapDidCommWebSocket` (WS receive with frame reassembly, FR-TRN-09/10), `MapDidCommOobEndpoint` (short-form OOB retrieval); `MaxReceiveBytes` ⇒ 413 / 1009 (FR-API-06) |
-| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10) |
+| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10); the complete mediator — `AddMediator()`, `MediatorOptions`, the forward → live / queue / optional direct-push pipeline, start-up checks of the routing DIDs (FR-MED-07, FR-PICK-09/10) |
+| `DidComm.Mediator.AspNetCore` | `MapDidCommMediator(pattern)`: the mediator's HTTP endpoint, its WebSocket endpoint with same-socket replies, and its out-of-band invitation endpoint |
 | `DidComm.TestSupport` *(not shipped)* | `InMemorySecretsResolver` for tests and samples — deliberately kept out of `DidComm.Core` per DD-02 |
 
 The spec's built-in protocols live **inside `DidComm.Core`**, not in separate `DidComm.Protocols.*`
@@ -310,12 +312,14 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-01 coverage gate
 (`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
 packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
-six shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
-intersects real execution hits with the public surface. Currently **572 of 585 members are proven
-to execute**; the remaining 13 have no executable code at all (enums, const holders, one static
-readonly field) and are itemized in the test output. The execution gate's allowlist is empty; a
-cheaper metadata-reference gate runs alongside it as a first check and carries 12 justified
-entries for members no sample references directly.
+eight shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
+intersects real execution hits with the public surface. Of the 978 public members, **628 are
+proven to execute**; 26 have no executable code at all (enums, const holders, two static readonly
+fields) and are itemized in the test output; the other 324 are the Phase 7 mediator surface, on
+the execution gate's allowlist with a `TODO(#97)` marker until sample 11 and cookbook sections
+CC–FF demonstrate them. A cheaper metadata-reference gate runs alongside it as a first check and
+carries 12 justified entries for members no sample references directly, plus 378 `TODO(#97)`
+entries for the same Phase 7 surface.
 
 ## Specifications
 
@@ -351,7 +355,7 @@ Phase 6, in detail:
 | Fixture submodule + harvested vectors + published `didcomm-dotnet` vectors (FR-IX-03/06) | ✅ Done — [didcomm-dotnet-fixtures](https://github.com/moisesja/didcomm-dotnet-fixtures) |
 | Live interop harness — both directions vs didcomm-python and didcomm-jvm over `did:peer`, nightly job (FR-IX-04/05/08) | ✅ Done — `tools/interop-live` |
 | Sample applications 03–10 and cookbook tasks A–J/L/Y/Z (FR-DX-04, §14.3) | ✅ Done |
-| Public-API coverage gate + §14.4 matrix (FR-DX-01, FR-DX-09) | ✅ Done — 572/585 members proven to execute; 13 have no executable code |
+| Public-API coverage gate + §14.4 matrix (FR-DX-01, FR-DX-09) | ✅ Done — 572/585 members proven to execute at the Phase 6 close; 13 have no executable code |
 | ActivitySource spans with redaction audit (NFR-04/05) and the BenchmarkDotNet suite (NFR-07) | ✅ Done |
 
 The conformance bar is binary: `MUST` requirements implemented, full Appendix C vector suite passes, the cross-implementation interop matrix passes — inbound static vectors harvested from SICPA Python, JVM and Rust, plus **live** round-trips against didcomm-python and didcomm-jvm (didcomm-rust is static-vector only; there is no live Rust leg) — every public API member exercised by a runnable sample, and the README quickstart works unmodified. Cells a counterpart genuinely cannot run are declared `n/a` with a falsifiable cause and are listed in [`tools/interop-live/README.md`](tools/interop-live/README.md); an `n/a` that stops being true is deleted, not renewed.
@@ -367,10 +371,12 @@ didcomm-dotnet/
 │   ├── DidComm.Transports.Http/                   # Polly-backed HTTPS sender (FR-TRN-04..08)
 │   ├── DidComm.Transports.WebSocket/              # WebSocket sender with pool + reconnect (FR-TRN-09..11)
 │   ├── DidComm.AspNetCore/                        # MapDidCommEndpoint / MapDidCommWebSocket / MapDidCommOobEndpoint
-│   └── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 + Message Pickup 3.0 (mediator role), store + policy contracts
+│   ├── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 + Message Pickup 3.0 (mediator role), store + policy contracts, AddMediator() + delivery pipeline
+│   └── DidComm.Mediator.AspNetCore/               # MapDidCommMediator: the mediator's HTTP, WebSocket and invitation endpoints
 ├── tests/
 │   ├── DidComm.Core.Tests/                        # unit tests
-│   ├── DidComm.InteropTests/                      # Appendix C vectors + Appendix B resolution + facade round-trip + rotation + routing + transports + sample smoke tests
+│   ├── DidComm.Mediator.Tests/                    # mediator service unit tests (coordination, pickup, pipeline)
+│   ├── DidComm.InteropTests/                      # Appendix C vectors + Appendix B resolution + facade round-trip + rotation + routing + transports + mediator endpoints + sample smoke tests
 │   └── DidComm.TestSupport/                       # InMemorySecretsResolver helper (non-test library)
 ├── samples/
 │   ├── _shared/                                   # Narrator + PeerIdentityFactory (did:peer:2 via NetDid)

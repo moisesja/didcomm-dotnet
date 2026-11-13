@@ -5,11 +5,13 @@ namespace DidComm.Diagnostics;
 /// <summary>
 /// Names the library's OpenTelemetry instrumentation (NFR-05). The library emits
 /// <see cref="Activity"/> spans through a single <see cref="ActivitySource"/> named
-/// <see cref="ActivitySourceName"/>; consumers subscribe to it from their own OpenTelemetry
-/// (or plain <see cref="ActivityListener"/>) pipeline — the library itself references no
-/// OpenTelemetry SDK and exports nothing on its own. When nothing listens, every
-/// instrumentation point is a no-op (<c>StartActivity</c> returns <c>null</c>), so the
-/// telemetry is zero-cost for hosts that never opt in.
+/// <see cref="ActivitySourceName"/>, and metrics through a meter named <see cref="MeterName"/>
+/// (a routing mediator's forward outcomes, and the mediator service's instruments);
+/// consumers subscribe to them from their own OpenTelemetry (or plain
+/// <see cref="ActivityListener"/> / <c>MeterListener</c>) pipeline — the library itself
+/// references no OpenTelemetry SDK and exports nothing on its own. When nothing listens, every
+/// span is a no-op (<c>StartActivity</c> returns <c>null</c>), so the tracing is zero-cost for
+/// hosts that never opt in.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -46,8 +48,9 @@ public static class DidCommDiagnostics
     /// <remarks>
     /// <para>The instruments, all with a closed, low-cardinality set of tag values and never a DID:</para>
     /// <list type="bullet">
-    /// <item><description><c>didcomm.forward.outcomes</c> (counter, unit <c>{forward}</c>): one count per forward a
-    /// routing mediator receives, tagged <c>didcomm.forward.outcome</c> with how it ended:
+    /// <item><description><c>didcomm.forward.outcomes</c> (counter, unit <c>{forward}</c>): one count per forward that
+    /// reaches a routing mediator's forward handler (one refused earlier, at unpack, is not counted),
+    /// tagged <c>didcomm.forward.outcome</c> with how it ended:
     /// <c>Delivered-Live</c>, <c>Queued</c>, <c>Dropped-Malformed</c>, <c>Dropped-NotEncrypted</c>,
     /// <c>Dropped-Expired</c>, <c>Dropped-Unknown</c>, <c>Dropped-Saturated</c>,
     /// <c>Dropped-Unacknowledged</c>, <c>Dropped-Shutdown</c>, <c>Dropped-TooLarge</c>,
@@ -55,8 +58,8 @@ public static class DidCommDiagnostics
     /// <item><description><c>didcomm.mediator.direct_push.outcomes</c> (counter): one count per direct push a
     /// mediator attempts or skips, tagged <c>didcomm.push.outcome</c> (<c>Pushed</c>,
     /// <c>Push-Failed</c>, or a <c>Push-Skipped-</c> reason).</description></item>
-    /// <item><description><c>didcomm.mediator.queue.purged</c> (counter): expired messages removed from the
-    /// pickup queue by the periodic purge.</description></item>
+    /// <item><description><c>didcomm.mediator.queue.purged</c> (counter): expired and aged-out messages
+    /// removed from the pickup queue by the periodic purge.</description></item>
     /// <item><description><c>didcomm.replay.saturated</c> and <c>didcomm.replay.clock_behind_refusals</c>
     /// (observable counters): replay-guard refusals because the guard was full, or because the
     /// host clock was far behind (only for the in-memory guard).</description></item>

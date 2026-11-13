@@ -38,7 +38,8 @@ namespace DidComm.Mediator.Pickup;
 /// a DID can drop them at once with <see cref="PurgeRecipientAsync"/>). A host revokes a grant with
 /// <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>, which revokes it and then calls
 /// <see cref="PurgeGrantAsync"/>; a message being stored for the peer at that moment is removed
-/// again by the queue's own registration check. A host that revokes through
+/// again by the queue's own registration check (unless that check, or the removal, fails). A host
+/// that revokes through
 /// <c>IMediationStore.RevokeAsync</c> alone calls <see cref="PurgeGrantAsync"/> itself; until then
 /// those records are retained and count against the store-wide bounds. They are not delivered while
 /// the peer holds no grant — and are again if the same peer is granted mediation again, since

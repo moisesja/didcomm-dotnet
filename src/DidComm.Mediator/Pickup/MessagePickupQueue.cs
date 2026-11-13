@@ -154,7 +154,8 @@ public sealed class MessagePickupQueue
     /// (<see cref="IMediationStore.RevokeAsync"/>) and then removes every message held under it
     /// (<see cref="IMessageStore.PurgeGrantAsync"/>). A message for the peer that arrives while this
     /// runs is not kept: the queue checks the grant again after storing a message and removes it when
-    /// the grant is gone. A host API; nothing here is reachable from the wire.
+    /// the grant is gone (if that check, or the removal, fails, the message stays until it expires or
+    /// reaches the mailbox age limit). A host API; nothing here is reachable from the wire.
     /// </summary>
     /// <remarks>
     /// Safe to retry: calling it again after a store fault revokes nothing more and purges what is

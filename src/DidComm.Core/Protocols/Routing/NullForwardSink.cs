@@ -4,8 +4,9 @@ namespace DidComm.Protocols.Routing;
 
 /// <summary>
 /// The default <see cref="IForwardSink"/>: accepts every forward and drops it, logging the message
-/// id at Information. Dropping is its documented contract, not a fault — a mediator that relays
-/// registers a real sink (<c>DidComm.Mediator</c>, #95) before <c>AddRoutingMediator</c>.
+/// id at Information. Dropping is its documented contract, not a fault — a complete mediator uses
+/// <c>AddMediator()</c> (<c>DidComm.Mediator</c>), which registers its own sink, and a host with a
+/// sink of its own registers it before <c>AddRoutingMediator</c>.
 /// </summary>
 public sealed class NullForwardSink : IForwardSink
 {

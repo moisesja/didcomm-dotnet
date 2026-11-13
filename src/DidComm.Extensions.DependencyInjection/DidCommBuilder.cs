@@ -155,9 +155,12 @@ public sealed class DidCommBuilder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Every registration is <c>TryAdd</c>, so a host (or the mediator service of #95) registers
-    /// its own <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or
-    /// <see cref="IRecipientRoutingKeyProvider"/> BEFORE calling this method and it wins. The
+    /// Every registration is <c>TryAdd</c>, so a host registers its own
+    /// <see cref="IForwardSink"/>, <see cref="IForwardRecipientRegistry"/> or
+    /// <see cref="IRecipientRoutingKeyProvider"/> BEFORE calling this method and it wins. A
+    /// complete mediator uses <c>AddMediator()</c> (<c>DidComm.Mediator</c>) instead: it registers
+    /// the mediator's sink and calls this method itself, and it refuses a call of this method made
+    /// before it. The
     /// defaults: the recipient registry is an empty <see cref="InMemoryForwardRecipientRegistry"/>
     /// — nothing is relayed until the host resolves it and registers recipients (or a Coordinate
     /// Mediation grant store replaces <see cref="IForwardRecipientRegistry"/>); the sink is

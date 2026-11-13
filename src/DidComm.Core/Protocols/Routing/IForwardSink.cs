@@ -4,8 +4,9 @@ namespace DidComm.Protocols.Routing;
 /// Where <see cref="ForwardHandler"/> hands a processed forward: the onward payload, its next hop
 /// and its scheduling hints (<see cref="ForwardProcessingResult.ExpiresTime"/>,
 /// <see cref="ForwardProcessingResult.NotBefore"/>). A sink pushes it to a live session, queues
-/// it for pickup, or delivers it directly (FR-ROUTE-11; the mediator service of #95). The default
-/// <see cref="NullForwardSink"/> drops everything.
+/// it for pickup, or delivers it directly (FR-ROUTE-11; <c>AddMediator()</c> in
+/// <c>DidComm.Mediator</c> registers the mediator's own). The default <see cref="NullForwardSink"/>
+/// drops everything.
 /// </summary>
 /// <remarks>
 /// <para>
