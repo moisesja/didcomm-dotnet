@@ -199,10 +199,9 @@ internal sealed class InboundAdmissionEndpoint
     /// else the application's shared default (built once, logged once at Information).
     /// </summary>
     /// <param name="services">The request services.</param>
-    /// <param name="coreOptions">The facade options the default guard reads the clock skew from.</param>
     /// <param name="logger">Optional logger.</param>
-    internal IInboundReplayGuard ResolveGuard(IServiceProvider services, DidCommOptions coreOptions, ILogger? logger)
-        => services.GetService<IInboundReplayGuard>() ?? _defaults.Guard(services, coreOptions, logger);
+    internal IInboundReplayGuard ResolveGuard(IServiceProvider services, ILogger? logger)
+        => services.GetService<IInboundReplayGuard>() ?? _defaults.Guard(services, logger);
 
     /// <summary>
     /// The session registry for this connection: the host's registered
@@ -286,9 +285,8 @@ internal sealed class InboundAdmissionDefaults
 
     /// <summary>The application's default replay guard, built on first use from the configured <see cref="ReplayProtectionOptions"/> (or the defaults).</summary>
     /// <param name="services">The request services.</param>
-    /// <param name="coreOptions">The facade options the guard reads the clock skew from.</param>
     /// <param name="logger">Optional logger.</param>
-    internal IInboundReplayGuard Guard(IServiceProvider services, DidCommOptions coreOptions, ILogger? logger)
+    internal IInboundReplayGuard Guard(IServiceProvider services, ILogger? logger)
     {
         var existing = Volatile.Read(ref _guard);
         if (existing is not null)
@@ -298,7 +296,7 @@ internal sealed class InboundAdmissionDefaults
             if (_guard is null)
             {
                 var options = services.GetService<IOptions<ReplayProtectionOptions>>()?.Value ?? new ReplayProtectionOptions();
-                Volatile.Write(ref _guard, new InMemoryReplayGuard(options, coreOptions, services.GetService<ILogger<InMemoryReplayGuard>>()));
+                Volatile.Write(ref _guard, new InMemoryReplayGuard(options, services.GetService<ILogger<InMemoryReplayGuard>>()));
                 SafeLog.Write(logger, LogLevel.Information, "No IInboundReplayGuard is registered; this application's return-route endpoints share one in-memory replay guard. Register it through AddDidComm to share it with handlers too.");
             }
             return _guard;

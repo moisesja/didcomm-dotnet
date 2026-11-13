@@ -100,10 +100,12 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
     /// <see cref="InMemoryMessageStore"/> that records lease requests and can hold one
     /// give-back call until the test lets it go.
     /// </param>
+    /// <param name="replay">The server's replay settings (<c>ReplayProtectionOptions</c>, FR-RR-08).</param>
     public static async Task<PickupEndpointHost> StartAsync(
         Action<MessagePickupOptions>? pickup = null,
         Action<ReturnRouteSessionOptions>? sessions = null,
-        bool parkingStore = false)
+        bool parkingStore = false,
+        Action<ReplayProtectionOptions>? replay = null)
     {
         var logs = new PickupLogCapture();
         PickupParkingStore? parking = null;
@@ -119,6 +121,7 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
             o.AllowSameSocketReplies = true;
             o.MaxReceiveBytes = Mebibyte;
             o.ConfigureSessions = sessions;
+            o.ConfigureReplay = replay;
             o.ConfigureServices = services =>
             {
                 services.AddSingleton<ILoggerProvider>(logs);

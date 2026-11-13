@@ -740,7 +740,7 @@ public sealed class ReturnRouteAdversarialTests
     public async Task A_server_clock_that_moves_backwards_between_two_deliveries_still_refuses_the_second()
     {
         await using var host = await ReturnRouteTestHost.StartAsync(o =>
-            o.ConfigureDidComm = b => b.Configure(c => c.ExpiresClockSkew = TimeSpan.FromSeconds(120)));
+            o.ConfigureReplay = r => r.ClockSkew = TimeSpan.FromSeconds(120));
         host.Recorder.Behavior = (message, _) => (Array.Empty<Message>(), ReturnRouteHttpTests.ReplyTo(host, message, host.Alice.Did));
         var inbound = host.Stamped(host.RecordingMessage(host.Alice).WithReturnRoute(ReturnRouteMode.All)).Build();
         var envelope = await host.AuthcryptAsync(host.Alice, inbound);
@@ -759,7 +759,7 @@ public sealed class ReturnRouteAdversarialTests
         host.DropLines(inbound.Id).Select(l => Outcome(l)).Should().Equal(
             nameof(ReplayAdmission.Duplicate),     // back 60 s, inside the skew: still remembered
             nameof(ReplayAdmission.FutureDated),   // back 121 s: refused on its timestamp
-            nameof(ReplayAdmission.Duplicate),     // created + Window + skew exactly: still remembered
+            nameof(ReplayAdmission.Duplicate),     // created + Window exactly: still remembered (and kept to created + Window + skew)
             nameof(ReplayAdmission.TooOld));       // past it: refused on age
         host.LeakingLogLines().Should().BeEmpty();
     }

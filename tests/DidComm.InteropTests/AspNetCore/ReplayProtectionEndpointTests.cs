@@ -224,7 +224,7 @@ public sealed class ReplayProtectionEndpointTests
         RendezvousReplayGuard? guard = null;
         await using var host = await ReturnRouteTestHost.StartAsync(o => o.ConfigureServices = services =>
             services.AddSingleton<IInboundReplayGuard>(sp => guard = new RendezvousReplayGuard(
-                new InMemoryReplayGuard(new ReplayProtectionOptions(), sp.GetRequiredService<IOptions<DidCommOptions>>().Value),
+                new InMemoryReplayGuard(new ReplayProtectionOptions()),
                 new Rendezvous(N, Timeout))));
         host.Recorder.Behavior = (message, _) => (Array.Empty<Message>(), ReturnRouteHttpTests.ReplyTo(host, message, host.Alice.Did));
 
@@ -252,7 +252,7 @@ public sealed class ReplayProtectionEndpointTests
         {
             o.AllowSameSocketReplies = true;
             o.ConfigureServices = services => services.AddSingleton<IInboundReplayGuard>(sp => guard = new RendezvousReplayGuard(
-                new InMemoryReplayGuard(new ReplayProtectionOptions(), sp.GetRequiredService<IOptions<DidCommOptions>>().Value),
+                new InMemoryReplayGuard(new ReplayProtectionOptions()),
                 new Rendezvous(2, Timeout)));
         });
         host.Recorder.Behavior = (message, _) => (Array.Empty<Message>(), ReturnRouteHttpTests.ReplyTo(host, message, host.Alice.Did));

@@ -15,8 +15,14 @@ public sealed class InMemoryReplayGuardTests
     private const string Alice = "did:example:alice";
     private const string Carol = "did:example:carol";
 
+    // These suites predate ReplayProtectionOptions.ClockSkew (#105) and run at ClockSkew = 0 unless a
+    // test asks for a skew, so they are also the "ClockSkew = 0 reproduces the old rule" differential.
     private static InMemoryReplayGuard Guard(ReplayProtectionOptions? options = null, TimeSpan? skew = null)
-        => new(options ?? new ReplayProtectionOptions(), new DidCommOptions { ExpiresClockSkew = skew ?? TimeSpan.Zero, Clock = () => T });
+    {
+        options ??= new ReplayProtectionOptions();
+        options.ClockSkew = skew ?? TimeSpan.Zero;
+        return new InMemoryReplayGuard(options);
+    }
 
     private static long S(DateTimeOffset t) => t.ToUnixTimeSeconds();
 
@@ -69,13 +75,19 @@ public sealed class InMemoryReplayGuardTests
     }
 
     [Fact]
-    public void Negative_skew_behaves_as_zero()
+    public void A_negative_skew_is_refused_and_a_later_change_to_the_options_has_no_effect()
     {
-        var g = Guard(skew: TimeSpan.FromSeconds(-30));
+        var refused = () => Guard(skew: TimeSpan.FromSeconds(-30));
+        refused.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("ClockSkew");
+
+        var options = new ReplayProtectionOptions { ClockSkew = TimeSpan.Zero };
+        var g = new InMemoryReplayGuard(options);
+        options.ClockSkew = TimeSpan.FromSeconds(-30);
+        options.Window = TimeSpan.FromSeconds(1);
 
         g.TryAdmit(Alice, "f1", S(T.AddSeconds(1)), T).Should().Be(ReplayAdmission.FutureDated);
         g.TryAdmit(Alice, "m1", S(T), T).Should().Be(ReplayAdmission.Admitted);
-        g.TryAdmit(Alice, "m1", S(T), T.AddSeconds(300)).Should().Be(ReplayAdmission.Duplicate);
+        g.TryAdmit(Alice, "m1", S(T), T.AddSeconds(300)).Should().Be(ReplayAdmission.Duplicate, "the guard kept the Window it was built with");
     }
 
     [Fact]
@@ -193,7 +205,9 @@ public sealed class InMemoryReplayGuardTests
         a.Should().Throw<ArgumentException>();
         var b = () => g.TryAdmit(Alice, "", S(T), T);
         b.Should().Throw<ArgumentException>();
-        var c = () => new InMemoryReplayGuard(new ReplayProtectionOptions(), null!);
+        var c = () => new InMemoryReplayGuard(null!);
         c.Should().Throw<ArgumentNullException>();
+        var d = () => new InMemoryReplayGuard(null!, logger: null);
+        d.Should().Throw<ArgumentNullException>();
     }
 }

@@ -23,13 +23,17 @@ public sealed class DidCommOptions
 
     /// <summary>
     /// Tolerance applied when checking <see cref="Messages.Message.ExpiresTime"/> against the
-    /// current clock (FR-API-05). Defaults to <see cref="TimeSpan.Zero"/> — strict expiry. The
-    /// FR-RR-08 replay guard uses the same tolerance (whole seconds, a sub-second value counts as
-    /// zero) for its future-dated bound and its retention, on the receive endpoints and on the
-    /// client's WebSocket inbound loop: with the default, a message stamped by a host whose clock runs
-    /// even slightly ahead can be refused as future-dated, so hosts that exchange return-route or
-    /// mediator-service messages across machines should set it to their expected clock offset.
+    /// current clock (FR-API-05), floored to whole seconds (so a positive sub-second value counts as
+    /// zero). Not validated: a negative value tightens expiry. Defaults to
+    /// <see cref="TimeSpan.Zero"/> — strict expiry. The same allowance judges a <c>from_prior</c>
+    /// JWT's <c>exp</c> / <c>nbf</c> (FR-ROT-05) and a forward's or queued payload's expiry
+    /// (FR-ROUTE-09), so the checks cannot drift apart.
     /// </summary>
+    /// <remarks>
+    /// It does not affect FR-RR-08 replay admission, which has its own tolerance for a peer whose
+    /// clock runs ahead: <see cref="Transports.ReturnRoute.ReplayProtectionOptions.ClockSkew"/>
+    /// (default 60 seconds). Raising this value only accepts expired messages for longer.
+    /// </remarks>
     public TimeSpan ExpiresClockSkew { get; set; } = TimeSpan.Zero;
 
     /// <summary>

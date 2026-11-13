@@ -1108,3 +1108,24 @@ Format per entry:
   flight if the callee never returns? Bound both numbers, test them with a gated dependency and
   churn, and write the saturation behaviour into the docs. See [[L-054]].
 
+## L-060 — A clock reading taken before a lock is not "now" inside it; judge shared state by the instant it was written at.
+
+- **Lesson:** When a guard keeps state that other callers remove by time (a cache purged at
+  "expiry < now"), every decision that relies on "if it were here it would still be here" must be
+  made against the latest instant anyone purged at, not against the caller's own reading. Readings
+  are taken before the lock, so concurrent callers reach it out of order, and a host clock can
+  step back; a forward-only argument ("a clock that moves backwards only keeps entries longer")
+  is about one caller, not the shared structure.
+- **Why:** In #105 the red-team and QA passes both re-admitted a captured request: another
+  request read the clock one second later, took the lock first and purged the entry, then the
+  replay, read at the last second of its window, passed its own age check. It predated the branch
+  (on `main` with a one-second inversion); my rewritten XML remark had re-asserted the wrong
+  claim, and #105's own acceptance line ("no instant exists at which the replay is admitted") was
+  the property it broke. The same review found a live `Window` change opening the same gap, which
+  the guard's "Validate() runs in the constructor" design had implied could not happen.
+- **How to apply:** For any check-then-insert against state another caller can remove, write down
+  which instant each removal used and refuse what may have been removed (a high-water mark under the
+  lock), then test with a deterministic out-of-order interleaving and a stepped-back clock. Copy
+  validated settings at construction instead of reading a mutable options object on every call. In
+  adversarial briefs, ask explicitly for "readings out of order" and "settings changed after
+  validation". See [[L-044]] and [[L-057]].

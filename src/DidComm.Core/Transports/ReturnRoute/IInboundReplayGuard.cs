@@ -28,8 +28,12 @@ public interface IInboundReplayGuard
     /// <summary>
     /// Admit <paramref name="messageId"/> from <paramref name="peerDidSubject"/> exactly once within
     /// the retention. The caller passes one clock reading per inbound (<c>DidCommOptions.Now()</c>,
-    /// the same instant the FR-API-05 expiry check used) so every judgement about the message is
-    /// made at the same time.
+    /// read once for the admission; the FR-API-05 expiry check at unpack read the clock earlier), so
+    /// every judgement the guard makes about the message uses that one instant. Readings of
+    /// concurrent inbounds can reach an implementation out of order, and a host clock can step back:
+    /// an implementation must still never admit a message it may have forgotten
+    /// (<see cref="InMemoryReplayGuard"/> refuses anything whose entry would already have been
+    /// purged).
     /// </summary>
     /// <param name="peerDidSubject">The bare DID subject of the authenticated sender (the sender key id's DID subject).</param>
     /// <param name="messageId">The message <c>id</c>.</param>

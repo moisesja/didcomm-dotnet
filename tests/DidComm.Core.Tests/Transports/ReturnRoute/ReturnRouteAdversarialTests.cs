@@ -119,8 +119,14 @@ public sealed class ReturnRouteAdversarialTests
 
     // ---- replay guard: window, retention, clock ------------------------------------------------
 
+    // These suites predate ReplayProtectionOptions.ClockSkew (#105) and run at ClockSkew = 0 unless a
+    // test asks for a skew, so they are also the "ClockSkew = 0 reproduces the old rule" differential.
     private static InMemoryReplayGuard Guard(ReplayProtectionOptions? options = null, TimeSpan? skew = null)
-        => new(options ?? new ReplayProtectionOptions(), new DidCommOptions { ExpiresClockSkew = skew ?? TimeSpan.Zero });
+    {
+        options ??= new ReplayProtectionOptions();
+        options.ClockSkew = skew ?? TimeSpan.Zero;
+        return new InMemoryReplayGuard(options);
+    }
 
     [Theory]
     [InlineData(0)]
@@ -160,9 +166,11 @@ public sealed class ReturnRouteAdversarialTests
     }
 
     [Fact]
-    public void A_negative_ExpiresClockSkew_behaves_as_zero()
+    public void A_ClockSkew_changed_to_a_negative_value_after_construction_has_no_effect()
     {
-        var g = Guard(skew: TimeSpan.FromSeconds(-90));
+        var options = new ReplayProtectionOptions { ClockSkew = TimeSpan.Zero };
+        var g = new InMemoryReplayGuard(options);
+        options.ClockSkew = TimeSpan.FromSeconds(-90);
         g.TryAdmit("did:example:a", "now", S(T), T).Should().Be(ReplayAdmission.Admitted);
         g.TryAdmit("did:example:a", "plus1", S(T) + 1, T).Should().Be(ReplayAdmission.FutureDated);
         g.TryAdmit("did:example:a", "now", S(T), T.AddSeconds(300)).Should().Be(ReplayAdmission.Duplicate, "retention is created + Window + 0");
@@ -177,7 +185,7 @@ public sealed class ReturnRouteAdversarialTests
     [InlineData(long.MaxValue - 1, ReplayAdmission.FutureDated)]
     public void Extreme_created_time_values_are_refused_and_never_overflow(long created, ReplayAdmission expected)
     {
-        var g = Guard(skew: TimeSpan.MaxValue - TimeSpan.FromDays(1));
+        var g = Guard(skew: TimeSpan.FromSeconds(int.MaxValue));
         g.TryAdmit("did:example:a", "x", created, T).Should().Be(expected);
         g.Count.Should().Be(0);
     }
@@ -185,22 +193,27 @@ public sealed class ReturnRouteAdversarialTests
     [Fact]
     public void The_largest_admissible_expiry_does_not_wrap()
     {
-        // created + Window + skew at its maximum: the latest clock, the widest window and skew the
-        // options allow. A wrap to a negative expiry would purge the entry on the next call and
+        // created + Window + skew at its maximum: the latest clock and the widest window and skew
+        // Validate() allows (the guard copies the validated values, so nothing larger can reach the
+        // arithmetic). A wrap to a negative expiry would purge the entry on the next call and
         // re-admit the replay.
         var options = new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(int.MaxValue) };
-        var g = Guard(options, skew: TimeSpan.MaxValue);
+        var g = Guard(options, skew: TimeSpan.FromSeconds(int.MaxValue));
         var now = DateTimeOffset.MaxValue;
-        var created = S(now) + (long)Math.Floor(TimeSpan.MaxValue.TotalSeconds);
+        var created = S(now) + int.MaxValue;
 
         g.TryAdmit("did:example:a", "max", created, now).Should().Be(ReplayAdmission.Admitted);
         g.TryAdmit("did:example:b", "purge-trigger", S(now), now).Should().Be(ReplayAdmission.Admitted);
         g.TryAdmit("did:example:a", "max", created, now).Should().Be(ReplayAdmission.Duplicate);
         g.Count.Should().Be(2);
 
+        // The earliest instant on a guard of its own: on this one it would be a clock step back of ten
+        // thousand years, which is refused (TooOld) by design.
         var earliest = DateTimeOffset.MinValue;
-        g.TryAdmit("did:example:c", "min", S(earliest), earliest).Should().Be(ReplayAdmission.Admitted);
-        g.TryAdmit("did:example:c", "min", S(earliest), earliest).Should().Be(ReplayAdmission.Duplicate);
+        var fresh = Guard(new ReplayProtectionOptions { Window = TimeSpan.FromSeconds(int.MaxValue) }, skew: TimeSpan.FromSeconds(int.MaxValue));
+        fresh.TryAdmit("did:example:c", "min", S(earliest), earliest).Should().Be(ReplayAdmission.Admitted);
+        fresh.TryAdmit("did:example:c", "min", S(earliest), earliest).Should().Be(ReplayAdmission.Duplicate);
+        g.TryAdmit("did:example:c", "min", S(earliest), earliest).Should().Be(ReplayAdmission.TooOld);
     }
 
     [Fact]
@@ -216,17 +229,33 @@ public sealed class ReturnRouteAdversarialTests
     }
 
     [Fact]
-    public void A_clock_that_jumps_forward_past_the_retention_and_back_readmits_documented_limitation()
+    public void A_clock_that_jumps_forward_past_the_retention_and_back_does_not_readmit()
     {
-        // ADV won't-fix (documented on InMemoryReplayGuard): the guard trusts DidCommOptions.Clock, as
-        // FR-API-05 expiry does. A forward jump beyond created + Window + skew purges the entry; if the
-        // clock then returns, the request is inside its window again and nothing remembers it.
+        // Before #105 this was the documented W-1 limitation: the forward jump purged the entry and,
+        // the clock back, nothing remembered the request. The guard now refuses any timestamped
+        // message whose entry would have expired before the latest purge instant.
         var g = Guard();
         g.TryAdmit("did:example:a", "m", S(T), T).Should().Be(ReplayAdmission.Admitted);
         var jumped = T.AddSeconds(301);
         g.TryAdmit("did:example:b", "purge-trigger", S(jumped), jumped).Should().Be(ReplayAdmission.Admitted);
+        g.Count.Should().Be(1, "the forward jump purged the first entry");
 
-        g.TryAdmit("did:example:a", "m", S(T), T).Should().Be(ReplayAdmission.Admitted);
+        g.TryAdmit("did:example:a", "m", S(T), T).Should().Be(ReplayAdmission.TooOld, "it may have been forgotten");
+    }
+
+    [Fact]
+    public void After_a_step_back_beyond_Window_plus_skew_fresh_messages_are_refused_until_the_clock_catches_up()
+    {
+        // The price of the guarantee above, pinned to the second: purged at T + 301 (Window 300,
+        // skew 0), so any message with created + 300 < T + 301 is refused, a fresh one included.
+        var g = Guard();
+        var jumped = T.AddSeconds(301);
+        g.TryAdmit("did:example:b", "purge-trigger", S(jumped), jumped).Should().Be(ReplayAdmission.Admitted);
+
+        g.TryAdmit("did:example:a", "fresh-at-T", S(T), T).Should().Be(ReplayAdmission.TooOld);
+        g.TryAdmit("did:example:a", "fresh-at-T+1", S(T) + 1, T.AddSeconds(1)).Should().Be(ReplayAdmission.Admitted);
+        new InMemoryReplayGuard(new ReplayProtectionOptions { ClockSkew = TimeSpan.Zero })
+            .TryAdmit("did:example:a", "fresh-at-T", S(T), T).Should().Be(ReplayAdmission.Admitted, "a rebuilt guard (a restart) starts from its first reading");
     }
 
     [Fact]

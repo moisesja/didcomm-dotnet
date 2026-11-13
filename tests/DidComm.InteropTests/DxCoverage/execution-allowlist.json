@@ -174,7 +174,7 @@
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions,DidComm.Facade.DidCommOptions)",
+      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.InMemoryReplayGuard::.ctor(DidComm.Transports.ReturnRoute.ReplayProtectionOptions)",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
@@ -239,10 +239,6 @@
     },
     {
       "member": "DidComm.Core!DidComm.Transports.ReturnRoute.MediatorServiceProtocols::prop:All",
-      "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.ReturnRoute.ReplayProtectionOptions::prop:RequireCreatedTime",
       "reason": "Return-route receive side (#91): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {

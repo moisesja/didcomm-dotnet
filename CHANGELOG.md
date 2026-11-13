@@ -6,6 +6,79 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — replay admission has its own clock-skew tolerance, 60 seconds by default (FR-RR-08, #105, epic #88)
+
+**Behaviour change (against earlier `[Unreleased]` builds; FR-RR-08 is new since 1.5.1):** an
+in-scope message — authcrypted with `return_route` other than `none`, or a Coordinate Mediation /
+Message Pickup message — whose `created_time` is up to **60 seconds ahead** of the receiver's clock
+is now **admitted**. Before, the replay guard took its tolerance from
+`DidCommOptions.ExpiresClockSkew`, which defaults to zero, so a peer whose clock ran even a second
+fast had such messages dropped silently (HTTP `202`, no reply) — between two real hosts,
+intermittent failures of mediation and pickup.
+
+- **New:** `ReplayProtectionOptions.ClockSkew` (`TimeSpan`, default 60 s): how far ahead of this
+  host's clock a `created_time` may be (refused as `FutureDated` beyond it), and how much longer than
+  `Window` an admitted entry is kept (`created_time + Window + ClockSkew`). Whole seconds, floored.
+  `Validate()` refuses a negative value and one over `int.MaxValue` seconds.
+- **`DidCommOptions.ExpiresClockSkew` is unchanged (default 0) and now governs expiry only**
+  (FR-API-05, and the FR-ROT-05 / FR-ROUTE-09 checks that share its arithmetic). It no longer
+  affects replay admission, and `ClockSkew` never lets an expired message through. A host that
+  raised `ExpiresClockSkew` to its clock offset, as the #92 notes advised, should move that value to
+  `ReplayProtectionOptions.ClockSkew` and set `ExpiresClockSkew` back: it now only accepts expired
+  messages for longer.
+- **Where it applies:** the receive endpoints (HTTP and WebSocket, with `AddDidComm`'s guard or the
+  endpoints' per-application fallback) and the client's inbound consumer for messages pushed on a
+  WebSocket session socket. One container has one value for both roles. An HTTP
+  `SendResult.Returned` is not replay-admitted (FR-RR-07, #92), so no replay setting decides it.
+  A host-registered `IInboundReplayGuard` applies its own rule.
+- **Cost:** an entry for a message stamped now is kept 6 minutes instead of 5, so the defaults
+  sustain about 91 admitted in-scope messages per second (`MaxEntries`) and 2.8 per sender
+  (`MaxEntriesPerPeer`) instead of 109 and 3.4. A sender that stamps `now + ClockSkew` holds each
+  entry `Window + 2 × ClockSkew` (7 minutes), which is also how long a fresh-DID flood can keep the
+  budget full. Memory bounds are unchanged.
+- **`InMemoryReplayGuard`** no longer depends on `DidCommOptions`: its constructors are
+  `(ReplayProtectionOptions)` and `(ReplayProtectionOptions, ILogger<InMemoryReplayGuard>?)` (the
+  type is unreleased). It now validates and copies its settings when it is built, so a later change
+  to the options object has no effect (before, `Window` was read on every call, and raising it
+  opened a gap between retention and age rejection).
+
+### Security — a captured request is never re-admitted when clock readings arrive out of order (FR-RR-08, #105)
+
+Found by the #105 red-team and QA passes; present since #91, on `main` too. The endpoints read the
+clock before the replay guard takes its lock, and the guard purged with whichever reading reached
+the lock. So if another request read the clock later but took the lock first and purged a
+captured request's entry, the replay — read earlier, at the last second of its window — was
+admitted again and its handler re-ran. At `ExpiresClockSkew` 0 (the old default) a one-second
+inversion across a second boundary was enough; a host clock stepping back did the same.
+
+- The guard now remembers the latest instant it purged at and refuses as `TooOld` any timestamped
+  message whose entry would already have expired by then (`created_time + Window + ClockSkew`
+  earlier than that instant): it may have been forgotten. With clock readings in order this is the
+  ordinary age rule. A reading D seconds behind refuses in-window messages older than
+  `Window + ClockSkew − D` by that reading; a message stamped at the reading itself is refused only
+  once D exceeds `Window + ClockSkew`.
+- This also closes the #91 limitation W-1 (a clock that jumps forward past an entry's retention and
+  back re-admitted the request). The price, stated in the PRD and the XML docs: after a clock step
+  back of more than `Window + ClockSkew`, fresh in-scope messages are refused as `TooOld` until the
+  clock is back within that span of the latest purge instant, or the process restarts —
+  availability, never integrity. Such refusals are logged as a rate-limited Warning with the lag in
+  seconds, so a guard left behind by a far-future clock reading is visible.
+- A second red-team pass on the fix ran a 92-million-call randomized search (non-monotonic clocks,
+  saturation, timestamp-free entries, extreme settings and instants) against an oracle written from
+  the documented rule: no message was admitted twice. The same oracle finds thousands of double
+  admissions in the guard as it was before this fix.
+
+Tests: the guard's boundaries at the default (59 and 60 s ahead admitted, 61 refused) and at
+`ClockSkew` 0 (the old rule, compared line by line with `main`), second-by-second sweeps through
+retention for future-dated `created_time`, out-of-order readings and clock steps (unit and over the
+TestServer endpoint, with a guard that parks the replay between its clock read and the lock), a
+random-walk comparison with an independent model of the rule, concurrency, validation, settings
+changed after construction; `ExpiresClockSkew` no longer changing admission, and `ClockSkew` never
+changing FR-API-05, FR-ROT-05 or FR-ROUTE-09 expiry; the client's inbound consumer; and two hosts
+whose clocks are 30 s apart (and 59, 60, 61, 90, 300, 301 s) completing trust ping with
+`return_route: all`, enrolment, pickup and live delivery over HTTP and WebSocket in both
+directions, with `ClockSkew = 0` negative controls that fail where `main` failed.
+
 ### Added — Message Pickup 3.0, mediator role: queue, deliveries, acknowledgements, live mode (FR-PICK-01..10, #94, epic #88)
 
 A mediator can now hold messages for the recipients enrolled with it and hand them over when they
@@ -569,11 +642,10 @@ build on it. The new types live in `DidComm.Transports.ReturnRoute`.
     no `Returned`: the send is delivered as before return routes, without reading a response. No
     reply between such DIDs could pass the identity rule anyway.
   - **Clock skew.** FR-RR-08 admission — on the receiver, and now in the client's inbound consumer —
-    refuses `created_time > now + ExpiresClockSkew`, compared in whole seconds (a skew under one
-    second counts as zero), and `DidCommOptions.ExpiresClockSkew` defaults to zero. So a message
-    stamped by a host whose clock runs even slightly ahead can be refused as `FutureDated`. Hosts
-    that talk across machines should set `DidCommOptions.ExpiresClockSkew` to their expected clock
-    offset.
+    refuses `created_time > now + ReplayProtectionOptions.ClockSkew`, compared in whole seconds
+    (default 60 s since #105; before it, the guard used `DidCommOptions.ExpiresClockSkew`, default
+    zero). Over WebSocket the mediator's replies and pushes are judged by the client's own setting;
+    an HTTP `SendResult.Returned` is not replay-admitted, so no replay setting decides it.
 
 ### Added — return-route receive side (FR-RR-01..06, FR-RR-08, #91, epic #88)
 
@@ -700,12 +772,12 @@ The new types live in `DidComm.Transports.ReturnRoute`.
   on a WebSocket — and is neither dispatched nor given a session; it is logged with the message id
   and the outcome only (the first and every 1000th per outcome at Warning, Debug otherwise), and a
   host-registered guard that throws counts as a drop. Rules: `created_time` must lie in
-  `[now − Window, now + ExpiresClockSkew]`; a message without one is refused unless
-  `RequireCreatedTime` is off, in which case it is remembered for `Window`; admission is one atomic
-  check-and-insert on (sender DID subject, message id), so concurrent duplicates admit exactly one;
-  an entry is kept until `created_time + Window + ExpiresClockSkew` inclusive while age rejection
-  starts at `now − Window`, so a captured request is never both forgotten and young enough to
-  pass. At the global or the per-sender budget a new entry is `Saturated` — not admitted, nothing
+  `[now − Window, now + ClockSkew]` (the replay rule's own skew since #105); a message without one is
+  refused unless `RequireCreatedTime` is off, in which case it is remembered for `Window`; admission
+  is one atomic check-and-insert on (sender DID subject, message id), so concurrent duplicates admit
+  exactly one; an entry is kept until `created_time + Window + ClockSkew` inclusive while age
+  rejection starts at `now − Window`, so a captured request is never both forgotten and young
+  enough to pass (since #105 also when clock readings arrive out of order). At the global or the per-sender budget a new entry is `Saturated` — not admitted, nothing
   evicted (saturation costs availability, never integrity) — and admission resumes as entries
   expire; an id longer than `MaxMessageIdLength` is refused before anything is stored. Inside: one
   lock over per-sender buckets plus a min-heap by expiry, purged on every call (amortised O(log n);
@@ -714,14 +786,15 @@ The new types live in `DidComm.Transports.ReturnRoute`.
   clock reading its caller passes (at the endpoints, one `DidCommOptions.Clock` reading per
   inbound), exactly as FR-API-05 expiry does.
 - **`ReplayProtectionOptions`** (validated; `services.AddOptions<ReplayProtectionOptions>().Configure(...)`):
-  `Window` = 5 minutes, the FR-RR-08 default; `RequireCreatedTime` = `true` — with `false`, an
-  identical captured timestamp-free request is accepted again once `Window` has passed (the
-  documented limitation of that setting); `MaxEntries` = 32 768 — about 109 admitted in-scope
-  messages per second sustained over the window on one host, with measured memory at that bound of
+  `Window` = 5 minutes, the FR-RR-08 default; `ClockSkew` = 60 seconds (#105, below);
+  `RequireCreatedTime` = `true` — with `false`, an identical captured timestamp-free request is
+  accepted again once `Window` has passed (the documented limitation of that setting); `MaxEntries`
+  = 32 768 — about 91 admitted in-scope messages per second sustained over the 6 minutes an entry is
+  kept at the defaults on one host, with measured memory at that bound of
   about 6 MB for UUID ids, about 35 MB for 512-character ids held by a few dozen senders, and up to
   about 170 MB when every entry belongs to a different sender with a maximal 2048-character DID
-  (the most a fresh-DID flood can reach); `MaxEntriesPerPeer` = 1024 — about 3.4 in-scope messages
-  per second per sender over the window, far above pickup polling plus acknowledgements and far
+  (the most a fresh-DID flood can reach); `MaxEntriesPerPeer` = 1024 — about 2.8 in-scope messages
+  per second per sender over those 6 minutes, far above pickup polling plus acknowledgements and far
   below the total, so one sender cannot starve the rest; `MaxMessageIdLength` = 512 — 14× a UUID
   (FR-MSG-02 bounds the id's alphabet, not its length).
 - **`MediatorServiceProtocols`**: the four mediator-service protocol identifiers (Coordinate
@@ -797,7 +870,7 @@ replay admission.
   identifier; a Routing 2.0 `forward` is exempt even with the header. Such a message is dropped —
   `202` with an empty body on HTTP, nothing on a WebSocket, not dispatched — when it has no
   `created_time`, is older than `Window` (default 5 minutes) or later than
-  `now + ExpiresClockSkew`, repeats a (sender, message id) already admitted, arrives while the
+  `now + ClockSkew` (default 60 seconds, #105), repeats a (sender, message id) already admitted, arrives while the
   guard's budget is full, or has an id over `MaxMessageIdLength` (default 512). The WebSocket
   endpoint applies it whether or not `AllowSameSocketReplies` is on, and under STOMP. Everything
   else — plaintext, anoncrypt and signed-only messages, and authcrypted messages that carry no
@@ -881,12 +954,12 @@ replay admission.
   never logged; an HTTP response carries at most one JWE; fresh-DID floods against both bounded
   stores; the logs are scanned for DIDs, key ids and thread ids.
 - **Known limitations** (by design; recorded in the #91 plan as W-1..W-4):
-  - A server clock that jumps forward past an entry's retention and back makes a request created
-    inside the restored window admissible again (a backwards step only keeps entries longer).
-    Keeping the host clock from stepping forward by more than `Window` plus the skew and back is
-    the host's part of FR-RR-08.
+  - (W-1, closed by #105.) A server clock that jumped forward past an entry's retention and back
+    made a request created inside the restored window admissible again. Since #105 the guard
+    refuses it; the cost is that fresh in-scope messages are refused after a clock step back of
+    more than `Window + ClockSkew`, until the clock catches up or the process restarts.
   - Freshly minted DIDs can fill the global replay budget and deny in-scope traffic to every sender
-    for up to `Window` (FR-RR-08 (5): saturation is not admitted); existing entries are never
+    for up to `Window + 2 × ClockSkew` (FR-RR-08 (5): saturation is not admitted); existing entries are never
     displaced. Put admission control or rate limiting in front of a mediator endpoint (#95).
   - The first delivery of a captured authcrypted `all` message owns the session socket, as above:
     confidentiality holds, availability for that sender does not.
