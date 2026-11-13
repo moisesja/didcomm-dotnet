@@ -179,21 +179,36 @@ public sealed class ForwardSelfAddressedTests
     }
 
     [Fact]
-    public async Task A_forward_inside_that_has_expired_is_dropped_as_expired()
+    public async Task A_forward_inside_that_has_expired_when_it_arrives_is_dropped_as_expired()
+    {
+        // #95 AD-1: layers are opened at receipt, on the request; the inner forward is judged then.
+        await using var f = await Fixture.CreateAsync();
+        var inner = await f.AnoncryptAsync(Forward(Bob, expires: T0.AddSeconds(10).ToUnixTimeSeconds()));
+        f.Now = T0.AddSeconds(20);
+
+        await f.HandleAsync(f.SelfAddressed(inner));
+
+        f.Sink.Count.Should().Be(0);
+        f.Handler.Outstanding.Should().Be(0, "dropped before anything was reserved");
+        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedExpired] = 1 });
+        f.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain("the forward inside it has expired");
+    }
+
+    [Fact]
+    public async Task A_forward_inside_that_expires_while_waiting_for_the_acknowledgement_is_dropped_as_expired()
     {
         await using var f = await Fixture.CreateAsync();
         var inner = await f.AnoncryptAsync(Forward(Bob, expires: T0.AddSeconds(10).ToUnixTimeSeconds()));
         var gate = new TaskCompletionSource();
 
-        var received = f.SelfAddressed(inner);
-        await f.HandleAsync(received, gate.Task, flush: false);
+        await f.HandleAsync(f.SelfAddressed(inner), gate.Task, flush: false);
         f.Now = T0.AddSeconds(20);   // the inner forward expires while the outer waits for its acknowledgement
         gate.SetResult();
         await f.Handler.FlushAsync(Flush);
 
         f.Sink.Count.Should().Be(0);
         f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedExpired] = 1 });
-        f.Logger.Warnings.Should().ContainSingle().Which.Formatted.Should().Contain("the forward inside it has expired");
+        f.Logger.Entries.Should().ContainSingle(e => e.Formatted.Contains("expired while queued"));
     }
 
     [Fact]
@@ -251,8 +266,10 @@ public sealed class ForwardSelfAddressedTests
     // ── Schedule ──────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task The_forward_inside_has_its_own_delay_drawn_when_it_is_opened_under_the_cap()
+    public async Task The_forward_inside_has_its_own_delay_drawn_at_receipt_under_the_cap()
     {
+        // #95 AD-1: the layer is opened at receipt (one clock reading per received forward), so a
+        // late acknowledgement never moves the inner forward's not-before.
         await using var f = await Fixture.CreateAsync(maxDelay: TimeSpan.FromHours(1));
         var gate = new TaskCompletionSource();
 
@@ -263,7 +280,27 @@ public sealed class ForwardSelfAddressedTests
 
         var result = f.Sink.Results.Should().ContainSingle().Which;
         result.Delay.Should().Be(TimeSpan.FromHours(1), "capped");
-        result.NotBefore.Should().Be(T0.AddMinutes(5).AddHours(1), "drawn when the layer was opened, on the pump");
+        result.NotBefore.Should().Be(T0.AddHours(1), "drawn at receipt, when the layer was opened");
+    }
+
+    [Fact]
+    public async Task Opening_happens_on_the_request_before_anything_is_reserved()
+    {
+        // #95 AD-1: the sender's own request opens what it sent; the pump never sees a layer
+        // addressed to the mediator, and a drop while opening reserves nothing.
+        await using var f = await Fixture.CreateAsync();
+        var gate = new TaskCompletionSource();
+
+        await f.HandleAsync(f.SelfAddressed(await f.AnoncryptAsync(Forward(Bob))), gate.Task, flush: false);
+
+        f.Registry.Requested.Should().Equal(new[] { Bob }, "the forward inside was opened and looked up on the request");
+        f.Handler.Outstanding.Should().Be(1, "the forward found inside is reserved, waiting for the acknowledgement");
+        gate.SetResult();
+        await f.Handler.FlushAsync(Flush);
+        f.Sink.Results.Should().ContainSingle().Which.NextHop.Should().Be(Bob);
+
+        await f.HandleAsync(f.SelfAddressed("""{"not":"an envelope"}"""), new TaskCompletionSource().Task, flush: false);
+        f.Handler.Outstanding.Should().Be(0, "a layer that cannot be opened is dropped before a reservation");
     }
 
     [Fact]
