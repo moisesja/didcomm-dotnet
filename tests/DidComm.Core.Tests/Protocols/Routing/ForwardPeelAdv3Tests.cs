@@ -109,7 +109,7 @@ public sealed class ForwardPeelAdv3Tests
     // for its authcrypt key and again for its signature), 8× what the outer unpack alone can be made
     // to resolve. A rewrapping mediator's layer is always a plain anoncrypt
     // (ForwardProcessor.RewrapToNextAsync), so nothing legitimate needs a resolution.
-    [Fact(Skip = "ADV-3 DEFECT 2: opening self-addressed layers resolves every sender-chosen DID of every layer inline (8 stranger DIDs for 8 authcrypt+signed layers), not one decryption per layer")]
+    [Fact]
     public async Task ADV3_D2_Opening_layers_addressed_to_the_mediator_resolves_no_DID_the_sender_chose()
     {
         await using var f = Fixture.Create();
@@ -122,21 +122,56 @@ public sealed class ForwardPeelAdv3Tests
             .Should().BeEmpty("a layer addressed to the mediator costs one decryption, not a resolution of DIDs the sender picked");
     }
 
-    [Fact]
-    public async Task ADV3_D2_today_one_request_makes_the_mediator_resolve_a_stranger_DID_per_opened_layer_inline()
+    public enum RefusedShape
     {
+        Authcrypt,
+        AnoncryptOfAuthcrypt,
+        AnoncryptOfSigned,
+        AuthcryptOfSigned,
+        SignedOnly,
+        Plaintext,
+        AnoncryptWithFromPrior,
+    }
+
+    [Theory]
+    [InlineData(RefusedShape.Authcrypt)]
+    [InlineData(RefusedShape.AnoncryptOfAuthcrypt)]
+    [InlineData(RefusedShape.AnoncryptOfSigned)]
+    [InlineData(RefusedShape.AuthcryptOfSigned)]
+    [InlineData(RefusedShape.SignedOnly)]
+    [InlineData(RefusedShape.Plaintext)]
+    [InlineData(RefusedShape.AnoncryptWithFromPrior)]
+    public async Task A_layer_that_is_not_an_anoncrypt_of_a_plaintext_is_refused_as_malformed_before_any_DID_is_resolved(RefusedShape shape)
+    {
+        // #95 ADV-3 D2: a rewrapping mediator's layer, and a sender's forward layer, is always an
+        // anoncrypt envelope around a plaintext message (FR-ROUTE-02/06). Anything else is refused
+        // from its shape alone — the sender's DID, its signer and a from_prior issuer are never asked for.
         await using var f = Fixture.Create();
-        var received = await f.AuthenticatedChainAsync(ForwardHandler.MaxSelfAddressedLayers);
+        var received = await f.RefusedShapeAsync(shape);
         f.Resolver.Clear();
 
-        await f.HandleAsync(received, flush: false);
+        await f.HandleAsync(received);
 
-        // Counted when HandleAsync returned, i.e. on the sender's request, before any acknowledgement.
-        var calls = f.Resolver.Requested.Where(d => d.StartsWith("did:example:stranger", StringComparison.Ordinal)).ToArray();
-        calls.Distinct().Should().HaveCount(ForwardHandler.MaxSelfAddressedLayers);
-        calls.Length.Should().BeGreaterThanOrEqualTo(2 * ForwardHandler.MaxSelfAddressedLayers, "each layer resolves its stranger for the authcrypt key and again for the signature");
-        await f.Handler.FlushAsync(Flush);
-        f.Sink.Count.Should().Be(1, "the chain is legal by the handler's rules and is relayed");
+        f.Resolver.Requested.Where(d => d.StartsWith("did:example:stranger", StringComparison.Ordinal))
+            .Should().BeEmpty("refused before any DID the sender chose is resolved ({0})", shape);
+        f.Sink.Count.Should().Be(0);
+        f.Outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedMalformed] = 1 });
+        ForwardHandlerTests.AssertLogsCarryNoExceptionObjectAndNone(f.Logger, "did:example:stranger");
+    }
+
+    [Fact]
+    public async Task A_rewrapped_layer_still_opens_with_no_DID_the_sender_chose_resolved()
+    {
+        // What a rewrapping mediator sends (ForwardProcessor.RewrapToNextAsync): a fresh forward,
+        // addressed to this mediator itself, anoncrypted to it — around the original forward.
+        await using var f = Fixture.Create();
+        var received = await f.NestedAsync(2);
+        f.Resolver.Clear();
+
+        await f.HandleAsync(received);
+
+        f.Sink.Results.Should().ContainSingle().Which.NextHop.Should().Be(Bob);
+        f.Resolver.Requested.Where(d => d.StartsWith("did:example:stranger", StringComparison.Ordinal)).Should().BeEmpty();
     }
 
     [Fact]
@@ -446,6 +481,53 @@ public sealed class ForwardPeelAdv3Tests
             }
             return AsDecryptedByMediator(ForwardMessage.Create(Mediator, Mediator, new[] { packed }), MediatorKid);
         }
+
+        /// <summary>A received self-addressed layer whose attachment has one of the refused shapes, built by a stranger.</summary>
+        public async Task<UnpackResult> RefusedShapeAsync(RefusedShape shape)
+        {
+            const string Stranger = "did:example:stranger-1";
+            var forward = ForwardMessage.Create(Mediator, Bob, new[] { Payload });
+            string packed;
+            switch (shape)
+            {
+                case RefusedShape.Authcrypt:
+                    forward.From = Stranger;
+                    packed = (await _stranger.PackEncryptedAsync(forward, new PackEncryptedOptions(Recipients: new[] { Mediator }, From: Stranger))).Message;
+                    break;
+                case RefusedShape.AnoncryptOfAuthcrypt:
+                    forward.From = Stranger;
+                    packed = (await _stranger.PackEncryptedAsync(forward, new PackEncryptedOptions(Recipients: new[] { Mediator }, From: Stranger, ProtectSender: true))).Message;
+                    break;
+                case RefusedShape.AnoncryptOfSigned:
+                    forward.From = Stranger;
+                    packed = (await _stranger.PackEncryptedAsync(forward, new PackEncryptedOptions(Recipients: new[] { Mediator }, SignFrom: Stranger))).Message;
+                    break;
+                case RefusedShape.AuthcryptOfSigned:
+                    forward.From = Stranger;
+                    packed = (await _stranger.PackEncryptedAsync(forward, new PackEncryptedOptions(Recipients: new[] { Mediator }, From: Stranger, SignFrom: Stranger))).Message;
+                    break;
+                case RefusedShape.SignedOnly:
+                    forward.From = Stranger;
+                    packed = await _stranger.PackSignedAsync(forward, Stranger);
+                    break;
+                case RefusedShape.Plaintext:
+                    packed = await _stranger.PackPlaintextAsync(forward);
+                    break;
+                default:
+                    // The termination form of from_prior (no 'from'): validating it would resolve the
+                    // issuer, a DID of the sender's choosing.
+                    forward.FromPrior = Jwt("""{"alg":"EdDSA","kid":"did:example:stranger-2#auth-1"}""", """{"iss":"did:example:stranger-2","iat":1800000000}""");
+                    packed = (await _stranger.PackEncryptedAsync(forward, new PackEncryptedOptions(Recipients: new[] { Mediator }))).Message;
+                    break;
+            }
+            return AsDecryptedByMediator(ForwardMessage.Create(Mediator, Mediator, new[] { packed }), MediatorKid);
+        }
+
+        private static string Jwt(string header, string payload)
+            => B64(header) + "." + B64(payload) + "." + B64("not-a-signature");
+
+        private static string B64(string text)
+            => Convert.ToBase64String(Encoding.UTF8.GetBytes(text)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
         public ProtocolContext Context(UnpackResult received, Task acknowledged)
             => new(received, new DidComm.Threading.ThreadState(received.Message.Id), Client: null, Options, new DidComm.Threading.InMemoryThreadStateStore())

@@ -254,12 +254,17 @@ public sealed class ForwardProcessor
     /// extra routing keys) and unpack it with the mediator's own <see cref="DidCommClient"/>, which
     /// holds the keys forwards to this mediator are encrypted to. The attachment rules are those of
     /// <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>: one attachment, decodable, not
-    /// empty. The unpack applies every receive rule (size, FR-API-05 expiry, consistency).
+    /// empty. The layer must be exactly an anoncrypt envelope around a plaintext message without
+    /// <c>from_prior</c> — what a rewrapping mediator produces (<see cref="RewrapMode.ReanoncryptToNext"/>)
+    /// and what a sender's forward layers are (FR-ROUTE-02); anything else is refused as malformed
+    /// before any DID is resolved, so opening a layer costs one decryption and no resolution of a DID
+    /// the sender chose. The unpack otherwise applies every receive rule (size, FR-API-05 expiry,
+    /// consistency).
     /// </summary>
     /// <param name="selfAddressed">The forward whose <c>next</c> is the DID that decrypted it.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ConsistencyException">Not a forward, more than one attachment, or an attachment with no data.</exception>
-    /// <exception cref="MalformedMessageException">The attachment is not valid base64url or decodes to no bytes; or the unpack refuses what is inside.</exception>
+    /// <exception cref="MalformedMessageException">The attachment is not valid base64url or decodes to no bytes; the layer is not an anoncrypt envelope around a plaintext message without <c>from_prior</c>; or the unpack refuses what is inside.</exception>
     /// <exception cref="DidCommException">Any other refusal of the unpack (it cannot be decrypted with a held key, a key cannot be resolved, ...).</exception>
     internal async Task<UnpackResult> PeelAsync(UnpackResult selfAddressed, CancellationToken ct)
     {
@@ -275,7 +280,7 @@ public sealed class ForwardProcessor
                 $"Forward message carries {attachments.Count} attachments; a forward addressed to this mediator must carry exactly one packed message (FR-ROUTE-05).");
         }
         var inner = ExtractAttachmentBytes(attachments[0]);
-        return await _client.UnpackAsync(Encoding.UTF8.GetString(inner), ct).ConfigureAwait(false);
+        return await _client.UnpackAnoncryptedPlaintextAsync(Encoding.UTF8.GetString(inner), ct).ConfigureAwait(false);
     }
 
     /// <summary>

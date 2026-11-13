@@ -81,6 +81,13 @@ internal static class EnvelopeReader
     /// causes a rejection. Null/empty means only the decrypting kid (when the envelope was
     /// encrypted) is checked.
     /// </param>
+    /// <param name="anoncryptOfPlaintextOnly">
+    /// When <c>true</c>, the input must be exactly an anoncrypt envelope around a plaintext message: a
+    /// plaintext or signed outer layer, an authcrypt layer, and a signature or another envelope inside
+    /// are refused with <see cref="MalformedMessageException"/> from the layer's kind alone, before the
+    /// layer is processed. The caller supplies no sender or signer lookup with it, so no DID the sender
+    /// chose can be resolved (a mediator opening a forward addressed to itself, FR-ROUTE-06).
+    /// </param>
     /// <param name="ct">Cancellation token for the (possibly I/O-bound) key agreement and DID resolution.</param>
     /// <exception cref="MalformedMessageException">When the input is not well-formed.</exception>
     /// <exception cref="CryptoException">When decryption / verification fails.</exception>
@@ -94,6 +101,7 @@ internal static class EnvelopeReader
         Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
         UnpackKeyBindingContext? bindingContext = null,
         IReadOnlySet<string>? ownDidSubjects = null,
+        bool anoncryptOfPlaintextOnly = false,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
@@ -121,6 +129,14 @@ internal static class EnvelopeReader
         for (var depth = 0; depth < 4; depth++) // hard upper bound — no legal composition nests deeper
         {
             var kind = EnvelopeDetector.Detect(current);
+            // The restricted shape (anoncrypt of a plaintext), refused from the kind alone, before the
+            // layer is processed: nothing of a refused layer is decrypted further or verified.
+            if (anoncryptOfPlaintextOnly && kind != (depth == 0 ? EnvelopeKind.Encrypted : EnvelopeKind.Plaintext))
+            {
+                throw new MalformedMessageException(depth == 0
+                    ? "This layer must be an anoncrypt envelope; a plaintext or signed layer is not accepted here."
+                    : "This anoncrypt layer must carry a plaintext message; a signature or another envelope inside it is not accepted here.");
+            }
             stack.Add(kind);
 
             switch (kind)
@@ -510,6 +526,13 @@ internal static class EnvelopeReader
 
                     if (isOutermostEncryptLayer)
                         anonymous = !jweResult.IsAuthenticated;
+
+                    if (anoncryptOfPlaintextOnly && jweResult.IsAuthenticated)
+                    {
+                        // Unreachable without a sender lookup (ECDH-1PU needs the sender's key); asserted
+                        // so the restriction never depends on the parser's handling of a null lookup.
+                        throw new MalformedMessageException("This layer must be anoncrypted; an authcrypt layer is not accepted here.");
+                    }
 
                     if (jweResult.IsAuthenticated)
                     {

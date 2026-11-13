@@ -95,11 +95,16 @@ namespace DidComm.Protocols.Routing;
 /// shared pump never runs a stranger's decryption or DID resolution. What is inside is screened
 /// exactly as an arriving forward is, at the same receipt instant: a <c>forward</c>, encrypted to a
 /// held key, not expired, its own <c>delay_milli</c> drawn under the cap, its <c>next</c> a
-/// registered recipient (the one registry lookup of the request). A forward inside that is again
-/// addressed to this mediator is opened in turn, at most <see cref="MaxSelfAddressedLayers"/> layers
-/// per received forward — so one request costs at most that many unpacks, each of a payload smaller
-/// than the last, the first bounded by <c>MaxReceiveBytes</c> — and one more is dropped as
-/// malformed. The forward found inside is then admitted with the received one's acknowledgement
+/// registered recipient (the one registry lookup of the request). A layer addressed to the mediator
+/// must be exactly an anoncrypt envelope around a plaintext message without <c>from_prior</c> — what
+/// a rewrapping mediator produces, and what a sender's forward layers are (FR-ROUTE-02); a plaintext,
+/// signed or authcrypt layer, a signature or another envelope inside, and <c>from_prior</c> are
+/// refused as malformed from their shape alone, before any DID is resolved. A forward inside that is
+/// again addressed to this mediator is opened in turn, at most <see cref="MaxSelfAddressedLayers"/>
+/// layers per received forward — so one request costs at most that many decryptions and no
+/// resolution of a DID the sender chose, every layer within <c>MaxReceiveBytes</c> (an opened layer
+/// is not necessarily smaller than the one it came out of: a <c>data.json</c> attachment is
+/// re-serialized) — and one more is dropped as malformed. The forward found inside is then admitted with the received one's acknowledgement
 /// (both count against the byte budget) and the pump only processes and sinks it. The relayed
 /// payload must not outlive any layer it came out of: its <see cref="ForwardProcessingResult.ExpiresTime"/>
 /// is the earliest <c>expires_time</c> of the received forward and every layer opened (FR-ROUTE-09),
