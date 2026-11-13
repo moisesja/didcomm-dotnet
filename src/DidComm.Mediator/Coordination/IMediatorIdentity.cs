@@ -6,9 +6,12 @@ namespace DidComm.Mediator.Coordination;
 /// </summary>
 /// <remarks>
 /// The default implementation returns <see cref="CoordinateMediationOptions.RoutingDids"/>.
-/// Register your own before <c>AddCoordinateMediation()</c> to supply them from elsewhere. When the
-/// list is empty the grant carries the DID that decrypted the <c>mediate-request</c> — the mediator
-/// DID the recipient already addressed. Each entry must be a bare DID of at most 2048 characters
+/// Register your own before <c>AddCoordinateMediation()</c> (or <c>AddMediator()</c>) to supply them
+/// from elsewhere; <see cref="MediatorIdentity"/> is a ready-made fixed list. When the list is empty
+/// the grant carries the DID that decrypted the <c>mediate-request</c> — the mediator DID the
+/// recipient already addressed. A complete mediator (<c>AddMediator()</c>) requires at least one
+/// routing DID and refuses to start without one; it also checks each DID's document when it starts
+/// (FR-MED-07). Each entry must be a bare DID of at most 2048 characters
 /// whose DID document has a <c>DIDCommMessaging</c> service with an <c>http(s)</c> or <c>ws(s)</c>
 /// endpoint; a grant that could not be built from the list is not sent. The list is also read for
 /// every <c>recipient-update</c>, to refuse the mediator's own DIDs as recipients: if reading it
