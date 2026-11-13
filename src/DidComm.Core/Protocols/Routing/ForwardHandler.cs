@@ -114,9 +114,9 @@ namespace DidComm.Protocols.Routing;
 /// payload must not outlive any layer it came out of: its <see cref="ForwardProcessingResult.ExpiresTime"/>
 /// is the earliest <c>expires_time</c> of the received forward and every layer opened (FR-ROUTE-09),
 /// for the expired-while-queued check and for the queue that stores it. What is inside and is not a forward is dropped: a mediator is not the final recipient
-/// of an application message. A hold asked for by the received forward is kept when it ends later
-/// than the one the forward found inside asks for (the <c>delay_milli</c> of an intermediate layer
-/// addressed to this mediator is not read). Only the DID that decrypted a layer counts as this
+/// of an application message. The relayed forward's not-before is the latest of the holds asked
+/// for by the received forward and by every layer opened, each capped and drawn at the receipt
+/// instant — never their sum, so a chain of layers is held at most the cap. Only the DID that decrypted a layer counts as this
 /// mediator: a forward naming another of the mediator's DIDs as <c>next</c> is looked up, and
 /// dropped as unknown. The sink receives the innermost forward's processing result with the
 /// received forward's context, and the forward the mediator received is counted once, by how the
