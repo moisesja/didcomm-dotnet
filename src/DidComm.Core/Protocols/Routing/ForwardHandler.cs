@@ -36,8 +36,10 @@ namespace DidComm.Protocols.Routing;
 /// published to the pump only once <see cref="ProtocolContext.Acknowledged"/> has completed — the
 /// transport's signal that the inbound was acknowledged on the wire. The registry-aware HTTP
 /// endpoint completes it from <c>Response.OnCompleted</c>, i.e. when the 202 has been committed,
-/// so neither the <see cref="ForwardProcessor"/> nor the <see cref="IForwardSink"/> runs before
-/// the sender holds the 202: response timing cannot depend on whether <c>next</c> is registered,
+/// so neither the forward's processing (<see cref="ForwardProcessor"/>'s pass-through, extra wraps
+/// or rewrap) nor the <see cref="IForwardSink"/> runs before the sender holds the 202 (only the
+/// opening of a forward addressed to this mediator itself happens before, on the request; see
+/// below): response timing cannot depend on whether <c>next</c> is registered,
 /// and a sink that pushes to a live session, queues, or re-encrypts (rewrap mode) never holds a
 /// request. The WebSocket endpoints and a direct <c>ProtocolDispatcher.DispatchAsync</c> caller
 /// provide no wire acknowledgement (<see cref="Task.CompletedTask"/>) and publish immediately.
@@ -104,8 +106,9 @@ namespace DidComm.Protocols.Routing;
 /// payload must not outlive any layer it came out of: its <see cref="ForwardProcessingResult.ExpiresTime"/>
 /// is the earliest <c>expires_time</c> of the received forward and every layer opened (FR-ROUTE-09),
 /// for the expired-while-queued check and for the queue that stores it. What is inside and is not a forward is dropped: a mediator is not the final recipient
-/// of an application message. A hold asked for by an outer layer is kept: the relayed forward's
-/// not-before is the latest of its layers'. Only the DID that decrypted a layer counts as this
+/// of an application message. A hold asked for by the received forward is kept when it ends later
+/// than the one the forward found inside asks for (the <c>delay_milli</c> of an intermediate layer
+/// addressed to this mediator is not read). Only the DID that decrypted a layer counts as this
 /// mediator: a forward naming another of the mediator's DIDs as <c>next</c> is looked up, and
 /// dropped as unknown. The sink receives the innermost forward's processing result with the
 /// received forward's context, and the forward the mediator received is counted once, by how the
