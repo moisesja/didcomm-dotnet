@@ -467,8 +467,10 @@ public sealed class DirectPushDispatcherTests
     }
 
     [Fact]
-    public async Task A_slow_endpoint_holds_only_the_workers_it_occupies()
+    public async Task A_slow_endpoint_holds_one_worker_and_its_grant_pushes_one_at_a_time()
     {
+        // L-020: this test pinned "a slow grant holds as many workers as it has jobs" (3 here). Since
+        // Q-4 a grant has at most one push in flight, so its endpoint holds a single worker.
         var slow = new Uri("https://slow-host.example/inbox-path");
         var gate = new PushGate();
         var fastDone = 0;
@@ -493,18 +495,71 @@ public sealed class DirectPushDispatcherTests
 
         for (var i = 0; i < 3; i++)
             fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:slow-recipient", forwardId: $"slow-{i}")).Should().BeTrue();
-        await gate.WaitForArrivalsAsync(3, Wait);
+        await gate.WaitForArrivalsAsync(1, Wait);
         for (var i = 0; i < 5; i++)
             fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"fast-{i}")).Should().BeTrue();
 
         await allFast.Task.WaitAsync(Wait);
-        gate.Arrived.Should().Be(3, "the slow pushes are still held");
-        fixture.Dispatcher.Outstanding.Should().BeGreaterThanOrEqualTo(3);
+        gate.Arrived.Should().Be(1, "the slow grant has one push in flight; its other two wait their turn");
+        fixture.Dispatcher.Outstanding.Should().BeGreaterThanOrEqualTo(3, "the slow grant's three jobs are still waiting or running");
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.Pushes(PushOutcomes.Pushed).Should().Be(8);
         fixture.Store.MessageCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task One_grant_never_has_two_pushes_in_flight_while_grants_together_use_every_worker()
+    {
+        var inFlight = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        var maxPerEndpoint = 0;
+        var maxTotal = 0;
+        var total = 0;
+        await using var fixture = PushFixture.Create(
+            async (request, ct) =>
+            {
+                var key = request.Endpoint.AbsolutePath;
+                var mine = inFlight.AddOrUpdate(key, 1, (_, n) => n + 1);
+                var all = Interlocked.Increment(ref total);
+                InterlockedMax(ref maxPerEndpoint, mine);
+                InterlockedMax(ref maxTotal, all);
+                await Task.Yield();
+                await Task.Delay(1, ct);
+                inFlight.AddOrUpdate(key, 0, (_, n) => n - 1);
+                Interlocked.Decrement(ref total);
+                return new TransportResult(true, 202);
+            },
+            directory: peer => new Uri($"https://recipient-host.example/{peer.Split(':').Last()}"),
+            configure: o =>
+            {
+                o.DirectPushConcurrency = 4;
+                o.Pickup.MaxQueueMessages = 40;
+            });
+        var jobs = new List<PushJob>();
+        for (var g = 0; g < 6; g++)
+        {
+            await fixture.EnrolAsync($"did:example:fair-peer-{g}", $"did:example:fair-recipient-{g}");
+            for (var j = 0; j < 10; j++)
+                jobs.Add(await fixture.QueuedJobAsync($"did:example:fair-recipient-{g}", forwardId: $"f{g}-{j}"));
+        }
+
+        jobs.Should().OnlyContain(job => fixture.Dispatcher.TryEnqueue(job));
+        await fixture.Dispatcher.WaitForIdleAsync(TimeSpan.FromSeconds(30));
+
+        maxPerEndpoint.Should().Be(1, "a grant's pushes go out one after another");
+        maxTotal.Should().BeGreaterThan(1, "different grants are pushed in parallel");
+        maxTotal.Should().BeLessThanOrEqualTo(4);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(60);
+        fixture.Store.MessageCount.Should().Be(0);
+
+        static void InterlockedMax(ref int target, int value)
+        {
+            int seen;
+            while ((seen = Volatile.Read(ref target)) < value && Interlocked.CompareExchange(ref target, value, seen) != seen)
+            {
+            }
+        }
     }
 
     // ---- shutdown ------------------------------------------------------------------------------

@@ -154,7 +154,11 @@ public sealed class MediatorOptions
     /// </summary>
     public bool DirectPush { get; set; }
 
-    /// <summary>How many direct pushes may run at the same time. Default 4; from 1 to 64.</summary>
+    /// <summary>
+    /// How many direct pushes may run at the same time. Default 4; from 1 to 64. Recipients take
+    /// turns, with at most one push in flight per mediation grant, so a recipient whose endpoint is
+    /// slow holds one of them at a time, never all.
+    /// </summary>
     public int DirectPushConcurrency { get; set; } = 4;
 
     /// <summary>

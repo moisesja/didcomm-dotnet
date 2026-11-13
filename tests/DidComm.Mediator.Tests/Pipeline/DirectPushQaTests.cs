@@ -391,12 +391,12 @@ public sealed class DirectPushQaTests
 
     // ── fairness between grants ───────────────────────────────────────────────────────────
 
-    // QA-1 DEFECT 2 (P3): one grant may hold 16 jobs (MaxPerGrant) while only
-    // DirectPushConcurrency (default 4) run at once, and the workers take jobs in arrival order.
-    // A recipient whose endpoint hangs therefore occupies every worker for DirectPushTimeout per
-    // round; another grant's due message is not pushed until those time out. The per-grant bound
-    // keeps the backlog shared, not the workers.
-    [Fact(Skip = "QA-1 DEFECT 2: a single slow grant can occupy every direct-push worker (MaxPerGrant 16 >= DirectPushConcurrency 4); other grants' pushes wait for its timeouts (DirectPushDispatcher.cs:242,294-315)")]
+    // QA-1 DEFECT 2 (P3), fixed by Q-4: grants are served in turn with at most one push in flight
+    // per grant, so a recipient whose endpoint hangs holds one worker, never all of them. L-020: the
+    // draft waited for four slow arrivals (four workers inside the slow endpoint); with the fix only
+    // one of the grant's pushes runs at a time, so it waits for one. The "today" pin that asserted the
+    // other grant waits for the slow timeouts is removed with the fix (it encoded the defect).
+    [Fact]
     public async Task A_slow_grant_with_as_many_jobs_as_workers_does_not_hold_up_another_grants_push()
     {
         var slow = new Uri("https://qa-slow-host.example/qa-inbox");
@@ -417,44 +417,48 @@ public sealed class DirectPushQaTests
 
         for (var i = 0; i < 4; i++)
             fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"slow-{i}")).Should().BeTrue();
-        await gate.WaitForArrivalsAsync(4, Wait);
+        await gate.WaitForArrivalsAsync(1, Wait);
         fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, forwardId: "fast")).Should().BeTrue();
 
         await fastPushed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        gate.Arrived.Should().Be(1, "the slow grant has one push in flight; its other three wait their turn");
+
+        gate.Open();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(5);
     }
 
     [Fact]
-    public async Task A_slow_grant_with_as_many_jobs_as_workers_today_holds_another_grants_push_until_its_timeouts()
+    public async Task Grants_are_served_in_turn_and_each_grant_in_arrival_order()
     {
-        // Pins the behaviour behind DEFECT 2: the other grant's push happens only once the slow
-        // pushes have run out of time.
-        var slow = new Uri("https://qa-slow-host.example/qa-inbox");
+        var order = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var gate = new PushGate();
+        var first = 0;
         await using var fixture = PushFixture.Create(
             async (request, ct) =>
             {
-                if (request.Endpoint == slow)
-                    await gate.PassAsync(ct);
+                if (Interlocked.Increment(ref first) == 1)
+                    await gate.PassAsync(ct); // parks the only worker while the backlog fills
+                order.Enqueue(request.Endpoint.AbsolutePath);
                 return new TransportResult(true, 202);
             },
-            directory: peer => peer == Peer ? slow : Inbox);
+            directory: peer => new Uri(peer == Peer ? "https://qa-recipient-host.example/a" : "https://qa-recipient-host.example/b"),
+            configure: o => o.DirectPushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
 
-        for (var i = 0; i < 4; i++)
-            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"slow-{i}")).Should().BeTrue();
-        await gate.WaitForArrivalsAsync(4, Wait);
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, forwardId: "fast")).Should().BeTrue();
+        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "a0")).Should().BeTrue();
+        await gate.WaitForArrivalsAsync(1, Wait);
+        for (var i = 1; i <= 3; i++)
+            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"a{i}")).Should().BeTrue();
+        for (var i = 0; i < 3; i++)
+            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, forwardId: $"b{i}")).Should().BeTrue();
 
-        // Every worker is inside a slow push: none can take the other grant's job.
-        fixture.Router.Requests.Should().HaveCount(4).And.OnlyContain(r => r.Endpoint == slow);
-        fixture.Dispatcher.Outstanding.Should().Be(5);
-
-        fixture.Time.Advance(TimeSpan.FromSeconds(30));
+        gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.Failed).Should().Be(4);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(1);
-        fixture.Router.Requests.Should().Contain(r => r.Endpoint == Inbox);
+
+        order.Should().Equal("/a", "/b", "/a", "/b", "/a", "/b", "/a");
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(7);
     }
 
     // ── expiry and the age limit while a job waits (FR-ROUTE-09, FR-PICK-10) ──────────────

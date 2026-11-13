@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using DidComm.Facade;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Internal;
@@ -40,6 +39,14 @@ internal sealed record PushJob(string GrantPeerDid, string RecipientDid, string 
 /// bound is refused (<c>Push-Skipped-Saturated</c>) and its message simply stays in the queue for
 /// pickup. Every job is a message already admitted under the queue's quota, so the work is bounded
 /// by what the mediator stored, 1:1.
+/// </para>
+/// <para>
+/// <strong>Fair.</strong> Each grant's jobs wait in their own first-in, first-out line, and the
+/// grants that have work are served in turn, with at most one push in flight per grant. A recipient
+/// whose endpoint is slow or hangs therefore holds one worker at a time (for at most
+/// <see cref="MediatorOptions.DirectPushTimeout"/> per push), never all of them: the other grants'
+/// pushes go on with the remaining workers. A grant's own pushes go out one after another, in the
+/// order they were handed over.
 /// </para>
 /// <para>
 /// <strong>Per push: it takes exactly the record it sends (L-057).</strong> The endpoint comes only
@@ -110,9 +117,13 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     private readonly TimeSpan _timeout;
     private readonly int _capacity;
     private readonly int _perGrant;
-    private readonly Channel<PushJob> _channel;
     private readonly object _gate = new();
-    private readonly Dictionary<string, int> _grantJobs = new(StringComparer.Ordinal);
+    // Under _gate: each grant's waiting jobs in arrival order and whether one of its pushes runs;
+    // the grants that have a waiting job and none running, in the order they are to be served.
+    private readonly Dictionary<string, GrantLine> _grants = new(StringComparer.Ordinal);
+    private readonly Queue<GrantLine> _ready = new();
+    // One count per entry put on _ready; a worker takes one, then a grant off _ready.
+    private readonly SemaphoreSlim _readySignal = new(0);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly CancellationToken _shutdownToken;
     private readonly Task[] _workers;
@@ -200,12 +211,6 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         _capacity = capacity;
         _perGrant = perGrant;
         _shutdownToken = _shutdown.Token;
-        _channel = Channel.CreateBounded<PushJob>(new BoundedChannelOptions(capacity)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = false,
-            SingleWriter = false,
-        });
 
         if (!_enabled)
         {
@@ -245,6 +250,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             return false;
 
         string refusal;
+        var signal = false;
         lock (_gate)
         {
             if (_stopped != 0)
@@ -253,23 +259,36 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             }
             else
             {
-                var grantJobs = _grantJobs.GetValueOrDefault(job.GrantPeerDid);
-                if (_outstanding >= _capacity || grantJobs >= _perGrant)
+                _grants.TryGetValue(job.GrantPeerDid, out var line);
+                if (_outstanding >= _capacity || (line?.Count ?? 0) >= _perGrant)
                 {
                     refusal = PushOutcomes.SkippedSaturated;
                 }
-                else if (_channel.Writer.TryWrite(job))
-                {
-                    if (_outstanding++ == 0)
-                        _idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                    _grantJobs[job.GrantPeerDid] = grantJobs + 1;
-                    return true;
-                }
                 else
                 {
-                    refusal = PushOutcomes.SkippedShutdown; // the writer was completed by a concurrent shutdown
+                    if (line is null)
+                        _grants.Add(job.GrantPeerDid, line = new GrantLine(job.GrantPeerDid));
+                    line.Waiting.Enqueue(job);
+                    if (_outstanding++ == 0)
+                        _idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    // A grant joins the turn only while none of its pushes runs; a running one
+                    // re-joins it when that push ends.
+                    if (!line.InFlight && !line.OnReady)
+                    {
+                        line.OnReady = true;
+                        _ready.Enqueue(line);
+                        signal = true;
+                    }
+                    refusal = string.Empty;
                 }
             }
+        }
+
+        if (refusal.Length == 0)
+        {
+            if (signal)
+                _readySignal.Release();
+            return true;
         }
 
         _metrics.RecordPush(refusal);
@@ -307,24 +326,36 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
 
     private async Task WorkerAsync()
     {
-        var reader = _channel.Reader;
         try
         {
-            while (await reader.WaitToReadAsync(_shutdownToken).ConfigureAwait(false))
+            while (true)
             {
-                while (reader.TryRead(out var job))
+                await _readySignal.WaitAsync(_shutdownToken).ConfigureAwait(false);
+
+                // Serve the next grant in turn: its oldest waiting job; the grant leaves the turn
+                // until this push ends, so it never has two pushes running.
+                GrantLine line;
+                PushJob job;
+                lock (_gate)
                 {
-                    try
-                    {
-                        if (_shutdownToken.IsCancellationRequested)
-                            _metrics.RecordPush(PushOutcomes.SkippedShutdown);
-                        else
-                            await PushOneAsync(job).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        Release(job);
-                    }
+                    if (!_ready.TryDequeue(out var next))
+                        continue; // the waiting jobs were discarded by a shutdown
+                    line = next;
+                    line.OnReady = false;
+                    job = line.Waiting.Dequeue();
+                    line.InFlight = true;
+                }
+
+                try
+                {
+                    if (_shutdownToken.IsCancellationRequested)
+                        _metrics.RecordPush(PushOutcomes.SkippedShutdown);
+                    else
+                        await PushOneAsync(job).ConfigureAwait(false);
+                }
+                finally
+                {
+                    Finish(line);
                 }
             }
         }
@@ -488,19 +519,30 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
 
     private DidCommClient Client() => _client ??= _services.GetRequiredService<DidCommClient>();
 
-    private void Release(PushJob job)
+    // A push of this grant ended: it gives back its slot and, when the grant has more waiting, the
+    // grant takes its turn again at the back of the line.
+    private void Finish(GrantLine line)
     {
         TaskCompletionSource? idle = null;
+        var signal = false;
         lock (_gate)
         {
-            var left = _grantJobs.GetValueOrDefault(job.GrantPeerDid) - 1;
-            if (left <= 0)
-                _grantJobs.Remove(job.GrantPeerDid);
-            else
-                _grantJobs[job.GrantPeerDid] = left;
+            line.InFlight = false;
+            if (line.Waiting.Count > 0 && _stopped == 0)
+            {
+                line.OnReady = true;
+                _ready.Enqueue(line);
+                signal = true;
+            }
+            else if (line.Waiting.Count == 0)
+            {
+                _grants.Remove(line.GrantPeerDid);
+            }
             if (--_outstanding == 0)
                 idle = _idle;
         }
+        if (signal)
+            _readySignal.Release();
         idle?.TrySetResult();
     }
 
@@ -527,25 +569,54 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     // Stop admission, cancel the running pushes, discard what waits. Idempotent.
     private void Stop()
     {
+        var discarded = 0;
+        TaskCompletionSource? idle = null;
         lock (_gate)
         {
             if (_stopped != 0)
                 return;
             _stopped = 1;
-            _channel.Writer.TryComplete();
+
+            // Every waiting job ends here; a running push ends on its own, through Finish.
+            _ready.Clear();
+            foreach (var line in _grants.Values.ToArray())
+            {
+                discarded += line.Waiting.Count;
+                line.Waiting.Clear();
+                line.OnReady = false;
+                if (!line.InFlight)
+                    _grants.Remove(line.GrantPeerDid);
+            }
+            _outstanding -= discarded;
+            if (discarded > 0 && _outstanding == 0)
+                idle = _idle;
         }
 
         CancelQuietly(_shutdown);
 
-        var discarded = 0;
-        while (_channel.Reader.TryRead(out var job))
-        {
+        for (var i = 0; i < discarded; i++)
             _metrics.RecordPush(PushOutcomes.SkippedShutdown);
-            Release(job);
-            discarded++;
-        }
+        idle?.TrySetResult();
         if (discarded > 0)
             MediatorLog.Write(_logger, LogLevel.Information, "Direct push stopped: {Discarded} waiting pushes discarded; their messages stay queued for pickup.", discarded);
+    }
+
+    // One grant's line, touched only under _gate.
+    private sealed class GrantLine(string grantPeerDid)
+    {
+        public string GrantPeerDid { get; } = grantPeerDid;
+
+        /// <summary>The grant's waiting jobs, oldest first.</summary>
+        public Queue<PushJob> Waiting { get; } = new();
+
+        /// <summary>Whether one of the grant's pushes is running.</summary>
+        public bool InFlight { get; set; }
+
+        /// <summary>Whether the grant is on the ready line.</summary>
+        public bool OnReady { get; set; }
+
+        /// <summary>The grant's jobs waiting or running, against <see cref="MaxPerGrant"/>.</summary>
+        public int Count => Waiting.Count + (InFlight ? 1 : 0);
     }
 
     /// <summary>Stop admission, cancel the running pushes and discard the waiting ones; does not wait.</summary>
