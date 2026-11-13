@@ -27,7 +27,7 @@ internal static class PushOutcomes
     /// <summary>The push backlog, or the grant's share of it, was full; the message stays queued.</summary>
     internal const string SkippedSaturated = "Push-Skipped-Saturated";
 
-    /// <summary>Direct push: no live session, and no directory, no endpoint for the grant, or the directory failed; the message stays queued.</summary>
+    /// <summary>Direct push: the message was not pushed live (no live session, or the session did not take it), and there is no directory, no endpoint for the grant, or the directory failed; the message stays queued.</summary>
     internal const string SkippedNoEndpoint = "Push-Skipped-NoEndpoint";
 
     /// <summary>Direct push is off and the recipient no longer had a live session with live delivery on when the push ran; the message stays queued.</summary>

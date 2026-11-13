@@ -57,7 +57,8 @@ namespace DidComm.Mediator;
 /// on gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
 /// <see cref="PushTimeout"/>), so a recipient that is slow to take a push holds up no one else's
 /// messages. Each recipient's pushes go one at a time, in the order its messages were stored, and
-/// every message stored while it is live is pushed: the push backlog is sized from the queue's
+/// every message stored while it is live, and already due when stored, is pushed (a message with a
+/// <c>delay_milli</c> hold is never pushed; it waits for pickup): the push backlog is sized from the queue's
 /// quotas (<see cref="MessagePickupOptions.MaxQueueMessages"/>,
 /// <see cref="MessagePickupOptions.MaxStoreMessages"/>). A message whose push fails or reaches
 /// <see cref="PushTimeout"/> stays queued, so a recipient in live mode should still ask for its
@@ -158,8 +159,8 @@ public sealed class MediatorOptions
     /// <summary>
     /// Whether the mediator also pushes each queued message straight to the recipient's own
     /// endpoint, found through a registered <see cref="IRecipientEndpointDirectory"/> (FR-PICK-09).
-    /// Default <c>false</c>. Each message gets one push attempt, in the background, after it is
-    /// queued: a single POST to exactly the directory's endpoint, with no retry, no redirect
+    /// Default <c>false</c>. A message that is due, still held and not pushed live gets at most one
+    /// push attempt, in the background, after it is queued: a single POST to exactly the directory's endpoint, with no retry, no redirect
     /// followed and outside the HTTP transport's circuit breaker (so one recipient's failing
     /// endpoint cannot stop the host's other sends). An <c>http(s)</c> 2xx answer removes the
     /// message from the queue; anything else, a redirect included, leaves it there for pickup, so a

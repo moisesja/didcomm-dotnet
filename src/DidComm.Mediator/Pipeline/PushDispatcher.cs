@@ -106,7 +106,8 @@ internal sealed record PushJob
 /// a pickup already took and removed still waiting their turn.
 /// </para>
 /// <para>
-/// <strong>What a live recipient can rely on.</strong> Every message stored while it has a live
+/// <strong>What a live recipient can rely on.</strong> Every message that is due when it is stored
+/// (a message with a <c>delay_milli</c> hold is never pushed) while the recipient has a live
 /// session with live delivery on is pushed to that session, in the order it was stored, one at a
 /// time — unless a push fails or reaches the deadline, in which case that message stays queued for
 /// pickup, and so do the ones stored during the cooldown that a deadline starts (below). Delivery is
