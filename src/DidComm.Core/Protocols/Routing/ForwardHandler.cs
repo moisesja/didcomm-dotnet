@@ -295,7 +295,18 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             SingleReader = false, // the shutdown path may drain while the pump is in the sink
             SingleWriter = false,
         });
-        _pump = Task.Run(() => PumpAsync(_shutdownToken));
+        // The handler is a singleton that can be built lazily, on the first request: its pump must not
+        // carry that request's execution context (ambient AsyncLocal state, logging scopes, the
+        // current activity) into every forward it ever processes.
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            _pump = Task.Run(() => PumpAsync(_shutdownToken));
+        }
+        else
+        {
+            using (ExecutionContext.SuppressFlow())
+                _pump = Task.Run(() => PumpAsync(_shutdownToken));
+        }
     }
 
     /// <inheritdoc />
