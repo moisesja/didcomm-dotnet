@@ -119,6 +119,8 @@ internal sealed class PickupCoordinator
         _leaseTimeout = options.LeaseTimeout;
         _maxMessageAge = options.MaxMessageAge;
         _maxAckIds = options.EffectiveMaxAckIds;
+        MaxQueueMessages = options.MaxQueueMessages;
+        MaxStoreMessages = options.MaxStoreMessages;
         _didCommOptions = didCommOptions;
         _sizing = new PickupSizing(options, didCommOptions.MaxReceiveBytes);
         _tracker = new PickupSessionTracker(store, logger);
@@ -132,6 +134,12 @@ internal sealed class PickupCoordinator
 
     /// <summary>The largest <c>message_id_list</c> a <c>messages-received</c> may carry.</summary>
     public int MaxAckIds => _maxAckIds;
+
+    /// <summary>The per-grant message quota in effect (<see cref="MessagePickupOptions.MaxQueueMessages"/>).</summary>
+    public int MaxQueueMessages { get; }
+
+    /// <summary>The store-wide message quota in effect (<see cref="MessagePickupOptions.MaxStoreMessages"/>).</summary>
+    public int MaxStoreMessages { get; }
 
     /// <summary>The sizing in effect.</summary>
     public PickupSizing Sizing => _sizing;

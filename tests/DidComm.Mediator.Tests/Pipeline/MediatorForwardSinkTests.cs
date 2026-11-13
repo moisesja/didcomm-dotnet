@@ -407,22 +407,32 @@ public sealed class MediatorForwardSinkTests
     }
 
     [Fact]
-    public async Task A_full_push_backlog_leaves_the_message_queued_and_the_forward_counted_as_queued()
+    public async Task Behind_a_stuck_push_every_message_the_queue_stores_is_handed_over_and_the_queue_quota_is_the_only_limit()
     {
+        // L-020 (ADV-4 D1): this test asserted that the 16-job per-grant share refused the 17th and
+        // 18th messages (Push-Skipped-Saturated) while the first push hung. The share is now the
+        // queue's own per-grant quota, so every stored message gets its push, and the message beyond
+        // the quota is the queue's to refuse (Dropped-Quota), never the dispatcher's.
+        const int Quota = 18;
         var gate = new PushGate();
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
-            directory: _ => Inbox);
+            directory: _ => Inbox,
+            configure: o => o.Pickup.MaxQueueMessages = Quota);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        for (var i = 0; i < PushDispatcher.MaxPerGrant + 2; i++)
+        for (var i = 0; i < Quota + 1; i++)
             await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, $"fwd-{i}"), CancellationToken.None);
 
-        fixture.ForwardOutcomeLog.Should().HaveCount(PushDispatcher.MaxPerGrant + 2).And.OnlyContain(o => o == ForwardOutcomes.Queued);
-        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(2);
+        fixture.ForwardOutcomeLog.Should().HaveCount(Quota + 1);
+        fixture.ForwardOutcomeLog.Take(Quota).Should().OnlyContain(o => o == ForwardOutcomes.Queued);
+        fixture.ForwardOutcomeLog.Last().Should().Be(ForwardOutcomes.DroppedQuota);
+        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(0);
+        fixture.Dispatcher.Outstanding.Should().Be(Quota);
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Store.MessageCount.Should().Be(2, "the two the backlog refused wait for pickup");
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(Quota);
+        fixture.Store.MessageCount.Should().Be(0, "every stored message was pushed and its copy removed");
     }
 
     [Fact]
@@ -433,26 +443,27 @@ public sealed class MediatorForwardSinkTests
         // reviewer's 16 ids of 524 288 characters kept 15 MiB in 15 waiting jobs while the store
         // counted 1 280 bytes).
         const int IdLength = 524_288;
+        const int Forwards = 16;
         var gate = new PushGate();
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        for (var i = 0; i < PushDispatcher.MaxPerGrant; i++)
+        for (var i = 0; i < Forwards; i++)
             await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, new string((char)('a' + i), IdLength)), CancellationToken.None);
         await gate.WaitForArrivalsAsync(1, Wait);
 
         // Every forward has returned (its reservation is given back); one push hangs, fifteen wait.
-        fixture.Dispatcher.Outstanding.Should().Be(PushDispatcher.MaxPerGrant);
+        fixture.Dispatcher.Outstanding.Should().Be(Forwards);
         var perJob = Peer.Length + Recipient.Length + PickupSizing.MaxMintedIdLength + DidComm.Diagnostics.LogValues.MaxIdLength;
         fixture.Dispatcher.RetainedCharacters.Should().BeLessThanOrEqualTo(
-            (long)PushDispatcher.MaxPerGrant * perJob,
+            (long)Forwards * perJob,
             "a job holds two DIDs, the queue's record id and the forward's id in its bounded log form, never the wire id");
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxPerGrant);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(Forwards);
         fixture.Dispatcher.RetainedCharacters.Should().Be(0);
     }
 

@@ -110,9 +110,10 @@ public static class MediatorBuilderExtensions
     /// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> packed deliveries, each at most
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>.</description></item>
     /// <item><description>Every relayed message is stored first; live and direct pushes follow on
-    /// background workers (<see cref="MediatorOptions.PushConcurrency"/>), at most one at a time per
-    /// recipient and 16 waiting or in flight, so a recipient that is slow to take a push holds up no
-    /// one else. A message that cannot be pushed stays queued for pickup.</description></item>
+    /// background workers (<see cref="MediatorOptions.PushConcurrency"/>), one at a time per
+    /// recipient and in order, so a recipient that is slow to take a push holds up no one else. Every
+    /// message stored while its recipient is live gets a push; one that cannot be pushed stays queued
+    /// for pickup.</description></item>
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
     /// <item><description>Direct push makes one attempt per message, one POST to exactly the

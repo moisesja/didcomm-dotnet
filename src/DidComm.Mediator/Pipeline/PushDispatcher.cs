@@ -3,7 +3,6 @@ using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Internal;
 using DidComm.Mediator.Pickup;
 using DidComm.Messages;
-using DidComm.Protocols.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -92,14 +91,27 @@ internal sealed record PushJob
 /// slow to resolve never holds up the storing of other recipients' messages.
 /// </para>
 /// <para>
-/// <strong>Bounded.</strong> At most <see cref="MediatorOptions.PushConcurrency"/> pushes run at
-/// once; at most <see cref="MaxBacklog"/> jobs wait or run; and one grant may hold at most
-/// <see cref="MaxPerGrant"/> of them, so one recipient cannot take the whole backlog. A job names a
-/// stored record and pins no payload, and holds bounded values only (<see cref="PushJob"/>).
-/// <see cref="TryEnqueue"/> never blocks: a job beyond either bound is refused
-/// (<c>Push-Skipped-Saturated</c>) and its message simply stays in the queue for pickup. Every job is
-/// a message already admitted under the queue's quota, so the work is bounded by what the mediator
-/// stored, 1:1.
+/// <strong>Bounded by the queue, so every stored message gets its push.</strong> At most
+/// <see cref="MediatorOptions.PushConcurrency"/> pushes run at once. A job exists only for a message
+/// the queue has stored, and the queue's own quotas bound those: so the backlog is sized from the
+/// pickup settings in effect, at most <see cref="MessagePickupOptions.MaxQueueMessages"/> jobs
+/// waiting or running for one grant and <see cref="MessagePickupOptions.MaxStoreMessages"/> in all
+/// (<see cref="PerGrant"/>, <see cref="Capacity"/>). No stored, due message is refused a job while
+/// the store holds it, however long a recipient's first push takes. A job names a stored record,
+/// pins no payload and holds bounded values only (<see cref="PushJob"/>): about 200 bytes besides
+/// the ids the stored record already holds. <see cref="TryEnqueue"/> never blocks. A job beyond
+/// either bound is refused (<c>Push-Skipped-Saturated</c>) and its message simply stays in the
+/// queue for pickup; that happens only when a grant has more jobs than its quota — a host
+/// <see cref="IMessageStore"/> that admits more than the pickup settings say, or jobs whose messages
+/// a pickup already took and removed still waiting their turn.
+/// </para>
+/// <para>
+/// <strong>What a live recipient can rely on.</strong> Every message stored while it has a live
+/// session with live delivery on is pushed to that session, in the order it was stored, one at a
+/// time — unless a push fails or reaches the deadline, in which case that message stays queued for
+/// pickup. Delivery is at-least-once: a
+/// pushed message stays leased to the session until <c>messages-received</c>, and goes back to the
+/// queue if the session closes or the lease times out first.
 /// </para>
 /// <para>
 /// <strong>Fair.</strong> Each grant's jobs wait in their own first-in, first-out line, and the
@@ -162,12 +174,6 @@ internal sealed record PushJob
 /// </remarks>
 internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
 {
-    /// <summary>Jobs waiting or running, at most (the forward handler's own backlog bound).</summary>
-    internal const int MaxBacklog = ForwardHandler.DefaultCapacity;
-
-    /// <summary>Jobs one grant may have waiting or running, at most.</summary>
-    internal const int MaxPerGrant = 16;
-
     /// <summary>How much longer than the push deadline a direct push's lease on its record runs.</summary>
     internal static readonly TimeSpan LeaseMargin = TimeSpan.FromSeconds(30);
 
@@ -232,7 +238,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         MediatorMetrics metrics,
         ILogger<PushDispatcher>? logger,
         TimeProvider timeProvider)
-        : this(services, options, queue, store, mediation, didCommOptions, metrics, logger, timeProvider, MaxBacklog, MaxPerGrant)
+        : this(services, options, queue, store, mediation, didCommOptions, metrics, logger, timeProvider, capacity: null, perGrant: null)
     {
     }
 
@@ -246,8 +252,8 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     /// <param name="metrics">The push counter.</param>
     /// <param name="logger">Optional logger.</param>
     /// <param name="timeProvider">The clock behind the per-push deadline.</param>
-    /// <param name="capacity">Jobs waiting or running, at most.</param>
-    /// <param name="perGrant">Jobs one grant may have waiting or running, at most.</param>
+    /// <param name="capacity">Jobs waiting or running, at most; <c>null</c> for the queue's store-wide message quota.</param>
+    /// <param name="perGrant">Jobs one grant may have waiting or running, at most; <c>null</c> for the queue's per-grant message quota.</param>
     internal PushDispatcher(
         IServiceProvider services,
         IOptions<MediatorOptions> options,
@@ -258,8 +264,8 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         MediatorMetrics metrics,
         ILogger<PushDispatcher>? logger,
         TimeProvider timeProvider,
-        int capacity,
-        int perGrant)
+        int? capacity,
+        int? perGrant)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
@@ -269,8 +275,12 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(didCommOptions);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(timeProvider);
-        ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
-        ArgumentOutOfRangeException.ThrowIfLessThan(perGrant, 1);
+        // Sized from the queue (D1 of ADV-4): a job exists only for a stored message, so the
+        // queue's quotas already bound the jobs, and none is refused while the store holds it.
+        capacity ??= queue.Coordinator.MaxStoreMessages;
+        perGrant ??= queue.Coordinator.MaxQueueMessages;
+        ArgumentOutOfRangeException.ThrowIfLessThan(capacity.Value, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(perGrant.Value, 1);
 
         // Read once, after validation: a host that changes the options object later changes nothing here.
         var settings = options.Value;
@@ -287,8 +297,8 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         _metrics = metrics;
         _logger = logger;
         _time = timeProvider;
-        _capacity = capacity;
-        _perGrant = perGrant;
+        _capacity = capacity.Value;
+        _perGrant = perGrant.Value;
         _shutdownToken = _shutdown.Token;
 
         // The workers must not carry the context of whoever happened to build this singleton (a
@@ -308,6 +318,12 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
 
     /// <summary>Whether direct push is on: a job not pushed live then goes to the recipient's endpoint.</summary>
     public bool DirectPushEnabled => _directPush;
+
+    /// <summary>Jobs waiting or running, at most: the queue's store-wide message quota unless a test set it.</summary>
+    internal int Capacity => _capacity;
+
+    /// <summary>Jobs one grant may have waiting or running, at most: the queue's per-grant message quota unless a test set it.</summary>
+    internal int PerGrant => _perGrant;
 
     /// <summary>
     /// Hand a stored message to the push workers. Never blocks and never throws: when a bound is
@@ -779,7 +795,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         /// <summary>Whether the grant is on the ready line.</summary>
         public bool OnReady { get; set; }
 
-        /// <summary>The grant's jobs waiting or running, against <see cref="MaxPerGrant"/>.</summary>
+        /// <summary>The grant's jobs waiting or running, against <see cref="PerGrant"/>.</summary>
         public int Count => Waiting.Count + (Running is null ? 0 : 1);
     }
 

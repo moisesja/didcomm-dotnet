@@ -482,62 +482,109 @@ public sealed class DirectPushDispatcherTests
     // ---- bounds and saturation -------------------------------------------------------------------
 
     [Fact]
-    public async Task One_grant_holds_at_most_16_jobs_and_a_refused_job_keeps_its_message_queued()
+    public async Task The_backlog_is_sized_from_the_queues_quotas_so_every_stored_message_can_have_a_job()
     {
+        // ADV-4 D1: a job exists only for a message the queue stored, so the store's quotas already
+        // bound the jobs; sizing the backlog from them means no stored, due message is refused a job.
+        await using var fixture = PushFixture.Create(directory: _ => Inbox, configure: o =>
+        {
+            o.Pickup.MaxQueueMessages = 37;
+            o.Pickup.MaxStoreMessages = 4_321;
+        });
+
+        fixture.Dispatcher.PerGrant.Should().Be(37);
+        fixture.Dispatcher.Capacity.Should().Be(4_321);
+        await using var defaults = PushFixture.Create(directory: _ => Inbox);
+        defaults.Dispatcher.PerGrant.Should().Be(new MessagePickupOptions().MaxQueueMessages);
+        defaults.Dispatcher.Capacity.Should().Be(new MessagePickupOptions().MaxStoreMessages);
+    }
+
+    [Fact]
+    public async Task A_grant_with_its_whole_quota_waiting_behind_a_stuck_push_has_every_message_handed_over()
+    {
+        // ADV-4 D1: the old 16-job share refused the rest of a burst while the first push was slow.
+        var gate = new PushGate();
+        await using var fixture = PushFixture.Create(
+            async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
+            directory: _ => Inbox,
+            configure: o => o.Pickup.MaxQueueMessages = 40);
+        await fixture.EnrolAsync(Peer, Recipient);
+
+        for (var i = 0; i < 40; i++)
+            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"fwd-{i}")).Should().BeTrue();
+        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(0);
+
+        gate.Open();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(40);
+        fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().HaveCount(40);
+        fixture.Store.MessageCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task One_grant_holds_at_most_its_share_of_jobs_and_a_refused_job_keeps_its_message_queued()
+    {
+        // L-020 (ADV-4 D1): the dispatcher is now sized from the queue's quotas, not 16 / 1 024; these bounds' mechanics are exercised on a dispatcher built with the old values through the test seam.
         var gate = new PushGate();
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
+        const int PerGrant = 16;
+        await using var dispatcher = fixture.NewDispatcher(capacity: 1_024, perGrant: PerGrant);
         var jobs = new List<PushJob>();
         for (var i = 0; i < 20; i++)
             jobs.Add(await fixture.QueuedJobAsync(Recipient, forwardId: $"fwd-{i}"));
 
-        var accepted = jobs.Select(j => fixture.Dispatcher.TryEnqueue(j)).ToArray();
+        var accepted = jobs.Select(j => dispatcher.TryEnqueue(j)).ToArray();
 
-        accepted.Count(a => a).Should().Be(PushDispatcher.MaxPerGrant);
-        accepted.Skip(PushDispatcher.MaxPerGrant).Should().OnlyContain(a => !a);
+        accepted.Count(a => a).Should().Be(PerGrant);
+        accepted.Skip(PerGrant).Should().OnlyContain(a => !a);
         fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(4);
 
         gate.Open();
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        await dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxPerGrant);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PerGrant);
         fixture.Store.MessageCount.Should().Be(4, "the refused jobs' messages were never pushed and stay queued");
         PipelineLogs.Of<PushDispatcher>(fixture.Logs).Count(e => e.Level == LogLevel.Warning).Should().Be(1, "saturation is logged at Warning once, then at Debug");
     }
 
     [Fact]
-    public async Task The_backlog_holds_at_most_1024_jobs_across_grants()
+    public async Task The_backlog_holds_at_most_its_capacity_across_grants()
     {
+        // L-020 (ADV-4 D1): the dispatcher is now sized from the queue's quotas, not 16 / 1 024; these bounds' mechanics are exercised on a dispatcher built with the old values through the test seam.
         var gate = new PushGate();
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox);
-        const int grants = PushDispatcher.MaxBacklog / PushDispatcher.MaxPerGrant + 1; // 65
+        const int Capacity = 1_024;
+        const int PerGrant = 16;
+        await using var dispatcher = fixture.NewDispatcher(Capacity, PerGrant);
+        const int grants = Capacity / PerGrant + 1; // 65
         var jobs = new List<PushJob>();
         for (var g = 0; g < grants; g++)
         {
             await fixture.EnrolAsync($"did:example:grant-{g}", $"did:example:recipient-{g}");
-            for (var j = 0; j < PushDispatcher.MaxPerGrant; j++)
+            for (var j = 0; j < PerGrant; j++)
                 jobs.Add(await fixture.QueuedJobAsync($"did:example:recipient-{g}", PushFixture.Payload(16), $"fwd-{g}-{j}"));
         }
 
-        var accepted = jobs.Count(job => fixture.Dispatcher.TryEnqueue(job));
+        var accepted = jobs.Count(job => dispatcher.TryEnqueue(job));
 
-        accepted.Should().Be(PushDispatcher.MaxBacklog);
-        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(PushDispatcher.MaxPerGrant);
+        accepted.Should().Be(Capacity);
+        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(PerGrant);
         await fixture.EnrolAsync("did:example:grant-new", "did:example:recipient-new");
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:recipient-new", forwardId: "fwd-new"))
+        dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:recipient-new", forwardId: "fwd-new"))
             .Should().BeFalse("the backlog is full whatever the grant");
 
         gate.Open();
-        await fixture.Dispatcher.WaitForIdleAsync(TimeSpan.FromSeconds(60));
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxBacklog);
-        fixture.Store.MessageCount.Should().Be(PushDispatcher.MaxPerGrant + 1, "the refused jobs' messages were never pushed and stay queued");
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:recipient-0", forwardId: "fwd-again"))
+        await dispatcher.WaitForIdleAsync(TimeSpan.FromSeconds(60));
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(Capacity);
+        fixture.Store.MessageCount.Should().Be(PerGrant + 1, "the refused jobs' messages were never pushed and stay queued");
+        dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:recipient-0", forwardId: "fwd-again"))
             .Should().BeTrue("released slots are reusable");
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        await dispatcher.WaitForIdleAsync(Wait);
     }
 
     [Fact]

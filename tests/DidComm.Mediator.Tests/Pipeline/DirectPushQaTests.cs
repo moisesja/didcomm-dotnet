@@ -254,17 +254,20 @@ public sealed class DirectPushQaTests
             directory: _ => Inbox,
             configure: o => o.Pickup.MaxQueueMessages = 40);
         await fixture.EnrolAsync(Peer, Recipient);
+        // L-020 (ADV-4 D1): the dispatcher is now sized from the queue's quotas, not 16 / 1 024; these bounds' mechanics are exercised on a dispatcher built with the old values through the test seam.
+        const int PerGrant = 16;
+        await using var dispatcher = fixture.NewDispatcher(capacity: 1_024, perGrant: PerGrant);
 
-        for (var i = 0; i < PushDispatcher.MaxPerGrant; i++)
-            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"s{i}")).Should().BeTrue();
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "over")).Should().BeFalse();
+        for (var i = 0; i < PerGrant; i++)
+            dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"s{i}")).Should().BeTrue();
+        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "over")).Should().BeFalse();
 
         gate.Open();
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "after")).Should().BeTrue("the grant's share is given back as its jobs end");
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        await dispatcher.WaitForIdleAsync(Wait);
+        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "after")).Should().BeTrue("the grant's share is given back as its jobs end");
+        await dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxPerGrant + 1);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PerGrant + 1);
         fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(1);
         fixture.Store.MessageCount.Should().Be(1, "only the refused job's message waits for pickup");
     }

@@ -60,7 +60,8 @@ public sealed class LivePushAdv4Tests
         await MessagePickupLive.UntilAsync(() => Task.FromResult(Deliveries(sessionB).Count == 1), "B is pushed live while A's push is parked");
 
         world.Fixture.ForwardOutcomeLog.Should().HaveCount(21).And.OnlyContain(o => o == ForwardOutcomes.Queued);
-        world.Fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(4, "A holds at most 16 jobs; the rest stay queued");
+        // L-020 (ADV-4 D1): A's share of the backlog is now its queue quota, so none of its twenty is refused.
+        world.Fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(0, "every stored message of A keeps its job");
         world.Fixture.Pushes(PushOutcomes.PushedLive).Should().Be(1);
         (await world.StatusAsync(a.Peer)).Should().Be(20, "every forward for A is stored");
         Deliveries(sessionA).Should().BeEmpty();
@@ -346,8 +347,10 @@ public sealed class LivePushAdv4Tests
     }
 
     [Fact]
-    public async Task A_burst_beyond_the_per_grant_line_loses_nothing_keeps_order_counts_one_outcome_per_message_and_later_messages_are_pushed_again()
+    public async Task A_burst_while_the_first_push_is_slow_loses_nothing_keeps_order_counts_one_outcome_per_message_and_later_messages_are_pushed_again()
     {
+        // L-020 (ADV-4 D1): this test asserted the defect — sixteen pushed, four refused by the
+        // 16-job share and left for pickup. The share is now the queue quota: all twenty are pushed.
         await using var world = await World.StartAsync(o => o.DirectPush = false);
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
@@ -366,25 +369,25 @@ public sealed class LivePushAdv4Tests
         open.SetResult();
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        // Order: the pushes go out in the order the forwards arrived (the first 16).
-        Deliveries(session).Select(d => d.Payload.Span[0]).Should().Equal(Enumerable.Range(0, 16).Select(i => Seed(i)));
+        // Order: the pushes go out in the order the forwards arrived, all twenty.
+        Deliveries(session).Select(d => d.Payload.Span[0]).Should().Equal(Enumerable.Range(0, 20).Select(i => Seed(i)));
         // Accounting: one forward outcome and one push outcome per message.
         world.Fixture.ForwardOutcomeLog.Should().HaveCount(20).And.OnlyContain(o => o == ForwardOutcomes.Queued);
-        world.Fixture.Pushes(PushOutcomes.PushedLive).Should().Be(16);
-        world.Fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(4);
+        world.Fixture.Pushes(PushOutcomes.PushedLive).Should().Be(20);
+        world.Fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(0);
         world.Fixture.PushOutcomeLog.Should().HaveCount(20);
         world.Fixture.Store.MessageCount.Should().Be(20, "the jobs take nothing from the quota; pushed records wait for their acknowledgement");
-        // No loss: the four the line refused are deliverable by a delivery-request at once.
-        (await world.PickupAsync(a.Peer)).Should().HaveCount(4);
+        // No loss and no double hand-out: every record is leased to the session.
+        (await world.PickupAsync(a.Peer)).Should().BeEmpty();
 
         // A later message is pushed live again once the line drained.
         await world.ForwardAsync(a.Recipient, 50);
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
-        Deliveries(session).Should().HaveCount(17);
+        Deliveries(session).Should().HaveCount(21);
         Deliveries(session)[^1].Payload.Span[0].Should().Be(Seed(50));
     }
 
-    [Fact(Skip = "ADV-4 DEFECT 1: a live recipient is never pushed the messages of a burst beyond the 16-job per-grant line; they wait silently in the queue (regression vs bbb1fee, which pushed every one)")]
+    [Fact]
     public async Task Every_message_that_arrives_while_live_delivery_is_on_is_pushed_over_the_live_session()
     {
         // Pickup 3.0: live mode is "delivering newly arriving messages directly to a connected

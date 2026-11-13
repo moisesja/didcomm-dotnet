@@ -56,10 +56,13 @@ namespace DidComm.Mediator;
 /// <item><description>A forwarded message is always stored first; a recipient with live delivery
 /// on gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
 /// <see cref="PushTimeout"/>), so a recipient that is slow to take a push holds up no one else's
-/// messages. Each recipient's pushes go one at a time, with at most 16 waiting or in flight: a message beyond
-/// that, or one whose push fails, stays queued, and a recipient in live mode should still ask for
-/// its queued messages (a <c>status-request</c> shows them) after a reconnect or a
-/// burst.</description></item>
+/// messages. Each recipient's pushes go one at a time, in the order its messages were stored, and
+/// every message stored while it is live is pushed: the push backlog is sized from the queue's
+/// quotas (<see cref="MessagePickupOptions.MaxQueueMessages"/>,
+/// <see cref="MessagePickupOptions.MaxStoreMessages"/>). A message whose push fails or reaches
+/// <see cref="PushTimeout"/> stays queued, so a recipient in live mode should still ask for its
+/// queued messages (a <c>status-request</c> shows them) after a reconnect or a slow
+/// period.</description></item>
 /// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>

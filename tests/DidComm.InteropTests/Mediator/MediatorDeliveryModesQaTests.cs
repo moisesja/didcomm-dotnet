@@ -158,9 +158,16 @@ public sealed class MediatorDeliveryModesQaTests
     }
 
     [Fact]
-    public async Task One_grant_holds_at_most_16_push_jobs_and_the_17th_waits_in_the_queue()
+    public async Task One_grant_holds_as_many_push_jobs_as_its_queue_quota_and_only_the_queue_refuses_beyond_it()
     {
-        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
+        // L-020 (ADV-4 D1): this test asserted the 16-job per-grant share: the 17th stored message got
+        // no push job (Push-Skipped-Saturated). The share is now the grant's queue quota, so every
+        // stored message is pushed, and the one beyond the quota is refused by the queue itself.
+        await using var f = await QaPushFixture.StartAsync(m =>
+        {
+            m.PushConcurrency = 1;
+            m.Pickup.MaxQueueMessages = 16;
+        });
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         f.Inbox.Gate = gate;
 
@@ -168,14 +175,14 @@ public sealed class MediatorDeliveryModesQaTests
             await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, flush: false, content: $"m{i}");
         await f.Mediator.FlushAsync();
 
-        f.Mediator.Outcome(ForwardOutcomes.Queued).Should().Be(17);
-        f.Mediator.PushOutcome(PushOutcomes.SkippedSaturated).Should().Be(1);
+        f.Mediator.Outcome(ForwardOutcomes.Queued).Should().Be(16);
+        f.Mediator.Outcome(ForwardOutcomes.DroppedQuota).Should().Be(1);
+        f.Mediator.PushOutcome(PushOutcomes.SkippedSaturated).Should().Be(0);
         gate.SetResult();
         await f.Mediator.PushesIdleAsync();
         f.Mediator.PushOutcome(PushOutcomes.Pushed).Should().Be(16);
         f.Inbox.Received.Should().HaveCount(16);
-        f.Mediator.Store.MessageCount.Should().Be(1);
-        (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle();
+        f.Mediator.Store.MessageCount.Should().Be(0);
         f.ShouldNotLeak();
     }
 
