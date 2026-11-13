@@ -30,13 +30,16 @@ internal sealed class PickupSessionState
     /// <summary>The session has ended. Once <c>true</c> it stays <c>true</c>, and live delivery is off.</summary>
     public bool IsClosed => Volatile.Read(ref _closed) == 1;
 
+    // A full fence (Interlocked), not a volatile write: this write and the caller's later read of
+    // IsClosed must not be reordered (a store followed by a load is the one pair release/acquire
+    // semantics allow to swap), or a close running at the same time could miss this lease.
     /// <summary>
     /// Say that a lease is about to be taken under <see cref="OwnerToken"/>. Called before the
     /// store call that records the lease; the caller looks at <see cref="IsClosed"/> again once the
     /// lease is in use. A session that never took a lease has nothing to clean up when it closes,
     /// so a peer that only opens connections and toggles live mode costs the store nothing.
     /// </summary>
-    public void MarkLeasing() => Volatile.Write(ref _leasing, 1);
+    public void MarkLeasing() => Interlocked.Exchange(ref _leasing, 1);
 
     /// <summary>
     /// How to build a live <c>delivery</c> (from, to, message) in the protocol version the recipient
@@ -68,10 +71,12 @@ internal sealed class PickupSessionState
 
     private void OnClosed()
     {
-        Volatile.Write(ref _closed, 1);
-        _liveDelivery = null;
         // Closed is written before the flag is read, and a taker writes the flag before it reads
         // Closed: one of the two always sees the other, so no lease is left to its timeout by a race.
+        // Both writes are full fences (Interlocked), so neither side's write can be reordered after
+        // its read.
+        Interlocked.Exchange(ref _closed, 1);
+        _liveDelivery = null;
         if (Volatile.Read(ref _leasing) == 1)
             _tracker.ReleaseLeasesInBackground(OwnerToken);
     }
