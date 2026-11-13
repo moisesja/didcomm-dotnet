@@ -71,8 +71,12 @@ internal sealed record PushJob(string GrantPeerDid, string RecipientDid, string 
 /// re-check, the take, the send and the removal (the directory lookup is the host's own synchronous
 /// code and is not bounded: a slow directory delays only pushes). It is a timer whose callback
 /// cancels inside a <c>try</c>, never <c>CancelAfter</c>: a callback host code registered on the
-/// token must not take the process down. Giving a lease back is not cancelled by shutdown; it has a
-/// bound of its own of the same length.
+/// token must not take the process down. The deadline ends the push whether or not the transport
+/// or the store honours the cancellation: a call still running then is abandoned (its result
+/// ignored, its fault observed), the push counts as failed and the lease is given back. An
+/// abandoned send may still reach the endpoint later, so the recipient may see the message twice
+/// (delivery is at-least-once); an abandoned take keeps the record until its lease ends. Giving a
+/// lease back is not cancelled by shutdown; it has a bound of its own of the same length.
 /// </para>
 /// <para>
 /// <strong>Dependencies (L-017).</strong> The directory and <see cref="DidCommClient"/> are resolved
@@ -410,7 +414,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         try
         {
             // The registration may have ended since the message was stored (a remove, a revoke).
-            var grant = await _mediation.FindGrantByRecipientDidAsync(job.RecipientDid, deadline.Token).ConfigureAwait(false);
+            var grant = await BoundedAsync(_mediation.FindGrantByRecipientDidAsync(job.RecipientDid, deadline.Token).AsTask(), deadline.Token).ConfigureAwait(false);
             if (!string.Equals(grant?.PeerDid, job.GrantPeerDid, StringComparison.Ordinal))
             {
                 _metrics.RecordPush(PushOutcomes.SkippedUnregistered);
@@ -422,7 +426,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             // expired, aged-out, not-yet-due, leased, passed-over, acknowledged or purged one.
             var now = _didComm.Now();
             var taking = new MessageLease(Owner: null, ExpiresAt: SaturatingAdd(now, _timeout + LeaseMargin));
-            var record = await _store.LeaseByIdAsync(job.GrantPeerDid, job.MessageId, taking, now, deadline.Token).ConfigureAwait(false);
+            var record = await BoundedAsync(_store.LeaseByIdAsync(job.GrantPeerDid, job.MessageId, taking, now, deadline.Token).AsTask(), deadline.Token).ConfigureAwait(false);
             if (record is null)
             {
                 _metrics.RecordPush(PushOutcomes.SkippedNotHeld);
@@ -431,7 +435,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             }
             lease = taking;
 
-            var result = await Client().SendPackedAsync(record.Payload, endpoint, MediaTypes.Encrypted, deadline.Token).ConfigureAwait(false);
+            var result = await BoundedAsync(Client().SendPackedAsync(record.Payload, endpoint, MediaTypes.Encrypted, deadline.Token), deadline.Token).ConfigureAwait(false);
             if (result is { Accepted: true, HttpStatusCode: >= 200 and <= 299 })
             {
                 // Delivered: counted as pushed whatever the removal says.
@@ -474,7 +478,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     {
         try
         {
-            return await _store.AcknowledgeAsync(job.GrantPeerDid, new[] { job.MessageId }, ct).ConfigureAwait(false) > 0;
+            return await BoundedAsync(_store.AcknowledgeAsync(job.GrantPeerDid, new[] { job.MessageId }, ct).AsTask(), ct).ConfigureAwait(false) > 0;
         }
         catch (Exception ex)
         {
@@ -493,12 +497,28 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         using var timer = _time.CreateTimer(static state => CancelQuietly((CancellationTokenSource)state!), bound, _timeout, Timeout.InfiniteTimeSpan);
         try
         {
-            await _store.ReleaseAsync(job.GrantPeerDid, new[] { job.MessageId }, lease.Id, bound.Token).ConfigureAwait(false);
+            await BoundedAsync(_store.ReleaseAsync(job.GrantPeerDid, new[] { job.MessageId }, lease.Id, bound.Token).AsTask(), bound.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             var level = MediatorLog.RateLimited(ref _storeFaultLines, out var n);
             MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId}: giving the queued message back failed with {ExceptionType}; it returns to pickup when the push's lease ends. {Count} such faults.", forwardId, ex.GetType().Name, n);
+        }
+    }
+
+    // The deadline ends the wait whether or not the callee honours its token (L-059): a transport or
+    // a store that ignores cancellation must not hold a worker, and its grant's turn, past the
+    // deadline. The abandoned call goes on by itself; its result is ignored and its fault observed.
+    private static async Task<T> BoundedAsync<T>(Task<T> work, CancellationToken token)
+    {
+        try
+        {
+            return await work.WaitAsync(token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            _ = work.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            throw;
         }
     }
 
