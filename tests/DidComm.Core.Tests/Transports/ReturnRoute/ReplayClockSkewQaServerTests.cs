@@ -363,10 +363,10 @@ public sealed class ReplayClockSkewQaServerTests
                 return ReplayAdmission.MissingCreatedTime;
             }
 
-            // The latest purge instant: a reading behind it purges nothing more.
-            _purgedAt = Math.Max(_purgedAt, nowS);
-            foreach (var key in _entries.Where(e => e.Value < _purgedAt).Select(e => e.Key).ToList())
+            // Purge at the reading; remember the latest instant purged at.
+            foreach (var key in _entries.Where(e => e.Value < nowS).Select(e => e.Key).ToList())
                 _entries.Remove(key);
+            _purgedAt = Math.Max(_purgedAt, nowS);
             long expiry;
             if (created is long stamped)
             {
@@ -376,7 +376,7 @@ public sealed class ReplayClockSkewQaServerTests
             }
             else
             {
-                expiry = _purgedAt + w;
+                expiry = nowS + w;
             }
             if (_entries.ContainsKey((peer, id)))
                 return ReplayAdmission.Duplicate;

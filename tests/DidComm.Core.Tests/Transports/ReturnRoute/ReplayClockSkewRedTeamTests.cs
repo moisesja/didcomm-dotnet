@@ -1,5 +1,6 @@
 using DidComm.Transports.ReturnRoute;
 using AwesomeAssertions;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace DidComm.Tests.Transports.ReturnRoute;
@@ -123,5 +124,104 @@ public sealed class ReplayClockSkewRedTeamTests
 
         guard.TryAdmit(Alice, "m", created, later)
             .Should().Be(ReplayAdmission.TooOld, "the guard still judges age with the Window it was built with");
+    }
+
+    // ---- the second red-team pass, on the revised guard ------------------------------------------
+
+    private const string Mallory = "did:example:mallory";
+
+    // F1. An earlier draft of the fix kept timestamp-free entries until "latest purge instant + Window"
+    // and purged only at readings past that instant, so after a clock step back a timestamp-free
+    // flood held the budget D + Window, and an honest peer's own entries piled up for the whole outage.
+    [Fact]
+    public void After_a_step_back_a_timestamp_free_flood_holds_the_budget_Window_from_its_own_reading()
+    {
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions { RequireCreatedTime = false, MaxEntries = 5, MaxEntriesPerPeer = 4 });
+        var t = S(T);
+        guard.TryAdmit(Other, "o", t + 200, At(t + 200)).Should().Be(ReplayAdmission.Admitted, "a reading 200 s ahead; the clock then steps back");
+        for (var i = 0; i < 4; i++)
+            guard.TryAdmit(Mallory, "f" + i, null, At(t)).Should().Be(ReplayAdmission.Admitted);
+
+        guard.TryAdmit(Alice, "a300", t + 300, At(t + 300)).Should().Be(ReplayAdmission.Saturated, "the flood is still held at t + Window");
+        guard.TryAdmit(Alice, "a301", t + 301, At(t + 301)).Should().Be(ReplayAdmission.Admitted, "and released one second later");
+    }
+
+    [Fact]
+    public void During_a_long_outage_an_honest_peers_timestamp_free_entries_still_expire_after_Window()
+    {
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions { RequireCreatedTime = false, MaxEntries = 100, MaxEntriesPerPeer = 10 });
+        var t = S(T);
+        guard.TryAdmit(Other, "o", t + 86_400, At(t + 86_400)).Should().Be(ReplayAdmission.Admitted, "a reading a day ahead; the clock returns");
+
+        var outcomes = Enumerable.Range(0, 40).Select(i => guard.TryAdmit(Alice, "p" + i, null, At(t + i * 600))).ToList();
+
+        outcomes.Should().AllBeEquivalentTo(ReplayAdmission.Admitted, "one message every 600 s, each forgotten Window after its own reading");
+        guard.SaturationCount.Should().Be(0);
+    }
+
+    // F2. The exact rule with a reading behind the latest purge instant: admitted only if
+    // created + Window + ClockSkew is not earlier than that instant. A reading D seconds behind
+    // refuses in-window messages older than Window + ClockSkew − D; one stamped at the reading itself
+    // only once D exceeds Window + ClockSkew.
+    [Theory]
+    [InlineData(60, 120, 239, ReplayAdmission.Admitted)]
+    [InlineData(60, 120, 240, ReplayAdmission.Admitted)]
+    [InlineData(60, 120, 241, ReplayAdmission.TooOld)]
+    [InlineData(60, 360, 0, ReplayAdmission.Admitted)]
+    [InlineData(60, 361, 0, ReplayAdmission.TooOld)]
+    [InlineData(0, 1, 299, ReplayAdmission.Admitted)]
+    [InlineData(0, 1, 300, ReplayAdmission.TooOld)]
+    public void A_reading_behind_the_latest_purge_instant_admits_exactly_what_cannot_have_been_forgotten(int skewSeconds, int behindSeconds, int ageSeconds, ReplayAdmission expected)
+    {
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions { ClockSkew = TimeSpan.FromSeconds(skewSeconds) });
+        var t = S(T);
+        guard.TryAdmit(Other, "o", t + behindSeconds, At(t + behindSeconds)).Should().Be(ReplayAdmission.Admitted);
+
+        guard.TryAdmit(Alice, "m", t - ageSeconds, At(t)).Should().Be(expected);
+    }
+
+    // F5. One far-future reading leaves the guard refusing every timestamped message until it is
+    // rebuilt (the documented price); it must at least be visible.
+    [Fact]
+    public void Refusals_at_a_reading_far_behind_the_latest_purge_instant_are_logged_with_the_lag()
+    {
+        var logger = new CapturingLogger();
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions(), logger);
+        var t = S(T);
+        guard.TryAdmit(Other, "o", S(DateTimeOffset.MaxValue), DateTimeOffset.MaxValue).Should().Be(ReplayAdmission.Admitted);
+
+        var refused = Enumerable.Range(0, 1001).Select(i => guard.TryAdmit(Alice, "m" + i, t + i, At(t + i))).Distinct().ToList();
+
+        refused.Should().Equal(ReplayAdmission.TooOld);
+        logger.Warnings.Should().HaveCount(2, "the first such refusal and the 1000th");
+        logger.Warnings[0].Should().Contain("behind the latest purge instant").And.Contain((S(DateTimeOffset.MaxValue) - t).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        new InMemoryReplayGuard(new ReplayProtectionOptions()).TryAdmit(Alice, "m0", t, At(t)).Should().Be(ReplayAdmission.Admitted, "a rebuilt guard starts over");
+    }
+
+    [Fact]
+    public void A_reading_behind_by_less_than_Window_plus_ClockSkew_logs_nothing()
+    {
+        var logger = new CapturingLogger();
+        var guard = new InMemoryReplayGuard(new ReplayProtectionOptions(), logger);
+        var t = S(T);
+        guard.TryAdmit(Other, "o", t + 120, At(t + 120)).Should().Be(ReplayAdmission.Admitted);
+
+        guard.TryAdmit(Alice, "old", t - 250, At(t)).Should().Be(ReplayAdmission.TooOld);
+        logger.Warnings.Should().BeEmpty("an ordinary race or small step is not a clock fault");
+    }
+
+    private sealed class CapturingLogger : ILogger<InMemoryReplayGuard>
+    {
+        public List<string> Warnings { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+                Warnings.Add(formatter(state, exception));
+        }
     }
 }

@@ -52,8 +52,7 @@ public sealed class ReplayProtectionOptions
     /// Whether an in-scope message without <c>created_time</c> is refused
     /// (<see cref="ReplayAdmission.MissingCreatedTime"/>). Default <c>true</c> (FR-RR-08 (2)). When
     /// <c>false</c> such a message is admitted and remembered for <see cref="Window"/> from its arrival
-    /// (<see cref="ClockSkew"/> does not apply: there is no timestamp to be early; with clock readings
-    /// out of order, from the latest instant the guard has purged at) — the documented
+    /// (<see cref="ClockSkew"/> does not apply: there is no timestamp to be early) — the documented
     /// limitation being that an identical captured request is accepted again once the window has
     /// passed.
     /// </summary>
