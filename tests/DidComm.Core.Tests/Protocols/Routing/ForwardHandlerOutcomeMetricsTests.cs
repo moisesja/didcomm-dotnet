@@ -246,20 +246,6 @@ public sealed class ForwardHandlerOutcomeMetricsTests
         h.Logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Warning && e.Formatted.Contains("not relayed: InvalidOperationException", StringComparison.Ordinal));
     }
 
-    /// <summary>A key service whose every lookup throws <see cref="Failure"/>.</summary>
-    private sealed class ThrowingKeyService(Exception failure) : DidComm.Resolution.IDidKeyService
-    {
-        public Exception Failure { get; } = failure;
-
-        public Task<IReadOnlyList<Jwk>> GetVerificationMethodsAsync(string did, DidComm.Resolution.VerificationRelationship relationship, CancellationToken ct = default)
-            => Task.FromException<IReadOnlyList<Jwk>>(Failure);
-
-        public Task<bool> IsKeyAuthorizedAsync(string did, string kid, DidComm.Resolution.VerificationRelationship relationship, CancellationToken ct = default)
-            => Task.FromException<bool>(Failure);
-
-        public void RejectUnsupportedMethod(string did) { }
-    }
-
     [Fact]
     public async Task Sink_that_throws_a_ConsistencyException_counts_as_faulted_not_malformed()
     {

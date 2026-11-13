@@ -125,4 +125,18 @@ internal static class ForwardTestEnvelopes
             => Task.FromResult(false);
         public void RejectUnsupportedMethod(string did) { }
     }
+
+    /// <summary>A key service whose every lookup throws <see cref="Failure"/>.</summary>
+    public sealed class ThrowingKeyService(Exception failure) : IDidKeyService
+    {
+        public Exception Failure { get; } = failure;
+
+        public Task<IReadOnlyList<Jwk>> GetVerificationMethodsAsync(string did, VerificationRelationship relationship, CancellationToken ct = default)
+            => Task.FromException<IReadOnlyList<Jwk>>(Failure);
+
+        public Task<bool> IsKeyAuthorizedAsync(string did, string kid, VerificationRelationship relationship, CancellationToken ct = default)
+            => Task.FromException<bool>(Failure);
+
+        public void RejectUnsupportedMethod(string did) { }
+    }
 }
