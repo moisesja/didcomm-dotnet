@@ -370,19 +370,30 @@ Registry (`InMemoryReturnRouteSessionRegistry`):
 
 Replay guard (`InMemoryReplayGuard`):
 
+- Settings: validated and copied at construction (`Window`, `ClockSkew`, `RequireCreatedTime` and
+  the three bounds); a later change to the `ReplayProtectionOptions` object has no effect. The guard
+  depends on nothing else — in particular not on `DidCommOptions` (#105: `ExpiresClockSkew` is
+  FR-API-05's, `ClockSkew` the replay rule's own, default 60 s).
 - `MaxMessageIdLength` (default 512) is checked first → `MessageIdTooLong`. Then whole-second
-  arithmetic, the FR-API-05 shape: `created_time < now − Window` → `TooOld`; `created_time > now +
-  skew` → `FutureDated` (skew = `DidCommOptions.ExpiresClockSkew`, read per call, clamped to ≥ 0);
-  expiry = `created_time + Window + skew`. No `created_time` → `MissingCreatedTime`, or with
-  `RequireCreatedTime = false` expiry = `now + Window`.
-- Under one lock: purge the min-heap of `(sender, id)` by expiry (entries strictly earlier than
-  now; the only removal path, so heap and buckets never diverge), then `Duplicate` if the sender's
-  bucket holds the id (no refresh), `Saturated` at `MaxEntries` (default 32 768) or at the bucket's
-  `MaxEntriesPerPeer` (default 1024) — nothing evicted, `SaturationCount` incremented — else
-  insert. A bucket keeps one copy of its sender subject, shared by its heap entries.
-- Retention property: an entry lives until `created_time + Window + skew` inclusive while age
+  arithmetic on the caller's reading: `created_time < now − Window` → `TooOld`; `created_time > now
+  + ClockSkew` → `FutureDated`; expiry = `created_time + Window + ClockSkew`. No `created_time` →
+  `MissingCreatedTime`, or with `RequireCreatedTime = false` expiry = `purgedAt + Window` (below).
+- Under one lock: if the reading is later than `purgedAt` (the latest instant purged at), purge the
+  min-heap of `(sender, id)` by expiry (entries strictly earlier than the reading; the only removal
+  path, so heap and buckets never diverge) and advance `purgedAt`. Then `TooOld` if the message's
+  expiry is earlier than `purgedAt` (its entry may have been purged — reachable only with a reading
+  behind `purgedAt`), `Duplicate` if the sender's bucket holds the id (no refresh), `Saturated` at
+  `MaxEntries` (default 32 768) or at the bucket's `MaxEntriesPerPeer` (default 1024) — nothing
+  evicted, `SaturationCount` incremented — else insert. A bucket keeps one copy of its sender
+  subject, shared by its heap entries.
+- Retention property: an entry lives until `created_time + Window + ClockSkew` inclusive while age
   rejection starts at `created_time < now − Window`, so there is no instant at which a captured
-  request is neither remembered nor too old.
+  request is neither remembered nor too old — also when readings reach the lock out of order (the
+  gate reads the clock before the lock, so two requests can race) or the host clock steps back,
+  because anything that may have been purged is refused. Cost: after a step back of more than
+  `Window + ClockSkew`, fresh in-scope messages are `TooOld` until the clock is back within that
+  span of `purgedAt`, or the process restarts. An entry stamped `now + ClockSkew` lives
+  `Window + 2 × ClockSkew` (420 s at the defaults).
 - Memory at the default budget (measured): about 6 MB with UUID ids, about 35 MB with 512-character
   ids from a few dozen senders, up to about 170 MB when every entry has its own maximal
   2048-character DID.
@@ -409,10 +420,11 @@ Threat model (the CHANGELOG's #91 Security entry is the full list):
   change an admission decision, a session push or the response that carries it. (The endpoints'
   pre-existing unpack-rejection and handler-fault lines still log the exception object.)
 
-Known limitations (documented, not fixed; W-1..W-4 in the #91 plan): a server clock that jumps
-forward past an entry's retention and back re-admits a request created inside the restored
-window; freshly minted DIDs can saturate the global replay budget and deny in-scope traffic for up
-to `Window` (#95 should rate-limit in front of the mediator); the first delivery of a captured
+Known limitations (documented, not fixed; W-2..W-4 in the #91 plan; W-1, a server clock that
+jumps forward past an entry's retention and back re-admitting a request, is closed by #105 at the
+cost described under the retention property): freshly minted DIDs can saturate the global replay
+budget and deny in-scope traffic for up to `Window + 2 × ClockSkew` (#95 should rate-limit in
+front of the mediator); the first delivery of a captured
 authcrypted `all` message owns the session socket (confidentiality holds); a handler that throws
 after pushing gets the uniform `400` and its push is discarded.
 
@@ -654,11 +666,12 @@ Known limitations:
   wait's own timeout.
 - One send gate per (endpoint, local DID, peer DID) is kept until dispose.
 - A DID over 2048 characters gets no session socket and no `Returned`.
-- Clock skew: FR-RR-08 admission, on the receiver and now in the client's inbound consumer, refuses
-  `created_time > now + ExpiresClockSkew` in whole seconds, and `DidCommOptions.ExpiresClockSkew`
-  defaults to zero, so a message stamped by a host whose clock runs even slightly ahead can be
-  refused as `FutureDated`. Hosts that talk across machines should set `ExpiresClockSkew` to their
-  expected clock offset.
+- Clock skew (#105): FR-RR-08 admission, on the receiver and in the client's inbound consumer,
+  refuses `created_time > now + ReplayProtectionOptions.ClockSkew` in whole seconds (default 60 s),
+  so a peer whose clock runs up to a minute ahead is admitted; one container has one value for both
+  roles. `SendResult.Returned` is not replay-admitted, so over HTTP no replay setting decides the
+  reply; over WebSocket the mediator's replies and pushes are judged by the client's own
+  `ClockSkew`. `DidCommOptions.ExpiresClockSkew` (default 0) governs FR-API-05 expiry only.
 
 ## Coordinate Mediation 3.0, mediator role (Phase 7, #93)
 
@@ -894,7 +907,7 @@ Documented limits:
 
 ## Phase 7: not built yet
 
-Phase 7 issues under epic #88 still open: the separate replay clock skew (#105); the delivery
+Phase 7 issues under epic #88 still open: the delivery
 pipeline — a forward sink that calls `MessagePickupQueue.DeliverAsync`, the optional direct push,
 `AddMediator()` and, in a new `DidComm.Mediator.AspNetCore` package, `MapDidCommMediator` (#95);
 the recipient-side client (#96); sample 11 with the cookbook sections (#97); Coordinate Mediation

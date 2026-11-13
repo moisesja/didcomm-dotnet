@@ -23,43 +23,62 @@ Build/verify (an item is done only when all three are green):
 - D3. Rules after the change (unchanged shape, new source): `TooOld` when `created < now − Window`; `FutureDated` when `created > now + ClockSkew`; else entry kept until `created + Window + ClockSkew` inclusive. No gap: age rejection starts after `created + Window`, the entry lives until `created + Window + ClockSkew` ≥ that.
 - D4. `ExpiresClockSkew` keeps default 0; its XML doc says it governs FR-API-05 expiry (and the FR-ROT-05 / FR-ROUTE-09 checks that share its arithmetic) and no longer replay admission, pointing at `ReplayProtectionOptions.ClockSkew`.
 - D5. Sizing docs follow the longer default retention (L-045): with `ClockSkew` 60 s an entry for a message stamped now lives 360 s instead of 300 s, so the `MaxEntries` / `MaxEntriesPerPeer` rate figures (≈ 109/s and ≈ 3.4/s over 300 s) become ≈ 91/s and ≈ 2.8/s over 360 s; worst case from admission is `Window + 2 × ClockSkew` (a message stamped `now + ClockSkew`), 420 s at the defaults. PRD (5)'s "rate × replay_window" becomes "rate × (replay_window + clock skew)".
-- D6. No change to `IInboundReplayGuard`, `InboundReplayGate`, `ReplayAdmission` (the `FutureDated` doc names the new setting), the scope rule, or any endpoint.
+- D6. No change to `IInboundReplayGuard`'s signature, `InboundReplayGate`, `ReplayAdmission` (the `FutureDated` doc names the new setting), the scope rule, or any endpoint.
+- D7 (added after the QA and red-team passes; RT-1 / QA-A D1). **Readings out of order never re-admit.** The gate reads the clock before the guard's lock, so a later reading can purge first and an earlier one then pass its own age check after the entry is gone (on `main` too: a one-second inversion at its zero skew; a stepped-back host clock does the same). Fix: under the lock the guard keeps `_purgedAt`, the latest instant it purged at (purging only when the reading is later), and refuses as `TooOld` any timestamped message whose expiry `created + Window + ClockSkew` is earlier than `_purgedAt` — it may have been forgotten. Honest traffic is unaffected unless the clock steps back by more than `Window + ClockSkew`; then fresh in-scope messages are refused until the clock catches up or the process restarts (availability, never integrity — FR-RR-08 (5)'s principle). This also closes #91's W-1. Timestamp-free entries are kept `_purgedAt + Window`. Alternatives weighed: purging with a lag (only widens the tolerated inversion), resetting the mark after a large step back (keeps W-1 open for no gain an attacker could not also use); rejected. PRD FR-RR-08 (4) states the rule and its price.
+- D8 (QA-A D2 / RT-3). **Settings are copied at construction.** `Window` was read per call, so raising it after admission moved age rejection past retention. The guard now validates a snapshot and keeps its own copies of all six settings; the clamp on the skew is gone (a validated copy cannot be negative).
 
 ## Threat model (L-031)
 
 - The future window widens from 0 s to 60 s by default. Who can use it: only a sender that authcrypts to us sets `created_time` (it is inside the encrypted, authenticated plaintext); a replaying attacker can only present captured messages whose `created_time` is fixed. A captured message is still admitted at most once per (sender subject, id) within its retention, and is `TooOld` after `created + Window`; widening the future bound adds no instant at which a replay is admitted (the sweep tests prove it for future-dated `created`).
 - Memory / availability lever: an authenticated peer (including a fresh self-made DID) can stamp `now + ClockSkew` so each of its entries lives `Window + 2 × ClockSkew` (420 s vs 300 s before at skew 0). Entries remain bounded by `MaxEntries` / `MaxEntriesPerPeer`; saturation remains fail-closed (availability only, W-2). Stated in the docs.
-- Host clock: the W-1 limitation (receiver clock jumping forward past retention and back) keeps its shape with `ClockSkew` in place of `ExpiresClockSkew`.
-- Hostile configuration: negative and over-`int.MaxValue`-second values refused by `Validate()`; a value mutated after validation is clamped at ≥ 0, and the largest `TimeSpan` cannot overflow the `long` arithmetic (test).
+- Host clock and concurrency (revised by D7): readings that reach the lock out of order, and a host clock that steps back, never re-admit a replay; W-1 is closed. The price is refusal of fresh in-scope traffic after a step back of more than `Window + ClockSkew`.
+- Hostile configuration: negative and over-`int.MaxValue`-second values refused by `Validate()`; the guard copies the validated values (D8), so nothing larger or negative reaches the arithmetic, and the largest validated values cannot overflow the `long` arithmetic (test).
 
 ## Steps
 
 ### A. Core
-- [ ] A1. `ReplayProtectionOptions.ClockSkew` + `Validate()` + XML docs (incl. `MaxEntries` / `MaxEntriesPerPeer` figures, `Window` doc mentions the skew in retention).
-- [ ] A2. `InMemoryReplayGuard`: read `ClockSkew`; drop `DidCommOptions` from both constructors; remarks rewritten (rules, retention, clock, worst-case retention).
-- [ ] A3. `ReplayAdmission.FutureDated` doc; `DidCommOptions.ExpiresClockSkew` doc; `ForwardProcessingResult` / `MessagePickupQueue` doc lines that cite `ExpiresClockSkew` stay (expiry) — check wording only.
-- [ ] A4. `AddDidComm` registration + XML doc; `InboundAdmissionDefaults.Guard` (AspNetCore fallback).
+- [x] A1. `ReplayProtectionOptions.ClockSkew` + `Validate()` + XML docs (incl. `MaxEntries` / `MaxEntriesPerPeer` figures, `Window` doc mentions the skew in retention).
+- [x] A2. `InMemoryReplayGuard`: read `ClockSkew`; drop `DidCommOptions` from both constructors; remarks rewritten (rules, retention, clock, worst-case retention).
+- [x] A3. `ReplayAdmission.FutureDated` doc; `DidCommOptions.ExpiresClockSkew` doc; `ForwardProcessingResult` / `MessagePickupQueue` doc lines that cite `ExpiresClockSkew` stay (expiry) — check wording only.
+- [x] A4. `AddDidComm` registration + XML doc; `InboundAdmissionDefaults.Guard` (AspNetCore fallback).
 
 ### B. Tests (the issue's acceptance list is the bar)
-- [ ] B1. Guard unit tests: helpers set `ClockSkew`, not `ExpiresClockSkew`; defaults `now + 59` / `now + 60` admitted, `now + 61` `FutureDated`; `ClockSkew = 0` reproduces the old edges; the per-second sweep for `created` in the future (0, +30, +59, +60) at skews 0 / 30 / 60 — no instant admits the replay, `Duplicate` until `created + Window + ClockSkew`, `TooOld` after; `ExpiresClockSkew` alone (0, 1 h, negative) changes nothing; clamp of a post-validation negative value; extreme values (largest skew, `DateTimeOffset.MaxValue`) never wrap.
-- [ ] B2. Options tests: default 60 s; negative and over-bound refused by `Validate()`, by the guard constructor and at `AddDidComm` resolution.
-- [ ] B3. Expiry unaffected: `UnpackAsync` with default options rejects `expires_time = now − 1` and accepts `now`; still rejects it with `ReplayProtectionOptions.ClockSkew` set large (different options object; proves independence); FR-ROUTE-09 tests unchanged.
-- [ ] B4. Server endpoint (HTTP + WS): with the default options, `created_time = now + 59` → handler invoked; `now + 61` → 202, handler not invoked, drop line `FutureDated`; `ExpiresClockSkew = 120 s` with default `ClockSkew` → `now + 61` still dropped; existing "clock moves backwards" test moves its 120 s to `ConfigureReplay`.
-- [ ] B5. Client inbound consumer (WebSocket push): server clock ahead by 59 s → push dispatched; by 61 s → dropped (client log line `FutureDated`); client `ClockSkew = 0` → a push 1 s ahead dropped.
-- [ ] B6. Two hosts 30 s apart (#98 clock-skew case), real `DidCommClient` against the TestServer mediator with `AddCoordinateMediation()` + `AddMessagePickup()`, client clock = server ± 30 s, over HTTP and over WebSocket: trust ping with `return_route: all`; `mediate-request` → `mediate-grant`, `recipient-update` → response; `status-request` → `status`, `delivery-request` → `delivery`, `messages-received` → `status` 0. Negative control: the same with `ClockSkew = 0` on both sides fails where the old behaviour failed (client ahead: the server drops the request; server ahead over WS: the client drops the reply).
-- [ ] B7. DX allowlists: rename the two `InMemoryReplayGuard` ctor entries; add `ReplayProtectionOptions::prop:ClockSkew` where the gate needs it (`TODO(#97)` reason); prove the gate is live with a negative control (remove the entry → red).
+- [x] B1. Guard unit tests: helpers set `ClockSkew`, not `ExpiresClockSkew`; defaults `now + 59` / `now + 60` admitted, `now + 61` `FutureDated`; `ClockSkew = 0` reproduces the old edges; the per-second sweep for `created` in the future (0, +30, +59, +60) at skews 0 / 30 / 60 — no instant admits the replay, `Duplicate` until `created + Window + ClockSkew`, `TooOld` after; `ExpiresClockSkew` alone (0, 1 h, negative) changes nothing; clamp of a post-validation negative value; extreme values (largest skew, `DateTimeOffset.MaxValue`) never wrap.
+- [x] B2. Options tests: default 60 s; negative and over-bound refused by `Validate()`, by the guard constructor and at `AddDidComm` resolution.
+- [x] B3. Expiry unaffected: `UnpackAsync` with default options rejects `expires_time = now − 1` and accepts `now`; still rejects it with `ReplayProtectionOptions.ClockSkew` set large (different options object; proves independence); FR-ROUTE-09 tests unchanged.
+- [x] B4. Server endpoint (HTTP + WS): with the default options, `created_time = now + 59` → handler invoked; `now + 61` → 202, handler not invoked, drop line `FutureDated`; `ExpiresClockSkew = 120 s` with default `ClockSkew` → `now + 61` still dropped; existing "clock moves backwards" test moves its 120 s to `ConfigureReplay`.
+- [x] B5. Client inbound consumer (WebSocket push): server clock ahead by 59 s → push dispatched; by 61 s → dropped (client log line `FutureDated`); client `ClockSkew = 0` → a push 1 s ahead dropped.
+- [x] B6. Two hosts 30 s apart (#98 clock-skew case), real `DidCommClient` against the TestServer mediator with `AddCoordinateMediation()` + `AddMessagePickup()`, client clock = server ± 30 s, over HTTP and over WebSocket: trust ping with `return_route: all`; `mediate-request` → `mediate-grant`, `recipient-update` → response; `status-request` → `status`, `delivery-request` → `delivery`, `messages-received` → `status` 0. Negative control: the same with `ClockSkew = 0` on both sides fails where the old behaviour failed (client ahead: the server drops the request; server ahead over WS: the client drops the reply).
+- [x] B7. DX allowlists: rename the two `InMemoryReplayGuard` ctor entries; add `ReplayProtectionOptions::prop:ClockSkew` where the gate needs it (`TODO(#97)` reason); prove the gate is live with a negative control (remove the entry → red).
 
 ### C. Docs
-- [ ] C1. PRD FR-RR-08 (1), (4), (5) and its acceptance column; FR-RR-09 if it names the skew; §8a list if needed.
-- [ ] C2. `docs/codebase-architecture.md` (replay guard section; #92 known-limitation bullet on clock skew).
-- [ ] C3. CHANGELOG `[Unreleased]`: new `### Changed — replay admission has its own clock-skew tolerance (FR-RR-08, #105)` flagging the behaviour change; earlier `[Unreleased]` #91 / #92 entries that state `ExpiresClockSkew` for replay are corrected in place (one release, one contract — L-045).
+- [x] C1. PRD FR-RR-08 (1), (4), (5) and its acceptance column; FR-RR-09 if it names the skew; §8a list if needed.
+- [x] C2. `docs/codebase-architecture.md` (replay guard section; #92 known-limitation bullet on clock skew).
+- [x] C3. CHANGELOG `[Unreleased]`: new `### Changed — replay admission has its own clock-skew tolerance (FR-RR-08, #105)` flagging the behaviour change; earlier `[Unreleased]` #91 / #92 entries that state `ExpiresClockSkew` for replay are corrected in place (one release, one contract — L-045).
 
 ### D. Verification and review passes
-- [ ] D1. Architect pass (Plan agent) on this design.
-- [ ] D2. Two independent QA agents (boundaries and clock advancement; `ClockSkew = 0` differential against `main`; client and server; concurrency; the retention/age seam; expiry unaffected).
-- [ ] D3. One independent adversarial agent (widened future window as a cache/memory lever; off-by-one; skew vs `Window`; overflow at extreme values; config mutation after validation).
+- [x] D1. Architect pass (Plan agent) on this design.
+- [x] D2. Two independent QA agents (boundaries and clock advancement; `ClockSkew = 0` differential against `main`; client and server; concurrency; the retention/age seam; expiry unaffected).
+- [x] D3. One independent adversarial agent (widened future window as a cache/memory lever; off-by-one; skew vs `Window`; overflow at extreme values; config mutation after validation).
+- [ ] D3b. Re-run the break-it pass on the revised fix (D7, D8) — L-030.
+- [x] D3c. Fix what the passes confirmed (D7, D8, doc wording); bring their suites in as regressions, adapted where they encoded the old rule.
 - [ ] D4. Full build / test / pack green; counts per project recorded below.
 
 ## Review
 
-(filled in at the end)
+### Passes (the first run's sub-agents were lost when the session ended; all three were rerun from scratch)
+
+- **Architect (Plan agent):** confirmed dropping the `DidCommOptions` constructor parameter (unreleased type) and listed every call site, including the three `ResolveGuard` callers; confirmed `SendResult.Returned` is not replay-admitted (the issue's scope item 3 is wrong) and that the client-side setting applies only to the inbound consumer, and there only to in-scope messages (a ping-response is out of scope, so a negative control must use a mediator-service reply); validation non-negative and ≤ `int.MaxValue` s, not bounded by `Window`; gap-free proof; stale docs list (incl. the fresh-DID saturation duration and the rate figures); test gaps (DI-level "ExpiresClockSkew alone", the fallback guard, the harness changes). All applied.
+- **QA-A (server side):** boundaries over a skew × window × sub-second grid, second-by-second sweeps, a 67 208-line trace differential against `main` (identical at `ClockSkew = s` vs `ExpiresClockSkew = s` except the 60 default-option lines +1..+60 s — the bug fixed), concurrency, validation, endpoints. Found D1 (a clock step back of `ClockSkew + 1` s after a purge re-admits; also as out-of-order concurrent readings) and D2 (raising `Window` after construction opens a gap) — both pre-existing on `main`. Fixed by D7 / D8.
+- **QA-B (client side, end to end, expiry):** pushes ahead by 0..300 s at client skews default / 0 / 3600; `Returned` unaffected by any `ClockSkew`; two-host matrix ±0..±301 s over HTTP and WebSocket (37 cases; 9 fail on `main`); expiry (FR-API-05, FR-ROT-05, FR-ROUTE-09 forward and queued) follows `ExpiresClockSkew` only; one container as client and server shares one guard. Found: D1 docs not yet updated (step C, done); D2 an invalid `ClockSkew` fails closed only at first use (pre-existing pattern of `Window`; follow-up); D3 the new `ExpiresClockSkew` doc sentence wrong for negative values (fixed).
+- **Red team:** RT-1 (the same defect as QA-A D1, proven end to end with a guard that parks the replay between its clock read and the lock; Medium on `main`, Low at the new default) — fixed by D7; RT-2 the widened future bound holds the budget `Window + 2 × ClockSkew` (documented; sizing sentence corrected); RT-3 = QA-A D2 — fixed by D8. Held: boundaries on a forward clock, overflow, negative/huge values, `RequireCreatedTime = false`, expiry independence, fallback guard, no new oracle.
+- Kept as regressions (renamed, adapted where they encoded the old rule — the W-1 readmission, a live mutation, a random-walk model without the purge instant, one sweep stepping back past `Window + ClockSkew`): `ReplayClockSkewQaServerTests`, `ReplayClockSkewRedTeamTests` (Core and Interop), `ReplayClockSkewQaEndpointTests`, `ReplayClockSkewQaClientTests`, `ReplayClockSkewQaTwoHostMatrixTests`, `ReplayClockSkewQaExpiryTests`, `ReplayClockSkewQaQueuedExpiryTests`. The random walks now assert "a timestamped message is admitted at most once" on non-monotonic clocks too.
+
+### Negative controls
+
+- Default `ClockSkew` temporarily set to zero: 10 of the then 29 new interop tests and 9 of the then 35 new core tests failed (HTTP with the client behind stayed green, as it must: `Returned` is never admitted).
+- DX gate: removing the `prop:ClockSkew` coverage entry turned `PublicApiCoverageTests` red naming the member; the gate also caught the stale constructor entries and, after D8, the now-redundant `RequireCreatedTime` execution entry.
+
+### Results
+
+(counts below)
