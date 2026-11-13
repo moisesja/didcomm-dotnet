@@ -74,8 +74,10 @@ public static class MediatorBuilderExtensions
     /// <strong>Start-up.</strong> In a generic host (<c>WebApplication</c>, <c>Host</c>) a hosted
     /// service checks the routing DIDs and every setting before the server starts listening,
     /// builds the out-of-band invitation, and removes expired and aged-out messages every
-    /// <see cref="MediatorOptions.PurgeInterval"/>. Outside a generic host nothing starts: the
-    /// checks happen when each part is first used, and nothing is purged unless the host calls
+    /// <see cref="MediatorOptions.PurgeInterval"/>. Outside a generic host nothing starts: each
+    /// part checks its own settings when it is first used, but the routing DIDs are not checked
+    /// against their DID documents, no invitation is built (the invitation endpoint answers
+    /// <c>404</c>), and nothing is purged unless the host calls
     /// <see cref="MessagePickupQueue.PurgeExpiredAsync"/> itself.
     /// </para>
     /// <para>

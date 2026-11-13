@@ -44,8 +44,10 @@ public interface IMediationStore
 
     /// <summary>
     /// End the grant <paramref name="peerDid"/> holds and unregister every DID under it. Returns
-    /// <c>false</c> when the peer held none. Forwards for those DIDs are dropped from then on; what
-    /// happens to messages already queued for them is the delivery pipeline's business.
+    /// <c>false</c> when the peer held none. Forwards for those DIDs are dropped from then on.
+    /// Messages already queued for them stay in the message store (not delivered while the peer
+    /// holds no grant) until purged: a host ends a mediation with
+    /// <c>MessagePickupQueue.RevokeAndPurgeAsync</c>, which calls this method and then purges.
     /// </summary>
     /// <param name="peerDid">The recipient's DID subject.</param>
     /// <param name="ct">Cancellation token.</param>
