@@ -52,15 +52,21 @@ admitted again and its handler re-ran. At `ExpiresClockSkew` 0 (the old default)
 inversion across a second boundary was enough; a host clock stepping back did the same.
 
 - The guard now remembers the latest instant it purged at and refuses as `TooOld` any timestamped
-  message whose entry would already have expired by then: it may have been forgotten. Honest
-  traffic is unaffected unless the clock steps back by more than `Window + ClockSkew`.
+  message whose entry would already have expired by then (`created_time + Window + ClockSkew`
+  earlier than that instant): it may have been forgotten. With clock readings in order this is the
+  ordinary age rule. A reading D seconds behind refuses in-window messages older than
+  `Window + ClockSkew − D` by that reading; a message stamped at the reading itself is refused only
+  once D exceeds `Window + ClockSkew`.
 - This also closes the #91 limitation W-1 (a clock that jumps forward past an entry's retention and
   back re-admitted the request). The price, stated in the PRD and the XML docs: after a clock step
   back of more than `Window + ClockSkew`, fresh in-scope messages are refused as `TooOld` until the
   clock is back within that span of the latest purge instant, or the process restarts —
-  availability, never integrity.
-- With `RequireCreatedTime = false`, a timestamp-free entry is kept for `Window` from the latest
-  purge instant rather than from an earlier reading.
+  availability, never integrity. Such refusals are logged as a rate-limited Warning with the lag in
+  seconds, so a guard left behind by a far-future clock reading is visible.
+- A second red-team pass on the fix ran a 92-million-call randomized search (non-monotonic clocks,
+  saturation, timestamp-free entries, extreme settings and instants) against an oracle written from
+  the documented rule: no message was admitted twice. The same oracle finds thousands of double
+  admissions in the guard as it was before this fix.
 
 Tests: the guard's boundaries at the default (59 and 60 s ahead admitted, 61 refused) and at
 `ClockSkew` 0 (the old rule, compared line by line with `main`), second-by-second sweeps through

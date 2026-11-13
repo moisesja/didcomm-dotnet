@@ -377,10 +377,11 @@ Replay guard (`InMemoryReplayGuard`):
 - `MaxMessageIdLength` (default 512) is checked first → `MessageIdTooLong`. Then whole-second
   arithmetic on the caller's reading: `created_time < now − Window` → `TooOld`; `created_time > now
   + ClockSkew` → `FutureDated`; expiry = `created_time + Window + ClockSkew`. No `created_time` →
-  `MissingCreatedTime`, or with `RequireCreatedTime = false` expiry = `purgedAt + Window` (below).
-- Under one lock: if the reading is later than `purgedAt` (the latest instant purged at), purge the
-  min-heap of `(sender, id)` by expiry (entries strictly earlier than the reading; the only removal
-  path, so heap and buckets never diverge) and advance `purgedAt`. Then `TooOld` if the message's
+  `MissingCreatedTime`, or with `RequireCreatedTime = false` expiry = `now + Window` (the caller's
+  reading).
+- Under one lock: purge the min-heap of `(sender, id)` by expiry (entries strictly earlier than the
+  reading; the only removal path, so heap and buckets never diverge) and advance `purgedAt`, the
+  latest instant purged at, if the reading is later. Then `TooOld` if the message's
   expiry is earlier than `purgedAt` (its entry may have been purged — reachable only with a reading
   behind `purgedAt`), `Duplicate` if the sender's bucket holds the id (no refresh), `Saturated` at
   `MaxEntries` (default 32 768) or at the bucket's `MaxEntriesPerPeer` (default 1024) — nothing
@@ -390,9 +391,12 @@ Replay guard (`InMemoryReplayGuard`):
   rejection starts at `created_time < now − Window`, so there is no instant at which a captured
   request is neither remembered nor too old — also when readings reach the lock out of order (the
   gate reads the clock before the lock, so two requests can race) or the host clock steps back,
-  because anything that may have been purged is refused. Cost: after a step back of more than
-  `Window + ClockSkew`, fresh in-scope messages are `TooOld` until the clock is back within that
-  span of `purgedAt`, or the process restarts. An entry stamped `now + ClockSkew` lives
+  because anything that may have been purged is refused. The exact rule is "admitted only if
+  `created_time + Window + ClockSkew ≥ purgedAt`": a reading D seconds behind refuses messages older
+  than `Window + ClockSkew − D` by that reading, and one stamped at the reading only once
+  D > `Window + ClockSkew`. Cost: after a step back of more than `Window + ClockSkew`, fresh in-scope
+  messages are `TooOld` until the clock is back within that span of `purgedAt`, or the process
+  restarts; those refusals are logged (rate-limited Warning with the lag in seconds). An entry stamped `now + ClockSkew` lives
   `Window + 2 × ClockSkew` (420 s at the defaults).
 - Memory at the default budget (measured): about 6 MB with UUID ids, about 35 MB with 512-character
   ids from a few dozen senders, up to about 170 MB when every entry has its own maximal
