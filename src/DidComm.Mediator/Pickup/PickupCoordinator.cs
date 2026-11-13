@@ -49,7 +49,7 @@ internal readonly record struct PickupOutcome(PickupReply Reply, PickupStatusVie
 /// </summary>
 /// <remarks>
 /// <para>
-/// Nothing here throws for a store, registry, session or id-generator fault: the fault is logged by
+/// Nothing here throws for a store, registry, session or id-source fault: the fault is logged by
 /// exception type name and turned into "no reply" (a request) or
 /// <see cref="PickupDeliveryOutcome.Faulted"/> (a delivery). Whatever a store returns is copied and
 /// checked inside the fault boundary before it is used. Leases taken by a request that then fails
@@ -70,9 +70,10 @@ internal sealed class PickupCoordinator
     private readonly PickupSizing _sizing;
     private readonly int _maxDeliveryBatch;
     private readonly TimeSpan _leaseTimeout;
+    private readonly TimeSpan? _maxMessageAge;
     private readonly int _maxAckIds;
     private readonly DidCommOptions _didCommOptions;
-    private readonly IMessageIdGenerator _ids;
+    private readonly Func<string> _newId;
     private readonly ILogger? _logger;
     private long _unauthenticated;
     private long _tooLarge;
@@ -85,7 +86,7 @@ internal sealed class PickupCoordinator
         IReturnRouteSessionRegistry sessions,
         MessagePickupOptions options,
         DidCommOptions didCommOptions,
-        IMessageIdGenerator? idGenerator,
+        Func<string>? newId,
         ILogger? logger)
     {
         ArgumentNullException.ThrowIfNull(store);
@@ -100,11 +101,13 @@ internal sealed class PickupCoordinator
         // Read once, after validation: a host that changes the options object later changes nothing here.
         _maxDeliveryBatch = options.MaxDeliveryBatch;
         _leaseTimeout = options.LeaseTimeout;
+        _maxMessageAge = options.MaxMessageAge;
         _maxAckIds = options.EffectiveMaxAckIds;
         _didCommOptions = didCommOptions;
         _sizing = new PickupSizing(options, didCommOptions.MaxReceiveBytes);
         _tracker = new PickupSessionTracker(store, logger);
-        _ids = idGenerator ?? UuidV4MessageIdGenerator.Instance;
+        // The queue's own CSPRNG (FR-PICK-04), never the container's IMessageIdGenerator.
+        _newId = newId ?? PickupIds.NewRandomId;
         _logger = logger;
         Log(LogLevel.Information,
             "Message pickup: a delivery is at most {MaxDeliveryBytes} packed bytes and {MaxDeliveryBatch} messages; the largest message accepted into the queue is {MaxAdmissiblePayloadBytes} bytes.",
@@ -305,9 +308,15 @@ internal sealed class PickupCoordinator
         try
         {
             var now = _didCommOptions.Now();
+            // "Expired at admission" is the message's own expiry only: the age limit, counted from
+            // now, cannot have passed yet.
             var expiresAt = ExpiryInstant(options.ExpiresTime);
             if (expiresAt is { } at && now >= at)
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Expired, null, null);
+            // The mailbox age limit is folded into the record's expiry (FR-PICK-10): every expiry
+            // path of the store — lease selection, status, the sweeps, PurgeExpiredAsync — then
+            // applies it to waiting, leased and passed-over records alike, by time only.
+            var storedExpiry = Earliest(expiresAt, AgedOutAt(now));
 
             // A DID URL is not normalised into its DID, and an over-long value is never looked up.
             if (!BareDid.IsBareDid(recipientDid))
@@ -328,7 +337,7 @@ internal sealed class PickupCoordinator
             for (var attempt = 0; attempt < 2 && outcome == EnqueueOutcome.DuplicateId; attempt++)
             {
                 id = NewMessageId();
-                var record = new QueuedMessage(id, peerDid, recipientDid, payload, now, options.NotBefore, expiresAt);
+                var record = new QueuedMessage(id, peerDid, recipientDid, payload, now, options.NotBefore, storedExpiry);
                 outcome = await _store.EnqueueAsync(record, lease, now, ct).ConfigureAwait(false);
             }
 
@@ -344,6 +353,30 @@ internal sealed class PickupCoordinator
                 default:
                     Log(LogLevel.Error, "Message pickup: a message was not queued: the store answered {Outcome}.", outcome.ToString());
                     return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
+            }
+
+            // The grant may have been revoked, and its records purged, between the lookup above and
+            // the enqueue (L-057): a purge that ran first cannot have removed this record. Look again,
+            // and when the DID no longer belongs to this grant remove exactly the record stored here.
+            switch (await RecheckRegistrationAsync(recipientDid, peerDid, ct).ConfigureAwait(false))
+            {
+                case Registration.Gone:
+                    if (await RemoveQuietlyAsync(peerDid, id!).ConfigureAwait(false))
+                    {
+                        Log(LogLevel.Information, "Message pickup: a message was not kept: its recipient DID stopped being registered while it was stored (a revoked grant or a removed DID).");
+                        return new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null);
+                    }
+                    // Could not be removed: it stays retained (and is reported so), under no lease.
+                    if (lease is not null)
+                        await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
+                    return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+                case Registration.Unknown:
+                    // The check failed: keep the record (never lose an accepted message; expiry or the
+                    // age limit reclaims it if it is never picked up), but push nothing live on an
+                    // unconfirmed registration.
+                    if (lease is not null)
+                        await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
+                    return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
             }
 
             if (target is null || lease is null)
@@ -395,6 +428,24 @@ internal sealed class PickupCoordinator
 
     /// <summary>See <see cref="MessagePickupQueue.PurgeExpiredAsync"/>.</summary>
     public ValueTask<int> PurgeExpiredAsync(CancellationToken ct) => _store.PurgeExpiredAsync(_didCommOptions.Now(), ct);
+
+    /// <summary>See <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>. Store faults propagate: a host API.</summary>
+    public async ValueTask<GrantRevocation> RevokeAndPurgeAsync(string peerDid, CancellationToken ct)
+    {
+        // Checked first, so a value that is not a bare DID is never handed to a store (and never quoted).
+        if (!BareDid.IsBareDid(peerDid))
+            throw new ArgumentException("The peer must be named by a bare DID of at most 2048 characters (no path, query or fragment).", nameof(peerDid));
+        ct.ThrowIfCancellationRequested();
+
+        // Revoke first: from here every delivery's re-check finds the DID unregistered and removes
+        // what it stored, so nothing stored after the purge below survives (L-057).
+        var revoked = await _mediation.RevokeAsync(peerDid, ct).ConfigureAwait(false);
+        var purged = await _store.PurgeGrantAsync(peerDid, ct).ConfigureAwait(false);
+        if (purged < 0)
+            throw new InvalidOperationException("The message store returned a purge count outside its contract.");
+        Log(LogLevel.Information, "Message pickup: a grant was revoked ({Revoked}) and {Purged} queued message(s) held under it were removed.", revoked, purged);
+        return new GrantRevocation(revoked, purged);
+    }
 
     /// <summary>Write a log line; a throwing logging provider changes nothing.</summary>
     public void Log(LogLevel level, string message, params object?[] args) => MediatorLog.Write(_logger, level, message, args);
@@ -659,16 +710,35 @@ internal sealed class PickupCoordinator
         return null;
     }
 
+    // Whatever produced the id, it is checked before it is stored: a test seam can hand back
+    // anything, and an id goes on the wire as an attachment id.
     private string NewMessageId()
     {
-        var id = _ids.NewId();
+        var id = _newId();
         if (!IsUsableId(id, PickupSizing.MaxMintedIdLength))
-            throw new InvalidOperationException("The message id generator returned an id that cannot be used as an attachment id.");
+            throw new InvalidOperationException("The message id source returned an id that cannot be used as an attachment id.");
         return id;
     }
 
     private static bool IsUsableId(string? id, int maxLength)
         => !string.IsNullOrEmpty(id) && id.Length <= maxLength && UnreservedUriChars.IsUnreserved(id);
+
+    // The mailbox age limit as an instant on the mediator's clock: admission time plus the limit,
+    // with no skew (the clock that admits is the clock that sweeps). Saturating: a limit that would
+    // run past the end of time ends there (a clock set close to DateTimeOffset.MaxValue).
+    private DateTimeOffset? AgedOutAt(DateTimeOffset now)
+    {
+        if (_maxMessageAge is not { } age)
+            return null;
+        return age.Ticks >= DateTimeOffset.MaxValue.UtcTicks - now.UtcTicks
+            ? DateTimeOffset.MaxValue
+            : new DateTimeOffset(now.UtcTicks + age.Ticks, TimeSpan.Zero);
+    }
+
+    private static DateTimeOffset? Earliest(DateTimeOffset? first, DateTimeOffset? second)
+        => first is not { } a ? second
+            : second is not { } b ? a
+            : a <= b ? a : b;
 
     // FR-ROUTE-09 as an instant: expires_time counts whole seconds and is expired once
     // now - skew > expires, i.e. from the start of second (expires + skew + 1).
@@ -684,6 +754,48 @@ internal sealed class PickupCoordinator
         if (first >= DateTimeOffset.MaxValue.ToUnixTimeSeconds())
             return DateTimeOffset.MaxValue;
         return DateTimeOffset.FromUnixTimeSeconds((long)first);
+    }
+
+    private enum Registration
+    {
+        Registered,
+        Gone,
+        Unknown,
+    }
+
+    // The post-enqueue check: does the recipient DID still belong to the grant the message was stored
+    // under? A store fault is Unknown (the caller keeps the record); cancellation of the caller's
+    // token leaves as itself, with the record kept, like any cancellation after the store.
+    private async ValueTask<Registration> RecheckRegistrationAsync(string recipientDid, string peerDid, CancellationToken ct)
+    {
+        try
+        {
+            var grant = await _mediation.FindGrantByRecipientDidAsync(recipientDid, ct).ConfigureAwait(false);
+            return string.Equals(grant?.PeerDid, peerDid, StringComparison.Ordinal) ? Registration.Registered : Registration.Gone;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            Log(LogLevel.Warning, "Message pickup: the registration check after storing a message failed with {ExceptionType}; the message is kept and not pushed live.", ex.GetType().Name);
+            return Registration.Unknown;
+        }
+    }
+
+    // Remove exactly the record this delivery stored (by its id, under its grant). Never throws,
+    // never cancelled: it is the clean-up of a delivery that already decided not to keep the
+    // message. True when the record is gone — removed here, or already removed by a purge or an
+    // acknowledgement; false when the store failed and the record may still be held.
+    private async ValueTask<bool> RemoveQuietlyAsync(string peerDid, string id)
+    {
+        try
+        {
+            await _store.AcknowledgeAsync(peerDid, new[] { id }, CancellationToken.None).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Error, "Message pickup: a message stored for a recipient that is no longer registered could not be removed ({ExceptionType}); it stays queued until it expires or the grant is purged.", ex.GetType().Name);
+            return false;
+        }
     }
 
     // On a path that is already failing or cleaning up: never throws, never cancelled. Only the

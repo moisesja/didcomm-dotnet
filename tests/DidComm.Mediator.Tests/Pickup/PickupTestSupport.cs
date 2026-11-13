@@ -145,6 +145,7 @@ internal sealed class PickupFakeStore : IMessageStore
     public Func<string, IReadOnlyList<string>, string, DateTimeOffset, CancellationToken, ValueTask<int>>? OnPassOver { get; set; }
     public Func<string, string?, DateTimeOffset, CancellationToken, ValueTask<QueueStatus>>? OnGetStatus { get; set; }
     public Func<string, string, CancellationToken, ValueTask<int>>? OnPurgeRecipient { get; set; }
+    public Func<string, CancellationToken, ValueTask<int>>? OnPurgeGrant { get; set; }
 
     public int CountOf(string method) => Calls.Count(c => c == method);
 
@@ -208,7 +209,7 @@ internal sealed class PickupFakeStore : IMessageStore
     public ValueTask<int> PurgeGrantAsync(string grantPeerDid, CancellationToken ct)
     {
         Calls.Enqueue(nameof(PurgeGrantAsync));
-        return Inner.PurgeGrantAsync(grantPeerDid, ct);
+        return OnPurgeGrant?.Invoke(grantPeerDid, ct) ?? Inner.PurgeGrantAsync(grantPeerDid, ct);
     }
 
     public ValueTask<int> PurgeExpiredAsync(DateTimeOffset now, CancellationToken ct)

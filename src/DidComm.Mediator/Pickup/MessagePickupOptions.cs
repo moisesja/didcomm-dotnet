@@ -83,6 +83,14 @@ public sealed class MessagePickupOptions
     /// your recipients need to survive. A message whose own <c>expires_time</c> comes first expires
     /// then. Must be greater than zero.
     /// </summary>
+    /// <remarks>
+    /// The queue reads this once, when it is built, and writes the resulting instant onto each
+    /// record as it accepts it (<see cref="QueuedMessage.ExpiresAt"/>): the limit in force at
+    /// admission is fixed on the record. Changing the setting later — or restarting with another
+    /// value over a persistent <see cref="IMessageStore"/> — does not shorten or lengthen what is
+    /// already held. A message whose not-before time (a forward's <c>delay_milli</c>) lies beyond
+    /// the limit ages out before it is due, so keep the limit longer than the longest delay honoured.
+    /// </remarks>
     public TimeSpan? MaxMessageAge { get; set; } = TimeSpan.FromDays(30);
 
     /// <summary>Check the settings; called when the role is registered and when it is first used.</summary>

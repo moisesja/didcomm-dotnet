@@ -1,7 +1,6 @@
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Mediator.Coordination;
-using DidComm.Messages;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -105,6 +104,7 @@ public static class MessagePickupBuilderExtensions
             sp.GetRequiredService<IReturnRouteSessionRegistry>(),
             sp.GetRequiredService<IOptions<MessagePickupOptions>>(),
             sp.GetRequiredService<IOptions<DidCommOptions>>(),
-            sp.GetService<IMessageIdGenerator>(),
-            sp.GetService<ILogger<MessagePickupQueue>>());
+            sp.GetService<ILogger<MessagePickupQueue>>(),
+            // The queue mints its own random ids; only the internal test seam can replace them.
+            sp.GetService<PickupIdSource>()?.Next);
 }

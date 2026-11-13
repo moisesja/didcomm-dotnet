@@ -21,7 +21,7 @@ namespace DidComm.Protocols.Routing;
 /// <see cref="Facade.UnpackResult.RecipientKid"/>), refuse a forward whose own
 /// <c>expires_time</c> has passed (FR-ROUTE-09, judged on <c>DidCommOptions.Clock</c> with the
 /// FR-API-05 skew), reduce <c>body.next</c> to its DID subject and ask the
-/// <see cref="IForwardRecipientRegistry"/>. Any failure drops the forward with a Warning that
+/// <see cref="IForwardRecipientRegistry"/>. Any failure drops the forward with a log line that
 /// carries the message id only — no DID, no kid, no payload — and the handler returns
 /// <c>null</c>: a mediator sends nothing back toward the sender, no problem report, and
 /// <c>please_ack</c> is never read (FR-ROUTE-07). The method never throws, except
@@ -50,15 +50,30 @@ namespace DidComm.Protocols.Routing;
 /// </para>
 /// <para>
 /// <strong>Schedule fixed at receipt.</strong> The clock is read once per forward, inline: the
-/// same instant judges the relay-time expiry and, with <c>delay_milli</c> sampled right there,
-/// becomes <see cref="ForwardProcessingResult.NotBefore"/> (FR-ROUTE-10). Time spent waiting for
-/// the acknowledgement or queued behind a slow sink never moves it.
+/// same instant judges the relay-time expiry and, with <c>delay_milli</c> resolved right there under
+/// the processor's <see cref="ForwardProcessorOptions.MaxDelay"/>, becomes
+/// <see cref="ForwardProcessingResult.NotBefore"/> (FR-ROUTE-10). Time spent waiting for the
+/// acknowledgement or queued behind a slow sink never moves it.
 /// </para>
 /// <para>
 /// <strong>Logging contract.</strong> Every line carries the message id and, on a failure, the
 /// exception type name(s) only. No exception object — and so no exception message — is ever
 /// handed to the logger: a resolution or sink fault can carry the next-hop DID in its text, and a
-/// console provider would print it.
+/// console provider would print it. Any stranger can make the handler drop a forward, so each
+/// drop line is rate-limited per reason: the first occurrence and every 1000th are written at
+/// Warning (the "expired while queued" line at Information), the others at Debug with the same
+/// text.
+/// </para>
+/// <para>
+/// <strong>Outcome metric.</strong> Each forward this handler ends is counted once on the
+/// <c>didcomm.forward.outcomes</c> counter of the <see cref="Diagnostics.DidCommDiagnostics.MeterName"/>
+/// meter: <c>Dropped-Malformed</c> (not a forward, malformed, or refused by the processor as
+/// inconsistent or malformed), <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or
+/// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered),
+/// <c>Dropped-Saturated</c>, <c>Dropped-Unacknowledged</c> (the transport never acknowledged it, or
+/// the request was cancelled), <c>Dropped-Shutdown</c> or <c>Faulted</c> (a screening, processing or
+/// sink fault). A forward the sink returns from normally is the sink's to count: the mediator's own
+/// sink counts how it ended, a host's sink counts nothing.
 /// </para>
 /// <para>
 /// <strong>Expiry twice, on purpose.</strong> Inline, so an expired forward never costs a queue slot
@@ -88,12 +103,13 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     internal const long DefaultByteBudget = 64L * 1024 * 1024;
 
     private static readonly TimeSpan DefaultShutdownGrace = TimeSpan.FromSeconds(5);
-    private const long DropLogEvery = 1000;
 
     private readonly ForwardProcessor _processor;
     private readonly IForwardSink _sink;
     private readonly IForwardRecipientRegistry _registry;
     private readonly ILogger<ForwardHandler>? _logger;
+    private readonly ForwardMetrics _metrics;
+    private readonly bool _ownsMetrics;
     private readonly int _capacity;
     private readonly long _byteBudget;
     private readonly TimeSpan _shutdownGrace;
@@ -110,9 +126,28 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private readonly ConcurrentDictionary<Task, byte> _pendingAcknowledgements = new();
     private int _outstandingItems;
     private long _outstandingBytes;
-    private long _dropped;
+    // One occurrence counter per drop line (DropReason), for the "first and every 1000th" rule.
+    private readonly long[] _dropLines = new long[(int)DropReason.Count];
     private int _shutdownStarted;
     private int _discardedAtShutdown;
+
+    /// <summary>Why the handler dropped a forward: each has its own rate-limited log line and one metric outcome.</summary>
+    private enum DropReason
+    {
+        NotAForward,
+        Malformed,
+        Posture,
+        ExpiredInline,
+        NextNotDid,
+        NotRegistered,
+        ScreeningFault,
+        Saturated,
+        Unacknowledged,
+        ExpiredWhileQueued,
+        ProcessorMalformed,
+        Faulted,
+        Count,
+    }
 
     // The dispatcher-built ProtocolContext (an immutable record) is everything the detached work
     // needs: the UnpackResult, the options/clock and the facade. The request token is NOT stored.
@@ -137,6 +172,24 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         ILogger<ForwardHandler>? logger = null)
         : this(processor, sink, registry, logger, DefaultCapacity, shutdownGrace: null) { }
 
+    /// <summary>
+    /// Create the handler with the default queue bound and shutdown grace, counting outcomes on a
+    /// shared <see cref="ForwardMetrics"/> (the container's, which the mediator's sink counts on
+    /// too). <c>AddRoutingMediator()</c> uses this constructor.
+    /// </summary>
+    /// <param name="processor">The mediator's forward processor.</param>
+    /// <param name="sink">Where processed forwards go.</param>
+    /// <param name="registry">The recipients this mediator relays for.</param>
+    /// <param name="metrics">The outcome counter; owned by the caller, never disposed here.</param>
+    /// <param name="logger">Optional logger.</param>
+    internal ForwardHandler(
+        ForwardProcessor processor,
+        IForwardSink sink,
+        IForwardRecipientRegistry registry,
+        ForwardMetrics metrics,
+        ILogger<ForwardHandler>? logger)
+        : this(processor, sink, registry, logger, DefaultCapacity, shutdownGrace: null, DefaultByteBudget, metrics ?? throw new ArgumentNullException(nameof(metrics))) { }
+
     /// <summary>Test seam: a handler with explicit queue bounds and shutdown grace.</summary>
     /// <param name="processor">The mediator's forward processor.</param>
     /// <param name="sink">Where processed forwards go.</param>
@@ -145,6 +198,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     /// <param name="capacity">Maximum forwards queued or in flight; the newest is dropped beyond it.</param>
     /// <param name="shutdownGrace">How long <see cref="DisposeAsync"/> waits for the pump; <c>null</c> for 5 seconds.</param>
     /// <param name="byteBudget">Maximum plaintext UTF-8 bytes queued or in flight; a forward that would exceed it is dropped.</param>
+    /// <param name="metrics">The outcome counter, owned by the caller; <c>null</c> to create one this handler owns and disposes.</param>
     internal ForwardHandler(
         ForwardProcessor processor,
         IForwardSink sink,
@@ -152,7 +206,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         ILogger<ForwardHandler>? logger,
         int capacity,
         TimeSpan? shutdownGrace,
-        long byteBudget = DefaultByteBudget)
+        long byteBudget = DefaultByteBudget,
+        ForwardMetrics? metrics = null)
     {
         ArgumentNullException.ThrowIfNull(processor);
         ArgumentNullException.ThrowIfNull(sink);
@@ -170,6 +225,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         _sink = sink;
         _registry = registry;
         _logger = logger;
+        _ownsMetrics = metrics is null;
+        _metrics = metrics ?? new ForwardMetrics(meterFactory: null);
         _capacity = capacity;
         _byteBudget = byteBudget;
         _shutdownToken = _shutdown.Token; // capture before the pump can start
@@ -206,7 +263,12 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(context);
-        ct.ThrowIfCancellationRequested();
+        if (ct.IsCancellationRequested)
+        {
+            // The request was abandoned before anything was decided: the sender gets no answer.
+            _metrics.Record(ForwardOutcomes.DroppedUnacknowledged);
+            ct.ThrowIfCancellationRequested();
+        }
 
         int bytes;
         TimeSpan? delay;
@@ -220,20 +282,20 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             {
                 if (!ForwardMessage.TryParse(message, out next, out _))
                 {
-                    SafeLogWarning("Forward {MessageId} dropped: not a forward message (FR-ROUTE-11).", message.Id);
+                    Dropped(DropReason.NotAForward, "Forward {MessageId} dropped: not a forward message (FR-ROUTE-11).", message.Id);
                     return null;
                 }
             }
             catch (MalformedMessageException ex)
             {
-                SafeLogWarning("Forward {MessageId} dropped: malformed forward (FR-ROUTE-01/FR-API-09): {ExceptionType}.", message.Id, ex.GetType().Name);
+                Dropped(DropReason.Malformed, "Forward {MessageId} dropped: malformed forward (FR-ROUTE-01/FR-API-09): {ExceptionType}.", message.Id, ex.GetType().Name);
                 return null;
             }
 
             // (b) FR-ROUTE-11 posture: encrypted and decrypted with a held key.
             if (!context.Received.Encrypted || string.IsNullOrEmpty(context.Received.RecipientKid))
             {
-                SafeLogWarning("Forward {MessageId} dropped: plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.Posture, "Forward {MessageId} dropped: plaintext, signed-only or not decrypted with a held key (FR-ROUTE-11).", message.Id);
                 return null;
             }
 
@@ -245,18 +307,19 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             var receivedAt = context.Options.Now();
             if (ForwardProcessingResult.IsExpiredAt(message.ExpiresTime, receivedAt, context.Options.ExpiresClockSkew))
             {
-                SafeLogWarning("Forward {MessageId} dropped: expired at relay time (FR-ROUTE-09).", message.Id);
+                Dropped(DropReason.ExpiredInline, "Forward {MessageId} dropped: expired at relay time (FR-ROUTE-09).", message.Id);
                 return null;
             }
 
-            delay = ForwardProcessor.ExtractDelay(message);
+            // The processor's own resolution, so its MaxDelay cap applies before the one draw.
+            delay = _processor.ResolveDelay(message);
             notBefore = delay is TimeSpan d ? receivedAt + d : null;
 
             // (d) Registered recipient, by DID subject. Unknown → drop, no problem report (D4).
             var subject = DidSubject.DidSubjectOf(next);
             if (subject is null)
             {
-                SafeLogWarning("Forward {MessageId} dropped: next is not a DID or DID URL (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.NextNotDid, "Forward {MessageId} dropped: next is not a DID or DID URL (FR-ROUTE-11).", message.Id);
                 return null;
             }
 
@@ -270,18 +333,19 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
             if (!await _registry.IsRegisteredAsync(subject, ct).ConfigureAwait(false))
             {
-                SafeLogWarning("Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11).", message.Id);
+                Dropped(DropReason.NotRegistered, "Forward {MessageId} dropped: next is not a registered recipient (FR-ROUTE-11).", message.Id);
                 return null;
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            _metrics.Record(ForwardOutcomes.DroppedUnacknowledged);
             throw;
         }
         catch (Exception ex)
         {
             // A registry (or logger / clock) fault must not become a 400 toward the sender.
-            SafeLogWarning("Forward {MessageId} dropped: inline screening failed with {ExceptionType}.", message.Id, ex.GetType().Name);
+            Dropped(DropReason.ScreeningFault, "Forward {MessageId} dropped: inline screening failed with {ExceptionType}.", message.Id, ex.GetType().Name);
             return null;
         }
 
@@ -312,7 +376,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
         if (!reserved)
         {
-            Drop(message.Id);
+            DropSaturated(message.Id);
             return null;
         }
 
@@ -324,7 +388,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         {
             // TryWrite refused: the writer was completed by a concurrent shutdown. Fail closed.
             ReleaseSlot(bytes);
-            Interlocked.Increment(ref _discardedAtShutdown);
+            Discarded(1);
         }
 
         return null;
@@ -351,7 +415,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         catch (OperationCanceledException) when (_shutdownToken.IsCancellationRequested)
         {
             ReleaseSlot(item.Bytes);
-            Interlocked.Increment(ref _discardedAtShutdown);
+            Discarded(1);
             return;
         }
         catch (Exception)
@@ -360,7 +424,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             // handler ran) or faulted: the sender never received the 202, so nothing is relayed.
             // The exception's text stays out of the logs.
             ReleaseSlot(item.Bytes);
-            SafeLogWarning("Forward {MessageId} dropped: the transport did not acknowledge it; not relayed.", id);
+            Dropped(DropReason.Unacknowledged, "Forward {MessageId} dropped: the transport did not acknowledge it; not relayed.", id);
             return;
         }
 
@@ -373,7 +437,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         if (!published)
         {
             ReleaseSlot(item.Bytes);
-            Interlocked.Increment(ref _discardedAtShutdown);
+            Discarded(1);
         }
     }
 
@@ -411,7 +475,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 if (shutdown.IsCancellationRequested)
                 {
                     ReleaseSlot(item.Bytes);
-                    Interlocked.Increment(ref _discardedAtShutdown);
+                    Discarded(1);
                     break;
                 }
 
@@ -443,30 +507,41 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     {
         var context = item.Context!;
         var id = context.Received.Message.Id;
+        // Which stage a fault came from decides its outcome: a processor that refuses the forward
+        // as inconsistent or malformed ends a malformed forward; anything else is a fault.
+        var processed = false;
         try
         {
             // The schedule was fixed at admission (FR-ROUTE-10); the processor does not re-read the clock.
             var result = await _processor.ProcessAsync(context.Received, item.Delay, item.NotBefore, shutdown).ConfigureAwait(false);
+            processed = true;
 
             // FR-ROUTE-09 again: the time spent queued may have crossed the forward's expiry.
             if (result.IsExpired(context.Options.Now(), context.Options.ExpiresClockSkew))
             {
-                SafeLogInformation("Forward {MessageId} discarded: expired while queued (FR-ROUTE-09).", id);
+                Dropped(DropReason.ExpiredWhileQueued, "Forward {MessageId} discarded: expired while queued (FR-ROUTE-09).", id);
                 return;
             }
 
+            // From here the sink counts how the forward ended; the handler counts it only when the
+            // sink throws, or is cancelled by the shutdown.
             await _sink.AcceptAsync(result, context, shutdown).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
         {
             // Normal cooperative shutdown; the forward is discarded (fail closed).
+            _metrics.Record(ForwardOutcomes.DroppedShutdown);
         }
         catch (Exception ex)
         {
             // ConsistencyException, MalformedMessageException, DidResolutionException,
             // CryptoException, sink faults. Type names only — a DidResolutionException carries the
             // next-hop DID in its message, so the exception object never reaches the logger.
-            SafeLogWarning(
+            var reason = !processed && ex is ConsistencyException or MalformedMessageException
+                ? DropReason.ProcessorMalformed
+                : DropReason.Faulted;
+            Dropped(
+                reason,
                 "Forward {MessageId} not relayed: {ExceptionType} (innermost: {InnerExceptionType}).",
                 id, ex.GetType().Name, InnermostTypeName(ex));
         }
@@ -544,6 +619,9 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     /// <summary>Test/diagnostic seam for proving shutdown completed.</summary>
     internal Task ShutdownCompletion => _shutdownCompletion.Task;
 
+    /// <summary>Test seam: the outcome counter this handler records on (its own, or the shared one it was given).</summary>
+    internal ForwardMetrics Metrics => _metrics;
+
     /// <summary>Stop admission, cancel the pump and discard queued forwards, without waiting for the sink.</summary>
     public void Dispose() => BeginShutdown();
 
@@ -613,6 +691,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             if (discarded > 0)
                 SafeLogInformation("Forward handler shut down: {Count} queued forward(s) discarded (fail closed).", discarded);
             _shutdown.Dispose();
+            if (_ownsMetrics)
+                _metrics.Dispose();
             _shutdownCompletion.TrySetResult();
         }
     }
@@ -633,7 +713,15 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
 
         if (discarded > 0)
-            Interlocked.Add(ref _discardedAtShutdown, discarded);
+            Discarded(discarded);
+    }
+
+    /// <summary>Count forwards discarded by the shutdown: the summary line's total and the metric, in one place.</summary>
+    /// <param name="count">How many forwards.</param>
+    private void Discarded(int count)
+    {
+        Interlocked.Add(ref _discardedAtShutdown, count);
+        _metrics.Record(ForwardOutcomes.DroppedShutdown, count);
     }
 
     private void ReleaseSlot(int bytes)
@@ -645,13 +733,12 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
     }
 
-    private void Drop(string messageId)
+    private void DropSaturated(string messageId)
     {
-        var dropped = Interlocked.Increment(ref _dropped);
-        if (dropped != 1 && dropped % DropLogEvery != 0)
-            return;
-
-        SafeLogWarning(
+        _metrics.Record(ForwardOutcomes.DroppedSaturated);
+        var level = RateLimitedLog.Level(ref _dropLines[(int)DropReason.Saturated], LogLevel.Warning, out var dropped);
+        SafeLog(
+            level,
             "Forward {MessageId} dropped: handler queue saturated (capacity {Capacity} forwards, {ByteBudget} plaintext bytes); fail closed. Total dropped: {Dropped}.",
             messageId,
             _capacity,
@@ -659,13 +746,39 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             dropped);
     }
 
+    /// <summary>
+    /// Count one forward ended by <paramref name="reason"/> on the outcome metric and write its
+    /// line, rate-limited per reason (the first and every 1000th at the line's level, Debug
+    /// otherwise). The arguments are the message id and type names only.
+    /// </summary>
+    /// <param name="reason">Why the forward was dropped.</param>
+    /// <param name="message">The line's template.</param>
+    /// <param name="args">The template's arguments.</param>
+    private void Dropped(DropReason reason, string message, params object?[] args)
+    {
+        _metrics.Record(OutcomeOf(reason));
+        var loud = reason == DropReason.ExpiredWhileQueued ? LogLevel.Information : LogLevel.Warning;
+        SafeLog(RateLimitedLog.Level(ref _dropLines[(int)reason], loud, out _), message, args);
+    }
+
+    private static string OutcomeOf(DropReason reason) => reason switch
+    {
+        DropReason.NotAForward or DropReason.Malformed or DropReason.ProcessorMalformed => ForwardOutcomes.DroppedMalformed,
+        DropReason.Posture => ForwardOutcomes.DroppedNotEncrypted,
+        DropReason.ExpiredInline or DropReason.ExpiredWhileQueued => ForwardOutcomes.DroppedExpired,
+        DropReason.NextNotDid or DropReason.NotRegistered => ForwardOutcomes.DroppedUnknown,
+        DropReason.Saturated => ForwardOutcomes.DroppedSaturated,
+        DropReason.Unacknowledged => ForwardOutcomes.DroppedUnacknowledged,
+        _ => ForwardOutcomes.Faulted,
+    };
+
     // Never takes an exception: the logging contract is message id + exception type names only
     // (a DidResolutionException's message names the next-hop DID; a sink's may name anything).
-    private void SafeLogWarning(string message, params object?[] args)
+    private void SafeLog(LogLevel level, string message, params object?[] args)
     {
         try
         {
-            _logger?.LogWarning(message, args);
+            _logger?.Log(level, message, args);
         }
         catch
         {
@@ -673,17 +786,9 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
     }
 
-    private void SafeLogInformation(string message, params object?[] args)
-    {
-        try
-        {
-            _logger?.LogInformation(message, args);
-        }
-        catch
-        {
-            // See SafeLogWarning.
-        }
-    }
+    private void SafeLogWarning(string message, params object?[] args) => SafeLog(LogLevel.Warning, message, args);
+
+    private void SafeLogInformation(string message, params object?[] args) => SafeLog(LogLevel.Information, message, args);
 
     private void ThrowIfShutdown()
     {

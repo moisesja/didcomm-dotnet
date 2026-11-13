@@ -33,6 +33,9 @@ public sealed class MessagePickupForwardProgressTests
                 {
                     o.MaxDeliveryBatch = batch;
                     o.LeaseTimeout = Lease;
+                    // The subject is forward progress, not aging: polls a day apart run past the
+                    // mailbox age limit (#95), which would remove the messages under test.
+                    o.MaxMessageAge = null;
                 },
                 fakeStore: true);
             var (mediator, peer) = await fixture.EnrolledAsync();

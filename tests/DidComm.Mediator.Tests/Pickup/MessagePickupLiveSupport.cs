@@ -127,6 +127,7 @@ internal sealed class MessagePickupLiveMediationStore : IMediationStore
 
     public Func<string, CancellationToken, ValueTask<MediationGrant?>>? OnFind { get; set; }
     public Func<string, CancellationToken, ValueTask<MediationGrant?>>? OnGetGrant { get; set; }
+    public Func<string, CancellationToken, ValueTask<bool>>? OnRevoke { get; set; }
 
     public ValueTask<MediationGrant?> GetGrantAsync(string peerDid, CancellationToken ct)
     {
@@ -143,7 +144,7 @@ internal sealed class MessagePickupLiveMediationStore : IMediationStore
     public ValueTask<bool> RevokeAsync(string peerDid, CancellationToken ct)
     {
         Calls.Enqueue(nameof(RevokeAsync));
-        return Inner.RevokeAsync(peerDid, ct);
+        return OnRevoke is { } hook ? hook(peerDid, ct) : Inner.RevokeAsync(peerDid, ct);
     }
 
     public ValueTask<IReadOnlyList<RecipientStoreOutcome>> UpdateRecipientsAsync(string peerDid, IReadOnlyList<RecipientUpdate> updates, CancellationToken ct)
@@ -166,8 +167,12 @@ internal sealed class MessagePickupLiveMediationStore : IMediationStore
     }
 }
 
-/// <summary>An <see cref="IMessageIdGenerator"/> a test scripts; a UUID when nothing is scripted.</summary>
-internal sealed class MessagePickupLiveIdGenerator : IMessageIdGenerator
+/// <summary>
+/// The ids of queued messages, as a test scripts them; a UUID when nothing is scripted. The queue
+/// mints its own random ids, so a test hands these to it through the internal
+/// <see cref="PickupIdSource"/> seam (<see cref="Source"/>), never as an <c>IMessageIdGenerator</c>.
+/// </summary>
+internal sealed class MessagePickupLiveIdGenerator
 {
     private int _calls;
 
@@ -182,6 +187,9 @@ internal sealed class MessagePickupLiveIdGenerator : IMessageIdGenerator
         var call = Interlocked.Increment(ref _calls);
         return Next is { } next ? next(call)! : Guid.NewGuid().ToString();
     }
+
+    /// <summary>The seam that makes the queue take its ids from <see cref="NewId"/>; register it in the container.</summary>
+    public PickupIdSource Source => new(NewId);
 }
 
 /// <summary>

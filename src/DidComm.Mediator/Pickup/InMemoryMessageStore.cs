@@ -13,10 +13,12 @@ namespace DidComm.Mediator.Pickup;
 /// <see cref="MessagePickupOptions.MaxStoreBytes"/> payload bytes in all. Every retained record
 /// counts, whatever its state. Worst-case memory is the store-wide byte bound plus the keys of the
 /// store-wide record bound (two DIDs of up to 2048 characters and an id per record, about 8 KiB):
-/// roughly 170 MiB at the defaults. Records without an expiry stay until they are acknowledged or
-/// purged; with a mediation policy that grants anyone, self-made grants can fill the store-wide
-/// bounds, after which new messages are refused for everyone while what is already held stays
-/// deliverable.
+/// roughly 170 MiB at the defaults. Every record the queue stores expires at the latest when the
+/// mailbox age limit runs out (<see cref="MessagePickupOptions.MaxMessageAge"/>, folded into
+/// <see cref="QueuedMessage.ExpiresAt"/>); with the limit turned off, records without an expiry
+/// stay until they are acknowledged or purged. With a mediation policy that grants anyone,
+/// self-made grants can fill the store-wide bounds, after which new messages are refused for
+/// everyone while what is already held stays deliverable.
 /// </para>
 /// <para>
 /// <strong>Concurrency.</strong> One lock guards everything, so the bound check and the insert, and

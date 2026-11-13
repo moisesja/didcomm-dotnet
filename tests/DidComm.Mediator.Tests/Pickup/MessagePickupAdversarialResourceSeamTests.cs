@@ -262,7 +262,7 @@ public sealed class MessagePickupAdversarialResourceSeamTests
     public async Task An_id_generator_that_returns_one_id_for_ever_costs_two_attempts_per_message_and_stores_nothing_more()
     {
         var generator = new OneIdGenerator();
-        await using var fixture = PickupFixture.Create(fakeStore: true, services: c => c.AddSingleton<IMessageIdGenerator>(generator));
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: c => c.AddSingleton(new PickupIdSource(generator.NewId)));
         var (mediator, peer) = await fixture.EnrolledAsync();
         var other = (await fixture.NewPeerAsync()).Did;
         await fixture.EnrolAsync(other, mediator, other);
@@ -285,7 +285,7 @@ public sealed class MessagePickupAdversarialResourceSeamTests
         fixture.Memory.MessageCount.Should().Be(1, "acknowledging an id removes it under the caller's grant only");
     }
 
-    private sealed class OneIdGenerator : IMessageIdGenerator
+    private sealed class OneIdGenerator
     {
         public string NewId() => "the-one-id";
     }

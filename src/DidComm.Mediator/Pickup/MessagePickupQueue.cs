@@ -18,8 +18,12 @@ namespace DidComm.Mediator.Pickup;
 /// Records are kept in the <see cref="IMessageStore"/>; this class adds the rules around it: who a
 /// message belongs to (the grant its recipient DID is registered under, looked up when the message
 /// arrives), what may be retained (the size and quota bounds) and where it goes first (a live
-/// session, else the queue). To drop what is held for a DID or a grant, call the store's
-/// <see cref="IMessageStore.PurgeRecipientAsync"/> / <see cref="IMessageStore.PurgeGrantAsync"/>.
+/// session, else the queue). A message leaves the queue when its recipient acknowledges it, when it
+/// expires — its own <c>expires_time</c>, or the mailbox age limit
+/// (<see cref="MessagePickupOptions.MaxMessageAge"/>, 30 days by default) — or when the host
+/// removes it. To end a peer's mediation and drop everything held for it, call
+/// <see cref="RevokeAndPurgeAsync"/>; to drop what is held for one DID, the store's
+/// <see cref="IMessageStore.PurgeRecipientAsync"/>.
 /// </para>
 /// <para>
 /// Thread-safe. It takes no dependency on the protocol dispatcher, a handler or
@@ -28,13 +32,17 @@ namespace DidComm.Mediator.Pickup;
 /// </remarks>
 public sealed class MessagePickupQueue
 {
-    /// <summary>Create the queue. Called by the container; hosts register it with <c>AddMessagePickup()</c>.</summary>
+    /// <summary>
+    /// Create the queue. Called by the container; hosts register it with <c>AddMessagePickup()</c>.
+    /// The ids of queued messages are minted by the queue itself: 16 random bytes from the
+    /// operating system's CSPRNG as 32 lowercase hex characters (FR-PICK-04). A container's
+    /// <see cref="IMessageIdGenerator"/> is never used for them.
+    /// </summary>
     /// <param name="store">Where queued messages are kept.</param>
     /// <param name="mediationStore">The grant and recipient registry: decides whose queue a message goes to and who may read it.</param>
     /// <param name="sessions">The live return-route sessions, for live delivery.</param>
-    /// <param name="options">Batch, lease and quota settings.</param>
+    /// <param name="options">Batch, lease, quota and age settings, read once here.</param>
     /// <param name="didCommOptions">Supplies <c>MaxReceiveBytes</c>, the clock and the expiry skew.</param>
-    /// <param name="idGenerator">Generates the ids of queued messages; the default is a UUID v4. Ids must be unreserved URI characters, at most 64, and should not be guessable from one another.</param>
     /// <param name="logger">Optional logger. Lines carry message ids of requests, type names and counts only.</param>
     /// <exception cref="ArgumentException"><paramref name="options"/> fail <see cref="MessagePickupOptions.Validate"/>, or the delivery budget in effect cannot carry any message.</exception>
     public MessagePickupQueue(
@@ -43,12 +51,29 @@ public sealed class MessagePickupQueue
         IReturnRouteSessionRegistry sessions,
         IOptions<MessagePickupOptions> options,
         IOptions<DidCommOptions> didCommOptions,
-        IMessageIdGenerator? idGenerator = null,
         ILogger<MessagePickupQueue>? logger = null)
+        : this(store, mediationStore, sessions, options, didCommOptions, logger, newId: null) { }
+
+    /// <summary>Test seam: the queue with the ids of queued messages taken from <paramref name="newId"/>.</summary>
+    /// <param name="store">Where queued messages are kept.</param>
+    /// <param name="mediationStore">The grant and recipient registry.</param>
+    /// <param name="sessions">The live return-route sessions.</param>
+    /// <param name="options">Batch, lease, quota and age settings.</param>
+    /// <param name="didCommOptions">Supplies <c>MaxReceiveBytes</c>, the clock and the expiry skew.</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="newId">Mints the ids of queued messages (each still checked before use); <c>null</c> for the queue's random ids.</param>
+    internal MessagePickupQueue(
+        IMessageStore store,
+        IMediationStore mediationStore,
+        IReturnRouteSessionRegistry sessions,
+        IOptions<MessagePickupOptions> options,
+        IOptions<DidCommOptions> didCommOptions,
+        ILogger<MessagePickupQueue>? logger,
+        Func<string>? newId)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(didCommOptions);
-        Coordinator = new PickupCoordinator(store, mediationStore, sessions, options.Value, didCommOptions.Value, idGenerator, logger);
+        Coordinator = new PickupCoordinator(store, mediationStore, sessions, options.Value, didCommOptions.Value, newId, logger);
     }
 
     /// <summary>The role's logic, shared with the handlers so that live flags, leases and counters are one set.</summary>
@@ -69,6 +94,11 @@ public sealed class MessagePickupQueue
     /// <c>delivery</c> and held until acknowledged. Otherwise it waits for a <c>delivery-request</c>.
     /// </summary>
     /// <remarks>
+    /// After the message is stored, the registration is checked once more: when the recipient DID
+    /// no longer belongs to the grant it was stored under (the grant was revoked meanwhile), exactly
+    /// that record is removed again and nothing is pushed, so a revoke-and-purge that overlaps the
+    /// call leaves nothing behind. If that check fails, the message is kept and reported
+    /// <see cref="PickupDeliveryOutcome.Queued"/>, but not pushed live.
     /// A message addressed to several recipients is delivered by one call per recipient: each call
     /// stores its own record with its own id, acknowledged separately (FR-PICK-05). The payload
     /// memory is kept as given, not copied: do not reuse the buffer, and pass a buffer of the
@@ -139,7 +169,10 @@ public sealed class MessagePickupQueue
     /// <exception cref="ArgumentException"><paramref name="peerDid"/> is not a bare DID. The value is not quoted.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
     public ValueTask<GrantRevocation> RevokeAndPurgeAsync(string peerDid, CancellationToken ct = default)
-        => throw new NotImplementedException("#95 B6");
+    {
+        ArgumentNullException.ThrowIfNull(peerDid);
+        return Coordinator.RevokeAndPurgeAsync(peerDid, ct);
+    }
 }
 
 /// <summary>What <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/> did.</summary>
@@ -152,8 +185,8 @@ public readonly record struct GrantRevocation(bool Revoked, int Purged)
 }
 
 /// <summary>When a message handed to <see cref="MessagePickupQueue.DeliverAsync"/> is due and when it expires.</summary>
-/// <param name="NotBefore">Do not deliver before this instant (a forward's <c>delay_milli</c>, FR-ROUTE-10); <c>null</c> for at once. A message that is not yet due is never pushed live: it is queued and can be picked up once due.</param>
-/// <param name="ExpiresTime">The message's <c>expires_time</c> in UTC epoch seconds (FR-ROUTE-09), judged with <c>DidCommOptions.ExpiresClockSkew</c> exactly as the forward path judges it; <c>null</c> for no expiry. An expired message is not accepted, and one that expires while queued is never delivered.</param>
+/// <param name="NotBefore">Do not deliver before this instant (a forward's <c>delay_milli</c>, FR-ROUTE-10); <c>null</c> for at once. A message that is not yet due is never pushed live: it is queued and can be picked up once due. One due only after the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>) ages out first and is never delivered.</param>
+/// <param name="ExpiresTime">The message's <c>expires_time</c> in UTC epoch seconds (FR-ROUTE-09), judged with <c>DidCommOptions.ExpiresClockSkew</c> exactly as the forward path judges it; <c>null</c> for no expiry of its own. An expired message is not accepted, and one that expires while queued is never delivered. The mailbox age limit applies either way.</param>
 /// <param name="AllowLive"><c>false</c> to queue the message even when the recipient has a live connection.</param>
 public sealed record PickupDeliveryOptions(DateTimeOffset? NotBefore = null, long? ExpiresTime = null, bool AllowLive = true)
 {
@@ -179,7 +212,7 @@ public enum PickupDeliveryOutcome
     /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent (the recipient may then see the message twice).</summary>
     Queued,
 
-    /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID).</summary>
+    /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID), or it stopped being registered to that grant while the message was being stored — a grant revoked meanwhile (<see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>) — and the record was removed again.</summary>
     NotRegistered,
 
     /// <summary>Not stored: the message's <c>expires_time</c> has passed.</summary>
@@ -191,6 +224,6 @@ public enum PickupDeliveryOutcome
     /// <summary>Not stored: the grant's quota, or the store's, is used up.</summary>
     QueueFull,
 
-    /// <summary>Not stored as far as is known: the mediation store, the message store or the id generator failed (logged by type).</summary>
+    /// <summary>Not stored as far as is known: the mediation store or the message store failed (logged by type).</summary>
     Faulted,
 }

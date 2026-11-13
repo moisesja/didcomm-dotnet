@@ -20,6 +20,7 @@ namespace DidComm.Mediator.Pickup;
 /// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due. A record that is expired at the instant of the call does not: expired records never keep a new message out.</description></item>
 /// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, not of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
 /// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>.</description></item>
+/// <item><description><strong>Expiry is the only clock rule a store applies.</strong> <see cref="QueuedMessage.ExpiresAt"/> already carries both the message's own expiry and the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>): the queue sets it to the earlier of the two when it stores the record. An expired record is never handed out, never reported and never counts against a bound, whatever its state (waiting, leased or passed over), and may be removed at any time. A store needs nothing beyond <c>ExpiresAt</c> to enforce the age limit; the limit in force when a record was stored stays fixed on it.</description></item>
 /// <item><description><strong>No throw after a partial change.</strong> A method that changes several records either throws before anything changed, or its return value is the truth.</description></item>
 /// <item><description><strong>Payloads are opaque.</strong> The bytes are kept as given and returned unchanged.</description></item>
 /// </list>
@@ -34,11 +35,14 @@ namespace DidComm.Mediator.Pickup;
 /// <strong>Removed DIDs and revoked grants.</strong> Nothing is delivered for a recipient DID that
 /// no longer belongs to the requesting peer's grant; the pickup role checks the registration when
 /// it delivers and removes the records it finds unregistered as they come up (a host that removes
-/// a DID can drop them at once with <see cref="PurgeRecipientAsync"/>). A host that revokes a grant
-/// (<c>IMediationStore.RevokeAsync</c>) calls <see cref="PurgeGrantAsync"/> to drop what was queued
-/// under it; until then those records are retained and count against the store-wide bounds. They
-/// are not delivered while the peer holds no grant — and are again if the same peer is granted
-/// mediation again, since records are kept under the peer's DID.
+/// a DID can drop them at once with <see cref="PurgeRecipientAsync"/>). A host revokes a grant with
+/// <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>, which revokes it and then calls
+/// <see cref="PurgeGrantAsync"/>; a message being stored for the peer at that moment is removed
+/// again by the queue's own registration check. A host that revokes through
+/// <c>IMediationStore.RevokeAsync</c> alone calls <see cref="PurgeGrantAsync"/> itself; until then
+/// those records are retained and count against the store-wide bounds. They are not delivered while
+/// the peer holds no grant — and are again if the same peer is granted mediation again, since
+/// records are kept under the peer's DID.
 /// </para>
 /// </remarks>
 public interface IMessageStore
@@ -168,7 +172,7 @@ public interface IMessageStore
 /// <param name="Payload">The encrypted message, exactly as received.</param>
 /// <param name="ReceivedAt">When the mediator accepted the message.</param>
 /// <param name="NotBefore">The message must not be delivered before this instant (a forward's <c>delay_milli</c>, FR-ROUTE-10); <c>null</c> for none.</param>
-/// <param name="ExpiresAt">The first instant at which the message is expired and must no longer be delivered (FR-ROUTE-09); <c>null</c> for none.</param>
+/// <param name="ExpiresAt">The first instant at which the message is expired and must no longer be delivered, and may be removed: the earlier of the forward's expiry (FR-ROUTE-09) and the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>, FR-PICK-10), counted from <see cref="ReceivedAt"/> on the mediator's clock; <c>null</c> for neither.</param>
 /// <param name="PassOvers">How many times the message has been passed over (<see cref="IMessageStore.PassOverAsync"/>): found undeliverable for now and set aside. Zero when enqueued; kept by the store and returned with the record by <see cref="IMessageStore.LeaseAsync"/>.</param>
 public sealed record QueuedMessage(
     string Id,

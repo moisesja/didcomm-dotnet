@@ -242,7 +242,8 @@ public sealed class MessagePickupLiveDeliverTests
         fixture.FakeMediation!.ResetCalls();
 
         (await fixture.Queue.DeliverAsync(longest, PickupFixture.Payload(20))).Outcome.Should().Be(Queued, "2048 characters is a DID (FR-API-09)");
-        fixture.FakeMediation.Calls.Should().Equal(nameof(IMediationStore.FindGrantByRecipientDidAsync));
+        // The lookup, and the registration check after the store (#95, JC-6).
+        fixture.FakeMediation.Calls.Should().Equal(nameof(IMediationStore.FindGrantByRecipientDidAsync), nameof(IMediationStore.FindGrantByRecipientDidAsync));
         fixture.FakeMediation.ResetCalls();
         fixture.FakeStore!.Calls.Clear();
 
@@ -593,7 +594,7 @@ public sealed class MessagePickupLiveDeliverTests
     public async Task An_id_generator_that_throws_gives_Faulted_before_the_store_is_called()
     {
         var ids = new MessagePickupLiveIdGenerator { Next = _ => throw new HandlerBoomException(HandlerBoomException.Marker) };
-        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton<IMessageIdGenerator>(ids));
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton(ids.Source));
         var (mediator, peer) = await fixture.EnrolledAsync();
 
         var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20));
@@ -629,7 +630,7 @@ public sealed class MessagePickupLiveDeliverTests
             _ => "queued-méssage",
         };
         var ids = new MessagePickupLiveIdGenerator { Next = _ => id };
-        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton<IMessageIdGenerator>(ids));
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton(ids.Source));
         var (mediator, peer) = await fixture.EnrolledAsync();
         var socket = fixture.Session(peer, mediator, live: true);
         await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket);
@@ -650,7 +651,7 @@ public sealed class MessagePickupLiveDeliverTests
         var id = "Az09-._~" + new string('k', 56);
         id.Length.Should().Be(64);
         var ids = new MessagePickupLiveIdGenerator { Next = _ => id };
-        await using var fixture = PickupFixture.Create(services: s => s.AddSingleton<IMessageIdGenerator>(ids));
+        await using var fixture = PickupFixture.Create(services: s => s.AddSingleton(ids.Source));
         var (mediator, peer) = await fixture.EnrolledAsync();
 
         var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20));
@@ -663,7 +664,7 @@ public sealed class MessagePickupLiveDeliverTests
     public async Task A_duplicate_id_is_retried_once_with_a_fresh_id()
     {
         var ids = new MessagePickupLiveIdGenerator { Next = call => call <= 2 ? "id-7f3a91" : "fresh-" + call };
-        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton<IMessageIdGenerator>(ids));
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton(ids.Source));
         var (mediator, peer) = await fixture.EnrolledAsync();
 
         var first = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20, 1));
@@ -680,7 +681,7 @@ public sealed class MessagePickupLiveDeliverTests
     public async Task A_second_duplicate_id_gives_Faulted_and_the_message_already_held_is_untouched()
     {
         var ids = new MessagePickupLiveIdGenerator { Next = _ => "id-7f3a91" };
-        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton<IMessageIdGenerator>(ids));
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: s => s.AddSingleton(ids.Source));
         var (mediator, peer) = await fixture.EnrolledAsync();
         var socket = fixture.Session(peer, mediator, live: true);
         (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20, 1))).Should().Be(new PickupDeliveryResult(Queued, "id-7f3a91", peer));
@@ -957,7 +958,7 @@ public sealed class MessagePickupLiveDeliverTests
     public async Task Copies_that_happen_to_share_an_id_across_grants_are_still_separate_records()
     {
         var ids = new MessagePickupLiveIdGenerator { Next = _ => "same-id-everywhere" };
-        await using var fixture = PickupFixture.Create(services: s => s.AddSingleton<IMessageIdGenerator>(ids));
+        await using var fixture = PickupFixture.Create(services: s => s.AddSingleton(ids.Source));
         var mediator = (await fixture.NewPeerAsync()).Did;
         var alice = (await fixture.NewPeerAsync()).Did;
         var bob = (await fixture.NewPeerAsync()).Did;
