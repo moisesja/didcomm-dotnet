@@ -357,6 +357,37 @@ public sealed class MediatorForwardSinkTests
     }
 
     [Fact]
+    public async Task Push_jobs_waiting_behind_a_blocked_push_retain_only_bounded_values_whatever_the_forward_ids_length()
+    {
+        // PR #109 review R1-1: a job outlives the forward handler's byte reservation and nothing but
+        // the job count bounds the backlog, so a job must not keep the forward's wire id alive (the
+        // reviewer's 16 ids of 524 288 characters kept 15 MiB in 15 waiting jobs while the store
+        // counted 1 280 bytes).
+        const int IdLength = 524_288;
+        var gate = new PushGate();
+        await using var fixture = PushFixture.Create(
+            async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
+            directory: _ => Inbox);
+        await fixture.EnrolAsync(Peer, Recipient);
+
+        for (var i = 0; i < DirectPushDispatcher.MaxPerGrant; i++)
+            await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, new string((char)('a' + i), IdLength)), CancellationToken.None);
+        await gate.WaitForArrivalsAsync(1, Wait);
+
+        // Every forward has returned (its reservation is given back); one push hangs, fifteen wait.
+        fixture.Dispatcher.Outstanding.Should().Be(DirectPushDispatcher.MaxPerGrant);
+        var perJob = Peer.Length + Recipient.Length + PickupSizing.MaxMintedIdLength + DidComm.Diagnostics.LogValues.MaxIdLength;
+        fixture.Dispatcher.RetainedCharacters.Should().BeLessThanOrEqualTo(
+            (long)DirectPushDispatcher.MaxPerGrant * perJob,
+            "a job holds two DIDs, the queue's record id and the forward's id in its bounded log form, never the wire id");
+
+        gate.Open();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(DirectPushDispatcher.MaxPerGrant);
+        fixture.Dispatcher.RetainedCharacters.Should().Be(0);
+    }
+
+    [Fact]
     public async Task The_direct_push_setting_is_read_once_when_the_sink_is_built()
     {
         await using var fixture = PushFixture.Create(directory: _ => Inbox, configure: o => o.DirectPush = false);

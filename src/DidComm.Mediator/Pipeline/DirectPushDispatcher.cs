@@ -14,12 +14,53 @@ namespace DidComm.Mediator.Pipeline;
 /// A stored message to push straight to its recipient's endpoint (FR-PICK-09). It names the record
 /// only: the payload that is sent is the one the store holds when the push takes the record.
 /// </summary>
-/// <param name="GrantPeerDid">The grant the message is held under: the key the endpoint directory is asked with, and the store's key for the record.</param>
-/// <param name="RecipientDid">The registered recipient DID the message is for; re-checked against the grant before the push.</param>
-/// <param name="MessageId">The store's id of the record to take, send and remove.</param>
-/// <param name="ForwardId">The id of the forward that carried it, for log lines only.</param>
-internal sealed record PushJob(string GrantPeerDid, string RecipientDid, string MessageId, string ForwardId)
+/// <remarks>
+/// A job outlives the forward that produced it (it can wait in the backlog long after the forward
+/// handler gave back its byte reservation), and nothing counts the memory it holds but its number.
+/// So it holds bounded values only: two bare DIDs of at most
+/// <see cref="Consistency.IdentifierLimits.MaxDidLength"/> characters, the queue's own record id of
+/// at most <see cref="PickupSizing.MaxMintedIdLength"/>, and the forward's id as the bounded log id
+/// (<see cref="MediatorLog.LogId"/>, at most <see cref="DidComm.Diagnostics.LogValues.MaxIdLength"/>
+/// characters), never the wire value, which the message model does not bound.
+/// </remarks>
+internal sealed record PushJob
 {
+    /// <summary>Create a job; the forward's id is kept in its bounded log form.</summary>
+    /// <param name="grantPeerDid">The grant the message is held under: the key the endpoint directory is asked with, and the store's key for the record. A bare DID.</param>
+    /// <param name="recipientDid">The registered recipient DID the message is for; re-checked against the grant before the push. A bare DID.</param>
+    /// <param name="messageId">The store's id of the record to take, send and remove.</param>
+    /// <param name="forwardId">The id of the forward that carried it, for log lines only; any length (it is bounded here).</param>
+    /// <exception cref="ArgumentException">A DID is longer than <see cref="Consistency.IdentifierLimits.MaxDidLength"/>, or the record id longer than <see cref="PickupSizing.MaxMintedIdLength"/>.</exception>
+    public PushJob(string grantPeerDid, string recipientDid, string messageId, string? forwardId)
+    {
+        ArgumentNullException.ThrowIfNull(grantPeerDid);
+        ArgumentNullException.ThrowIfNull(recipientDid);
+        ArgumentNullException.ThrowIfNull(messageId);
+        if (grantPeerDid.Length > Consistency.IdentifierLimits.MaxDidLength || recipientDid.Length > Consistency.IdentifierLimits.MaxDidLength)
+            throw new ArgumentException("A push job holds bare DIDs of at most 2048 characters.");
+        if (messageId.Length > PickupSizing.MaxMintedIdLength)
+            throw new ArgumentException("A push job holds the queue's own record id.", nameof(messageId));
+        GrantPeerDid = grantPeerDid;
+        RecipientDid = recipientDid;
+        MessageId = messageId;
+        ForwardId = MediatorLog.LogId(forwardId);
+    }
+
+    /// <summary>The grant the message is held under.</summary>
+    public string GrantPeerDid { get; }
+
+    /// <summary>The registered recipient DID the message is for.</summary>
+    public string RecipientDid { get; }
+
+    /// <summary>The store's id of the record.</summary>
+    public string MessageId { get; }
+
+    /// <summary>The forward's id in its bounded log form (<see cref="MediatorLog.LogId"/>).</summary>
+    public string ForwardId { get; }
+
+    /// <summary>The characters the job holds: the measure of what it retains (bounded by construction).</summary>
+    internal int RetainedCharacters => GrantPeerDid.Length + RecipientDid.Length + MessageId.Length + ForwardId.Length;
+
     /// <summary>Nothing identifying: no DID, no queue id.</summary>
     public override string ToString() => nameof(PushJob);
 }
@@ -285,7 +326,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
                         _idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                     // A grant joins the turn only while none of its pushes runs; a running one
                     // re-joins it when that push ends.
-                    if (!line.InFlight && !line.OnReady)
+                    if (line.Running is null && !line.OnReady)
                     {
                         line.OnReady = true;
                         _ready.Enqueue(line);
@@ -307,11 +348,11 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         if (refusal == PushOutcomes.SkippedSaturated)
         {
             var level = MediatorLog.RateLimited(ref _saturatedLines, out var n);
-            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the push backlog is full; the message stays queued for pickup. {Count} such skips.", MediatorLog.LogId(job.ForwardId), n);
+            MediatorLog.Write(_logger, level, "Direct push of forward {ForwardId} skipped: the push backlog is full; the message stays queued for pickup. {Count} such skips.", job.ForwardId, n);
         }
         else
         {
-            MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} skipped: the mediator is shutting down; the message stays queued for pickup.", MediatorLog.LogId(job.ForwardId));
+            MediatorLog.Write(_logger, LogLevel.Debug, "Direct push of forward {ForwardId} skipped: the mediator is shutting down; the message stays queued for pickup.", job.ForwardId);
         }
         return false;
     }
@@ -336,6 +377,28 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>
+    /// Test seam: the characters held by the jobs waiting or running, the measure of what the
+    /// backlog retains after the forwards that produced the jobs gave back their reservations.
+    /// </summary>
+    internal long RetainedCharacters
+    {
+        get
+        {
+            lock (_gate)
+            {
+                long total = 0;
+                foreach (var line in _grants.Values)
+                {
+                    foreach (var job in line.Waiting)
+                        total += job.RetainedCharacters;
+                    total += line.Running?.RetainedCharacters ?? 0;
+                }
+                return total;
+            }
+        }
+    }
+
     private async Task WorkerAsync()
     {
         try
@@ -355,7 +418,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
                     line = next;
                     line.OnReady = false;
                     job = line.Waiting.Dequeue();
-                    line.InFlight = true;
+                    line.Running = job;
                 }
 
                 try
@@ -383,7 +446,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
 
     private async Task PushOneAsync(PushJob job)
     {
-        var forwardId = MediatorLog.LogId(job.ForwardId);
+        var forwardId = job.ForwardId;
 
         // Where to: only the host's directory, never anything the message says (JC-5).
         Uri? endpoint;
@@ -555,7 +618,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         var signal = false;
         lock (_gate)
         {
-            line.InFlight = false;
+            line.Running = null;
             if (line.Waiting.Count > 0 && _stopped == 0)
             {
                 line.OnReady = true;
@@ -612,7 +675,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
                 discarded += line.Waiting.Count;
                 line.Waiting.Clear();
                 line.OnReady = false;
-                if (!line.InFlight)
+                if (line.Running is null)
                     _grants.Remove(line.GrantPeerDid);
             }
             _outstanding -= discarded;
@@ -637,14 +700,14 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
         /// <summary>The grant's waiting jobs, oldest first.</summary>
         public Queue<PushJob> Waiting { get; } = new();
 
-        /// <summary>Whether one of the grant's pushes is running.</summary>
-        public bool InFlight { get; set; }
+        /// <summary>The grant's push that is running, if any.</summary>
+        public PushJob? Running { get; set; }
 
         /// <summary>Whether the grant is on the ready line.</summary>
         public bool OnReady { get; set; }
 
         /// <summary>The grant's jobs waiting or running, against <see cref="MaxPerGrant"/>.</summary>
-        public int Count => Waiting.Count + (InFlight ? 1 : 0);
+        public int Count => Waiting.Count + (Running is null ? 0 : 1);
     }
 
     /// <summary>Stop admission, cancel the running pushes and discard the waiting ones; does not wait.</summary>

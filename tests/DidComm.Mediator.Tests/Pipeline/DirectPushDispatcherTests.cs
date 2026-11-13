@@ -563,6 +563,25 @@ public sealed class DirectPushDispatcherTests
     }
 
     [Fact]
+    public void A_job_keeps_the_forward_id_only_in_its_bounded_log_form_and_refuses_unbounded_values()
+    {
+        // PR #109 review R1-1: a job outlives the forward's byte reservation, so whatever it holds
+        // must be bounded by construction, not by every caller remembering to shorten the wire id.
+        var wireId = new string('w', 524_288);
+        var job = new PushJob(Peer, Recipient, new string('a', 32), wireId);
+
+        job.ForwardId.Should().Be("(id of 524288 characters)");
+        job.RetainedCharacters.Should().Be(Peer.Length + Recipient.Length + 32 + job.ForwardId.Length);
+        new PushJob(Peer, Recipient, "id", "fwd-short").ForwardId.Should().Be("fwd-short");
+        new PushJob(Peer, Recipient, "id", null).ForwardId.Should().Be("(none)");
+
+        var longDid = "did:example:" + new string('d', 2048);
+        FluentActions.Invoking(() => new PushJob(longDid, Recipient, "id", "f")).Should().Throw<ArgumentException>();
+        FluentActions.Invoking(() => new PushJob(Peer, longDid, "id", "f")).Should().Throw<ArgumentException>();
+        FluentActions.Invoking(() => new PushJob(Peer, Recipient, new string('a', PickupSizing.MaxMintedIdLength + 1), "f")).Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
     public async Task A_slow_endpoint_holds_one_worker_and_its_grant_pushes_one_at_a_time()
     {
         // L-020: this test pinned "a slow grant holds as many workers as it has jobs" (3 here). Since
