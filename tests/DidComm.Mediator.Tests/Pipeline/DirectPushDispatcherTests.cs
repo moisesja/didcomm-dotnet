@@ -45,6 +45,7 @@ public sealed class DirectPushDispatcherTests
         request.Endpoint.Should().Be(Inbox);
         request.MediaType.Should().Be(MediaTypes.Encrypted);
         request.Payload.ToArray().Should().Equal(payload, "the payload sent is the one the store holds");
+        request.SingleAttempt.Should().BeTrue("a push is one request to exactly the directory's endpoint: no retry, no redirect, no circuit breaker");
         fixture.Store.MessageCount.Should().Be(0, "a delivered push removes the queued copy");
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
         fixture.Directory!.Calls.Should().Be(1);

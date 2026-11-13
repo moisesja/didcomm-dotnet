@@ -56,9 +56,14 @@ namespace DidComm.Mediator;
 /// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
-/// <item><description>Direct push (<see cref="DirectPush"/>) makes one attempt per message. A
-/// recipient that relies on it must also pick up, or the messages a push could not deliver stay
-/// in its queue until they expire or reach the mailbox age limit.</description></item>
+/// <item><description>Direct push (<see cref="DirectPush"/>) makes one attempt per message: one
+/// request to exactly the directory's endpoint, never retried and never redirected. A recipient
+/// that relies on it must also pick up, or the messages a push could not deliver stay in its queue
+/// until they expire or reach the mailbox age limit.</description></item>
+/// <item><description>Forwards are outside replay protection. With direct push on, each replay of a
+/// captured forward is stored and pushed again, and since a delivered push frees its place in the
+/// queue, the recipient's quota does not limit how often: recipients should drop messages whose id
+/// they have already seen.</description></item>
 /// </list>
 /// <para>
 /// <c>AddMediator()</c> describes what to put in front of the mediator's endpoint and how to set
@@ -144,13 +149,18 @@ public sealed class MediatorOptions
     /// Whether the mediator also pushes each queued message straight to the recipient's own
     /// endpoint, found through a registered <see cref="IRecipientEndpointDirectory"/> (FR-PICK-09).
     /// Default <c>false</c>. Each message gets one push attempt, in the background, after it is
-    /// queued: an <c>http(s)</c> 2xx answer removes it from the queue; anything else leaves it there
-    /// for pickup, so a recipient that relies on push must also pick up now and then. A push sends
+    /// queued: a single POST to exactly the directory's endpoint, with no retry, no redirect
+    /// followed and outside the HTTP transport's circuit breaker (so one recipient's failing
+    /// endpoint cannot stop the host's other sends). An <c>http(s)</c> 2xx answer removes the
+    /// message from the queue; anything else, a redirect included, leaves it there for pickup, so a
+    /// recipient that relies on push must also pick up now and then. A push sends
     /// only what the queue still holds for delivery when the push starts: it takes the message
     /// under a lease of its own first, so a message that has expired, aged out, been acknowledged,
     /// or is being fetched by the recipient is not pushed. A plain <c>http</c> endpoint also needs
     /// <c>"http"</c> in <c>HttpTransportOptions.AllowedSchemes</c> (the HTTP transport sends to
-    /// <c>https</c> only by default).
+    /// <c>https</c> only by default). Forwards are outside replay protection, so each replay of a
+    /// captured forward is pushed again (a delivered push frees its place in the quota): recipients
+    /// should drop messages whose id they have already seen.
     /// </summary>
     public bool DirectPush { get; set; }
 

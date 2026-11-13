@@ -59,10 +59,14 @@ internal sealed record PushJob(string GrantPeerDid, string RecipientDid, string 
 /// yet due, leased to a pickup or passed over, is not pushed (<c>Push-Skipped-NotHeld</c>), so an
 /// expired or aged-out message is never pushed (FR-ROUTE-09, FR-PICK-10), one a recipient is fetching
 /// or has acknowledged is not sent twice, and one a purge removed is not sent after the peer is
-/// granted again. The stored payload goes out through <see cref="DidCommClient.SendPackedAsync"/>,
-/// which always applies the outbound endpoint guard. Only an accepted answer with an HTTP 2xx status
-/// counts as delivered; the record is then removed. Anything else gives the lease back at once, and
-/// the message waits for pickup: one attempt per message. The lease runs
+/// granted again. The stored payload goes out through <see cref="DidCommClient.SendPackedAsync(ReadOnlyMemory{byte}, Uri, string, SendPackedOptions, CancellationToken)"/>,
+/// which always applies the outbound endpoint guard, as a single attempt
+/// (<see cref="SendPackedOptions.SingleAttempt"/>): exactly one POST to exactly the directory's
+/// endpoint, with no retry, no redirect followed and outside the HTTP transport's circuit breaker,
+/// so one recipient's failing endpoint cannot stop pushes to the others or the host's other HTTP
+/// sends. Only an accepted answer with an HTTP 2xx status counts as delivered (a redirect is a
+/// failure); the record is then removed. Anything else gives the lease back at once, and the
+/// message waits for pickup: one attempt per message. The lease runs
 /// <see cref="MediatorOptions.DirectPushTimeout"/> plus <see cref="LeaseMargin"/>, so a record whose
 /// push never finishes goes back to pickup after that.
 /// </para>
@@ -109,6 +113,10 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
     internal static readonly TimeSpan LeaseMargin = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan ShutdownGrace = TimeSpan.FromSeconds(5);
+
+    // One request to exactly the directory's endpoint: no retry, no redirect, no circuit breaker
+    // (one recipient's failing endpoint must not stop pushes to the others, AD-6).
+    private static readonly SendPackedOptions SingleAttempt = new() { SingleAttempt = true };
 
     private readonly IServiceProvider _services;
     private readonly IMessageStore _store;
@@ -435,7 +443,7 @@ internal sealed class DirectPushDispatcher : IAsyncDisposable, IDisposable
             }
             lease = taking;
 
-            var result = await BoundedAsync(Client().SendPackedAsync(record.Payload, endpoint, MediaTypes.Encrypted, deadline.Token), deadline.Token).ConfigureAwait(false);
+            var result = await BoundedAsync(Client().SendPackedAsync(record.Payload, endpoint, MediaTypes.Encrypted, SingleAttempt, deadline.Token), deadline.Token).ConfigureAwait(false);
             if (result is { Accepted: true, HttpStatusCode: >= 200 and <= 299 })
             {
                 // Delivered: counted as pushed whatever the removal says.

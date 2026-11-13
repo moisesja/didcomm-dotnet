@@ -23,6 +23,14 @@ namespace DidComm.Transports.Http;
 /// body read, capped and time-bounded, into <see cref="TransportResult.ResponsePayload"/>. Any other
 /// response body is never read.
 /// <para>
+/// A request with <see cref="TransportRequest.SingleAttempt"/> set bypasses the retry, redirect and
+/// circuit-breaker rules: exactly one POST to exactly <see cref="TransportRequest.Endpoint"/>, bounded
+/// by <see cref="HttpTransportOptions.RequestTimeout"/>; any answer but a 2xx (a 3xx included) is a
+/// <see cref="TransportException"/>; the circuit breaker neither counts the attempt nor refuses it.
+/// The connect-time SSRF pinning still applies. The mediator's direct push sends this way, so a
+/// recipient's failing endpoint cannot open the breaker for every other send of the host.
+/// </para>
+/// <para>
 /// Its own log lines carry the scheme and the status, never the endpoint URI: an endpoint can be a
 /// secret (a capability URL) or identify a recipient. The <see cref="IHttpClientFactory"/> request
 /// logging of the framework (categories <c>System.Net.Http.HttpClient.*</c>) writes the full URI at
@@ -91,6 +99,9 @@ public sealed class HttpDidCommTransport : IDidCommTransport
         }
 
         var httpClient = _httpClientFactory.CreateClient(HttpClientName);
+        if (request.SingleAttempt)
+            return await SendOnceAsync(httpClient, request, ct).ConfigureAwait(false);
+
         var currentUri = request.Endpoint;
 
         for (var hop = 0; hop <= _options.MaxRedirectHops; hop++)
@@ -111,21 +122,7 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             {
                 var status = (int)response.StatusCode;
                 if (status >= 200 && status < 300)
-                {
-                    // The scheme and the status only: an endpoint can be a host secret (a direct-push
-                    // capability URL) or name a recipient, so the URI never reaches a log line.
-                    _logger.LogDebug("HttpDidCommTransport POST over {Scheme} → {Status}", currentUri.Scheme, status);
-                    // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and
-                    // only when the request carries a cap, which the facade sets only for a send that
-                    // asked for a return route. Otherwise the body is never touched.
-                    if (status == 200
-                        && request.MaxResponseBytes is int cap
-                        && TryDidCommMediaType(response.Content.Headers.ContentType?.MediaType, out var canonical))
-                    {
-                        return await ReadCappedAsync(response.Content, cap, canonical, ct).ConfigureAwait(false);
-                    }
-                    return new TransportResult(Accepted: true, HttpStatusCode: status);
-                }
+                    return await AcceptedAsync(response, status, currentUri, request, ct).ConfigureAwait(false);
 
                 // FR-TRN-06: only the 307 (Temporary Redirect) is followed. 308 Permanent Redirect
                 // and 301 Moved Permanently are explicitly refused — endpoint discovery happens at
@@ -163,6 +160,89 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             $"HTTP send exceeded {_options.MaxRedirectHops} redirect hops starting from '{request.Endpoint}'.",
             httpStatusCode: 307,
             scheme: request.Endpoint.Scheme);
+    }
+
+    /// <summary>
+    /// A single-attempt send (<see cref="TransportRequest.SingleAttempt"/>): one POST to exactly
+    /// <see cref="TransportRequest.Endpoint"/>, outside the resilience pipeline — no retry, no
+    /// circuit breaker (the attempt is neither counted nor refused by it), no redirect followed: any
+    /// answer other than a 2xx, a 3xx included, is a <see cref="TransportException"/>. The same named
+    /// client is used, so the connect-time SSRF pinning applies; the attempt is bounded by
+    /// <see cref="HttpTransportOptions.RequestTimeout"/>.
+    /// </summary>
+    /// <param name="httpClient">The named client.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="ct">The caller's cancellation token.</param>
+    private async Task<TransportResult> SendOnceAsync(HttpClient httpClient, TransportRequest request, CancellationToken ct)
+    {
+        var endpoint = request.Endpoint;
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        attempt.CancelAfter(AsWaitBudget(_options.RequestTimeout));
+        HttpResponseMessage response;
+        try
+        {
+            using var httpRequest = BuildRequest(endpoint, request);
+            response = await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, attempt.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            throw new TransportException(
+                $"HTTP POST to '{endpoint}' did not answer within {_options.RequestTimeout} (single attempt, not retried).",
+                ex,
+                httpStatusCode: null,
+                scheme: endpoint.Scheme);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new TransportException(
+                $"HTTP POST to '{endpoint}' failed (single attempt, not retried).",
+                ex,
+                httpStatusCode: ex.StatusCode is { } code ? (int)code : null,
+                scheme: endpoint.Scheme);
+        }
+
+        using (response)
+        {
+            var status = (int)response.StatusCode;
+            if (status >= 200 && status < 300)
+                return await AcceptedAsync(response, status, endpoint, request, ct).ConfigureAwait(false);
+
+            throw new TransportException(
+                $"HTTP POST to '{endpoint}' failed with status {status} ({response.ReasonPhrase}). A single-attempt send does not retry and follows no redirect.",
+                httpStatusCode: status,
+                scheme: endpoint.Scheme);
+        }
+    }
+
+    /// <summary>
+    /// The 2xx answer: one Debug line, then the in-band body when one was asked for (FR-RR-07),
+    /// else accepted.
+    /// </summary>
+    /// <param name="response">The 2xx response.</param>
+    /// <param name="status">Its status code.</param>
+    /// <param name="uri">The URI that answered (only its scheme is logged).</param>
+    /// <param name="request">The request.</param>
+    /// <param name="ct">The caller's cancellation token.</param>
+    private async Task<TransportResult> AcceptedAsync(HttpResponseMessage response, int status, Uri uri, TransportRequest request, CancellationToken ct)
+    {
+        // The scheme and the status only: an endpoint can be a host secret (a direct-push
+        // capability URL) or name a recipient, so the URI never reaches a log line.
+        _logger.LogDebug("HttpDidCommTransport POST over {Scheme} → {Status}", uri.Scheme, status);
+
+        // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and only when
+        // the request carries a cap, which the facade sets only for a send that asked for a return
+        // route. Otherwise the body is never touched.
+        if (status == 200
+            && request.MaxResponseBytes is int cap
+            && TryDidCommMediaType(response.Content.Headers.ContentType?.MediaType, out var canonical))
+        {
+            return await ReadCappedAsync(response.Content, cap, canonical, ct).ConfigureAwait(false);
+        }
+        return new TransportResult(Accepted: true, HttpStatusCode: status);
     }
 
     /// <summary>The 16 KiB unit a body of unknown (or large declared) length is read in.</summary>
