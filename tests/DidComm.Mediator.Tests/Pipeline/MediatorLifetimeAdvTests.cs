@@ -39,7 +39,7 @@ public sealed class MediatorLifetimeAdvTests
         var store = new ScriptedMessageStore();
         var never = new TaskCompletionSource<QueuedMessage?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var fixture = PushFixture.Create(directory: _ => Inbox, configure: m => m.DirectPushConcurrency = 1, services: s => s.AddSingleton<IMessageStore>(store));
+        await using var fixture = PushFixture.Create(directory: _ => Inbox, configure: m => m.PushConcurrency = 1, services: s => s.AddSingleton<IMessageStore>(store));
         try
         {
             await fixture.EnrolAsync(PeerA, RecipientA);
@@ -57,7 +57,7 @@ public sealed class MediatorLifetimeAdvTests
             fixture.Dispatcher.TryEnqueue(jobA).Should().BeTrue();
             await entered.Task.WaitAsync(Wait);
             fixture.Dispatcher.TryEnqueue(jobB).Should().BeTrue();
-            fixture.Time.Advance(TimeSpan.FromMinutes(5)); // well past DirectPushTimeout (30 s) and the lease margin
+            fixture.Time.Advance(TimeSpan.FromMinutes(5)); // well past PushTimeout (30 s) and the lease margin
 
             await fixture.Dispatcher.WaitForIdleAsync(Wait);
             fixture.PushOutcomeLog.Should().BeEquivalentTo(new[] { PushOutcomes.Failed, PushOutcomes.Pushed }, "each job ends with one outcome within its deadline");

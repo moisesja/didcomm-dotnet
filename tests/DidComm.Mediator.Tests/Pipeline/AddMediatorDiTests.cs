@@ -285,7 +285,7 @@ public sealed class AddMediatorDiTests
         { o => o.Pickup.MaxQueueMessages = 0, null },
         { o => o.CoordinateMediation.MaxGrants = 0, null },
         { o => o.MaxForwardDelay = TimeSpan.FromSeconds(-1), null },
-        { o => o.DirectPushConcurrency = 0, null },
+        { o => o.PushConcurrency = 0, null },
         { o => { o.MaxForwardDelay = TimeSpan.FromDays(20); o.Pickup.MaxMessageAge = TimeSpan.FromDays(10); }, null },
     };
 
@@ -409,7 +409,7 @@ public sealed class AddMediatorDiTests
             sp.GetRequiredService<ProtocolDispatcher>();
             sp.GetRequiredService<ForwardHandler>();
             sp.GetRequiredService<IForwardSink>().Should().BeOfType<MediatorForwardSink>();
-            sp.GetRequiredService<DirectPushDispatcher>();
+            sp.GetRequiredService<PushDispatcher>();
             sp.GetRequiredService<DidCommClient>();
             sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<MediatorHostedService>().Should().ContainSingle();
             sp.GetRequiredService<MediatorInvitationHolder>().PlaintextJson.Should().BeNull("only a started mediator issues its invitation");

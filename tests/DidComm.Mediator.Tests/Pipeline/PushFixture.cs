@@ -42,7 +42,7 @@ internal sealed class PushFixture : IAsyncDisposable
     public ScriptedTransportRouter Router { get; }
     public ScriptedDirectory? Directory { get; }
 
-    public DirectPushDispatcher Dispatcher => Services.GetRequiredService<DirectPushDispatcher>();
+    public PushDispatcher Dispatcher => Services.GetRequiredService<PushDispatcher>();
     public MessagePickupQueue Queue => Services.GetRequiredService<MessagePickupQueue>();
     public IMediationStore Mediation => Services.GetRequiredService<IMediationStore>();
     public InMemoryMessageStore Store => (InMemoryMessageStore)Services.GetRequiredService<IMessageStore>();
@@ -53,10 +53,10 @@ internal sealed class PushFixture : IAsyncDisposable
     public IReadOnlyList<string?> ForwardOutcomeLog => Recorder.TagValues("didcomm.forward.outcomes", "didcomm.forward.outcome");
 
     /// <summary>The number of pushes recorded with <paramref name="outcome"/>.</summary>
-    public long Pushes(string outcome) => Recorder.Sum(MediatorMetrics.DirectPushOutcomesInstrument, MediatorMetrics.PushOutcomeTag, outcome);
+    public long Pushes(string outcome) => Recorder.Sum(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag, outcome);
 
     /// <summary>Every push outcome recorded, in order.</summary>
-    public IReadOnlyList<string?> PushOutcomeLog => Recorder.TagValues(MediatorMetrics.DirectPushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
+    public IReadOnlyList<string?> PushOutcomeLog => Recorder.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
 
     /// <param name="send">What the transport does with each push; default: accept with 202.</param>
     /// <param name="directory">The endpoint per grant; <c>null</c> registers no directory at all.</param>
@@ -125,6 +125,20 @@ internal sealed class PushFixture : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Register <paramref name="session"/> and turn live delivery on over it, as its peer would: a
+    /// <c>live-delivery-change</c> authcrypted from the peer to the mediator, through the real
+    /// protocol dispatcher. The container must hold both parties' secrets.
+    /// </summary>
+    public async Task GoLiveAsync(LiveTestSession session)
+    {
+        Services.GetRequiredService<DidComm.Transports.ReturnRoute.IReturnRouteSessionRegistry>().Register(session);
+        var client = Services.GetRequiredService<DidCommClient>();
+        var change = MessagePickup.CreateLiveDeliveryChange(session.PeerDid, session.LocalDid, liveDelivery: true);
+        var packed = await client.PackEncryptedAsync(change, new PackEncryptedOptions(Recipients: new[] { session.LocalDid }, From: session.PeerDid));
+        await Services.GetRequiredService<DidComm.Protocols.ProtocolDispatcher>().DispatchAsync(await client.UnpackAsync(packed.Message), client, Options, Task.CompletedTask, session, CancellationToken.None);
+    }
+
     /// <summary>Queue a message for <paramref name="recipientDid"/> and build the push job the sink would hand over.</summary>
     public async Task<PushJob> QueuedJobAsync(string recipientDid, byte[]? payload = null, string forwardId = "fwd-1")
     {
@@ -136,15 +150,16 @@ internal sealed class PushFixture : IAsyncDisposable
     }
 
     /// <summary>A second dispatcher over this container's stores with explicit bounds (the test seam); the caller disposes it.</summary>
-    public DirectPushDispatcher NewDispatcher(int capacity, int perGrant)
+    public PushDispatcher NewDispatcher(int capacity, int perGrant)
         => new(
             Services,
             Services.GetRequiredService<IOptions<MediatorOptions>>(),
+            Queue,
             Services.GetRequiredService<IMessageStore>(),
             Mediation,
             Services.GetRequiredService<IOptions<DidCommOptions>>(),
             Services.GetRequiredService<MediatorMetrics>(),
-            Services.GetService<ILogger<DirectPushDispatcher>>(),
+            Services.GetService<ILogger<PushDispatcher>>(),
             Time,
             capacity,
             perGrant);

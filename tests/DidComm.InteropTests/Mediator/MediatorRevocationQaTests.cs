@@ -80,7 +80,7 @@ public sealed class MediatorRevocationQaTests
     [Fact]
     public async Task A_push_job_waiting_when_the_grant_is_revoked_is_never_sent()
     {
-        await using var f = await QaPushFixture.StartAsync(m => m.DirectPushConcurrency = 1);
+        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
         var carol = await f.Mediator.NewPeerAsync();
         await f.Mediator.EnrolAsync(carol);
         f.Directory.Map(carol.Did, f.Inbox.Endpoint("/carol"));
@@ -103,7 +103,7 @@ public sealed class MediatorRevocationQaTests
     [Fact]
     public async Task A_waiting_push_job_of_a_purged_message_is_not_sent_after_the_peer_is_granted_again()
     {
-        await using var f = await QaPushFixture.StartAsync(m => m.DirectPushConcurrency = 1);
+        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
         var carol = await f.Mediator.NewPeerAsync();
         await f.Mediator.EnrolAsync(carol);
         f.Directory.Map(carol.Did, f.Inbox.Endpoint("/carol"));

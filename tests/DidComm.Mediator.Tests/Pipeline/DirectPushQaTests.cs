@@ -13,7 +13,7 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// QA-1 (#95): <see cref="DirectPushDispatcher"/> at the component level — the status-code and
+/// QA-1 (#95): <see cref="PushDispatcher"/> at the component level — the status-code and
 /// endpoint matrices, the re-check, saturation and recovery, exactly one outcome per job, shutdown
 /// with a throwing cancellation callback, fairness between grants, and what the dispatcher does
 /// with a stored message whose expiry or age limit passes while its job waits (FR-ROUTE-09,
@@ -89,7 +89,7 @@ public sealed class DirectPushQaTests
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
         fixture.Store.MessageCount.Should().Be(1);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains(nameof(TransportException), StringComparison.Ordinal));
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains(nameof(TransportException), StringComparison.Ordinal));
         NoLeaks(fixture, job.MessageId);
     }
 
@@ -224,7 +224,7 @@ public sealed class DirectPushQaTests
 
         fixture.Router.Requests.Should().BeEmpty();
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -255,7 +255,7 @@ public sealed class DirectPushQaTests
             configure: o => o.Pickup.MaxQueueMessages = 40);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        for (var i = 0; i < DirectPushDispatcher.MaxPerGrant; i++)
+        for (var i = 0; i < PushDispatcher.MaxPerGrant; i++)
             fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"s{i}")).Should().BeTrue();
         fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "over")).Should().BeFalse();
 
@@ -264,7 +264,7 @@ public sealed class DirectPushQaTests
         fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "after")).Should().BeTrue("the grant's share is given back as its jobs end");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(DirectPushDispatcher.MaxPerGrant + 1);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxPerGrant + 1);
         fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(1);
         fixture.Store.MessageCount.Should().Be(1, "only the refused job's message waits for pickup");
     }
@@ -279,7 +279,7 @@ public sealed class DirectPushQaTests
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox,
-            configure: o => o.DirectPushConcurrency = 1);
+            configure: o => o.PushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
         await using var dispatcher = fixture.NewDispatcher(capacity: 3, perGrant: 2);
@@ -361,7 +361,7 @@ public sealed class DirectPushQaTests
                 return new TransportResult(true, 202);
             },
             directory: _ => Inbox,
-            configure: o => o.DirectPushConcurrency = 1);
+            configure: o => o.PushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         var dispatcher = fixture.Dispatcher;
         dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "in-flight")).Should().BeTrue();
@@ -443,7 +443,7 @@ public sealed class DirectPushQaTests
                 return new TransportResult(true, 202);
             },
             directory: peer => new Uri(peer == Peer ? "https://qa-recipient-host.example/a" : "https://qa-recipient-host.example/b"),
-            configure: o => o.DirectPushConcurrency = 1);
+            configure: o => o.PushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
 
@@ -543,8 +543,8 @@ public sealed class DirectPushQaTests
             directory: _ => Inbox,
             configure: o =>
             {
-                o.DirectPushConcurrency = 1;
-                o.DirectPushTimeout = TimeSpan.FromMinutes(5);
+                o.PushConcurrency = 1;
+                o.PushTimeout = TimeSpan.FromMinutes(5);
                 configure?.Invoke(o);
             },
             didComm: o => o.ExpiresClockSkew = TimeSpan.Zero);

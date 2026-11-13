@@ -74,11 +74,11 @@ public sealed class MediatorDeliveryModesQaTests
     }
 
     [Fact]
-    public async Task A_direct_push_that_outlasts_DirectPushTimeout_on_the_injected_TimeProvider_is_abandoned_and_the_message_stays_queued()
+    public async Task A_direct_push_that_outlasts_PushTimeout_on_the_injected_TimeProvider_is_abandoned_and_the_message_stays_queued()
     {
         var time = new QaManualTimeProvider();
         await using var f = await QaPushFixture.StartAsync(
-            m => m.DirectPushTimeout = TimeSpan.FromSeconds(7),
+            m => m.PushTimeout = TimeSpan.FromSeconds(7),
             services => services.AddSingleton<TimeProvider>(time));
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         f.Inbox.Gate = gate;
@@ -160,7 +160,7 @@ public sealed class MediatorDeliveryModesQaTests
     [Fact]
     public async Task One_grant_holds_at_most_16_push_jobs_and_the_17th_waits_in_the_queue()
     {
-        await using var f = await QaPushFixture.StartAsync(m => m.DirectPushConcurrency = 1);
+        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         f.Inbox.Gate = gate;
 
@@ -186,7 +186,7 @@ public sealed class MediatorDeliveryModesQaTests
     {
         // One push worker, parked on Bob's endpoint by the first message; the second message's job
         // waits behind it. Its forward expires before the worker reaches it.
-        await using var f = await QaPushFixture.StartAsync(m => m.DirectPushConcurrency = 1);
+        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         f.Inbox.Gate = gate;
         var t0 = f.Mediator.Clock.Now;
@@ -212,7 +212,7 @@ public sealed class MediatorDeliveryModesQaTests
     {
         await using var f = await QaPushFixture.StartAsync(m =>
         {
-            m.DirectPushConcurrency = 1;
+            m.PushConcurrency = 1;
             m.MaxForwardDelay = TimeSpan.Zero;
             m.Pickup.MaxMessageAge = TimeSpan.FromMinutes(1);
         });
@@ -238,6 +238,9 @@ public sealed class MediatorDeliveryModesQaTests
     [Fact]
     public async Task A_live_session_takes_the_message_first_and_nothing_is_pushed_directly()
     {
+        // L-020 (PR #109 review R1-2): the forward is now only stored by the forward pump (Queued) and
+        // the push workers push it live (Pushed-Live) before they would try the directory; the old
+        // Delivered-Live forward outcome and the empty push counter described the in-pump live push.
         await using var f = await QaPushFixture.StartAsync();
         using var socket = await f.Mediator.ConnectAsync();
         await GoLiveAsync(f.Mediator, socket, f.Bob);
@@ -247,8 +250,8 @@ public sealed class MediatorDeliveryModesQaTests
         (await MediatorRecipient.UnpackFromSenderAsync(f.B, pushed.Payload, f.Alice)).Message.Id.Should().Be(note.Id);
         await f.Mediator.PushesIdleAsync();
 
-        f.Mediator.Outcomes.Should().Equal(ForwardOutcomes.DeliveredLive);
-        f.Mediator.PushOutcomes.Should().BeEmpty("a message delivered live is never handed to direct push");
+        f.Mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
+        f.Mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.PushedLive }, "the live session is tried first, and a message it took is never pushed directly");
         f.Inbox.Entered.Should().Be(0);
         f.Directory.Calls.Should().Be(0);
         (await AckOverSocketAsync(f.Mediator, socket, f.Bob, pushed.Id)).MessageCount.Should().Be(0);
@@ -282,6 +285,8 @@ public sealed class MediatorDeliveryModesQaTests
         // Whichever side wins (the push is written before the server notices the abort, or the
         // session is gone first), the message ends with one outcome and can be fetched on a new
         // connection: a live lease ends with its session (L-044: assert the invariant, not the race).
+        // L-020 (PR #109 review R1-2): the forward is always stored (Queued) and at most one push job
+        // follows (none when the session was already gone), so the race is now on the push counter.
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
@@ -296,8 +301,10 @@ public sealed class MediatorDeliveryModesQaTests
         socket.Dispose();
         (await post).Status.Should().Be(HttpStatusCode.Accepted);
         await mediator.FlushAsync();
+        await mediator.PushesIdleAsync();
 
-        mediator.Outcomes.Should().ContainSingle().Which.Should().BeOneOf(ForwardOutcomes.DeliveredLive, ForwardOutcomes.Queued);
+        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
+        mediator.PushOutcomes.Should().HaveCountLessThanOrEqualTo(1, "one outcome for the push job, when the session was still there to get one");
         IReadOnlyList<DeliveredMessage> fetched = Array.Empty<DeliveredMessage>();
         (await ReturnRouteTestHost.WaitUntilAsync(() =>
         {
@@ -337,7 +344,10 @@ public sealed class MediatorDeliveryModesQaTests
         (await MediatorRecipient.UnpackFromSenderAsync(bob, onOlder.Payload, alice)).Message.Id.Should().Be(second.Id);
         (await AckOverSocketAsync(mediator, older, bob, onOlder.Id)).MessageCount.Should().Be(0);
 
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.DeliveredLive, ForwardOutcomes.DeliveredLive);
+        // L-020 (PR #109 review R1-2): stored by the forward pump, pushed live by the push workers.
+        await mediator.PushesIdleAsync();
+        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.Queued);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive, PushOutcomes.PushedLive);
         await older.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         mediator.LeakingLogLines(onNewer.Id, onOlder.Id).Should().BeEmpty();
     }
@@ -345,8 +355,11 @@ public sealed class MediatorDeliveryModesQaTests
     [Fact]
     public async Task A_live_session_that_stops_reading_takes_what_its_push_bound_allows_and_the_rest_is_queued_never_both()
     {
-        // Invariant for every interleaving: each forward ends Delivered-Live (one frame on the socket)
-        // or Queued (fetchable, not leased to the socket), never both, never neither.
+        // Invariant for every interleaving: each message is pushed live (one frame on the socket) or
+        // stays queued (fetchable, not leased to the socket), never both, never neither.
+        // L-020 (PR #109 review R1-2): every forward is now counted Queued when stored; whether it was
+        // pushed live is the push counter's Pushed-Live (one push job per message, all eight fit the
+        // grant's share of the push backlog).
         const int Sent = 8;
         await using var mediator = await MediatorTestServer.StartAsync(o => o.Mediator = m => m.Sessions.MaxPendingPushes = 2);
         var bob = await mediator.NewPeerAsync();
@@ -359,9 +372,11 @@ public sealed class MediatorDeliveryModesQaTests
         for (var i = 0; i < Sent; i++)
             sent.Add((await Qa.SendNoteAsync(mediator, alice, bob, flush: false, content: $"m{i}")).Id);
         await mediator.FlushAsync();
-        var live = (int)mediator.Outcome(ForwardOutcomes.DeliveredLive);
-        var queued = (int)mediator.Outcome(ForwardOutcomes.Queued);
-        (live + queued).Should().Be(Sent);
+        await mediator.PushesIdleAsync();
+        mediator.Outcome(ForwardOutcomes.Queued).Should().Be(Sent);
+        mediator.PushOutcomes.Should().HaveCount(Sent);
+        var live = (int)mediator.PushOutcome(PushOutcomes.PushedLive);
+        var queued = Sent - live;
         live.Should().BeGreaterThan(0);
 
         var received = new List<DeliveredMessage>();

@@ -8,7 +8,7 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// ADV-3 (#95): the push deadline (<c>DirectPushDispatcher.BoundedAsync</c>) abandons a store or
+/// ADV-3 (#95): the push deadline (<c>PushDispatcher.BoundedAsync</c>) abandons a store or
 /// transport call that ignores its token. What an abandoned call does when it finally returns:
 /// can it corrupt the queue (a late 2xx removing a record a pickup holds, a late take holding a
 /// lease a pickup needs) or give a job a second outcome? Deterministic: every call is a gate the test
@@ -20,7 +20,7 @@ public sealed class DirectPushDeadlineAdv3Tests
     private const string Recipient = "did:example:adv3-recipient";
     private static readonly Uri Inbox = new("https://adv3-recipient.example/inbox");
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan PastDeadline = TimeSpan.FromSeconds(31); // DirectPushTimeout is 30 s
+    private static readonly TimeSpan PastDeadline = TimeSpan.FromSeconds(31); // PushTimeout is 30 s
 
     [Fact]
     public async Task A_take_that_returns_after_the_deadline_sends_nothing_and_holds_the_record_only_until_its_lease_ends()

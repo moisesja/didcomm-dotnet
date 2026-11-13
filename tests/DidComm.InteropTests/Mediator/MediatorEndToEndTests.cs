@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using AwesomeAssertions;
 using DidComm.Mediator.AspNetCore;
 using DidComm.Mediator.Pickup;
+using DidComm.Mediator.Pipeline;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using DidComm.Transports;
@@ -91,7 +92,11 @@ public sealed class MediatorEndToEndTests
         (await MediatorRecipient.UnpackFromSenderAsync(b, pushed.Payload, alice)).Message.Id.Should().Be(note.Id);
 
         await mediator.FlushAsync();
-        mediator.Outcomes.Should().Equal(new[] { ForwardOutcomes.DeliveredLive }, "delivered live, so never counted as queued for pickup");
+        // L-020 (PR #109 review R1-2): the forward pump now stores every forward (Queued) and never
+        // awaits a live session; the push workers push it live (Pushed-Live on the push counter).
+        await mediator.PushesIdleAsync();
+        mediator.Outcomes.Should().Equal(new[] { ForwardOutcomes.Queued }, "stored first, by the forward pump");
+        mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.PushedLive }, "then pushed live by the push workers");
         mediator.Store.MessageCount.Should().Be(1, "the live push is the store's own copy, held until it is acknowledged");
 
         var ack = MessagePickup.CreateMessagesReceived(bob.Did, mediator.Did, new[] { pushed.Id });

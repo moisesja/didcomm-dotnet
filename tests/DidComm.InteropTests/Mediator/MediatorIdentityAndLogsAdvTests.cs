@@ -125,8 +125,11 @@ public sealed class MediatorIdentityAndLogsAdvTests
         (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Binary, "the status for Bob");
         await Qa.SendNoteAsync(mediator, alice, bob);
 
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.DeliveredLive);
+        // L-020 (PR #109 review R1-2): the forward pump now only stores (Queued); the push workers push it live.
+        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
         (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Binary, "Bob's live delivery");
+        await mediator.PushesIdleAsync();
+        mediator.PushOutcomes.Should().Equal(DidComm.Mediator.Pipeline.PushOutcomes.PushedLive);
         (await mediator.FetchAsync(bob)).Should().BeEmpty("the message is leased to the session Mallory holds");
         (await mediator.PostAsync(captured)).Status.Should().Be(HttpStatusCode.Accepted, "Bob's own copy is now a replay");
 

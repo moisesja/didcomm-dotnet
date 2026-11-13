@@ -38,14 +38,14 @@ public sealed class AddMediatorQaTests
         { "PurgeInterval", o => o.PurgeInterval = TimeSpan.FromSeconds(1), true },
         { "PurgeInterval", o => o.PurgeInterval = TimeSpan.FromHours(24), true },
         { "PurgeInterval", o => o.PurgeInterval = TimeSpan.FromHours(24) + TimeSpan.FromTicks(1), false },
-        { "DirectPushConcurrency", o => o.DirectPushConcurrency = 0, false },
-        { "DirectPushConcurrency", o => o.DirectPushConcurrency = 1, true },
-        { "DirectPushConcurrency", o => o.DirectPushConcurrency = 64, true },
-        { "DirectPushConcurrency", o => o.DirectPushConcurrency = 65, false },
-        { "DirectPushTimeout", o => o.DirectPushTimeout = TimeSpan.Zero, false },
-        { "DirectPushTimeout", o => o.DirectPushTimeout = TimeSpan.FromTicks(1), true },
-        { "DirectPushTimeout", o => o.DirectPushTimeout = TimeSpan.FromMinutes(5), true },
-        { "DirectPushTimeout", o => o.DirectPushTimeout = TimeSpan.FromMinutes(5) + TimeSpan.FromTicks(1), false },
+        { "PushConcurrency", o => o.PushConcurrency = 0, false },
+        { "PushConcurrency", o => o.PushConcurrency = 1, true },
+        { "PushConcurrency", o => o.PushConcurrency = 64, true },
+        { "PushConcurrency", o => o.PushConcurrency = 65, false },
+        { "PushTimeout", o => o.PushTimeout = TimeSpan.Zero, false },
+        { "PushTimeout", o => o.PushTimeout = TimeSpan.FromTicks(1), true },
+        { "PushTimeout", o => o.PushTimeout = TimeSpan.FromMinutes(5), true },
+        { "PushTimeout", o => o.PushTimeout = TimeSpan.FromMinutes(5) + TimeSpan.FromTicks(1), false },
         { "RewrapMode", o => o.RewrapMode = (RewrapMode)99, false },
         { "RewrapMode", o => o.RewrapMode = (RewrapMode)(-1), false },
         { "Pickup.MaxMessageAge", o => o.Pickup.MaxMessageAge = TimeSpan.FromHours(1), false },
@@ -382,10 +382,10 @@ public sealed class AddMediatorQaTests
         public IForwardSink Sink { get; } = sink;
     }
 
-    private sealed class MediationStoreTakingDispatcher(DirectPushDispatcher pushes) : IMediationStore
+    private sealed class MediationStoreTakingDispatcher(PushDispatcher pushes) : IMediationStore
     {
         private readonly InMemoryMediationStore _inner = new(new CoordinateMediationOptions());
-        public DirectPushDispatcher Pushes { get; } = pushes;
+        public PushDispatcher Pushes { get; } = pushes;
         public ValueTask<MediationGrant?> GetGrantAsync(string peerDid, CancellationToken ct) => _inner.GetGrantAsync(peerDid, ct);
         public ValueTask<MediationGrant?> GrantAsync(MediationGrant grant, CancellationToken ct) => _inner.GrantAsync(grant, ct);
         public ValueTask<bool> RevokeAsync(string peerDid, CancellationToken ct) => _inner.RevokeAsync(peerDid, ct);

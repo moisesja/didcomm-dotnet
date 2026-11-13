@@ -19,8 +19,8 @@ public sealed class MediatorOptionsTests
         options.MaxForwardDelay.Should().Be(TimeSpan.FromHours(1));
         options.PurgeInterval.Should().Be(TimeSpan.FromMinutes(5));
         options.DirectPush.Should().BeFalse();
-        options.DirectPushConcurrency.Should().Be(4);
-        options.DirectPushTimeout.Should().Be(TimeSpan.FromSeconds(30));
+        options.PushConcurrency.Should().Be(4);
+        options.PushTimeout.Should().Be(TimeSpan.FromSeconds(30));
         options.Pickup.MaxMessageAge.Should().Be(TimeSpan.FromDays(30));
         options.CoordinateMediation.RoutingDids.Should().BeEmpty();
         options.CoordinateMediation.MaxGrants.Should().Be(1_000);
@@ -36,10 +36,10 @@ public sealed class MediatorOptionsTests
         { nameof(MediatorOptions.MaxForwardDelay), o => o.MaxForwardDelay = TimeSpan.FromMilliseconds(int.MaxValue) + TimeSpan.FromTicks(1) },
         { nameof(MediatorOptions.PurgeInterval), o => o.PurgeInterval = TimeSpan.FromSeconds(1) - TimeSpan.FromTicks(1) },
         { nameof(MediatorOptions.PurgeInterval), o => o.PurgeInterval = TimeSpan.FromHours(24) + TimeSpan.FromTicks(1) },
-        { nameof(MediatorOptions.DirectPushConcurrency), o => o.DirectPushConcurrency = 0 },
-        { nameof(MediatorOptions.DirectPushConcurrency), o => o.DirectPushConcurrency = 65 },
-        { nameof(MediatorOptions.DirectPushTimeout), o => o.DirectPushTimeout = TimeSpan.Zero },
-        { nameof(MediatorOptions.DirectPushTimeout), o => o.DirectPushTimeout = TimeSpan.FromMinutes(5) + TimeSpan.FromTicks(1) },
+        { nameof(MediatorOptions.PushConcurrency), o => o.PushConcurrency = 0 },
+        { nameof(MediatorOptions.PushConcurrency), o => o.PushConcurrency = 65 },
+        { nameof(MediatorOptions.PushTimeout), o => o.PushTimeout = TimeSpan.Zero },
+        { nameof(MediatorOptions.PushTimeout), o => o.PushTimeout = TimeSpan.FromMinutes(5) + TimeSpan.FromTicks(1) },
         { nameof(MediatorOptions.RewrapMode), o => o.RewrapMode = (RewrapMode)42 },
     };
 
@@ -59,10 +59,10 @@ public sealed class MediatorOptionsTests
         o => { o.MaxForwardDelay = TimeSpan.FromMilliseconds(int.MaxValue); o.Pickup.MaxMessageAge = null; },
         o => o.PurgeInterval = TimeSpan.FromSeconds(1),
         o => o.PurgeInterval = TimeSpan.FromHours(24),
-        o => o.DirectPushConcurrency = 1,
-        o => o.DirectPushConcurrency = 64,
-        o => o.DirectPushTimeout = TimeSpan.FromTicks(1),
-        o => o.DirectPushTimeout = TimeSpan.FromMinutes(5),
+        o => o.PushConcurrency = 1,
+        o => o.PushConcurrency = 64,
+        o => o.PushTimeout = TimeSpan.FromTicks(1),
+        o => o.PushTimeout = TimeSpan.FromMinutes(5),
         o => o.RewrapMode = RewrapMode.ReanoncryptToNext,
     };
 
@@ -162,8 +162,8 @@ public sealed class MediatorOptionsTests
             MaxForwardDelay = TimeSpan.FromMinutes(3),
             PurgeInterval = TimeSpan.FromSeconds(7),
             DirectPush = true,
-            DirectPushConcurrency = 9,
-            DirectPushTimeout = TimeSpan.FromSeconds(11),
+            PushConcurrency = 9,
+            PushTimeout = TimeSpan.FromSeconds(11),
         };
         var cm = new CoordinateMediationOptions();
         var pickup = new MessagePickupOptions { MaxMessageAge = TimeSpan.FromMinutes(2) };
@@ -180,8 +180,8 @@ public sealed class MediatorOptionsTests
         effective.MaxForwardDelay.Should().Be(TimeSpan.FromMinutes(3));
         effective.PurgeInterval.Should().Be(TimeSpan.FromSeconds(7));
         effective.DirectPush.Should().BeTrue();
-        effective.DirectPushConcurrency.Should().Be(9);
-        effective.DirectPushTimeout.Should().Be(TimeSpan.FromSeconds(11));
+        effective.PushConcurrency.Should().Be(9);
+        effective.PushTimeout.Should().Be(TimeSpan.FromSeconds(11));
         effective.Invoking(o => o.Validate()).Should().Throw<ArgumentException>().Which.ParamName.Should().Be("Pickup.MaxMessageAge",
             "the cross-role rule is checked on the values in effect");
     }

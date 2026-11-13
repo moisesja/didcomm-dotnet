@@ -7,6 +7,7 @@ using AwesomeAssertions;
 using DidComm.Facade;
 using DidComm.InteropTests.AspNetCore;
 using DidComm.Mediator.Pickup;
+using DidComm.Mediator.Pipeline;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using DidComm.Samples.Shared;
@@ -89,7 +90,10 @@ public sealed class MediatorMatrixQaTests
                 break;
             default:
                 delivered = (await mediator.ReceiveOverSocketAsync(socket!, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
-                mediator.Outcomes.Should().Equal(ForwardOutcomes.DeliveredLive);
+                // L-020 (PR #109 review R1-2): the forward pump now only stores (Queued); the push workers push it live (Pushed-Live).
+                await mediator.PushesIdleAsync();
+                mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
+                mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
                 (await MediatorDeliveryModesQaTests.AckOverSocketAsync(mediator, socket!, bob, delivered.Id)).MessageCount.Should().Be(0);
                 break;
         }
@@ -168,16 +172,32 @@ public sealed class MediatorMatrixQaTests
         var statuses = await Task.WhenAll(shuffled.Select(p => Task.Run(() => mediator.PostAsync(p))));
         statuses.Should().OnlyContain(r => r.Status == HttpStatusCode.Accepted && r.Body.Length == 0);
         await mediator.FlushAsync();
+        await mediator.PushesIdleAsync();
         var perGrant = DidsPerGrant * Senders * PerPair;
-        mediator.Outcome(ForwardOutcomes.DeliveredLive).Should().Be(perGrant, "every message of the live grant is pushed");
-        mediator.Outcome(ForwardOutcomes.Queued).Should().Be((Grants - 1) * perGrant);
+        // L-020 (PR #109 review R1-2): every forward is stored first (Queued) and the live grant's
+        // messages are pushed by the push workers, one at a time per grant with at most 16 waiting or
+        // in flight: under this burst a push job beyond that share is refused and its message stays
+        // queued for the live recipient to fetch (L-044: assert the invariant, not the race).
+        mediator.Outcome(ForwardOutcomes.Queued).Should().Be(Grants * perGrant);
+        mediator.PushOutcomes.Should().HaveCount(perGrant, "one push outcome per message of the live grant, none for the others");
+        mediator.PushOutcomes.Should().OnlyContain(o => o == PushOutcomes.PushedLive || o == PushOutcomes.SkippedSaturated || o == PushOutcomes.Failed);
+        var pushedLive = (int)mediator.PushOutcome(PushOutcomes.PushedLive);
+        pushedLive.Should().BeGreaterThan(0);
 
-        // Grant 0: the live pushes, one per message.
+        // Grant 0: the live pushes, one per message pushed; whatever was not pushed is fetched on the same socket.
         var live = new List<DeliveredMessage>();
-        while (live.Count < perGrant)
+        while (live.Count < pushedLive)
             live.AddRange((await mediator.ReceiveOverSocketAsync(liveSocket, peers[0])).Delivery(thid: null));
+        live.Should().HaveCount(pushedLive);
+        (await MediatorDeliveryModesQaTests.AckOverSocketAsync(mediator, liveSocket, peers[0], live.Select(m => m.Id).ToArray())).MessageCount.Should().Be(perGrant - pushedLive);
+        while (live.Count < perGrant)
+        {
+            var request = MessagePickup.CreateDeliveryRequest(peers[0].Did, mediator.Did, 10);
+            var batch = (await mediator.AskOverSocketAsync(liveSocket, peers[0], request)).Delivery(request.Id);
+            live.AddRange(batch);
+            await MediatorDeliveryModesQaTests.AckOverSocketAsync(mediator, liveSocket, peers[0], batch.Select(m => m.Id).ToArray());
+        }
         await ShouldBeExactlyAsync(live, recipients[0], senders, expected[0]);
-        (await MediatorDeliveryModesQaTests.AckOverSocketAsync(mediator, liveSocket, peers[0], live.Select(m => m.Id).ToArray())).MessageCount.Should().Be(0);
 
         // Grant 1: delivery-request over its socket, acknowledging as it goes.
         var polled = new List<DeliveredMessage>();

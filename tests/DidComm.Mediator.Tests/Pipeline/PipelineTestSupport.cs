@@ -352,10 +352,18 @@ internal sealed class LiveTestSession(string peerDid, string localDid) : IReturn
         return ValueTask.FromResult(true);
     }
 
-    public ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
+    /// <summary>What a sized send (a live push) does instead of taking the message; <c>null</c> takes every one.</summary>
+    public Func<Message, CancellationToken, Task<ReturnRouteSendResult>>? OnPush { get; set; }
+
+    /// <summary>End the session, as a dropped connection does.</summary>
+    public void Close() => _closed.Cancel();
+
+    public async ValueTask<ReturnRouteSendResult> TrySendAsync(Message message, int maxPackedBytes, CancellationToken ct)
     {
-        Sent.Enqueue(message);
-        return ValueTask.FromResult(ReturnRouteSendResult.Sent);
+        var result = OnPush is { } push ? await push(message, ct) : ReturnRouteSendResult.Sent;
+        if (result == ReturnRouteSendResult.Sent)
+            Sent.Enqueue(message);
+        return result;
     }
 }
 

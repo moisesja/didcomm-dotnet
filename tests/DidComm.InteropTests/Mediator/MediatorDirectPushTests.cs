@@ -138,8 +138,12 @@ public sealed class MediatorDirectPushTests
         await using var fixture = await PushFixture.StartAsync();
         var (mediator, inbox, bob, b, alice) = (fixture.Mediator, fixture.Inbox, fixture.Bob, fixture.B, fixture.Alice);
         fixture.Directory.Map(bob.Did, inbox.Endpoint("/bob-inbox"));
-        // The host revokes the grant while the push is under way: after the message was stored and
-        // the push job taken, before the worker's own registration check.
+        // The host revokes the grant while the push is under way: after the message was stored, the
+        // push job taken and its registration checked, when the worker asks the directory.
+        // L-020 (PR #109 review R1-2): the job now checks the registration and tries the live session
+        // before it asks the directory (D6), so this hook runs after the check (which the dispatcher
+        // tests cover with Push-Skipped-Unregistered) and it is the purge that keeps the push away:
+        // the take by id finds nothing (Push-Skipped-NotHeld), and nothing is sent either way.
         GrantRevocation? revocation = null;
         fixture.Directory.OnFind = grant => revocation = mediator.Queue.RevokeAndPurgeAsync(grant).AsTask().GetAwaiter().GetResult();
 
@@ -149,7 +153,7 @@ public sealed class MediatorDirectPushTests
 
         revocation.Should().Be(new GrantRevocation(Revoked: true, Purged: 1));
         mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
-        mediator.PushOutcomes.Should().Equal(PushOutcomes.SkippedUnregistered);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.SkippedNotHeld);
         inbox.Entered.Should().Be(0, "nothing reaches a recipient whose registration ended");
         mediator.Store.MessageCount.Should().Be(0);
     }
@@ -159,7 +163,7 @@ public sealed class MediatorDirectPushTests
     {
         // L-059: one push worker, parked on a gated endpoint. Forwards for another recipient keep
         // being accepted, queued and picked up while it hangs.
-        await using var fixture = await PushFixture.StartAsync(m => m.DirectPushConcurrency = 1);
+        await using var fixture = await PushFixture.StartAsync(m => m.PushConcurrency = 1);
         var (mediator, inbox, bob, b, alice) = (fixture.Mediator, fixture.Inbox, fixture.Bob, fixture.B, fixture.Alice);
         fixture.Directory.Map(bob.Did, inbox.Endpoint("/bob-inbox"));
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -257,7 +257,82 @@ public sealed class MediatorForwardSinkTests
     }
 
     [Fact]
-    public async Task A_recipient_with_live_delivery_on_gets_the_message_pushed_live()
+    public async Task A_recipient_with_live_delivery_on_gets_the_message_stored_then_pushed_live_by_the_push_workers()
+    {
+        // L-020 (PR #109 review R1-2): the sink used to push live itself, inside DeliverAsync on the
+        // forward pump, and count the forward Delivered-Live. It now only stores (Queued) and hands
+        // the message to the push workers, which push it live (Pushed-Live on the push counter).
+        await using var peers = new PipelinePeers();
+        var mediator = await peers.NewAsync();
+        var peer = await peers.NewAsync();
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.DirectPush = false);
+        await fixture.EnrolAsync(peer.Did, Recipient);
+        var session = new LiveTestSession(peer.Did, mediator.Did);
+        await fixture.GoLiveAsync(session);
+        var before = session.Sent.Count;
+
+        await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture), CancellationToken.None);
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+
+        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.PushedLive);
+        session.Sent.Count.Should().Be(before + 1);
+        MessagePickup.TryParseDelivery(session.Sent.Last(), out var delivered, out _).Should().BeTrue();
+        delivered.Should().ContainSingle();
+        fixture.Store.MessageCount.Should().Be(1, "the pushed copy is held, leased to the session, until it is acknowledged");
+        SinkLines(fixture).Should().ContainSingle().Which.Level.Should().Be(LogLevel.Debug);
+        PipelineLogs.Leaking(fixture.Logs, peer.Did, mediator.Did, Recipient).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_sink_stores_and_returns_while_a_live_push_is_stuck_and_other_grants_go_on()
+    {
+        // PR #109 review R1-2 at the unit level: the forward pump never awaits a live session.
+        // Grant A's session never finishes taking its push; the sink still returns at once for A,
+        // stores B's message, and B's own live session gets its push from another worker.
+        const string RecipientB = "did:example:sink-recipient-b";
+        await using var peers = new PipelinePeers();
+        var mediator = await peers.NewAsync();
+        var peerA = await peers.NewAsync();
+        var peerB = await peers.NewAsync();
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.DirectPush = false);
+        await fixture.EnrolAsync(peerA.Did, Recipient);
+        await fixture.EnrolAsync(peerB.Did, RecipientB);
+        var stuck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sessionA = new LiveTestSession(peerA.Did, mediator.Did);
+        var sessionB = new LiveTestSession(peerB.Did, mediator.Did);
+        await fixture.GoLiveAsync(sessionA);
+        await fixture.GoLiveAsync(sessionB);
+        sessionA.OnPush = async (_, ct) =>
+        {
+            entered.TrySetResult();
+            await stuck.Task.WaitAsync(ct);
+            return ReturnRouteSendResult.Sent;
+        };
+        var pushedB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sessionB.OnPush = (_, _) =>
+        {
+            pushedB.TrySetResult();
+            return Task.FromResult(ReturnRouteSendResult.Sent);
+        };
+
+        await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, "fwd-a"), CancellationToken.None).WaitAsync(Wait);
+        await entered.Task.WaitAsync(Wait);
+        await fixture.Sink.AcceptAsync(Forward(RecipientB), Context(fixture, "fwd-b"), CancellationToken.None).WaitAsync(Wait);
+
+        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.Queued);
+        fixture.Store.MessageCount.Should().Be(2, "both messages are stored while A's push is stuck");
+        await pushedB.Task.WaitAsync(Wait);
+        stuck.Task.IsCompleted.Should().BeFalse("B's live push went out on another worker while A's was still stuck");
+
+        stuck.TrySetResult();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.PushedLive, PushOutcomes.PushedLive);
+    }
+
+    [Fact]
+    public async Task A_message_that_is_not_due_yet_is_never_pushed_live()
     {
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
@@ -265,21 +340,15 @@ public sealed class MediatorForwardSinkTests
         await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.DirectPush = false);
         await fixture.EnrolAsync(peer.Did, Recipient);
         var session = new LiveTestSession(peer.Did, mediator.Did);
-        fixture.Services.GetRequiredService<IReturnRouteSessionRegistry>().Register(session);
-        var client = fixture.Services.GetRequiredService<DidCommClient>();
-        var change = MessagePickup.CreateLiveDeliveryChange(peer.Did, mediator.Did, liveDelivery: true);
-        var packed = await client.PackEncryptedAsync(change, new PackEncryptedOptions(Recipients: new[] { mediator.Did }, From: peer.Did));
-        await fixture.Services.GetRequiredService<ProtocolDispatcher>().DispatchAsync(await client.UnpackAsync(packed.Message), client, fixture.Options, Task.CompletedTask, session, CancellationToken.None);
+        await fixture.GoLiveAsync(session);
         var before = session.Sent.Count;
 
-        await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture), CancellationToken.None);
+        await fixture.Sink.AcceptAsync(Forward(Recipient, notBefore: fixture.Time.GetUtcNow() + TimeSpan.FromTicks(1)), Context(fixture), CancellationToken.None);
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DeliveredLive);
-        session.Sent.Count.Should().Be(before + 1);
-        MessagePickup.TryParseDelivery(session.Sent.Last(), out var delivered, out _).Should().BeTrue();
-        delivered.Should().ContainSingle();
-        SinkLines(fixture).Should().ContainSingle().Which.Level.Should().Be(LogLevel.Debug);
-        PipelineLogs.Leaking(fixture.Logs, peer.Did, mediator.Did, Recipient).Should().BeEmpty();
+        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
+        fixture.PushOutcomeLog.Should().BeEmpty("a message that is not due gets no push job");
+        session.Sent.Count.Should().Be(before);
     }
 
     // ---- the hand-over to direct push -----------------------------------------------------------
@@ -298,7 +367,7 @@ public sealed class MediatorForwardSinkTests
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
         fixture.Router.Requests.Should().ContainSingle().Which.Payload.ToArray().Should().Equal(payload);
         fixture.Store.MessageCount.Should().Be(0);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("fwd-push", StringComparison.Ordinal));
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("fwd-push", StringComparison.Ordinal));
         NoLeaks(fixture);
     }
 
@@ -346,10 +415,10 @@ public sealed class MediatorForwardSinkTests
             directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        for (var i = 0; i < DirectPushDispatcher.MaxPerGrant + 2; i++)
+        for (var i = 0; i < PushDispatcher.MaxPerGrant + 2; i++)
             await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, $"fwd-{i}"), CancellationToken.None);
 
-        fixture.ForwardOutcomeLog.Should().HaveCount(DirectPushDispatcher.MaxPerGrant + 2).And.OnlyContain(o => o == ForwardOutcomes.Queued);
+        fixture.ForwardOutcomeLog.Should().HaveCount(PushDispatcher.MaxPerGrant + 2).And.OnlyContain(o => o == ForwardOutcomes.Queued);
         fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(2);
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
@@ -370,20 +439,20 @@ public sealed class MediatorForwardSinkTests
             directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        for (var i = 0; i < DirectPushDispatcher.MaxPerGrant; i++)
+        for (var i = 0; i < PushDispatcher.MaxPerGrant; i++)
             await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, new string((char)('a' + i), IdLength)), CancellationToken.None);
         await gate.WaitForArrivalsAsync(1, Wait);
 
         // Every forward has returned (its reservation is given back); one push hangs, fifteen wait.
-        fixture.Dispatcher.Outstanding.Should().Be(DirectPushDispatcher.MaxPerGrant);
+        fixture.Dispatcher.Outstanding.Should().Be(PushDispatcher.MaxPerGrant);
         var perJob = Peer.Length + Recipient.Length + PickupSizing.MaxMintedIdLength + DidComm.Diagnostics.LogValues.MaxIdLength;
         fixture.Dispatcher.RetainedCharacters.Should().BeLessThanOrEqualTo(
-            (long)DirectPushDispatcher.MaxPerGrant * perJob,
+            (long)PushDispatcher.MaxPerGrant * perJob,
             "a job holds two DIDs, the queue's record id and the forward's id in its bounded log form, never the wire id");
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(DirectPushDispatcher.MaxPerGrant);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxPerGrant);
         fixture.Dispatcher.RetainedCharacters.Should().Be(0);
     }
 

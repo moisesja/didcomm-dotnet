@@ -259,7 +259,10 @@ public sealed class MediatorRoutesQaTests
         {
             case Delivery.Live:
                 payload = (await mediator.ReceiveOverSocketAsync(socket!, bob)).Delivery(thid: null).Should().ContainSingle().Subject.Payload;
-                mediator.Outcomes.Should().Equal(ForwardOutcomes.DeliveredLive);
+                // L-020 (PR #109 review R1-2): the forward pump now only stores (Queued); the push workers push it live (Pushed-Live).
+                await mediator.PushesIdleAsync();
+                mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
+                mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
                 break;
             case Delivery.DirectPush:
                 await mediator.PushesIdleAsync();

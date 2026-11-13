@@ -445,7 +445,7 @@ internal sealed class MediatorTestServer : IAsyncDisposable
 
     public ForwardHandler Handler => App.Services.GetRequiredService<ForwardHandler>();
 
-    internal DirectPushDispatcher Pushes => App.Services.GetRequiredService<DirectPushDispatcher>();
+    internal PushDispatcher Pushes => App.Services.GetRequiredService<PushDispatcher>();
 
     internal MediatorHostedService Hosted => App.Services.GetServices<IHostedService>().OfType<MediatorHostedService>().Single();
 
@@ -595,9 +595,9 @@ internal sealed class MediatorTestServer : IAsyncDisposable
     public IReadOnlyList<string?> Outcomes => Measurements.TagValues(ForwardOutcomes.ForwardOutcomesInstrument, ForwardOutcomes.OutcomeTag);
 
     /// <summary>How many direct pushes ended with <paramref name="outcome"/>.</summary>
-    public long PushOutcome(string outcome) => Measurements.Sum(MediatorMetrics.DirectPushOutcomesInstrument, MediatorMetrics.PushOutcomeTag, outcome);
+    public long PushOutcome(string outcome) => Measurements.Sum(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag, outcome);
 
-    public IReadOnlyList<string?> PushOutcomes => Measurements.TagValues(MediatorMetrics.DirectPushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
+    public IReadOnlyList<string?> PushOutcomes => Measurements.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
 
     // ---- requests ---------------------------------------------------------------------------
 

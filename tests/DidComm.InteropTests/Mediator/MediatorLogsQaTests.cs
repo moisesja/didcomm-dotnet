@@ -131,10 +131,11 @@ public sealed class MediatorLogsQaTests
 
         mediator.Outcomes.Should().Contain(new[]
         {
-            ForwardOutcomes.Queued, ForwardOutcomes.DeliveredLive, ForwardOutcomes.DroppedUnknown, ForwardOutcomes.DroppedTooLarge,
+            ForwardOutcomes.Queued, ForwardOutcomes.DroppedUnknown, ForwardOutcomes.DroppedTooLarge,
             ForwardOutcomes.DroppedQuota, ForwardOutcomes.DroppedUnacknowledged,
         });
-        mediator.PushOutcomes.Should().Contain(new[] { DidComm.Mediator.Pipeline.PushOutcomes.Pushed, DidComm.Mediator.Pipeline.PushOutcomes.Failed });
+        // L-020 (PR #109 review R1-2): the live delivery is now a push outcome (Pushed-Live), not a forward outcome.
+        mediator.PushOutcomes.Should().Contain(new[] { DidComm.Mediator.Pipeline.PushOutcomes.PushedLive, DidComm.Mediator.Pipeline.PushOutcomes.Pushed, DidComm.Mediator.Pipeline.PushOutcomes.Failed });
         return (mediator, sensitive, f);
     }
 }

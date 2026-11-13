@@ -13,7 +13,7 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// <see cref="DirectPushDispatcher"/> (FR-PICK-09, JC-4, JC-5): a 2xx removes, anything else keeps;
+/// <see cref="PushDispatcher"/> (FR-PICK-09, JC-4, JC-5): a 2xx removes, anything else keeps;
 /// only http(s) from the host's directory; the registration is re-checked; bounded backlog, byte
 /// budget and per-grant share; a slow endpoint holds only its workers; shutdown loses nothing; lazy
 /// resolution; no execution-context flow; log lines name no DID, endpoint or exception text.
@@ -160,8 +160,8 @@ public sealed class DirectPushDispatcherTests
             return (await fixture.Store.LeaseAsync(new MessageLeaseRequest(Peer, null, 10, int.MaxValue, at, new MessageLease(null, at + TimeSpan.FromSeconds(1))), CancellationToken.None)).Count;
         }
 
-        (await PickupSeesAsync(TimeSpan.FromSeconds(30) + DirectPushDispatcher.LeaseMargin - TimeSpan.FromTicks(1))).Should().Be(0, "the push holds the record under its lease");
-        (await PickupSeesAsync(TimeSpan.FromSeconds(30) + DirectPushDispatcher.LeaseMargin)).Should().Be(1, "the lease ends DirectPushTimeout + LeaseMargin after the take");
+        (await PickupSeesAsync(TimeSpan.FromSeconds(30) + PushDispatcher.LeaseMargin - TimeSpan.FromTicks(1))).Should().Be(0, "the push holds the record under its lease");
+        (await PickupSeesAsync(TimeSpan.FromSeconds(30) + PushDispatcher.LeaseMargin)).Should().Be(1, "the lease ends PushTimeout + LeaseMargin after the take");
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
     }
@@ -179,7 +179,7 @@ public sealed class DirectPushDispatcherTests
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
         fixture.Router.Requests.Should().BeEmpty();
         store.Inner.MessageCount.Should().Be(1);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains(nameof(HandlerBoomException), StringComparison.Ordinal));
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains(nameof(HandlerBoomException), StringComparison.Ordinal));
         NoLeaks(fixture);
     }
 
@@ -195,7 +195,7 @@ public sealed class DirectPushDispatcherTests
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
         store.Inner.MessageCount.Should().Be(1);
-        var after = fixture.Time.GetUtcNow() + TimeSpan.FromSeconds(30) + DirectPushDispatcher.LeaseMargin;
+        var after = fixture.Time.GetUtcNow() + TimeSpan.FromSeconds(30) + PushDispatcher.LeaseMargin;
         (await store.Inner.LeaseAsync(new MessageLeaseRequest(Peer, null, 10, int.MaxValue, after, new MessageLease(null, after + TimeSpan.FromSeconds(1))), CancellationToken.None))
             .Should().ContainSingle();
         NoLeaks(fixture);
@@ -224,7 +224,7 @@ public sealed class DirectPushDispatcherTests
 
         fixture.Store.MessageCount.Should().Be(1, because);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().ContainSingle(e => e.Level == LogLevel.Warning);
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().ContainSingle(e => e.Level == LogLevel.Warning);
         NoLeaks(fixture, job.MessageId);
     }
 
@@ -235,7 +235,7 @@ public sealed class DirectPushDispatcherTests
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox,
-            configure: o => o.DirectPushTimeout = TimeSpan.FromSeconds(30));
+            configure: o => o.PushTimeout = TimeSpan.FromSeconds(30));
         await fixture.EnrolAsync(Peer, Recipient);
         var job = await fixture.QueuedJobAsync(Recipient);
 
@@ -248,13 +248,13 @@ public sealed class DirectPushDispatcherTests
 
         fixture.Store.MessageCount.Should().Be(1);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
     }
 
     // The deadline must end the push even when the callee ignores its token. A transport that only
     // returns once the far end gives up (the ASP.NET Core TestServer client does exactly that while
     // the server-side handler ignores RequestAborted) otherwise holds the worker, and the grant's
-    // turn, until the far end returns: the push "outlasts" DirectPushTimeout by however long that is.
+    // turn, until the far end returns: the push "outlasts" PushTimeout by however long that is.
     [Fact]
     public async Task A_push_whose_transport_ignores_the_cancellation_still_ends_at_its_deadline_and_gives_the_message_back()
     {
@@ -268,7 +268,7 @@ public sealed class DirectPushDispatcherTests
                 return new TransportResult(true, 202);
             },
             directory: _ => Inbox,
-            configure: o => o.DirectPushTimeout = TimeSpan.FromSeconds(7));
+            configure: o => o.PushTimeout = TimeSpan.FromSeconds(7));
         await fixture.EnrolAsync(Peer, Recipient);
         fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
@@ -279,7 +279,7 @@ public sealed class DirectPushDispatcherTests
         await fixture.Dispatcher.WaitForIdleAsync(Wait); // without opening the gate
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("Timeout", StringComparison.Ordinal));
         var now = fixture.Time.GetUtcNow();
         (await fixture.Store.LeaseAsync(new MessageLeaseRequest(Peer, null, 10, int.MaxValue, now, new MessageLease("pickup", now + TimeSpan.FromMinutes(1))), CancellationToken.None))
             .Should().ContainSingle("the push gave its lease back at the deadline, so a pickup gets the message now");
@@ -384,7 +384,7 @@ public sealed class DirectPushDispatcherTests
         fixture.Router.Requests.Should().BeEmpty();
         fixture.Store.MessageCount.Should().Be(1);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedScheme);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().ContainSingle(e => e.Level == LogLevel.Warning);
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().ContainSingle(e => e.Level == LogLevel.Warning);
         NoLeaks(fixture);
     }
 
@@ -428,7 +428,7 @@ public sealed class DirectPushDispatcherTests
         fixture.Router.Requests.Should().BeEmpty();
         fixture.Store.MessageCount.Should().Be(1);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedNoEndpoint);
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Should().ContainSingle(e => e.Level == LogLevel.Warning)
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().ContainSingle(e => e.Level == LogLevel.Warning)
             .Which.Everything.Should().Contain(nameof(HandlerBoomException));
         NoLeaks(fixture);
     }
@@ -495,16 +495,16 @@ public sealed class DirectPushDispatcherTests
 
         var accepted = jobs.Select(j => fixture.Dispatcher.TryEnqueue(j)).ToArray();
 
-        accepted.Count(a => a).Should().Be(DirectPushDispatcher.MaxPerGrant);
-        accepted.Skip(DirectPushDispatcher.MaxPerGrant).Should().OnlyContain(a => !a);
+        accepted.Count(a => a).Should().Be(PushDispatcher.MaxPerGrant);
+        accepted.Skip(PushDispatcher.MaxPerGrant).Should().OnlyContain(a => !a);
         fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(4);
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(DirectPushDispatcher.MaxPerGrant);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxPerGrant);
         fixture.Store.MessageCount.Should().Be(4, "the refused jobs' messages were never pushed and stay queued");
-        PipelineLogs.Of<DirectPushDispatcher>(fixture.Logs).Count(e => e.Level == LogLevel.Warning).Should().Be(1, "saturation is logged at Warning once, then at Debug");
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Count(e => e.Level == LogLevel.Warning).Should().Be(1, "saturation is logged at Warning once, then at Debug");
     }
 
     [Fact]
@@ -514,27 +514,27 @@ public sealed class DirectPushDispatcherTests
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox);
-        const int grants = DirectPushDispatcher.MaxBacklog / DirectPushDispatcher.MaxPerGrant + 1; // 65
+        const int grants = PushDispatcher.MaxBacklog / PushDispatcher.MaxPerGrant + 1; // 65
         var jobs = new List<PushJob>();
         for (var g = 0; g < grants; g++)
         {
             await fixture.EnrolAsync($"did:example:grant-{g}", $"did:example:recipient-{g}");
-            for (var j = 0; j < DirectPushDispatcher.MaxPerGrant; j++)
+            for (var j = 0; j < PushDispatcher.MaxPerGrant; j++)
                 jobs.Add(await fixture.QueuedJobAsync($"did:example:recipient-{g}", PushFixture.Payload(16), $"fwd-{g}-{j}"));
         }
 
         var accepted = jobs.Count(job => fixture.Dispatcher.TryEnqueue(job));
 
-        accepted.Should().Be(DirectPushDispatcher.MaxBacklog);
-        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(DirectPushDispatcher.MaxPerGrant);
+        accepted.Should().Be(PushDispatcher.MaxBacklog);
+        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(PushDispatcher.MaxPerGrant);
         await fixture.EnrolAsync("did:example:grant-new", "did:example:recipient-new");
         fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:recipient-new", forwardId: "fwd-new"))
             .Should().BeFalse("the backlog is full whatever the grant");
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(TimeSpan.FromSeconds(60));
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(DirectPushDispatcher.MaxBacklog);
-        fixture.Store.MessageCount.Should().Be(DirectPushDispatcher.MaxPerGrant + 1, "the refused jobs' messages were never pushed and stay queued");
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PushDispatcher.MaxBacklog);
+        fixture.Store.MessageCount.Should().Be(PushDispatcher.MaxPerGrant + 1, "the refused jobs' messages were never pushed and stay queued");
         fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync("did:example:recipient-0", forwardId: "fwd-again"))
             .Should().BeTrue("released slots are reusable");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
@@ -604,7 +604,7 @@ public sealed class DirectPushDispatcherTests
                 return new TransportResult(true, 202);
             },
             directory: peer => peer == "did:example:slow-peer" ? slow : Inbox,
-            configure: o => o.DirectPushConcurrency = 4);
+            configure: o => o.PushConcurrency = 4);
         await fixture.EnrolAsync("did:example:slow-peer", "did:example:slow-recipient");
         await fixture.EnrolAsync(Peer, Recipient);
 
@@ -648,7 +648,7 @@ public sealed class DirectPushDispatcherTests
             directory: peer => new Uri($"https://recipient-host.example/{peer.Split(':').Last()}"),
             configure: o =>
             {
-                o.DirectPushConcurrency = 4;
+                o.PushConcurrency = 4;
                 o.Pickup.MaxQueueMessages = 40;
             });
         var jobs = new List<PushJob>();
@@ -686,7 +686,7 @@ public sealed class DirectPushDispatcherTests
         await using var fixture = PushFixture.Create(
             async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
             directory: _ => Inbox,
-            configure: o => o.DirectPushConcurrency = 1);
+            configure: o => o.PushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         var dispatcher = fixture.Dispatcher;
         for (var i = 0; i < 3; i++)
@@ -706,17 +706,24 @@ public sealed class DirectPushDispatcherTests
     // ---- off, lazy, context ------------------------------------------------------------------
 
     [Fact]
-    public async Task With_direct_push_off_nothing_is_taken_or_counted()
+    public async Task With_direct_push_off_a_job_without_a_live_session_never_reaches_the_directory_and_its_message_stays_queued()
     {
+        // L-020 (PR #109 review R1-2): the workers now run whenever AddMediator() is used, because
+        // they also do the live pushes; with direct push off the dispatcher used to refuse every
+        // job. A job whose peer has no live session any more (the sink hands one over only when it
+        // saw one) now ends with its own outcome, and still never consults the directory.
         await using var fixture = PushFixture.Create(directory: _ => Inbox, configure: o => o.DirectPush = false);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        fixture.Dispatcher.Enabled.Should().BeFalse();
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeFalse();
+        fixture.Dispatcher.DirectPushEnabled.Should().BeFalse();
+        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.PushOutcomeLog.Should().BeEmpty();
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedNoLiveSession);
         fixture.Directory!.Calls.Should().Be(0);
+        fixture.Router.Requests.Should().BeEmpty();
         fixture.Store.MessageCount.Should().Be(1);
+        (await fixture.Store.GetStatusAsync(Peer, null, fixture.Time.GetUtcNow(), CancellationToken.None)).MessageCount.Should().Be(1, "nothing took a lease on it");
     }
 
     [Fact]
@@ -760,7 +767,7 @@ public sealed class DirectPushDispatcherTests
     {
         await using var fixture = PushFixture.Create(directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
-        DirectPushDispatcher dispatcher;
+        PushDispatcher dispatcher;
         using (ExecutionContext.SuppressFlow())
             dispatcher = fixture.Dispatcher;
 

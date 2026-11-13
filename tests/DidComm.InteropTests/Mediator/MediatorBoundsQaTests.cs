@@ -4,6 +4,7 @@ using System.Text;
 using AwesomeAssertions;
 using DidComm.InteropTests.AspNetCore;
 using DidComm.Mediator.Pickup;
+using DidComm.Mediator.Pipeline;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using Microsoft.Extensions.DependencyInjection;
@@ -77,7 +78,10 @@ public sealed class MediatorBoundsQaTests
                 var push = await mediator.ReceiveOverSocketAsync(socket!, bob);
                 push.Packed.Length.Should().BeLessThanOrEqualTo(1024 * 1024);
                 delivered = push.Delivery(thid: null).Should().ContainSingle().Subject;
-                mediator.Outcomes.Should().Equal(ForwardOutcomes.DroppedTooLarge, ForwardOutcomes.DeliveredLive);
+                // L-020 (PR #109 review R1-2): the forward pump now only stores (Queued); the push workers push it live (Pushed-Live).
+                await mediator.PushesIdleAsync();
+                mediator.Outcomes.Should().Equal(ForwardOutcomes.DroppedTooLarge, ForwardOutcomes.Queued);
+                mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
                 break;
         }
         Encoding.UTF8.GetString(delivered.Payload.Span).Should().Be(exact, "the payload is relayed byte for byte");
@@ -104,18 +108,23 @@ public sealed class MediatorBoundsQaTests
         await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob);
         await Qa.SendNoteAsync(mediator, alice, bob, content: "live");
         var pushed = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
+        await mediator.PushesIdleAsync();
         await Qa.SendNoteAsync(mediator, alice, bob, Qa.Delay(60_000), content: "not yet due");
         await Qa.SendNoteAsync(mediator, alice, bob, content: "over quota");
         await Qa.SendNoteAsync(mediator, alice, carol, content: "another grant");
 
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.DeliveredLive, ForwardOutcomes.Queued, ForwardOutcomes.DroppedQuota, ForwardOutcomes.Queued);
+        // L-020 (PR #109 review R1-2): the live message is stored (Queued) and then pushed live by the push workers.
+        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.Queued, ForwardOutcomes.Queued, ForwardOutcomes.DroppedQuota, ForwardOutcomes.Queued);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
         var status = MessagePickup.CreateStatusRequest(bob.Did, mediator.Did);
         (await mediator.AskOverSocketAsync(socket, bob, status)).Status(status.Id).MessageCount.Should().Be(2, "the not-yet-due message holds quota without being reported");
 
         // Acknowledging frees room: the next message is accepted (and pushed live).
         (await MediatorDeliveryModesQaTests.AckOverSocketAsync(mediator, socket, bob, leased.Id)).MessageCount.Should().Be(1);
         await Qa.SendNoteAsync(mediator, alice, bob, content: "room again");
-        mediator.Outcomes.Last().Should().Be(ForwardOutcomes.DeliveredLive);
+        await mediator.PushesIdleAsync();
+        mediator.Outcomes.Last().Should().Be(ForwardOutcomes.Queued);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive, PushOutcomes.PushedLive);
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         mediator.LeakingLogLines(leased.Id, pushed.Id).Should().BeEmpty();
     }

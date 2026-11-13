@@ -197,7 +197,10 @@ public sealed class MediatorTimeBoundsQaTests
 
         await Qa.SendNoteAsync(mediator, alice, bob);
         var pushed = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.DeliveredLive);
+        // L-020 (PR #109 review R1-2): the forward pump now only stores (Queued); the push workers push it live (Pushed-Live).
+        await mediator.PushesIdleAsync();
+        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
 
         mediator.Clock.Advance(limit - TimeSpan.FromTicks(1));
         var status = MessagePickup.CreateStatusRequest(bob.Did, mediator.Did);

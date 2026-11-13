@@ -48,7 +48,7 @@ public sealed class MediatorGenericHostTests
             .Which.Should().BeAssignableTo<IHostedLifecycleService>();
         host.Services.GetRequiredService<MediatorInvitationHolder>().PlaintextJson.Should().Contain(mediator.Did);
         host.Services.GetRequiredService<IForwardSink>().Should().BeOfType<MediatorForwardSink>();
-        host.Services.GetRequiredService<DirectPushDispatcher>().Enabled.Should().BeTrue();
+        host.Services.GetRequiredService<PushDispatcher>().DirectPushEnabled.Should().BeTrue();
         host.Services.GetRequiredService<ProtocolDispatcher>().Should().NotBeNull();
 
         await host.StopAsync().WaitAsync(Wait);
@@ -74,7 +74,7 @@ public sealed class MediatorGenericHostTests
         var mediator = await peers.NewAsync(HostedFixture.HttpsService);
         var host = Build(peers, mediator.Did, o => o.DirectPush = true);
         await host.StartAsync().WaitAsync(Wait);
-        var dispatcher = host.Services.GetRequiredService<DirectPushDispatcher>();
+        var dispatcher = host.Services.GetRequiredService<PushDispatcher>();
 
         await host.StopAsync().WaitAsync(Wait);
         await ((IAsyncDisposable)host).DisposeAsync().AsTask().WaitAsync(Wait);
