@@ -174,8 +174,9 @@ Inbound forward:
    once `ProtocolContext.Acknowledged` completes: the registry-aware `MapDidCommEndpoint` creates
    it per request, completes it from `Response.OnCompleted` (the 202 is committed) and cancels it
    on `RequestAborted` or a post-handler 400, passing it through the
-   `ProtocolDispatcher.DispatchAsync(…, Task acknowledged, …)` overload — so neither the processor
-   nor the sink runs before the sender holds the 202. The WebSocket endpoint and a direct
+   `ProtocolDispatcher.DispatchAsync(…, Task acknowledged, …)` overload — so neither the processing
+   nor the sink runs before the sender holds the 202 (only a forward addressed to the mediator
+   itself is opened before it, inline; see below). The WebSocket endpoint and a direct
    dispatcher caller pass `Task.CompletedTask` and publish immediately. A cancelled or faulted
    acknowledgement releases the reservation and drops the forward with a warning (id only). The
    clock was read once, at step 3: the same instant fixes the `delay_milli` schedule

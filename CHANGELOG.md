@@ -1318,8 +1318,9 @@ replay admission.
   their plaintext bytes, so a slow sink cannot be used to park 1024 × `MaxReceiveBytes` in memory;
   beyond either bound the newest is dropped with a rate-limited warning) and is published to the
   pump only once `ProtocolContext.Acknowledged` has completed — the transport's signal that the
-  inbound was acknowledged on the wire — so neither `ForwardProcessor` nor the sink runs before
-  the sender holds the 202; a cancelled or faulted acknowledgement (client abort before the
+  inbound was acknowledged on the wire — so neither `ForwardProcessor`'s processing nor the sink
+  runs before the sender holds the 202 (since #95 a forward addressed to the mediator itself is
+  opened inline, before it, on the sender's request); a cancelled or faulted acknowledgement (client abort before the
   response was committed, a rejection after the handler ran) releases the reservation and drops
   the forward with a warning. The detached work runs on the handler's shutdown token, never the
   request's, so a client abort after the 202 cannot cancel the relay. The clock is read once per
