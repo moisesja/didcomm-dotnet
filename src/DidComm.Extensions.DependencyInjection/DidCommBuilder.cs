@@ -193,6 +193,13 @@ public sealed class DidCommBuilder
     /// The container disposes the singleton <see cref="ForwardHandler"/> with the provider, which
     /// stops its pump within the shutdown grace.
     /// </para>
+    /// <para>
+    /// The handler counts each forward it ends on the <c>didcomm.forward.outcomes</c> counter of the
+    /// <see cref="Diagnostics.DidCommDiagnostics.MeterName"/> meter, created through the container's
+    /// <see cref="System.Diagnostics.Metrics.IMeterFactory"/> when one is registered (ASP.NET Core
+    /// registers it). Its drop lines are rate-limited per reason: the first and every 1000th at
+    /// Warning, the rest at Debug.
+    /// </para>
     /// </remarks>
     /// <param name="options">Pass-through / rewrap / extra routing keys; <c>null</c> for the defaults (pass-through, no extras). A positional record, so an instance rather than a callback.</param>
     /// <exception cref="ArgumentException">When <paramref name="options"/> combines rewrap mode with extra routing keys (<see cref="ForwardProcessorOptions.Validate"/>).</exception>
@@ -216,6 +223,23 @@ public sealed class DidCommBuilder
             sp.GetRequiredService<ForwardProcessorOptions>(),
             sp.GetRequiredService<IRecipientRoutingKeyProvider>(),
             sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DidCommOptions>>().Value));
+        // One outcome counter per container, shared by the handler and the mediator's sink
+        // (AddMediator registers the identical TryAdd). The host's IMeterFactory owns the meter
+        // when there is one (ASP.NET Core registers it); otherwise the counter owns its own meter
+        // and the container disposes it.
+        Services.TryAddSingleton(sp => new ForwardMetrics(sp.GetService<System.Diagnostics.Metrics.IMeterFactory>()));
+        // A factory, so the handler counts on the shared counter. The container cannot see a cycle
+        // through a factory, so it is guarded like AddProtocol<T>()'s own entry: a sink (or another
+        // collaborator) that closes a cycle back into the handler, the registry or the dispatcher
+        // fails the first resolution with InvalidOperationException instead of hanging it. Registered
+        // before AddProtocol, whose TryAddSingleton<ForwardHandler>() then adds nothing; its guarded
+        // IProtocolHandler entry forwards to this singleton.
+        Services.TryAddSingleton(DependencyCycleGuard.Guard(typeof(ForwardHandler), sp => new ForwardHandler(
+            sp.GetRequiredService<ForwardProcessor>(),
+            sp.GetRequiredService<IForwardSink>(),
+            sp.GetRequiredService<IForwardRecipientRegistry>(),
+            sp.GetRequiredService<ForwardMetrics>(),
+            sp.GetService<ILogger<ForwardHandler>>())));
         return AddProtocol<ForwardHandler>();
     }
 
