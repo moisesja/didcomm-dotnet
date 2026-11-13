@@ -77,7 +77,7 @@
     <!-- ASP.NET Core (transports). Test/sample-only; tracks the same 10.0.x servicing line as
          Microsoft.Extensions below. -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.14" />
-    <!-- Microsoft.Extensions, one servicing line for all five. These are runtime minimums in the
+    <!-- Microsoft.Extensions, one servicing line for all six. These are runtime minimums in the
          published packages, and NetDid 4.0.0 already requires 10.0.14 for Caching.Memory and
          Logging.Abstractions. -->
     <!-- Caching -->
@@ -88,6 +88,8 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.14" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.14" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.14" />
+    <!-- Hosting (DidComm.Mediator: the mediator's hosted service, #95) -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.14" />
     <!-- Resilience (retry + timeout + circuit-breaker) for the Phase 5 HTTPS + WebSocket
          transports. Polly v8 is the .NET-idiomatic policy library and the user-confirmed
          Phase 5 choice for FR-TRN-08 / FR-TRN-11. Used via Polly.ResiliencePipeline; no

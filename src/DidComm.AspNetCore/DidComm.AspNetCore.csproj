@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="DidComm.InteropTests" />
+    <InternalsVisibleTo Include="DidComm.Mediator.AspNetCore" />
   </ItemGroup>
 
 </Project>

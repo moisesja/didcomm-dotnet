@@ -577,6 +577,22 @@ public static class DidCommEndpointRouteBuilderExtensions
     public static IEndpointConventionBuilder MapDidCommWebSocket(
         this IEndpointRouteBuilder endpoints,
         string pattern)
+        => MapDidCommWebSocketCore(endpoints, pattern, mediatorEndpoint: false);
+
+    /// <summary>
+    /// The registry-aware WebSocket endpoint behind <see cref="MapDidCommWebSocket(IEndpointRouteBuilder, string)"/>.
+    /// With <paramref name="mediatorEndpoint"/> <c>true</c> (the mediator package's endpoint) each
+    /// connection uses <see cref="DidCommReceiveOptions.ForMediatorEndpoint"/> — same-socket replies
+    /// on, STOMP off — for this endpoint only; the host's other WebSocket endpoints keep the
+    /// configured options.
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern.</param>
+    /// <param name="mediatorEndpoint"><c>true</c> to force the mediator endpoint's receive options; <c>false</c> for the public overload's behaviour.</param>
+    internal static IEndpointConventionBuilder MapDidCommWebSocketCore(
+        IEndpointRouteBuilder endpoints,
+        string pattern,
+        bool mediatorEndpoint)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
@@ -597,6 +613,8 @@ public static class DidCommEndpointRouteBuilderExtensions
             var client = sp.GetRequiredService<DidCommClient>();
             var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
+            if (mediatorEndpoint)
+                receiveOptions = receiveOptions.ForMediatorEndpoint();
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
             var loggerFactory = sp.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Mediator.AspNetCore</RootNamespace>
+    <AssemblyName>DidComm.Mediator.AspNetCore</AssemblyName>
+    <PackageId>DidComm.Mediator.AspNetCore</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>ASP.NET Core endpoints for the didcomm-dotnet mediator (PRD §8b/§8c, epic #88). MapDidCommMediator maps, under one pattern, the HTTP and WebSocket receive endpoints of a mediator registered with AddMediator() — same-socket replies on for its WebSocket, so pickup and live delivery work there — and the endpoint that serves the mediator's out-of-band invitation.</Description>
+    <!-- No released baseline exists on NuGet yet, so there is nothing for SDK Package Validation to
+         compare against. Remove this line (the repo-wide default is true) once the first version of
+         this package has shipped and PackageValidationBaselineVersion names it. -->
+    <EnablePackageValidation>false</EnablePackageValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DidComm.Mediator\DidComm.Mediator.csproj" />
+    <ProjectReference Include="..\DidComm.AspNetCore\DidComm.AspNetCore.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
+</Project>

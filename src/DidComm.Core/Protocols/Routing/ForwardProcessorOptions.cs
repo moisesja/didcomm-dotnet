@@ -11,7 +11,18 @@ public sealed record ForwardProcessorOptions(
     RewrapMode Mode = RewrapMode.PassThrough,
     IReadOnlyList<Jwk>? ExtraRecipientRoutingKeys = null)
 {
-    /// <summary>Validate the option combination. Throws when the two modes are mutually exclusive.</summary>
+    /// <summary>
+    /// The longest delay a forward's <c>delay_milli</c> can ask this mediator to hold a message for
+    /// (FR-ROUTE-10). A longer positive delay is shortened to it. For a negative value, which asks
+    /// for a random delay of up to its magnitude, the magnitude is capped to this before the random
+    /// delay is drawn. No forward is refused because of its delay. <c>null</c> (the default) keeps
+    /// the library's hard bound of <see cref="int.MaxValue"/> milliseconds (about 24.8 days).
+    /// <c>AddMediator()</c> sets it from the mediator's own setting.
+    /// </summary>
+    public TimeSpan? MaxDelay { get; init; }
+
+    /// <summary>Validate the option combination.</summary>
+    /// <exception cref="ArgumentException">Extra routing keys are combined with <see cref="RewrapMode.ReanoncryptToNext"/>, or <see cref="MaxDelay"/> is negative or longer than <see cref="int.MaxValue"/> milliseconds.</exception>
     public void Validate()
     {
         if (Mode == RewrapMode.ReanoncryptToNext && ExtraRecipientRoutingKeys is { Count: > 0 })
@@ -19,6 +30,13 @@ public sealed record ForwardProcessorOptions(
             throw new ArgumentException(
                 "ExtraRecipientRoutingKeys cannot be combined with RewrapMode.ReanoncryptToNext — pick one transformation per mediator hop.",
                 nameof(ExtraRecipientRoutingKeys));
+        }
+
+        if (MaxDelay is { } maxDelay && (maxDelay < TimeSpan.Zero || maxDelay > TimeSpan.FromMilliseconds(int.MaxValue)))
+        {
+            throw new ArgumentException(
+                "The value must be zero or more and at most int.MaxValue milliseconds.",
+                nameof(MaxDelay));
         }
     }
 }

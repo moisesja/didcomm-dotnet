@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 
@@ -25,6 +26,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
     <InternalsVisibleTo Include="DidComm.InteropTests" />
+    <InternalsVisibleTo Include="DidComm.Mediator.AspNetCore" />
   </ItemGroup>
 
 </Project>

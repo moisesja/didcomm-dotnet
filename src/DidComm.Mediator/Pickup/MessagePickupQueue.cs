@@ -118,6 +118,37 @@ public sealed class MessagePickupQueue
     /// <param name="ct">Cancellation token.</param>
     /// <returns>How many messages were removed.</returns>
     public ValueTask<int> PurgeExpiredAsync(CancellationToken ct = default) => Coordinator.PurgeExpiredAsync(ct);
+
+    /// <summary>
+    /// End a peer's mediation and drop everything held for it, in one call: revokes the peer's grant
+    /// (<see cref="IMediationStore.RevokeAsync"/>) and then removes every message held under it
+    /// (<see cref="IMessageStore.PurgeGrantAsync"/>). A message for the peer that arrives while this
+    /// runs is not kept: the queue checks the grant again after storing a message and removes it when
+    /// the grant is gone. A host API; nothing here is reachable from the wire.
+    /// </summary>
+    /// <remarks>
+    /// Safe to retry: calling it again after a store fault revokes nothing more and purges what is
+    /// left. What it cannot stop: a live delivery or direct push already being sent completes. If the
+    /// same peer is granted mediation again while the call runs, messages stored for the new grant
+    /// before the purge are removed too, so deny the peer in the mediation policy before revoking. A
+    /// fault of the mediation store or the message store propagates to the caller.
+    /// </remarks>
+    /// <param name="peerDid">The DID of the peer the grant was made to: a bare DID.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Whether a grant was revoked, and how many messages were removed.</returns>
+    /// <exception cref="ArgumentException"><paramref name="peerDid"/> is not a bare DID. The value is not quoted.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
+    public ValueTask<GrantRevocation> RevokeAndPurgeAsync(string peerDid, CancellationToken ct = default)
+        => throw new NotImplementedException("#95 B6");
+}
+
+/// <summary>What <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/> did.</summary>
+/// <param name="Revoked"><c>true</c> when the peer held a grant and it is now revoked; <c>false</c> when it held none.</param>
+/// <param name="Purged">How many messages held under the grant were removed.</param>
+public readonly record struct GrantRevocation(bool Revoked, int Purged)
+{
+    /// <summary>The outcome only: no DID is printed.</summary>
+    public override string ToString() => $"GrantRevocation {{ Revoked = {Revoked}, Purged = {Purged} }}";
 }
 
 /// <summary>When a message handed to <see cref="MessagePickupQueue.DeliverAsync"/> is due and when it expires.</summary>
