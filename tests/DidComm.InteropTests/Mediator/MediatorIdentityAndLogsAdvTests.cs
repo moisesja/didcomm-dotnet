@@ -167,7 +167,7 @@ public sealed class MediatorIdentityAndLogsAdvTests
 
     private const string Marker = "ADVMARKER-did:peer:2.Ez6LSmallory";
 
-    [Fact(Skip = "ADV-1 DEFECT 5 (P3): the endpoints MapDidCommMediator composes log every rejected inbound with the exception object (LogWarning(ex, ...), not rate-limited); its message can quote stranger-chosen text — here a message id with a DID and a newline — so attacker text and DIDs reach the mediator's Warning lines, contrary to the #95 logging claim ('never a DID ... or exception text; every line a stranger can trigger is rate-limited'). Same code on main in DidComm.AspNetCore. Un-skip to see it fail.")]
+    [Fact]
     public async Task ADV1_D5_No_line_the_mediator_endpoints_write_for_a_strangers_rejected_message_carries_its_text()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
@@ -181,29 +181,6 @@ public sealed class MediatorIdentityAndLogsAdvTests
         }
 
         mediator.Logs.Entries.Should().NotContain(e => e.Contains(Marker, StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task A_strangers_rejected_message_puts_its_text_in_the_mediator_endpoints_Warning_lines_today()
-    {
-        // DEFECT 5 as it behaves now (pin): over HTTP and over the mediator WebSocket, each rejected
-        // message writes one Warning with the exception, whose message quotes the hostile id —
-        // marker, DID and the injected line break included — and every repeat writes another.
-        await using var mediator = await MediatorTestServer.StartAsync();
-
-        for (var i = 0; i < 3; i++)
-            (await PostPlaintextAsync(mediator, HostilePlaintext())).Should().Be(HttpStatusCode.BadRequest);
-        using (var socket = await mediator.ConnectAsync())
-        {
-            await ReturnRouteTestHost.SendAsync(socket, HostilePlaintext());
-            await MediatorTestServer.WaitUntilAsync(() => mediator.Logs.Entries.Count(e => e.Contains("MapDidCommWebSocket", StringComparison.Ordinal)) >= 1, "the socket logged the discard");
-            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
-        }
-
-        var leaking = mediator.Logs.Records.Where(r => r.Text.Contains(Marker, StringComparison.Ordinal)).ToList();
-        leaking.Should().HaveCount(4, "three HTTP rejections and one WebSocket discard, none rate-limited");
-        leaking.Should().OnlyContain(r => r.Level == LogLevel.Warning);
-        leaking.Should().OnlyContain(r => r.Text.Contains("\nINFO: forged line", StringComparison.Ordinal), "the line break in the id reaches the sink as is");
     }
 
     /// <summary>A plaintext message whose id breaks FR-MSG-02: a DID-looking marker and a line break.</summary>

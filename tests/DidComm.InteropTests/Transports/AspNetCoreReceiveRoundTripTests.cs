@@ -264,8 +264,9 @@ public sealed class AspNetCoreReceiveRoundTripTests
         rejected.Status.Should().Be(HttpStatusCode.BadRequest);
         rejected.Body.Should().BeEmpty();
         received.Should().BeEmpty();
-        logs.Entries.Should().Contain(e => e.Contains("rejecting inbound envelope (MalformedMessageException)") && e.Contains("JWS signer 'kid' exceeds the maximum length"),
-            "the logged rejection is the length refusal");
+        // #95 AD-5: the rejection names the exception type, never its text.
+        logs.Entries.Should().Contain(e => e.Contains("rejecting inbound envelope (MalformedMessageException"), "the logged rejection is the malformed-message refusal");
+        logs.Entries.Should().NotContain(e => e.Contains("JWS signer 'kid' exceeds the maximum length"), "the exception's text is not logged");
         logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
         (await PostEnvelopeAsync(server, "not even json")).Should().Be(rejected, "the response is the same as for any other rejection");
     }

@@ -300,7 +300,9 @@ public sealed class WebSocketTransportRoundTripTests
 
         socket.State.Should().Be(WebSocketState.Open, "an over-long kid must not tear down the connection");
         received.Should().HaveCount(1, "the hostile envelope is dropped, the valid one is still delivered");
-        logs.Entries.Should().Contain(e => e.Contains("discarding malformed envelope") && e.Contains("JWS signer 'kid' exceeds the maximum length"));
+        // #95 AD-5: the discard names the exception type, never its text.
+        logs.Entries.Should().Contain(e => e.Contains("discarding malformed envelope (MalformedMessageException)"));
+        logs.Entries.Should().NotContain(e => e.Contains("JWS signer 'kid' exceeds the maximum length"), "the exception's text is not logged");
         logs.Entries.Should().NotContain(e => e.Contains(new string('k', 64)), "the logs must not carry the over-long value");
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test done", default);

@@ -1087,10 +1087,11 @@ public sealed class MessagePickupWebSocketTests
 
         mediator.Logs.OfPickup.Where(r => Leaks(r.Rendered)).Select(r => r.Rendered).Should().BeEmpty(
             "pickup log lines carry the id of the request, type names and counts — never a DID, a recipient_did, an attachment id or a thread id");
-        var logged = mediator.Logs.Records.Where(r => r.Exception is not null).ToList();
-        logged.Should().HaveCountGreaterThanOrEqualTo(malformed.Length, "the endpoint logs each malformed request with its exception");
-        logged.Where(r => Leaks(r.Exception!.ToString())).Select(r => r.Exception!.Message).Should().BeEmpty(
-            "a MalformedMessageException names the member and the rule, never a value");
+        // The endpoint writes the exception's type name, never the object (#95 AD-5; it used to log
+        // the object, whose text a stranger can shape).
+        mediator.Logs.Records.Where(r => r.Exception is not null).Should().BeEmpty("no line carries an exception object");
+        mediator.Logs.Records.Count(r => r.Text.Contains(nameof(DidComm.Exceptions.MalformedMessageException), StringComparison.Ordinal))
+            .Should().BeGreaterThanOrEqualTo(malformed.Length, "the endpoint logs each malformed request by its type");
         mediator.Logs.OfOthers.Where(r => r.Level >= LogLevel.Information && Leaks(r.Rendered)).Select(r => $"{r.Category}: {r.Text}").Should().BeEmpty(
             "no line of the host at Information or above carries one of these values either");
     }
