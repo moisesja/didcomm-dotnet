@@ -2,10 +2,12 @@ using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Mediator.Coordination;
+using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Tests.Coordination;
+using DidComm.Messages;
+using DidComm.Resolution;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
-using DidComm.Messages;
 using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
@@ -250,6 +252,70 @@ internal sealed class ScriptedMediationStore : IMediationStore
 
     public ValueTask<MediationGrant?> FindGrantByRecipientDidAsync(string recipientDid, CancellationToken ct)
         => OnFind is { } hook ? hook(recipientDid, ct) : _inner.FindGrantByRecipientDidAsync(recipientDid, ct);
+}
+
+/// <summary>An <see cref="IMessageStore"/> over the real in-memory store whose purge a test can replace; signals every purge call.</summary>
+internal sealed class ScriptedMessageStore : IMessageStore
+{
+    private readonly object _gate = new();
+    private readonly List<(int Count, TaskCompletionSource Signal)> _waiters = new();
+    private int _purges;
+
+    public InMemoryMessageStore Inner { get; } = new(new MessagePickupOptions());
+
+    /// <summary>Replaces the purge; the default purges the inner store.</summary>
+    public Func<DateTimeOffset, CancellationToken, ValueTask<int>>? OnPurgeExpired { get; set; }
+
+    public int Purges => Volatile.Read(ref _purges);
+
+    /// <summary>Wait (bounded, in real time) until <paramref name="count"/> purge calls have completed.</summary>
+    public Task WaitForPurgesAsync(int count, TimeSpan timeout)
+    {
+        lock (_gate)
+        {
+            if (_purges >= count)
+                return Task.CompletedTask;
+            var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _waiters.Add((count, signal));
+            return signal.Task.WaitAsync(timeout);
+        }
+    }
+
+    public async ValueTask<int> PurgeExpiredAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        try
+        {
+            return OnPurgeExpired is { } hook ? await hook(now, ct) : await Inner.PurgeExpiredAsync(now, ct);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _purges++;
+                foreach (var waiter in _waiters.Where(w => w.Count <= _purges).ToArray())
+                {
+                    waiter.Signal.TrySetResult();
+                    _waiters.Remove(waiter);
+                }
+            }
+        }
+    }
+
+    public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct) => Inner.EnqueueAsync(message, lease, now, ct);
+    public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => Inner.LeaseAsync(request, ct);
+    public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
+    public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
+    public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
+    public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct) => Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);
+    public ValueTask<int> PurgeRecipientAsync(string grantPeerDid, string recipientDid, CancellationToken ct) => Inner.PurgeRecipientAsync(grantPeerDid, recipientDid, ct);
+    public ValueTask<int> PurgeGrantAsync(string grantPeerDid, CancellationToken ct) => Inner.PurgeGrantAsync(grantPeerDid, ct);
+}
+
+/// <summary>An <see cref="IServiceEndpointResolver"/> a test scripts per DID.</summary>
+internal sealed class ScriptedServiceResolver(Func<string, CancellationToken, Task<IReadOnlyList<DidCommServiceInfo>>> resolve) : IServiceEndpointResolver
+{
+    public Task<IReadOnlyList<DidCommServiceInfo>> ResolveAsync(string did, CancellationToken ct = default) => resolve(did, ct);
 }
 
 /// <summary>A live (WebSocket-like) return-route session that takes every message and records it.</summary>

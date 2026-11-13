@@ -7,6 +7,7 @@ using DidComm.Protocols.Routing;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -183,6 +184,7 @@ public static class MediatorBuilderExtensions
             sp.GetRequiredService<IOptions<MediatorOptions>>(),
             sp.GetService<ILogger<MediatorForwardSink>>()));
         services.TryAdd(ServiceDescriptor.Singleton(typeof(IForwardSink), s_forwardSink));
+        services.TryAddSingleton<MediatorInvitationHolder>();
 
         // Validates the settings this call can see; its TryAdds of the options and the defaults
         // registered above are no-ops.
@@ -190,6 +192,13 @@ public static class MediatorBuilderExtensions
 
         // Trust Ping for health checks, Discover Features for the role disclosures (idempotent).
         builder.AddBuiltInProtocols();
+
+        // The start-up checks and the purge schedule; it resolves everything when the host starts it.
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, MediatorHostedService>(sp => new MediatorHostedService(
+            sp,
+            sp.GetRequiredService<IOptions<MediatorOptions>>(),
+            sp.GetService<ILogger<MediatorHostedService>>(),
+            sp.GetService<TimeProvider>() ?? TimeProvider.System)));
         return builder;
     }
 

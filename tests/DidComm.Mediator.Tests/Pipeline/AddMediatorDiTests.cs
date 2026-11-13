@@ -411,7 +411,21 @@ public sealed class AddMediatorDiTests
             sp.GetRequiredService<IForwardSink>().Should().BeOfType<MediatorForwardSink>();
             sp.GetRequiredService<DirectPushDispatcher>();
             sp.GetRequiredService<DidCommClient>();
+            sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<MediatorHostedService>().Should().ContainSingle();
+            sp.GetRequiredService<MediatorInvitationHolder>().PlaintextJson.Should().BeNull("only a started mediator issues its invitation");
         }).WaitAsync(Timeout);
+    }
+
+    [Fact]
+    public async Task Repeated_calls_register_one_hosted_service()
+    {
+        await using var sp = Build(b =>
+        {
+            b.AddMediator(o => o.CoordinateMediation.RoutingDids.Add(Mediator1));
+            b.AddMediator();
+        });
+
+        sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<MediatorHostedService>().Should().ContainSingle();
     }
 
     [Fact]
