@@ -34,7 +34,7 @@ public sealed class ForwardPipelineQaTests
     [Fact]
     public async Task A_registered_recipient_is_queued_and_counted_once()
     {
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create();
         await fixture.EnrolAsync(Peer, Recipient);
 
         await RunAsync(fixture, Forward(Recipient, "e2e-1"));
@@ -47,7 +47,7 @@ public sealed class ForwardPipelineQaTests
     [Fact]
     public async Task A_DID_URL_next_is_queued_under_its_DID_and_counted_once()
     {
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create();
         await fixture.EnrolAsync(Peer, Recipient);
 
         await RunAsync(fixture, Forward(Recipient + "#key-x25519-1", "e2e-url"));
@@ -71,7 +71,7 @@ public sealed class ForwardPipelineQaTests
     [Fact]
     public async Task A_grant_revoked_between_the_inline_check_and_the_sink_is_dropped_by_the_sink_and_counted_once()
     {
-        await using var fixture = PushFixture.Create(directory: _ => new Uri("https://qa-e2e-host.example/in"));
+        await using var fixture = PushFixture.Create();
         await fixture.EnrolAsync(Peer, Recipient);
         var ack = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -83,7 +83,7 @@ public sealed class ForwardPipelineQaTests
 
         fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DroppedUnknown);
         fixture.Store.MessageCount.Should().Be(0);
-        fixture.PushOutcomeLog.Should().BeEmpty("a dropped forward is never handed to direct push");
+        fixture.PushOutcomeLog.Should().BeEmpty("a dropped forward is never handed to the push workers");
     }
 
     [Fact]
@@ -143,11 +143,7 @@ public sealed class ForwardPipelineQaTests
     [Fact]
     public async Task Forwards_past_the_quota_are_each_counted_once_as_quota()
     {
-        await using var fixture = PushFixture.Create(configure: o =>
-        {
-            o.DirectPush = false;
-            o.Pickup.MaxQueueMessages = 2;
-        });
+        await using var fixture = PushFixture.Create(configure: o => o.Pickup.MaxQueueMessages = 2);
         await fixture.EnrolAsync(Peer, Recipient);
 
         for (var i = 0; i < 5; i++)
@@ -166,7 +162,7 @@ public sealed class ForwardPipelineQaTests
     public async Task A_mediation_store_that_throws_on_one_lookup_ends_the_forward_with_one_outcome_and_no_leak(int failingCall, string expected, int retained)
     {
         var mediation = new HookedMediationStore();
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false, services: s => s.AddSingleton<IMediationStore>(mediation));
+        await using var fixture = PushFixture.Create(services: s => s.AddSingleton<IMediationStore>(mediation));
         await fixture.EnrolAsync(Peer, Recipient);
         mediation.OnFind = (call, _, _) => call == failingCall
             ? throw new HandlerBoomException(HandlerBoomException.Marker + " " + Recipient + " " + Peer)
@@ -214,7 +210,7 @@ public sealed class ForwardPipelineQaTests
     {
         var first = true;
         var store = new HookedMessageStore { OnEnqueue = _ => { var dup = first; first = false; return dup ? EnqueueOutcome.DuplicateId : null; } };
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false, services: s => s.AddSingleton<IMessageStore>(store));
+        await using var fixture = PushFixture.Create(services: s => s.AddSingleton<IMessageStore>(store));
         await fixture.EnrolAsync(Peer, Recipient);
 
         await RunAsync(fixture, Forward(Recipient, "e2e-dup-once"));
@@ -232,11 +228,9 @@ public sealed class ForwardPipelineQaTests
     // QA-1 DEFECT 4 (P3, fixed by #95 Q-6): the handler shuts down while the queue is re-checking the
     // registration of a message it has already stored. DeliverAsync kept the record but left with
     // OperationCanceledException; the sink re-threw it and the handler counted the forward as
-    // Dropped-Shutdown — while the message was in the queue and would be delivered — and the
-    // message was never handed to direct push. Now the stored message is reported Queued, counted
-    // Queued, and handed to direct push like any queued message; this fixture's push endpoint
-    // accepts it, so the push delivers and removes it (whether that has happened by the time the
-    // shutdown returns is a race, so the test waits for the push workers before it looks).
+    // Dropped-Shutdown — while the message was in the queue and would be delivered. Now the stored
+    // message is reported Queued, counted Queued, and handed on like any queued message: this
+    // recipient has no live session, so it waits in the queue for pickup.
     [Fact]
     public async Task A_shutdown_after_the_message_is_stored_counts_what_happened_to_it()
     {
@@ -245,8 +239,8 @@ public sealed class ForwardPipelineQaTests
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.Queued);
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
-        fixture.Store.MessageCount.Should().Be(0, "the direct push it was handed to delivered it");
+        fixture.PushOutcomeLog.Should().BeEmpty("no live session: nothing to push");
+        fixture.Store.MessageCount.Should().Be(1, "the stored message waits for pickup");
     }
 
     // ── an attachment that decodes to nothing (DEFECT 5, mediator side) ───────────────────
@@ -273,7 +267,7 @@ public sealed class ForwardPipelineQaTests
     {
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
-        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did);
         var client = fixture.Services.GetRequiredService<DidCommClient>();
         var forward = ForwardMessage.Create(mediator.Did, Recipient, new[] { Inner });
         forward.AdditionalHeaders = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -294,11 +288,7 @@ public sealed class ForwardPipelineQaTests
     {
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
-        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o =>
-        {
-            o.DirectPush = false;
-            o.MaxForwardDelay = TimeSpan.FromMilliseconds(3);
-        });
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.MaxForwardDelay = TimeSpan.FromMilliseconds(3));
         var client = fixture.Services.GetRequiredService<DidCommClient>();
         var forward = ForwardMessage.Create(mediator.Did, Recipient, new[] { Inner });
         forward.AdditionalHeaders = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -320,7 +310,7 @@ public sealed class ForwardPipelineQaTests
     {
         var mediation = new HookedMediationStore();
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var fixture = PushFixture.Create(directory: _ => new Uri("https://qa-e2e-host.example/in"), services: s => s.AddSingleton<IMediationStore>(mediation));
+        var fixture = PushFixture.Create(services: s => s.AddSingleton<IMediationStore>(mediation));
         await fixture.EnrolAsync(Peer, Recipient);
         mediation.OnFindAsync = async (call, _, ct) =>
         {

@@ -116,7 +116,7 @@ public sealed class QueueIdsQaTests
     public async Task A_container_id_generator_that_throws_is_never_called_for_a_queued_message()
     {
         var generator = new ThrowingGenerator();
-        await using var fixture = PushFixture.Create(configure: o => { o.DirectPush = false; o.Pickup.MaxQueueMessages = 300; }, services: s => s.AddSingleton<IMessageIdGenerator>(generator));
+        await using var fixture = PushFixture.Create(configure: o => o.Pickup.MaxQueueMessages = 300, services: s => s.AddSingleton<IMessageIdGenerator>(generator));
         await fixture.EnrolAsync(Peer, Recipient);
 
         var ids = new List<string>();
@@ -129,7 +129,7 @@ public sealed class QueueIdsQaTests
 
     private static PushFixture Fixture(Func<string> ids)
         => PushFixture.Create(
-            configure: o => { o.DirectPush = false; o.Pickup.MaxQueueMessages = 300; },
+            configure: o => o.Pickup.MaxQueueMessages = 300,
             services: s => s.AddSingleton(new PickupIdSource(ids)));
 
     private sealed class ThrowingGenerator : IMessageIdGenerator

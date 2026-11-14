@@ -107,7 +107,7 @@ public sealed class RevokeAndRecheckQaTests
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
         var peer = await peers.NewAsync();
-        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did);
         await fixture.EnrolAsync(peer.Did, Recipient);
         var session = new ParkingLiveSession(peer.Did, mediator.Did);
         await TurnLiveOnAsync(fixture, peer.Did, mediator.Did, session);
@@ -129,7 +129,7 @@ public sealed class RevokeAndRecheckQaTests
     public async Task Cancelled_between_the_revoke_and_the_purge_it_revokes_and_a_retry_purges()
     {
         var mediation = new CancellingOnRevokeStore();
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false, services: s => s.AddSingleton<IMediationStore>(mediation));
+        await using var fixture = PushFixture.Create(services: s => s.AddSingleton<IMediationStore>(mediation));
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.Queue.DeliverAsync(Recipient, PushFixture.Payload(30));
         using var cts = new CancellationTokenSource();
@@ -147,7 +147,7 @@ public sealed class RevokeAndRecheckQaTests
     [Fact]
     public async Task Two_concurrent_revokes_revoke_once_and_purge_everything_once()
     {
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create();
         await fixture.EnrolAsync(Peer, Recipient);
         for (var i = 0; i < 5; i++)
             await fixture.Queue.DeliverAsync(Recipient, PushFixture.Payload(30, (byte)i));
@@ -168,7 +168,7 @@ public sealed class RevokeAndRecheckQaTests
     [InlineData("DID:example:qa-secret")]
     public async Task A_peer_that_is_not_a_bare_DID_is_refused_without_quoting_it(string value)
     {
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create();
 
         var ex = (await FluentActions.Awaiting(async () => await fixture.Queue.RevokeAndPurgeAsync(value)).Should().ThrowAsync<ArgumentException>()).Which;
 
@@ -183,7 +183,7 @@ public sealed class RevokeAndRecheckQaTests
     {
         var mediation = new HookedMediationStore();
         var gate = new Gate();
-        var fixture = PushFixture.Create(configure: o => o.DirectPush = false, services: s => s.AddSingleton<IMediationStore>(mediation));
+        var fixture = PushFixture.Create(services: s => s.AddSingleton<IMediationStore>(mediation));
         if (extraRecipient is null)
             await fixture.EnrolAsync(Peer, Recipient);
         else

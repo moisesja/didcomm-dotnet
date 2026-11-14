@@ -153,14 +153,7 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
             _logger);
         await validator.ValidateAsync(routingDids, cancellationToken).ConfigureAwait(false);
 
-        // (7) Direct push without a directory pushes nothing.
-        if (effective.DirectPush && !IsRegistered(typeof(IRecipientEndpointDirectory)))
-        {
-            MediatorLog.Write(_logger, LogLevel.Warning,
-                "Direct push is on but no IRecipientEndpointDirectory is registered: nothing will be pushed to an endpoint, and every message not pushed live waits for pickup. Register one before AddMediator().");
-        }
-
-        // (8) The out-of-band invitation, from the primary routing DID, now that it is known good.
+        // (7) The out-of-band invitation, from the primary routing DID, now that it is known good.
         var client = _services.GetRequiredService<DidCommClient>();
         var invitation = OutOfBand.CreateInvitation(
             from: routingDids[0],
@@ -171,17 +164,16 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
         _services.GetRequiredService<MediatorInvitationHolder>().PlaintextJson =
             await client.PackPlaintextAsync(invitation.Message, cancellationToken).ConfigureAwait(false);
 
-        // (9) The observable instruments, for whichever of these is the library's in-memory type.
+        // (8) The observable instruments, for whichever of these is the library's in-memory type.
         Resolve();
         _metrics!.RegisterObservables(replayGuard, sessions, _services.GetRequiredService<IMessageStore>());
 
-        // (10) One line, no DID.
+        // (9) One line, no DID.
         MediatorLog.Write(_logger, LogLevel.Information,
-            "Mediator ready: {RoutingDidCount} routing DID(s) checked (FR-MED-07); forward delay honoured up to {MaxForwardDelay}; mailbox age limit {MaxMessageAge}; direct push {DirectPush}; purge every {PurgeInterval}.",
+            "Mediator ready: {RoutingDidCount} routing DID(s) checked (FR-MED-07); forward delay honoured up to {MaxForwardDelay}; mailbox age limit {MaxMessageAge}; purge every {PurgeInterval}.",
             routingDids.Count,
             effective.MaxForwardDelay,
             effective.Pickup.MaxMessageAge is { } age ? age.ToString() : "off",
-            effective.DirectPush ? "on" : "off",
             effective.PurgeInterval);
     }
 
@@ -394,11 +386,6 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
         }
         return dids;
     }
-
-    private bool IsRegistered(Type service)
-        => _services.GetService<IServiceProviderIsService>() is { } check
-            ? check.IsService(service)
-            : _services.GetService(service) is not null;
 
     private static void CancelQuietly(CancellationTokenSource source)
     {

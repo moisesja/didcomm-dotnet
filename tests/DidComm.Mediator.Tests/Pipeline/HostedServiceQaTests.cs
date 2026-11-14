@@ -261,7 +261,7 @@ public sealed class HostedServiceQaTests
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
         var peer = await peers.NewAsync();
-        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did, configure: o => o.DirectPush = false);
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did);
         await fixture.EnrolAsync(peer.Did, "did:example:qa-live-recipient");
         var session = new LiveTestSession(peer.Did, mediator.Did);
         fixture.Services.GetRequiredService<IReturnRouteSessionRegistry>().Register(session);

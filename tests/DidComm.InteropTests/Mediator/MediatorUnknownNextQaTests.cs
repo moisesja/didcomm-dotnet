@@ -1,11 +1,8 @@
 using System.Net;
 using AwesomeAssertions;
 using DidComm.InteropTests.AspNetCore;
-using DidComm.Mediator;
 using DidComm.Mediator.Coordination;
-using DidComm.Mediator.Pipeline;
 using DidComm.Protocols.Routing;
-using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace DidComm.InteropTests.Mediator;
@@ -61,10 +58,10 @@ public sealed class MediatorUnknownNextQaTests
         await f.Mediator.PushesIdleAsync();
 
         f.Mediator.Outcomes.Should().ContainSingle().Which.Should().BeOneOf(ForwardOutcomes.DroppedUnknown, ForwardOutcomes.DroppedMalformed);
+        // No outbound message: nothing is stored, so nothing can be pushed (pushes are the mediator's
+        // only egress for a stored forward).
         f.Mediator.Store.MessageCount.Should().Be(0);
         f.Mediator.PushOutcomes.Should().BeEmpty();
-        f.Directory.Calls.Should().Be(0);
-        f.Inbox.Entered.Should().Be(0, "no outbound message");
         f.Mediator.Logs.Entries.Should().Contain(e => e.Contains(forward.Id), "the drop is logged by the forward's id");
         f.Mediator.LeakingLogLines(next, f.Removed.Did, f.RevokedRecipient.Did).Should().BeEmpty();
         f.Mediator.Logs.Entries.Should().NotContain(e => e.Contains("evil.example", StringComparison.Ordinal));
@@ -77,7 +74,7 @@ public sealed class MediatorUnknownNextQaTests
     [InlineData(";param=1")]
     public async Task A_DID_URL_next_of_a_registered_DID_is_delivered_to_that_DID(string suffix)
     {
-        await using var f = await Cast.StartAsync(directPush: false);
+        await using var f = await Cast.StartAsync();
 
         var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.Bob, next: f.Bob.Did + suffix);
 
@@ -121,7 +118,7 @@ public sealed class MediatorUnknownNextQaTests
         const int WarmUp = 8;
         const int Batches = 6;
         const int PerBatch = 8;
-        await using var f = await Cast.StartAsync(directPush: false, raiseQuotas: true);
+        await using var f = await Cast.StartAsync(raiseQuotas: true);
         var classes = new[] { f.Bob.Did, f.Stranger.Did, f.Removed.Did, f.RevokedRecipient.Did };
         var inner = await f.Alice.AuthcryptAsync(f.Alice.Note(f.Bob.Did), f.Bob.Did);
         var total = WarmUp + Batches * PerBatch;
@@ -168,15 +165,13 @@ public sealed class MediatorUnknownNextQaTests
     }
 
     /// <summary>
-    /// A mediator (direct push on, every grant mapped to the inbox so any outbound would show) with:
-    /// Bob (registered, his own DID), Carol (registered C, then removed it), Dave (registered D, then
-    /// his grant revoked and purged), Erin (granted, registered nothing), a stranger, and Alice.
+    /// A mediator with: Bob (registered, his own DID), Carol (registered C, then removed it), Dave
+    /// (registered D, then his grant revoked and purged), Erin (granted, registered nothing), a
+    /// stranger, and Alice.
     /// </summary>
     private sealed class Cast : IAsyncDisposable
     {
         public required MediatorTestServer Mediator { get; init; }
-        public required InboxServer Inbox { get; init; }
-        public required TestEndpointDirectory Directory { get; init; }
         public required TestPeer Bob { get; init; }
         public required TestPeer Removed { get; init; }
         public required TestPeer RevokedRecipient { get; init; }
@@ -197,26 +192,17 @@ public sealed class MediatorUnknownNextQaTests
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
 
-        public static async Task<Cast> StartAsync(bool directPush = true, bool raiseQuotas = false)
+        public static async Task<Cast> StartAsync(bool raiseQuotas = false)
         {
-            var network = new MediatorNetwork();
-            var inbox = await InboxServer.StartAsync(network);
-            var directory = new TestEndpointDirectory();
-            var mediator = await MediatorTestServer.StartAsync(o =>
+            var mediator = await MediatorTestServer.StartAsync(o => o.Mediator = m =>
             {
-                o.Network = network;
-                o.Mediator = m =>
+                if (raiseQuotas)
                 {
-                    m.DirectPush = directPush;
-                    if (raiseQuotas)
-                    {
-                        m.Pickup.MaxQueueMessages = 10_000;
-                        m.Pickup.MaxQueueBytes = 512L * 1024 * 1024;
-                        m.Pickup.MaxStoreMessages = 10_000;
-                        m.Pickup.MaxStoreBytes = 512L * 1024 * 1024;
-                    }
-                };
-                o.ConfigureServices = s => s.AddSingleton<IRecipientEndpointDirectory>(directory);
+                    m.Pickup.MaxQueueMessages = 10_000;
+                    m.Pickup.MaxQueueBytes = 512L * 1024 * 1024;
+                    m.Pickup.MaxStoreMessages = 10_000;
+                    m.Pickup.MaxStoreBytes = 512L * 1024 * 1024;
+                }
             });
             var bob = await mediator.NewPeerAsync();
             await mediator.EnrolAsync(bob);
@@ -238,20 +224,14 @@ public sealed class MediatorUnknownNextQaTests
             (await mediator.RequestMediationAsync(erin)).Should().Equal(mediator.Did);
 
             var stranger = await mediator.NewPeerAsync();
-            foreach (var peer in new[] { bob, carol, dave, erin, stranger })
-                directory.Map(peer.Did, inbox.Endpoint("/inbox"));
             var alice = await mediator.NewSenderAsync();
             return new Cast
             {
-                Mediator = mediator, Inbox = inbox, Directory = directory, Bob = bob, Removed = removed,
+                Mediator = mediator, Bob = bob, Removed = removed,
                 RevokedRecipient = revoked, Erin = erin, Stranger = stranger, Alice = alice,
             };
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await Mediator.DisposeAsync();
-            await Inbox.DisposeAsync();
-        }
+        public ValueTask DisposeAsync() => Mediator.DisposeAsync();
     }
 }

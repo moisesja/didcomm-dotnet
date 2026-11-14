@@ -16,7 +16,7 @@ namespace DidComm.InteropTests.Mediator;
 /// QA-2 (#95), time through the real endpoints with the clock injected (<c>DidCommOptions.Clock</c>;
 /// peers stamp <c>created_time</c> from the server's clock): the <c>delay_milli</c> cap at and around
 /// its bound, negative and non-integer hints, the exact not-before instant, delayed messages and live
-/// or direct push; the mailbox age limit one tick before, at and after the limit for <c>status</c>,
+/// push; the mailbox age limit one tick before, at and after the limit for <c>status</c>,
 /// <c>delivery-request</c>, live push and the hosted purge (once, and through the loop on a manual
 /// <see cref="TimeProvider"/>); and FR-ROUTE-09 expiry at every stage a forward passes through.
 /// </summary>
@@ -146,24 +146,30 @@ public sealed class MediatorTimeBoundsQaTests
     {
         // L-020 (PR #109 review round 2, D-1): a push takes what the store hands out now, so a delayed
         // message is never pushed before it is due (FR-ROUTE-10) and, once due, goes with the grant's
-        // next push like any queued message; it used to stay pickup-only for good. (Round 8: unless a
-        // later message of the grant had its direct attempt first — then it is behind the grant's
-        // cursor and waits for pickup; PushArrivalOrderTests pins that.)
+        // next push like any queued message; it used to stay pickup-only for good. Over the live
+        // session here (its form for a push to the recipient's own endpoint left #95, #110).
         await using var f = await QaPushFixture.StartAsync(m => m.MaxForwardDelay = Cap);
+        using var socket = await f.Mediator.ConnectAsync();
+        await MediatorDeliveryModesQaTests.GoLiveAsync(f.Mediator, socket, f.Bob);
 
         var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, Qa.Delay(1));
         await f.Mediator.PushesIdleAsync();
         f.Mediator.PushOutcomes.Should().BeEmpty("one millisecond of delay is enough to skip the push");
         f.Mediator.Clock.Advance(TimeSpan.FromMilliseconds(1));
         var undelayed = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "undelayed");
-        await f.Mediator.PushesIdleAsync();
 
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed, PushOutcomes.Pushed);
-        var pushed = new List<string>();
-        foreach (var (_, body) in f.Inbox.Received)
-            pushed.Add((await MediatorRecipient.UnpackFromSenderAsync(f.B, body, f.Alice)).Message.Id);
-        pushed.Should().Equal(note.Id, undelayed.Id);
-        (await f.Mediator.FetchAsync(f.Bob)).Should().BeEmpty();
+        var pushed = new List<DeliveredMessage>();
+        for (var i = 0; i < 2; i++)
+            pushed.Add((await f.Mediator.ReceiveOverSocketAsync(socket, f.Bob)).Delivery(thid: null).Should().ContainSingle().Subject);
+        var ids = new List<string>();
+        foreach (var m in pushed)
+            ids.Add((await MediatorRecipient.UnpackFromSenderAsync(f.B, m.Payload, f.Alice)).Message.Id);
+        ids.Should().Equal(note.Id, undelayed.Id);
+        await f.Mediator.PushesIdleAsync();
+        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive, PushOutcomes.PushedLive);
+        (await f.Mediator.FetchAsync(f.Bob)).Should().BeEmpty("both are leased to the live session");
+        (await MediatorDeliveryModesQaTests.AckOverSocketAsync(f.Mediator, socket, f.Bob, pushed.Select(m => m.Id).ToArray())).MessageCount.Should().Be(0);
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
     }
 
     // ---- mailbox age limit -------------------------------------------------------------------------

@@ -138,6 +138,42 @@ public sealed class MediatorLivePushAdv4Tests
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
     }
 
+    [Fact]
+    public async Task A_message_that_ages_out_while_the_grants_first_live_push_is_held_is_never_pushed()
+    {
+        // FR-PICK-10 (QA-2; its form for a push to the recipient's own endpoint left #95, #110): the
+        // mailbox age limit is part of the record's expiry, so a message that ages out while the
+        // grant's first push is held in its key resolution is never handed to a push; only the push
+        // that already took its record completes.
+        var (mediator, keys) = await StartAsync(honourCancellation: true, mediatorOptions: m =>
+        {
+            m.MaxForwardDelay = TimeSpan.Zero;
+            m.Pickup.MaxMessageAge = TimeSpan.FromMinutes(1);
+        });
+        await using var _ = mediator;
+        var bob = await mediator.NewPeerAsync();
+        var a = await mediator.NewRecipientAsync();
+        await mediator.EnrolAsync(bob, a.Did);
+        var alice = await mediator.NewSenderAsync();
+        using var socket = await mediator.ConnectAsync();
+        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob);
+        keys.Pause(bob.Did);
+
+        var first = await Qa.SendNoteAsync(mediator, alice, a, content: "first");
+        await MediatorTestServer.WaitUntilAsync(() => keys.Arrivals >= 1, "the first push is packing");
+        mediator.Clock.Advance(TimeSpan.FromSeconds(30));
+        await Qa.SendNoteAsync(mediator, alice, a, content: "second");
+        // The first ages out at +60 s, the second at +90 s: past +90 s both are beyond the limit.
+        mediator.Clock.Advance(TimeSpan.FromSeconds(61));
+        keys.Release();
+
+        var pushed = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
+        (await MediatorRecipient.UnpackFromSenderAsync(a, pushed.Payload, alice)).Message.Id.Should().Be(first.Id, "only the push that had already taken its record completes");
+        await mediator.PushesIdleAsync();
+        mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.PushedLive }, "the aged-out second message is never handed to a push");
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
+    }
+
     // ---- isolation: grants that stall their own resolution vs another live recipient ---------------
 
     [Fact]

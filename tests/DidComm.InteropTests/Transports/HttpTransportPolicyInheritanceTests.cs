@@ -92,6 +92,54 @@ public sealed class HttpTransportPolicyInheritanceTests
             "no policy was configured anywhere, so the default blocking policy refuses loopback");
     }
 
+    // #95 ADV-3 (moved here from the single-attempt wire tests, which left the PR with #110): every
+    // spelling of a loopback destination, the IPv4-translated ::ffff:0:a.b.c.d and the RFC 8215
+    // 64:ff9b:1::/48 forms of AD-8 included, is refused by the real ConnectCallback before a byte is
+    // sent — the transport is called directly, so the facade's pre-send check is not in the way.
+    [Theory]
+    [InlineData("localhost")]
+    [InlineData("127.0.0.1")]
+    [InlineData("[::ffff:127.0.0.1]")]
+    [InlineData("[::ffff:0:7f00:1]")]
+    [InlineData("[::127.0.0.1]")]
+    [InlineData("[64:ff9b:1::7f00:1]")]
+    [InlineData("127.0.0.1.")]
+    [InlineData("2130706433")]
+    public async Task ConnectCallback_refuses_every_spelling_of_a_loopback_destination_with_nothing_reaching_it(string host)
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            var services = new ServiceCollection();
+            services.AddDidComm(b =>
+            {
+                b.UseNetDidResolver();
+                b.UseSecretsResolver(new InMemorySecretsResolver());
+                b.UseHttpTransport(o =>
+                {
+                    o.AllowedSchemes = new[] { "http", "https" };
+                    o.MaxRetryAttempts = 0;
+                });
+            });
+            await using var sp = services.BuildServiceProvider();
+            var transport = sp.GetRequiredService<IDidCommTransport>();
+            var request = new TransportRequest(
+                new Uri($"http://{host}:{port}/inbox"), new byte[] { 1 }, "application/didcomm-encrypted+json");
+
+            var ex = (await ((Func<Task>)(() => transport.SendAsync(request, default)))
+                .Should().ThrowAsync<HttpRequestException>()).Which;
+
+            FlattenMessages(ex).Should().Contain("private or reserved", host);
+            listener.Pending().Should().BeFalse("no connection reached the loopback listener ({0})", host);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     // Walk the InnerException chain into one string: when the SSRF guard fires, its TransportException is
     // wrapped by HttpRequestException (and a SocketException sits below a plain connect-refused), so assert
     // against the whole chain rather than any single layer's message.

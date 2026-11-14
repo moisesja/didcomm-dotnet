@@ -7,8 +7,8 @@ namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
 /// The closed vocabulary of the <c>didcomm.mediator.push.outcomes</c> counter: one value per push
-/// attempt (taking the grant's next record from the store and pushing it, live or direct; a fault or
-/// the deadline while taking counts as a failed attempt), and one per wake-up of a
+/// attempt (taking the grant's next record from the store and pushing it over the live session; a
+/// fault or the deadline while taking counts as a failed attempt), and one per wake-up of a
 /// grant that was skipped or could push nothing it had, saying why. A wake-up that finds nothing
 /// left to push (its message already pushed by a running operation, or taken by a pickup) is no
 /// outcome. A message is never counted before a push takes it.
@@ -18,31 +18,21 @@ internal static class PushOutcomes
     /// <summary>A record was pushed over the recipient's live session; it stays leased to the session until acknowledged.</summary>
     internal const string PushedLive = "Pushed-Live";
 
-    /// <summary>A record was pushed to the recipient's endpoint, which answered with a 2xx status; the queued copy was removed.</summary>
-    internal const string Pushed = "Pushed";
-
     /// <summary>
-    /// A push did not deliver and its record stays queued (always available to pickup; a live push
-    /// that was given back is tried again at the grant's next wake-up, a direct push that was sent is
-    /// not tried again): the live session did not take it or it was too large for the
-    /// session even alone (then passed over), the endpoint did not answer with a 2xx, a transport,
-    /// store or session fault, or the deadline. At the deadline the worker stops waiting without
-    /// knowing the result: the push runs on until its call ends and may still deliver (a direct
-    /// push's 2xx then removes the record; a live session that reports it sent keeps it leased).
+    /// A push did not deliver and its record stays queued (always available to pickup; a push that
+    /// was given back is tried again at the grant's next wake-up): the live session did not take it
+    /// or it was too large for the session even alone (then passed over), a store or session fault,
+    /// or the deadline. At the deadline the worker stops waiting without knowing the result: the push
+    /// runs on until its call ends and may still deliver (a live session that reports it sent keeps
+    /// it leased).
     /// </summary>
     internal const string Failed = "Push-Failed";
 
     /// <summary>A wake-up started nothing: <c>2 × PushConcurrency</c> push operations had not ended yet. The messages stay queued.</summary>
     internal const string SkippedSaturated = "Push-Skipped-Saturated";
 
-    /// <summary>A wake-up with direct push on pushed nothing: no live push applied, and there is no directory, no endpoint for the grant, or the directory failed.</summary>
-    internal const string SkippedNoEndpoint = "Push-Skipped-NoEndpoint";
-
-    /// <summary>A wake-up with direct push off pushed nothing: the recipient no longer had a live session with live delivery on.</summary>
+    /// <summary>A wake-up pushed nothing: the recipient no longer had a live session with live delivery on.</summary>
     internal const string SkippedNoLiveSession = "Push-Skipped-NoLiveSession";
-
-    /// <summary>A wake-up with direct push on pushed nothing: the directory named an endpoint that is not absolute <c>http</c> or <c>https</c>.</summary>
-    internal const string SkippedScheme = "Push-Skipped-Scheme";
 
     /// <summary>A record taken for a push was removed instead: its recipient DID is no longer registered under the grant.</summary>
     internal const string SkippedUnregistered = "Push-Skipped-Unregistered";
@@ -62,7 +52,7 @@ internal static class PushOutcomes
 /// </summary>
 internal sealed class MediatorMetrics : IDisposable
 {
-    /// <summary>Counter of push outcomes (live and direct), tagged <see cref="PushOutcomeTag"/>.</summary>
+    /// <summary>Counter of push outcomes, tagged <see cref="PushOutcomeTag"/>.</summary>
     internal const string PushOutcomesInstrument = "didcomm.mediator.push.outcomes";
 
     /// <summary>The push counter's single tag key; values from <see cref="PushOutcomes"/>.</summary>

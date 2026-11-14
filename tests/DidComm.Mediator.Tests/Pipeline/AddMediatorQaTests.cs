@@ -329,7 +329,6 @@ public sealed class AddMediatorQaTests
             b.AddMediator(o =>
             {
                 o.CoordinateMediation.RoutingDids.Add(Routing);
-                o.DirectPush = true;
             });
         });
         return services.BuildServiceProvider();

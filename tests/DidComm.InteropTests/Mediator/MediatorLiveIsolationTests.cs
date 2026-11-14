@@ -20,8 +20,7 @@ public sealed class MediatorLiveIsolationTests
     public async Task A_live_recipient_whose_key_resolution_stalls_holds_up_no_other_recipients_storage_or_pickup()
     {
         // The reviewer's reproduction: two enrolled grants, A live over a WebSocket; A's outbound key
-        // resolution paused (cancellation-cooperative) after A turned live delivery on; direct push
-        // off. Before the fix the forward pump awaited A's live push, so B's forward was accepted
+        // resolution paused (cancellation-cooperative) after A turned live delivery on. Before the fix the forward pump awaited A's live push, so B's forward was accepted
         // (202) but B's stored count stayed 0 until A's resolution was released.
         GatedKeyService? keys = null;
         await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = services =>

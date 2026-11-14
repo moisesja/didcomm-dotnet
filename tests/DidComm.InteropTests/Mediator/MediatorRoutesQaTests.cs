@@ -20,8 +20,8 @@ namespace DidComm.InteropTests.Mediator;
 /// QA-2 (#95), routes through the real mediator: the longest route a sender builds (8 forward layers,
 /// the mediator-as-endpoint layer included) is relayed and every layer peels; a 9-layer route is
 /// refused before anything is sent (FR-ROUTE-04). Rewrap mode and per-recipient extra routing keys
-/// (FR-ROUTE-05/06) produce onions the recipient unwraps whether the message reaches it live, from the
-/// queue or by direct push; and a two-mediator route still delivers when the first mediator rewraps.
+/// (FR-ROUTE-05/06) produce onions the recipient unwraps whether the message reaches it live or from
+/// the queue; and a two-mediator route still delivers when the first mediator rewraps.
 /// </summary>
 public sealed class MediatorRoutesQaTests
 {
@@ -84,17 +84,14 @@ public sealed class MediatorRoutesQaTests
     [Theory]
     [InlineData(Delivery.Queue)]
     [InlineData(Delivery.Live)]
-    [InlineData(Delivery.DirectPush)]
     public async Task In_rewrap_mode_the_recipient_peels_one_fresh_layer_whichever_way_it_receives_the_message(Delivery delivery)
         => await RoundTripAsync(delivery, m => m.RewrapMode = RewrapMode.ReanoncryptToNext, provider: null, expectLayers: 1);
 
     [Theory]
     [InlineData(Delivery.Queue, 1)]
     [InlineData(Delivery.Live, 1)]
-    [InlineData(Delivery.DirectPush, 1)]
     [InlineData(Delivery.Queue, 2)]
     [InlineData(Delivery.Live, 2)]
-    [InlineData(Delivery.DirectPush, 2)]
     public async Task Per_recipient_extra_routing_keys_add_layers_the_recipient_peels_whichever_way_it_receives_the_message(Delivery delivery, int keys)
         => await RoundTripAsync(delivery, configure: null, provider: new QaRoutingKeys(), expectLayers: keys);
 
@@ -146,26 +143,18 @@ public sealed class MediatorRoutesQaTests
 
     // ---- two mediators, the first rewrapping -------------------------------------------------------
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_two_mediator_route_delivers_when_the_first_mediator_rewraps(bool viaDirectPush)
+    [Fact]
+    public async Task A_two_mediator_route_delivers_when_the_first_mediator_rewraps()
     {
         var network = new MediatorNetwork();
         var clock = new TestClock(DateTimeOffset.FromUnixTimeSeconds(1_800_000_000));
         var m2Identity = await MediatorCast.MintAsync(new DidCommServiceSpec("http://m2.test/", Accept: new[] { "didcomm/v2" }));
-        var directory = new TestEndpointDirectory();
         await using var m1 = await MediatorTestServer.StartAsync(o =>
         {
             o.Host = "m1.test";
             o.Network = network;
             o.Clock = clock;
-            o.Mediator = m =>
-            {
-                m.DirectPush = viaDirectPush;
-                m.RewrapMode = RewrapMode.ReanoncryptToNext;
-            };
-            o.ConfigureServices = s => s.AddSingleton<IRecipientEndpointDirectory>(directory);
+            o.Mediator = m => m.RewrapMode = RewrapMode.ReanoncryptToNext;
         });
         await using var m2 = await MediatorTestServer.StartAsync(o =>
         {
@@ -176,7 +165,6 @@ public sealed class MediatorRoutesQaTests
         });
         var m2AtM1 = m1.Own(TestPeer.Create(m2Identity));
         await m1.EnrolAsync(m2AtM1);
-        directory.Map(m2.Did, m2.Endpoint);
         var bob = await m2.NewPeerAsync();
         (await m2.RequestMediationAsync(bob)).Should().Equal(m2.Did);
         var b = m2.Own(await MediatorCast.MintRecipientAsync(m1.Did, m2.Did));
@@ -187,16 +175,9 @@ public sealed class MediatorRoutesQaTests
         (await alice.Client.SendAsync(note, new SendOptions(new[] { b.Did }, alice.Did))).Transport.Accepted.Should().BeTrue();
         await m1.FlushAsync();
         m1.Outcomes.Should().Equal(ForwardOutcomes.Queued);
-        if (viaDirectPush)
-        {
-            await m1.PushesIdleAsync();
-            m1.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
-        }
-        else
-        {
-            var relayed = (await m1.FetchAsync(m2AtM1)).Should().ContainSingle().Subject;
-            await Qa.PostForwardAsync(m2, Encoding.UTF8.GetString(relayed.Payload.Span));
-        }
+        // M2 picks the message up from M1 like any recipient and posts it to its own endpoint.
+        var relayed = (await m1.FetchAsync(m2AtM1)).Should().ContainSingle().Subject;
+        await Qa.PostForwardAsync(m2, Encoding.UTF8.GetString(relayed.Payload.Span));
 
         await m2.FlushAsync();
         m2.Outcomes.Should().Equal(new[] { ForwardOutcomes.Queued }, "M2 peels M1's fresh layer and relays the inner forward to B");
@@ -210,25 +191,15 @@ public sealed class MediatorRoutesQaTests
     {
         Queue,
         Live,
-        DirectPush,
     }
 
     private static async Task RoundTripAsync(Delivery delivery, Action<MediatorOptions>? configure, QaRoutingKeys? provider, int expectLayers)
     {
-        var network = new MediatorNetwork();
-        await using var inbox = await InboxServer.StartAsync(network);
-        var directory = new TestEndpointDirectory();
         await using var mediator = await MediatorTestServer.StartAsync(o =>
         {
-            o.Network = network;
-            o.Mediator = m =>
-            {
-                m.DirectPush = delivery == Delivery.DirectPush;
-                configure?.Invoke(m);
-            };
+            o.Mediator = configure;
             o.ConfigureServices = s =>
             {
-                s.AddSingleton<IRecipientEndpointDirectory>(directory);
                 if (provider is not null)
                     s.AddSingleton<IRecipientRoutingKeyProvider>(provider);
             };
@@ -240,7 +211,6 @@ public sealed class MediatorRoutesQaTests
         if (provider is not null)
             provider.For(b.Did, Enumerable.Repeat(PublicX25519(bIdentity), expectLayers).ToArray());
         await mediator.AddRecipientsAsync(bob, new[] { b.Did });
-        directory.Map(bob.Did, inbox.Endpoint("/bob"));
         var alice = await mediator.NewSenderAsync();
 
         WebSocket? socket = null;
@@ -263,11 +233,6 @@ public sealed class MediatorRoutesQaTests
                 await mediator.PushesIdleAsync();
                 mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
                 mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
-                break;
-            case Delivery.DirectPush:
-                await mediator.PushesIdleAsync();
-                mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
-                payload = inbox.Received.Should().ContainSingle().Subject.Body;
                 break;
             default:
                 payload = (await mediator.FetchAsync(bob)).Should().ContainSingle().Subject.Payload;

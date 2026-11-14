@@ -4,7 +4,6 @@ using AwesomeAssertions;
 using DidComm.InteropTests.AspNetCore;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
-using DidComm.Mediator.Pipeline;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using Xunit;
@@ -14,9 +13,10 @@ namespace DidComm.InteropTests.Mediator;
 /// <summary>
 /// QA-2 (#95), ending a peer's mediation with <c>MessagePickupQueue.RevokeAndPurgeAsync</c> while its
 /// messages are in every state the pipeline can hold them in — queued, leased by a delivery-request,
-/// pushed live and not acknowledged, on their way to a direct push — and while a forward for it is
-/// admitted but not yet relayed; then the same peer granted again, and a revoked peer's recipient DID
-/// moved to another grant.
+/// pushed live and not acknowledged — and while a forward for it is admitted but not yet relayed; then
+/// the same peer granted again, and a revoked peer's recipient DID moved to another grant. (A live
+/// push already being sent when the grant is revoked, and one whose grant is revoked while it waits
+/// for a worker: DidComm.Mediator.Tests, RevokeAndRecheckQaTests and LivePushAdv4Tests.)
 /// </summary>
 public sealed class MediatorRevocationQaTests
 {
@@ -59,72 +59,6 @@ public sealed class MediatorRevocationQaTests
         (await mediator.StatusAsync(carol)).MessageCount.Should().Be(1);
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         mediator.LeakingLogLines(b.Did, leased.Id, pushed.Id).Should().BeEmpty();
-    }
-
-    [Fact]
-    public async Task A_direct_push_already_on_the_wire_completes_but_leaves_nothing_behind_after_revoke_and_purge()
-    {
-        await using var f = await QaPushFixture.StartAsync();
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B);
-        await MediatorTestServer.WaitUntilAsync(() => f.Inbox.Entered == 1, "the push is on the wire");
-        (await f.Mediator.Queue.RevokeAndPurgeAsync(f.Bob.Did)).Should().Be(new GrantRevocation(Revoked: true, Purged: 1));
-        gate.SetResult();
-        await f.Mediator.PushesIdleAsync();
-
-        f.Mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.Pushed }, "documented residual: a push already being sent completes");
-        f.Mediator.Store.MessageCount.Should().Be(0, "and nothing is resurrected by the late removal");
-        (await f.Mediator.FetchAsync(f.Bob)).Should().BeEmpty();
-        f.ShouldNotLeak();
-    }
-
-    [Fact]
-    public async Task A_push_job_waiting_when_the_grant_is_revoked_is_never_sent()
-    {
-        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
-        var carol = await f.Mediator.NewPeerAsync();
-        await f.Mediator.EnrolAsync(carol);
-        f.Directory.Map(carol.Did, f.Inbox.Endpoint("/carol"));
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, carol, content: "carol's, parks the worker");
-        await MediatorTestServer.WaitUntilAsync(() => f.Inbox.Entered == 1, "the only worker is parked");
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "bob's, waits");
-        (await f.Mediator.Queue.RevokeAndPurgeAsync(f.Bob.Did)).Should().Be(new GrantRevocation(Revoked: true, Purged: 1));
-        gate.SetResult();
-        await f.Mediator.PushesIdleAsync();
-
-        // L-020 (PR #109 review round 2, D-1): the purge removed Bob's message, so his wake-up finds
-        // nothing to push, which is no outcome (it was Push-Skipped-Unregistered for the job).
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
-        f.Inbox.Received.Should().ContainSingle().Which.Path.Should().Be("/carol");
-        f.Mediator.Store.MessageCount.Should().Be(0);
-        f.ShouldNotLeak(carol.Did);
-    }
-
-    [Fact]
-    public async Task A_waiting_push_job_of_a_purged_message_is_not_sent_after_the_peer_is_granted_again()
-    {
-        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
-        var carol = await f.Mediator.NewPeerAsync();
-        await f.Mediator.EnrolAsync(carol);
-        f.Directory.Map(carol.Did, f.Inbox.Endpoint("/carol"));
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, carol, content: "carol's, parks the worker");
-        await MediatorTestServer.WaitUntilAsync(() => f.Inbox.Entered == 1, "the only worker is parked");
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "bob's, purged while its job waits");
-        (await f.Mediator.Queue.RevokeAndPurgeAsync(f.Bob.Did)).Should().Be(new GrantRevocation(Revoked: true, Purged: 1));
-        (await f.Mediator.RequestMediationAsync(f.Bob)).Should().Equal(f.Mediator.Did);
-        await f.Mediator.AddRecipientsAsync(f.Bob, new[] { f.B.Did });
-        gate.SetResult();
-        await f.Mediator.PushesIdleAsync();
-
-        f.Inbox.Received.Select(r => r.Path).Should().Equal(new[] { "/carol" }, "the purged message is not delivered after the purge");
     }
 
     [Fact]

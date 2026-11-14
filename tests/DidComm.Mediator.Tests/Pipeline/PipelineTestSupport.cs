@@ -8,7 +8,6 @@ using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
-using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using NetCrypto;
@@ -211,32 +210,6 @@ internal sealed class MeasurementRecorder : IDisposable
     public void Dispose() => _listener.Dispose();
 }
 
-/// <summary>An <see cref="IRecipientEndpointDirectory"/> a test scripts; counts its calls.</summary>
-internal sealed class ScriptedDirectory(Func<string, Uri?> find) : IRecipientEndpointDirectory
-{
-    private int _calls;
-
-    public int Calls => Volatile.Read(ref _calls);
-
-    public Uri? Find(string grantPeerDid)
-    {
-        Interlocked.Increment(ref _calls);
-        return find(grantPeerDid);
-    }
-}
-
-/// <summary>An <see cref="ITransportRouter"/> a test scripts; records every request it is handed.</summary>
-internal sealed class ScriptedTransportRouter(Func<TransportRequest, CancellationToken, Task<TransportResult>> send) : ITransportRouter
-{
-    public ConcurrentQueue<TransportRequest> Requests { get; } = new();
-
-    public Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
-    {
-        Requests.Enqueue(request);
-        return send(request, ct);
-    }
-}
-
 /// <summary>An <see cref="IMediationStore"/> over the real in-memory store whose recipient lookup a test can replace (to make it throw or park).</summary>
 internal sealed class ScriptedMediationStore : IMediationStore
 {
@@ -305,7 +278,7 @@ internal sealed class ScriptedMessageStore : IMessageStore
     /// <summary>Replaces the lease (the take before a push or a pickup); the default leases in the inner store.</summary>
     public Func<MessageLeaseRequest, CancellationToken, ValueTask<IReadOnlyList<QueuedMessage>>>? OnLease { get; set; }
     public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => OnLease is { } hook ? hook(request, ct) : Inner.LeaseAsync(request, ct);
-    /// <summary>Replaces the acknowledgement (the removal after a direct push); the default acknowledges in the inner store.</summary>
+    /// <summary>Replaces the acknowledgement; the default acknowledges in the inner store.</summary>
     public Func<string, IReadOnlyList<string>, CancellationToken, ValueTask<int>>? OnAcknowledge { get; set; }
 
     /// <summary>Replaces the give-back by lease id; the default gives back in the inner store.</summary>

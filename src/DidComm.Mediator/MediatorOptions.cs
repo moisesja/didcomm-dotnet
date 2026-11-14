@@ -60,24 +60,18 @@ namespace DidComm.Mediator;
 /// time, oldest first, and a live session is pushed only those that arrive after the status that
 /// answered its turning live delivery on (by the store's arrival order, whatever the clock does;
 /// what that status counted is picked up). A message with a <c>delay_milli</c> hold is never
-/// pushed before it is due; once due it goes with the recipient's next push (a direct one only
-/// while no later message of the recipient has had its direct attempt). A message whose live push
-/// fails, or that arrives while the recipient's pushes are paused after one reached
+/// pushed before it is due; once due it goes with the recipient's next push. A message whose live
+/// push fails, or that arrives while the recipient's pushes are paused after one reached
 /// <see cref="PushTimeout"/>, stays queued and is tried again when the recipient next receives a
 /// message, so a recipient in live mode should still ask for its queued messages (a
 /// <c>status-request</c> shows them) after a reconnect or a slow period.</description></item>
 /// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
-/// <item><description>Direct push (<see cref="DirectPush"/>) sends each push as one request to
-/// exactly the directory's endpoint, never retried and never redirected, and makes one attempt per
-/// message. A message whose push fails stays queued for pickup and is not pushed directly again,
-/// so a recipient that relies on direct push must also pick up, or those messages can stay in its
-/// queue until they expire or reach the mailbox age limit.</description></item>
-/// <item><description>Forwards are outside replay protection. With direct push on, each replay of a
-/// captured forward is stored and pushed again, and since a delivered push frees its place in the
-/// queue, the recipient's quota does not limit how often: recipients should drop messages whose id
-/// they have already seen.</description></item>
+/// <item><description>The mediator pushes only over live sessions. A built-in direct push to a
+/// recipient's own endpoint is tracked in #110; until then a host that needs one pushes forwarded
+/// messages itself through its own <see cref="IForwardSink"/> (the #90 seam), with
+/// <c>AddRoutingMediator()</c> rather than <c>AddMediator()</c>.</description></item>
 /// </list>
 /// <para>
 /// <c>AddMediator()</c> describes what to put in front of the mediator's endpoint and how to set
@@ -160,51 +154,25 @@ public sealed class MediatorOptions
     public TimeSpan PurgeInterval { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Whether the mediator also pushes each queued message straight to the recipient's own
-    /// endpoint, found through a registered <see cref="IRecipientEndpointDirectory"/> (FR-PICK-09).
-    /// Default <c>false</c>. When a message is queued for a recipient, or a session of it turns live
-    /// delivery on, the push workers push, in the background and after any live push, the
-    /// recipient's due messages that no direct push has attempted yet (with a live session, those
-    /// queued before it turned live delivery on), oldest first, each as a single POST to exactly the
-    /// directory's endpoint, with no retry, no redirect followed and outside the HTTP transport's
-    /// circuit breaker (so one recipient's failing endpoint cannot stop the host's other sends). Each
-    /// message gets one direct attempt. An <c>http(s)</c> 2xx answer removes the message from the
-    /// queue; anything else, a redirect included, leaves it there for pickup and ends that run of
-    /// pushes; it is not pushed directly again, holds up none of the recipient's later messages, and
-    /// a recipient that relies on push must also pick up now and then. A message that was not yet
-    /// due when a later one of its recipient was attempted waits for pickup too. A push sends
-    /// only what the queue still holds for delivery when the push starts: it takes the message
-    /// under a lease of its own first, so a message that has expired, aged out, been acknowledged,
-    /// or is being fetched by the recipient is not pushed. A plain <c>http</c> endpoint also needs
-    /// <c>"http"</c> in <c>HttpTransportOptions.AllowedSchemes</c> (the HTTP transport sends to
-    /// <c>https</c> only by default). Forwards are outside replay protection, so each replay of a
-    /// captured forward is pushed again (a delivered push frees its place in the quota): recipients
-    /// should drop messages whose id they have already seen.
-    /// </summary>
-    public bool DirectPush { get; set; }
-
-    /// <summary>
-    /// How many push workers run: live pushes over a recipient's WebSocket connection and, when
-    /// <see cref="DirectPush"/> is on, direct pushes to its endpoint. Default 4; from 1 to 64. Pushes
-    /// run in the background, never on the forward pump, so a recipient that is slow to take a push
-    /// (a slow endpoint, or a DID that is slow to resolve) never holds up the storing of other
-    /// recipients' messages. Recipients take turns, with at most one push in flight per mediation
+    /// How many push workers run: live pushes over a recipient's WebSocket connection. Default 4;
+    /// from 1 to 64. Pushes run in the background, never on the forward pump, so a recipient that is
+    /// slow to take a push (a DID that is slow to resolve, a connection that is slow to read) never
+    /// holds up the storing of other recipients' messages. Recipients take turns, with at most one push in flight per mediation
     /// grant, so a slow recipient holds one of them at a time, never all. A push abandoned at
     /// <see cref="PushTimeout"/> frees its worker but counts until its call ends: at most twice this
     /// many recipients' pushes are unfinished at once, and while that many are, a new message starts
     /// no push and waits for pickup or its recipient's next message. A host collaborator (session,
-    /// DID resolver, transport, endpoint directory or store) that never completes a cancelled call
+    /// DID resolver or store) that never completes a cancelled call
     /// keeps its push unfinished, so twice this many such calls stop every push until one of them
     /// completes; pickup keeps working.
     /// </summary>
     public int PushConcurrency { get; set; } = 4;
 
     /// <summary>
-    /// How long a push worker waits for one push (live or direct) before it gives up on it and
-    /// serves other recipients; the message stays queued. Default 30 seconds; greater than zero and
-    /// at most 5 minutes. The abandoned call runs on until it ends, holding the message under its
-    /// lease meanwhile (for a direct push at most this plus 30 seconds; for a live push as any live
-    /// delivery), and its recipient gets no other push before it ends. A recipient whose push
+    /// How long a push worker waits for one push before it gives up on it and serves other
+    /// recipients; the message stays queued. Default 30 seconds; greater than zero and at most 5
+    /// minutes. The abandoned call runs on until it ends, holding the message under its lease
+    /// meanwhile (as any live delivery), and its recipient gets no other push before it ends. A recipient whose push
     /// reaches the deadline has its pushes paused for twice as long, measured on the monotonic clock
     /// so a step of the wall clock does not change it (its messages wait for pickup meanwhile), so a
     /// recipient that stalls its own pushes cannot hold a push worker continuously.
@@ -320,7 +288,6 @@ public sealed class MediatorOptions
             RewrapMode = pipeline.RewrapMode,
             MaxForwardDelay = pipeline.MaxForwardDelay,
             PurgeInterval = pipeline.PurgeInterval,
-            DirectPush = pipeline.DirectPush,
             PushConcurrency = pipeline.PushConcurrency,
             PushTimeout = pipeline.PushTimeout,
         };

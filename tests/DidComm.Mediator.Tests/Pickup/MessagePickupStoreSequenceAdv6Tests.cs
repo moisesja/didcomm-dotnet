@@ -9,8 +9,7 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// <summary>
 /// ADV-6 (#95, PR #109 review round 2): the arrival-sequence contract of
 /// <see cref="InMemoryMessageStore"/> under concurrency and around every removal path. The mediator
-/// decides "arrived after live-on" and "already attempted directly" by these numbers alone, so each
-/// test states an invariant that must hold for every interleaving (L-044) rather than one schedule.
+/// decides "arrived after live-on" by these numbers alone, so each test states an invariant that must hold for every interleaving (L-044) rather than one schedule.
 /// </summary>
 public sealed class MessagePickupStoreSequenceAdv6Tests
 {

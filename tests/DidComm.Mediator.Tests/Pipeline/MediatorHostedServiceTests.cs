@@ -55,6 +55,7 @@ public sealed class MediatorHostedServiceTests
 
         var ready = fixture.ServiceLines.Should().ContainSingle(e => e.Level == LogLevel.Information).Which;
         ready.Everything.Should().Contain("Mediator ready").And.Contain("1 routing DID");
+        fixture.ServiceLines.Should().NotContain(e => e.Level >= LogLevel.Warning, "a healthy mediator starts quietly");
         PipelineLogs.Leaking(fixture.Logs, fixture.Dids).Should().BeEmpty();
     }
 
@@ -75,28 +76,6 @@ public sealed class MediatorHostedServiceTests
 
         fixture.ServiceLines.Should().ContainSingle(e => e.Level == LogLevel.Warning).Which.Everything.Should().Contain("routing keys");
         PipelineLogs.Leaking(fixture.Logs, fixture.Dids.Append("upstream").ToArray()).Should().BeEmpty();
-    }
-
-    [Fact]
-    public async Task Direct_push_without_a_directory_starts_with_a_warning()
-    {
-        await using var fixture = await HostedFixture.CreateAsync(configure: o => o.DirectPush = true);
-
-        await fixture.StartingAsync();
-
-        fixture.ServiceLines.Should().ContainSingle(e => e.Level == LogLevel.Warning).Which.Everything.Should().Contain("IRecipientEndpointDirectory");
-    }
-
-    [Fact]
-    public async Task Direct_push_with_a_directory_starts_quietly()
-    {
-        await using var fixture = await HostedFixture.CreateAsync(
-            configure: o => o.DirectPush = true,
-            before: s => s.AddSingleton<IRecipientEndpointDirectory>(new ScriptedDirectory(_ => null)));
-
-        await fixture.StartingAsync();
-
-        fixture.ServiceLines.Should().NotContain(e => e.Level >= LogLevel.Warning);
     }
 
     [Fact]

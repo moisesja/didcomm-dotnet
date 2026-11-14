@@ -131,7 +131,8 @@ public sealed class MessagePickupQueue
 
     /// <summary>
     /// Remove a retained message without waiting for the recipient's acknowledgement: for a
-    /// pipeline that delivered it another way (a direct push that succeeded, FR-PICK-09).
+    /// pipeline that delivered it another way (for example a host's own forward sink that pushed it
+    /// to the recipient's endpoint, FR-PICK-09).
     /// </summary>
     /// <param name="grantPeerDid">The grant the message is held under (<see cref="PickupDeliveryResult.GrantPeerDid"/>).</param>
     /// <param name="messageId">The message's id (<see cref="PickupDeliveryResult.MessageId"/>).</param>
@@ -163,7 +164,7 @@ public sealed class MessagePickupQueue
     /// </summary>
     /// <remarks>
     /// Safe to retry: calling it again after a store fault revokes nothing more and purges what is
-    /// left. What it cannot stop: a live delivery or direct push already being sent completes. If the
+    /// left. What it cannot stop: a live delivery already being sent completes. If the
     /// same peer is granted mediation again while the call runs, messages stored for the new grant
     /// before the purge are removed too, so deny the peer in the mediation policy before revoking. A
     /// fault of the mediation store or the message store propagates to the caller.
