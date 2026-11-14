@@ -358,10 +358,10 @@ lease is pinned end to end by `PickupClientBudgetLeaseTests`.
     mediator exposes this.
   - **One replay budget per sender.** Over a WebSocket, the client's replay admission keeps at most
     `ReplayProtectionOptions.MaxEntriesPerPeer` entries per sender (1024 by default), each for about
-    6 minutes, and a mediator is one sender. A mediator that sends one host more than that within
-    those minutes, for all of its DIDs together, has the rest of its answers and pushes refused
-    (`Saturated`): pushes then arrive by polling, and calls time out. Raise the setting on a busy
-    recipient host.
+    6 minutes, and a mediator is one sender. A mediator that sends one host more Coordinate
+    Mediation and Pickup messages than that within those minutes, for all of its DIDs together, has
+    the rest of its answers and pushes refused (`Saturated`): pushes then arrive by polling, and
+    calls time out. Raise the setting on a busy recipient host.
   - Pre-existing, outside #96 (a follow-up): `DiscoverFeaturesClient`'s Warning for a rejected
     `disclose` on a known thread quotes the message id, `from`, `to`, the recipient key id and the
     requester's and responder's DIDs.
