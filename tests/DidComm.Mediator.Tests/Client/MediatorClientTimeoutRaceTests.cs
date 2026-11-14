@@ -215,6 +215,8 @@ public sealed class MediatorClientTimeoutRaceTests : IAsyncLifetime
             return new TaskCompletionSource<SendResult>().Task;
         };
         var (_, exchange) = Start(cts.Token);
+        // L-044: the send (and its registration) must be in place before the deadline fires.
+        await _send.FirstCall.WaitAsync(TimeSpan.FromSeconds(10));
 
         _time.Advance(_channel.Options.RequestTimeout);
 
