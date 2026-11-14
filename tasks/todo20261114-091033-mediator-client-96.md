@@ -66,9 +66,9 @@ The architect's design follows below verbatim except where these notes override 
 | PickupClient fetch (C) | QA-2 | Q2-1 a message encrypted to two held DIDs never passes the second DID's `recipientDid` filter | fix-c `e416c35` |
 | Live stream (C) | QA-2 | Q2-2 permanent pack-stage failures retried with back-off instead of thrown (also: a racing wait whose losing read could fault unobserved) | fix-c `c54135c`, `6b6e6e7`; exact busy-refusal type by the orchestrator |
 | MediationClient (B) | QA-1 | none (observations only) | — |
-| **`recipientDid` filter (C) — L-063 trigger** | ADV-1 (break-it on the Q2-1 fix) | ADV1-2 (Medium): a co-recipient re-encrypts Alice's signed message to T and F and relays it into F's queue; T's key opens it, the label F passes the label-based filter, F gets a non-repudiable message Alice never addressed to F, and T's copy is then dropped as a repeat. ADV1-3 (Low): without `apv` a relay appends F's label. Root cause: envelope labels are not evidence (L-040). | strict rule (owner A) — fix round 2 |
-| Duplicate filter | ADV-1 | ADV1-1 (Medium): the key's local DID is the decrypting DID, not the grant DID whose fetch runs, so a copy of T's message relayed into F's queue (unfiltered fetch) makes T lose its own copy | mailbox DID in the key — fix round 2 |
-| Unpack limiter (A) — borderline | ADV-2 | ADV2-1 (Medium): 10 messages from senders whose DIDs resolve slowly make one fetch take 3 × `UnpackTimeout` (90 s) > the mediator's 60 s lease, so fetch-until-drained never reaches what is behind them (live drain worse: sequential). ADV2-2 (Low): the 16 abandoned-unpack slots are per container, so one sender with a resolver that ignores cancellation refuses every other sender's message. (Earlier on this component: the fix-A sweep's unobserved race, fixed.) | one decrypt budget per delivery (owner A) — fix round 2; ADV2-2 documented |
+| **`recipientDid` filter (C) — L-063 trigger** | ADV-1 (break-it on the Q2-1 fix) | ADV1-2 (Medium): a co-recipient re-encrypts Alice's signed message to T and F and relays it into F's queue; T's key opens it, the label F passes the label-based filter, F gets a non-repudiable message Alice never addressed to F, and T's copy is then dropped as a repeat. ADV1-3 (Low): without `apv` a relay appends F's label. Root cause: envelope labels are not evidence (L-040). | strict rule (owner A) — fix round 2 `73ff4d4` |
+| Duplicate filter | ADV-1 | ADV1-1 (Medium): the key's local DID is the decrypting DID, not the grant DID whose fetch runs, so a copy of T's message relayed into F's queue (unfiltered fetch) makes T lose its own copy | mailbox DID in the key — `f435f5e` |
+| Unpack limiter (A) — borderline | ADV-2 | ADV2-1 (Medium): 10 messages from senders whose DIDs resolve slowly make one fetch take 3 × `UnpackTimeout` (90 s) > the mediator's 60 s lease, so fetch-until-drained never reaches what is behind them (live drain worse: sequential). ADV2-2 (Low): the 16 abandoned-unpack slots are per container, so one sender with a resolver that ignores cancellation refuses every other sender's message. (Earlier on this component: the fix-A sweep's unobserved race, fixed.) | one decrypt budget per delivery (owner A) `8eb9a88`; equal share per message (same-delivery starvation found in fix round 2) `2e45df7`; ADV2-2 documented |
 | Channel (A) | ADV-1 | a test-only race (`When_the_deadline_and_the_callers_cancellation_are_both_set…` lacked its rendezvous) — test fixed, not a product defect | `9043b7a`+1 |
 
 ## Progress log
@@ -82,6 +82,7 @@ The architect's design follows below verbatim except where these notes override 
 - Red team (ADV-1 `adv1-96`: `d501daf`, `1db535d`; ADV-2 `adv2-96`: `e039a86`; branches local, not merged — their defect tests fail on purpose) and docs (`docs-96`: `8453e5b`, `a91d70d`, `2c9dceb`, `03ef9f4`, `e96bceb`, `1e6edaa`, merged). Findings in the tally. Also from ADV-1: ADV1-4 (Low, doc) — plan §7 overclaims "identity fails before lookup" / "the thid probe only runs for messages authcrypted by a mediator": a stranger's own authcrypt with our pending `thid` does reach the map and is refused by the pair check, indistinguishable from a miss (pinned); residuals to document: a thread-less `disclose` replay answers later queries of its pair (non-conformant mediator only), `PickupItem.Error` carries Core's unpack exception text (quotes DIDs/kids; pre-existing), picked-up messages are not replay-checked if an app re-dispatches them, `DiscoverFeaturesClient.LogRejected` logs raw values (pre-existing). From ADV-2 (residuals): a withholding mediator can hold a live stream's `DisposeAsync` for one `RequestTimeout`; the replay guard's per-peer 1024-entry budget (#105) caps a busy mediator's pushes. Held attacks are pinned as passing regressions. Docs: plan §7 "client > 6 min behind" is 5 min (`Window`), fixed in the architecture doc; stale `ReceiveLiveAsync` retry wording fixed (`9043b7a`). DX: 1021 public members; coverage allowlist 433 (421 `TODO(#97)`, 43 for #96), execution 366 (all `TODO(#97)`, 42 for #96).
 - **L-063 stop (2026-11-14):** the `recipientDid` filter drew a second defect class after its Q2-1 fix (ADV1-2, ADV1-3 break the label-based fix). Per the churn guard, handed back to the epic orchestrator with the findings side by side and options (strict "own key opened it" rule with the two-DID case documented / a Core key-preference unpack / defer the client-side filter check), together with the unpack-limiter question (batch deadline below the lease now, or document + follow-up). Full suite green at the hand-back head with the red-team tests unmerged: Core 2548, Mediator 4152, Interop 1363.
 - **Owner decisions on the L-063 stop (2026-11-14, #88 comment 6882452052): option A for both.** (1) `recipientDid` filter: the strict rule — a message passes F's filter only if one of F's own keys opened it; the label rule is dropped (closes ADV1-2, ADV1-3); the two-identity case is documented (under the second DID's filter it is reported as "for another of your DIDs"; discard with `AckAsync`, or it ages out); B (decrypt with F's key first) is a candidate follow-up only; ADV1-1 fixed: the duplicate filter is also keyed by the fetched mailbox's DID. (2) One decrypt budget per `FetchAsync` and per live-stream delivery round, well inside the mediator's lease (about 20 s against our 60 s `LeaseTimeout`); messages not opened by then are failures and stay queued, so the next fetch passes over them while their lease lasts; ADV2-2 documented as a residual. Coordinator's additions (not the owner's): docs say what to do with a message that keeps failing (discard with `AckAsync`; a mediator that does not hold fetched messages aside returns it every fetch, and the budget does not help there); check and pin with a test how our mediator behaves when the lease expires during the budget; choose the default against the lease default in the code and say in the option's XML how they relate. R-9 (package split) is not decided: raise it in the "Planning update after #96" comment. Red-team suites merged into the feature branch (`adv1-96`, `adv2-96`).
+- Fix round 2 (`fix2-96`: `73ff4d4` strict filter, `f435f5e` per-mailbox duplicate memory, `8eb9a88` one budget per delivery; merged `e39a709`): decision 1-A, ADV1-1 and decision 2-A as decided; `UnpackTimeout` now means the per-delivery budget (default 20 s = a third of our mediator's 60 s `LeaseTimeout`, pinned by a test; no public surface change); the live stream opens a whole delivery before yielding; the lease-expiry behaviour is pinned (`PickupClientBudgetLeaseTests`: with a lease shorter than the budget a concurrent or next fetch gets the messages again, and the late acknowledgement is still accepted — the store deletes by id); ADV2-2 converted to a pinned residual; Q2-1 now pins the documented two-DID behaviour. The engineer found same-delivery starvation inside 2-A (four never-resolving senders at the front keep the messages behind them in that delivery from ever starting, at every redelivery): fixed by the orchestrator in `2e45df7` — each message gets an equal share of the budget (budget ÷ rounds of four; the budget stays the backstop) — my engineering call within decision 2-A. Two tests aligned by the orchestrator (`8d70f4f`): ADV1-1's "received and still queued" (impossible with R-6) → "received or still queued"; QA-2's live-cancel scenario split across two drain rounds (a delivery is opened whole). Plan §7 corrected (ADV1-4; 5 min not 6; walker and page bound as built; per-step timeouts). Full suite green: Core 2548, Mediator 4197, Interop 1367.
 
 ---
 
@@ -147,7 +148,7 @@ public enum CoordinateMediationVersion { Negotiate = 0, V3 = 1, V2 = 2 }
 
 public sealed class MediatorClientOptions
 {
-    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);   // (0, 10 min]; one exchange: send + answer (route resolution counts toward the first exchange)
+    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);   // (0, 10 min]; one exchange: send + answer (as built: each step — endpoint resolution, the version query, the request — has its own RequestTimeout; Q1-2)
     public int MaxPendingRequests { get; set; } = 64;                           // [1, 4096]; over it → InvalidOperationException before sending
     public CoordinateMediationVersion CoordinateMediationVersion { get; set; } = CoordinateMediationVersion.Negotiate; // defined value
     public int DedupeCapacity { get; set; } = 4096;                             // [0, 1_000_000]; 0 = off
@@ -276,7 +277,7 @@ internal interface IMediatorExchange
     Task<MediatorRoute> ResolveRouteAsync(string mediatorDid, Uri? serviceEndpointOverride, bool requireWebSocket, CancellationToken ct);
     Task<InboundMessageSnapshot> ExchangeAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct);
     LiveRegistration RegisterLiveStream(string mediatorDid, string localDid);          // InvalidOperationException: one exists, or 16 already
-    Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct); // deadline, concurrency, abandoned bound
+    // as built (fix round 2): Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(payloads, string? requestId, ct) — one budget per delivery, an equal share per message, 4 workers, abandoned bound
     DuplicateFilter Duplicates { get; }
     NegotiatedVersionCache Versions { get; }
 }
@@ -357,13 +358,13 @@ A mediator whose first DID-document entry is `https` is reached over HTTP. A cli
 - **Grant.** Validate before allocating: `routing_did` is a string, or an array of length ≤ 16 (counted on the `JsonElement` first, L-055). Each entry is a bare DID ≤ 2048. Otherwise `MediationProtocolException`. A deny → `null`.
 - **`recipient-update-response` / `keylist-update-response`.** The count must equal the request's, and each entry's `recipient_did` (ordinal) and `action` must equal the request entry at the same index. Otherwise `MediationProtocolException`.
 - **`recipient` / `keylist`.**
-  - `dids.Count` ≤ `paginate?.Limit ?? 1000`;
+  - `dids.Count` ≤ 1000 whatever `limit` asked (as built, QA fix round: a mediator that ignores `paginate` still works);
   - if `pagination` is present: `count == dids.Count`, `offset ==` the requested offset (0 without `paginate`), `remaining ≥ 0`;
   - otherwise `MediationProtocolException`.
 - **Page walker.**
   - Page size 100.
   - `offset += dids.Count`.
-  - Stop on `pagination == null`, `remaining == 0` or `dids.Count == 0` (progress guard), or after 1000 pages.
+  - Stop on `pagination == null` or `remaining == 0`; an empty page with `remaining > 0`, or DIDs remaining after page 1000, is a `MediationProtocolException` (as built: never a silent truncation).
   - Yields DID strings.
 
 CM 2.0 shapes: string `routing_did`; `keylist-update` / `keylist-update-response` / `keylist-query` / `keylist` with `keys`; same entry fields. The internal codec writes through `MediationBodies.WriteUpdates/WritePaginate` and reads through `ReadRoutingDids`, `ReadUpdated` and `ReadRecipients("keys")`. **#99 reuses** the type constants and these codecs and adds `CreateGrant(string)`, `CreateKeylistUpdateResponse`, `CreateKeylist` and the request parsers.
@@ -535,7 +536,7 @@ Fallback if SDK 10.0.100's docs or extension emission misbehave under `/warnaser
 - Cannot write on S(E,L,M): only E writes to it.
 - Via the host's own receive endpoints:
   - post-sign tampering → unpack fails, nothing dispatched (HTTP body tampering → `TransportException` status 200; WS → frame dropped → timeout);
-  - a self-consistent forgery (Mallory's authcrypt, `from` = Mallory, our pending `thid`) → identity fails before lookup, and the real answer still completes;
+  - a self-consistent forgery (Mallory's authcrypt, `from` = Mallory, our pending `thid`) → it passes the identity rule (it binds a sender to its own `from`), reaches the pending-map lookup and is refused by the request's (mediator, local DID) pair check, indistinguishable from a miss (corrected per ADV1-4); the real answer still completes;
   - `from` = M with Mallory's skid → refused at unpack (FR-CONSIST);
   - anoncrypt, signed-only or `anoncrypt(sign)` → identity fails;
   - authcrypt from M to another local DID → pair mismatch;
@@ -556,7 +557,7 @@ Fallback if SDK 10.0.100's docs or extension emission misbehave under `/warnaser
 | Abandoned unpacks | ≤ 16 |
 | Correlator cost when idle | one volatile read |
 
-**Timing.** Identity is computed before any dictionary probe, with `&`-combined compares (D-7). The `thid` probe only runs for messages authcrypted by a mediator to us.
+**Timing.** Identity is computed before any dictionary probe, with `&`-combined compares (D-7). The `thid` probe runs for any authcrypt message addressed to one of our DIDs (corrected per ADV1-4: not only a mediator's); a hit on another pair is refused by the pair check and looks exactly like a miss (same result, same log line), and our ids are 122-bit random.
 
 **Peer-controlled latency (L-061).**
 - The correlator never awaits. The WS receive loop is never held by the client.
@@ -566,7 +567,7 @@ Fallback if SDK 10.0.100's docs or extension emission misbehave under `/warnaser
 
 **Clock.**
 - A mediator more than `ReplayProtectionOptions.ClockSkew` (60 s) ahead has its WS answers dropped (`FutureDated`) although it acted → `TimeoutException`; retries are idempotent; live pushes return after the lease.
-- A client more than about 6 min behind is refused `TooOld` → timeouts.
+- A client more than 5 min behind (the mediator's replay `Window`) is refused `TooOld` → timeouts.
 - Documented: clocks must agree within a minute by default.
 - Over HTTP, `Returned` is not admitted, so skew does not matter there.
 
