@@ -87,10 +87,15 @@ public sealed class PickupClientAcceptanceQa2Tests
         }
 
         var got = new List<string>();
+        var queueIds = new List<string>();
         using var cts = new CancellationTokenSource();
         var stream = harness.Pickup.ReceiveLiveAsync(mediator.Did, bob.Did, ct: cts.Token).GetAsyncEnumerator();
         for (var i = 0; i < 3; i++)
-            got.Add((await PickupE2E.NextAsync(stream)).Unpacked!.Message.Id);
+        {
+            var item = await PickupE2E.NextAsync(stream);
+            queueIds.Add(item.Id);
+            got.Add(item.Unpacked!.Message.Id);
+        }
         got.Should().Equal(queued.Select(q => q.Id), "what was queued before live mode arrives by the drain, oldest first");
 
         // Asking for the fourth takes the third; nothing else is ready, so the three are acknowledged.
@@ -105,7 +110,9 @@ public sealed class PickupClientAcceptanceQa2Tests
         }
         (await PickupE2E.Within(fourth)).Should().BeTrue();
         PickupE2E.ShouldBeAlicesNote(stream.Current, alice, recipient, pushed[0]);
+        queueIds.Add(stream.Current.Id);
         PickupE2E.ShouldBeAlicesNote(await PickupE2E.NextAsync(stream), alice, recipient, pushed[1]);
+        queueIds.Add(stream.Current.Id);
         await mediator.PushesIdleAsync();
         mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(2, "both arrived after live delivery was on");
 
@@ -118,6 +125,7 @@ public sealed class PickupClientAcceptanceQa2Tests
         (await PickupE2E.Within(harness.Pickup.GetStatusAsync(mediator.Did, bob.Did))).MessageCount.Should().Be(0);
         PickupE2E.ShouldAllBeStampedWith(observer, bob.Did, mediator.Clock.Now);
         mediator.LeakingLogLines(recipient.Did, bob.Did).Should().BeEmpty();
+        Qa2.LinesWithAny(mediator, queueIds.Concat(queued.Select(q => q.Id)).Concat(pushed.Select(p => p.Id))).Should().BeEmpty("no queue id or inner message id in any line");
     }
 
     [Theory]

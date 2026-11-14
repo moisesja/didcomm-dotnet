@@ -213,4 +213,24 @@ public sealed class PickupClientFetchAndRewrapQa2Tests
         batch.Items.Should().ContainSingle().Which.Unpacked!.Message.Id.Should().Be(note.Id);
         (await mediator.StatusAsync(bob)).MessageCount.Should().Be(0);
     }
+
+    /// <summary>
+    /// Observation (interop between this library's own pieces): a mediator configured with
+    /// <c>MaxAckIds</c> below 100 (allowed down to <c>MaxDeliveryBatch</c>, 10 by default) refuses the
+    /// client's 100-id chunks as malformed, so <see cref="PickupClient.AckAsync"/> of more than that many
+    /// ids fails with a <see cref="DidComm.Exceptions.TransportException"/> (HTTP 400). Pinned so a
+    /// change to either side is visible.
+    /// </summary>
+    [Fact]
+    public async Task Observation_AckAsync_chunks_of_100_are_refused_by_a_mediator_whose_MaxAckIds_is_lower()
+    {
+        await using var mediator = await MediatorTestServer.StartAsync(o => o.Mediator = m => m.Pickup.MaxAckIds = 10);
+        await using var harness = await MediatorClientHarness.CreateAsync(mediator);
+        var (bob, _) = await PickupE2E.EnrolAsync(mediator, harness);
+        var ids = Enumerable.Range(0, 11).Select(_ => Guid.NewGuid().ToString("N")).ToArray();
+
+        (await harness.Pickup.AckAsync(mediator.Did, bob.Did, ids.Take(10).ToArray())).MessageCount.Should().Be(0);
+        var refused = (await FluentActions.Awaiting(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, ids)).Should().ThrowAsync<DidComm.Exceptions.TransportException>()).Which;
+        refused.HttpStatusCode.Should().Be(400);
+    }
 }
