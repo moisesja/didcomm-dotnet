@@ -456,6 +456,50 @@ public sealed class MediatorClientEnrolmentQa1Tests
         host.Logs.Entries.Where(e => everyone.Any(v => e.Contains(v, StringComparison.Ordinal))).Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task Without_dependency_injection_the_client_enrols_registers_and_lists_over_HTTP_and_refuses_a_WebSocket_before_sending()
+    {
+        var atMediator = new Qa1Recorder();
+        await using var mediator = await MediatorTestServer.StartAsync(o => o.PostConfigureServices = atMediator.Register);
+        await using var harness = await MediatorClientHarness.CreateAsync(mediator, o =>
+        {
+            o.UseWebSocket = true;
+            o.AddMediatorClient = false;
+        });
+        var bob = await harness.NewPeerAsync();
+        var mediation = new MediationClient(harness.Client);
+
+        var grant = await mediation.RequestMediationAsync(mediator.Did, bob.Did).WaitAsync(Qa1.Wait);
+        var published = Qa1.FakeDids(1, "n")[0];
+        (await mediation.UpdateRecipientsAsync(mediator.Did, bob.Did, new[] { new RecipientUpdate(published, RecipientUpdateAction.Add) }))
+            .Single().Result.Should().Be(RecipientUpdateOutcome.Success);
+        (await mediation.QueryRecipientsAsync(mediator.Did, bob.Did)).Dids.Should().Equal(published);
+        grant!.RoutingDids.Should().Equal(mediator.Did);
+
+        var sentSoFar = atMediator.From(bob.Did).Count;
+        var act = () => mediation.QueryRecipientsAsync(mediator.Did, bob.Did, serviceEndpointOverride: harness.WebSocketEndpoint);
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Contain("AddMediatorClient");
+        atMediator.From(bob.Did).Should().HaveCount(sentSoFar, "nothing was sent on the refused route");
+        harness.Connects.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Without_a_grant_updates_answer_client_error_for_every_entry_and_a_query_an_empty_page_not_an_exception()
+    {
+        await using var mediator = await MediatorTestServer.StartAsync();
+        await using var harness = await MediatorClientHarness.CreateAsync(mediator);
+        var bob = await harness.NewPeerAsync();
+        var dids = Qa1.FakeDids(3, "g");
+
+        var results = await harness.Mediation.UpdateRecipientsAsync(mediator.Did, bob.Did,
+            new[] { new RecipientUpdate(dids[0], RecipientUpdateAction.Add), new RecipientUpdate(dids[1], RecipientUpdateAction.Remove), new RecipientUpdate(dids[2], RecipientUpdateAction.Add) });
+        var page = await harness.Mediation.QueryRecipientsAsync(mediator.Did, bob.Did);
+
+        results.Should().OnlyContain(r => r.Result == RecipientUpdateOutcome.ClientError, "FR-MED-05: a peer without a grant gets client_error per entry (not a problem report)");
+        page.Dids.Should().BeEmpty();
+        page.Pagination.Should().Be(new RecipientPagination(0, 0, 0));
+    }
+
     /// <summary>
     /// Q1-1. The documented set-up for a WebSocket route is <c>UseWebSocketTransport(o =&gt;
     /// o.ReceiveInbound = true)</c> plus <c>UseInboundDispatch()</c>, and the docs promise
