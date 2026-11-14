@@ -93,7 +93,7 @@ public sealed class PickupClientLiveStreamTests
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
         second.IsCompleted.Should().BeFalse();
         exchange.AcknowledgedIds.Should().Equal("q1");
-        exchange.Duplicates.Contains(DefaultOutcome("ok:m1").DedupeKey).Should().BeTrue();
+        exchange.Duplicates.Contains(L, DefaultOutcome("ok:m1").DedupeKey).Should().BeTrue();
         await StopAsync(stream, second, cts);
     }
 
@@ -119,7 +119,7 @@ public sealed class PickupClientLiveStreamTests
 
         seen.Should().Equal("q1", "q2");
         exchange.AcknowledgedIds.Should().Equal("q1");
-        exchange.Duplicates.Contains(DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse("the last item is not remembered either");
+        exchange.Duplicates.Contains(L, DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse("the last item is not remembered either");
         exchange.Sent[^1].Should().Match<SentRequest>(s => s.Is(MessagePickup.LiveDeliveryChangeType) && !s.Live);
         exchange.Registrations.Should().BeEmpty();
 

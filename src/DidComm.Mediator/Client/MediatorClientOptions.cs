@@ -46,9 +46,11 @@ public sealed class MediatorClientOptions
     /// <summary>
     /// How many delivered messages the clients remember, so a message the mediator delivers again
     /// (delivery is at-least-once) is acknowledged but not returned a second time. Default 4096;
-    /// 0 turns this off; at most 1 000 000. A message is remembered by a fixed-size hash of its
-    /// sender, the DID it was decrypted for and its id (of its bytes when the sender is anonymous),
-    /// so the memory used stays bounded whatever the wire values look like. The oldest are
+    /// 0 turns this off; at most 1 000 000. A message is remembered by a fixed-size hash of the
+    /// mailbox it came from (the <c>from</c> of the fetch or live stream), its sender, the DID it was
+    /// decrypted for and its id (of its bytes when the sender is anonymous), so a message returned
+    /// from one mailbox is never a repeat in another, and the memory used stays bounded whatever the
+    /// wire values look like. The oldest are
     /// forgotten first, and a forgotten message that comes back is returned again. 0 turns off the
     /// memory from one call or stream to the next; a fetch still returns a message that comes twice
     /// in one delivery only once.

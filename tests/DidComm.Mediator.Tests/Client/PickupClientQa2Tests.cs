@@ -119,7 +119,7 @@ public sealed class PickupClientQa2Tests
 
         await FluentActions.Awaiting(() => PickupTest.Within(second)).Should().ThrowAsync<OperationCanceledException>();
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1" }, "q1 was taken when q2 was asked for; q2 never reached the consumer");
-        exchange.Duplicates.Contains(DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse();
+        exchange.Duplicates.Contains(L, DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse();
         exchange.Registrations.Should().BeEmpty();
     }
 

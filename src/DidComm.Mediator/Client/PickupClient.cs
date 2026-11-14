@@ -31,7 +31,10 @@ namespace DidComm.Mediator.Client;
 /// message runs out. The clients remember recent messages
 /// (<see cref="MediatorClientOptions.DedupeCapacity"/>) and do not return one twice while they
 /// remember it, but an application that must never act twice on a message should also keep track
-/// of the message ids it has handled.
+/// of the message ids it has handled. They remember a message per mailbox, the <c>from</c> of the
+/// fetch or stream that returned it: a copy that reaches another of your DIDs' mailboxes (a third
+/// party can relay one there) is returned from that mailbox too, and never makes the first
+/// mailbox's own copy count as a repeat.
 /// </para>
 /// <para>
 /// <strong>Messages that do not unpack</strong> are returned as items with
@@ -186,8 +189,9 @@ public sealed class PickupClient
     /// <see cref="AckAsync"/>.
     /// </para>
     /// <para>
-    /// <strong>Repeats.</strong> A message the clients already returned is acknowledged again and
-    /// left out while they remember it (<see cref="MediatorClientOptions.DedupeCapacity"/>). With
+    /// <strong>Repeats.</strong> A message the clients already returned from this mailbox (this
+    /// <paramref name="from"/>) is acknowledged again and left out while they remember it
+    /// (<see cref="MediatorClientOptions.DedupeCapacity"/>). With
     /// <c>DedupeCapacity</c> set to 0 nothing is remembered from one call to the next, but a message
     /// that comes twice in the same delivery is still returned only once.
     /// </para>
@@ -307,7 +311,7 @@ public sealed class PickupClient
                     "It was not acknowledged and stays queued: discard it with AckAsync, or it ages out at the mediator.", request.Id)));
                 continue;
             }
-            if (Exchange.Duplicates.Contains(outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
+            if (Exchange.Duplicates.Contains(from, outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
             {
                 repeats++;
                 acknowledge.Add(entry.Id);
@@ -325,7 +329,7 @@ public sealed class PickupClient
         // comes back. After it the batch is returned whatever happens to the acknowledgement.
         ct.ThrowIfCancellationRequested();
         foreach (var key in commit)
-            Exchange.Duplicates.Add(key);
+            Exchange.Duplicates.Add(from, key);
         if (acknowledge.Count > 0)
             await AcknowledgeQuietlyAsync(route, mediatorDid, from, acknowledge).ConfigureAwait(false);
 

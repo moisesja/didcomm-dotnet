@@ -8,14 +8,19 @@ namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
 /// The bounded memory of delivered messages already returned to the application, so a redelivery
-/// is acknowledged but not returned twice (design D-15, §4.9). Keys are SHA-256 truncated to 128
-/// bits: over (authenticated sender DID subject, decrypting DID subject, inner message id) for an
-/// authenticated message — a stranger reusing someone's message id cannot suppress it — and over the
-/// innermost packed bytes for an anonymous one. FIFO eviction at <see cref="Capacity"/>; capacity 0
-/// turns it off (<see cref="Contains"/> is always <c>false</c>, <see cref="Add"/> does nothing).
-/// Retained memory is O(capacity × 16 B) whatever the wire values (L-062). Thread-safe (one lock).
-/// A key is added only at a commit point: in a fetch right before the acknowledgement, in a live
-/// stream when the consumer asks for the next item. Owner: engineer A.
+/// is acknowledged but not returned twice (design D-15, §4.9). A message's key
+/// (<see cref="KeyOf"/>) is SHA-256 truncated to 128 bits: over (authenticated sender DID subject,
+/// decrypting DID subject, inner message id) for an authenticated message — a stranger reusing
+/// someone's message id cannot suppress it — and over the innermost packed bytes for an anonymous
+/// one. What the filter remembers is that key scoped to the mailbox it was fetched from (the DID
+/// subject of the <c>from</c> of the fetch or live stream; ADV1-1): a copy of one DID's message that
+/// a third party relays into another DID's mailbox can never make the genuine owner's copy count as
+/// a repeat, while the copies of one message in one mailbox (a wallet whose DIDs share one grant)
+/// are still returned once. FIFO eviction at <see cref="Capacity"/>; capacity 0 turns it off
+/// (<see cref="Contains"/> is always <c>false</c>, <see cref="Add"/> does nothing). Retained memory is
+/// O(capacity × 16 B) whatever the wire values (L-062). Thread-safe (one lock). A key is added only at
+/// a commit point: in a fetch right before the acknowledgement, in a live stream when the consumer
+/// asks for the next item. Owner: engineer A.
 /// </summary>
 internal sealed class DuplicateFilter
 {
@@ -44,7 +49,7 @@ internal sealed class DuplicateFilter
         }
     }
 
-    /// <summary>The key of a message that unpacked (see the class summary for what it covers).</summary>
+    /// <summary>The key of a message that unpacked (see the class summary for what it covers), before it is scoped to a mailbox (<see cref="InMailbox"/>).</summary>
     /// <param name="unpacked">The innermost unpack result.</param>
     /// <param name="innermostPacked">The packed text the innermost message was unpacked from (keyed for an anonymous sender).</param>
     internal static UInt128 KeyOf(UnpackResult unpacked, string innermostPacked)
@@ -82,22 +87,51 @@ internal sealed class DuplicateFilter
         return BinaryPrimitives.ReadUInt128BigEndian(digest[..16]);
     }
 
-    /// <summary>Whether <paramref name="key"/> is remembered.</summary>
-    /// <param name="key">A key from <see cref="KeyOf"/>.</param>
-    internal bool Contains(UInt128 key)
+    /// <summary>
+    /// The key the filter remembers: <paramref name="messageKey"/> scoped to the mailbox it was
+    /// fetched from, SHA-256 truncated to 128 bits over (the mailbox's DID subject, the message key).
+    /// </summary>
+    /// <param name="mailboxDid">The DID whose mailbox the fetch or live stream reads: its <c>from</c> (a bare DID).</param>
+    /// <param name="messageKey">A key from <see cref="KeyOf"/>.</param>
+    internal static UInt128 InMailbox(string mailboxDid, UInt128 messageKey)
+    {
+        ArgumentNullException.ThrowIfNull(mailboxDid);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("didcomm-dotnet/pickup-dedupe/mailbox\n"u8);
+        AppendField(hash, DidSubject.DidSubjectOf(mailboxDid) ?? mailboxDid);
+        Span<byte> key = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt128BigEndian(key, messageKey);
+        hash.AppendData(key);
+
+        Span<byte> digest = stackalloc byte[32];
+        hash.GetHashAndReset(digest);
+        return BinaryPrimitives.ReadUInt128BigEndian(digest[..16]);
+    }
+
+    /// <summary>Whether the message <paramref name="messageKey"/> was already returned from the mailbox of <paramref name="mailboxDid"/>.</summary>
+    /// <param name="mailboxDid">The DID whose mailbox the fetch or live stream reads: its <c>from</c>.</param>
+    /// <param name="messageKey">A key from <see cref="KeyOf"/>.</param>
+    internal bool Contains(string mailboxDid, UInt128 messageKey)
     {
         if (Capacity == 0)
             return false;
+        var key = InMailbox(mailboxDid, messageKey);
         lock (_gate)
             return _keys.Contains(key);
     }
 
-    /// <summary>Remember <paramref name="key"/>, forgetting the oldest key when full; a key already remembered is not added twice.</summary>
-    /// <param name="key">A key from <see cref="KeyOf"/>.</param>
-    internal void Add(UInt128 key)
+    /// <summary>
+    /// Remember that the message <paramref name="messageKey"/> was returned from the mailbox of
+    /// <paramref name="mailboxDid"/>, forgetting the oldest key when full; a key already remembered
+    /// is not added twice.
+    /// </summary>
+    /// <param name="mailboxDid">The DID whose mailbox the fetch or live stream reads: its <c>from</c>.</param>
+    /// <param name="messageKey">A key from <see cref="KeyOf"/>.</param>
+    internal void Add(string mailboxDid, UInt128 messageKey)
     {
         if (Capacity == 0)
             return;
+        var key = InMailbox(mailboxDid, messageKey);
         lock (_gate)
         {
             if (!_keys.Add(key))

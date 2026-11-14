@@ -83,7 +83,7 @@ public sealed class PickupClientFetchTests
     {
         // L-057: a give-back names what it took. Every kind of entry in one delivery.
         var exchange = new FakePickupExchange();
-        exchange.Duplicates.Add(DefaultOutcome("ok:seen-before").DedupeKey);
+        exchange.Duplicates.Add(L, DefaultOutcome("ok:seen-before").DedupeKey);
         exchange.On(MessagePickup.DeliveryRequestType, r => RawDelivery(r, new Attachment?[]
         {
             Entry("good1", "ok:m1"),
@@ -244,7 +244,7 @@ public sealed class PickupClientFetchTests
         refused.RequestId.Should().Be(exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id);
         refused.Message.Should().NotContain(L).And.NotContain(carol);
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3" }, "a message for another DID than the filter is left with the mediator");
-        exchange.Duplicates.Contains(DefaultOutcome($"to:{L}:m2").DedupeKey).Should().BeFalse();
+        exchange.Duplicates.Contains(L, DefaultOutcome($"to:{L}:m2").DedupeKey).Should().BeFalse();
     }
 
     [Fact]
@@ -310,6 +310,22 @@ public sealed class PickupClientFetchTests
         unfiltered.Unpacker = exchange.Unpacker;
         (await PickupTest.Client(unfiltered).FetchAsync(M, L, limit: 10)).Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
         unfiltered.AcknowledgedIds.Should().Equal("q1");
+    }
+
+    // ADV1-1: repeats are remembered per mailbox (the `from` of the fetch). A copy a third party
+    // relayed into another DID's mailbox, once returned there, must not make this mailbox's own copy a
+    // repeat; within one mailbox a repeat is still a repeat.
+    [Fact]
+    public async Task A_message_returned_from_one_mailbox_is_not_a_repeat_in_another()
+    {
+        const string other = "did:example:other";
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")));
+        var client = PickupTest.Client(exchange);
+
+        (await client.FetchAsync(M, other, limit: 10)).Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
+        (await client.FetchAsync(M, L, limit: 10)).Items.Should().ContainSingle("this mailbox never returned it").Which.Unpacked!.Message.Id.Should().Be("m1");
+        (await client.FetchAsync(M, L, limit: 10)).Items.Should().BeEmpty("in the same mailbox it is a repeat");
+        exchange.AcknowledgedIds.Should().Equal("q1", "q1", "q1");
     }
 
     [Fact]

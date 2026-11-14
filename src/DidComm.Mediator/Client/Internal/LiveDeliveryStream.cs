@@ -454,7 +454,7 @@ internal sealed class LiveDeliveryStream
             _log.UnpackFailures(requestId: null, new[] { outcome.Error! });
             return new PickupItem(entry.Id, unpacked: null, outcome.Error);
         }
-        if (_exchange.Duplicates.Contains(outcome.DedupeKey))
+        if (_exchange.Duplicates.Contains(_localDid, outcome.DedupeKey))
         {
             AddTaken(entry.Id);
             return null;
@@ -470,7 +470,7 @@ internal sealed class LiveDeliveryStream
     {
         if (ReferenceEquals(item, _yielded))
         {
-            _exchange.Duplicates.Add(_yieldedKey);
+            _exchange.Duplicates.Add(_localDid, _yieldedKey);
             AddTaken(item.Id);
         }
         _yielded = null;
