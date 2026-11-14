@@ -101,7 +101,7 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         await FluentActions.Awaiting(() => _w.Client.UnpackAsync(tampered)).Should().ThrowAsync<DidCommException>("a tampered envelope does not unpack, so the dispatcher never sees it");
         // from = the mediator, but Mallory's sender key: the envelope layer refuses it (FR-CONSIST-01).
         var forgedFrom = await Capture(() => _w.ReceiveAsync(_w.Grant(request.Id), from: _w.Mallory.Did));
-        forgedFrom.Should().NotBeNull("a message whose from is the mediator but whose sender key is Mallory's never becomes a snapshot");
+        forgedFrom.Should().BeOfType<ConsistencyException>("a message whose from is the mediator but whose sender key is Mallory's is refused at unpack (FR-CONSIST-01) and never becomes a snapshot");
 
         exchange.IsCompleted.Should().BeFalse();
         _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(request.Id))).Should().BeTrue();
