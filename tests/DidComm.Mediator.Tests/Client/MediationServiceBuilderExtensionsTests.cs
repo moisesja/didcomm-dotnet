@@ -12,7 +12,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// <c>DidCommServiceBuilder.ForMediation(grant)</c>, the C# 14 static extension member (#96 design
 /// D-21, §6.4): the call compiles against the receiver type, builds exactly what
 /// <c>ForMediator(grant.RoutingDids[0])</c> builds, and refuses a grant that names no routing DID.
-/// The A0 stub commit's proof; engineer B extends it (DID URL, <c>WithRoutingKeys</c> bound).
+/// The A0 stub commit's proof, extended by engineer B: a first routing DID that is not a bare DID
+/// (a DID URL, over-long, null), only the first routing DID read, and <c>WithRoutingKeys</c>
+/// counting the mediator's own layer toward the 8-layer bound.
 /// </summary>
 public sealed class MediationServiceBuilderExtensionsTests
 {
@@ -53,6 +55,71 @@ public sealed class MediationServiceBuilderExtensionsTests
         var act = () => DidCommServiceBuilder.ForMediation(new MediationGrant(Peer, Array.Empty<string>()));
 
         act.Should().Throw<ArgumentException>().Where(e => e.GetType() == typeof(ArgumentException)).WithParameterName("grant");
+    }
+
+    [Theory]
+    [InlineData("did:example:mediator#key-1")]
+    [InlineData("did:example:mediator?service=a")]
+    [InlineData("did:example:mediator/path")]
+    [InlineData("not-a-did")]
+    [InlineData("")]
+    public void ForMediation_refuses_a_first_routing_did_that_is_not_a_bare_did_without_quoting_it(string routingDid)
+    {
+        var act = () => DidCommServiceBuilder.ForMediation(new MediationGrant(Peer, new[] { routingDid }));
+
+        var thrown = act.Should().Throw<ArgumentException>().Which;
+        thrown.Should().NotBeOfType<ArgumentNullException>();
+        if (routingDid.Length > 0)
+            thrown.Message.Should().NotContain(routingDid);
+    }
+
+    [Fact]
+    public void ForMediation_refuses_an_over_long_first_routing_did()
+    {
+        var act = () => DidCommServiceBuilder.ForMediation(new MediationGrant(Peer, new[] { "did:example:" + new string('m', 2100) }));
+
+        act.Should().Throw<ArgumentException>().Which.Message.Should().NotContain("mmmm");
+    }
+
+    [Fact]
+    public void ForMediation_refuses_a_null_first_routing_did()
+    {
+        var act = () => DidCommServiceBuilder.ForMediation(new MediationGrant(Peer, new string[] { null! }));
+
+        act.Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
+    public void ForMediation_uses_only_the_first_routing_did()
+    {
+        var service = DidCommServiceBuilder.ForMediation(new MediationGrant(Peer, new[] { RoutingDid, "not even a DID" })).Build();
+
+        Describe(service).Should().Contain("\"uri\":\"did:example:mediator\"");
+    }
+
+    [Fact]
+    public void ForMediation_then_WithRoutingKeys_counts_the_mediators_layer_toward_the_8_layer_bound()
+    {
+        MediatorEndpointExpander.MaxForwardLayers.Should().Be(8);
+        var grant = new MediationGrant(Peer, new[] { RoutingDid });
+        var seven = Enumerable.Range(0, 7).Select(i => $"did:example:relay{i}#key-x25519-1").ToArray();
+
+        var service = DidCommServiceBuilder.ForMediation(grant).WithRoutingKeys(seven).Build();
+        JsonSerializer.Serialize(service.ServiceEndpoint!.Map).Should().Contain("\"routingKeys\"").And.Contain("relay6");
+
+        // Eight more keys plus the mediator's own layer is nine: refused from the count, before the
+        // poisoned ninth key is looked at (L-055).
+        var eight = seven.Append("not a routing key").ToArray();
+        var act = () => DidCommServiceBuilder.ForMediation(grant).WithRoutingKeys(eight);
+        act.Should().Throw<ArgumentException>().WithMessage("*9 forward layers*");
+    }
+
+    [Fact]
+    public void ForMediation_then_WithRoutingKeys_still_checks_each_key()
+    {
+        var act = () => DidCommServiceBuilder.ForMediation(new MediationGrant(Peer, new[] { RoutingDid })).WithRoutingKeys("did:example:relay#");
+
+        act.Should().Throw<ArgumentException>().WithMessage("*Routing key 0*");
     }
 
     [Fact]

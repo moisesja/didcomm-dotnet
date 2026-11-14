@@ -1,0 +1,1 @@
+{"id":"123456780","type":"https://didcomm.org/coordinate-mediation/2.0/keylist-query","typ":"application/didcomm-plain+json","body":{"paginate":{"limit":30,"offset":0}},"return_route":"all"}
