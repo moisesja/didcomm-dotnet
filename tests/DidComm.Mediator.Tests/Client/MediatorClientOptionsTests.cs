@@ -1,7 +1,11 @@
 using AwesomeAssertions;
 using DidComm.Extensions.DependencyInjection;
+using DidComm.Facade;
 using DidComm.Mediator.Client;
+using DidComm.Mediator.Client.Internal;
+using DidComm.TestSupport;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace DidComm.Mediator.Tests.Client;
@@ -107,6 +111,114 @@ public sealed class MediatorClientOptionsTests
 
         act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName(nameof(MediatorClientOptions.MaxPendingRequests));
         services.Should().HaveCount(before, "the settings are checked before anything is added");
+    }
+
+    [Theory]
+    [MemberData(nameof(OutOfRange))]
+    public void The_non_DI_clients_refuse_a_bad_setting(Action<MediatorClientOptions> set, string setting)
+    {
+        using var sp = Container();
+        var client = sp.GetRequiredService<DidCommClient>();
+        var options = new MediatorClientOptions();
+        set(options);
+
+        FluentActions.Invoking(() => new MediationClient(client, options)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName(setting);
+        FluentActions.Invoking(() => new PickupClient(client, options)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName(setting);
+    }
+
+    [Fact]
+    public void The_non_DI_clients_use_the_defaults_without_options()
+    {
+        using var sp = Container();
+
+        var channel = (MediatorClientChannel)new PickupClient(sp.GetRequiredService<DidCommClient>()).Exchange;
+
+        channel.Options.RequestTimeout.Should().Be(TimeSpan.FromSeconds(30));
+        channel.Duplicates.Capacity.Should().Be(4096);
+        channel.Unpacker.Timeout.Should().Be(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public void The_channel_keeps_a_copy_so_later_changes_change_nothing()
+    {
+        using var sp = Container();
+        var options = new MediatorClientOptions { DedupeCapacity = 7, UnpackTimeout = TimeSpan.FromSeconds(3), MaxPendingRequests = 2 };
+
+        var channel = new MediatorClientChannel(sp.GetRequiredService<DidCommClient>(), options, receivesInbound: false, TimeProvider.System, loggerFactory: null);
+        options.DedupeCapacity = 0;
+        options.UnpackTimeout = TimeSpan.FromSeconds(9);
+        options.MaxPendingRequests = 4000;
+
+        channel.Options.Should().NotBeSameAs(options);
+        channel.Options.MaxPendingRequests.Should().Be(2);
+        channel.Duplicates.Capacity.Should().Be(7);
+        channel.Unpacker.Timeout.Should().Be(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public void The_container_settings_are_copied_when_the_channel_is_built()
+    {
+        using var sp = Container(b => b.AddMediatorClient(o => o.LivePollInterval = TimeSpan.FromSeconds(5)));
+        var channel = sp.GetRequiredService<MediatorClientChannel>();
+
+        sp.GetRequiredService<IOptions<MediatorClientOptions>>().Value.LivePollInterval = TimeSpan.FromHours(2);
+
+        channel.Options.LivePollInterval.Should().Be(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void The_delegate_runs_once_at_registration_and_once_when_the_container_builds_the_settings()
+    {
+        var runs = 0;
+        using var sp = Container(b => b.AddMediatorClient(o =>
+        {
+            runs++;
+            o.DedupeCapacity = 0;
+        }));
+        runs.Should().Be(1, "the probe at registration");
+
+        sp.GetRequiredService<MediatorClientChannel>().Options.DedupeCapacity.Should().Be(0);
+
+        runs.Should().Be(2);
+    }
+
+    [Fact]
+    public void A_delegate_that_throws_at_registration_propagates_and_registers_nothing()
+    {
+        var services = new ServiceCollection();
+        var before = 0;
+        var act = () => services.AddDidComm(b =>
+        {
+            before = b.Services.Count;
+            b.AddMediatorClient(_ => throw new FormatException("bad settings"));
+        });
+
+        act.Should().Throw<FormatException>();
+        services.Should().HaveCount(before);
+    }
+
+    [Fact]
+    public void Settings_that_only_fail_together_with_a_later_call_fail_at_that_call()
+    {
+        var services = new ServiceCollection();
+        var act = () => services.AddDidComm(b => b
+            .AddMediatorClient(o => o.RequestTimeout = TimeSpan.FromSeconds(5))
+            .AddMediatorClient(o => o.UnpackTimeout = TimeSpan.Zero));
+
+        // Each call validates its own delegate on a fresh probe; the second one is out of range by itself.
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName(nameof(MediatorClientOptions.UnpackTimeout));
+    }
+
+    private static ServiceProvider Container(Action<DidCommBuilder>? configure = null)
+    {
+        var services = new ServiceCollection();
+        services.AddDidComm(b =>
+        {
+            b.UseNetDidResolver();
+            b.UseSecretsResolver(new InMemorySecretsResolver());
+            configure?.Invoke(b);
+        });
+        return services.BuildServiceProvider();
     }
 
     [Fact]
