@@ -87,7 +87,14 @@ internal sealed class PendingRequest
         return true;
     }
 
-    /// <summary>Fail the request with <paramref name="error"/>; <c>false</c> when an outcome was already decided.</summary>
+    /// <summary>
+    /// Fail the request with <paramref name="error"/>; <c>false</c> when an outcome was already
+    /// decided. The fault is marked observed at once: the exchange that wins this CAS may throw the
+    /// failure itself instead of awaiting <see cref="Completion"/> (the HTTP no-answer rule, or a
+    /// disposal that ends the send first), and a faulted task nobody awaits would otherwise be
+    /// reported on <see cref="TaskScheduler.UnobservedTaskException"/> when collected (L-039). A
+    /// caller that does await <see cref="Completion"/> still sees <paramref name="error"/>.
+    /// </summary>
     /// <param name="error">What the waiting caller observes.</param>
     internal bool TryFail(Exception error)
     {
@@ -95,6 +102,7 @@ internal sealed class PendingRequest
         if (Interlocked.CompareExchange(ref _state, Failed, Waiting) != Waiting)
             return false;
         Completion.TrySetException(error);
+        _ = Completion.Task.Exception;
         return true;
     }
 }

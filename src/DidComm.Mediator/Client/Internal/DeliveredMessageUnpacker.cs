@@ -98,8 +98,9 @@ internal sealed class DeliveredMessageUnpacker
         }
         catch (OperationCanceledException) when (deadline.Token.IsCancellationRequested)
         {
-            if (!work.IsCompleted)
-                Abandon(work);
+            // The wait ended, so the work's own outcome is never awaited — whether it still runs or
+            // ended as the deadline did (a fault there would otherwise go unobserved, L-039).
+            Abandon(work);
             if (ct.IsCancellationRequested)
                 throw new OperationCanceledException(ct);
             return DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
@@ -145,7 +146,8 @@ internal sealed class DeliveredMessageUnpacker
         }
     }
 
-    // The unpack passed its deadline but still runs: it keeps an abandoned slot until it ends.
+    // The unpack's wait passed its deadline: its outcome is observed whenever it comes, and while it
+    // still runs it keeps an abandoned slot (one that already ended gives the slot back at once).
     private void Abandon(Task work)
     {
         Interlocked.Increment(ref _abandoned);
