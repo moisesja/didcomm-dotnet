@@ -497,10 +497,10 @@ public sealed class PickupClient
 
     /// <summary>
     /// Receive your messages as they arrive, over a WebSocket. The stream turns live delivery on,
-    /// takes what is already queued, then yields each message the mediator pushes. Every
-    /// <see cref="MediatorClientOptions.LivePollInterval"/> it turns live delivery on again and takes
-    /// what is queued: that picks up messages whose delivery was delayed and recovers from a dropped
-    /// connection. Items that failed to unpack are yielded too, with <see cref="PickupItem.Error"/>
+    /// takes what is already queued, then yields each message the mediator pushes. One
+    /// <see cref="MediatorClientOptions.LivePollInterval"/> after each such round ends it turns live
+    /// delivery on again and takes what is queued: that picks up messages whose delivery was delayed
+    /// and recovers from a dropped connection. Items that failed to unpack are yielded too, with <see cref="PickupItem.Error"/>
     /// set; they are never acknowledged and are yielded again when the mediator delivers them again.
     /// </summary>
     /// <remarks>
@@ -543,17 +543,17 @@ public sealed class PickupClient
     /// <strong>Drain rounds and pushes take turns.</strong> Once a cycle is draining, its next drain
     /// round runs before the stream takes another push, and a waiting push gets its turn after that
     /// round. So a steady flow of pushes that are slow to open (from a sender whose DID resolves
-    /// slowly or never) cannot keep the drain from running, and with the default settings a drain
-    /// that keeps meeting slow messages cannot keep the pushes from theirs. A push that waits stays
-    /// leased to your connection at the mediator: nothing is lost. A known limit (to be hardened in
-    /// <see href="https://github.com/moisesja/didcomm-dotnet/issues/111">#111</see>): when <see cref="MediatorClientOptions.LivePollInterval"/> is shorter than a
-    /// drain round can take (its <see cref="MediatorClientOptions.UnpackTimeout"/>, plus your time on
-    /// its items), a sender whose DID never resolves can keep one slow message in every round, each
-    /// new cycle then starts a drain round ahead of the waiting pushes, and pushed messages are not
-    /// taken while that lasts; they come back through the drain when the mediator's lease ends (60
-    /// seconds at this library's mediator), or, at a mediator that holds pushes for the connection,
-    /// when the stream ends. Keep the poll interval above the unpack budget (the defaults are 1
-    /// minute and 20 seconds).
+    /// slowly or never) cannot keep the drain from running, and a drain that keeps meeting slow
+    /// messages cannot keep the pushes from theirs. A push that waits stays leased to your
+    /// connection at the mediator: nothing is lost.
+    /// </para>
+    /// <para>
+    /// <strong>A cycle runs to its end before the next one.</strong> Once a cycle has turned live
+    /// delivery on, it sends its delivery requests until the mediator has nothing more for it (or
+    /// after 50 rounds), and only then is the next cycle scheduled, one
+    /// <see cref="MediatorClientOptions.LivePollInterval"/> after that end. So however slowly the
+    /// mediator answers — even more slowly than the interval — every cycle fetches what is queued,
+    /// and a cycle coming due never pre-empts a drain or the pushes waiting their turn.
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing</strong> is yielded again each time the mediator delivers
@@ -570,8 +570,9 @@ public sealed class PickupClient
     /// <para>
     /// <strong>Polling is part of the design.</strong> A message whose sender delayed it is never
     /// pushed when it falls due, and the mediator has no scheduler that would push it later, now or
-    /// in a future version (FR-PICK-08). The drain when the stream starts and the one every
-    /// <see cref="MediatorClientOptions.LivePollInterval"/> are how such a message reaches you, and
+    /// in a future version (FR-PICK-08). The drain when the stream starts and the one each
+    /// <see cref="MediatorClientOptions.LivePollInterval"/> after the previous drain ended are how
+    /// such a message reaches you, and
     /// how the stream recovers from a dropped connection: they are the lasting design, not a
     /// stopgap. Poll at least as often as the longest delay you expect your senders to ask for (this
     /// library's mediator caps a delay at 1 hour by default, <c>MediatorOptions.MaxForwardDelay</c>),

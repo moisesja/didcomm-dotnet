@@ -2009,8 +2009,13 @@ at, on the injected `TimeProvider`. A reading lower than that one (a host clock 
 an NTP correction, a restored snapshot) counts as due: one early cycle, retry or flush, never one
 postponed by the step (fix round 3, ADV3-5; L-060, as `NegotiatedVersionCache` treats such an age).
 
-- **The cycle** runs at the start, every `LivePollInterval` on the monotonic clock, and after a
-  failed step once the back-off has passed. It sends `live-delivery-change{true}` → `status`; a
+- **The cycle** runs at the start, one `LivePollInterval` after the previous cycle's drain ended
+  (on the monotonic clock), and after a failed step once the back-off has passed. A cycle that has
+  started is never pre-empted: the loop arms the next cycle only once this one's drain has ended
+  (`DrainDone`), so a mediator answering more slowly than the interval still gets the drain's
+  delivery requests (PR #112 review R1-1: the next cycle used to be scheduled when a cycle started,
+  before its answer, and the loop checks a due cycle first, so such a mediator got
+  `live-delivery-change` for ever and nothing was fetched). It sends `live-delivery-change{true}` → `status`; a
   status with live delivery off is logged once as a Warning, and the stream keeps polling. Then it
   drains: `delivery-request{10}` until a `status` (or a delivery without attachments), at most 50
   rounds. Live mode goes on before the drain, so a message that arrives in between is after the
@@ -2303,13 +2308,9 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
   - **Found by the final break-it pass on fix round 3 (ADV-4), deferred to #111 by owner decision
     (that pass's findings are documented, not patched); none loses a message; reproductions skipped
     naming #111 in `PickupClientLiveAdv4Tests` and `DeliveredUnpackAdv4Tests`:**
-    - **A new cycle takes a waiting push's turn back** (ADV4-1, Low). With `LivePollInterval`
-      shorter than a drain round can take (`UnpackTimeout`, plus the consumer's time on its items) —
-      a valid but non-default setting — a sender whose DID never resolves keeps one slow message in
-      every drain round, each new cycle clears the owed push turn and starts a round ahead of the
-      waiting pushes, and pushed messages are not taken while that lasts. They stay leased and come
-      back through the drain when the lease ends (60 s here), or, at a mediator that holds pushes for
-      the connection, when the stream ends. The defaults (1 min interval, 20 s budget) hold.
+    - **A new cycle took a waiting push's turn back** (ADV4-1, Low) — **resolved in #96** by the
+      fix for the review's R1-1: no cycle can come due while a drain is in progress, so nothing
+      clears the owed push turn; `PickupClientLiveAdv4Tests.ADV4_1_…` runs again and passes.
     - **A blocked unpack keeps its whole delivery reachable** (ADV4-2, Low). The `Task.Run` work
       item captures the `Delivery`, so while host code blocks its thread the delivery's bytes and the
       messages opened so far stay in memory until that code returns (bounded by the slots; L-062).

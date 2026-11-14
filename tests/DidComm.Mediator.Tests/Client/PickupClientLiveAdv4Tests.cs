@@ -22,7 +22,8 @@ public sealed class PickupClientLiveAdv4Tests
     // ---- ADV3-1: the turns ---------------------------------------------------------------------
 
     /// <summary>
-    /// ADV4-1 (defect, Low). Property broken — <see cref="LiveDeliveryStream"/> remarks and
+    /// ADV4-1 (defect, Low; resolved in #96 by the fix for PR #112 review R1-1 — no cycle can come
+    /// due while a drain is in progress — so this reproduction runs again and passes). Property broken — <see cref="LiveDeliveryStream"/> remarks and
     /// <see cref="PickupClient.ReceiveLiveAsync"/>: "a drain that keeps meeting slow messages cannot
     /// keep the pushes from theirs"; "a waiting push gets its turn after that round".
     /// <para>
@@ -40,7 +41,7 @@ public sealed class PickupClientLiveAdv4Tests
     /// keeps pushed messages for the connection it never arrives while the attack lasts.
     /// </para>
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111 (slow-sender hardening): with LivePollInterval shorter than a drain round, a new cycle takes the waiting push's turn back, so a slow message in every round keeps pushes waiting (ADV4-1).")]
+    [Fact]
     public async Task ADV4_1_a_cycle_that_comes_due_during_every_drain_round_takes_the_waiting_pushs_turn_back_for_ever()
     {
         var (exchange, client) = Live(o =>
@@ -150,7 +151,9 @@ public sealed class PickupClientLiveAdv4Tests
         items.Where(x => x.Id.StartsWith('p')).Select(x => x.Id).Should().Equal(expected);
         items.Where(x => x.Id.StartsWith('p')).Should().OnlyContain(x => x.Error == null);
         items.Where(x => x.Id.StartsWith('d')).Should().OnlyContain(x => x.Error is TimeoutException);
-        Types(exchange).Count(t => t == LiveOn).Should().BeGreaterThanOrEqualTo(3, "cycles came due while the pushes waited");
+        // Updated with R1-1's fix (PR #112 review): a cycle that has started finishes its drain before
+        // the next one is armed, so no cycle comes due while this drain keeps meeting slow messages.
+        Types(exchange).Count(t => t == LiveOn).Should().Be(1, "no cycle can come due while a drain is in progress (R1-1)");
         exchange.AcknowledgedIds.Should().BeEquivalentTo(expected).And.OnlyHaveUniqueItems();
     }
 

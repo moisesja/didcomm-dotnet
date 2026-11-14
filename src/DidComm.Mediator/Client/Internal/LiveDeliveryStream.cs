@@ -225,7 +225,12 @@ internal sealed class LiveDeliveryStream
                 await FlushAsync(ct).ConfigureAwait(false);
                 continue;
             }
-            if (IsDue(_nextCycle))
+            // A cycle that has started finishes before the next one is armed (R1-1): its drain runs
+            // to its end (a status, an empty delivery, MaxDrainRounds, or a failure), and only then
+            // is the next cycle scheduled, LivePollInterval after that end. So a mediator whose
+            // answers take longer than the interval still gets the drain's delivery requests, and
+            // a cycle coming due can never pre-empt a drain in progress.
+            if (!_draining && IsDue(_nextCycle))
             {
                 await CycleAsync(ct).ConfigureAwait(false);
                 continue;
@@ -239,10 +244,9 @@ internal sealed class LiveDeliveryStream
             // While a cycle drains, its rounds and the pushes take turns, a drain round first
             // (ADV3-1): a waiting push is taken only after a drain round, so a steady flow of pushes
             // that each take their whole budget to open cannot keep the drain from running, and a
-            // drain that keeps meeting slow messages cannot, with the default settings, keep the
-            // pushes from their turn. Known limit (ADV4-1, deferred to #111): a new cycle clears the
-            // owed push turn, so with LivePollInterval shorter than a drain round a slow message in
-            // every round keeps the pushes waiting (they stay leased; nothing is lost).
+            // drain that keeps meeting slow messages cannot keep the pushes from their turn — no
+            // cycle can come due while a drain is in progress (R1-1), so nothing clears the owed
+            // push turn (ADV4-1).
             var drainDue = _draining && IsDue(_notBefore);
             if (drainDue && !_pushTurn)
             {
@@ -308,9 +312,11 @@ internal sealed class LiveDeliveryStream
 
     // ---- the cycle --------------------------------------------------------------------------
 
+    // The next cycle is not scheduled here, before the answer (R1-1: an answer slower than the
+    // interval would find it due on return, and the stream would send live-on for ever): it is
+    // scheduled when this cycle's drain ends (DrainDone), or after a back-off when a step fails.
     private async Task CycleAsync(CancellationToken ct)
     {
-        _nextCycle = DueIn(_exchange.Options.LivePollInterval);
         _liveRequested = true;
         var spec = DeliveryReader.LiveDeliveryChangeSpec;
         var request = MessagePickup.CreateLiveDeliveryChange(_localDid, _mediatorDid, liveDelivery: true, UuidV4MessageIdGenerator.Instance);
@@ -375,11 +381,13 @@ internal sealed class LiveDeliveryStream
             DrainDone();
     }
 
-    // A cycle ran to its end: the failure count starts again.
+    // A cycle ran to its end: the failure count starts again, and the next cycle is due one
+    // LivePollInterval from now — measured from the end of this one, never from its start (R1-1).
     private void DrainDone()
     {
         _draining = false;
         _failures = 0;
+        _nextCycle = DueIn(_exchange.Options.LivePollInterval);
     }
 
     // A step failed: back off (the next cycle re-arms live mode and drains again), or end the

@@ -60,8 +60,9 @@ public sealed class MediatorClientOptions
 
     /// <summary>
     /// How often a live stream (<see cref="PickupClient.ReceiveLiveAsync"/>) turns live delivery on
-    /// again and collects what is queued, besides taking what the mediator pushes. Default 1 minute;
-    /// 1 second to 24 hours. It is also how a stream notices a dropped connection, and the only way
+    /// again and collects what is queued, besides taking what the mediator pushes, measured from the
+    /// end of the previous collection (a collection always runs to its end first, however slowly the
+    /// mediator answers). Default 1 minute; 1 second to 24 hours. It is also how a stream notices a dropped connection, and the only way
     /// it receives a message whose delivery its sender delayed (a mediator never pushes a delayed
     /// message when it falls due), so keep it at or below the longest delay you expect your senders
     /// to ask for (this library's mediator allows up to an hour by default). The mediator has no

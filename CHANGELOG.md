@@ -130,8 +130,9 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   at its first `MoveNextAsync`). A mediator that cannot deliver live on the connection answers with
   a problem report: `MediationProtocolException` with `ProblemCode` `e.m.live-mode-not-supported`.
 - **The live stream** (`ReceiveLiveAsync`) turns live delivery on, takes what is already queued, then
-  yields what the mediator pushes; every `LivePollInterval` it turns live delivery on again and
-  takes what is queued. **An item is acknowledged when you ask for the next one**: the next
+  yields what the mediator pushes; one `LivePollInterval` after each such round ends it turns live
+  delivery on again and takes what is queued. A round always runs to its end before the next is
+  scheduled, however slowly the mediator answers (PR #112 review R1-1). **An item is acknowledged when you ask for the next one**: the next
   `MoveNextAsync`, which `await foreach` makes once your loop body has finished with the item. **When
   the enumeration ends** — `break`, `return`, an exception out of your loop body, cancellation, a
   failure of the stream — **the last item is not acknowledged**, because the stream cannot tell
@@ -401,13 +402,19 @@ deferred to #111 are checked in skipped, their skip reason naming #111. Fix roun
     ignores cancellation can hold slots that way, and one slow sender is then enough to hold all 16.
     Until those lookups end, every delivered message fails at once ("unpack capacity exhausted"),
     for every DID and tenant of the container. Use a resolver that honours its cancellation token.
+  - **Found in review (PR #112, R1-1) and fixed before release: a slow mediator could starve the live
+    stream.** The next cycle was scheduled when a cycle started, before its `live-delivery-change`
+    was answered, and the loop checks a due cycle first, so a mediator answering more slowly than
+    `LivePollInterval` made the stream send `live-delivery-change` for ever with no delivery request
+    and nothing yielded. Now a started cycle runs its drain to its end before the next one is armed,
+    and the next one is due one interval after that end; regression tests cover latency below,
+    at and above the interval, failed and timed-out steps, and an interval shorter than
+    `RequestTimeout` (`PickupClientLiveSchedulingTests`).
   - **Found by the final break-it pass on fix round 3 (ADV-4), documented and deferred to #111 by
     owner decision** (none loses a message; reproductions skipped naming #111):
-    - **A new cycle takes a waiting push's turn back (ADV4-1, Low).** When `LivePollInterval` is
-      shorter than a drain round can take (a valid but non-default setting), a sender whose DID never
-      resolves can keep one slow message in every round, and pushed messages are not taken while
-      that lasts; they come back through the drain when the mediator's lease ends. Keep the poll
-      interval above `UnpackTimeout` (the defaults are 1 minute and 20 seconds).
+    - **A new cycle took a waiting push's turn back (ADV4-1, Low) — resolved in #96 by the fix for
+      the review's R1-1** (below): no cycle can come due while a drain is in progress, so nothing
+      clears the owed push turn; its reproduction now passes.
     - **A blocked unpack keeps its delivery in memory (ADV4-2, Low).** While a sender's DID lookup
       blocks its thread, the whole delivery (its other messages and the ones already opened) stays in
       memory until the lookup returns, bounded by the abandoned-unpack slots.
