@@ -26,17 +26,17 @@ The architect's design follows below verbatim except where these notes override 
 ## Checklist
 
 ### A0. Contract stubs (engineer A0, merged before A/B/C branch)
-- [ ] A0.1 Every §2 public type/member with XML docs and `NotImplementedException` bodies; internal `IMediatorExchange`, `MediatorRoute`, `MediatorExchangeSpec`, `LiveRegistration`, `DeliveredOutcome`, a stub `MediatorClientChannel`; Core internal signatures (`Pthid` / `Verified` on the snapshot implemented outright; `OnInbound` → `bool` per R-3).
-- [ ] A0.2 C# 14 `extension(DidCommServiceBuilder)` for `ForMediation` proven under `/warnaserror` and the DX scanner (or the fallback, recorded here).
-- [ ] A0.3 `TODO(#97)` entries in both allowlists (ids from the gate's failure output); counts recorded.
-- [ ] A0.4 `tests/DidComm.InteropTests/Mediator/Client/MediatorClientHarness.cs` (HTTP or WS client container against `MediatorTestServer`).
-- [ ] A0.5 Build / test / pack green.
+- [x] A0.1 Every §2 public type/member with XML docs and `NotImplementedException` bodies; internal `IMediatorExchange`, `MediatorRoute`, `MediatorExchangeSpec`, `LiveRegistration`, `DeliveredOutcome`, a stub `MediatorClientChannel`; Core internal signatures (`Pthid` / `Verified` on the snapshot implemented outright; `OnInbound` → `bool` per R-3).
+- [x] A0.2 C# 14 `extension(DidCommServiceBuilder)` for `ForMediation` proven under `/warnaserror` and the DX scanner (or the fallback, recorded here).
+- [x] A0.3 `TODO(#97)` entries in both allowlists (ids from the gate's failure output); counts recorded.
+- [x] A0.4 `tests/DidComm.InteropTests/Mediator/Client/MediatorClientHarness.cs` (HTTP or WS client container against `MediatorTestServer`).
+- [x] A0.5 Build / test / pack green.
 
 ### A. Core + channel + DI (engineer A)
 - [ ] A1 `InboundMessageSnapshot` `Pthid`/`Verified`; `ReturnRouteEligibility` snapshot overload + parity test.
 - [ ] A2 `DidCommClient.ResolveDirectEndpointAsync` + `UnpackDeliveredAsync` (rewrap opening, ≤ 8 layers); `ForwardProcessor.ExtractAttachmentBytes` internal.
 - [ ] A3 `MediatorClientChannel` (exchange, matcher table §4.2, pending map, guarded deadline timer, HTTP no-answer, dispose).
-- [ ] A4 `DuplicateFilter`, `DeliveredMessageUnpacker` (timeout, concurrency 4, abandoned ≤ 16).
+- [ ] A4 `DuplicateFilter` (done by the orchestrator before the split, so C can test against it), `DeliveredMessageUnpacker` (timeout, concurrency 4, abandoned ≤ 16).
 - [ ] A5 `MediatorClientOptions` + `Validate`, `MediationProtocolException`, `AddMediatorClient()`; dispatcher Debug downgrade (R-3).
 
 ### B. MediationClient, CM 2.0, ForMediation (engineer B)
@@ -64,7 +64,8 @@ The architect's design follows below verbatim except where these notes override 
 
 ## Progress log
 
-- (empty)
+- A0 (engineer `eng-a0-96`): `9de0bc9` Core internals (snapshot `Pthid`/`Verified`, correlator claim R-3 with the dispatcher's Debug downgrade, internal seams), `797cbae` public stubs + `AddMediatorClient` + `ForMediation` (C# 14 `extension(DidCommServiceBuilder)`: compiles under `/warnaserror`; the DX scanner lists the static class and the implementation method only, pinned by `ExtensionMemberSurfaceTests`), `26a7ed2` `MediatorClientHarness`. Gate green: Core 2458, Mediator 3510, Interop 1261; pack 8 packages. Allowlists: coverage 390 → 433 (43 #96 entries), execution 324 → 366 (42). Deviations accepted: `IMediatorExchange.UnpackDeliveredBatchAsync` (fetch path, 4-way); `MediatorExchangeSpec.Expected` is `IReadOnlyList`; the new `TryGetPeer` overload keeps the existing non-nullable `out string`; channel dispose is idempotent (the container disposes it once per registration); `LiveRegistration`, `DeliveredOutcome`, the facade constructors and `ValidatedCopy()` are real; the unpacker computes `DedupeKey`; no `[EnumeratorCancellation]` on the non-iterator stubs (CS8424); exceptions take already-sanitized values; `AddMediatorClient` lets `Validate()`'s exception propagate.
+- `DuplicateFilter` implemented by the orchestrator before the split (C's fakes call it): SHA-256/128 over length-prefixed (sender subject, decrypting subject, id) when authenticated or signed, else over the innermost packed bytes; FIFO; capacity 0 off; 9 tests.
 
 ---
 

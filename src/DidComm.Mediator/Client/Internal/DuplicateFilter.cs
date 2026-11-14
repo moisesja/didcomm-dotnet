@@ -1,3 +1,7 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
+using DidComm.Consistency;
 using DidComm.Facade;
 
 namespace DidComm.Mediator.Client.Internal;
@@ -15,6 +19,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// </summary>
 internal sealed class DuplicateFilter
 {
+    private readonly object _gate = new();
+    private readonly HashSet<UInt128> _keys = new();
+    private readonly Queue<UInt128> _order = new();
+
     /// <summary>Create a filter.</summary>
     /// <param name="capacity">How many keys to remember (<see cref="MediatorClientOptions.DedupeCapacity"/>, already validated); 0 = off.</param>
     internal DuplicateFilter(int capacity)
@@ -26,19 +34,87 @@ internal sealed class DuplicateFilter
     /// <summary>How many keys the filter remembers; 0 = off.</summary>
     internal int Capacity { get; }
 
+    /// <summary>How many keys are remembered now (test seam).</summary>
+    internal int Count
+    {
+        get
+        {
+            lock (_gate)
+                return _keys.Count;
+        }
+    }
+
     /// <summary>The key of a message that unpacked (see the class summary for what it covers).</summary>
     /// <param name="unpacked">The innermost unpack result.</param>
     /// <param name="innermostPacked">The packed text the innermost message was unpacked from (keyed for an anonymous sender).</param>
     internal static UInt128 KeyOf(UnpackResult unpacked, string innermostPacked)
-        => throw new NotImplementedException("#96 engineer A: DuplicateFilter.KeyOf (design D-15).");
+    {
+        ArgumentNullException.ThrowIfNull(unpacked);
+        ArgumentNullException.ThrowIfNull(innermostPacked);
+
+        // The authenticated sender is the authcrypt sender key's DID subject, else the verified
+        // signer's. Message ids are unique per sender only (DIDComm v2.1 §Message Headers), so the
+        // sender is part of the key: a stranger who reuses someone else's message id produces a
+        // different key and cannot suppress that message. Without an authenticated sender there is
+        // no identity to bind the id to, so the key is over the exact bytes delivered: a replayed
+        // or redelivered copy of the same message matches, a different message with the same id
+        // does not.
+        var sender = unpacked.Authenticated || unpacked.NonRepudiation
+            ? DidSubject.DidSubjectOf(!string.IsNullOrEmpty(unpacked.SenderKid) ? unpacked.SenderKid : unpacked.SignerKid)
+            : null;
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (sender is not null)
+        {
+            hash.AppendData("didcomm-dotnet/pickup-dedupe/authenticated\n"u8);
+            AppendField(hash, sender);
+            AppendField(hash, DidSubject.DidSubjectOf(unpacked.RecipientKid) ?? string.Empty);
+            AppendField(hash, unpacked.Message.Id ?? string.Empty);
+        }
+        else
+        {
+            hash.AppendData("didcomm-dotnet/pickup-dedupe/anonymous\n"u8);
+            AppendField(hash, innermostPacked);
+        }
+
+        Span<byte> digest = stackalloc byte[32];
+        hash.GetHashAndReset(digest);
+        return BinaryPrimitives.ReadUInt128BigEndian(digest[..16]);
+    }
 
     /// <summary>Whether <paramref name="key"/> is remembered.</summary>
     /// <param name="key">A key from <see cref="KeyOf"/>.</param>
     internal bool Contains(UInt128 key)
-        => throw new NotImplementedException("#96 engineer A: DuplicateFilter.Contains (design §4.9).");
+    {
+        if (Capacity == 0)
+            return false;
+        lock (_gate)
+            return _keys.Contains(key);
+    }
 
     /// <summary>Remember <paramref name="key"/>, forgetting the oldest key when full; a key already remembered is not added twice.</summary>
     /// <param name="key">A key from <see cref="KeyOf"/>.</param>
     internal void Add(UInt128 key)
-        => throw new NotImplementedException("#96 engineer A: DuplicateFilter.Add (design §4.9).");
+    {
+        if (Capacity == 0)
+            return;
+        lock (_gate)
+        {
+            if (!_keys.Add(key))
+                return;
+            _order.Enqueue(key);
+            while (_order.Count > Capacity)
+                _keys.Remove(_order.Dequeue());
+        }
+    }
+
+    // Length-prefixed UTF-8 fields, so ("ab", "c") and ("a", "bc") never hash alike.
+    private static void AppendField(IncrementalHash hash, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+        hash.AppendData(length);
+        hash.AppendData(bytes);
+    }
 }
