@@ -10,14 +10,13 @@ namespace DidComm.InteropTests.Mediator;
 
 /// <summary>
 /// QA-2 (#95), what the mediator writes to its logs over a busy run that touches every outcome the
-/// pipeline has — queued, delivered live, pushed directly, push failed, dropped unknown, expired, over
-/// quota, too large, unacknowledged, a revoked grant — at every level, Trace included: no DID, no key
-/// id, no queue record id and no push endpoint (FR-ROUTE-11, FR-PICK-09, #95 observability).
+/// pipeline has — queued, delivered live, dropped unknown, expired, over quota, too large,
+/// unacknowledged, a revoked grant — at every level, Trace included: no DID, no key id and no queue
+/// record id (FR-ROUTE-11, FR-PICK-09, #95 observability). That the HTTP transport's own line never
+/// carries an endpoint URI (QA-2 defect 4, Q-9) is pinned by HttpTransportAcceptedLogTests.
 /// </summary>
 public sealed class MediatorLogsQaTests
 {
-    private const string EndpointToken = "push-endpoint-capability-7f3a9c";
-
     [Fact]
     public async Task No_log_line_at_any_level_carries_a_DID_a_key_id_or_a_queue_record_id()
     {
@@ -26,64 +25,17 @@ public sealed class MediatorLogsQaTests
             Qa.LinesWith(mediator.Logs, sensitive).Should().BeEmpty();
     }
 
-    [Fact]
-    public async Task The_mediator_packages_own_lines_never_carry_the_push_endpoint()
-    {
-        // Everything except the HTTP transport's Debug line and the framework's IHttpClientFactory
-        // request logging (see DEFECT 4 below).
-        var (mediator, _, f) = await RunBusyScenarioAsync();
-        await using (f)
-        {
-            mediator.Logs.Entries.Where(e => !IsHttpTransportLine(e))
-                .Should().NotContain(e => e.Contains(EndpointToken, StringComparison.Ordinal));
-        }
-    }
-
-    // QA-2 DEFECT 4 (fixed, #95 Q-9): the direct-push endpoint (a host secret, possibly a capability
-    // URL) reached the logs through the library's HttpDidCommTransport Debug line, which wrote the
-    // full URI; it now writes the scheme and the status only. Scoped to the library's own lines: the
-    // framework's IHttpClientFactory request logging (categories System.Net.Http.HttpClient.*, e.g.
-    // "Start processing HTTP request POST {uri}" at Information) also prints the URI. That is the
-    // framework's line, not removed by the library; the operations guidance tells hosts to filter
-    // those categories.
-    [Fact]
-    public async Task No_log_line_at_any_level_carries_the_push_endpoint()
-    {
-        var (mediator, _, f) = await RunBusyScenarioAsync();
-        await using (f)
-        {
-            mediator.Logs.CategorizedRecords
-                .Where(r => !r.Category.StartsWith("System.Net.Http.HttpClient.", StringComparison.Ordinal))
-                .Select(r => r.Text)
-                .Should().NotContain(t => t.Contains(EndpointToken, StringComparison.Ordinal));
-            mediator.Logs.CategorizedRecords.Should().Contain(r => r.Text.StartsWith("HttpDidCommTransport POST", StringComparison.Ordinal),
-                "the transport's own line is written (Debug) and is in scope of the check");
-        }
-    }
-
-    private static bool IsHttpTransportLine(string line)
-        => line.StartsWith("HttpDidCommTransport POST", StringComparison.Ordinal)
-           || line.StartsWith("Start processing HTTP request", StringComparison.Ordinal)
-           || line.StartsWith("Sending HTTP request", StringComparison.Ordinal)
-           || line.StartsWith("Received HTTP response", StringComparison.Ordinal)
-           || line.StartsWith("End processing HTTP request", StringComparison.Ordinal);
-
     private static async Task<(MediatorTestServer Mediator, List<string> Sensitive, QaPushFixture Fixture)> RunBusyScenarioAsync()
     {
-        var f = await QaPushFixture.StartAsync(m => m.Pickup.MaxQueueMessages = 4, map: false);
+        var f = await QaPushFixture.StartAsync(m => m.Pickup.MaxQueueMessages = 4);
         var mediator = f.Mediator;
-        f.Directory.Map(f.Bob.Did, f.Inbox.Endpoint("/" + EndpointToken));
         var sensitive = new List<string> { mediator.Did, f.Bob.Did, f.B.Did, f.Alice.Did };
         sensitive.AddRange(mediator.Kids);
 
-        // Pushed directly (2xx), then a failed push (500).
-        await Qa.SendNoteAsync(mediator, f.Alice, f.B, content: "pushed");
+        // Queued with no live session (nothing is pushed), then picked up and acknowledged.
+        await Qa.SendNoteAsync(mediator, f.Alice, f.B, content: "queued");
+        await Qa.SendNoteAsync(mediator, f.Alice, f.B, content: "queued too");
         await mediator.PushesIdleAsync();
-        f.Inbox.Status = 500;
-        await Qa.SendNoteAsync(mediator, f.Alice, f.B, content: "push fails");
-        await mediator.PushesIdleAsync();
-
-        // Picked up and acknowledged; leased and left.
         foreach (var m in await mediator.FetchAsync(f.Bob))
         {
             sensitive.Add(m.Id);
@@ -135,7 +87,7 @@ public sealed class MediatorLogsQaTests
             ForwardOutcomes.DroppedQuota, ForwardOutcomes.DroppedUnacknowledged,
         });
         // L-020 (PR #109 review R1-2): the live delivery is now a push outcome (Pushed-Live), not a forward outcome.
-        mediator.PushOutcomes.Should().Contain(new[] { DidComm.Mediator.Pipeline.PushOutcomes.PushedLive, DidComm.Mediator.Pipeline.PushOutcomes.Pushed, DidComm.Mediator.Pipeline.PushOutcomes.Failed });
+        mediator.PushOutcomes.Should().Contain(DidComm.Mediator.Pipeline.PushOutcomes.PushedLive);
         return (mediator, sensitive, f);
     }
 }

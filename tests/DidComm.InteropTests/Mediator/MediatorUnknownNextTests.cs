@@ -2,9 +2,8 @@ using System.Diagnostics;
 using System.Net;
 using AwesomeAssertions;
 using DidComm.InteropTests.AspNetCore;
-using DidComm.Mediator;
+using DidComm.Mediator.Pickup;
 using DidComm.Protocols.Routing;
-using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace DidComm.InteropTests.Mediator;
@@ -21,19 +20,12 @@ public sealed class MediatorUnknownNextTests
     [Fact]
     public async Task An_unknown_next_is_answered_202_and_nothing_is_queued_pushed_or_reported()
     {
-        // Direct push is on and the registered peer has an endpoint, so any outbound message would show.
-        var network = new MediatorNetwork();
-        await using var inbox = await InboxServer.StartAsync(network);
-        var directory = new TestEndpointDirectory();
-        await using var mediator = await MediatorTestServer.StartAsync(o =>
-        {
-            o.Network = network;
-            o.Mediator = m => m.DirectPush = true;
-            o.ConfigureServices = services => services.AddSingleton<IRecipientEndpointDirectory>(directory);
-        });
+        // The registered peer is live, so any outbound message (a push) would show on its connection.
+        await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
-        directory.Map(bob.Did, inbox.Endpoint("/bob-inbox"));
+        using var socket = await mediator.ConnectAsync();
+        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob);
         var stranger = await mediator.NewPeerAsync();
         var alice = await mediator.NewSenderAsync();
 
@@ -46,11 +38,13 @@ public sealed class MediatorUnknownNextTests
         await mediator.PushesIdleAsync();
         mediator.Outcomes.Should().Equal(ForwardOutcomes.DroppedUnknown);
         mediator.Store.MessageCount.Should().Be(0);
-        mediator.PushOutcomes.Should().BeEmpty();
-        directory.Calls.Should().Be(0);
-        inbox.Entered.Should().Be(0, "no outbound message");
+        mediator.PushOutcomes.Should().BeEmpty("no outbound message");
+        // The live connection's next frame answers its own request: nothing was pushed to it.
+        var status = MessagePickup.CreateStatusRequest(bob.Did, mediator.Did);
+        (await mediator.AskOverSocketAsync(socket, bob, status)).Status(status.Id).MessageCount.Should().Be(0);
         mediator.Logs.Entries.Should().Contain(e => e.Contains(forward.Id) && e.Contains("not a registered recipient"));
         mediator.LeakingLogLines().Should().BeEmpty();
+        await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "done", default);
     }
 
     [Fact]

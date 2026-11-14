@@ -337,7 +337,7 @@ internal sealed class MediatorTestServerOptions
     /// <summary>Settings on top of the routing DID (<c>AddMediator(configure)</c>).</summary>
     public Action<MediatorOptions>? Mediator { get; set; }
 
-    /// <summary>Runs before <c>AddDidComm</c>: what a host registers before <c>AddMediator()</c> (directory, routing-key provider, stores).</summary>
+    /// <summary>Runs before <c>AddDidComm</c>: what a host registers before <c>AddMediator()</c> (routing-key provider, stores).</summary>
     public Action<IServiceCollection>? ConfigureServices { get; set; }
 
     /// <summary>Runs after <c>AddDidComm</c> (a registration made after <c>AddMediator()</c>).</summary>
@@ -379,9 +379,9 @@ internal sealed class MediatorRequestControls
 /// <c>AddDidComm(UseNetDidResolver, UseSecretsResolver(mediator), UseHttpTransport, AddMediator(…))</c>,
 /// <c>UseWebSockets()</c> and <c>MapDidCommMediator(pattern)</c>. The mediator's DID is a did:peer:2
 /// minted with <c>DidCommServiceBuilder.ForEndpoint</c> at the server's own address, so the FR-MED-07
-/// start-up checks pass; its HTTP egress (direct push, a relay to a second mediator) goes over the
-/// <see cref="MediatorNetwork"/>. The clock is injected (<c>DidCommOptions.Clock</c>), metrics go to a
-/// per-test meter factory, logs to a capturing provider. The recipient side is hand-rolled
+/// start-up checks pass; any HTTP egress goes over the <see cref="MediatorNetwork"/>. The clock is
+/// injected (<c>DidCommOptions.Clock</c>), metrics go to a per-test meter factory, logs to a capturing
+/// provider. The recipient side is hand-rolled
 /// (stamped, <c>return_route: all</c>, authcrypted) Coordinate Mediation and pickup messages.
 /// </summary>
 internal sealed class MediatorTestServer : IAsyncDisposable
@@ -594,7 +594,7 @@ internal sealed class MediatorTestServer : IAsyncDisposable
     /// <summary>Every forward outcome recorded, in order.</summary>
     public IReadOnlyList<string?> Outcomes => Measurements.TagValues(ForwardOutcomes.ForwardOutcomesInstrument, ForwardOutcomes.OutcomeTag);
 
-    /// <summary>How many direct pushes ended with <paramref name="outcome"/>.</summary>
+    /// <summary>How many pushes ended with <paramref name="outcome"/> (<c>didcomm.mediator.push.outcomes</c>).</summary>
     public long PushOutcome(string outcome) => Measurements.Sum(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag, outcome);
 
     public IReadOnlyList<string?> PushOutcomes => Measurements.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
@@ -725,7 +725,7 @@ internal sealed class MediatorTestServer : IAsyncDisposable
     /// <summary>Every forward admitted so far has been relayed, dropped or discarded (the handler's test seam).</summary>
     public Task FlushAsync() => Handler.FlushAsync(Timeout);
 
-    /// <summary>The direct-push workers are idle.</summary>
+    /// <summary>The push workers are idle.</summary>
     public Task PushesIdleAsync() => Pushes.WaitForIdleAsync(Timeout);
 
     public static async Task WaitUntilAsync(Func<bool> condition, string because)

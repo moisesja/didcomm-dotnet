@@ -8,249 +8,27 @@ using DidComm.Mediator.Pipeline;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using DidComm.Transports;
-using DidComm.Transports.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace DidComm.InteropTests.Mediator;
 
 /// <summary>
-/// QA-2 (#95), delivery modes end to end: live push over the mediator's WebSocket, the queue, and
-/// direct push to a host-registered endpoint — the status codes that count as delivered, the ones that
-/// do not, the per-push deadline on an injected <see cref="TimeProvider"/>, schemes and the transport's
-/// <c>AllowedSchemes</c>, the D6 order (live first, then queue, then push), a session that closes
-/// before or during a push, two live sessions, the per-grant push bound, and FR-ROUTE-09 for a
-/// message whose expiry passes while its push waits.
+/// QA-2 (#95), delivery modes end to end: live push over the mediator's WebSocket and the queue — the
+/// D6 order (live first, then the queue), a session that closes before or during a push, two live
+/// sessions, and a live session that stops reading. (A message whose expiry or age limit passes while
+/// the grant's push waits: MediatorLivePushAdv4Tests.)
 /// </summary>
 public sealed class MediatorDeliveryModesQaTests
 {
-    // ---- direct push: what counts as delivered ---------------------------------------------------
-
-    [Theory]
-    [InlineData(200)]
-    [InlineData(201)]
-    [InlineData(202)]
-    [InlineData(204)]
-    [InlineData(299)]
-    public async Task A_direct_push_answered_with_any_2xx_removes_the_queued_copy(int status)
-    {
-        await using var f = await QaPushFixture.StartAsync();
-        f.Inbox.Status = status;
-
-        var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B);
-        await f.Mediator.PushesIdleAsync();
-
-        var received = f.Inbox.Received.Should().ContainSingle().Subject;
-        (await MediatorRecipient.UnpackFromSenderAsync(f.B, received.Body, f.Alice)).Message.Id.Should().Be(note.Id);
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
-        f.Mediator.Store.MessageCount.Should().Be(0);
-        (await f.Mediator.StatusAsync(f.Bob)).MessageCount.Should().Be(0);
-        f.ShouldNotLeak();
-    }
-
-    [Theory]
-    [InlineData(400)]
-    [InlineData(401)]
-    [InlineData(404)]
-    [InlineData(409)]
-    [InlineData(413)]
-    [InlineData(500)]
-    [InlineData(502)]
-    [InlineData(503)]
-    public async Task A_direct_push_answered_with_4xx_or_5xx_leaves_the_message_queued_once_tried(int status)
-    {
-        await using var f = await QaPushFixture.StartAsync();
-        f.Inbox.Status = status;
-
-        var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B);
-        await f.Mediator.PushesIdleAsync();
-
-        f.Inbox.Entered.Should().Be(1, "one attempt per message, no retry");
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed);
-        f.Mediator.Store.MessageCount.Should().Be(1);
-        var delivered = (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle().Subject;
-        (await MediatorRecipient.UnpackFromSenderAsync(f.B, delivered.Payload, f.Alice)).Message.Id.Should().Be(note.Id);
-        f.ShouldNotLeak();
-    }
+    // ---- D6: live first, then the queue ----------------------------------------------------------
 
     [Fact]
-    public async Task A_direct_push_that_outlasts_PushTimeout_on_the_injected_TimeProvider_is_abandoned_and_the_message_stays_queued()
-    {
-        var time = new QaManualTimeProvider();
-        await using var f = await QaPushFixture.StartAsync(
-            m => m.PushTimeout = TimeSpan.FromSeconds(7),
-            services => services.AddSingleton<TimeProvider>(time));
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-
-        var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B);
-        await MediatorTestServer.WaitUntilAsync(() => f.Inbox.Entered == 1, "the push is parked in Bob's endpoint");
-
-        time.Advance(TimeSpan.FromSeconds(6));
-        f.Mediator.PushOutcomes.Should().BeEmpty("one second before the deadline the push still runs");
-        time.Advance(TimeSpan.FromSeconds(1));
-        await f.Mediator.PushesIdleAsync();
-        gate.SetResult();
-
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed);
-        f.Mediator.Store.MessageCount.Should().Be(1, "an abandoned push never loses the accepted message");
-        var delivered = (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle().Subject;
-        (await MediatorRecipient.UnpackFromSenderAsync(f.B, delivered.Payload, f.Alice)).Message.Id.Should().Be(note.Id);
-        f.Mediator.Logs.Entries.Should().Contain(e => e.Contains("Direct push") && e.Contains("Timeout"));
-        f.ShouldNotLeak();
-    }
-
-    [Theory]
-    [InlineData("ws://inbox.test/bob")]
-    [InlineData("wss://inbox.test/bob")]
-    [InlineData("ftp://inbox.test/bob")]
-    [InlineData("didcomm:transport/queue")]
-    public async Task An_endpoint_that_is_not_http_or_https_is_never_pushed_to(string endpoint)
-    {
-        await using var f = await QaPushFixture.StartAsync(map: false);
-        f.Directory.Map(f.Bob.Did, new Uri(endpoint, UriKind.RelativeOrAbsolute));
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B);
-        await f.Mediator.PushesIdleAsync();
-
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.SkippedScheme);
-        f.Inbox.Entered.Should().Be(0);
-        (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle();
-        f.ShouldNotLeak(endpoint);
-    }
-
-    [Fact]
-    public async Task With_the_transport_limited_to_https_an_http_endpoint_is_refused_and_an_https_one_is_pushed()
-    {
-        await using var f = await QaPushFixture.StartAsync(post: services =>
-            services.Configure<HttpTransportOptions>(o => o.AllowedSchemes = new[] { "https" }));
-
-        // http: the transport refuses the scheme; the message stays queued.
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "over http");
-        await f.Mediator.PushesIdleAsync();
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed);
-        f.Inbox.Entered.Should().Be(0, "the http endpoint was never contacted");
-        f.Mediator.Store.MessageCount.Should().Be(1);
-
-        // https: pushed (the test network answers for the host whatever the scheme).
-        f.Directory.Map(f.Bob.Did, new Uri($"https://{InboxServer.Host}/bob-inbox"));
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "over https");
-        await f.Mediator.PushesIdleAsync();
-        // L-020 (PR #109 review round 8): each message gets one direct attempt (the grant's cursor), so
-        // the message that failed over http stays queued for pickup and only the new one is pushed.
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed, PushOutcomes.Pushed);
-        f.Inbox.Received.Should().ContainSingle();
-        f.Mediator.Store.MessageCount.Should().Be(1, "the failed message waits for pickup");
-        (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle();
-        f.ShouldNotLeak();
-    }
-
-    [Fact]
-    public async Task An_endpoint_outside_the_outbound_guard_is_refused_and_the_message_stays_queued()
-    {
-        await using var f = await QaPushFixture.StartAsync(map: false);
-        f.Directory.Map(f.Bob.Did, new Uri("http://127.0.0.1/bob-inbox"));
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B);
-        await f.Mediator.PushesIdleAsync();
-
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed);
-        f.Inbox.Entered.Should().Be(0);
-        (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle();
-        f.ShouldNotLeak("127.0.0.1");
-    }
-
-    [Fact]
-    public async Task One_grant_holds_as_many_push_jobs_as_its_queue_quota_and_only_the_queue_refuses_beyond_it()
-    {
-        // L-020 (ADV-4 D1): this test asserted the 16-job per-grant share: the 17th stored message got
-        // no push job (Push-Skipped-Saturated). The share is now the grant's queue quota, so every
-        // stored message is pushed, and the one beyond the quota is refused by the queue itself.
-        await using var f = await QaPushFixture.StartAsync(m =>
-        {
-            m.PushConcurrency = 1;
-            m.Pickup.MaxQueueMessages = 16;
-        });
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-
-        for (var i = 0; i < 17; i++)
-            await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, flush: false, content: $"m{i}");
-        await f.Mediator.FlushAsync();
-
-        f.Mediator.Outcome(ForwardOutcomes.Queued).Should().Be(16);
-        f.Mediator.Outcome(ForwardOutcomes.DroppedQuota).Should().Be(1);
-        f.Mediator.PushOutcome(PushOutcomes.SkippedSaturated).Should().Be(0);
-        gate.SetResult();
-        await f.Mediator.PushesIdleAsync();
-        f.Mediator.PushOutcome(PushOutcomes.Pushed).Should().Be(16);
-        f.Inbox.Received.Should().HaveCount(16);
-        f.Mediator.Store.MessageCount.Should().Be(0);
-        f.ShouldNotLeak();
-    }
-
-    // ---- FR-ROUTE-09 / FR-PICK-10 before a direct push --------------------------------------------
-
-    [Fact]
-    public async Task A_message_whose_forward_expires_while_its_push_job_waits_is_never_pushed()
-    {
-        // One push worker, parked on Bob's endpoint by the first message; the second message's job
-        // waits behind it. Its forward expires before the worker reaches it.
-        await using var f = await QaPushFixture.StartAsync(m => m.PushConcurrency = 1);
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-        var t0 = f.Mediator.Clock.Now;
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "first");
-        await MediatorTestServer.WaitUntilAsync(() => f.Inbox.Entered == 1, "the only push worker is parked");
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, Qa.Expires(t0.AddSeconds(60)), content: "expiring");
-        f.Mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.Queued);
-
-        f.Mediator.Clock.Advance(TimeSpan.FromSeconds(61));
-        (await f.Mediator.StatusAsync(f.Bob)).MessageCount.Should().Be(1, "the expired message is no longer counted (only the parked first one is)");
-        gate.SetResult();
-        await f.Mediator.PushesIdleAsync();
-
-        var contents = new List<string>();
-        foreach (var (_, body) in f.Inbox.Received)
-            contents.Add((await MediatorRecipient.UnpackFromSenderAsync(f.B, body, f.Alice)).Message.Body!["content"]!.GetValue<string>());
-        contents.Should().Equal(new[] { "first" }, "a message whose forward expired is never pushed (FR-ROUTE-09)");
-    }
-
-    [Fact]
-    public async Task A_message_that_ages_out_while_its_push_job_waits_is_never_pushed()
-    {
-        await using var f = await QaPushFixture.StartAsync(m =>
-        {
-            m.PushConcurrency = 1;
-            m.MaxForwardDelay = TimeSpan.Zero;
-            m.Pickup.MaxMessageAge = TimeSpan.FromMinutes(1);
-        });
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Inbox.Gate = gate;
-
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "first");
-        await MediatorTestServer.WaitUntilAsync(() => f.Inbox.Entered == 1, "the only push worker is parked");
-        f.Mediator.Clock.Advance(TimeSpan.FromSeconds(30));
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "second");
-
-        // The first ages out at +60 s, the second at +90 s: at +90 s both are past the limit.
-        f.Mediator.Clock.Advance(TimeSpan.FromSeconds(60));
-        (await f.Mediator.StatusAsync(f.Bob)).MessageCount.Should().Be(0);
-        gate.SetResult();
-        await f.Mediator.PushesIdleAsync();
-
-        f.Inbox.Received.Should().ContainSingle("only the push already on the wire completes; the waiting job's message had aged out");
-    }
-
-    // ---- D6: live first, then the queue, then the push ---------------------------------------------
-
-    [Fact]
-    public async Task A_live_session_takes_the_message_first_and_nothing_is_pushed_directly()
+    public async Task A_live_session_takes_the_message_first()
     {
         // L-020 (PR #109 review R1-2): the forward is now only stored by the forward pump (Queued) and
-        // the push workers push it live (Pushed-Live) before they would try the directory; the old
-        // Delivered-Live forward outcome and the empty push counter described the in-pump live push.
+        // the push workers push it live (Pushed-Live); the old Delivered-Live forward outcome and the
+        // empty push counter described the in-pump live push.
         await using var f = await QaPushFixture.StartAsync();
         using var socket = await f.Mediator.ConnectAsync();
         await GoLiveAsync(f.Mediator, socket, f.Bob);
@@ -261,16 +39,14 @@ public sealed class MediatorDeliveryModesQaTests
         await f.Mediator.PushesIdleAsync();
 
         f.Mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
-        f.Mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.PushedLive }, "the live session is tried first, and a message it took is never pushed directly");
-        f.Inbox.Entered.Should().Be(0);
-        f.Directory.Calls.Should().Be(0);
+        f.Mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.PushedLive }, "the live session takes it, once");
         (await AckOverSocketAsync(f.Mediator, socket, f.Bob, pushed.Id)).MessageCount.Should().Be(0);
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         f.ShouldNotLeak(pushed.Id);
     }
 
     [Fact]
-    public async Task After_the_live_session_closes_the_next_message_is_queued_and_pushed_directly()
+    public async Task After_the_live_session_closes_the_next_message_is_queued_for_pickup()
     {
         await using var f = await QaPushFixture.StartAsync();
         var socket = await f.Mediator.ConnectAsync();
@@ -283,10 +59,11 @@ public sealed class MediatorDeliveryModesQaTests
         await f.Mediator.PushesIdleAsync();
 
         f.Mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
-        (await MediatorRecipient.UnpackFromSenderAsync(f.B, f.Inbox.Received.Single().Body, f.Alice)).Message.Id.Should().Be(note.Id);
-        f.Mediator.Store.MessageCount.Should().Be(0);
-        f.ShouldNotLeak();
+        f.Mediator.PushOutcomes.Should().BeEmpty("with no live session nothing is woken, and the message waits for pickup");
+        f.Mediator.Store.MessageCount.Should().Be(1);
+        var delivered = (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle().Subject;
+        (await MediatorRecipient.UnpackFromSenderAsync(f.B, delivered.Payload, f.Alice)).Message.Id.Should().Be(note.Id);
+        f.ShouldNotLeak(delivered.Id);
     }
 
     [Fact]
@@ -464,61 +241,28 @@ public sealed class MediatorDeliveryModesQaTests
     }
 }
 
-/// <summary>A mediator with <c>DirectPush</c> on and a directory mapping Bob to an inbox, Bob enrolled with recipient DID B, and Alice.</summary>
+/// <summary>A mediator with Bob enrolled with recipient DID B, and Alice.</summary>
 internal sealed class QaPushFixture : IAsyncDisposable
 {
     public required MediatorTestServer Mediator { get; init; }
-    public required InboxServer Inbox { get; init; }
-    public required TestEndpointDirectory Directory { get; init; }
     public required TestPeer Bob { get; init; }
     public required TestPeer B { get; init; }
     public required MediatorSender Alice { get; init; }
 
-    public static async Task<QaPushFixture> StartAsync(
-        Action<MediatorOptions>? mediator = null,
-        Action<IServiceCollection>? services = null,
-        Action<IServiceCollection>? post = null,
-        bool map = true)
+    public static async Task<QaPushFixture> StartAsync(Action<MediatorOptions>? mediator = null)
     {
-        var network = new MediatorNetwork();
-        var inbox = await InboxServer.StartAsync(network);
-        var directory = new TestEndpointDirectory();
-        var server = await MediatorTestServer.StartAsync(o =>
-        {
-            o.Network = network;
-            o.Mediator = m =>
-            {
-                m.DirectPush = true;
-                mediator?.Invoke(m);
-            };
-            o.ConfigureServices = s =>
-            {
-                s.AddSingleton<IRecipientEndpointDirectory>(directory);
-                services?.Invoke(s);
-            };
-            o.PostConfigureServices = post;
-        });
+        var server = await MediatorTestServer.StartAsync(o => o.Mediator = mediator);
         var bob = await server.NewPeerAsync();
         (await server.RequestMediationAsync(bob)).Should().Equal(server.Did);
         var b = await server.NewRecipientAsync();
         await server.AddRecipientsAsync(bob, new[] { b.Did });
         var alice = await server.NewSenderAsync();
-        if (map)
-            directory.Map(bob.Did, inbox.Endpoint("/bob-inbox"));
-        return new QaPushFixture { Mediator = server, Inbox = inbox, Directory = directory, Bob = bob, B = b, Alice = alice };
+        return new QaPushFixture { Mediator = server, Bob = bob, B = b, Alice = alice };
     }
 
-    /// <summary>No DID or key id in any log line, and no push endpoint in the mediator's own lines.</summary>
+    /// <summary>No DID or key id in any log line.</summary>
     public void ShouldNotLeak(params string[] extra)
-    {
-        Mediator.LeakingLogLines(extra.Append(B.Did).ToArray()).Should().BeEmpty();
-        Mediator.Logs.Entries.Where(e => e.Contains("push", StringComparison.OrdinalIgnoreCase))
-            .Should().NotContain(e => e.Contains(InboxServer.Host, StringComparison.Ordinal));
-    }
+        => Mediator.LeakingLogLines(extra.Append(B.Did).ToArray()).Should().BeEmpty();
 
-    public async ValueTask DisposeAsync()
-    {
-        await Mediator.DisposeAsync();
-        await Inbox.DisposeAsync();
-    }
+    public ValueTask DisposeAsync() => Mediator.DisposeAsync();
 }
