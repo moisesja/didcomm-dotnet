@@ -32,13 +32,31 @@ namespace DidComm.Mediator.Client.Internal;
 /// as <see cref="SecretNotFoundException"/>) ends it at once.
 /// </para>
 /// <para>
+/// <strong>Drain rounds and pushes take turns (ADV3-1).</strong> Once a cycle is draining, its next
+/// drain round runs before the stream takes another push, and a push waiting in the mailbox gets its
+/// turn after that round. Opening a delivery can take its whole budget (a sender whose DID resolves
+/// slowly or never), so a stream that served a waiting push before the drain let a steady flow of
+/// slow pushes keep the drain from ever running: what only a drain reaches (messages queued before
+/// the stream started, delayed ones, pushes the full mailbox dropped) never arrived. Taking turns,
+/// neither a flow of slow pushes nor a drain that keeps meeting slow messages keeps the other from
+/// its turn. A push that waits stays leased to the session at the mediator: nothing is lost.
+/// </para>
+/// <para>
+/// <strong>Clock.</strong> The cycle, the back-off and the 10-second flush age are judged by the time
+/// elapsed since the reading they were set at. A reading lower than that one (a host clock that
+/// stepped back: an NTP correction, a restored snapshot) counts as due, at the cost of one early
+/// cycle, retry or flush, instead of postponing them by the step (ADV3-5, L-060; the version cache
+/// treats such an age the same way).
+/// </para>
+/// <para>
 /// <strong>Items.</strong> Pushes are read from the mailbox (at most 10 messages per delivery). Each
 /// delivery the stream takes — a drain round's answer or a push — is opened up front, all of its
 /// messages under one budget (<see cref="MediatorClientOptions.UnpackTimeout"/>, owner decision 2-A),
 /// on the consumer's own <c>MoveNextAsync</c> and never on a receive loop; then its results are
 /// yielded in delivery order. The consumer's time with an item is therefore never counted against
 /// the budget, and a message the budget runs out on is a failure item (a
-/// <see cref="TimeoutException"/> naming the drain's request id). A message this stream already
+/// <see cref="TimeoutException"/> that names the drain round's request id; one from a push names no
+/// request, since a push answers none). A message this stream already
 /// holds (opened and not yet yielded, or taken and not yet acknowledged) is skipped and not opened
 /// again; one the duplicate filter remembers is acknowledged and not yielded; a failure is yielded,
 /// never acknowledged, and reported again when it comes back. A drain answered with a delivery in
@@ -112,9 +130,10 @@ internal sealed class LiveDeliveryStream
 
     private PickupItem? _yielded;
     private UInt128 _yieldedKey;
-    private long _nextCycleAt;
-    private long _notBefore;
+    private Due _nextCycle;
+    private Due _notBefore;
     private bool _draining;
+    private bool _pushTurn;
     private int _drainRounds;
     private int _failures;
     private bool _liveRequested;
@@ -129,8 +148,9 @@ internal sealed class LiveDeliveryStream
         _mediatorDid = mediatorDid;
         _localDid = localDid;
         _time = exchange.Time;
-        _nextCycleAt = _time.GetTimestamp();
-        _notBefore = _nextCycleAt;
+        // Both due at once: the first cycle runs at the first MoveNextAsync.
+        _nextCycle = DueIn(TimeSpan.Zero);
+        _notBefore = _nextCycle;
     }
 
     /// <summary>How many taken messages wait for an acknowledgement (test seam).</summary>
@@ -202,7 +222,7 @@ internal sealed class LiveDeliveryStream
                 await FlushAsync(ct).ConfigureAwait(false);
                 continue;
             }
-            if (Now >= _nextCycleAt)
+            if (IsDue(_nextCycle))
             {
                 await CycleAsync(ct).ConfigureAwait(false);
                 continue;
@@ -213,12 +233,23 @@ internal sealed class LiveDeliveryStream
                     return item;
                 continue;
             }
+            // While a cycle drains, its rounds and the pushes take turns, a drain round first
+            // (ADV3-1): a waiting push is taken only after a drain round, so a steady flow of pushes
+            // that each take their whole budget to open cannot keep the drain from running, and a
+            // drain that keeps meeting slow messages cannot keep the pushes from their turn.
+            var drainDue = _draining && IsDue(_notBefore);
+            if (drainDue && !_pushTurn)
+            {
+                await DrainRoundAsync(ct).ConfigureAwait(false);
+                continue;
+            }
             if (_registration.Pushes.TryRead(out var push))
             {
+                _pushTurn = false;
                 await LoadPushAsync(push, ct).ConfigureAwait(false);
                 continue;
             }
-            if (_draining && Now >= _notBefore)
+            if (drainDue)
             {
                 await DrainRoundAsync(ct).ConfigureAwait(false);
                 continue;
@@ -232,11 +263,11 @@ internal sealed class LiveDeliveryStream
     // buffered message nor a push), or the oldest has waited 10 s; never during a back-off.
     private bool FlushDue()
     {
-        if (_taken.Count == 0 || Now < _notBefore)
+        if (_taken.Count == 0 || !IsDue(_notBefore))
             return false;
         return _taken.Count >= FlushAt
             || (_ready.Count == 0 && !_registration.Pushes.TryPeek(out _))
-            || _time.GetElapsedTime(_taken[0].At) >= FlushAge;
+            || HasPassed(_taken[0].At, FlushAge);
     }
 
     // Wait for a push, the next cycle, or the caller's cancellation. One awaited operation, so no
@@ -248,13 +279,15 @@ internal sealed class LiveDeliveryStream
     // error, and the stream ends; an error it was closed with (the channel's disposal) is thrown.
     private async Task<bool> WaitAsync(CancellationToken ct)
     {
-        var now = Now;
-        if (now >= _nextCycleAt)
+        // One reading: due (the interval passed, or the clock stepped back below the cycle's
+        // reading), or the time left, which is then more than zero and at most the interval.
+        var elapsed = _time.GetElapsedTime(_nextCycle.Since);
+        if (elapsed < TimeSpan.Zero || elapsed >= _nextCycle.After)
             return true;
-        using var wake = OwnDeadline.Start(_time, _time.GetElapsedTime(now, _nextCycleAt), ct);
+        using var wake = OwnDeadline.Start(_time, _nextCycle.After - elapsed, ct);
         // Read again once the timer exists: a clock that passed the cycle while the timer was being
         // set (a manual clock moved in between) is seen here, not waited out for a whole interval.
-        if (Now >= _nextCycleAt)
+        if (IsDue(_nextCycle))
             return true;
         try
         {
@@ -271,7 +304,7 @@ internal sealed class LiveDeliveryStream
 
     private async Task CycleAsync(CancellationToken ct)
     {
-        _nextCycleAt = Later(_exchange.Options.LivePollInterval);
+        _nextCycle = DueIn(_exchange.Options.LivePollInterval);
         _liveRequested = true;
         var spec = DeliveryReader.LiveDeliveryChangeSpec;
         var request = MessagePickup.CreateLiveDeliveryChange(_localDid, _mediatorDid, liveDelivery: true, UuidV4MessageIdGenerator.Instance);
@@ -292,11 +325,14 @@ internal sealed class LiveDeliveryStream
             _log.LiveNotInEffect(request.Id);
         }
         _draining = true;
+        _pushTurn = false; // the cycle's first drain round goes before any waiting push
         _drainRounds = 0;
     }
 
     private async Task DrainRoundAsync(CancellationToken ct)
     {
+        // Whatever this round's outcome, a waiting push has the next turn (ADV3-1).
+        _pushTurn = true;
         var spec = DeliveryReader.DeliveryRequestSpec;
         var request = MessagePickup.CreateDeliveryRequest(_localDid, _mediatorDid, DrainLimit, recipientDid: null, UuidV4MessageIdGenerator.Instance);
         InboundMessageSnapshot answer;
@@ -349,8 +385,8 @@ internal sealed class LiveDeliveryStream
         if (_failures >= MaxFailures)
             ExceptionDispatchInfo.Capture(error).Throw();
         var backoff = Backoff(_failures);
-        _notBefore = Later(backoff);
-        _nextCycleAt = _notBefore;
+        _notBefore = DueIn(backoff);
+        _nextCycle = _notBefore;
         _log.CycleFailed(requestId, spec.Name, error, _failures, backoff);
     }
 
@@ -424,7 +460,8 @@ internal sealed class LiveDeliveryStream
 
     // Take one delivery: skip the ids this stream already holds, open the rest up front under one
     // budget (the consumer's time with an item never counts against it), and queue the results in
-    // delivery order. Failures are logged once per delivery, with the drain's request id.
+    // delivery order. Failures are logged once per delivery, with the drain round's request id; a
+    // push's (requestId null) name none, in the log and in their TimeoutException alike.
     private async Task LoadAsync(DeliveryContents contents, string? requestId, CancellationToken ct)
     {
         if (contents.Excess > 0)
@@ -615,6 +652,20 @@ internal sealed class LiveDeliveryStream
 
     private long Now => _time.GetTimestamp();
 
-    private long Later(TimeSpan by)
-        => Now + (long)(by.Ticks * ((double)_time.TimestampFrequency / TimeSpan.TicksPerSecond));
+    /// <summary>A point <see cref="After"/> past the clock reading <see cref="Since"/> (a <see cref="TimeProvider"/> timestamp).</summary>
+    /// <param name="Since">The reading it was set at.</param>
+    /// <param name="After">How long after that reading it is due.</param>
+    private readonly record struct Due(long Since, TimeSpan After);
+
+    private Due DueIn(TimeSpan after) => new(Now, after);
+
+    private bool IsDue(Due due) => HasPassed(due.Since, due.After);
+
+    // Whether `span` has passed since the reading `since`. A reading lower than `since` is a clock
+    // that stepped back: due at once, never postponed by the step (ADV3-5, L-060).
+    private bool HasPassed(long since, TimeSpan span)
+    {
+        var elapsed = _time.GetElapsedTime(since);
+        return elapsed < TimeSpan.Zero || elapsed >= span;
+    }
 }

@@ -201,10 +201,10 @@ public sealed class PickupClientLiveCycleTests
         exchange.Clock.Advance(TimeSpan.FromSeconds(30));
         exchange.Registration!.TryPush(Push(("q2", "ok:m2"))).Should().BeTrue();
         (await Next(stream)).Id.Should().Be("q2");
-        Types(exchange).Should().Equal(new[] { LiveOn, Drain, LiveOn }, "the cycle came due while the consumer held q1: it runs before the next item, and a waiting push goes before its drain");
+        Types(exchange).Should().Equal(new[] { LiveOn, Drain, LiveOn, Drain }, "the cycle came due while the consumer held q1: it runs before the next item, and its drain round goes before the waiting push (ADV3-1)");
         var next = stream.MoveNextAsync().AsTask();
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-        Types(exchange).Should().Equal(LiveOn, Drain, LiveOn, Ack, Drain);
+        Types(exchange).Should().Equal(LiveOn, Drain, LiveOn, Drain, Ack);
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q2" }, "q1 was taken when the consumer asked for q2, so it had not waited ten seconds");
         await StopAsync(stream, next, cts);
     }
