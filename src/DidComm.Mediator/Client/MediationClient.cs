@@ -227,33 +227,39 @@ public sealed class MediationClient
     private async Task<RecipientQueryResult> QueryRecipientsCoreAsync(string mediatorDid, string from, RecipientQueryPaging? paginate, Uri? serviceEndpointOverride, CancellationToken ct)
     {
         var (route, version) = await StartAsync(mediatorDid, from, serviceEndpointOverride, ct).ConfigureAwait(false);
-        return await QueryPageAsync(route, version, mediatorDid, from, paginate, ct).ConfigureAwait(false);
+        return (await QueryPageAsync(route, version, mediatorDid, from, paginate, ct).ConfigureAwait(false)).Page;
     }
 
     // One route and one version for the whole walk (one operation, design D-3); one page per
-    // request. Stops when the mediator reports no position or nothing remaining, on an empty page
-    // (no progress, whatever it reports), or after MaxWalkerPages.
+    // request, advancing by what the page held. It ends normally only when the mediator says the
+    // list is complete: no position reported, or nothing remaining. Anything else that stops it —
+    // an empty page while DIDs remain (no progress), MaxWalkerPages reached while DIDs remain — is
+    // a MediationProtocolException after the DIDs already yielded, never a silent end.
     private async IAsyncEnumerable<string> WalkRecipientsAsync(string mediatorDid, string from, Uri? serviceEndpointOverride, [EnumeratorCancellation] CancellationToken ct)
     {
         var (route, version) = await StartAsync(mediatorDid, from, serviceEndpointOverride, ct).ConfigureAwait(false);
         var offset = 0;
-        for (var page = 0; page < CoordinateMediationWire.MaxWalkerPages; page++)
+        for (var page = 1; ; page++)
         {
-            var result = await QueryPageAsync(route, version, mediatorDid, from, new RecipientQueryPaging(CoordinateMediationWire.WalkerPageSize, offset), ct).ConfigureAwait(false);
+            var (result, requestId) = await QueryPageAsync(route, version, mediatorDid, from, new RecipientQueryPaging(CoordinateMediationWire.WalkerPageSize, offset), ct).ConfigureAwait(false);
             foreach (var did in result.Dids)
                 yield return did;
-            if (result.Pagination is not { Remaining: > 0 } || result.Dids.Count == 0)
+            if (result.Pagination is not { Remaining: > 0 })
                 yield break;
+            if (result.Dids.Count == 0)
+                throw CoordinateMediationWire.IncompleteWalk(version, requestId, "the mediator sent an empty page but reports DIDs remaining");
+            if (page == CoordinateMediationWire.MaxWalkerPages)
+                throw CoordinateMediationWire.IncompleteWalk(version, requestId, $"the mediator still reports DIDs remaining after {CoordinateMediationWire.MaxWalkerPages} pages, the most the walk fetches");
+            // At most MaxWalkerPages pages of at most MaxPageLimit DIDs each: no overflow.
             offset += result.Dids.Count;
         }
-        Log(LogLevel.Warning, "Recipient listing stopped after {Pages} pages; the mediator reports more.", CoordinateMediationWire.MaxWalkerPages);
     }
 
-    private async Task<RecipientQueryResult> QueryPageAsync(MediatorRoute route, CoordinateMediationVersion version, string mediatorDid, string from, RecipientQueryPaging? paginate, CancellationToken ct)
+    private async Task<(RecipientQueryResult Page, string RequestId)> QueryPageAsync(MediatorRoute route, CoordinateMediationVersion version, string mediatorDid, string from, RecipientQueryPaging? paginate, CancellationToken ct)
     {
         var (request, spec) = CoordinateMediationWire.QueryRequest(version, from, mediatorDid, paginate);
         var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
-        return CoordinateMediationWire.ReadQueryAnswer(version, CoordinateMediationWire.Deserialize(answer, request.Id, spec), request.Id, paginate);
+        return (CoordinateMediationWire.ReadQueryAnswer(version, CoordinateMediationWire.Deserialize(answer, request.Id, spec), request.Id, paginate), request.Id);
     }
 
     // The route of the operation, resolved once, then the version to speak on it (design §4.4):

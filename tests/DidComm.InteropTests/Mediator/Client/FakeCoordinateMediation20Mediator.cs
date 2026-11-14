@@ -53,13 +53,14 @@ internal sealed class FakeCoordinateMediation20Mediator : IAsyncDisposable
     /// <param name="mediator">The #95 test server whose network and clock the host joins (its log capture too).</param>
     /// <param name="speaks20">Register the 2.0 handler.</param>
     /// <param name="omitThid">The handler answers without <c>thid</c>, as the 2.0 page's examples do.</param>
-    public static async Task<FakeCoordinateMediation20Mediator> StartAsync(MediatorTestServer mediator, bool speaks20 = true, bool omitThid = false)
+    /// <param name="paging">How the handler answers a <c>keylist-query</c>'s <c>paginate</c>.</param>
+    public static async Task<FakeCoordinateMediation20Mediator> StartAsync(MediatorTestServer mediator, bool speaks20 = true, bool omitThid = false, KeylistPaging paging = KeylistPaging.Honoured)
     {
         var identity = await MediatorCast.MintAsync(new DidCommServiceSpec($"http://{Host}{Path}", Accept: new[] { "didcomm/v2" }));
         var secrets = new InMemorySecretsResolver();
         foreach (var jwk in identity.Privates)
             secrets.Add(jwk);
-        var handler = speaks20 ? new FakeCoordinateMediation20Handler(identity.Did, omitThid) : null;
+        var handler = speaks20 ? new FakeCoordinateMediation20Handler(identity.Did, omitThid, paging) : null;
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer(o => o.BaseAddress = new Uri($"http://{Host}/"));
@@ -96,12 +97,26 @@ internal sealed class FakeCoordinateMediation20Mediator : IAsyncDisposable
     }
 }
 
+/// <summary>How <see cref="FakeCoordinateMediation20Handler"/> answers a <c>keylist-query</c>'s <c>paginate</c>.</summary>
+public enum KeylistPaging
+{
+    /// <summary>The page asked for (30 DIDs from offset 0 without a <c>paginate</c>), with its <c>pagination</c>.</summary>
+    Honoured,
+
+    /// <summary><c>paginate</c> ignored: every key at offset 0, with <c>pagination</c> <c>{count: all, offset: 0, remaining: 0}</c>.</summary>
+    IgnoredWithPosition,
+
+    /// <summary><c>paginate</c> ignored: every key, without a <c>pagination</c> (the member is optional).</summary>
+    IgnoredWithoutPosition,
+}
+
 /// <summary>
 /// The mediator role of Coordinate Mediation 2.0 for the tests, answering in the shapes of the
 /// didcomm.org 2.0 page (the <c>coordinate-mediation-2.0</c> fixtures): <c>mediate-grant</c> with a
 /// single-string <c>routing_did</c>, <c>keylist-update-response</c> with one <c>updated</c> entry
 /// per update (<c>success</c>, or <c>no_change</c> / <c>client_error</c>), and <c>keylist</c> with
-/// <c>keys</c> and a <c>pagination</c>. Answers go back on the request's return route: from the DID
+/// <c>keys</c> and a <c>pagination</c> (or, per <see cref="Paging"/>, every key whatever was asked
+/// for, as a mediator that ignores <c>paginate</c> answers). Answers go back on the request's return route: from the DID
 /// that decrypted it to its authenticated sender, with <c>thid</c> = the request id unless
 /// <see cref="OmitThid"/>. It records every 2.0 message it handled.
 /// </summary>
@@ -111,10 +126,11 @@ internal sealed class FakeCoordinateMediation20Handler : IProtocolHandler, IProt
     private readonly ConcurrentQueue<Message> _handled = new();
     private readonly ConcurrentDictionary<string, List<string>> _keys = new(StringComparer.Ordinal);
 
-    public FakeCoordinateMediation20Handler(string routingDid, bool omitThid)
+    public FakeCoordinateMediation20Handler(string routingDid, bool omitThid, KeylistPaging paging = KeylistPaging.Honoured)
     {
         _routingDid = routingDid;
         OmitThid = omitThid;
+        Paging = paging;
     }
 
     public string ProtocolUri => CoordinateMediation20.ProtocolUri;
@@ -122,6 +138,8 @@ internal sealed class FakeCoordinateMediation20Handler : IProtocolHandler, IProt
     public IReadOnlyList<string> Roles { get; } = new[] { CoordinateMediation.MediatorRole };
 
     public bool OmitThid { get; }
+
+    public KeylistPaging Paging { get; }
 
     /// <summary>The 2.0 messages handled, in order.</summary>
     public IReadOnlyList<Message> Handled => _handled.ToArray();
@@ -173,9 +191,15 @@ internal sealed class FakeCoordinateMediation20Handler : IProtocolHandler, IProt
             {
                 var paginate = MediationBodies.ReadPaginate(MediationBodies.ToElement(message.Body), "keylist-query");
                 var all = KeysOf(peer);
+                type = CoordinateMediation20.KeylistType;
+                if (Paging != KeylistPaging.Honoured)
+                {
+                    var whole = Paging == KeylistPaging.IgnoredWithPosition ? new RecipientPagination(all.Count, 0, 0) : null;
+                    body = MediationBodies.WriteRecipients(CoordinateMediation20.KeysList, all, whole);
+                    break;
+                }
                 var offset = Math.Min(paginate?.Offset ?? 0, all.Count);
                 var page = all.Skip(offset).Take(Math.Max(0, paginate?.Limit ?? 30)).ToArray();
-                type = CoordinateMediation20.KeylistType;
                 body = MediationBodies.WriteRecipients(CoordinateMediation20.KeysList, page, new RecipientPagination(page.Length, offset, all.Count - offset - page.Length));
                 break;
             }
