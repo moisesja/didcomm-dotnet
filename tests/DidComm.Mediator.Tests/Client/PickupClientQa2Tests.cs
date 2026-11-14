@@ -169,6 +169,61 @@ public sealed class PickupClientQa2Tests
         exchange.Duplicates.Count.Should().Be(1);
     }
 
+    /// <summary>
+    /// <b>Q2-2</b> (#96 design §4.8 "Cycle failures. A cycle failing with <c>TimeoutException</c> /
+    /// <c>TransportException</c> is retried with backoff"; <see cref="PickupClient.ReceiveLiveAsync"/>
+    /// remarks: "A step that fails (no answer, a transport failure) is retried"). A step that fails for
+    /// a reason no retry can fix — here the pack stage cannot find this agent's key for <c>from</c>
+    /// (<see cref="SecretNotFoundException"/>) — must end the stream at once, as it ends
+    /// <see cref="PickupClient.FetchAsync"/>. The stream retries every exception other than a
+    /// <see cref="MediationProtocolException"/>, <see cref="ObjectDisposedException"/> or the caller's
+    /// cancellation, so the caller waits through four back-offs (1 + 2 + 4 + 8 s) and five identical
+    /// failures before it sees the error.
+    /// </summary>
+    [Fact]
+    public async Task Q2_2_A_permanent_pack_stage_failure_ends_the_live_stream_at_once_instead_of_after_four_back_offs()
+    {
+        var (exchange, client) = PickupClientLiveStreamTests.Live();
+        exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
+            r.Live ? throw new SecretNotFoundException(L + "#key-1") : Status(r, live: false));
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var first = stream.MoveNextAsync().AsTask();
+        try
+        {
+            var backingOff = exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+            await Task.WhenAny(first, backingOff);
+
+            first.IsCompleted.Should().BeTrue("a failure no retry can fix is not retried after a back-off");
+            await FluentActions.Awaiting(() => first).Should().ThrowAsync<SecretNotFoundException>();
+            exchange.SentOf(MessagePickup.LiveDeliveryChangeType).Count(s => s.Live).Should().Be(1);
+        }
+        finally
+        {
+            // A MoveNextAsync still pending (the stream backing off) is ended through its token.
+            await cts.CancelAsync();
+            try
+            {
+                await first.WaitAsync(PickupTest.Timeout);
+            }
+            catch (Exception)
+            {
+                // The outcome was asserted above.
+            }
+            await stream.DisposeAsync();
+        }
+    }
+
+    /// <summary>The same failure on a fetch surfaces at once (the contrast for Q2-2).</summary>
+    [Fact]
+    public async Task A_pack_stage_failure_ends_a_fetch_at_once()
+    {
+        var exchange = new FakePickupExchange();
+        exchange.On(MessagePickup.DeliveryRequestType, (Func<SentRequest, InboundMessageSnapshot>)(_ => throw new SecretNotFoundException(L + "#key-1")));
+
+        await FluentActions.Awaiting(() => PickupTest.Client(exchange).FetchAsync(M, L, 10)).Should().ThrowAsync<SecretNotFoundException>();
+    }
+
     // ---- fetch: cancellation at every await point -----------------------------------------------
 
     [Fact]
