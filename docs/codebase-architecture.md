@@ -2147,9 +2147,9 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 - **Clocks.** Over a WebSocket, answers and pushes pass the client's own replay admission: a
   mediator more than `ReplayProtectionOptions.ClockSkew` (60 s by default) ahead has them dropped
   (`FutureDated`) although it acted, so the call times out; retries are idempotent, and live pushes
-  come back after their lease. Requests pass the mediator's admission: a client too far ahead, or
-  more than `Window + ClockSkew` (6 minutes at the defaults) behind, is refused unexecuted and times
-  out. Over HTTP, `Returned` is not admitted, so skew decides nothing for answers there. Keep the
+  come back after their lease. Requests pass the mediator's admission: a client more than the
+  mediator's `ClockSkew` ahead (`FutureDated`), or more than its `Window` (5 minutes by default)
+  behind (`TooOld`), is refused unexecuted and times out. Over HTTP, `Returned` is not admitted, so skew decides nothing for answers there. Keep the
   clocks within a minute of each other by default (`MediatorClientClockSkewTests`,
   `PickupClientClockSkewQa2Tests`).
 - **Unobserved task exceptions** (QA-1 Q1-3, QA-2 Q2-3, fixed): a failed pending request that nobody
