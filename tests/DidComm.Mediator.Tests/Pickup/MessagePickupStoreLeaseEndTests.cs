@@ -403,8 +403,8 @@ public sealed class MessagePickupStoreLeaseEndTests
         (await store.AcknowledgeAsync(Alice, new[] { "copy-1" }, None)).Should().Be(1);
 
         (store.MessageCount, store.TotalBytes).Should().Be((2, 128L));
-        (await store.GetStatusAsync(Alice, R1, T0, None)).Should().Be(QueueStatus.Empty);
-        (await store.GetStatusAsync(Alice, R2, T0, None)).Should().Be(new QueueStatus(1, 64, T0, T0), "the other recipient's copy is still held");
+        (await store.GetStatusAsync(Alice, R1, T0, None)).Counts().Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(Alice, R2, T0, None)).Counts().Should().Be(new QueueStatus(1, 64, T0, T0), "the other recipient's copy is still held");
         (await store.ReleaseLeasesAsync("socket", None)).Should().Be(1);
         var second = (await store.LeaseAsync(Take(Alice), None)).Should().ContainSingle().Subject;
         second.Id.Should().Be("copy-2");
@@ -430,8 +430,8 @@ public sealed class MessagePickupStoreLeaseEndTests
         (await store.LeaseIdsAsync(Take(Bob))).Should().BeEmpty("Bob's record is still leased");
 
         (await store.AcknowledgeAsync(Alice, new[] { "m1" }, None)).Should().Be(1);
-        (await store.GetStatusAsync(Bob, null, T0, None)).Should().Be(new QueueStatus(1, 20, T0, T0));
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(Bob, null, T0, None)).Counts().Should().Be(new QueueStatus(1, 20, T0, T0));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(QueueStatus.Empty);
         (store.MessageCount, store.TotalBytes).Should().Be((1, 20L));
 
         // Alice's key no longer reaches any record called "m1".
@@ -452,8 +452,8 @@ public sealed class MessagePickupStoreLeaseEndTests
         await store.AddAsync(Message("b1", Bob, shared, size: 4));
         await store.AddAsync(Message("b2", Bob, shared, size: 8));
 
-        (await store.GetStatusAsync(Alice, shared, T0, None)).Should().Be(new QueueStatus(1, 1, T0, T0));
-        (await store.GetStatusAsync(Bob, shared, T0, None)).Should().Be(new QueueStatus(2, 12, T0, T0));
+        (await store.GetStatusAsync(Alice, shared, T0, None)).Counts().Should().Be(new QueueStatus(1, 1, T0, T0));
+        (await store.GetStatusAsync(Bob, shared, T0, None)).Counts().Should().Be(new QueueStatus(2, 12, T0, T0));
 
         (await store.LeaseIdsAsync(Take(Alice, recipient: shared, owner: "alice-socket"))).Should().Equal("a1");
         (await store.LeaseIdsAsync(Take(Bob, recipient: shared, max: 1, owner: "bob-socket"))).Should().Equal("b1");
@@ -462,8 +462,8 @@ public sealed class MessagePickupStoreLeaseEndTests
         (await store.ReleaseAsync(Alice, new[] { "b1" }, None)).Should().Be(0);
 
         (await store.PurgeRecipientAsync(Alice, shared, None)).Should().Be(1);
-        (await store.GetStatusAsync(Bob, shared, T0, None)).Should().Be(new QueueStatus(2, 12, T0, T0), "purging the DID under Alice's grant leaves Bob's records for the same DID");
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(1, 2, T0, T0));
+        (await store.GetStatusAsync(Bob, shared, T0, None)).Counts().Should().Be(new QueueStatus(2, 12, T0, T0), "purging the DID under Alice's grant leaves Bob's records for the same DID");
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(1, 2, T0, T0));
         (await store.ReleaseLeasesAsync("bob-socket", None)).Should().Be(1, "Bob's lease survived Alice's purge");
 
         (await store.PurgeRecipientAsync(Bob, shared, None)).Should().Be(2);

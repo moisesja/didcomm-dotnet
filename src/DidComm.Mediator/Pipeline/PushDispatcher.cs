@@ -27,16 +27,22 @@ namespace DidComm.Mediator.Pipeline;
 /// </para>
 /// <para>
 /// <strong>In the delivery order (D6).</strong> First, while the grant's peer has a live session
-/// with live delivery on, the messages stored since it turned live delivery on go over that session
-/// (<see cref="PickupCoordinator.PushNextLiveAsync"/>, <c>Pushed-Live</c>): each stays leased to the
-/// session until <c>messages-received</c>, its close or the lease timeout; one too large for the
-/// session's envelope is passed over, as a pickup does; one the session does not take is given back
-/// and ends the operation. Messages stored before live delivery went on are the recipient's to pick
-/// up (FR-PICK-06). Then, when direct push is on and the host's
+/// with live delivery on, the messages that arrived after it turned live delivery on go over that
+/// session (<see cref="PickupCoordinator.PushNextLiveAsync"/>, <c>Pushed-Live</c>): each stays leased
+/// to the session until <c>messages-received</c>, its close or the lease timeout; one too large for
+/// the session's envelope is passed over, as a pickup does; one the session does not take is given
+/// back and ends the operation. "Arrived after" is arrival order, not time: the store numbers every
+/// record as it stores it (<see cref="QueuedMessage.Sequence"/>), and the session's mark is the
+/// highest number in the status that answered its turning live delivery on — so a message is either
+/// counted in that status, and the recipient's to pick up (FR-PICK-06), or pushed, whatever the
+/// clocks do. Turning live delivery on wakes the grant
+/// (<see cref="PickupCoordinator.LiveDeliveryStarted"/>), for a message that arrived after that
+/// status but before the session was live. Then, when direct push is on and the host's
 /// <see cref="IRecipientEndpointDirectory"/> names an absolute <c>http</c> or <c>https</c> endpoint
-/// (a WebSocket write gives no receipt), the grant's other due messages go to it: each is taken
-/// under a lease of its own (<see cref="MediatorOptions.PushTimeout"/> + <see cref="LeaseMargin"/>)
-/// and sent as a single attempt through
+/// (a WebSocket write gives no receipt), the grant's due messages that its direct push has not
+/// attempted yet go to it, oldest first: each is taken under a lease of its own
+/// (<see cref="MediatorOptions.PushTimeout"/> + <see cref="LeaseMargin"/>) and sent as a single
+/// attempt through
 /// <see cref="DidCommClient.SendPackedAsync(ReadOnlyMemory{byte}, Uri, string, SendPackedOptions, CancellationToken)"/>
 /// (<see cref="SendPackedOptions.SingleAttempt"/>: one POST, no retry, no redirect followed, outside
 /// the HTTP transport's circuit breaker, the outbound endpoint guard applied); an HTTP 2xx removes it
@@ -44,9 +50,23 @@ namespace DidComm.Mediator.Pipeline;
 /// for pickup.
 /// </para>
 /// <para>
-/// <strong>Retries.</strong> A message whose push failed stays queued and is tried again the next
-/// time its grant is woken, which is when the recipient next receives a message; pickup always
-/// works. Delivery is at-least-once.
+/// <strong>One direct attempt per message; retries.</strong> Each grant has a direct-push cursor on
+/// the same arrival sequence: the direct step takes only records after it
+/// (<see cref="MessageLeaseRequest.AfterSequence"/>) and moves it past every record it sends,
+/// whatever the outcome. So each message gets one direct attempt; one the endpoint refused (or that
+/// reached the deadline) stays queued for pickup, and neither blocks the grant's later messages nor
+/// is sent again with them. A message that was not yet due when a later one of its grant was
+/// attempted is behind the cursor and waits for pickup too. The cursors are kept apart from the
+/// per-grant entries below (pruning an idle grant keeps its cursor), at most
+/// <see cref="CoordinateMediationOptions.MaxGrants"/> of them; past that the least recently used is
+/// dropped, and its grant's remaining records get at most one more direct attempt each. A live push
+/// the session did not take (<c>NotSent</c>: no free push slot, downgraded or closing) — or that
+/// faulted, or reached its deadline and was then given back — is tried again at the grant's next
+/// wake-up: that is at most one live attempt per wake-up (the operation ends there, and a deadline
+/// also pauses the grant), a wake-up is a stored message or a session turning live delivery on, and
+/// nothing is written to the connection unless the session takes it — so it cannot multiply the
+/// traffic of what was forwarded. One too large for the session is passed over, for a period that
+/// doubles each time. Pickup always works. Delivery is at-least-once.
 /// </para>
 /// <para>
 /// <strong>A push names what it took (D-5).</strong> Every send is preceded by a lease on exactly
@@ -69,27 +89,32 @@ namespace DidComm.Mediator.Pipeline;
 /// <c>try</c> (never <c>CancelAfter</c>). At the deadline the worker stops waiting and serves other
 /// grants; the push counts as <c>Push-Failed</c>, and its grant is paused for
 /// <see cref="CooldownPushTimeouts"/> × <see cref="MediatorOptions.PushTimeout"/> (one minute at the
-/// defaults): wake-ups meanwhile are skipped (<c>Push-Skipped-Cooldown</c>), and their messages wait
-/// for pickup. The abandoned push still ends its lease exactly once when it ends, and its grant is
-/// not served again before that. A session that ignores cancellation and later reports the message
-/// sent keeps it leased, as for any live push; a direct push whose 2xx arrives late removes it
-/// (at-least-once). A peer that
-/// stalls on purpose holds a worker at most once per cooldown. The residual: with K grants that
-/// stall every push and W workers, a healthy recipient's push can wait up to about ceil(K / W) ×
-/// <see cref="MediatorOptions.PushTimeout"/>, and once K reaches 3 × W that wait recurs; nothing is
-/// lost, pickup always works, and a mediation policy that enrols only known peers closes it.
+/// defaults), measured on the monotonic clock (<see cref="TimeProvider.GetTimestamp"/>), so a step of
+/// the wall clock neither lengthens nor shortens it: wake-ups meanwhile are skipped
+/// (<c>Push-Skipped-Cooldown</c>), and their messages wait for pickup. The abandoned push still ends
+/// its lease exactly once when it ends, and its grant is not served again before that. A session
+/// that ignores cancellation and later reports the message sent keeps it leased, as for any live
+/// push; a direct push whose 2xx arrives late removes it (at-least-once). When a stalled push does
+/// end at its deadline, a peer that stalls on purpose holds a worker at most once per cooldown: with
+/// K grants that stall every push this way and W workers, a healthy recipient's push can wait up to
+/// about ceil(K / W) × <see cref="MediatorOptions.PushTimeout"/>, and once K reaches 3 × W that wait
+/// recurs; nothing is lost, pickup always works, and a mediation policy that enrols only known peers
+/// closes it. A push that does not end at its deadline is the next paragraph's case.
 /// </para>
 /// <para>
 /// <strong>Bounded (D-4).</strong> <see cref="MediatorOptions.PushConcurrency"/> workers; at most
 /// <see cref="UnsettledPerWorker"/> × <see cref="MediatorOptions.PushConcurrency"/> operations
 /// between their start and the end of the work they started (abandoned ones included). When that
 /// many exist, a wake-up starts nothing (<c>Push-Skipped-Saturated</c>) and its messages wait for
-/// pickup or the grant's next wake-up. A call that never ends (a host session, DID resolver,
-/// transport or store that ignores cancellation) keeps its operation, and its grant, unsettled
-/// until it does; once that many operations are so held, no push starts, and pickup still works.
-/// Each operation holds at most one record at a time. The
+/// pickup or the grant's next wake-up. A host collaborator — a return-route session, the DID
+/// resolver, a transport, the endpoint directory or the store — that never completes a call after
+/// it was cancelled keeps that call's operation, and its grant, unsettled until it does complete;
+/// <see cref="UnsettledPerWorker"/> × <see cref="MediatorOptions.PushConcurrency"/> such calls hold
+/// every operation there is, and then no push starts, for any recipient, until one of them
+/// completes. Pickup keeps working throughout. Each operation holds at most one record at a time. The
 /// dispatcher holds one small entry per grant that is woken, busy or cooling down (its DID, at most
-/// 2048 characters), dropped when it is none of these.
+/// 2048 characters), dropped when it is none of these, and at most
+/// <see cref="CoordinateMediationOptions.MaxGrants"/> direct-push cursors (a DID and a number each).
 /// </para>
 /// <para>
 /// <strong>Dependencies (L-017).</strong> The pickup queue, the message store, the counter and the
@@ -139,6 +164,10 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     // for a worker, in the order they are to be served.
     private readonly Dictionary<string, GrantState> _grants = new(StringComparer.Ordinal);
     private readonly Queue<GrantState> _ready = new();
+    // Under _gate: each grant's direct-push cursor, most recently used first, at most _maxCursors.
+    private readonly Dictionary<string, LinkedListNode<DirectCursor>> _cursors = new(StringComparer.Ordinal);
+    private readonly LinkedList<DirectCursor> _cursorOrder = new();
+    private readonly int _maxCursors;
     // One count per entry put on _ready; a worker takes one, then a grant off _ready.
     private readonly SemaphoreSlim _readySignal = new(0);
     private readonly CancellationTokenSource _shutdown = new();
@@ -165,7 +194,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     /// <param name="didCommOptions">Supplies the clock the store judges records by.</param>
     /// <param name="metrics">The push counter.</param>
     /// <param name="logger">Optional logger.</param>
-    /// <param name="timeProvider">The clock behind the deadlines and the cooldown.</param>
+    /// <param name="timeProvider">The clock behind the deadlines and the cooldown (its monotonic timestamps).</param>
     public PushDispatcher(
         IServiceProvider services,
         IOptions<MediatorOptions> options,
@@ -191,6 +220,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         _timeout = settings.PushTimeout;
         _cooldown = TimeSpan.FromTicks(settings.PushTimeout.Ticks * CooldownPushTimeouts);
         _maxUnsettled = UnsettledPerWorker * settings.PushConcurrency;
+        _maxCursors = settings.CoordinateMediation.MaxGrants;
 
         _services = services;
         _pickup = queue.Coordinator;
@@ -201,6 +231,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         _logger = logger;
         _time = timeProvider;
         _shutdownToken = _shutdown.Token;
+        _pickup.LiveDeliveryStarted += OnLiveDeliveryStarted;
 
         // The workers must not carry the context of whoever happened to build this singleton (a
         // request's activity, its async-locals): start them with the flow suppressed.
@@ -225,6 +256,27 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
 
     /// <summary>Pushes one operation makes before it yields its worker.</summary>
     internal int PerRun => _perRun;
+
+    /// <summary>The most direct-push cursors kept.</summary>
+    internal int MaxDirectCursors => _maxCursors;
+
+    /// <summary>Test seam: the direct-push cursors kept.</summary>
+    internal int DirectCursors
+    {
+        get
+        {
+            lock (_gate)
+                return _cursors.Count;
+        }
+    }
+
+    /// <summary>Test seam: the arrival sequence of the last record <paramref name="grantPeerDid"/>'s direct push attempted, if its cursor is kept; does not count as a use.</summary>
+    /// <param name="grantPeerDid">The grant.</param>
+    internal long? DirectCursorOf(string grantPeerDid)
+    {
+        lock (_gate)
+            return _cursors.TryGetValue(grantPeerDid, out var node) ? node.Value.Sequence : null;
+    }
 
     /// <summary>
     /// Wake <paramref name="grantPeerDid"/>'s grant: something may be due for it. Never blocks and
@@ -271,6 +323,10 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         _metrics.RecordPush(skipped);
         return false;
     }
+
+    // A session turned live delivery on: a message that arrived after the status it was answered
+    // with, while no session was live, is pushed now (a wake-up like any other).
+    private void OnLiveDeliveryStarted(string grantPeerDid) => Wake(grantPeerDid);
 
     /// <summary>Test seam: complete when no wake-up waits and no worker serves a grant (abandoned work may still run).</summary>
     /// <param name="timeout">How long to wait.</param>
@@ -485,14 +541,15 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             _ => Step.Empty,
         };
 
-    // Take the grant's next due record under a lease of this push's own, then find where it goes,
-    // send it once, and remove it (2xx) or give it back (anything else, a fault included). Neither
-    // is cancelled: they run when the send has ended, however long that takes.
+    // Take the grant's next due record after its cursor under a lease of this push's own, then find
+    // where it goes, move the cursor past it, send it once, and remove it (2xx) or give it back
+    // (anything else, a fault included). Neither is cancelled: they run when the send has ended,
+    // however long that takes.
     private async Task<Step> PushNextDirectAsync(string grantPeerDid, CancellationToken ct)
     {
         var now = _didComm.Now();
         var lease = new MessageLease(Owner: null, ExpiresAt: SaturatingAdd(now, _timeout + LeaseMargin));
-        var (taken, record) = await _pickup.TakeNextAsync(grantPeerDid, lease, storedSince: null, now, ct).ConfigureAwait(false);
+        var (taken, record) = await _pickup.TakeNextAsync(grantPeerDid, lease, CursorOf(grantPeerDid), now, ct).ConfigureAwait(false);
         if (record is null)
             return taken == TakeResult.Removed ? Step.Removed : Step.Empty;
 
@@ -504,6 +561,8 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             var (endpoint, skipped) = Endpoint(grantPeerDid);
             if (endpoint is null)
                 return skipped;
+            // Attempted from here on, whatever the outcome: it gets no other direct attempt.
+            Advance(grantPeerDid, record.Sequence);
             var result = await Client().SendPackedAsync(record.Payload, endpoint, MediaTypes.Encrypted, SingleAttempt, ct).ConfigureAwait(false);
             delivered = result is { Accepted: true, HttpStatusCode: >= 200 and <= 299 };
         }
@@ -557,7 +616,47 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     private void Failed(bool direct, string reason)
     {
         var level = MediatorLog.RateLimited(ref _failedLines, out var n);
-        MediatorLog.Write(_logger, level, "{Kind} push not delivered ({Reason}); the message stays queued for pickup and is tried again at the recipient's next wake-up. {Count} such failures.", direct ? "Direct" : "Live", reason, n);
+        if (direct)
+            MediatorLog.Write(_logger, level, "Direct push not delivered ({Reason}); the message stays queued for pickup. {Count} such failures.", reason, n);
+        else
+            MediatorLog.Write(_logger, level, "Live push not delivered ({Reason}); the message stays queued for pickup and is tried again at the recipient's next wake-up. {Count} such failures.", reason, n);
+    }
+
+    // The arrival sequence after which the grant's direct push takes its next record: the last one
+    // it attempted, or none (every record) when it attempted none or its cursor was dropped.
+    private long? CursorOf(string grantPeerDid)
+    {
+        lock (_gate)
+        {
+            if (!_cursors.TryGetValue(grantPeerDid, out var node))
+                return null;
+            _cursorOrder.Remove(node);
+            _cursorOrder.AddFirst(node);
+            return node.Value.Sequence;
+        }
+    }
+
+    // A direct push is about to send this record: move the grant's cursor past it. A new cursor
+    // beyond the bound drops the least recently used one (its grant may attempt its remaining
+    // records once more).
+    private void Advance(string grantPeerDid, long sequence)
+    {
+        lock (_gate)
+        {
+            if (_cursors.TryGetValue(grantPeerDid, out var node))
+            {
+                node.Value.Sequence = Math.Max(node.Value.Sequence, sequence);
+                _cursorOrder.Remove(node);
+                _cursorOrder.AddFirst(node);
+                return;
+            }
+            if (_cursors.Count >= _maxCursors && _cursorOrder.Last is { } oldest)
+            {
+                _cursorOrder.RemoveLast();
+                _cursors.Remove(oldest.Value.GrantPeerDid);
+            }
+            _cursors.Add(grantPeerDid, _cursorOrder.AddFirst(new DirectCursor(grantPeerDid, sequence)));
+        }
     }
 
     private async Task QuietlyAsync(ValueTask<int> call, string what)
@@ -573,8 +672,9 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         }
     }
 
-    // Under _gate.
-    private bool IsCoolingLocked(GrantState grant) => grant.CoolUntil > _time.GetUtcNow();
+    // Under _gate. On the monotonic clock: a step of the wall clock does not move it.
+    private bool IsCoolingLocked(GrantState grant)
+        => grant.CoolingSince is { } since && _time.GetElapsedTime(since) < _cooldown;
 
     // Under _gate: put a woken, idle grant in line; false when it is already in line or busy (it is
     // served after its operation settles).
@@ -589,11 +689,17 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         return true;
     }
 
-    // Under _gate: drop the entry of a grant that is neither woken, in line, busy nor cooling.
+    // Under _gate: drop the entry of a grant that is neither woken, in line, busy nor cooling — that
+    // very entry only. A worker may still hold an entry that was dropped and replaced meanwhile (a
+    // saturated skip that has not finished yet); removing by key would drop the replacement, which
+    // may be busy, and let a second operation of the grant start (D-3).
     private void PruneLocked(GrantState grant)
     {
-        if (!grant.Woken && !grant.Queued && !grant.Busy && !IsCoolingLocked(grant))
+        if (!grant.Woken && !grant.Queued && !grant.Busy && !IsCoolingLocked(grant)
+            && _grants.TryGetValue(grant.GrantPeerDid, out var held) && ReferenceEquals(held, grant))
+        {
             _grants.Remove(grant.GrantPeerDid);
+        }
     }
 
     // A worker is done with the grant it took off the line.
@@ -642,10 +748,9 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     {
         lock (_gate)
         {
-            var now = _time.GetUtcNow();
             foreach (var other in _grants.Values.ToArray())
                 PruneLocked(other);
-            grant.CoolUntil = SaturatingAdd(now, _cooldown);
+            grant.CoolingSince = _time.GetTimestamp();
         }
         var level = MediatorLog.RateLimited(ref _cooldownLines, out var n);
         MediatorLog.Write(_logger, level, "Pushes to a recipient paused for {Cooldown}: its push reached the deadline. Its messages stay queued for pickup meanwhile. {Count} such pauses.", _cooldown, n);
@@ -698,6 +803,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             if (_stopped != 0)
                 return;
             _stopped = 1;
+            _pickup.LiveDeliveryStarted -= OnLiveDeliveryStarted;
             while (_ready.TryDequeue(out var grant))
             {
                 grant.Queued = false;
@@ -716,6 +822,15 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         idle?.TrySetResult();
     }
 
+    // One grant's direct-push cursor, touched only under _gate.
+    private sealed class DirectCursor(string grantPeerDid, long sequence)
+    {
+        public string GrantPeerDid { get; } = grantPeerDid;
+
+        /// <summary>The arrival sequence of the last record attempted.</summary>
+        public long Sequence { get; set; } = sequence;
+    }
+
     // One grant's state, touched only under _gate.
     private sealed class GrantState(string grantPeerDid)
     {
@@ -730,8 +845,8 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         /// <summary>An operation started and its work has not ended.</summary>
         public bool Busy { get; set; }
 
-        /// <summary>Paused until this instant (on the dispatcher's clock).</summary>
-        public DateTimeOffset CoolUntil { get; set; } = DateTimeOffset.MinValue;
+        /// <summary>When its last cooldown started (<see cref="TimeProvider.GetTimestamp"/>); <c>null</c> if it never had one.</summary>
+        public long? CoolingSince { get; set; }
     }
 
     /// <summary>Stop admission, cancel the running pushes and drop the waiting wake-ups; does not wait.</summary>

@@ -146,7 +146,9 @@ public sealed class MediatorTimeBoundsQaTests
     {
         // L-020 (PR #109 review round 2, D-1): a push takes what the store hands out now, so a delayed
         // message is never pushed before it is due (FR-ROUTE-10) and, once due, goes with the grant's
-        // next push like any queued message; it used to stay pickup-only for good.
+        // next push like any queued message; it used to stay pickup-only for good. (Round 8: unless a
+        // later message of the grant had its direct attempt first — then it is behind the grant's
+        // cursor and waits for pickup; PushArrivalOrderTests pins that.)
         await using var f = await QaPushFixture.StartAsync(m => m.MaxForwardDelay = Cap);
 
         var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, Qa.Delay(1));

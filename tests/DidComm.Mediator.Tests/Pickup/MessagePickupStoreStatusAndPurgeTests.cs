@@ -30,12 +30,12 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         await store.AddAsync(Message("expiring-next", size: 64, receivedAt: T0.AddMinutes(6), expiresAt: now + Tick));
 
         // Due and unexpired at `now`: waiting, leased, pushed, due-now, expiring-next.
-        (await store.GetStatusAsync(Alice, null, now, None)).Should().Be(new QueueStatus(5, 1 + 2 + 4 + 16 + 64, T0.AddMinutes(1), T0.AddMinutes(6)));
+        (await store.GetStatusAsync(Alice, null, now, None)).Counts().Should().Be(new QueueStatus(5, 1 + 2 + 4 + 16 + 64, T0.AddMinutes(1), T0.AddMinutes(6)));
         // The record that is not yet due is retained and counts against the bounds; it is only not reported.
         (store.MessageCount, store.TotalBytes).Should().Be((6, 1L + 2 + 4 + 8 + 16 + 64));
 
         // One tick on: "not-due" is due, "expiring-next" is expired.
-        (await store.GetStatusAsync(Alice, null, now + Tick, None)).Should().Be(new QueueStatus(5, 1 + 2 + 4 + 8 + 16, T0.AddMinutes(1), T0.AddMinutes(5)));
+        (await store.GetStatusAsync(Alice, null, now + Tick, None)).Counts().Should().Be(new QueueStatus(5, 1 + 2 + 4 + 8 + 16, T0.AddMinutes(1), T0.AddMinutes(5)));
         (store.MessageCount, store.TotalBytes).Should().Be((5, 1L + 2 + 4 + 8 + 16));
     }
 
@@ -44,7 +44,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
     {
         var store = NewStore();
         await store.AddAsync(Message("m1", receivedAt: T0.AddSeconds(30)));
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(1, 10, T0.AddSeconds(30), T0.AddSeconds(30)));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(1, 10, T0.AddSeconds(30), T0.AddSeconds(30)));
 
         await store.AddAsync(Message("m2", receivedAt: T0.AddSeconds(10)));
         await store.AddAsync(Message("m3", receivedAt: T0.AddSeconds(50)));
@@ -52,14 +52,14 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         // Held but not yet due: it is not reported, so its ReceivedAt is not the oldest either.
         await store.AddAsync(Message("hidden", receivedAt: T0.AddSeconds(-100), notBefore: T0.AddHours(1)));
 
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(4, 40, T0.AddSeconds(10), T0.AddSeconds(50)));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(4, 40, T0.AddSeconds(10), T0.AddSeconds(50)));
         (await store.LeaseIdsAsync(Take(until: T0))).Should().Equal(new[] { "m1", "m2", "m3", "m4" }, "selection is by arrival, the times are by ReceivedAt");
 
         (await store.AcknowledgeAsync(Alice, new[] { "m3" }, None)).Should().Be(1);
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(3, 30, T0.AddSeconds(10), T0.AddSeconds(30)));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(3, 30, T0.AddSeconds(10), T0.AddSeconds(30)));
         (await store.AcknowledgeAsync(Alice, new[] { "m2" }, None)).Should().Be(1);
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(2, 20, T0.AddSeconds(20), T0.AddSeconds(30)));
-        (await store.GetStatusAsync(Alice, null, T0.AddHours(1), None)).Should().Be(new QueueStatus(3, 30, T0.AddSeconds(-100), T0.AddSeconds(30)));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(2, 20, T0.AddSeconds(20), T0.AddSeconds(30)));
+        (await store.GetStatusAsync(Alice, null, T0.AddHours(1), None)).Counts().Should().Be(new QueueStatus(3, 30, T0.AddSeconds(-100), T0.AddSeconds(30)));
     }
 
     [Fact]
@@ -72,12 +72,12 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         await store.AddAsync(Message("d", recipient: R1, size: 8, receivedAt: T0.AddSeconds(4), notBefore: T0.AddHours(1)));
         await store.AddAsync(Message("x", Bob, recipient: R1, size: 16));
 
-        (await store.GetStatusAsync(Alice, R1, T0, None)).Should().Be(new QueueStatus(2, 5, T0.AddSeconds(1), T0.AddSeconds(3)));
-        (await store.GetStatusAsync(Alice, R2, T0, None)).Should().Be(new QueueStatus(1, 2, T0.AddSeconds(2), T0.AddSeconds(2)));
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(3, 7, T0.AddSeconds(1), T0.AddSeconds(3)));
-        (await store.GetStatusAsync(Alice, "did:example:nobody", T0, None)).Should().Be(QueueStatus.Empty);
-        (await store.GetStatusAsync(Alice, R1.ToUpperInvariant(), T0, None)).Should().Be(QueueStatus.Empty, "recipient DIDs are compared ordinally");
-        (await store.GetStatusAsync(Alice, Alice, T0, None)).Should().Be(QueueStatus.Empty, "the grant's own DID is a recipient DID like any other: nothing was queued for it");
+        (await store.GetStatusAsync(Alice, R1, T0, None)).Counts().Should().Be(new QueueStatus(2, 5, T0.AddSeconds(1), T0.AddSeconds(3)));
+        (await store.GetStatusAsync(Alice, R2, T0, None)).Counts().Should().Be(new QueueStatus(1, 2, T0.AddSeconds(2), T0.AddSeconds(2)));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(3, 7, T0.AddSeconds(1), T0.AddSeconds(3)));
+        (await store.GetStatusAsync(Alice, "did:example:nobody", T0, None)).Counts().Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(Alice, R1.ToUpperInvariant(), T0, None)).Counts().Should().Be(QueueStatus.Empty, "recipient DIDs are compared ordinally");
+        (await store.GetStatusAsync(Alice, Alice, T0, None)).Counts().Should().Be(QueueStatus.Empty, "the grant's own DID is a recipient DID like any other: nothing was queued for it");
     }
 
     [Fact]
@@ -85,17 +85,17 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
     {
         QueueStatus.Empty.Should().Be(new QueueStatus(0, 0, null, null));
         var store = NewStore();
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(QueueStatus.Empty, "nobody ever queued for this grant");
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(QueueStatus.Empty, "nobody ever queued for this grant");
 
         await store.AddAsync(Message("not-due", notBefore: T0.AddHours(1)));
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(QueueStatus.Empty, "the only record is not yet due");
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(QueueStatus.Empty, "the only record is not yet due");
         store.MessageCount.Should().Be(1);
 
         await store.AddAsync(Message("expiring", expiresAt: T0.AddMinutes(1)));
-        (await store.GetStatusAsync(Alice, null, T0.AddMinutes(1), None)).Should().Be(QueueStatus.Empty, "the only due record is expired");
+        (await store.GetStatusAsync(Alice, null, T0.AddMinutes(1), None)).Counts().Should().Be(QueueStatus.Empty, "the only due record is expired");
 
         (await store.AcknowledgeAsync(Alice, new[] { "not-due" }, None)).Should().Be(1);
-        (await store.GetStatusAsync(Alice, null, T0.AddHours(2), None)).Should().Be(QueueStatus.Empty, "everything was acknowledged or expired");
+        (await store.GetStatusAsync(Alice, null, T0.AddHours(2), None)).Counts().Should().Be(QueueStatus.Empty, "everything was acknowledged or expired");
         (store.MessageCount, store.TotalBytes).Should().Be((0, 0L));
     }
 
@@ -133,8 +133,8 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         (await store.PurgeRecipientAsync(Alice, R1, None)).Should().Be(4);
 
         (store.MessageCount, store.TotalBytes).Should().Be((3, 2L + 16 + 64));
-        (await store.GetStatusAsync(Alice, R1, T0.AddDays(2), None)).Should().Be(QueueStatus.Empty);
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(2, 18, T0, T0));
+        (await store.GetStatusAsync(Alice, R1, T0.AddDays(2), None)).Counts().Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(2, 18, T0, T0));
         (await store.GetStatusAsync(Bob, R1, T0, None)).MessageCount.Should().Be(1, "the same DID under another grant is not this grant's to purge");
         (await store.LeaseIdsAsync(Take())).Should().Equal(new[] { "r2-waiting" }, "the lease on the other recipient's record is intact");
         (await store.ReleaseLeasesAsync("socket", None)).Should().Be(1, "of the owner's three leases only the other recipient's is left");
@@ -163,7 +163,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
         (await store.PurgeGrantAsync(Alice, None)).Should().Be(3);
 
         (store.MessageCount, store.TotalBytes).Should().Be((2, 18L));
-        (await store.GetStatusAsync(Alice, null, T0.AddDays(2), None)).Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(Alice, null, T0.AddDays(2), None)).Counts().Should().Be(QueueStatus.Empty);
         (await store.LeaseIdsAsync(Take(Alice, now: T0.AddDays(2)))).Should().BeEmpty();
         (await store.LeaseIdsAsync(Take(Bob))).Should().Equal(new[] { "b-waiting" }, "Bob's lease is intact");
         (await store.ReleaseLeasesAsync("socket", None)).Should().Be(1, "the owner is left with its lease in the other grant");
@@ -197,7 +197,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
 
         (store.MessageCount, store.TotalBytes).Should().Be((3, 4L + 8 + 32));
         (await store.PurgeExpiredAsync(at, None)).Should().Be(0);
-        (await store.GetStatusAsync(Bob, null, T0, None)).Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(Bob, null, T0, None)).Counts().Should().Be(QueueStatus.Empty);
         (await store.LeaseIdsAsync(Take(Alice, now: at, until: at))).Should().Equal("a-live", "a-forever");
         (await store.LeaseIdsAsync(Take(Carol, now: at))).Should().BeEmpty("the lease of a record that did not expire is intact");
         (await store.ReleaseLeasesAsync("socket", None)).Should().Be(1, "the expired record took its lease with it");
@@ -268,7 +268,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
                 (store.MessageCount, store.TotalBytes).Should().Be((1, 1L));
                 break;
             case Touch.Status:
-                (await store.GetStatusAsync(Alice, null, at, None)).Should().Be(new QueueStatus(1, 1, T0, T0));
+                (await store.GetStatusAsync(Alice, null, at, None)).Counts().Should().Be(new QueueStatus(1, 1, T0, T0));
                 (store.MessageCount, store.TotalBytes).Should().Be((1, 1L));
                 break;
         }
@@ -325,7 +325,7 @@ public sealed class MessagePickupStoreStatusAndPurgeTests
                 (await store.LeaseIdsAsync(Take(now: at))).Should().BeEmpty();
                 break;
             case Emptied.ByExpiryOnStatus:
-                (await store.GetStatusAsync(Alice, null, at, None)).Should().Be(QueueStatus.Empty);
+                (await store.GetStatusAsync(Alice, null, at, None)).Counts().Should().Be(QueueStatus.Empty);
                 break;
             case Emptied.ByExpiryOnEnqueue:
                 // An enqueue that is refused still applies the expiry first, and must leave the

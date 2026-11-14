@@ -128,7 +128,9 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <summary>
     /// Register <paramref name="session"/> and turn live delivery on over it, as its peer would: a
     /// <c>live-delivery-change</c> authcrypted from the peer to the mediator, through the real
-    /// protocol dispatcher. The container must hold both parties' secrets.
+    /// protocol dispatcher. The container must hold both parties' secrets. Turning live delivery on
+    /// wakes the grant; this returns once that wake-up has been served, so a test's own wake-ups
+    /// are not coalesced with it (L-044).
     /// </summary>
     public async Task GoLiveAsync(LiveTestSession session)
     {
@@ -137,6 +139,7 @@ internal sealed class PushFixture : IAsyncDisposable
         var change = MessagePickup.CreateLiveDeliveryChange(session.PeerDid, session.LocalDid, liveDelivery: true);
         var packed = await client.PackEncryptedAsync(change, new PackEncryptedOptions(Recipients: new[] { session.LocalDid }, From: session.PeerDid));
         await Services.GetRequiredService<DidComm.Protocols.ProtocolDispatcher>().DispatchAsync(await client.UnpackAsync(packed.Message), client, Options, Task.CompletedTask, session, CancellationToken.None);
+        await Dispatcher.WaitForIdleAsync(TimeSpan.FromSeconds(10));
     }
 
     /// <summary>

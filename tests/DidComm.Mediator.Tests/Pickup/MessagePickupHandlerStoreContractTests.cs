@@ -232,7 +232,7 @@ public sealed class MessagePickupHandlerStoreContractTests
         get
         {
             var data = new TheoryData<string, string>();
-            foreach (var garbage in new[] { "null", "a negative count", "negative bytes", "both negative" })
+            foreach (var garbage in new[] { "null", "a negative count", "negative bytes", "both negative", "a negative high-water sequence" })
             {
                 foreach (var request in new[] { "status-request", "filtered status-request", "delivery-request with limit 0", "delivery-request without a session", "delivery-request on an empty lease", "messages-received", "live-delivery-change{true}", "live-delivery-change{false}" })
                     data.Add(garbage, request);
@@ -258,6 +258,7 @@ public sealed class MessagePickupHandlerStoreContractTests
             "null" => null!,
             "a negative count" => new QueueStatus(-1, 10, h.Start, h.Start),
             "negative bytes" => new QueueStatus(1, -1, h.Start, h.Start),
+            "a negative high-water sequence" => new QueueStatus(1, 10, h.Start, h.Start) { HighWaterSequence = -1 },
             _ => new QueueStatus(int.MinValue, long.MinValue, null, null),
         });
         h.ResetTraces();

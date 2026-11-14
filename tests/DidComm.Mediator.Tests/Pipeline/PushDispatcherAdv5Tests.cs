@@ -38,7 +38,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- D-1 / liveness: which messages a live push takes --------------------------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 1 (P2): a live push takes only records whose ReceivedAt >= LiveMode.Since, two readings of the wall clock; after the clock steps back, every message stored for a healthy live session is never pushed (regression vs 755c497, which pushed by event order).")]
+    // ADV-5 DEFECT 1 (P2), fixed in round 8: "arrived after live-on" was two readings of the wall
+    // clock; it is now the store's arrival sequence against the live-on status's high-water mark.
+    [Fact]
     public async Task Defect1_after_the_clock_steps_back_a_message_stored_for_a_live_recipient_is_still_pushed_live()
     {
         await using var peers = new PipelinePeers();
@@ -70,7 +72,9 @@ public sealed class PushDispatcherAdv5Tests
         Deliveries(session).Should().HaveCount(2);
     }
 
-    [Fact(Skip = "ADV-5 DEFECT 2 (P2): DeliverAsync reads the clock before its grant lookup and its enqueue; live delivery turned on in between gets Since > ReceivedAt, so a message enqueued after live-on (and after the live-on status, which did not count it) is never pushed (regression vs 755c497).")]
+    // ADV-5 DEFECT 2 (P2), fixed in round 8: the message is numbered when it is stored, after the
+    // live-on status read, so it is after the mark whenever its clock reading was taken.
+    [Fact]
     public async Task Defect2_a_message_stored_after_live_delivery_went_on_is_pushed_even_when_its_clock_reading_came_first()
     {
         await using var peers = new PipelinePeers();
@@ -116,13 +120,13 @@ public sealed class PushDispatcherAdv5Tests
     }
 
     [Fact]
-    public async Task A_store_that_ignores_ReceivedAtOrAfter_is_refused_and_no_record_from_before_live_delivery_is_pushed_or_left_leased()
+    public async Task A_store_that_ignores_AfterSequence_is_refused_and_no_record_from_before_live_delivery_is_pushed_or_left_leased()
     {
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
         var peer = await peers.NewAsync();
         var store = new ScriptedMessageStore();
-        store.OnLease = (request, ct) => store.Inner.LeaseAsync(request with { ReceivedAtOrAfter = null }, ct);
+        store.OnLease = (request, ct) => store.Inner.LeaseAsync(request with { AfterSequence = null }, ct);
         await using var fixture = PushFixture.Create(
             configure: o => o.DirectPush = false,
             services: s => s.AddSingleton<IMessageStore>(store),
@@ -138,7 +142,8 @@ public sealed class PushDispatcherAdv5Tests
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         Deliveries(session).Should().BeEmpty("the record the store handed out was stored before live delivery went on");
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
+        // Round 8: turning live delivery on wakes the grant too, so the store's refused take is counted twice.
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.Failed);
         var now = fixture.Time.GetUtcNow();
         var free = await store.Inner.LeaseAsync(new MessageLeaseRequest(peer.Did, null, 10, int.MaxValue, now, new MessageLease("adv5-pickup", now + TimeSpan.FromMinutes(1))), CancellationToken.None);
         free.Select(r => r.Id).Should().Contain(before.MessageId).And.HaveCount(2, "the refused take gave its lease back: both wait for pickup");
@@ -146,7 +151,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- direct push: what a refused record does to the grant's later messages ------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 3 (P2): a direct push takes the grant's oldest due record and ends the operation at the first failure; a record the endpoint always refuses (any sender can make one: MapDidCommEndpoint answers 400 to an inner message it cannot open) is retried at every wake and no later message of the grant is ever pushed (regression vs 755c497: one attempt per message).")]
+    // ADV-5 DEFECT 3 (P2), fixed in round 8: the direct step takes only records after the grant's
+    // cursor, which passes every record it attempted, so a refused one blocks nothing.
+    [Fact]
     public async Task Defect3_a_message_the_endpoint_refuses_does_not_keep_the_grants_later_messages_from_being_pushed()
     {
         const int PoisonSize = 4096;
@@ -167,7 +174,9 @@ public sealed class PushDispatcherAdv5Tests
         fixture.Store.MessageCount.Should().Be(1, "only the refused one waits for pickup");
     }
 
-    [Fact(Skip = "ADV-5 DEFECT 4 (P2): a refused record is sent again, in full, at every later wake of its grant: one large stored message turns each later tiny forward into a POST of the large one (measured: 21 POSTs of 564 525 bytes, 11.9 MB of egress, for 1 large + 20 tiny forwards totalling 0.57 MB); the docs promise one attempt per message (regression vs 755c497).")]
+    // ADV-5 DEFECT 4 (P2), fixed in round 8: one direct attempt per message (the cursor), so a
+    // refused message is never sent again with the grant's later ones.
+    [Fact]
     public async Task Defect4_a_refused_message_is_not_sent_again_at_full_size_for_every_later_forward()
     {
         await using var fixture = PushFixture.Create((_, _) => Task.FromResult(new TransportResult(true, 503)), directory: _ => Inbox);
@@ -201,14 +210,17 @@ public sealed class PushDispatcherAdv5Tests
         }
 
         fixture.Router.Requests.Should().HaveCount(12, "one operation per wake, ended by its first failure");
-        fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().AllSatisfy(p => p.Should().Equal(PushFixture.Payload(64, 0)), "each operation takes the oldest record again");
+        // L-020 (round 8): each operation takes the record after the cursor, not the oldest again.
+        fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().Equal(Enumerable.Range(0, 12).Select(i => PushFixture.Payload(64, (byte)i)), (a, b) => a.SequenceEqual(b), "each message gets one attempt, in the order they were stored");
         fixture.Pushes(PushOutcomes.SkippedCooldown).Should().Be(0);
         fixture.Store.MessageCount.Should().Be(12);
     }
 
     // ---- D-3: one operation per grant ------------------------------------------------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 5 (P3): PruneLocked removes the dictionary entry by key, not by identity; a worker that still holds a pruned GrantState (here: the saturated-skip path, parked in its log line) later drops the grant's NEW busy entry, so the next wake creates a third entry and a second operation of the same grant runs concurrently (D-3; also loses a cooldown set on the orphaned entry).")]
+    // ADV-5 DEFECT 5 (P3), fixed in round 8: PruneLocked removes an entry only when the map holds
+    // that very entry, so a worker holding a dropped one cannot remove its busy replacement.
+    [Fact]
     public async Task Defect5_a_stale_grant_entry_never_lets_a_second_operation_of_the_same_grant_start()
     {
         MessagePickupLive.RaiseThreadPoolFloor(2);
@@ -451,7 +463,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- clock: the cooldown -------------------------------------------------------------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 6 (P3): the cooldown is judged on TimeProvider.GetUtcNow() (wall clock); a backward step of the host clock lengthens the pause by the size of the step (here one hour instead of 2 x PushTimeout). Same at 755c497; not on main (no dispatcher).")]
+    // ADV-5 DEFECT 6 (P3), fixed in round 8: the cooldown is measured on the monotonic clock
+    // (TimeProvider.GetTimestamp / GetElapsedTime).
+    [Fact]
     public async Task Defect6_a_backward_step_of_the_wall_clock_does_not_lengthen_a_cooldown()
     {
         WallStepClock? wall = null;
@@ -486,10 +500,46 @@ public sealed class PushDispatcherAdv5Tests
 
         wall!.Step(TimeSpan.FromHours(-1)); // an NTP correction; the monotonic clock is unaffected
         fixture.Time.Advance(PushTimeout * (PushDispatcher.CooldownPushTimeouts + 1));
+        // Round 8: the timed-out message had its one direct attempt (the cursor); a new one shows the grant is served.
+        await fixture.StoreAsync(Recipient, PushFixture.Payload(64, 2));
 
         fixture.Dispatcher.Wake(Peer).Should().BeTrue("2 x PushTimeout has passed on the monotonic clock");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.Pushes(PushOutcomes.Pushed).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_forward_step_of_the_wall_clock_does_not_shorten_a_cooldown()
+    {
+        // Round 8, with Defect6: the pause is measured on the monotonic clock in both directions.
+        WallStepClock? wall = null;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fixture = PushFixture.Create(
+            async (_, ct) =>
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct); // reaches the deadline
+                return new TransportResult(true, 202);
+            },
+            directory: _ => Inbox,
+            services: s =>
+            {
+                var manual = (ManualTimeProvider)s.Last(x => x.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
+                wall = new WallStepClock(manual);
+                s.AddSingleton<TimeProvider>(wall);
+            });
+        await fixture.EnrolAsync(Peer, Recipient);
+        await fixture.StoreAsync(Recipient);
+
+        fixture.Dispatcher.Wake(Peer).Should().BeTrue();
+        await entered.Task.WaitAsync(Wait);
+        fixture.Time.Advance(PushTimeout);
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the timed-out push settled");
+
+        wall!.Step(TimeSpan.FromHours(1));
+        fixture.Dispatcher.Wake(Peer).Should().BeFalse("no time has passed on the monotonic clock: the grant is still paused");
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown);
     }
 
     // ---- support ---------------------------------------------------------------------------------------------

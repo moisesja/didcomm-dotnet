@@ -53,7 +53,7 @@ public sealed class MessagePickupStoreBoundsTests
         (await TryAddAsync(store, Message("one", size: 1))).Should().Be(EnqueueOutcome.GrantByteLimitReached);
         (await TryAddAsync(store, Message("nothing", size: 0))).Should().Be(EnqueueOutcome.Enqueued, "no bytes do not take the grant past its budget");
         (await TryAddAsync(store, Message("one", Bob, size: 1))).Should().Be(EnqueueOutcome.Enqueued, "the budget is the grant's own");
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(3, 100, T0, T0));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(3, 100, T0, T0));
     }
 
     [Theory]
@@ -88,7 +88,7 @@ public sealed class MessagePickupStoreBoundsTests
         (await TryAddAsync(store, Message("e1", "did:example:erin", size: 0))).Should().Be(EnqueueOutcome.StoreLimitReached);
         (store.MessageCount, store.TotalBytes).Should().Be((5, 50L));
         (await store.GetStatusAsync(Carol, null, T0, None)).MessageCount.Should().Be(1);
-        (await store.GetStatusAsync("did:example:dave", null, T0, None)).Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync("did:example:dave", null, T0, None)).Counts().Should().Be(QueueStatus.Empty);
 
         // A slot freed in one grant is a slot for any grant.
         (await store.AcknowledgeAsync(Alice, new[] { "a1" }, None)).Should().Be(1);

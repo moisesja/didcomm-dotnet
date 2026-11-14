@@ -254,7 +254,7 @@ internal sealed class ScriptedMediationStore : IMediationStore
         => OnFind is { } hook ? hook(recipientDid, ct) : _inner.FindGrantByRecipientDidAsync(recipientDid, ct);
 }
 
-/// <summary>An <see cref="IMessageStore"/> over the real in-memory store whose purge a test can replace; signals every purge call.</summary>
+/// <summary>An <see cref="IMessageStore"/> over the real in-memory store whose purge, lease, acknowledgement, give-back and status read a test can replace; signals every purge call.</summary>
 internal sealed class ScriptedMessageStore : IMessageStore
 {
     private readonly object _gate = new();
@@ -317,7 +317,10 @@ internal sealed class ScriptedMessageStore : IMessageStore
         => OnRelease is { } hook ? hook(grantPeerDid, messageIds, leaseId, ct) : Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
-    public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct) => Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);
+    /// <summary>Replaces the status read; the default reads the inner store.</summary>
+    public Func<string, string?, DateTimeOffset, CancellationToken, ValueTask<QueueStatus>>? OnGetStatus { get; set; }
+    public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct)
+        => OnGetStatus is { } hook ? hook(grantPeerDid, recipientDid, now, ct) : Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);
     public ValueTask<int> PurgeRecipientAsync(string grantPeerDid, string recipientDid, CancellationToken ct) => Inner.PurgeRecipientAsync(grantPeerDid, recipientDid, ct);
     public ValueTask<int> PurgeGrantAsync(string grantPeerDid, CancellationToken ct) => Inner.PurgeGrantAsync(grantPeerDid, ct);
 }

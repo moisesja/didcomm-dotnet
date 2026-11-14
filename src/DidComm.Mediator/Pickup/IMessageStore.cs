@@ -18,7 +18,8 @@ namespace DidComm.Mediator.Pickup;
 /// <item><description><strong>A lease is given back only by its taker.</strong> <see cref="ReleaseAsync"/> names the lease it ends (<see cref="MessageLease.Id"/>) and leaves a record alone when it carries another lease by now — the first one ran out and somebody else took the record — so a late clean-up can never make a message that was just delivered deliverable again.</description></item>
 /// <item><description><strong>A record that was passed over stays where it is.</strong> <see cref="PassOverAsync"/> marks a record the taker could not deliver for now: it stays stored and counted, in its position, and <see cref="LeaseAsync"/> does not hand it out again before the instant given — whatever happens to leases, sessions or connections in the meantime. The mark and the number of times it was set (<see cref="QueuedMessage.PassOvers"/>) belong to the record and last as long as it does; they are what lets a recipient's later requests get past such records instead of meeting the same ones first every time.</description></item>
 /// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due. A record that is expired at the instant of the call does not: expired records never keep a new message out.</description></item>
-/// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, not of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
+/// <item><description><strong>Every record has an arrival sequence the store assigns.</strong> When <see cref="EnqueueAsync"/> stores a record, the store gives it a <see cref="QueuedMessage.Sequence"/> greater than that of every record it stored before (one counter for the whole store will do; a value the caller set is ignored), returns it with the record, reports the highest one assigned so far in every status (<see cref="QueueStatus.HighWaterSequence"/>) and honours <see cref="MessageLeaseRequest.AfterSequence"/>. The mediator decides "arrived after" by it — whether a record arrived after a session turned live delivery on, and which records a direct push has attempted — never by comparing two clock readings. Records a store hands out outside it are refused by the mediator (not pushed; pickup still works).</description></item>
+/// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, which is that of <see cref="QueuedMessage.Sequence"/>, not that of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
 /// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>.</description></item>
 /// <item><description><strong>Expiry is the only clock rule a store applies.</strong> <see cref="QueuedMessage.ExpiresAt"/> already carries both the message's own expiry and the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>): the queue sets it to the earlier of the two when it stores the record. An expired record is never handed out, never reported and never counts against a bound, whatever its state (waiting, leased or passed over), and may be removed at any time. A store needs nothing beyond <c>ExpiresAt</c> to enforce the age limit; the limit in force when a record was stored stays fixed on it.</description></item>
 /// <item><description><strong>No throw after a partial change.</strong> A method that changes several records either throws before anything changed, or its return value is the truth.</description></item>
@@ -67,7 +68,7 @@ public interface IMessageStore
     /// grant's records in arrival order — only those for <see cref="MessageLeaseRequest.RecipientDid"/>
     /// when it is set — and takes each record that is not expired, is due and is not under a live
     /// lease and is not passed over for now (<see cref="PassOverAsync"/>) — and, when
-    /// <see cref="MessageLeaseRequest.ReceivedAtOrAfter"/> is set, was stored at or after it — until
+    /// <see cref="MessageLeaseRequest.AfterSequence"/> is set, has a greater <see cref="QueuedMessage.Sequence"/> — until
     /// <see cref="MessageLeaseRequest.MaxMessages"/> are taken or the next one would
     /// carry the payload total past <see cref="MessageLeaseRequest.MaxPayloadBytes"/>. It stops
     /// there and does not look for a smaller record further on, so the result is always a prefix of
@@ -186,6 +187,13 @@ public sealed record QueuedMessage(
     DateTimeOffset? ExpiresAt = null,
     int PassOvers = 0)
 {
+    /// <summary>
+    /// The record's arrival sequence: assigned by the store when it stores the record, greater than
+    /// that of every record it stored before, and returned with the record from then on (see
+    /// <see cref="IMessageStore"/>). A value set by the caller of <see cref="IMessageStore.EnqueueAsync"/> is ignored.
+    /// </summary>
+    public long Sequence { get; init; }
+
     /// <summary>The payload length and the times only: no DID, id or payload is printed, so a logged instance carries no wire value.</summary>
     public override string ToString()
         => $"QueuedMessage {{ Payload = {Payload.Length} bytes, ReceivedAt = {ReceivedAt:O}, NotBefore = {NotBefore:O}, ExpiresAt = {ExpiresAt:O} }}";
@@ -227,13 +235,14 @@ public sealed record MessageLeaseRequest(
     MessageLease Lease)
 {
     /// <summary>
-    /// Only records stored at or after this instant (<see cref="QueuedMessage.ReceivedAt"/> on or
-    /// after it); <c>null</c>, the default, for any. The mediator's live push uses it so that a
-    /// session in live mode is pushed only what arrived after it turned live delivery on: what was
-    /// queued before is the recipient's to pick up (FR-PICK-06). A store that ignores it hands out
-    /// records the mediator then refuses as outside the contract.
+    /// Only records whose <see cref="QueuedMessage.Sequence"/> is greater than this one — that
+    /// arrived after it; <c>null</c>, the default, for any. The mediator's live push asks for the
+    /// records that arrived after the status read that answered the session's turning live
+    /// delivery on (what was queued before is the recipient's to pick up, FR-PICK-06), and its
+    /// direct push for the records after the last one it attempted. A store that ignores it hands
+    /// out records the mediator then refuses as outside the contract.
     /// </summary>
-    public DateTimeOffset? ReceivedAtOrAfter { get; init; }
+    public long? AfterSequence { get; init; }
 
     /// <summary>The numbers only: no DID is printed.</summary>
     public override string ToString()
@@ -249,6 +258,13 @@ public sealed record QueueStatus(int MessageCount, long TotalBytes, DateTimeOffs
 {
     /// <summary>The status of an empty queue.</summary>
     public static QueueStatus Empty { get; } = new(0, 0, null, null);
+
+    /// <summary>
+    /// The highest <see cref="QueuedMessage.Sequence"/> the store had assigned when it read this
+    /// status (zero before the first): every record it stores afterwards has a greater one. Read in
+    /// the same step as the counts, so a record either is counted here or arrives after this mark.
+    /// </summary>
+    public long HighWaterSequence { get; init; }
 }
 
 /// <summary>What <see cref="IMessageStore.EnqueueAsync"/> did. The store reports the fact; nothing here reaches the sender of the message.</summary>
