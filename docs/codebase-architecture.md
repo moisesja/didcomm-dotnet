@@ -1748,8 +1748,9 @@ changes.
    (FR-RR-04), so a 202, an identity-refused body or a body that answers nothing leaves nothing to
    wait for. A `TransportException` (status 200: over the cap, stalled or unreadable, FR-RR-07)
    propagates as it is.
-6. **WebSocket.** The answer is awaited; then the continuation yields (`ForceYielding`), so parsing
-   never runs on the dispatcher's receive path.
+6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
+   has already completed the request in step 5). It is awaited; then the continuation yields
+   (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
 7. **A problem report** answering the request (by `pthid`, or `thid`) → `MediationProtocolException`
    with `ProblemCode` sanitized (`MediatorProblemCode`: at most 128 characters of `a`–`z`, `0`–`9`,
    `.`, `_`, `-` that parse as a problem code, else `null`). The body is read on the caller's
