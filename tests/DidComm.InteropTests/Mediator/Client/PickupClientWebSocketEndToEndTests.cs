@@ -38,7 +38,7 @@ public sealed class PickupClientWebSocketEndToEndTests
 
         // Asking for a third: m2 is taken, nothing else is ready, so m1 and m2 are acknowledged;
         // the drain then finds nothing and the stream waits.
-        var third = stream.MoveNextAsync().AsTask();
+        var third = PickupE2E.MoveNext(stream);
         await observer.WaitForAsync(bob.Did, 4);
         observer.KindsFrom(bob.Did).Should().Equal("live-on", "delivery-request", "messages-received", "delivery-request");
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 0, "m1 and m2 were acknowledged");
@@ -87,7 +87,7 @@ public sealed class PickupClientWebSocketEndToEndTests
         var alice = await harness.NewAliceAsync();
         using var cts = new CancellationTokenSource();
         var stream = harness.Pickup.ReceiveLiveAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint, cts.Token).GetAsyncEnumerator();
-        var first = stream.MoveNextAsync().AsTask();
+        var first = PickupE2E.MoveNext(stream);
         await observer.WaitForAsync(bob.Did, 2);
 
         var note = alice.Note(recipient.Did, "later");
@@ -110,7 +110,7 @@ public sealed class PickupClientWebSocketEndToEndTests
         observer.KindsFrom(bob.Did).Should().StartWith(new[] { "live-on", "delivery-request", "live-on" },
             "the periodic cycle turns live delivery on again");
         // Asking for the next item takes it, and it is acknowledged.
-        var next = stream.MoveNextAsync().AsTask();
+        var next = PickupE2E.MoveNext(stream);
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 0, "the delayed message was acknowledged");
         await MediatorTestServer.WaitUntilAsync(() => observer.KindsFrom(bob.Did).Contains("messages-received"), "the observer recorded the acknowledgement (it runs off the reply path)");
         await PickupE2E.StopAsync(stream, next, cts);
@@ -132,7 +132,7 @@ public sealed class PickupClientWebSocketEndToEndTests
         failed.Error.Should().NotBeNull();
         failed.Unpacked.Should().BeNull();
         PickupE2E.ShouldBeAlicesNote(await PickupE2E.NextAsync(stream), alice, recipient, good);
-        var waiting = stream.MoveNextAsync().AsTask();
+        var waiting = PickupE2E.MoveNext(stream);
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 1, "the good one was acknowledged");
         await PickupE2E.StopAsync(stream, waiting, cts);
 

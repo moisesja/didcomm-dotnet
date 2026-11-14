@@ -159,11 +159,29 @@ internal static class PickupE2E
             "the send path stamps created_time from DidCommOptions.Clock on every return-route request (FR-RR-09)");
     }
 
-    /// <summary>Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in time.</summary>
-    public static Task<T> Within<T>(Task<T> task) => task.WaitAsync(MediatorTestServer.Timeout);
+    /// <summary>
+    /// Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in
+    /// time. A task that times out is still observed (<see cref="Observed"/>).
+    /// </summary>
+    public static Task<T> Within<T>(Task<T> task) => Observed(task).WaitAsync(MediatorTestServer.Timeout);
 
     /// <summary>Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in time.</summary>
-    public static Task<T> Within<T>(ValueTask<T> task) => task.AsTask().WaitAsync(MediatorTestServer.Timeout);
+    public static Task<T> Within<T>(ValueTask<T> task) => Within(task.AsTask());
+
+    /// <summary>Ask for the next live item without awaiting it yet; the move is <see cref="Observed"/>.</summary>
+    public static Task<bool> MoveNext(IAsyncEnumerator<PickupItem> stream) => Observed(stream.MoveNextAsync().AsTask());
+
+    /// <summary>
+    /// <paramref name="task"/>, with a failure it ends with observed even when the test stops before
+    /// awaiting it (a failed assertion, a timeout): the harness's disposal then fails a pending live
+    /// move with an <see cref="ObjectDisposedException"/>, which would otherwise reach
+    /// <see cref="TaskScheduler.UnobservedTaskException"/> and fail whichever later test watches it.
+    /// </summary>
+    private static Task<T> Observed<T>(Task<T> task)
+    {
+        _ = task.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task;
+    }
 
     /// <summary>The next live item (bounded in time).</summary>
     public static async Task<PickupItem> NextAsync(IAsyncEnumerator<PickupItem> stream)
