@@ -2300,6 +2300,31 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
     lookups end, every delivered message fails at once ("unpack capacity exhausted"), for every DID
     and tenant of the container. The fix for now is a resolver that honours its token;
     `UnpackTimeout` and `FetchAsync` document it.
+  - **Found by the final break-it pass on fix round 3 (ADV-4), deferred to #111 by owner decision
+    (that pass's findings are documented, not patched); none loses a message; reproductions skipped
+    naming #111 in `PickupClientLiveAdv4Tests` and `DeliveredUnpackAdv4Tests`:**
+    - **A new cycle takes a waiting push's turn back** (ADV4-1, Low). With `LivePollInterval`
+      shorter than a drain round can take (`UnpackTimeout`, plus the consumer's time on its items) —
+      a valid but non-default setting — a sender whose DID never resolves keeps one slow message in
+      every drain round, each new cycle clears the owed push turn and starts a round ahead of the
+      waiting pushes, and pushed messages are not taken while that lasts. They stay leased and come
+      back through the drain when the lease ends (60 s here), or, at a mediator that holds pushes for
+      the connection, when the stream ends. The defaults (1 min interval, 20 s budget) hold.
+    - **A blocked unpack keeps its whole delivery reachable** (ADV4-2, Low). The `Task.Run` work
+      item captures the `Delivery`, so while host code blocks its thread the delivery's bytes and the
+      messages opened so far stay in memory until that code returns (bounded by the slots; L-062).
+    - **Host code can start after its delivery ended** (ADV4-3, Low). A message a worker was starting
+      when the budget, the caller or the container's disposal ended the delivery can still have its
+      DID and secrets lookups started afterwards, with an already-cancelled token, possibly after the
+      container was disposed.
+    - **A clock whose readings keep going lower** (ADV4-4, Low; needs a host `TimeProvider` that
+      breaks its monotonic contract). Every pass then finds the next cycle due: the live stream
+      re-sends `live-delivery-change` in a tight loop and skips its back-offs. One step back costs one
+      early cycle, as designed.
+    - **Pool threads per blocking sender** (residual). A resolver that blocks its thread can now hold
+      up to four pool threads per delivery being opened besides the 16 slots (and the ADV3-2
+      overshoot); on a small machine that can starve the thread pool for the whole process, its
+      timers included.
 - **Blocking host code cannot be bounded.** Every unpack runs on the pool, so a resolver that blocks
   its thread no longer holds the caller, and the budget still decides the outcome; but the blocked
   thread and its work stay the host's until it returns (holding an abandoned-unpack slot meanwhile).

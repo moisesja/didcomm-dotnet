@@ -197,7 +197,9 @@ internal sealed class DeliveredMessageUnpacker
     /// <summary>
     /// One delivery being opened: up to <see cref="FetchConcurrency"/> workers take its messages in
     /// order; the first of "every message ended" and "the budget ended" closes it, under one lock,
-    /// and completes the result. After it is closed nothing is started and nothing is recorded.
+    /// and completes the result. After it is closed nothing is recorded, and no worker takes a new
+    /// message; but a message a worker was starting at that moment can still have its host unpack
+    /// started afterwards, with an already-cancelled token (ADV4-3, a known limit deferred to #111).
     /// </summary>
     private sealed class Delivery
     {
@@ -321,8 +323,10 @@ internal sealed class DeliveredMessageUnpacker
                 try
                 {
                     // Through the message's share (linked to the budget), not on the work itself:
-                    // when either ends this worker moves on, so an abandoned unpack never keeps the
-                    // delivery (its bytes and the messages opened so far) alive (L-062).
+                    // when either ends this worker moves on. Known limit (ADV4-2, deferred to #111):
+                    // the work item started with Task.Run captures this Delivery, so while host code
+                    // blocks its thread the whole delivery (its bytes and the messages opened so far)
+                    // stays reachable until that code returns (L-062; bounded by the slots).
                     var unpacked = await work.WaitAsync(slotToken).ConfigureAwait(false);
                     outcome = DeliveredOutcome.Success(unpacked.Result, unpacked.LayersOpened, DuplicateFilter.KeyOf(unpacked.Result, unpacked.InnermostPacked));
                 }

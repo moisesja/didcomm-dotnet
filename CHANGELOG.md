@@ -401,6 +401,25 @@ deferred to #111 are checked in skipped, their skip reason naming #111. Fix roun
     ignores cancellation can hold slots that way, and one slow sender is then enough to hold all 16.
     Until those lookups end, every delivered message fails at once ("unpack capacity exhausted"),
     for every DID and tenant of the container. Use a resolver that honours its cancellation token.
+  - **Found by the final break-it pass on fix round 3 (ADV-4), documented and deferred to #111 by
+    owner decision** (none loses a message; reproductions skipped naming #111):
+    - **A new cycle takes a waiting push's turn back (ADV4-1, Low).** When `LivePollInterval` is
+      shorter than a drain round can take (a valid but non-default setting), a sender whose DID never
+      resolves can keep one slow message in every round, and pushed messages are not taken while
+      that lasts; they come back through the drain when the mediator's lease ends. Keep the poll
+      interval above `UnpackTimeout` (the defaults are 1 minute and 20 seconds).
+    - **A blocked unpack keeps its delivery in memory (ADV4-2, Low).** While a sender's DID lookup
+      blocks its thread, the whole delivery (its other messages and the ones already opened) stays in
+      memory until the lookup returns, bounded by the abandoned-unpack slots.
+    - **Host code can start after its delivery ended (ADV4-3, Low).** A message being started just as
+      its delivery ends (budget, cancellation, the container's disposal) can still have its lookups
+      started afterwards, with an already-cancelled token.
+    - **A clock whose readings keep going lower (ADV4-4, Low).** With a host `TimeProvider` whose
+      readings decrease on every read (breaking its contract; one step back costs one early cycle),
+      the live stream re-sends `live-delivery-change` in a tight loop and skips its back-offs.
+    - **Pool threads per blocking sender (residual).** A resolver that blocks its thread can hold up
+      to four pool threads per delivery being opened, besides the 16 slots; on a small machine that
+      can slow the whole process.
 - **Residuals, documented (red team).**
   - **Junk that never opens fills the mailbox until discarded.** The clients never discard a
     failure on their own, so a message that never opens stays queued until the host discards it

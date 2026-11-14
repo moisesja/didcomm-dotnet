@@ -45,8 +45,11 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>Clock.</strong> The cycle, the back-off and the 10-second flush age are judged by the time
 /// elapsed since the reading they were set at. A reading lower than that one (a host clock that
 /// stepped back: an NTP correction, a restored snapshot) counts as due, at the cost of one early
-/// cycle, retry or flush, instead of postponing them by the step (ADV3-5, L-060; the version cache
-/// treats such an age the same way).
+/// cycle, retry or flush per step, instead of postponing them by the step (ADV3-5, L-060; the
+/// version cache treats such an age the same way). A known limit (ADV4-4, deferred to #111): a
+/// host <see cref="TimeProvider"/> whose readings keep going lower on every read (not one step
+/// back, which breaks its monotonic contract) makes every pass find the next cycle due, so the
+/// stream re-sends <c>live-delivery-change</c> in a tight loop and skips its back-offs.
 /// </para>
 /// <para>
 /// <strong>Items.</strong> Pushes are read from the mailbox (at most 10 messages per delivery). Each
@@ -236,7 +239,10 @@ internal sealed class LiveDeliveryStream
             // While a cycle drains, its rounds and the pushes take turns, a drain round first
             // (ADV3-1): a waiting push is taken only after a drain round, so a steady flow of pushes
             // that each take their whole budget to open cannot keep the drain from running, and a
-            // drain that keeps meeting slow messages cannot keep the pushes from their turn.
+            // drain that keeps meeting slow messages cannot, with the default settings, keep the
+            // pushes from their turn. Known limit (ADV4-1, deferred to #111): a new cycle clears the
+            // owed push turn, so with LivePollInterval shorter than a drain round a slow message in
+            // every round keeps the pushes waiting (they stay leased; nothing is lost).
             var drainDue = _draining && IsDue(_notBefore);
             if (drainDue && !_pushTurn)
             {

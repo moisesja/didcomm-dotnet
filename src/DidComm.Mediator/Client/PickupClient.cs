@@ -259,6 +259,16 @@ public sealed class PickupClient
     /// <item><description>The bound of 16 abandoned unpacks is checked when an unpack starts, not
     /// reserved, so deliveries opened at the same moment (several fetches or live streams) can
     /// together leave more than 16 running.</description></item>
+    /// <item><description>While a sender's DID lookup blocks its thread, the client keeps that whole
+    /// delivery in memory — the other messages in it and the ones already opened — until the lookup
+    /// returns (bounded by the abandoned-unpack slots). Each lookup runs on a thread-pool thread of
+    /// its own, so a resolver that blocks can hold up to four pool threads per delivery being opened
+    /// besides the 16 slots, and on a small machine that can slow the whole process, its timers
+    /// included.</description></item>
+    /// <item><description>When a delivery ends (its budget, your cancellation or the container's
+    /// disposal) just as a message is being started, that message's DID and secrets lookups can
+    /// still start afterwards, with an already-cancelled token, possibly after the container was
+    /// disposed.</description></item>
     /// </list>
     /// <para>
     /// <strong>Repeats.</strong> A message the clients already returned from this mailbox (this
@@ -533,9 +543,17 @@ public sealed class PickupClient
     /// <strong>Drain rounds and pushes take turns.</strong> Once a cycle is draining, its next drain
     /// round runs before the stream takes another push, and a waiting push gets its turn after that
     /// round. So a steady flow of pushes that are slow to open (from a sender whose DID resolves
-    /// slowly or never) cannot keep the drain from running, and a drain that keeps meeting slow
-    /// messages cannot keep the pushes from theirs. A push that waits stays leased to your
-    /// connection at the mediator: nothing is lost.
+    /// slowly or never) cannot keep the drain from running, and with the default settings a drain
+    /// that keeps meeting slow messages cannot keep the pushes from theirs. A push that waits stays
+    /// leased to your connection at the mediator: nothing is lost. A known limit (to be hardened in
+    /// <see href="https://github.com/moisesja/didcomm-dotnet/issues/111">#111</see>): when <see cref="MediatorClientOptions.LivePollInterval"/> is shorter than a
+    /// drain round can take (its <see cref="MediatorClientOptions.UnpackTimeout"/>, plus your time on
+    /// its items), a sender whose DID never resolves can keep one slow message in every round, each
+    /// new cycle then starts a drain round ahead of the waiting pushes, and pushed messages are not
+    /// taken while that lasts; they come back through the drain when the mediator's lease ends (60
+    /// seconds at this library's mediator), or, at a mediator that holds pushes for the connection,
+    /// when the stream ends. Keep the poll interval above the unpack budget (the defaults are 1
+    /// minute and 20 seconds).
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing</strong> is yielded again each time the mediator delivers
