@@ -14,8 +14,10 @@ namespace DidComm.Mediator;
 /// when the recipient answers with a 2xx status, and the message is then removed from the queue. A <c>ws</c> or <c>wss</c> endpoint is skipped, because a
 /// WebSocket write gives no receipt, so a dropped connection would lose the message silently;
 /// recipients that want messages pushed over a socket use pickup live mode, which is acknowledged.
-/// Any push that fails or is skipped leaves the message queued for pickup; it is pushed again when
-/// the recipient next receives a message.
+/// Any push that fails or is skipped leaves the message queued for pickup. Each message gets one
+/// direct attempt: one whose push was sent and failed is not pushed directly again, while one whose
+/// push was skipped (no endpoint here, one that is not <c>http</c> or <c>https</c>, busy or paused
+/// push workers) is pushed when the recipient next receives a message.
 /// </para>
 /// <para>
 /// A push sends only what the queue still holds for delivery: just before it is sent, the message

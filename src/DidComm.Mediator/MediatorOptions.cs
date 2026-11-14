@@ -57,10 +57,12 @@ namespace DidComm.Mediator;
 /// on gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
 /// <see cref="PushTimeout"/>), so a recipient that is slow to take a push holds up no one else's
 /// messages. A push takes what the queue holds when it runs: each recipient's messages go one at a
-/// time, oldest first, and a live session is pushed only those stored since it turned live
-/// delivery on (what was queued before is picked up). A message with a <c>delay_milli</c> hold is
-/// never pushed before it is due; once due it goes with the recipient's next push. A message whose
-/// push fails, or that arrives while the recipient's pushes are paused after one reached
+/// time, oldest first, and a live session is pushed only those that arrive after the status that
+/// answered its turning live delivery on (by the store's arrival order, whatever the clock does;
+/// what that status counted is picked up). A message with a <c>delay_milli</c> hold is never
+/// pushed before it is due; once due it goes with the recipient's next push (a direct one only
+/// while no later message of the recipient has had its direct attempt). A message whose live push
+/// fails, or that arrives while the recipient's pushes are paused after one reached
 /// <see cref="PushTimeout"/>, stays queued and is tried again when the recipient next receives a
 /// message, so a recipient in live mode should still ask for its queued messages (a
 /// <c>status-request</c> shows them) after a reconnect or a slow period.</description></item>
@@ -68,10 +70,10 @@ namespace DidComm.Mediator;
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
 /// <item><description>Direct push (<see cref="DirectPush"/>) sends each push as one request to
-/// exactly the directory's endpoint, never retried and never redirected. A message whose push fails
-/// stays queued and is pushed again only when its recipient next receives a message, so a
-/// recipient that relies on direct push must also pick up, or those messages can stay in its queue
-/// until they expire or reach the mailbox age limit.</description></item>
+/// exactly the directory's endpoint, never retried and never redirected, and makes one attempt per
+/// message. A message whose push fails stays queued for pickup and is not pushed directly again,
+/// so a recipient that relies on direct push must also pick up, or those messages can stay in its
+/// queue until they expire or reach the mailbox age limit.</description></item>
 /// <item><description>Forwards are outside replay protection. With direct push on, each replay of a
 /// captured forward is stored and pushed again, and since a delivered push frees its place in the
 /// queue, the recipient's quota does not limit how often: recipients should drop messages whose id
@@ -160,15 +162,17 @@ public sealed class MediatorOptions
     /// <summary>
     /// Whether the mediator also pushes each queued message straight to the recipient's own
     /// endpoint, found through a registered <see cref="IRecipientEndpointDirectory"/> (FR-PICK-09).
-    /// Default <c>false</c>. When a message is queued for a recipient, the push workers push, in the
-    /// background and after any live push, the recipient's other due messages (with a live session,
-    /// those queued before it turned live delivery on), oldest first, each as a single POST to
-    /// exactly the directory's endpoint, with no retry, no redirect followed and outside the HTTP
-    /// transport's circuit breaker (so one recipient's failing endpoint cannot stop the host's other
-    /// sends). An <c>http(s)</c> 2xx answer removes the message from the queue; anything else, a
-    /// redirect included, leaves it there for pickup and ends that run of pushes: it is tried again
-    /// when the recipient next receives a message, so a recipient that relies on push must also pick
-    /// up now and then. A push sends
+    /// Default <c>false</c>. When a message is queued for a recipient, or a session of it turns live
+    /// delivery on, the push workers push, in the background and after any live push, the
+    /// recipient's due messages that no direct push has attempted yet (with a live session, those
+    /// queued before it turned live delivery on), oldest first, each as a single POST to exactly the
+    /// directory's endpoint, with no retry, no redirect followed and outside the HTTP transport's
+    /// circuit breaker (so one recipient's failing endpoint cannot stop the host's other sends). Each
+    /// message gets one direct attempt. An <c>http(s)</c> 2xx answer removes the message from the
+    /// queue; anything else, a redirect included, leaves it there for pickup and ends that run of
+    /// pushes; it is not pushed directly again, holds up none of the recipient's later messages, and
+    /// a recipient that relies on push must also pick up now and then. A message that was not yet
+    /// due when a later one of its recipient was attempted waits for pickup too. A push sends
     /// only what the queue still holds for delivery when the push starts: it takes the message
     /// under a lease of its own first, so a message that has expired, aged out, been acknowledged,
     /// or is being fetched by the recipient is not pushed. A plain <c>http</c> endpoint also needs
@@ -188,7 +192,10 @@ public sealed class MediatorOptions
     /// grant, so a slow recipient holds one of them at a time, never all. A push abandoned at
     /// <see cref="PushTimeout"/> frees its worker but counts until its call ends: at most twice this
     /// many recipients' pushes are unfinished at once, and while that many are, a new message starts
-    /// no push and waits for pickup or its recipient's next message.
+    /// no push and waits for pickup or its recipient's next message. A host collaborator (session,
+    /// DID resolver, transport, endpoint directory or store) that never completes a cancelled call
+    /// keeps its push unfinished, so twice this many such calls stop every push until one of them
+    /// completes; pickup keeps working.
     /// </summary>
     public int PushConcurrency { get; set; } = 4;
 
@@ -198,8 +205,9 @@ public sealed class MediatorOptions
     /// at most 5 minutes. The abandoned call runs on until it ends, holding the message under its
     /// lease meanwhile (for a direct push at most this plus 30 seconds; for a live push as any live
     /// delivery), and its recipient gets no other push before it ends. A recipient whose push
-    /// reaches the deadline has its pushes paused for twice as long (its messages wait for pickup
-    /// meanwhile), so a recipient that stalls its own pushes cannot hold a push worker continuously.
+    /// reaches the deadline has its pushes paused for twice as long, measured on the monotonic clock
+    /// so a step of the wall clock does not change it (its messages wait for pickup meanwhile), so a
+    /// recipient that stalls its own pushes cannot hold a push worker continuously.
     /// </summary>
     public TimeSpan PushTimeout { get; set; } = TimeSpan.FromSeconds(30);
 

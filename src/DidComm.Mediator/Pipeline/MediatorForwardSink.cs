@@ -37,7 +37,8 @@ namespace DidComm.Mediator.Pipeline;
 /// that is queued and already due, and only when something could push it (direct push is on, or
 /// the recipient has a live session with live delivery on right now); the wake-up is O(1) and never
 /// blocks, it carries nothing of the message (the push takes what the store holds), and a message
-/// whose push fails stays queued, for pickup and for the grant's next wake-up.
+/// whose push fails stays queued for pickup (a failed live push is also tried again at the grant's
+/// next wake-up; a direct push makes one attempt per message).
 /// </para>
 /// <para>
 /// <strong>Dependencies (L-017).</strong> The queue, the push dispatcher, the counter and the
@@ -151,10 +152,12 @@ internal sealed class MediatorForwardSink : IForwardSink
         }
     }
 
-    // Best-effort and after the message is stored: a not-yet-due message waits in the queue and is
-    // picked up once due (never pushed early, live or direct); a message nothing could push (direct
-    // push off and no live session now) wakes nothing; a failure here changes nothing about the
-    // forward, which is already counted as Queued. Synchronous: it never awaits a session.
+    // Best-effort and after the message is stored: a not-yet-due message wakes nothing and is never
+    // pushed early, live or direct; once due it goes with the grant's next push (a direct one only
+    // while the grant's direct-push cursor has not passed it) or is picked up. A message nothing
+    // could push (direct push off and no live session now) wakes nothing; a failure here changes
+    // nothing about the forward, which is already counted as Queued. Synchronous: it never awaits a
+    // session.
     private void HandToPush(ForwardProcessingResult result, ProtocolContext context, string subject, PickupDeliveryResult delivery, string forwardId)
     {
         if (delivery.MessageId is null || delivery.GrantPeerDid is not { } grantPeerDid)
