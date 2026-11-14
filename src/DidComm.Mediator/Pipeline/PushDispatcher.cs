@@ -60,12 +60,13 @@ namespace DidComm.Mediator.Pipeline;
 /// per-grant entries below (pruning an idle grant keeps its cursor), at most
 /// <see cref="CoordinateMediationOptions.MaxGrants"/> of them; past that the least recently used is
 /// dropped, and its grant's remaining records get at most one more direct attempt each. A live push
-/// the session did not take (<c>NotSent</c>: no free push slot, downgraded or closing) is tried
-/// again at the grant's next wake-up: that is at most one live attempt per wake-up, a wake-up is a
-/// stored message or a session turning live delivery on, and nothing is written to the connection
-/// unless the session takes it — so it cannot multiply the traffic of what was forwarded. One too
-/// large for the session is passed over, for a period that doubles each time. Pickup always works.
-/// Delivery is at-least-once.
+/// the session did not take (<c>NotSent</c>: no free push slot, downgraded or closing) — or that
+/// faulted, or reached its deadline and was then given back — is tried again at the grant's next
+/// wake-up: that is at most one live attempt per wake-up (the operation ends there, and a deadline
+/// also pauses the grant), a wake-up is a stored message or a session turning live delivery on, and
+/// nothing is written to the connection unless the session takes it — so it cannot multiply the
+/// traffic of what was forwarded. One too large for the session is passed over, for a period that
+/// doubles each time. Pickup always works. Delivery is at-least-once.
 /// </para>
 /// <para>
 /// <strong>A push names what it took (D-5).</strong> Every send is preceded by a lease on exactly
