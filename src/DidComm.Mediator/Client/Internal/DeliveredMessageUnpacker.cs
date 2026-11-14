@@ -10,10 +10,13 @@ namespace DidComm.Mediator.Client.Internal;
 /// L-063 stop (owner decision 2-A): <strong>one budget</strong> (<see cref="Budget"/>, a
 /// <see cref="GuardedDeadline"/> on the injected <see cref="TimeProvider"/>, never a
 /// <c>CancelAfter</c> token handed to host code) for all of a delivery's messages, every re-wrap
-/// layer included; at most <see cref="FetchConcurrency"/> opened at a time; and at most
+/// layer included, of which each message gets an equal share (<see cref="ShareOf"/>: the budget
+/// divided by the rounds the workers need), so a message slow to open cannot keep the messages
+/// behind it from their turn; at most <see cref="FetchConcurrency"/> opened at a time; and at most
 /// <see cref="MaxAbandoned"/> abandoned unpacks of this unpacker (one per channel, so one per
-/// container) still running, beyond which a message fails at once without starting. A message the
-/// budget runs out on — still being opened, or still waiting for its turn — is a failure
+/// container) still running, beyond which a message fails at once without starting. A message its
+/// share or the budget runs out on — still being opened, or (only as a backstop) still waiting for
+/// its turn — is a failure
 /// (<see cref="TimeoutException"/> naming the delivery's request id when there is one), so a
 /// delivery ends within its budget, well inside the mediator's lease (ADV2-1). An unpack that does
 /// not honour cancellation keeps its abandoned slot until it ends (L-059; ADV2-2 is the documented
@@ -119,6 +122,26 @@ internal sealed class DeliveredMessageUnpacker
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
             $"The delivered message{ForRequest(requestId)} was not unpacked: the delivery's budget of {Budget} (MediatorClientOptions.UnpackTimeout) ran out {(started ? "while it was being opened" : "before its turn came")}. It was not acknowledged.")));
 
+    private static DeliveredOutcome OutOfShare(string? requestId, TimeSpan share)
+        => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
+            $"The delivered message{ForRequest(requestId)} was not unpacked: it used up its share of {share} of the delivery's budget (MediatorClientOptions.UnpackTimeout) while it was being opened. It was not acknowledged.")));
+
+    /// <summary>
+    /// Each message's share of a delivery's budget: the budget divided by the number of rounds the
+    /// workers need for the delivery (<c>ceil(count / workers)</c>), so a message that is slow to open
+    /// — its sender's DID resolves slowly — gives up its worker after its share and cannot keep the
+    /// messages behind it from their turn (same-delivery starvation). A delivery of up to
+    /// <see cref="FetchConcurrency"/> messages gives each the whole budget.
+    /// </summary>
+    /// <param name="budget">The delivery's budget.</param>
+    /// <param name="count">The number of messages in the delivery (at least 1).</param>
+    internal static TimeSpan ShareOf(TimeSpan budget, int count)
+    {
+        var workers = Math.Min(FetchConcurrency, Math.Max(1, count));
+        var rounds = (Math.Max(1, count) + workers - 1) / workers;
+        return TimeSpan.FromTicks(Math.Max(1, budget.Ticks / rounds));
+    }
+
     private static string ForRequest(string? requestId)
         => requestId is null ? string.Empty : string.Create(CultureInfo.InvariantCulture, $" of request '{requestId}'");
 
@@ -140,6 +163,7 @@ internal sealed class DeliveredMessageUnpacker
         private readonly bool[] _started;
         private readonly TaskCompletionSource<IReadOnlyList<DeliveredOutcome>> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly object _gate = new();
+        private readonly TimeSpan _share;
         private int _next;
         private int _done;
         private bool _closed;
@@ -153,6 +177,7 @@ internal sealed class DeliveredMessageUnpacker
             _outcomes = new DeliveredOutcome[payloads.Count];
             _running = new Task?[payloads.Count];
             _started = new bool[payloads.Count];
+            _share = ShareOf(owner.Budget, payloads.Count);
             _budget = new GuardedDeadline(owner.Time, owner.Budget, ct);
             // Read once: the token stays readable after the deadline is disposed, its source does not.
             _budgetToken = _budget.Token;
@@ -213,17 +238,31 @@ internal sealed class DeliveredMessageUnpacker
                         return; // recorded as "not started" by OnBudgetEnded
                     _started[index] = true;
                 }
+                // This message's share of the budget (ShareOf): its own guarded deadline, linked to the
+                // budget, so a slow message gives up its worker and the messages behind it get their turn.
+                var slot = new GuardedDeadline(_owner.Time, _share, _budgetToken);
+                var slotToken = slot.Token;
                 Task<DeliveredUnpack> work;
                 try
                 {
-                    work = _owner.Unpack(packed, _budgetToken);
+                    work = _owner.Unpack(packed, slotToken);
                 }
                 catch (OperationCanceledException) when (_budgetToken.IsCancellationRequested)
                 {
+                    ReleaseSlot(slot);
                     return; // the budget ended (or the caller cancelled): OnBudgetEnded records it
+                }
+                catch (OperationCanceledException) when (slotToken.IsCancellationRequested)
+                {
+                    ReleaseSlot(slot);
+                    if (!Complete(index, OutOfShare(_requestId, _share)))
+                        return;
+                    await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+                    continue;
                 }
                 catch (Exception ex)
                 {
+                    slot.Dispose();
                     Complete(index, DeliveredOutcome.Failure(ex));
                     continue;
                 }
@@ -238,6 +277,7 @@ internal sealed class DeliveredMessageUnpacker
                 }
                 if (lateForIt)
                 {
+                    ReleaseSlot(slot);
                     _owner.Abandon(work);
                     return;
                 }
@@ -245,24 +285,53 @@ internal sealed class DeliveredMessageUnpacker
                 DeliveredOutcome outcome;
                 try
                 {
-                    // Through the budget, not on the work itself: when the budget ends this worker
-                    // ends too, so an abandoned unpack never keeps the delivery (its bytes and the
-                    // messages opened so far) alive (L-062).
-                    var unpacked = await work.WaitAsync(_budgetToken).ConfigureAwait(false);
+                    // Through the message's share (linked to the budget), not on the work itself:
+                    // when either ends this worker moves on, so an abandoned unpack never keeps the
+                    // delivery (its bytes and the messages opened so far) alive (L-062).
+                    var unpacked = await work.WaitAsync(slotToken).ConfigureAwait(false);
                     outcome = DeliveredOutcome.Success(unpacked.Result, unpacked.LayersOpened, DuplicateFilter.KeyOf(unpacked.Result, unpacked.InnermostPacked));
                 }
                 catch (OperationCanceledException) when (_budgetToken.IsCancellationRequested)
                 {
+                    ReleaseSlot(slot);
                     return; // the budget ended (or the caller cancelled): OnBudgetEnded records it
+                }
+                catch (OperationCanceledException) when (slotToken.IsCancellationRequested)
+                {
+                    // The message's share ran out before the budget. Let its work go (it keeps an
+                    // abandoned slot until it ends) unless the delivery was closed meanwhile, in which
+                    // case OnBudgetEnded recorded it and let the work go itself.
+                    ReleaseSlot(slot);
+                    bool closed;
+                    lock (_gate)
+                    {
+                        closed = _closed;
+                        if (!closed)
+                            _running[index] = null;
+                    }
+                    if (closed)
+                        return;
+                    _owner.Abandon(work);
+                    if (!Complete(index, OutOfShare(_requestId, _share)))
+                        return;
+                    // Never start the next message on the share timer's own thread.
+                    await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+                    continue;
                 }
                 catch (Exception ex)
                 {
                     outcome = DeliveredOutcome.Failure(ex);
                 }
+                slot.Dispose();
                 if (!Complete(index, outcome))
                     return;
             }
         }
+
+        // A share deadline that fired (or whose budget fired) may be running its own callbacks on
+        // this very thread: it is disposed later, on the pool, never inside its own Cancel().
+        private static void ReleaseSlot(GuardedDeadline slot)
+            => ThreadPool.UnsafeQueueUserWorkItem(static deadline => deadline.Dispose(), slot, preferLocal: false);
 
         // Record one outcome; the last one closes the delivery. False when it was already closed (the
         // outcome is then discarded: OnBudgetEnded recorded this message and let its work go).

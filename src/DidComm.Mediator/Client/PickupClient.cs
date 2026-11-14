@@ -199,14 +199,15 @@ public sealed class PickupClient
     /// </para>
     /// <para>
     /// <strong>Time to open the messages.</strong> All the messages of one fetch share one budget,
-    /// <see cref="MediatorClientOptions.UnpackTimeout"/> (20 seconds by default), and are opened four
-    /// at a time. Those still being opened, or still waiting their turn, when it runs out are
-    /// returned as failed items with a <see cref="TimeoutException"/> that names the request (never a
-    /// message), and are not acknowledged; the others are returned and acknowledged as usual. So a
-    /// fetch ends within the budget even when some senders' DIDs resolve slowly or never, and while
-    /// the mediator still sets those messages aside the next fetch reaches what is behind them. A
-    /// message waiting its turn can fail because of slow ones in front of it; with a
-    /// <paramref name="limit"/> of 4 or less every message of a fetch is opened at once.
+    /// <see cref="MediatorClientOptions.UnpackTimeout"/> (20 seconds by default), opened four at a
+    /// time, each with an equal share of it (the budget divided by the rounds of four the fetch
+    /// needs). One that is not open when its share is up is returned as a failed item with a
+    /// <see cref="TimeoutException"/> that names the request (never a message) and is not
+    /// acknowledged, and the next one takes its place; the others are returned and acknowledged as
+    /// usual. So a fetch ends within the budget even when some senders' DIDs resolve slowly or
+    /// never, slow messages cannot keep the ones behind them in the same fetch from being opened,
+    /// and while the mediator still sets the slow ones aside the next fetch reaches what is queued
+    /// behind them. A smaller <paramref name="limit"/> gives each message a larger share.
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing.</strong> Discard it with <see cref="AckAsync"/> once you
@@ -484,7 +485,8 @@ public sealed class PickupClient
     /// <para>
     /// <strong>Opening.</strong> Each delivery the stream takes — the answer to a drain round, or a
     /// push — is opened before any of its items is yielded, all of its messages within one
-    /// <see cref="MediatorClientOptions.UnpackTimeout"/> and four at a time, on your own
+    /// <see cref="MediatorClientOptions.UnpackTimeout"/>, four at a time and each with an equal
+    /// share of it, on your own
     /// <c>MoveNextAsync</c>. The time you spend on an item never counts against it. Messages it runs
     /// out on are yielded as failed items (<see cref="TimeoutException"/>) and not acknowledged; the
     /// rest are yielded and acknowledged as usual.

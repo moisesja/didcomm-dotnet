@@ -77,10 +77,14 @@ public sealed class MediatorClientOptions
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The messages of a delivery are opened four at a time. Those still being opened, or still
-    /// waiting their turn, when the time is up are reported as failed items with a
-    /// <see cref="TimeoutException"/> (naming the request, never a message) and are not
-    /// acknowledged; the rest of the delivery is returned and acknowledged as usual. A live stream
+    /// The messages of a delivery are opened four at a time, and each gets an equal share of the
+    /// time: this value divided by the number of rounds of four the delivery needs (the whole of it
+    /// for up to four messages, half for five to eight, a third for nine to twelve). A message that
+    /// is not open when its share is up — its sender's DID resolves slowly, or never — is reported
+    /// as a failed item with a <see cref="TimeoutException"/> (naming the request, never a message)
+    /// and is not acknowledged, and the next message takes its place; so slow messages cannot keep
+    /// the ones behind them from being opened. The rest of the delivery is returned and acknowledged
+    /// as usual. A live stream
     /// opens a delivery before it yields any of its items, so the time you spend on an item never
     /// counts against this.
     /// </para>

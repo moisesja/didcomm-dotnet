@@ -68,9 +68,11 @@ public sealed class DeliveredUnpackAdv2Tests
     }
 
     /// <summary>
-    /// ADV2-1 companion, updated by fix round 2 to the new arithmetic (owner decision 2-A: one
-    /// budget per delivery). Ten stalling messages, four opened at a time, all fail within one
-    /// budget of clock time: the four being opened and the six still waiting their turn.
+    /// ADV2-1 companion, updated to the decided arithmetic (owner decision 2-A: one budget per
+    /// delivery; each message an equal share of it, so slow messages cannot starve the ones behind
+    /// them). Ten stalling messages need three rounds of four: each round ends at its share (a third
+    /// of the budget) and the delivery ends with the budget, every message failed while it was being
+    /// opened and none left without its turn.
     /// </summary>
     [Fact]
     public async Task ADV2_1_ten_stalling_messages_all_fail_within_one_delivery_budget()
@@ -78,27 +80,57 @@ public sealed class DeliveredUnpackAdv2Tests
         var time = new ManualTimeProvider();
         var unpacker = new DeliveredMessageUnpacker(StallUntilCancelled, UnpackTimeout, time);
         var payloads = Enumerable.Range(0, 10).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes("stall-" + i)).ToArray();
+        var share = DeliveredMessageUnpacker.ShareOf(UnpackTimeout, payloads.Length);
 
         var batch = unpacker.UnpackAllAsync(payloads, default);
-        var budgets = 0;
-        while (!batch.IsCompleted)
+        // Three rounds of four (four, four, two): each round's shares are scheduled beside the
+        // budget's timer, then the clock passes them; the third ends exactly with the budget.
+        foreach (var inRound in new[] { 4, 4, 2 })
         {
-            await time.WaitForScheduledTimersAsync(1, RealTime);
-            time.Advance(UnpackTimeout);
-            budgets++;
-            await Task.Yield();
-            if (budgets > 10)
-                break;
+            batch.IsCompleted.Should().BeFalse("the delivery is not decided before its last round");
+            await time.WaitForScheduledTimersAsync(1 + inRound, RealTime);
+            time.Advance(share);
         }
         var outcomes = await batch.WaitAsync(RealTime);
 
-        budgets.Should().Be(1);
         outcomes.Should().HaveCount(10).And.OnlyContain(o => !o.Succeeded && o.Error is TimeoutException);
-        outcomes.Take(DeliveredMessageUnpacker.FetchConcurrency).Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"));
-        outcomes.Skip(DeliveredMessageUnpacker.FetchConcurrency).Should().OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
-        // The budget lets the four unpacks go at once; each gives its slot back when it has noticed
-        // its cancellation (bounded wait: a missing give-back fails the test instead of parking it).
+        outcomes.Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"), "every message got its turn");
         SpinWait.SpinUntil(() => unpacker.Abandoned == 0, RealTime).Should().BeTrue("an unpack that honours cancellation gives its slot back");
+    }
+
+    /// <summary>
+    /// ADV2-1 follow-on (found by fix round 2's engineer: same-delivery starvation). Four senders
+    /// whose DIDs never resolve are first in a delivery of ten; the six honest messages behind them
+    /// are opened once the four have used up their shares, inside the budget — they are not starved
+    /// at every redelivery while the four stay at the front of the queue.
+    /// </summary>
+    [Fact]
+    public async Task ADV2_1_four_stalling_senders_first_in_a_delivery_do_not_starve_the_six_behind_them()
+    {
+        var time = new ManualTimeProvider();
+        var unpacker = new DeliveredMessageUnpacker(
+            (text, ct) => text.StartsWith("stall-", StringComparison.Ordinal) ? StallUntilCancelled(text, ct) : Task.FromResult(Opened(text)),
+            UnpackTimeout,
+            time);
+        var payloads = Enumerable.Range(0, 4).Select(i => "stall-" + i).Concat(Enumerable.Range(0, 6).Select(i => "ok-" + i))
+            .Select(t => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(t)).ToArray();
+        var share = DeliveredMessageUnpacker.ShareOf(UnpackTimeout, payloads.Length);
+
+        var batch = unpacker.UnpackAllAsync(payloads, "request-7", default);
+        await time.WaitForScheduledTimersAsync(1 + DeliveredMessageUnpacker.FetchConcurrency, RealTime); // the budget and the four stalling shares
+        time.Advance(share);
+        var outcomes = await batch.WaitAsync(RealTime);
+
+        outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("its share"));
+        outcomes.Skip(4).Should().OnlyContain(o => o.Succeeded, "the honest messages behind the stalling ones are opened in the same delivery");
+        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, RealTime).Should().BeTrue();
+    }
+
+    private static DeliveredUnpack Opened(string text)
+    {
+        var message = new DidComm.Messages.MessageBuilder().WithId(text).WithType("https://example.org/notes/1.0/note").WithBody(new System.Text.Json.Nodes.JsonObject()).Build();
+        var result = new UnpackResult(message, new[] { DidComm.Jose.EnvelopeKind.Plaintext }, false, false, false, false, null, null, null, null, null, null, Array.Empty<string>(), null);
+        return new DeliveredUnpack(result, text, 0);
     }
 
     /// <summary>
