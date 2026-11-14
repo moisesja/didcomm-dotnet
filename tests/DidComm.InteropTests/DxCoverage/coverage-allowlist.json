@@ -178,26 +178,6 @@
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Core!DidComm.Facade.DidCommClient::SendPackedAsync(System.ReadOnlyMemory`1<System.Byte>,System.Uri,System.String,DidComm.Facade.SendPackedOptions,System.Threading.CancellationToken)",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Facade.SendPackedOptions",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Facade.SendPackedOptions::.ctor()",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Facade.SendPackedOptions::prop:SingleAttempt",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Core!DidComm.Transports.TransportRequest::prop:SingleAttempt",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
       "member": "DidComm.Extensions.DependencyInjection!DidComm.Extensions.DependencyInjection.DidCommBuilder::AddRoutingMediator(DidComm.Protocols.Routing.ForwardProcessorOptions)",
       "reason": "Mediator routing core (#90): the sample that demonstrates it is the handler-based rewrite of sample 04 (#97); delete this entry when #97 lands."
     },
@@ -1518,14 +1498,6 @@
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.IRecipientEndpointDirectory",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Mediator!DidComm.Mediator.IRecipientEndpointDirectory::Find(System.String)",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
       "member": "DidComm.Mediator!DidComm.Mediator.MediatorBuilderExtensions",
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
@@ -1547,10 +1519,6 @@
     },
     {
       "member": "DidComm.Mediator!DidComm.Mediator.MediatorOptions::prop:CoordinateMediation",
-      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
-    },
-    {
-      "member": "DidComm.Mediator!DidComm.Mediator.MediatorOptions::prop:DirectPush",
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
