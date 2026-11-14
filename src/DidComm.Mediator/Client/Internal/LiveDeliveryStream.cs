@@ -24,23 +24,29 @@ namespace DidComm.Mediator.Client.Internal;
 /// mediator's arrival mark) or drained, never neither. The cycle runs at the start, every
 /// <see cref="MediatorClientOptions.LivePollInterval"/> on the monotonic clock (which also picks up
 /// delayed messages, never pushed when they fall due, and recovers a dropped connection), and after
-/// a failed step with back-off from 1 s doubling to 30 s. Five failures in a row end the stream with
-/// the last exception; a <see cref="MediationProtocolException"/> (for example live mode not
-/// supported) ends it at once.
+/// a failed step with back-off from 1 s doubling to 30 s. The mediator has no scheduler for due
+/// messages, now or later (owner decision D2 on #88, 2026-11-14), so this polling is the permanent
+/// design, not a stopgap. Only a failure a retry can fix is retried (<see cref="Retryable"/>); five
+/// in a row end the stream with the last exception, and any other failure (a
+/// <see cref="MediationProtocolException"/> such as live mode not supported, a pack-stage error such
+/// as <see cref="SecretNotFoundException"/>) ends it at once.
 /// </para>
 /// <para>
 /// <strong>Items.</strong> Pushes are read from the mailbox (at most 10 messages per delivery) and
 /// unpacked one at a time on the consumer's own <c>MoveNextAsync</c>, never on a receive loop. A
 /// message this stream already holds (buffered, or taken and not yet acknowledged) is skipped; one
 /// the duplicate filter remembers is acknowledged and not yielded; a failure is yielded, never
-/// acknowledged, and reported again when it comes back.
+/// acknowledged, and reported again when it comes back. A drain answered with a delivery in which
+/// no message has a usable id ends the stream (nothing in it could be acknowledged, so the drain
+/// would ask again for ever); such a push is ignored.
 /// </para>
 /// <para>
 /// <strong>Acknowledgement (R-2).</strong> A yielded message is taken — added to the duplicate filter
 /// and queued for acknowledgement — when the consumer asks for the next item; taken messages are
-/// acknowledged in <c>messages-received</c> batches of at most 100 when 10 are waiting, when nothing
-/// is ready, or when the oldest has waited 10 s. When the enumeration ends for any reason the last
-/// yielded message is not taken; what was taken is acknowledged, live mode is turned off, both
+/// acknowledged when 10 are waiting, when nothing is ready, or when the oldest has waited 10 s, in
+/// <c>messages-received</c> messages of at most <see cref="MaxAckIds"/> ids each (several when more
+/// are waiting, as after an acknowledgement outage). When the enumeration ends for any reason the
+/// last yielded message is not taken; what was taken is acknowledged, live mode is turned off, both
 /// within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever the caller's token, and
 /// the mailbox is closed. Buffered or drained messages never yielded are never acknowledged.
 /// </para>
@@ -64,7 +70,15 @@ internal sealed class LiveDeliveryStream
     /// <summary>Taken messages are acknowledged once this many are waiting.</summary>
     internal const int FlushAt = 10;
 
-    /// <summary>The most ids of one <c>messages-received</c>, and of taken messages waiting.</summary>
+    /// <summary>
+    /// The most ids of one <c>messages-received</c>. A mediator may lower the ids it accepts per
+    /// message to its delivery batch size (this library's: <c>MessagePickupOptions.MaxAckIds</c>, at
+    /// least <c>MaxDeliveryBatch</c>, 10 by default) and refuses a longer message as malformed, which
+    /// would leave a stream recovering from an acknowledgement outage unable to acknowledge anything.
+    /// </summary>
+    internal const int MaxAckIds = 10;
+
+    /// <summary>The most taken messages waiting for an acknowledgement.</summary>
     internal const int MaxTaken = 100;
 
     /// <summary>Consecutive failed steps that end the stream.</summary>
@@ -99,6 +113,7 @@ internal sealed class LiveDeliveryStream
     private int _drainRounds;
     private int _failures;
     private bool _liveRequested;
+    private bool _answered;
     private bool _warnedNotLive;
 
     private LiveDeliveryStream(IMediatorExchange exchange, PickupLog log, MediatorRoute route, LiveRegistration registration, string mediatorDid, string localDid)
@@ -177,7 +192,12 @@ internal sealed class LiveDeliveryStream
         {
             ct.ThrowIfCancellationRequested();
             if (FlushDue())
+            {
+                // One messages-received of at most MaxAckIds ids; looked at again, so the rest of a
+                // longer backlog follows in further messages.
                 await FlushAsync(ct).ConfigureAwait(false);
+                continue;
+            }
             if (Now >= _nextCycleAt)
             {
                 await CycleAsync(ct).ConfigureAwait(false);
@@ -215,27 +235,32 @@ internal sealed class LiveDeliveryStream
             || _time.GetElapsedTime(_taken[0].At) >= FlushAge;
     }
 
+    // Wait for a push, the next cycle, or the caller's cancellation. One awaited operation, so no
+    // task is left behind for nobody to observe: two tasks raced with WhenAny leave the loser
+    // running, and a mailbox the channel's disposal ends with an error after the race was decided
+    // would fault it unobserved. The read is woken by a timer of our own instead (OwnDeadline: its
+    // callback cannot carry an exception onto a timer thread), linked to the caller's token.
+    // true: something to do (a push, or the cycle is due); false: the mailbox was closed without an
+    // error, and the stream ends; an error it was closed with (the channel's disposal) is thrown.
     private async Task<bool> WaitAsync(CancellationToken ct)
     {
         var now = Now;
-        var remaining = _nextCycleAt > now ? _time.GetElapsedTime(now, _nextCycleAt) : TimeSpan.Zero;
-        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var read = _registration.Pushes.WaitToReadAsync(stop.Token).AsTask();
-        var delay = Task.Delay(remaining, _time, stop.Token);
+        if (now >= _nextCycleAt)
+            return true;
+        using var wake = OwnDeadline.Start(_time, _time.GetElapsedTime(now, _nextCycleAt), ct);
+        // Read again once the timer exists: a clock that passed the cycle while the timer was being
+        // set (a manual clock moved in between) is seen here, not waited out for a whole interval.
+        if (Now >= _nextCycleAt)
+            return true;
         try
         {
-            await Task.WhenAny(read, delay).ConfigureAwait(false);
+            return await _registration.Pushes.WaitToReadAsync(wake.Token).ConfigureAwait(false);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            // Only our own waits are registered on this source.
-            stop.Cancel();
+            ct.ThrowIfCancellationRequested();
+            return true; // the timer: the cycle is due
         }
-        ct.ThrowIfCancellationRequested();
-        if (read.IsFaulted)
-            await read.ConfigureAwait(false); // the mailbox ended with an error (the channel was disposed)
-        // false: the mailbox was closed without an error, and the stream ends.
-        return !read.IsCompletedSuccessfully || read.Result;
     }
 
     // ---- the cycle --------------------------------------------------------------------------
@@ -256,6 +281,7 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
+        _answered = true;
         var status = DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
         if (status.LiveDelivery == false && !_warnedNotLive)
         {
@@ -280,6 +306,7 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
+        _answered = true;
 
         var message = DeliveryReader.Open(answer, request.Id, spec);
         if (DeliveryReader.IsStatus(message))
@@ -296,6 +323,9 @@ internal sealed class LiveDeliveryStream
             DrainDone();
             return;
         }
+        // Nothing in it can be acknowledged, so the next round would get it again: not retried.
+        if (contents.Entries.Count == 0)
+            throw DeliveryReader.NoUsableIds(request.Id, spec);
         Load(contents, request.Id);
         if (++_drainRounds >= MaxDrainRounds)
             DrainDone();
@@ -331,11 +361,43 @@ internal sealed class LiveDeliveryStream
         return delay < MaxBackoff ? delay : MaxBackoff;
     }
 
-    // Whether a failed step is retried: not a protocol error from the mediator (thrown at once),
-    // not the channel's disposal, not the caller's cancellation.
-    private static bool Retryable(Exception error, CancellationToken ct)
-        => error is not (MediationProtocolException or ObjectDisposedException)
-           && !(error is OperationCanceledException && ct.IsCancellationRequested);
+    /// <summary>
+    /// Whether a failed step is retried after a back-off: only a failure a retry can fix (Q2-2).
+    /// Everything else ends the stream at once, as it ends a fetch: a problem report or a malformed
+    /// answer, a pack-stage refusal such as <see cref="SecretNotFoundException"/>, the container's
+    /// disposal, the caller's cancellation.
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item><see cref="TimeoutException"/>: no answer in time; the next attempt may get one.</item>
+    /// <item><see cref="TransportException"/>: the connection failed; the next attempt reconnects.</item>
+    /// <item>
+    /// <see cref="InvalidOperationException"/>, once the mediator has answered this stream. The
+    /// channel refuses a request with it when <see cref="MediatorClientOptions.MaxPendingRequests"/>
+    /// of the container's requests are already waiting: transient, the others end within
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. No type tells that refusal from the send
+    /// path's own (no key curve in common with the mediator, a mediator reached through routing, no
+    /// transport router), which are configuration no retry fixes; those fail the stream's very first
+    /// request, before any answer, and are thrown then. <see cref="ObjectDisposedException"/> is an
+    /// <see cref="InvalidOperationException"/> too and is never retried: the container is gone.
+    /// </item>
+    /// <item>
+    /// <see cref="OperationCanceledException"/> the caller did not cause: a transport giving up on
+    /// a wait of its own, a timeout by another name. The caller's cancellation is never retried.
+    /// </item>
+    /// </list>
+    /// </remarks>
+    /// <param name="error">The step's exception.</param>
+    /// <param name="ct">The caller's token.</param>
+    private bool Retryable(Exception error, CancellationToken ct)
+        => error switch
+        {
+            TimeoutException or TransportException => true,
+            ObjectDisposedException => false,
+            InvalidOperationException => _answered,
+            OperationCanceledException => !ct.IsCancellationRequested,
+            _ => false,
+        };
 
     // ---- items ------------------------------------------------------------------------------
 
@@ -449,6 +511,7 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
+        _answered = true;
         Acknowledged(ids.Length);
     }
 
@@ -504,9 +567,10 @@ internal sealed class LiveDeliveryStream
         }
     }
 
+    // The oldest taken ids, at most MaxAckIds: one messages-received.
     private string[] TakenBatch()
     {
-        var count = Math.Min(_taken.Count, MaxTaken);
+        var count = Math.Min(_taken.Count, MaxAckIds);
         var ids = new string[count];
         for (var i = 0; i < count; i++)
             ids[i] = _taken[i].Id;
