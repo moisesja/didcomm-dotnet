@@ -18,7 +18,7 @@ namespace DidComm.Mediator.Pickup;
 /// <item><description><strong>A lease is given back only by its taker.</strong> <see cref="ReleaseAsync"/> names the lease it ends (<see cref="MessageLease.Id"/>) and leaves a record alone when it carries another lease by now — the first one ran out and somebody else took the record — so a late clean-up can never make a message that was just delivered deliverable again.</description></item>
 /// <item><description><strong>A record that was passed over stays where it is.</strong> <see cref="PassOverAsync"/> marks a record the taker could not deliver for now: it stays stored and counted, in its position, and <see cref="LeaseAsync"/> does not hand it out again before the instant given — whatever happens to leases, sessions or connections in the meantime. The mark and the number of times it was set (<see cref="QueuedMessage.PassOvers"/>) belong to the record and last as long as it does; they are what lets a recipient's later requests get past such records instead of meeting the same ones first every time.</description></item>
 /// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due. A record that is expired at the instant of the call does not: expired records never keep a new message out.</description></item>
-/// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, not of <see cref="QueuedMessage.ReceivedAt"/>). <see cref="LeaseByIdAsync"/> is the same select-and-mark for one record named by id, under the same rules: it never takes a record <see cref="LeaseAsync"/> would not hand out at that instant, and the two never hand out the same record at once.</description></item>
+/// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, not of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
 /// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>.</description></item>
 /// <item><description><strong>Expiry is the only clock rule a store applies.</strong> <see cref="QueuedMessage.ExpiresAt"/> already carries both the message's own expiry and the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>): the queue sets it to the earlier of the two when it stores the record. An expired record is never handed out, never reported and never counts against a bound, whatever its state (waiting, leased or passed over), and may be removed at any time. A store needs nothing beyond <c>ExpiresAt</c> to enforce the age limit; the limit in force when a record was stored stays fixed on it.</description></item>
 /// <item><description><strong>No throw after a partial change.</strong> A method that changes several records either throws before anything changed, or its return value is the truth.</description></item>
@@ -78,24 +78,6 @@ public interface IMessageStore
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The leased records in arrival order; empty when nothing is deliverable.</returns>
     ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct);
-
-    /// <summary>
-    /// Take one record, named by id, under <paramref name="lease"/>, in one atomic step: when the
-    /// grant holds it and, at <paramref name="now"/>, it is not expired, is due, is not under a live
-    /// lease and is not passed over for now (<see cref="PassOverAsync"/>), mark it with the lease and
-    /// return it; otherwise change nothing and return <c>null</c>. The same rules as
-    /// <see cref="LeaseAsync"/>, for a caller that must send exactly the record it was told about.
-    /// (The mediator's own pushes take the next record with <see cref="LeaseAsync"/>.) An expired
-    /// record found here may be removed, as by any time-dependent operation. Never throws after a
-    /// partial change.
-    /// </summary>
-    /// <param name="grantPeerDid">The grant the record is held under.</param>
-    /// <param name="messageId">The record's id.</param>
-    /// <param name="lease">The lease to put on the record.</param>
-    /// <param name="now">The instant to judge expiry, the not-before time, an existing lease and a pass-over mark by.</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>The record, now leased; or <c>null</c> when the grant does not hold it or it may not be handed out at <paramref name="now"/>.</returns>
-    ValueTask<QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, MessageLease lease, DateTimeOffset now, CancellationToken ct);
 
     /// <summary>
     /// Remove the records of <paramref name="grantPeerDid"/> with these ids, whatever their state

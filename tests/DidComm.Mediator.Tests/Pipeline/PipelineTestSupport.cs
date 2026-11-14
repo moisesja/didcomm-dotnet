@@ -308,14 +308,8 @@ internal sealed class ScriptedMessageStore : IMessageStore
     /// <summary>Replaces the acknowledgement (the removal after a direct push); the default acknowledges in the inner store.</summary>
     public Func<string, IReadOnlyList<string>, CancellationToken, ValueTask<int>>? OnAcknowledge { get; set; }
 
-    /// <summary>Replaces the take-by-id (the direct push's lease); the default takes in the inner store.</summary>
-    public Func<string, string, MessageLease, DateTimeOffset, CancellationToken, ValueTask<QueuedMessage?>>? OnLeaseById { get; set; }
-
     /// <summary>Replaces the give-back by lease id; the default gives back in the inner store.</summary>
     public Func<string, IReadOnlyList<string>, string, CancellationToken, ValueTask<int>>? OnRelease { get; set; }
-
-    public ValueTask<QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, MessageLease lease, DateTimeOffset now, CancellationToken ct)
-        => OnLeaseById is { } hook ? hook(grantPeerDid, messageId, lease, now, ct) : Inner.LeaseByIdAsync(grantPeerDid, messageId, lease, now, ct);
 
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
         => OnAcknowledge is { } hook ? hook(grantPeerDid, messageIds, ct) : Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);

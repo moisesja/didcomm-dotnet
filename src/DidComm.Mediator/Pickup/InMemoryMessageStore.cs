@@ -198,37 +198,6 @@ public sealed class InMemoryMessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public ValueTask<QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, MessageLease lease, DateTimeOffset now, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(grantPeerDid);
-        ArgumentNullException.ThrowIfNull(messageId);
-        ArgumentNullException.ThrowIfNull(lease);
-        ct.ThrowIfCancellationRequested();
-
-        lock (_gate)
-        {
-            if (!_grants.TryGetValue(grantPeerDid, out var queue))
-                return new ValueTask<QueuedMessage?>((QueuedMessage?)null);
-            PurgeExpired(queue, now);
-            DropIfEmpty(grantPeerDid, queue);
-            if (!queue.ById.TryGetValue(messageId, out var entry))
-                return new ValueTask<QueuedMessage?>((QueuedMessage?)null);
-
-            // The predicates of LeaseAsync, for this one record.
-            var message = entry.Message;
-            if (message.ExpiresAt is { } expires && now >= expires)
-                return new ValueTask<QueuedMessage?>((QueuedMessage?)null);
-            if (message.NotBefore is { } notBefore && notBefore > now)
-                return new ValueTask<QueuedMessage?>((QueuedMessage?)null);
-            if (entry.LeaseExpiresAt > now || entry.PassedOverUntil > now)
-                return new ValueTask<QueuedMessage?>((QueuedMessage?)null);
-
-            Mark(entry, lease);
-            return new ValueTask<QueuedMessage?>(message);
-        }
-    }
-
-    /// <inheritdoc />
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(grantPeerDid);

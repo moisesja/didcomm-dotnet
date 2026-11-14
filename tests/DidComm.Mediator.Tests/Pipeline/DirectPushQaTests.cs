@@ -466,7 +466,7 @@ public sealed class DirectPushQaTests
     // ── expiry and the age limit while a job waits (FR-ROUTE-09, FR-PICK-10) ──────────────
 
     // QA-1 DEFECT 1 (P2), fixed by Q-1: the push takes the record it sends by id
-    // (IMessageStore.LeaseByIdAsync), so a message whose forward expires_time — or whose mailbox
+    // (now through IMessageStore.LeaseAsync at the moment of the push), so a message whose forward expires_time — or whose mailbox
     // age limit — passed while its job waited is never pushed (FR-ROUTE-09, FR-PICK-10). The
     // "today" pins that asserted the push are removed with the fix (L-020: they encoded the defect).
     [Fact]

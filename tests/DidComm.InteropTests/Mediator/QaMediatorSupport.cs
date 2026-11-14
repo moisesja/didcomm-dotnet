@@ -305,7 +305,6 @@ internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
     }
 
     public ValueTask<IReadOnlyList<DidComm.Mediator.Pickup.QueuedMessage>> LeaseAsync(DidComm.Mediator.Pickup.MessageLeaseRequest request, CancellationToken ct) => Inner.LeaseAsync(request, ct);
-    public ValueTask<DidComm.Mediator.Pickup.QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, DidComm.Mediator.Pickup.MessageLease lease, DateTimeOffset now, CancellationToken ct) => Inner.LeaseByIdAsync(grantPeerDid, messageId, lease, now, ct);
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
     public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);

@@ -660,9 +660,6 @@ internal sealed class PickupParkingStore : IMessageStore
         return leased;
     }
 
-    public ValueTask<QueuedMessage?> LeaseByIdAsync(string grantPeerDid, string messageId, MessageLease lease, DateTimeOffset now, CancellationToken ct)
-        => Inner.LeaseByIdAsync(grantPeerDid, messageId, lease, now, ct);
-
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct)
     {
         foreach (var id in messageIds)
