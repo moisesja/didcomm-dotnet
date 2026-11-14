@@ -33,24 +33,24 @@ The architect's design follows below verbatim except where these notes override 
 - [x] A0.5 Build / test / pack green.
 
 ### A. Core + channel + DI (engineer A)
-- [ ] A1 `InboundMessageSnapshot` `Pthid`/`Verified`; `ReturnRouteEligibility` snapshot overload + parity test.
-- [ ] A2 `DidCommClient.ResolveDirectEndpointAsync` + `UnpackDeliveredAsync` (rewrap opening, ≤ 8 layers); `ForwardProcessor.ExtractAttachmentBytes` internal.
-- [ ] A3 `MediatorClientChannel` (exchange, matcher table §4.2, pending map, guarded deadline timer, HTTP no-answer, dispose).
-- [ ] A4 `DuplicateFilter` (done by the orchestrator before the split, so C can test against it), `DeliveredMessageUnpacker` (timeout, concurrency 4, abandoned ≤ 16).
-- [ ] A5 `MediatorClientOptions` + `Validate`, `MediationProtocolException`, `AddMediatorClient()`; dispatcher Debug downgrade (R-3).
+- [x] A1 `InboundMessageSnapshot` `Pthid`/`Verified`; `ReturnRouteEligibility` snapshot overload + parity test.
+- [x] A2 `DidCommClient.ResolveDirectEndpointAsync` + `UnpackDeliveredAsync` (rewrap opening, ≤ 8 layers); `ForwardProcessor.ExtractAttachmentBytes` internal.
+- [x] A3 `MediatorClientChannel` (exchange, matcher table §4.2, pending map, guarded deadline timer, HTTP no-answer, dispose).
+- [x] A4 `DuplicateFilter` (done by the orchestrator before the split, so C can test against it), `DeliveredMessageUnpacker` (timeout, concurrency 4, abandoned ≤ 16).
+- [x] A5 `MediatorClientOptions` + `Validate`, `MediationProtocolException`, `AddMediatorClient()`; dispatcher Debug downgrade (R-3).
 
 ### B. MediationClient, CM 2.0, ForMediation (engineer B)
-- [ ] B1 Negotiation (DF with `ReturnRoute: All`, cache, pin, `MediationNotSupportedException`).
-- [ ] B2 CM 3.0 + internal CM 2.0 codec; fixtures `coordinate-mediation-2.0/*.json`; answer validation (§4.5); page walker.
-- [ ] B3 `ForMediation`; fake CM 2.0 mediator; end-to-end enrolment tests (HTTP, WS, deny, 2.0, neither).
+- [x] B1 Negotiation (DF with `ReturnRoute: All`, cache, pin, `MediationNotSupportedException`).
+- [x] B2 CM 3.0 + internal CM 2.0 codec; fixtures `coordinate-mediation-2.0/*.json`; answer validation (§4.5); page walker.
+- [x] B3 `ForMediation`; fake CM 2.0 mediator; end-to-end enrolment tests (HTTP, WS, deny, 2.0, neither).
 
 ### C. PickupClient + live (engineer C)
-- [ ] C1 Status / fetch (per-attachment reading, `limit` bound, filter, dedupe, commit point, ack) / ack chunks / live toggle.
-- [ ] C2 `LiveDeliveryStream` (cycle, drain, push buffer, ack-on-next per R-2, backoff, live-off at end).
-- [ ] C3 End-to-end: HTTP and WS acceptance, partial unpack, delayed message in live mode, rewrap, mediator + recipient in one host, clock skew.
+- [x] C1 Status / fetch (per-attachment reading, `limit` bound, filter, dedupe, commit point, ack) / ack chunks / live toggle.
+- [x] C2 `LiveDeliveryStream` (cycle, drain, push buffer, ack-on-next per R-2, backoff, live-off at end).
+- [x] C3 End-to-end: HTTP and WS acceptance, partial unpack, delayed message in live mode, rewrap, mediator + recipient in one host, clock skew.
 
 ### D. Verification and hardening (orchestrator)
-- [ ] D1 Integrate A, B, C; full build/test/pack green.
+- [x] D1 Integrate A, B, C; full build/test/pack green.
 - [ ] D2 Two independent QA passes (permutation list from the brief); fixes; per-component defect tally (L-063).
 - [ ] D3 One or more independent adversarial passes; fixes; break-it on non-trivial fixes.
 - [ ] D4 Docs: CHANGELOG, PRD (FR-MED-09, FR-MED-10, FR-PICK-11, FR-ROUTE-06, FR-RR-09 evidence, §12), architecture doc (new #96 section, Packages row, Tests list, "still to build"), XML docs; DX totals reported.
@@ -66,6 +66,8 @@ The architect's design follows below verbatim except where these notes override 
 
 - A0 (engineer `eng-a0-96`): `9de0bc9` Core internals (snapshot `Pthid`/`Verified`, correlator claim R-3 with the dispatcher's Debug downgrade, internal seams), `797cbae` public stubs + `AddMediatorClient` + `ForMediation` (C# 14 `extension(DidCommServiceBuilder)`: compiles under `/warnaserror`; the DX scanner lists the static class and the implementation method only, pinned by `ExtensionMemberSurfaceTests`), `26a7ed2` `MediatorClientHarness`. Gate green: Core 2458, Mediator 3510, Interop 1261; pack 8 packages. Allowlists: coverage 390 → 433 (43 #96 entries), execution 324 → 366 (42). Deviations accepted: `IMediatorExchange.UnpackDeliveredBatchAsync` (fetch path, 4-way); `MediatorExchangeSpec.Expected` is `IReadOnlyList`; the new `TryGetPeer` overload keeps the existing non-nullable `out string`; channel dispose is idempotent (the container disposes it once per registration); `LiveRegistration`, `DeliveredOutcome`, the facade constructors and `ValidatedCopy()` are real; the unpacker computes `DedupeKey`; no `[EnumeratorCancellation]` on the non-iterator stubs (CS8424); exceptions take already-sanitized values; `AddMediatorClient` lets `Validate()`'s exception propagate.
 - `DuplicateFilter` implemented by the orchestrator before the split (C's fakes call it): SHA-256/128 over length-prefixed (sender subject, decrypting subject, id) when authenticated or signed, else over the innermost packed bytes; FIFO; capacity 0 off; 9 tests.
+- Engineers A (`eng-a-96`: `7ad885a` Core — direct endpoint, rewrap opening, snapshot identity; `63f1c69` channel, matcher, guarded deadlines, unpacker; `f2c966c` channel e2e; `cf3fdee`; `0347761` observe abandoned work), B (`eng-b-96`: `ae5db9f` CM 2.0 codec + fixtures + bounded readers; `ffb5955` MediationClient + negotiation; `6eb3b3e` e2e; `1379472` docs) and C (`eng-c-96`: `ea04a8b` PickupClient + live stream; `6d6c3d1`, `f24e2c2`, `2cb63b3`, `4cca196` tests) in parallel; merged without conflicts (`3fb7ca3`, `c58360c`, `25a045e`). After integration 37/38 client e2e tests passed at once; the one failure was the delayed-message test over-specifying the request sequence (the re-armed `live-delivery-change` wakes the grant, so the due message can come by push before the drain) and reading the off-path observer without waiting: fixed in `bb14f1d` and the next commit. Full suite green: Core 2548, Mediator 4000, Interop 1296 (interop run twice more, green).
+- Accepted deviations reported by A: abandoned-unpack bound per channel (not process-wide); `ResolveDirectEndpointAsync` also applies `SendAsync`'s recipient parse and `RejectUnsupportedMethod`, in `SendAsync`'s order; the rewrap layer rule also requires the stack to be exactly anoncrypt around plaintext and no `NonRepudiation` (the mediator's restricted shape); the matcher's answer types are a static table and `ExchangeAsync` refuses specs outside it; request ids empty or > 64 chars refused before sending; a non-HTTP non-WS scheme treated as WS; dispose ends live registrations with `ObjectDisposedException`. By B: `DisclosedProtocols` lists every clean protocol disclosure among the first 256 whatever its roles; ≤ 32 roles read per disclosure; the version cache evicts only expired entries, treats an entry stamped ahead of the clock as expired, reads the clock inside its lock; `UpdateRecipientsAsync` copies the caller's list once after the count check; arguments validated synchronously. By C: a filter mismatch is a failure item with a `MediationProtocolException`; a `recipient_did` echo that differs from the filter (or is present without a filter) is refused in fetch/status, ignored in the live stream; an item counts as taken only if the next item is asked for with the token not cancelled; failures in a row count every failed step and reset when a drain completes; a malformed drain answer ends the stream, a malformed push is dropped; a count mismatch from the batch unpacker throws.
 
 ---
 
