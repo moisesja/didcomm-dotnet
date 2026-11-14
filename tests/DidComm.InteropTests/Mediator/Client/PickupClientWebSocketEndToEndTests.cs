@@ -103,11 +103,13 @@ public sealed class PickupClientWebSocketEndToEndTests
 
         (await PickupE2E.Within(first)).Should().BeTrue();
         PickupE2E.ShouldBeAlicesNote(stream.Current, alice, recipient, note);
-        observer.KindsFrom(bob.Did).Should().StartWith(new[] { "live-on", "delivery-request", "live-on", "delivery-request" },
-            "the periodic cycle turns live delivery on again, then drains");
         // The re-armed live-delivery-change also wakes the grant (#95), so the now-due message reaches
         // the stream either by that push or by the drain's delivery-request, whichever leases it first;
-        // both are the cycle's doing. Asking for the next item takes it, and it is acknowledged.
+        // both are the cycle's doing. The observer runs off the reply path, so wait for its record.
+        await observer.WaitForAsync(bob.Did, 3);
+        observer.KindsFrom(bob.Did).Should().StartWith(new[] { "live-on", "delivery-request", "live-on" },
+            "the periodic cycle turns live delivery on again");
+        // Asking for the next item takes it, and it is acknowledged.
         var next = stream.MoveNextAsync().AsTask();
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 0, "the delayed message was acknowledged");
         observer.KindsFrom(bob.Did).Should().Contain("messages-received");
