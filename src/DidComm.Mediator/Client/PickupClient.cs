@@ -440,8 +440,8 @@ public sealed class PickupClient
     /// and at most 16 per container. A step that got no answer (<see cref="TimeoutException"/>) or
     /// failed in the transport (<see cref="TransportException"/>) is retried after a pause that
     /// starts at one second and doubles up to 30; so is a request refused because too many of the
-    /// container's requests are already waiting (<see cref="InvalidOperationException"/>), once the
-    /// mediator has answered this stream. Five failures in a row end the stream with the last
+    /// container's requests are already waiting (an <see cref="InvalidOperationException"/>; every
+    /// other one is thrown at once). Five failures in a row end the stream with the last
     /// exception. Any other failure ends it at once with its exception: a problem report from the
     /// mediator, a malformed answer, a key of <paramref name="from"/> this agent does not hold, the
     /// container's disposal.
@@ -453,7 +453,7 @@ public sealed class PickupClient
     /// <param name="ct">Cancellation token (combined with one passed through <c>WithCancellation</c>); cancelling ends the enumeration.</param>
     /// <returns>The items, as they arrive.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent. While enumerating: a refusal of the send path before the mediator first answered (at once), or five refusals in a row because too many requests were waiting.</exception>
+    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent. While enumerating: a refusal of the send path (no key curve in common with the mediator, a mediator reached through routing, no transport router), at once; or five refusals in a row because too many of the container's requests were waiting.</exception>
     /// <exception cref="MediationProtocolException">While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>), a malformed answer, or a drain answered with a delivery in which no message has a usable id.</exception>
     /// <exception cref="TimeoutException">While enumerating: five steps in a row got no answer.</exception>
     /// <exception cref="TransportException">While enumerating: five steps in a row failed to send.</exception>
