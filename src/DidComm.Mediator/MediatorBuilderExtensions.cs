@@ -38,8 +38,8 @@ public static class MediatorBuilderExtensions
     /// Make this agent a complete mediator (FR-MED-07, FR-PICK-09/10): Coordinate Mediation 3.0,
     /// the routing mediator that relays forwards, Message Pickup 3.0, the built-in protocols (Trust
     /// Ping answers health checks; Discover Features discloses the mediator roles), and the delivery
-    /// pipeline that puts each relayed message in the recipient's queue (pushing it live, or
-    /// directly to the recipient's endpoint, when it can). Map its endpoints with
+    /// pipeline that puts each relayed message in the recipient's queue (pushing it live when the
+    /// recipient has a live session). Map its endpoints with
     /// <c>MapDidCommMediator()</c> from the <c>DidComm.Mediator.AspNetCore</c> package.
     /// </summary>
     /// <remarks>
@@ -63,7 +63,7 @@ public static class MediatorBuilderExtensions
     /// <para>
     /// <strong>Register collaborators first.</strong> Every registration here is a <c>TryAdd</c>:
     /// an <see cref="IMediationStore"/>, <see cref="IMessageStore"/>, <see cref="IMediationPolicy"/>,
-    /// <see cref="IMediatorIdentity"/>, <see cref="IRecipientEndpointDirectory"/> or
+    /// <see cref="IMediatorIdentity"/> or
     /// <see cref="IRecipientRoutingKeyProvider"/> of the host's own must be registered before this
     /// call to take effect; a replay guard or session registry of its own before <c>AddDidComm</c>.
     /// None of them may take the protocol dispatcher, the handler registry, a protocol handler or
@@ -109,7 +109,7 @@ public static class MediatorBuilderExtensions
     /// <item><description>A live session whose peer stops reading holds up to
     /// <see cref="ReturnRouteSessionOptions.MaxPendingPushes"/> packed deliveries, each at most
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>.</description></item>
-    /// <item><description>Every relayed message is stored first; live and direct pushes follow on
+    /// <item><description>Every relayed message is stored first; live pushes follow on
     /// background workers (<see cref="MediatorOptions.PushConcurrency"/>), one at a time per
     /// recipient and oldest first, so a recipient that is slow to take a push holds up no one else. A
     /// live session is pushed what arrives after the status that answered its turning live delivery
@@ -118,17 +118,11 @@ public static class MediatorBuilderExtensions
     /// next receives a message.</description></item>
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
-    /// <item><description>Direct push sends each push as one POST to exactly the directory's
-    /// endpoint with no retry and no redirect followed, and makes one attempt per message: a message
-    /// whose push fails stays queued for pickup, so a recipient that relies on it must also pick up.
-    /// A plain <c>http</c> push endpoint needs <c>"http"</c> in
-    /// <c>HttpTransportOptions.AllowedSchemes</c>. Forwards are outside replay protection, so with
-    /// direct push on each replay of a captured forward is pushed again; recipients should drop
-    /// messages whose id they have already seen.</description></item>
-    /// <item><description>Push endpoints can be secrets (capability URLs). The library's own log lines
-    /// never carry them, but <c>IHttpClientFactory</c>'s request logging writes the full URI at
-    /// Information: filter the <c>System.Net.Http.HttpClient.*</c> categories. A
-    /// <c>TransportException</c>'s message names the endpoint; log it by type.</description></item>
+    /// <item><description>The mediator pushes only over live sessions; every other message waits for
+    /// pickup. A built-in direct push to a recipient's own endpoint is tracked in #110; until then a
+    /// host that needs one pushes forwarded messages itself through its own
+    /// <see cref="IForwardSink"/> (the #90 seam), with <c>AddRoutingMediator()</c> rather than this
+    /// method.</description></item>
     /// </list>
     /// </remarks>
     /// <param name="builder">The DIDComm builder.</param>
@@ -191,13 +185,12 @@ public static class MediatorBuilderExtensions
         services.TryAddSingleton(sp => new MediatorMetrics(sp.GetService<IMeterFactory>()));
 
         // The pipeline's parts take nothing that leads back to the dispatcher, the handlers or the
-        // facade (L-017): the push workers resolve the directory and DidCommClient on first use.
+        // facade (L-017).
         services.TryAddSingleton(BuildPushDispatcher);
         services.TryAddSingleton(sp => new MediatorForwardSink(
             sp.GetRequiredService<MessagePickupQueue>(),
             sp.GetRequiredService<PushDispatcher>(),
             sp.GetRequiredService<ForwardMetrics>(),
-            sp.GetRequiredService<IOptions<MediatorOptions>>(),
             sp.GetService<ILogger<MediatorForwardSink>>()));
         services.TryAdd(ServiceDescriptor.Singleton(typeof(IForwardSink), s_forwardSink));
         services.TryAddSingleton<MediatorInvitationHolder>();
@@ -236,11 +229,8 @@ public static class MediatorBuilderExtensions
         try
         {
             return new PushDispatcher(
-                sp,
                 sp.GetRequiredService<IOptions<MediatorOptions>>(),
                 sp.GetRequiredService<MessagePickupQueue>(),
-                sp.GetRequiredService<IMessageStore>(),
-                sp.GetRequiredService<IOptions<DidCommOptions>>(),
                 sp.GetRequiredService<MediatorMetrics>(),
                 sp.GetService<ILogger<PushDispatcher>>(),
                 sp.GetService<TimeProvider>() ?? TimeProvider.System);
@@ -295,9 +285,9 @@ public static class MediatorBuilderExtensions
             if (ReferenceEquals(descriptor.ImplementationFactory, s_forwardSink))
                 continue;
             throw new InvalidOperationException(
-                "An IForwardSink is already registered, and AddMediator() relays every forward through its own sink (the pickup queue, live " +
-                "delivery and direct push). Remove that registration; to push messages to recipients' own endpoints, register an " +
-                "IRecipientEndpointDirectory and set MediatorOptions.DirectPush = true.");
+                "An IForwardSink is already registered, and AddMediator() relays every forward through its own sink (the pickup queue and " +
+                "live delivery). Remove that registration; a host that pushes forwards to recipients' own endpoints itself keeps its " +
+                "IForwardSink and uses AddRoutingMediator() instead of AddMediator().");
         }
     }
 

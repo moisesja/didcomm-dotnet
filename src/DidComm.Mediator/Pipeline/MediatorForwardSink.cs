@@ -4,17 +4,15 @@ using DidComm.Mediator.Pickup;
 using DidComm.Protocols;
 using DidComm.Protocols.Routing;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
 /// The mediator's <see cref="IForwardSink"/> (FR-ROUTE-11, FR-PICK-08/09): every forward the
 /// routing mediator relays is stored in the recipient's pickup queue, and when the stored message is
-/// due its grant is woken in <see cref="PushDispatcher"/>, whose workers push what the store then
-/// holds over the recipient's live connection (when it has one with live delivery on) or, when
-/// direct push is on, to the recipient's own endpoint. Otherwise it waits for a
-/// <c>delivery-request</c>.
+/// due and the recipient has a live connection with live delivery on, its grant is woken in
+/// <see cref="PushDispatcher"/>, whose workers push what the store then holds over that connection.
+/// Otherwise it waits for a <c>delivery-request</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -34,16 +32,14 @@ namespace DidComm.Mediator.Pipeline;
 /// how long that takes. The push workers do it instead, per grant and bounded, so one recipient
 /// that is slow to take a push never holds up the storing of other recipients' messages. Pushing is
 /// a separate, best-effort step after the message is stored: the grant is woken only for a message
-/// that is queued and already due, and only when something could push it (direct push is on, or
-/// the recipient has a live session with live delivery on right now); the wake-up is O(1) and never
-/// blocks, it carries nothing of the message (the push takes what the store holds), and a message
-/// whose push fails stays queued for pickup (a failed live push is also tried again at the grant's
-/// next wake-up; a direct push makes one attempt per message).
+/// that is queued and already due, and only when the recipient has a live session with live
+/// delivery on right now; the wake-up is O(1) and never blocks, it carries nothing of the message
+/// (the push takes what the store holds), and a message whose push fails stays queued for pickup
+/// and is tried again at the grant's next wake-up.
 /// </para>
 /// <para>
-/// <strong>Dependencies (L-017).</strong> The queue, the push dispatcher, the counter and the
-/// settings; nothing that leads back to the protocol dispatcher, the handlers or the facade. The
-/// settings are copied at construction.
+/// <strong>Dependencies (L-017).</strong> The queue, the push dispatcher and the counter; nothing
+/// that leads back to the protocol dispatcher, the handlers or the facade.
 /// </para>
 /// <para>
 /// <strong>Logging.</strong> The forward's id (shortened when long), outcome names and exception type
@@ -58,7 +54,6 @@ internal sealed class MediatorForwardSink : IForwardSink
     private readonly PushDispatcher _pushes;
     private readonly ForwardMetrics _metrics;
     private readonly ILogger? _logger;
-    private readonly bool _directPush;
     private long _unknown;
     private long _expired;
     private long _tooLarge;
@@ -67,26 +62,22 @@ internal sealed class MediatorForwardSink : IForwardSink
 
     /// <summary>Create the sink.</summary>
     /// <param name="queue">The pickup queue every forward goes into.</param>
-    /// <param name="pushes">The push workers: live pushes, and direct pushes when direct push is on.</param>
+    /// <param name="pushes">The push workers, for live pushes.</param>
     /// <param name="metrics">The forward outcome counter shared with the forward handler.</param>
-    /// <param name="options">The mediator settings; copied here.</param>
     /// <param name="logger">Optional logger.</param>
     public MediatorForwardSink(
         MessagePickupQueue queue,
         PushDispatcher pushes,
         ForwardMetrics metrics,
-        IOptions<MediatorOptions> options,
         ILogger<MediatorForwardSink>? logger)
     {
         ArgumentNullException.ThrowIfNull(queue);
         ArgumentNullException.ThrowIfNull(pushes);
         ArgumentNullException.ThrowIfNull(metrics);
-        ArgumentNullException.ThrowIfNull(options);
         _queue = queue;
         _pushes = pushes;
         _metrics = metrics;
         _logger = logger;
-        _directPush = options.Value.DirectPush;
     }
 
     /// <inheritdoc />
@@ -153,11 +144,9 @@ internal sealed class MediatorForwardSink : IForwardSink
     }
 
     // Best-effort and after the message is stored: a not-yet-due message wakes nothing and is never
-    // pushed early, live or direct; once due it goes with the grant's next push (a direct one only
-    // while the grant's direct-push cursor has not passed it) or is picked up. A message nothing
-    // could push (direct push off and no live session now) wakes nothing; a failure here changes
-    // nothing about the forward, which is already counted as Queued. Synchronous: it never awaits a
-    // session.
+    // pushed early; once due it goes with the grant's next push or is picked up. A message for a
+    // recipient with no live session now wakes nothing; a failure here changes nothing about the
+    // forward, which is already counted as Queued. Synchronous: it never awaits a session.
     private void HandToPush(ForwardProcessingResult result, ProtocolContext context, string subject, PickupDeliveryResult delivery, string forwardId)
     {
         if (delivery.MessageId is null || delivery.GrantPeerDid is not { } grantPeerDid)
@@ -169,7 +158,7 @@ internal sealed class MediatorForwardSink : IForwardSink
                 MediatorLog.Write(_logger, LogLevel.Debug, "Forward {ForwardId} is not due yet: not pushed; it waits in the queue.", forwardId);
                 return;
             }
-            if (!_directPush && !_queue.Coordinator.HasLiveTarget(grantPeerDid))
+            if (!_queue.Coordinator.HasLiveTarget(grantPeerDid))
                 return;
             _pushes.Wake(grantPeerDid);
         }
