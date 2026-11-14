@@ -6,22 +6,34 @@ using DidComm.Facade;
 namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
-/// Unpacks delivered messages under the bounds of design D-19 / §4.9: one deadline
-/// (<see cref="Timeout"/>, a <see cref="GuardedDeadline"/> on the injected <see cref="TimeProvider"/>
-/// plus <c>WaitAsync</c>, never a <c>CancelAfter</c> token handed to host code) covering every
-/// re-wrap layer; at most <see cref="FetchConcurrency"/> unpacks at a time per batch; and at most
+/// Opens the messages of one delivery under the bounds of design D-19 / §4.9 as decided on the
+/// L-063 stop (owner decision 2-A): <strong>one budget</strong> (<see cref="Budget"/>, a
+/// <see cref="GuardedDeadline"/> on the injected <see cref="TimeProvider"/>, never a
+/// <c>CancelAfter</c> token handed to host code) for all of a delivery's messages, every re-wrap
+/// layer included; at most <see cref="FetchConcurrency"/> opened at a time; and at most
 /// <see cref="MaxAbandoned"/> abandoned unpacks of this unpacker (one per channel, so one per
-/// container) still running, beyond which a new unpack fails at once as a failure outcome without
-/// starting. An unpack that does not honour cancellation keeps its abandoned slot until it ends
-/// (L-059). A bad message is a failure outcome, never an exception; only the caller's cancellation
-/// throws. Owner: engineer A.
+/// container) still running, beyond which a message fails at once without starting. A message the
+/// budget runs out on — still being opened, or still waiting for its turn — is a failure
+/// (<see cref="TimeoutException"/> naming the delivery's request id when there is one), so a
+/// delivery ends within its budget, well inside the mediator's lease (ADV2-1). An unpack that does
+/// not honour cancellation keeps its abandoned slot until it ends (L-059; ADV2-2 is the documented
+/// residual: a host resolver that ignores cancellation can hold all 16 slots). A bad message is a
+/// failure outcome, never an exception; only the caller's cancellation throws. Owner: engineer A.
 /// </summary>
+/// <remarks>
+/// The outcome of a delivery is decided by whichever comes first: its last message ending, or its
+/// budget. The budget's own callback (on the budget's token, so also the caller's cancellation)
+/// fills in every message that has no outcome yet, lets go of the unpacks still running and
+/// completes the result, synchronously; it never waits for host code to notice its cancellation,
+/// and whatever such code does afterwards is discarded. The result's continuations run
+/// asynchronously, never inside the timer's callback.
+/// </remarks>
 internal sealed class DeliveredMessageUnpacker
 {
-    /// <summary>How many messages of one fetch are unpacked at the same time.</summary>
+    /// <summary>How many messages of one delivery are opened at the same time.</summary>
     internal const int FetchConcurrency = 4;
 
-    /// <summary>The bound on abandoned unpacks (deadline passed, work still running) before new unpacks fail fast.</summary>
+    /// <summary>The bound on abandoned unpacks (budget passed, work still running) before new unpacks fail fast.</summary>
     internal const int MaxAbandoned = 16;
 
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -30,123 +42,63 @@ internal sealed class DeliveredMessageUnpacker
 
     /// <summary>Create an unpacker.</summary>
     /// <param name="unpack">The unpack step: <see cref="DidCommClient.UnpackDeliveredAsync"/> in production, a gated fake in tests.</param>
-    /// <param name="timeout">The per-message deadline (<see cref="MediatorClientOptions.UnpackTimeout"/>).</param>
-    /// <param name="time">The clock of the deadline timers.</param>
-    internal DeliveredMessageUnpacker(Func<string, CancellationToken, Task<DeliveredUnpack>> unpack, TimeSpan timeout, TimeProvider time)
+    /// <param name="budget">The budget of one delivery (<see cref="MediatorClientOptions.UnpackTimeout"/>).</param>
+    /// <param name="time">The clock of the budget timers.</param>
+    internal DeliveredMessageUnpacker(Func<string, CancellationToken, Task<DeliveredUnpack>> unpack, TimeSpan budget, TimeProvider time)
     {
         ArgumentNullException.ThrowIfNull(unpack);
         ArgumentNullException.ThrowIfNull(time);
         Unpack = unpack;
-        Timeout = timeout;
+        Budget = budget;
         Time = time;
     }
 
     /// <summary>The unpack step.</summary>
     internal Func<string, CancellationToken, Task<DeliveredUnpack>> Unpack { get; }
 
-    /// <summary>The per-message deadline.</summary>
-    internal TimeSpan Timeout { get; }
+    /// <summary>The budget of one delivery: how long opening all of its messages may take.</summary>
+    internal TimeSpan Budget { get; }
 
-    /// <summary>The clock of the deadline timers.</summary>
+    /// <summary>The clock of the budget timers.</summary>
     internal TimeProvider Time { get; }
 
     /// <summary>How many abandoned unpacks are still running now (test seam).</summary>
     internal int Abandoned => Volatile.Read(ref _abandoned);
 
-    /// <summary>Unpack one delivered message (UTF-8 packed bytes).</summary>
+    /// <summary>Open a delivery of one message (UTF-8 packed bytes) under its own budget.</summary>
     /// <param name="payload">The delivered bytes.</param>
     /// <param name="ct">The caller's cancellation; it alone makes the call throw.</param>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
     internal async Task<DeliveredOutcome> UnpackAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested();
+        => (await UnpackAllAsync(new[] { payload }, requestId: null, ct).ConfigureAwait(false))[0];
 
-        // The bound is checked before any work starts (L-055, L-059).
-        if (Volatile.Read(ref _abandoned) >= MaxAbandoned)
-        {
-            return DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
-                $"The delivered message was not unpacked: {MaxAbandoned} earlier unpacks passed their deadline and are still running (unpack capacity exhausted).")));
-        }
-
-        string packed;
-        try
-        {
-            packed = StrictUtf8.GetString(payload.Span);
-        }
-        catch (DecoderFallbackException ex)
-        {
-            return DeliveredOutcome.Failure(new MalformedMessageException("The delivered message is not valid UTF-8.", ex));
-        }
-        if (packed.Length == 0)
-            return DeliveredOutcome.Failure(new MalformedMessageException("The delivered message is empty."));
-
-        using var deadline = new GuardedDeadline(Time, Timeout, ct);
-        Task<DeliveredUnpack> work;
-        try
-        {
-            work = Unpack(packed, deadline.Token);
-        }
-        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
-        {
-            return DeliveredOutcome.Failure(ex);
-        }
-
-        try
-        {
-            var unpacked = await work.WaitAsync(deadline.Token).ConfigureAwait(false);
-            return DeliveredOutcome.Success(unpacked.Result, unpacked.LayersOpened, DuplicateFilter.KeyOf(unpacked.Result, unpacked.InnermostPacked));
-        }
-        catch (OperationCanceledException) when (deadline.Token.IsCancellationRequested)
-        {
-            // The wait ended, so the work's own outcome is never awaited — whether it still runs or
-            // ended as the deadline did (a fault there would otherwise go unobserved, L-039).
-            Abandon(work);
-            if (ct.IsCancellationRequested)
-                throw new OperationCanceledException(ct);
-            return DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
-                $"The delivered message was not unpacked within {Timeout} (MediatorClientOptions.UnpackTimeout).")));
-        }
-        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
-        {
-            return DeliveredOutcome.Failure(ex);
-        }
-    }
-
-    /// <summary>Unpack a batch, at most <see cref="FetchConcurrency"/> at a time; the outcomes are in the order of <paramref name="payloads"/>.</summary>
+    /// <summary>Open the messages of one delivery under one budget, with no request id to name (a live push).</summary>
     /// <param name="payloads">The delivered bytes, in delivery order.</param>
     /// <param name="ct">The caller's cancellation; it alone makes the call throw.</param>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
-    internal async Task<IReadOnlyList<DeliveredOutcome>> UnpackAllAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct)
+    internal Task<IReadOnlyList<DeliveredOutcome>> UnpackAllAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct)
+        => UnpackAllAsync(payloads, requestId: null, ct);
+
+    /// <summary>
+    /// Open the messages of one delivery under one budget, at most <see cref="FetchConcurrency"/> at
+    /// a time; the outcomes are in the order of <paramref name="payloads"/>. The returned task is
+    /// complete when the last message has ended or, at the latest, when the budget runs out.
+    /// </summary>
+    /// <param name="payloads">The delivered bytes, in delivery order.</param>
+    /// <param name="requestId">Our id of the request the delivery answers, named by the timeout failures; <c>null</c> for a live push.</param>
+    /// <param name="ct">The caller's cancellation; it alone makes the call throw.</param>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
+    internal Task<IReadOnlyList<DeliveredOutcome>> UnpackAllAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(payloads);
-        ct.ThrowIfCancellationRequested();
+        if (ct.IsCancellationRequested)
+            return Task.FromCanceled<IReadOnlyList<DeliveredOutcome>>(ct);
         if (payloads.Count == 0)
-            return Array.Empty<DeliveredOutcome>();
-
-        var outcomes = new DeliveredOutcome[payloads.Count];
-        using var gate = new SemaphoreSlim(FetchConcurrency, FetchConcurrency);
-        var running = new Task[payloads.Count];
-        for (var i = 0; i < payloads.Count; i++)
-            running[i] = UnpackOneAsync(i);
-        // Every task ends: each unpack is bounded by its deadline, and a gate wait by ct.
-        await Task.WhenAll(running).ConfigureAwait(false);
-        return outcomes;
-
-        async Task UnpackOneAsync(int index)
-        {
-            await gate.WaitAsync(ct).ConfigureAwait(false);
-            try
-            {
-                outcomes[index] = await UnpackAsync(payloads[index], ct).ConfigureAwait(false);
-            }
-            finally
-            {
-                gate.Release();
-            }
-        }
+            return Task.FromResult<IReadOnlyList<DeliveredOutcome>>(Array.Empty<DeliveredOutcome>());
+        return new Delivery(this, payloads, requestId, ct).Start();
     }
 
-    // The unpack's wait passed its deadline: its outcome is observed whenever it comes, and while it
+    // The unpack's wait passed the budget: its outcome is observed whenever it comes, and while it
     // still runs it keeps an abandoned slot (one that already ended gives the slot back at once).
     private void Abandon(Task work)
     {
@@ -154,12 +106,220 @@ internal sealed class DeliveredMessageUnpacker
         work.ContinueWith(
             static (t, state) =>
             {
-                _ = t.Exception; // observed: a fault after the deadline is not an unobserved exception
+                _ = t.Exception; // observed: a fault after the budget is not an unobserved exception
                 Interlocked.Decrement(ref ((DeliveredMessageUnpacker)state!)._abandoned);
             },
             this,
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    private DeliveredOutcome OutOfTime(string? requestId, bool started)
+        => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
+            $"The delivered message{ForRequest(requestId)} was not unpacked: the delivery's budget of {Budget} (MediatorClientOptions.UnpackTimeout) ran out {(started ? "while it was being opened" : "before its turn came")}. It was not acknowledged.")));
+
+    private static string ForRequest(string? requestId)
+        => requestId is null ? string.Empty : string.Create(CultureInfo.InvariantCulture, $" of request '{requestId}'");
+
+    /// <summary>
+    /// One delivery being opened: up to <see cref="FetchConcurrency"/> workers take its messages in
+    /// order; the first of "every message ended" and "the budget ended" closes it, under one lock,
+    /// and completes the result. After it is closed nothing is started and nothing is recorded.
+    /// </summary>
+    private sealed class Delivery
+    {
+        private readonly DeliveredMessageUnpacker _owner;
+        private readonly IReadOnlyList<ReadOnlyMemory<byte>> _payloads;
+        private readonly string? _requestId;
+        private readonly CancellationToken _ct;
+        private readonly GuardedDeadline _budget;
+        private readonly CancellationToken _budgetToken;
+        private readonly DeliveredOutcome[] _outcomes;
+        private readonly Task?[] _running;
+        private readonly bool[] _started;
+        private readonly TaskCompletionSource<IReadOnlyList<DeliveredOutcome>> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly object _gate = new();
+        private int _next;
+        private int _done;
+        private bool _closed;
+
+        internal Delivery(DeliveredMessageUnpacker owner, IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+        {
+            _owner = owner;
+            _payloads = payloads;
+            _requestId = requestId;
+            _ct = ct;
+            _outcomes = new DeliveredOutcome[payloads.Count];
+            _running = new Task?[payloads.Count];
+            _started = new bool[payloads.Count];
+            _budget = new GuardedDeadline(owner.Time, owner.Budget, ct);
+            // Read once: the token stays readable after the deadline is disposed, its source does not.
+            _budgetToken = _budget.Token;
+        }
+
+        internal Task<IReadOnlyList<DeliveredOutcome>> Start()
+        {
+            // Runs inside the budget's (or the caller's) Cancel(): ours only, it never throws, waits
+            // for nothing and runs no continuation inline (the result's run asynchronously).
+            _budgetToken.UnsafeRegister(static state => ((Delivery)state!).OnBudgetEnded(), this);
+            var workers = Math.Min(FetchConcurrency, _outcomes.Length);
+            for (var w = 0; w < workers; w++)
+                GuardedDeadline.ObserveAbandoned(RunWorkerAsync());
+            return _result.Task;
+        }
+
+        // Take the next message, open it, record its outcome; until there is none or the delivery is
+        // closed. No exception leaves it: a bad message is an outcome, the budget's end and the
+        // caller's cancellation are OnBudgetEnded's to record.
+        private async Task RunWorkerAsync()
+        {
+            while (true)
+            {
+                int index;
+                lock (_gate)
+                {
+                    if (_closed || _next >= _outcomes.Length)
+                        return;
+                    index = _next++;
+                }
+
+                // The bound is checked before any work starts (L-055, L-059).
+                if (Volatile.Read(ref _owner._abandoned) >= MaxAbandoned)
+                {
+                    Complete(index, DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
+                        $"The delivered message{ForRequest(_requestId)} was not unpacked: {MaxAbandoned} earlier unpacks passed their deadline and are still running (unpack capacity exhausted). It was not acknowledged."))));
+                    continue;
+                }
+                string packed;
+                try
+                {
+                    packed = StrictUtf8.GetString(_payloads[index].Span);
+                }
+                catch (DecoderFallbackException ex)
+                {
+                    Complete(index, DeliveredOutcome.Failure(new MalformedMessageException("The delivered message is not valid UTF-8.", ex)));
+                    continue;
+                }
+                if (packed.Length == 0)
+                {
+                    Complete(index, DeliveredOutcome.Failure(new MalformedMessageException("The delivered message is empty.")));
+                    continue;
+                }
+
+                lock (_gate)
+                {
+                    if (_closed)
+                        return; // recorded as "not started" by OnBudgetEnded
+                    _started[index] = true;
+                }
+                Task<DeliveredUnpack> work;
+                try
+                {
+                    work = _owner.Unpack(packed, _budgetToken);
+                }
+                catch (OperationCanceledException) when (_budgetToken.IsCancellationRequested)
+                {
+                    return; // the budget ended (or the caller cancelled): OnBudgetEnded records it
+                }
+                catch (Exception ex)
+                {
+                    Complete(index, DeliveredOutcome.Failure(ex));
+                    continue;
+                }
+                bool lateForIt;
+                lock (_gate)
+                {
+                    // Closed between the start and here: OnBudgetEnded recorded it but could not let
+                    // the work go, so this worker does.
+                    lateForIt = _closed;
+                    if (!lateForIt)
+                        _running[index] = work;
+                }
+                if (lateForIt)
+                {
+                    _owner.Abandon(work);
+                    return;
+                }
+
+                DeliveredOutcome outcome;
+                try
+                {
+                    // Through the budget, not on the work itself: when the budget ends this worker
+                    // ends too, so an abandoned unpack never keeps the delivery (its bytes and the
+                    // messages opened so far) alive (L-062).
+                    var unpacked = await work.WaitAsync(_budgetToken).ConfigureAwait(false);
+                    outcome = DeliveredOutcome.Success(unpacked.Result, unpacked.LayersOpened, DuplicateFilter.KeyOf(unpacked.Result, unpacked.InnermostPacked));
+                }
+                catch (OperationCanceledException) when (_budgetToken.IsCancellationRequested)
+                {
+                    return; // the budget ended (or the caller cancelled): OnBudgetEnded records it
+                }
+                catch (Exception ex)
+                {
+                    outcome = DeliveredOutcome.Failure(ex);
+                }
+                if (!Complete(index, outcome))
+                    return;
+            }
+        }
+
+        // Record one outcome; the last one closes the delivery. False when it was already closed (the
+        // outcome is then discarded: OnBudgetEnded recorded this message and let its work go).
+        private bool Complete(int index, DeliveredOutcome outcome)
+        {
+            bool last;
+            lock (_gate)
+            {
+                if (_closed)
+                    return false;
+                _outcomes[index] = outcome;
+                _running[index] = null;
+                last = ++_done == _outcomes.Length;
+                if (last)
+                    _closed = true;
+            }
+            if (last)
+            {
+                _result.TrySetResult(_outcomes);
+                _budget.Dispose();
+            }
+            return true;
+        }
+
+        // The budget ran out, or the caller cancelled (the budget is linked to its token): every
+        // message without an outcome is out of time — started or not — and the unpacks still
+        // running are let go, keeping their abandoned slots until they end.
+        private void OnBudgetEnded()
+        {
+            List<Task>? running = null;
+            bool cancelled;
+            lock (_gate)
+            {
+                if (_closed)
+                    return;
+                _closed = true;
+                cancelled = _ct.IsCancellationRequested;
+                for (var i = 0; i < _outcomes.Length; i++)
+                {
+                    if (_outcomes[i] is not null)
+                        continue;
+                    if (_running[i] is { } work)
+                        (running ??= new List<Task>()).Add(work);
+                    _outcomes[i] = _owner.OutOfTime(_requestId, _started[i]);
+                }
+            }
+            if (running is not null)
+            {
+                foreach (var work in running)
+                    _owner.Abandon(work);
+            }
+            if (cancelled)
+                _result.TrySetCanceled(_ct);
+            else
+                _result.TrySetResult(_outcomes);
+            // Not inside the Cancel() that is running this callback: later, on the pool.
+            ThreadPool.UnsafeQueueUserWorkItem(static budget => budget.Dispose(), _budget, preferLocal: false);
+        }
     }
 }

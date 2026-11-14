@@ -24,10 +24,10 @@ internal sealed class DeliveredOutcome
     /// <summary>How many self-addressed forward layers were opened (0 for a pass-through delivery, and on failure).</summary>
     internal int LayersOpened { get; }
 
-    /// <summary>The <see cref="DuplicateFilter"/> key of the message (<see cref="DuplicateFilter.KeyOf"/>); meaningful only on success.</summary>
+    /// <summary>The <see cref="DuplicateFilter"/> key of the message (<see cref="DuplicateFilter.KeyOf"/>), before the filter scopes it to the mailbox it was fetched from; meaningful only on success.</summary>
     internal UInt128 DedupeKey { get; }
 
-    /// <summary>Why the message did not unpack (the unpack exception, or a <see cref="TimeoutException"/> for the deadline and the abandoned-unpack bound); <c>null</c> on success.</summary>
+    /// <summary>Why the message did not unpack (the unpack exception, or a <see cref="TimeoutException"/> for the delivery's budget and the abandoned-unpack bound); <c>null</c> on success.</summary>
     internal Exception? Error { get; }
 
     /// <summary>Whether the message unpacked.</summary>

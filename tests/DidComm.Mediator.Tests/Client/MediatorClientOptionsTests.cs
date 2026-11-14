@@ -27,8 +27,19 @@ public sealed class MediatorClientOptionsTests
         options.CoordinateMediationVersion.Should().Be(CoordinateMediationVersion.Negotiate);
         options.DedupeCapacity.Should().Be(4096);
         options.LivePollInterval.Should().Be(TimeSpan.FromMinutes(1));
-        options.UnpackTimeout.Should().Be(TimeSpan.FromSeconds(30));
+        options.UnpackTimeout.Should().Be(TimeSpan.FromSeconds(20));
         options.Invoking(o => o.Validate()).Should().NotThrow();
+    }
+
+    [Fact]
+    public void The_default_delivery_budget_is_well_inside_this_librarys_default_mediator_lease()
+    {
+        // Owner decision 2-A: the messages a fetch gives up on must still be set aside when the next
+        // fetch comes, so the budget is a third of the lease, leaving room for the request and the
+        // acknowledgement (each bounded by RequestTimeout, which a responsive mediator never needs).
+        var lease = new DidComm.Mediator.Pickup.MessagePickupOptions().LeaseTimeout;
+
+        new MediatorClientOptions().UnpackTimeout.Should().BeLessThanOrEqualTo(lease / 3);
     }
 
     public static TheoryData<Action<MediatorClientOptions>> InRange => new()
@@ -135,7 +146,7 @@ public sealed class MediatorClientOptionsTests
 
         channel.Options.RequestTimeout.Should().Be(TimeSpan.FromSeconds(30));
         channel.Duplicates.Capacity.Should().Be(4096);
-        channel.Unpacker.Timeout.Should().Be(TimeSpan.FromSeconds(30));
+        channel.Unpacker.Budget.Should().Be(TimeSpan.FromSeconds(20));
     }
 
     [Fact]
@@ -152,7 +163,7 @@ public sealed class MediatorClientOptionsTests
         channel.Options.Should().NotBeSameAs(options);
         channel.Options.MaxPendingRequests.Should().Be(2);
         channel.Duplicates.Capacity.Should().Be(7);
-        channel.Unpacker.Timeout.Should().Be(TimeSpan.FromSeconds(3));
+        channel.Unpacker.Budget.Should().Be(TimeSpan.FromSeconds(3));
     }
 
     [Fact]

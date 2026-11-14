@@ -31,13 +31,33 @@ namespace DidComm.Mediator.Client;
 /// message runs out. The clients remember recent messages
 /// (<see cref="MediatorClientOptions.DedupeCapacity"/>) and do not return one twice while they
 /// remember it, but an application that must never act twice on a message should also keep track
-/// of the message ids it has handled.
+/// of the message ids it has handled. They remember a message per mailbox, the <c>from</c> of the
+/// fetch or stream that returned it: a copy that reaches another of your DIDs' mailboxes (a third
+/// party can relay one there) is returned from that mailbox too, and never makes the first
+/// mailbox's own copy count as a repeat.
 /// </para>
 /// <para>
 /// <strong>Messages that do not unpack</strong> are returned as items with
 /// <see cref="PickupItem.Error"/> set and are not acknowledged: the mediator keeps them and delivers
-/// them again after its lease (60 seconds at this library's mediator). Discard one you have given
-/// up on with <see cref="AckAsync"/>.
+/// them again after its lease (60 seconds at this library's mediator). The clients never discard
+/// one on their own: discard one you have given up on with <see cref="AckAsync"/>. That includes a
+/// message that did not open in time: all the messages of one delivery share one
+/// <see cref="MediatorClientOptions.UnpackTimeout"/>. The error is the unpack's own exception, and
+/// its text can quote DIDs and key ids: log its type, not its message, wherever identifiers must not
+/// go.
+/// </para>
+/// <para>
+/// <strong>No replay check.</strong> Messages these clients return have not been through the
+/// replay check that messages arriving on the transport get (FR-RR-08). If you hand them on to your
+/// own protocol handlers, track the message ids you have handled.
+/// </para>
+/// <para>
+/// <strong>Several of your DIDs.</strong> A <c>recipientDid</c> filter accepts only a message that
+/// one of that DID's own keys opened. A message a sender encrypted to two of your DIDs opens with
+/// the key its envelope lists first among those this agent holds, so it is accepted without a
+/// filter or under that first DID's filter; under the second DID's filter it is a failed item,
+/// "for another of your DIDs", and stays queued: discard it with <see cref="AckAsync"/>, or it ages
+/// out at the mediator.
 /// </para>
 /// <para>
 /// <strong>Which endpoint.</strong> The first <c>DIDCommMessaging</c> service entry of the
@@ -178,18 +198,53 @@ public sealed class PickupClient
     /// <see cref="AckAsync"/>.
     /// </para>
     /// <para>
-    /// <strong>Repeats.</strong> A message the clients already returned is acknowledged again and
-    /// left out while they remember it (<see cref="MediatorClientOptions.DedupeCapacity"/>). With
+    /// <strong>Time to open the messages.</strong> All the messages of one fetch share one budget,
+    /// <see cref="MediatorClientOptions.UnpackTimeout"/> (20 seconds by default), and are opened four
+    /// at a time. Those still being opened, or still waiting their turn, when it runs out are
+    /// returned as failed items with a <see cref="TimeoutException"/> that names the request (never a
+    /// message), and are not acknowledged; the others are returned and acknowledged as usual. So a
+    /// fetch ends within the budget even when some senders' DIDs resolve slowly or never, and while
+    /// the mediator still sets those messages aside the next fetch reaches what is behind them. A
+    /// message waiting its turn can fail because of slow ones in front of it; with a
+    /// <paramref name="limit"/> of 4 or less every message of a fetch is opened at once.
+    /// </para>
+    /// <para>
+    /// <strong>A message that keeps failing.</strong> Discard it with <see cref="AckAsync"/> once you
+    /// have given up on it: the client never does. A mediator that does not set fetched messages
+    /// aside delivers it first on every fetch, and then neither the budget nor a loop that fetches
+    /// until drained gets you past it; only discarding it does.
+    /// </para>
+    /// <para>
+    /// <strong>A DID resolver that ignores cancellation.</strong> A message whose budget ran out keeps
+    /// one of the container's 16 slots for abandoned unpacks until its sender's DID lookup really
+    /// ends. With a resolver that ignores its cancellation token, one slow sender can hold all 16,
+    /// and until those lookups end every delivered message fails at once ("unpack capacity
+    /// exhausted"), for every DID and tenant of the container. Use a resolver that honours
+    /// cancellation.
+    /// </para>
+    /// <para>
+    /// <strong>Repeats.</strong> A message the clients already returned from this mailbox (this
+    /// <paramref name="from"/>) is acknowledged again and left out while they remember it
+    /// (<see cref="MediatorClientOptions.DedupeCapacity"/>). With
     /// <c>DedupeCapacity</c> set to 0 nothing is remembered from one call to the next, but a message
     /// that comes twice in the same delivery is still returned only once.
     /// </para>
     /// <para>
+    /// <strong>The <paramref name="recipientDid"/> filter.</strong> Under a filter a message counts as
+    /// that DID's only when one of that DID's own keys opened it. The other recipients an envelope
+    /// lists are not proof: whoever writes an envelope can list anyone, so a message is never
+    /// accepted for a DID because its envelope names that DID.
+    /// </para>
+    /// <para>
     /// <strong>One message to several of your DIDs.</strong> A sender can encrypt one message to
     /// several DIDs whose keys this agent holds, and the mediator then queues a copy for each. Every
-    /// copy opens with the first of those keys the message names, so the copies are the same message:
-    /// it is returned once (its <see cref="UnpackResult.RecipientKid"/> names that first DID) and the
-    /// other copies are acknowledged as repeats. Under a <paramref name="recipientDid"/> filter such a
-    /// message is that DID's when its sender encrypted it to that DID too, whichever key opened it.
+    /// copy opens with the first of those keys the envelope lists (its
+    /// <see cref="UnpackResult.RecipientKid"/> names that DID). Fetched with the same
+    /// <paramref name="from"/>, the copies are the same message: it is returned once and the other
+    /// copies are acknowledged as repeats. Such a message is accepted without a filter, or under the
+    /// filter of the DID whose key opened it. Under the filter of another of those DIDs its copy is
+    /// a failed item, "for another of your DIDs", and stays queued: fetch without a filter to take
+    /// it, discard it with <see cref="AckAsync"/>, or let it age out at the mediator.
     /// </para>
     /// <para>
     /// <strong>Who sent it.</strong> The message inside an item can be plaintext or anoncrypted, so
@@ -200,7 +255,7 @@ public sealed class PickupClient
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="limit">The most messages to take, 1 to 100. Anything the mediator sends beyond it is not opened and not acknowledged.</param>
-    /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message is this DID's when this DID's key opened it or its sender encrypted it to this DID too; any other is returned as a failed item and not acknowledged.</param>
+    /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message is this DID's only when one of this DID's own keys opened it; any other is returned as a failed item and not acknowledged (see the remarks for a message encrypted to two of your DIDs).</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The batch: the items in delivery order, whether the queue was drained, and the mediator's <c>status</c> when it answered with one.</returns>
@@ -251,7 +306,7 @@ public sealed class PickupClient
         }
         var outcomes = payloads.Count == 0
             ? Array.Empty<DeliveredOutcome>()
-            : await Exchange.UnpackDeliveredBatchAsync(payloads, ct).ConfigureAwait(false);
+            : await Exchange.UnpackDeliveredBatchAsync(payloads, request.Id, ct).ConfigureAwait(false);
         if (outcomes.Count != payloads.Count)
             throw new InvalidOperationException("The unpacker returned another number of outcomes than it was given messages.");
 
@@ -286,10 +341,11 @@ public sealed class PickupClient
                 // D-20: the filter is enforced, not trusted to the mediator (IsFor).
                 mismatches++;
                 items.Add(new PickupItem(entry.Id, unpacked: null, new MediationProtocolException(
-                    $"A message delivered for request '{request.Id}' was decrypted for another DID than its recipient_did filter; it was not acknowledged.", request.Id)));
+                    $"A message delivered for request '{request.Id}' is for another of your DIDs: a key of another DID than the recipient_did filter's opened it. " +
+                    "It was not acknowledged and stays queued: discard it with AckAsync, or it ages out at the mediator.", request.Id)));
                 continue;
             }
-            if (Exchange.Duplicates.Contains(outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
+            if (Exchange.Duplicates.Contains(from, outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
             {
                 repeats++;
                 acknowledge.Add(entry.Id);
@@ -307,7 +363,7 @@ public sealed class PickupClient
         // comes back. After it the batch is returned whatever happens to the acknowledgement.
         ct.ThrowIfCancellationRequested();
         foreach (var key in commit)
-            Exchange.Duplicates.Add(key);
+            Exchange.Duplicates.Add(from, key);
         if (acknowledge.Count > 0)
             await AcknowledgeQuietlyAsync(route, mediatorDid, from, acknowledge).ConfigureAwait(false);
 
@@ -420,8 +476,26 @@ public sealed class PickupClient
     /// are never acknowledged; they come back after the connection closes or the mediator's lease
     /// ends. On the way out the stream sends the acknowledgements still waiting and turns live
     /// delivery off, all within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever your
-    /// token says. Enumerate with <c>await foreach</c> (or dispose the enumerator): that is what
-    /// closes the stream and frees its place.
+    /// token says: a mediator that withholds its answers can hold up the enumerator's
+    /// <c>DisposeAsync</c> (the end of an <c>await foreach</c>) for up to one
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. Enumerate with <c>await foreach</c> (or
+    /// dispose the enumerator): that is what closes the stream and frees its place.
+    /// </para>
+    /// <para>
+    /// <strong>Opening.</strong> Each delivery the stream takes — the answer to a drain round, or a
+    /// push — is opened before any of its items is yielded, all of its messages within one
+    /// <see cref="MediatorClientOptions.UnpackTimeout"/> and four at a time, on your own
+    /// <c>MoveNextAsync</c>. The time you spend on an item never counts against it. Messages it runs
+    /// out on are yielded as failed items (<see cref="TimeoutException"/>) and not acknowledged; the
+    /// rest are yielded and acknowledged as usual.
+    /// </para>
+    /// <para>
+    /// <strong>A message that keeps failing</strong> is yielded again each time the mediator delivers
+    /// it again. Discard it with <c>AckAsync(mediatorDid, from, new[] { item.Id })</c> once you have
+    /// given up on it: the stream never does. A mediator that does not set delivered messages aside
+    /// delivers it on every drain, and the budget does not get the stream past it. The error's text
+    /// can quote DIDs and key ids (see <see cref="PickupItem.Error"/>), and the messages are not
+    /// replay-checked (see the class remarks).
     /// </para>
     /// <para>
     /// <strong>Polling is part of the design.</strong> A message whose sender delayed it is never
@@ -497,27 +571,22 @@ public sealed class PickupClient
             Log.RepeatedIds(requestId, contents.RepeatedIds);
     }
 
-    // D-20 (as refined for Q2-1): whether a message that unpacked is the filter's DID's. It is when
-    // that DID's key opened the innermost message, or when the innermost envelope names that DID
-    // among its recipients: a sender that encrypted one message to two of our DIDs addressed it to
-    // both, and the unpack opens it with the first held key the envelope names, which may be the
-    // other DID's. A message whose envelope does not name the filter's DID at all (a mediator
-    // handing over another of our DIDs' messages, or another tenant's, under this filter) is not.
-    // One pass over every kid, no early exit (`|`, not `||`); each kid is checked against the
-    // FR-API-09 bound the unpack applies to recipient kids before it is parsed (L-055).
+    // D-20 (owner decision 1-A on the L-063 stop): a message that unpacked is the filter's DID's only
+    // when one of that DID's own keys opened it: the DID subject of the key that decrypted the
+    // innermost envelope (UnpackResult.RecipientKid) is the filter's DID. The envelope's other
+    // recipient labels are not evidence (L-040): a co-recipient that re-encrypts a message, or a
+    // relay that appends a label to an envelope without `apv`, can write any of them (ADV1-2,
+    // ADV1-3). The consequence for a message a sender encrypted to two of our DIDs is documented on
+    // FetchAsync: it passes the filter of the DID whose key opened it (the first held key the
+    // envelope lists), not the other one's. One comparison, no early exit; the key id is checked
+    // against the FR-API-09 bound before it is parsed (L-055).
     private static bool IsFor(UnpackResult unpacked, string recipientDid)
     {
-        var match = NamesDid(unpacked.RecipientKid, recipientDid);
-        foreach (var kid in unpacked.AllRecipientKids)
-            match |= NamesDid(kid, recipientDid);
-        return match;
+        var kid = unpacked.RecipientKid;
+        return kid is not null
+               && IdentifierLimits.IsWithinKeyIdLimits(kid)
+               && string.Equals(DidSubject.DidSubjectOf(kid), recipientDid, StringComparison.Ordinal);
     }
-
-    // Whether a key id's DID subject is the bare DID `did` (L-034: subjects, never raw strings).
-    private static bool NamesDid(string? kid, string did)
-        => kid is not null
-           && IdentifierLimits.IsWithinKeyIdLimits(kid)
-           && string.Equals(DidSubject.DidSubjectOf(kid), did, StringComparison.Ordinal);
 
     private static void RequireBareDid(string? value, string parameter)
     {

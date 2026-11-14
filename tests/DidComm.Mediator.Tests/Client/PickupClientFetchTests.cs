@@ -83,7 +83,7 @@ public sealed class PickupClientFetchTests
     {
         // L-057: a give-back names what it took. Every kind of entry in one delivery.
         var exchange = new FakePickupExchange();
-        exchange.Duplicates.Add(DefaultOutcome("ok:seen-before").DedupeKey);
+        exchange.Duplicates.Add(L, DefaultOutcome("ok:seen-before").DedupeKey);
         exchange.On(MessagePickup.DeliveryRequestType, r => RawDelivery(r, new Attachment?[]
         {
             Entry("good1", "ok:m1"),
@@ -244,7 +244,7 @@ public sealed class PickupClientFetchTests
         refused.RequestId.Should().Be(exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id);
         refused.Message.Should().NotContain(L).And.NotContain(carol);
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3" }, "a message for another DID than the filter is left with the mediator");
-        exchange.Duplicates.Contains(DefaultOutcome($"to:{L}:m2").DedupeKey).Should().BeFalse();
+        exchange.Duplicates.Contains(L, DefaultOutcome($"to:{L}:m2").DedupeKey).Should().BeFalse();
     }
 
     [Fact]
@@ -255,45 +255,89 @@ public sealed class PickupClientFetchTests
         batch.Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
     }
 
-    // Q2-1: one message encrypted to two of our DIDs (carol first, then L) opens with carol's key, the
-    // first held key it names. Under a filter on L it is still L's message: the sender addressed it to
-    // L too. One whose envelope does not name L at all is not, whichever of our keys opened it.
+    // Owner decision 1-A (L-063 stop): under a filter on L only a message one of L's own keys opened
+    // is L's. The envelope's other recipient labels are not evidence (L-040; ADV1-2, ADV1-3): one a
+    // sender encrypted to carol and L opens with carol's key (the first held key it lists) and is a
+    // failure under L's filter, though its envelope names L; it is accepted unfiltered or under
+    // carol's filter. A message L's key opened passes whatever else its envelope lists.
     [Fact]
-    public async Task Under_a_filter_a_message_its_sender_also_encrypted_to_the_filters_DID_is_returned_whichever_key_opened_it()
+    public async Task Under_a_filter_only_a_message_one_of_the_filter_DIDs_own_keys_opened_passes_whatever_its_envelope_lists()
     {
         const string carol = "did:example:carol";
         const string dave = "did:example:dave";
         var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r,
             ("q1", "multi:m1"),
-            ("q2", "elsewhere:m2"),
+            ("q2", "mine:m2"),
             ("q3", "multi-last:m3")));
         exchange.Unpacker = (text, _) => Task.FromResult(text switch
         {
             "multi:m1" => Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", L + "#key-1"),
-            "elsewhere:m2" => Encrypted(text, "m2", decryptedFor: carol, carol + "#key-1", dave + "#key-1"),
+            "mine:m2" => Encrypted(text, "m2", decryptedFor: L, carol + "#key-1", dave + "#key-1", L + "#key-1"),
             "multi-last:m3" => Encrypted(text, "m3", decryptedFor: carol, carol + "#key-1", dave + "#key-1", L + "#key-2"),
             _ => DefaultOutcome(text),
         });
 
         var batch = await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10, recipientDid: L);
 
-        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", true), ("q2", false), ("q3", true));
-        batch.Items[0].Unpacked!.RecipientKid.Should().Be(carol + "#key-1", "the item reports the key that opened it");
-        batch.Items[1].Error.Should().BeOfType<MediationProtocolException>("its envelope does not name the filter's DID");
-        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3" }, "only the messages that are the filter's DID's");
+        var requestId = exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id;
+        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", false), ("q2", true), ("q3", false));
+        batch.Items[1].Unpacked!.RecipientKid.Should().Be(L + "#key-1");
+        foreach (var refused in new[] { batch.Items[0], batch.Items[2] })
+        {
+            var error = refused.Error.Should().BeOfType<MediationProtocolException>("carol's key opened it, though its envelope names L").Subject;
+            error.RequestId.Should().Be(requestId);
+            error.Message.Should().Contain(requestId).And.Contain("another of your DIDs").And.Contain("AckAsync");
+            error.Message.Should().NotContain(L).And.NotContain(carol).And.NotContain(dave);
+        }
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q2" }, "only the message L's own key opened is L's");
     }
 
     [Fact]
-    public async Task Under_a_filter_an_envelope_kid_over_the_identifier_bounds_does_not_count_even_when_it_starts_with_the_filters_DID()
+    public async Task A_message_its_sender_encrypted_to_two_of_our_DIDs_is_accepted_unfiltered_or_under_the_filter_of_the_DID_whose_key_opened_it()
     {
         const string carol = "did:example:carol";
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "multi:m1")));
+        exchange.Unpacker = (text, _) => Task.FromResult(text == "multi:m1"
+            ? Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", L + "#key-1")
+            : DefaultOutcome(text));
+        var client = PickupTest.Client(exchange);
+
+        (await client.FetchAsync(M, L, limit: 10, recipientDid: L)).Items.Should().ContainSingle().Which.Error.Should().BeOfType<MediationProtocolException>();
+        (await client.FetchAsync(M, L, limit: 10, recipientDid: carol)).Items.Should().ContainSingle().Which.Unpacked!.RecipientKid.Should().Be(carol + "#key-1");
+        exchange.AcknowledgedIds.Should().Equal("q1");
+
+        var unfiltered = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "multi:m1")));
+        unfiltered.Unpacker = exchange.Unpacker;
+        (await PickupTest.Client(unfiltered).FetchAsync(M, L, limit: 10)).Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
+        unfiltered.AcknowledgedIds.Should().Equal("q1");
+    }
+
+    // ADV1-1: repeats are remembered per mailbox (the `from` of the fetch). A copy a third party
+    // relayed into another DID's mailbox, once returned there, must not make this mailbox's own copy a
+    // repeat; within one mailbox a repeat is still a repeat.
+    [Fact]
+    public async Task A_message_returned_from_one_mailbox_is_not_a_repeat_in_another()
+    {
+        const string other = "did:example:other";
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")));
+        var client = PickupTest.Client(exchange);
+
+        (await client.FetchAsync(M, other, limit: 10)).Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
+        (await client.FetchAsync(M, L, limit: 10)).Items.Should().ContainSingle("this mailbox never returned it").Which.Unpacked!.Message.Id.Should().Be("m1");
+        (await client.FetchAsync(M, L, limit: 10)).Items.Should().BeEmpty("in the same mailbox it is a repeat");
+        exchange.AcknowledgedIds.Should().Equal("q1", "q1", "q1");
+    }
+
+    [Fact]
+    public async Task Under_a_filter_a_decrypting_key_id_over_the_identifier_bounds_does_not_pass_even_when_it_starts_with_the_filters_DID()
+    {
         var overLong = L + "#" + new string('k', 4096);           // over 4096 characters in all
         var longDid = "did:example:" + new string('b', 2048);    // a DID part over 2048 characters
         var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "long:m1"), ("q2", "longdid:m2")));
         exchange.Unpacker = (text, _) => Task.FromResult(text switch
         {
-            "long:m1" => Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", overLong),
-            "longdid:m2" => Encrypted(text, "m2", decryptedFor: carol, carol + "#key-1", longDid + "#key-1"),
+            "long:m1" => Success(Authcrypt(A, L, "m1") with { RecipientKid = overLong, AllRecipientKids = new[] { overLong } }, text),
+            "longdid:m2" => Success(Authcrypt(A, L, "m2") with { RecipientKid = longDid + "#key-1", AllRecipientKids = new[] { longDid + "#key-1" } }, text),
             _ => DefaultOutcome(text),
         });
 
@@ -549,6 +593,74 @@ public sealed class PickupClientFetchTests
         seen.Where(i => i.Unpacked != null).Select(i => i.Id).Should().Equal("g1");
         seen.Where(i => i.Error != null).Select(i => i.Id).Should().Equal("f1", "f2", "f3");
         mailbox.Remaining.Should().Equal(new[] { "f1", "f2", "f3" }, "failures are never acknowledged (FR-PICK-11)");
+    }
+
+    // ---- the delivery budget (owner decision 2-A) ----------------------------------------------
+
+    [Fact]
+    public async Task A_fetch_opens_its_delivery_as_one_batch_naming_its_request()
+    {
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1"), ("q2", "ok:m2")));
+
+        await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10);
+
+        exchange.Batches.Should().Equal(new[] { ((string?)exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id, 2) });
+    }
+
+    [Fact]
+    public async Task Messages_the_budget_runs_out_on_are_failures_naming_the_request_and_stay_queued_while_the_rest_is_returned_and_acknowledged()
+    {
+        var budget = new MediatorClientOptions().UnpackTimeout;
+        var exchange = new FakePickupExchange().UseBudget(budget).On(MessagePickup.DeliveryRequestType, r => Delivery(r,
+            ("q1", "ok:m1"), ("q2", "stall:m2"), ("q3", "ok:m3"), ("q4", "stall:m4"), ("q5", "ok:m5"), ("q6", "ok:m6")));
+        exchange.Unpacker = Stalling;
+
+        var fetch = PickupTest.Client(exchange).FetchAsync(M, L, limit: 10);
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        fetch.IsCompleted.Should().BeFalse();
+        exchange.Clock.Advance(budget);
+        var batch = await PickupTest.Within(fetch);
+
+        var requestId = exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id;
+        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", true), ("q2", false), ("q3", true), ("q4", false), ("q5", true), ("q6", true));
+        foreach (var failed in new[] { batch.Items[1], batch.Items[3] })
+            failed.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(requestId).And.Contain("UnpackTimeout").And.NotContain("m2").And.NotContain("m4");
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3", "q5", "q6" }, "the messages the budget ran out on are left with the mediator");
+    }
+
+    [Fact]
+    public async Task With_the_default_budget_a_loop_that_fetches_until_drained_gets_past_a_full_batch_of_stalling_senders_within_the_lease()
+    {
+        // ADV2-1 at the fetch level, with the defaults: ten messages whose senders never resolve fill
+        // the first batch; the fetch gives up on all of them within one budget, well inside the
+        // mediator's lease, so the next fetch passes over them and reaches what is behind them.
+        var stalls = Enumerable.Range(0, 10).Select(i => ($"s{i}", $"stall:{i}"));
+        var mailbox = new FakeMailbox(new ManualTimeProvider(), stalls.Append(("g1", "ok:good")).ToArray());
+        var exchange = mailbox.Attach(new FakePickupExchange(time: mailbox.Time).UseBudget(new MediatorClientOptions().UnpackTimeout));
+        exchange.Unpacker = Stalling;
+        var client = PickupTest.Client(exchange);
+        var started = mailbox.Time.GetUtcNow();
+
+        var first = client.FetchAsync(M, L, limit: 10);
+        await mailbox.Time.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        mailbox.Time.Advance(exchange.Options.UnpackTimeout);
+        (await PickupTest.Within(first)).Items.Should().HaveCount(10).And.OnlyContain(i => i.Error is TimeoutException);
+
+        var second = await client.FetchAsync(M, L, limit: 10);
+        var third = await client.FetchAsync(M, L, limit: 10);
+
+        (mailbox.Time.GetUtcNow() - started).Should().BeLessThan(FakeMailbox.Lease, "all of it happened while the stalled messages were still leased");
+        second.Items.Should().ContainSingle().Which.Unpacked!.Message.Id.Should().Be("good");
+        third.Drained.Should().BeTrue();
+        mailbox.Remaining.Should().BeEquivalentTo(stalls.Select(s => s.Item1), "failures are never acknowledged");
+    }
+
+    // An unpack step whose "stall:" messages wait until cancelled (a sender DID that never resolves).
+    private static async Task<DeliveredOutcome> Stalling(string text, CancellationToken ct)
+    {
+        if (text.StartsWith("stall:", StringComparison.Ordinal))
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        return DefaultOutcome(text);
     }
 
     [Fact]

@@ -498,7 +498,7 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         await FluentActions.Awaiting(() => channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default)).Should().ThrowAsync<ObjectDisposedException>();
         await FluentActions.Awaiting(() => channel.ResolveRouteAsync(_w.Mediator.Did, Https, false, default)).Should().ThrowAsync<ObjectDisposedException>();
         FluentActions.Invoking(() => channel.RegisterLiveStream(_w.Mediator.Did, _w.OtherLocal.Did)).Should().Throw<ObjectDisposedException>();
-        await FluentActions.Awaiting(() => channel.UnpackDeliveredAsync(new byte[] { 1 }, default)).Should().ThrowAsync<ObjectDisposedException>();
+        await FluentActions.Awaiting(() => channel.UnpackDeliveredBatchAsync(new ReadOnlyMemory<byte>[] { new byte[] { 1 } }, requestId: null, default)).Should().ThrowAsync<ObjectDisposedException>();
         stream.Dispose();
         sendGate.TrySetResult(FakeSend.Accepted(Wss));
     }

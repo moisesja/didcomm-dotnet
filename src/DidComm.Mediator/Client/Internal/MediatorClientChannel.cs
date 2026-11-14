@@ -166,7 +166,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     /// <summary>The channel's logger (category <c>DidComm.Mediator.Client.Internal.MediatorClientChannel</c>), or <c>null</c>.</summary>
     internal ILogger? Logger { get; }
 
-    /// <summary>The unpack limiter behind <see cref="UnpackDeliveredAsync"/> and <see cref="UnpackDeliveredBatchAsync"/>.</summary>
+    /// <summary>The unpack limiter behind <see cref="UnpackDeliveredBatchAsync"/>: one budget per delivery, 4 at a time, at most 16 abandoned unpacks.</summary>
     internal DeliveredMessageUnpacker Unpacker { get; }
 
     /// <summary>Whether <see cref="Dispose"/> or <see cref="DisposeAsync"/> has run.</summary>
@@ -399,17 +399,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     }
 
     /// <inheritdoc/>
-    public Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
-        return Unpacker.UnpackAsync(payload, ct);
-    }
-
-    /// <inheritdoc/>
-    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct)
-    {
-        ObjectDisposedException.ThrowIf(IsDisposed, this);
-        return Unpacker.UnpackAllAsync(payloads, ct);
+        return Unpacker.UnpackAllAsync(payloads, requestId, ct);
     }
 
     /// <summary>

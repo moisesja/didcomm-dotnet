@@ -10,8 +10,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// The pickup client's duplicate filter (#96 design D-15, §4.9): keys bind a message id to its
 /// authenticated sender (a stranger reusing an id cannot suppress someone else's message), an
-/// anonymous message is keyed by its bytes, eviction is FIFO at the capacity, capacity 0 is off, and
-/// retained memory does not grow with the wire values (L-062).
+/// anonymous message is keyed by its bytes, a message is remembered per mailbox it was fetched from
+/// (ADV1-1), eviction is FIFO at the capacity, capacity 0 is off, and retained memory does not grow
+/// with the wire values (L-062).
 /// </summary>
 public sealed class DuplicateFilterTests
 {
@@ -65,21 +66,53 @@ public sealed class DuplicateFilterTests
             .Should().NotBe(DuplicateFilter.KeyOf(Authcrypt("did:example:a", Bob, "bc"), "p"));
     }
 
+    // ---- the mailbox scope (ADV1-1) ----
+
+    [Fact]
+    public void A_message_is_remembered_per_mailbox()
+    {
+        // A copy of T's message that a third party relayed into F's mailbox, once returned from F's
+        // mailbox, must not make T's own copy a repeat: the same message key, another mailbox.
+        const string f = "did:example:f";
+        const string t = "did:example:t";
+        var filter = new DuplicateFilter(8);
+        var message = DuplicateFilter.KeyOf(Authcrypt(Alice, t, "id-1"), "p");
+
+        filter.Add(f, message);
+
+        filter.Contains(f, message).Should().BeTrue("returned from F's mailbox once: a repeat there");
+        filter.Contains(t, message).Should().BeFalse("T never received it from its own mailbox");
+        DuplicateFilter.InMailbox(f, message).Should().NotBe(DuplicateFilter.InMailbox(t, message));
+    }
+
+    [Fact]
+    public void The_mailbox_scope_is_the_DID_subject_and_the_message_keys_stay_distinct()
+    {
+        var one = DuplicateFilter.KeyOf(Authcrypt(Alice, Bob, "id-1"), "p");
+        var two = DuplicateFilter.KeyOf(Authcrypt(Alice, Bob, "id-2"), "p");
+
+        DuplicateFilter.InMailbox(Bob, one).Should().Be(DuplicateFilter.InMailbox(Bob, one));
+        DuplicateFilter.InMailbox(Bob, one).Should().NotBe(DuplicateFilter.InMailbox(Bob, two));
+        DuplicateFilter.InMailbox(Bob, one).Should().NotBe(one, "the remembered key is not the bare message key");
+        DuplicateFilter.InMailbox("did:example:bo", one).Should().NotBe(DuplicateFilter.InMailbox(Bob, one),
+            "a DID that is a prefix of another is another mailbox");
+    }
+
     [Fact]
     public void Remembers_up_to_capacity_and_evicts_the_oldest_first()
     {
         var filter = new DuplicateFilter(3);
-        filter.Add(1);
-        filter.Add(2);
-        filter.Add(2);
-        filter.Add(3);
+        filter.Add(Bob, 1);
+        filter.Add(Bob, 2);
+        filter.Add(Bob, 2);
+        filter.Add(Bob, 3);
         filter.Count.Should().Be(3, "a key already remembered is not added twice");
-        filter.Add(4);
+        filter.Add(Bob, 4);
 
-        filter.Contains(1).Should().BeFalse("the oldest key is forgotten first");
-        filter.Contains(2).Should().BeTrue();
-        filter.Contains(3).Should().BeTrue();
-        filter.Contains(4).Should().BeTrue();
+        filter.Contains(Bob, 1).Should().BeFalse("the oldest key is forgotten first");
+        filter.Contains(Bob, 2).Should().BeTrue();
+        filter.Contains(Bob, 3).Should().BeTrue();
+        filter.Contains(Bob, 4).Should().BeTrue();
         filter.Count.Should().Be(3);
     }
 
@@ -87,8 +120,8 @@ public sealed class DuplicateFilterTests
     public void Capacity_zero_is_off()
     {
         var filter = new DuplicateFilter(0);
-        filter.Add(7);
-        filter.Contains(7).Should().BeFalse();
+        filter.Add(Bob, 7);
+        filter.Contains(Bob, 7).Should().BeFalse();
         filter.Count.Should().Be(0);
     }
 
@@ -98,9 +131,10 @@ public sealed class DuplicateFilterTests
         // L-062: only fixed-size hashes are kept, so 200 000-character ids cost what short ones do.
         var hugeId = new string('i', 200_000);
         var hugeSender = "did:example:" + new string('s', 2_000);
+        var hugeMailbox = "did:example:" + new string('m', 2_000);
         var filter = new DuplicateFilter(64);
         for (var n = 0; n < 1_000; n++)
-            filter.Add(DuplicateFilter.KeyOf(Authcrypt(hugeSender, Bob, hugeId + n), "p"));
+            filter.Add(hugeMailbox, DuplicateFilter.KeyOf(Authcrypt(hugeSender, Bob, hugeId + n), "p"));
 
         filter.Count.Should().Be(64);
         typeof(DuplicateFilter).GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
@@ -116,7 +150,7 @@ public sealed class DuplicateFilterTests
         await Task.WhenAll(Enumerable.Range(0, 8).Select(t => Task.Run(() =>
         {
             for (var n = 0; n < 5_000; n++)
-                filter.Add((UInt128)(t * 1_000_000 + n));
+                filter.Add(Bob, (UInt128)(t * 1_000_000 + n));
         })));
         filter.Count.Should().Be(100);
     }

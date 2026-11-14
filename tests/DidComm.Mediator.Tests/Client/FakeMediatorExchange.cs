@@ -106,9 +106,7 @@ internal sealed class FakeMediatorExchange : IMediatorExchange
 
     public LiveRegistration RegisterLiveStream(string mediatorDid, string localDid) => throw new NotSupportedException("Not used by MediationClient.");
 
-    public Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
-
-    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
+    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
 
     /// <summary>A client over this exchange, as the DI constructor builds it.</summary>
     public MediationClient Client(Microsoft.Extensions.Logging.ILogger<MediationClient>? logger = null) => new(this, logger);

@@ -119,7 +119,7 @@ public sealed class PickupClientQa2Tests
 
         await FluentActions.Awaiting(() => PickupTest.Within(second)).Should().ThrowAsync<OperationCanceledException>();
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1" }, "q1 was taken when q2 was asked for; q2 never reached the consumer");
-        exchange.Duplicates.Contains(DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse();
+        exchange.Duplicates.Contains(L, DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse();
         exchange.Registrations.Should().BeEmpty();
     }
 
@@ -438,7 +438,7 @@ public sealed class PickupClientQa2Tests
 
         public Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => inner.UnpackDeliveredAsync(payload, ct);
 
-        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct)
-            => inner.UnpackDeliveredBatchAsync(payloads, ct);
+        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+            => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);
     }
 }
