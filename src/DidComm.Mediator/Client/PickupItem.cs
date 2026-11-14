@@ -1,0 +1,50 @@
+using DidComm.Facade;
+
+namespace DidComm.Mediator.Client;
+
+/// <summary>
+/// One message a mediator delivered (Message Pickup 3.0, FR-PICK-11): either it unpacked, and
+/// <see cref="Unpacked"/> holds it, or it did not, and <see cref="Error"/> says why.
+/// </summary>
+/// <remarks>
+/// A failed item is not acknowledged: the mediator keeps it and delivers it again after its lease
+/// ends (60 seconds at this library's mediator). When you have given up on it, discard it with
+/// <see cref="PickupClient.AckAsync"/> and its <see cref="Id"/>.
+/// </remarks>
+public sealed class PickupItem
+{
+    /// <summary>Initialize an item; exactly one of <paramref name="unpacked"/> and <paramref name="error"/> is set.</summary>
+    /// <param name="id">The mediator's id for the message.</param>
+    /// <param name="unpacked">The innermost unpacked message, or <c>null</c>.</param>
+    /// <param name="error">Why it did not unpack, or <c>null</c>.</param>
+    /// <exception cref="ArgumentException">Both or neither of <paramref name="unpacked"/> and <paramref name="error"/> are set.</exception>
+    internal PickupItem(string id, UnpackResult? unpacked, Exception? error)
+    {
+        ArgumentNullException.ThrowIfNull(id);
+        if ((unpacked is null) == (error is null))
+            throw new ArgumentException("Exactly one of the unpack result and the error is set.", nameof(unpacked));
+        Id = id;
+        Unpacked = unpacked;
+        Error = error;
+    }
+
+    /// <summary>
+    /// The mediator's id for the message (the <c>delivery</c> attachment id). Opaque: pass it back to
+    /// <see cref="PickupClient.AckAsync"/> as it is, and read nothing into it. At most 2048
+    /// unreserved URI characters.
+    /// </summary>
+    public string Id { get; }
+
+    /// <summary>
+    /// The message, unpacked: the innermost one when the mediator re-wrapped it for you (the
+    /// forward layers it added are opened, FR-ROUTE-06). <c>null</c> when it did not unpack.
+    /// </summary>
+    public UnpackResult? Unpacked { get; }
+
+    /// <summary>
+    /// Why the message did not unpack (for example it was not encrypted for any DID whose keys this
+    /// agent holds, or it was for another DID than the one you asked for). Set exactly when
+    /// <see cref="Unpacked"/> is <c>null</c>; such an item was not acknowledged.
+    /// </summary>
+    public Exception? Error { get; }
+}

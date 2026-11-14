@@ -1296,6 +1296,174 @@
     {
       "member": "DidComm.Mediator.AspNetCore!DidComm.Mediator.AspNetCore.MediatorEndpointRouteBuilderExtensions::MapDidCommMediator(Microsoft.AspNetCore.Routing.IEndpointRouteBuilder,System.String)",
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::.ctor(DidComm.Facade.DidCommClient,DidComm.Mediator.Client.MediatorClientOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Client.MediationClient>)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::QueryAllRecipientsAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::QueryRecipientsAsync(System.String,System.String,DidComm.Mediator.Coordination.RecipientQueryPaging,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::RequestMediationAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::UpdateRecipientsAsync(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationNotSupportedException",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationNotSupportedException::prop:DisclosedProtocols",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationProtocolException",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationProtocolException::prop:ProblemCode",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationProtocolException::prop:RequestId",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationServiceBuilderExtensions",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationServiceBuilderExtensions::ForMediation(DidComm.Mediator.Coordination.MediationGrant)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientBuilderExtensions",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientBuilderExtensions::AddMediatorClient(DidComm.Extensions.DependencyInjection.DidCommBuilder,System.Action`1<DidComm.Mediator.Client.MediatorClientOptions>)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::.ctor()",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::Validate()",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:CoordinateMediationVersion",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:DedupeCapacity",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:LivePollInterval",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:MaxPendingRequests",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:RequestTimeout",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:UnpackTimeout",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch::prop:Drained",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch::prop:Items",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch::prop:Status",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::.ctor(DidComm.Facade.DidCommClient,DidComm.Mediator.Client.MediatorClientOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Client.PickupClient>)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::AckAsync(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::FetchAsync(System.String,System.String,System.Int32,System.String,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::GetStatusAsync(System.String,System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::ReceiveLiveAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::SetLiveDeliveryAsync(System.String,System.String,System.Boolean,System.Uri,System.Threading.CancellationToken)",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem::prop:Error",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem::prop:Id",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem::prop:Unpacked",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.RecipientQueryResult",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.RecipientQueryResult::prop:Dids",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Client.RecipientQueryResult::prop:Pagination",
+      "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     }
   ]
 }
