@@ -151,7 +151,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- direct push: what a refused record does to the grant's later messages ------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 3 (P2): a direct push takes the grant's oldest due record and ends the operation at the first failure; a record the endpoint always refuses (any sender can make one: MapDidCommEndpoint answers 400 to an inner message it cannot open) is retried at every wake and no later message of the grant is ever pushed (regression vs 755c497: one attempt per message).")]
+    // ADV-5 DEFECT 3 (P2), fixed in round 8: the direct step takes only records after the grant's
+    // cursor, which passes every record it attempted, so a refused one blocks nothing.
+    [Fact]
     public async Task Defect3_a_message_the_endpoint_refuses_does_not_keep_the_grants_later_messages_from_being_pushed()
     {
         const int PoisonSize = 4096;
@@ -172,7 +174,9 @@ public sealed class PushDispatcherAdv5Tests
         fixture.Store.MessageCount.Should().Be(1, "only the refused one waits for pickup");
     }
 
-    [Fact(Skip = "ADV-5 DEFECT 4 (P2): a refused record is sent again, in full, at every later wake of its grant: one large stored message turns each later tiny forward into a POST of the large one (measured: 21 POSTs of 564 525 bytes, 11.9 MB of egress, for 1 large + 20 tiny forwards totalling 0.57 MB); the docs promise one attempt per message (regression vs 755c497).")]
+    // ADV-5 DEFECT 4 (P2), fixed in round 8: one direct attempt per message (the cursor), so a
+    // refused message is never sent again with the grant's later ones.
+    [Fact]
     public async Task Defect4_a_refused_message_is_not_sent_again_at_full_size_for_every_later_forward()
     {
         await using var fixture = PushFixture.Create((_, _) => Task.FromResult(new TransportResult(true, 503)), directory: _ => Inbox);
@@ -206,7 +210,8 @@ public sealed class PushDispatcherAdv5Tests
         }
 
         fixture.Router.Requests.Should().HaveCount(12, "one operation per wake, ended by its first failure");
-        fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().AllSatisfy(p => p.Should().Equal(PushFixture.Payload(64, 0)), "each operation takes the oldest record again");
+        // L-020 (round 8): each operation takes the record after the cursor, not the oldest again.
+        fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().Equal(Enumerable.Range(0, 12).Select(i => PushFixture.Payload(64, (byte)i)), (a, b) => a.SequenceEqual(b), "each message gets one attempt, in the order they were stored");
         fixture.Pushes(PushOutcomes.SkippedCooldown).Should().Be(0);
         fixture.Store.MessageCount.Should().Be(12);
     }

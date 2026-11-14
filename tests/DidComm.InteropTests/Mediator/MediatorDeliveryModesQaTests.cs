@@ -136,11 +136,12 @@ public sealed class MediatorDeliveryModesQaTests
         f.Directory.Map(f.Bob.Did, new Uri($"https://{InboxServer.Host}/bob-inbox"));
         await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "over https");
         await f.Mediator.PushesIdleAsync();
-        // L-020 (PR #109 review round 2, D-1): the message that failed stays queued and goes with the
-        // grant's next push; both are pushed over https now.
-        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed, PushOutcomes.Pushed, PushOutcomes.Pushed);
-        f.Inbox.Received.Should().HaveCount(2);
-        f.Mediator.Store.MessageCount.Should().Be(0, "the failed message was retried at the next wake-up");
+        // L-020 (PR #109 review round 8): each message gets one direct attempt (the grant's cursor), so
+        // the message that failed over http stays queued for pickup and only the new one is pushed.
+        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed, PushOutcomes.Pushed);
+        f.Inbox.Received.Should().ContainSingle();
+        f.Mediator.Store.MessageCount.Should().Be(1, "the failed message waits for pickup");
+        (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle();
         f.ShouldNotLeak();
     }
 

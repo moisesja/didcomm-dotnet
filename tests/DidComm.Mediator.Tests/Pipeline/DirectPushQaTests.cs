@@ -308,12 +308,13 @@ public sealed class DirectPushQaTests
     // ── exactly one outcome per push attempt ──────────────────────────────────────────────
 
     [Fact]
-    public async Task A_failed_push_ends_its_operation_and_the_message_is_tried_again_at_the_next_wake_up_with_one_outcome_per_attempt()
+    public async Task A_failed_push_ends_its_operation_and_the_next_wake_up_goes_on_with_the_next_message_with_one_outcome_per_attempt()
     {
         // L-020 (PR #109 review round 2, D-1/D-2): this test counted one outcome per job. Wake-ups
         // now coalesce and an operation stops at its first failure, so the property is one outcome
-        // per push attempt (and one per wake-up that pushed nothing), and a failed message's retry
-        // at the grant's next wake-up.
+        // per push attempt (and one per wake-up that pushed nothing). Round 8: each message gets one
+        // direct attempt (the grant's cursor), so the next wake-up goes on with the next message
+        // rather than the failed one.
         var n = 0;
         await using var fixture = PushFixture.Create(
             (r, _) => Interlocked.Increment(ref n) % 2 == 0
@@ -335,7 +336,7 @@ public sealed class DirectPushQaTests
 
         fixture.Pushes(PushOutcomes.SkippedScheme).Should().Be(1, "one wake-up of the grant whose endpoint is not http(s)");
         fixture.Pushes(PushOutcomes.Failed).Should().Be(3, "each of the three operations stopped at its failure");
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(2, "the failed message went out at the next wake-up");
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(2, "each later operation went on with the message after the failed one");
         fixture.Router.Requests.Should().HaveCount(5, "one request per counted attempt");
         fixture.Store.MessageCount.Should().Be(10);
         fixture.Dispatcher.Unsettled.Should().Be(0);
