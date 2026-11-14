@@ -49,7 +49,9 @@ public sealed class MediatorClientOptions
     /// 0 turns this off; at most 1 000 000. A message is remembered by a fixed-size hash of its
     /// sender, the DID it was decrypted for and its id (of its bytes when the sender is anonymous),
     /// so the memory used stays bounded whatever the wire values look like. The oldest are
-    /// forgotten first, and a forgotten message that comes back is returned again.
+    /// forgotten first, and a forgotten message that comes back is returned again. 0 turns off the
+    /// memory from one call or stream to the next; a fetch still returns a message that comes twice
+    /// in one delivery only once.
     /// </summary>
     public int DedupeCapacity { get; set; } = 4096;
 
@@ -59,7 +61,9 @@ public sealed class MediatorClientOptions
     /// 1 second to 24 hours. It is also how a stream notices a dropped connection, and the only way
     /// it receives a message whose delivery its sender delayed (a mediator never pushes a delayed
     /// message when it falls due), so keep it at or below the longest delay you expect your senders
-    /// to ask for (this library's mediator allows up to an hour by default).
+    /// to ask for (this library's mediator allows up to an hour by default). The mediator has no
+    /// scheduler for due messages, now or in a future version: this poll, and the one when a stream
+    /// starts, is the permanent design, not a stopgap (FR-PICK-08).
     /// </summary>
     public TimeSpan LivePollInterval { get; set; } = TimeSpan.FromMinutes(1);
 

@@ -262,7 +262,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         if (Interlocked.Increment(ref _pendingCount) > Options.MaxPendingRequests)
         {
             Interlocked.Decrement(ref _pendingCount);
-            throw new InvalidOperationException(string.Create(CultureInfo.InvariantCulture,
+            throw new MediatorBusyException(string.Create(CultureInfo.InvariantCulture,
                 $"{Options.MaxPendingRequests} mediator requests are already waiting for an answer (MediatorClientOptions.MaxPendingRequests); request '{request.Id}' ({spec.Name}) was not sent."));
         }
 

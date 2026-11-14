@@ -350,7 +350,7 @@ public sealed class PickupClientQa2Tests
     }
 
     [Fact]
-    public async Task A_delivery_with_zero_attachments_is_drained_and_a_delivery_of_only_unusable_ids_is_not()
+    public async Task A_delivery_with_zero_attachments_is_drained_and_a_delivery_of_only_unusable_ids_is_a_protocol_error()
     {
         var exchange = new FakePickupExchange();
         exchange.OnSequence(MessagePickup.DeliveryRequestType,
@@ -362,9 +362,10 @@ public sealed class PickupClientQa2Tests
         empty.Drained.Should().BeTrue();
         empty.Status.Should().BeNull();
 
-        var unusable = await client.FetchAsync(M, L, 10);
-        unusable.Items.Should().BeEmpty();
-        unusable.Drained.Should().BeFalse("the mediator did deliver something (observation: a loop on Drained against a mediator that keeps doing this never ends)");
+        // Observation 7, taken into the fix round: a delivery none of whose messages carries a usable
+        // id is a protocol error, so a loop on Drained against a mediator that keeps doing this ends.
+        var refused = await FluentActions.Awaiting(() => client.FetchAsync(M, L, 10)).Should().ThrowAsync<MediationProtocolException>();
+        refused.Which.RequestId.Should().Be(exchange.SentOf(MessagePickup.DeliveryRequestType)[1].Request.Id);
         exchange.SentOf(MessagePickup.MessagesReceivedType).Should().BeEmpty();
     }
 

@@ -113,7 +113,6 @@ internal sealed class LiveDeliveryStream
     private int _drainRounds;
     private int _failures;
     private bool _liveRequested;
-    private bool _answered;
     private bool _warnedNotLive;
 
     private LiveDeliveryStream(IMediatorExchange exchange, PickupLog log, MediatorRoute route, LiveRegistration registration, string mediatorDid, string localDid)
@@ -281,7 +280,6 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
-        _answered = true;
         var status = DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
         if (status.LiveDelivery == false && !_warnedNotLive)
         {
@@ -306,7 +304,6 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
-        _answered = true;
 
         var message = DeliveryReader.Open(answer, request.Id, spec);
         if (DeliveryReader.IsStatus(message))
@@ -372,14 +369,13 @@ internal sealed class LiveDeliveryStream
     /// <item><see cref="TimeoutException"/>: no answer in time; the next attempt may get one.</item>
     /// <item><see cref="TransportException"/>: the connection failed; the next attempt reconnects.</item>
     /// <item>
-    /// <see cref="InvalidOperationException"/>, once the mediator has answered this stream. The
-    /// channel refuses a request with it when <see cref="MediatorClientOptions.MaxPendingRequests"/>
-    /// of the container's requests are already waiting: transient, the others end within
-    /// <see cref="MediatorClientOptions.RequestTimeout"/>. No type tells that refusal from the send
-    /// path's own (no key curve in common with the mediator, a mediator reached through routing, no
-    /// transport router), which are configuration no retry fixes; those fail the stream's very first
-    /// request, before any answer, and are thrown then. <see cref="ObjectDisposedException"/> is an
-    /// <see cref="InvalidOperationException"/> too and is never retried: the container is gone.
+    /// The channel's refusal because <see cref="MediatorClientOptions.MaxPendingRequests"/> of the
+    /// container's requests are already waiting (<see cref="MediatorBusyException"/>, an
+    /// <see cref="InvalidOperationException"/> to callers): transient, the others end within
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. Every other
+    /// <see cref="InvalidOperationException"/> — the send path's configuration refusals (no key curve
+    /// in common with the mediator, a mediator reached through routing, no transport router) and
+    /// <see cref="ObjectDisposedException"/> (the container is gone) — is thrown at once.
     /// </item>
     /// <item>
     /// <see cref="OperationCanceledException"/> the caller did not cause: a transport giving up on
@@ -394,7 +390,7 @@ internal sealed class LiveDeliveryStream
         {
             TimeoutException or TransportException => true,
             ObjectDisposedException => false,
-            InvalidOperationException => _answered,
+            MediatorBusyException => true,
             OperationCanceledException => !ct.IsCancellationRequested,
             _ => false,
         };
@@ -511,7 +507,6 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
-        _answered = true;
         Acknowledged(ids.Length);
     }
 

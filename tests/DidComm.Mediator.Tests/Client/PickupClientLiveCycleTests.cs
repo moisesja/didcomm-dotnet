@@ -447,11 +447,11 @@ public sealed class PickupClientLiveCycleTests
     [Theory]
     [InlineData("too many requests waiting")]
     [InlineData("a cancellation the caller did not ask for")]
-    public async Task Once_the_mediator_has_answered_a_refusal_for_too_many_waiting_requests_or_a_cancellation_nobody_asked_for_is_retried(string kind)
+    public async Task A_refusal_for_too_many_waiting_requests_or_a_cancellation_nobody_asked_for_is_retried(string kind)
     {
         var (exchange, client) = Live();
         Exception error = kind == "too many requests waiting"
-            ? new InvalidOperationException("64 mediator requests are already waiting for an answer; the request was not sent.")
+            ? new MediatorBusyException("64 mediator requests are already waiting for an answer; the request was not sent.")
             : new OperationCanceledException();
         var drains = 0;
         exchange.On(MessagePickup.DeliveryRequestType, r => Interlocked.Increment(ref drains) switch
@@ -475,6 +475,23 @@ public sealed class PickupClientLiveCycleTests
         var next = stream.MoveNextAsync().AsTask();
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
         await StopAsync(stream, next, cts);
+    }
+
+    [Fact]
+    public async Task A_configuration_refusal_after_the_mediator_answered_is_not_retried()
+    {
+        // Only the channel's own busy refusal (MediatorBusyException) is transient; any other
+        // InvalidOperationException from the send path is configuration, answered or not.
+        var (exchange, client) = Live();
+        var refusal = new InvalidOperationException("No key curve in common.");
+        exchange.On(MessagePickup.DeliveryRequestType, _ => Task.FromException<InboundMessageSnapshot>(refusal));
+        await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
+
+        var thrown = (await FluentActions.Awaiting(() => PickupTest.Within(stream.MoveNextAsync())).Should().ThrowAsync<InvalidOperationException>()).Which;
+
+        thrown.Should().BeSameAs(refusal);
+        Types(exchange).Should().Equal(LiveOn, Drain, LiveOff);
+        exchange.Clock.ScheduledTimers.Should().Be(0, "no back-off was scheduled");
     }
 
     [Fact]

@@ -376,7 +376,9 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
                 GC.WaitForPendingFinalizers();
             }
 
-            seen.OfType<ObjectDisposedException>().Where(ex => ex.ObjectName == nameof(MediatorClientChannel))
+            // Only exceptions that were stored and never thrown (no stack trace) are this channel's
+            // leak; a thrown one that another test running in parallel left unawaited is not.
+            seen.OfType<ObjectDisposedException>().Where(ex => ex.ObjectName == nameof(MediatorClientChannel) && ex.StackTrace is null)
                 .Should().BeEmpty("the caller saw the disposal; nothing may be left for the finalizer to report");
         }
         finally
@@ -419,48 +421,12 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
 
     // ---- the request deadline's documented scope ---------------------------------------------
 
-    /// <summary>
-    /// Q1-2. <see cref="MediatorClientOptions.RequestTimeout"/> is documented as "How long one request
-    /// waits for the mediator's answer, the send included (and, for the first request of a call,
-    /// finding the mediator's endpoint)" (and plan §2: "route resolution counts toward the first
-    /// exchange"). The code gives the endpoint resolution a full <c>RequestTimeout</c> window of its
-    /// own (<c>MediatorClientChannel.ResolveRouteAsync</c>) and then starts a fresh window for the
-    /// request (<c>ExchangeCoreAsync</c>), so a call can wait up to twice the setting before its first
-    /// answer (three times with the Discover Features query). Here resolution takes 20 s and the
-    /// mediator another 20 s of a 30 s budget: the documented contract times the call out; the code
-    /// keeps waiting.
-    /// </summary>
-    [Fact]
-    public async Task Q1_2_Finding_the_endpoint_counts_toward_the_first_requests_RequestTimeout()
-    {
-        var resolving = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var resolverCalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var channel = Create(_w, _send, c => c.CoordinateMediationVersion = CoordinateMediationVersion.V3, time: _time,
-            resolveEndpoint: (_, _) =>
-            {
-                resolverCalled.TrySetResult();
-                return resolving.Task;
-            });
-        var mediation = new MediationClient(channel, logger: null);
-
-        var call = mediation.RequestMediationAsync(_w.Mediator.Did, _w.Local.Did);
-        await resolverCalled.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        _time.Advance(TimeSpan.FromSeconds(20));
-        resolving.SetResult(Wss);
-        await _send.FirstCall.WaitAsync(TimeSpan.FromSeconds(10));
-        await _time.WaitForScheduledTimersAsync(1, TimeSpan.FromSeconds(10));
-        _time.Advance(TimeSpan.FromSeconds(20));
-
-        try
-        {
-            call.IsCompleted.Should().BeTrue("40 s have passed of a 30 s RequestTimeout that includes finding the endpoint");
-            await FluentActions.Awaiting(() => call).Should().ThrowAsync<TimeoutException>();
-        }
-        finally
-        {
-            await channel.DisposeAsync();
-        }
-    }
+    // Q1-2 (retired by the orchestrator: doc fixed). The documented contract is now "each step —
+    // finding the endpoint, the version query, the request — has its own RequestTimeout"; the code
+    // always behaved that way. Pinned by MediatorClientTimeoutRaceTests
+    // (Finding_the_endpoint_and_the_request_each_get_a_whole_RequestTimeout,
+    // Running_out_while_finding_the_endpoint_names_no_request_and_sends_nothing) and
+    // MediationClientTimeoutTests.
 
     // ---- the dispatcher's no-handler level (R-3) ----------------------------------------------
 
