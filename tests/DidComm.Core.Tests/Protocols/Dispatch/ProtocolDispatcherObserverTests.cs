@@ -273,9 +273,7 @@ public sealed class ProtocolDispatcherObserverTests
 
     private sealed class NoOpCorrelator : IInboundCorrelator
     {
-        public void OnInbound(InboundMessageSnapshot received)
-        {
-        }
+        public bool OnInbound(InboundMessageSnapshot received) => false;
     }
 
     // ---------------------------------------------------------------------------------------

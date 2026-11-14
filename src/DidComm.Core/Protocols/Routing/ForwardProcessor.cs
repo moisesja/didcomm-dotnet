@@ -304,7 +304,15 @@ public sealed class ForwardProcessor
         }
     }
 
-    private static byte[] ExtractAttachmentBytes(Messages.Attachment attachment)
+    /// <summary>
+    /// The bytes a forward's attachment carries (<c>data.json</c> serialized, or relaxed
+    /// <c>data.base64</c>). Invalid or empty base64 is refused as <see cref="MalformedMessageException"/>,
+    /// an attachment with neither form as <see cref="ConsistencyException"/>. The one
+    /// attachment-decoding rule: the mediator uses it to relay, and the recipient-side client to open a
+    /// delivery a mediator re-wrapped for it (FR-ROUTE-06).
+    /// </summary>
+    /// <param name="attachment">The forward's single attachment.</param>
+    internal static byte[] ExtractAttachmentBytes(Messages.Attachment attachment)
     {
         if (attachment.Data.Json is JsonNode json)
             return Encoding.UTF8.GetBytes(json.ToJsonString());

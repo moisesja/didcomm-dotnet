@@ -22,5 +22,12 @@ internal interface IInboundCorrelator
 {
     /// <summary>Inspect an immutable inbound snapshot and complete any matching pending operation. Fast, non-blocking, no I/O.</summary>
     /// <param name="received">The immutable plaintext/trust snapshot created at the unpack boundary.</param>
-    void OnInbound(InboundMessageSnapshot received);
+    /// <returns>
+    /// <c>true</c> when this correlator claimed the message: it completed a pending request with it,
+    /// or handed it to a live stream waiting for it. <c>false</c> when the message was not for this
+    /// correlator (or was refused). The dispatcher uses the answer only to choose a log level: a
+    /// claimed message that no protocol handler is registered for is expected (it was the answer to
+    /// a request), so that line drops from Information to Debug. It never changes the dispatch.
+    /// </returns>
+    bool OnInbound(InboundMessageSnapshot received);
 }

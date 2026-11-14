@@ -61,7 +61,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     /// </summary>
     /// <param name="registry">Resolved handlers per FR-PROTO-03.</param>
     /// <param name="threads">Per-thread state store (FR-I18N-02, FR-PROTO-10).</param>
-    /// <param name="logger">Optional structured logger: Information lines for a consumed pure ACK (FR-THR-04 rule 3) and for a message no handler is registered for (its bounded id, never its type), and a rate-limited Warning for a peer's FR-THR-04 rule-2 violation (the first and every 1000th; Debug otherwise).</param>
+    /// <param name="logger">Optional structured logger: Information lines for a consumed pure ACK (FR-THR-04 rule 3) and for a message no handler is registered for (its bounded id, never its type; Debug instead when a built-in client claimed the message as the answer to its own request), and a rate-limited Warning for a peer's FR-THR-04 rule-2 violation (the first and every 1000th; Debug otherwise).</param>
     /// <param name="traceOptions">Optional Trace 2.0 options (FR-PROTO-11). Registered via <c>DidCommBuilder.EnableTracing(...)</c>; when supplied, every inbound message is checked against <see cref="TraceObserver.ShouldReport"/> and an authorised trace-report intent is logged at <c>Information</c>. HTTP POST integration is deferred.</param>
     public ProtocolDispatcher(
         ProtocolHandlerRegistry registry,
@@ -236,12 +236,13 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         // throw before a genuine authenticated response reaches its waiter. The hook only validates
         // fixed headers and transfers the snapshot into a TCS; typed body parsing happens on the
         // requester's continuation, off this receive path.
-        if (snapshot is not null)
-            NotifyCorrelators(snapshot);
+        // 'claimed' only lowers the level of the no-handler line below: a response a correlator
+        // completed a pending request with is expected to have no handler on a client-only host.
+        var claimed = snapshot is not null && NotifyCorrelators(snapshot);
 
         try
         {
-            var outcome = await DispatchCoreAsync(received, client, options, acknowledged, session, ct).ConfigureAwait(false);
+            var outcome = await DispatchCoreAsync(received, client, options, acknowledged, session, claimed, ct).ConfigureAwait(false);
             activity?.SetTag(DidCommDiagnostics.DispatchResultTag, outcome.Result.ToString());
             return outcome;
         }
@@ -281,13 +282,16 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         }
     }
 
-    private void NotifyCorrelators(InboundMessageSnapshot received)
+    // Every correlator sees the message (no short-circuit on the first claim); the answer is whether
+    // any of them claimed it. A correlator that throws has not claimed it.
+    private bool NotifyCorrelators(InboundMessageSnapshot received)
     {
+        var claimed = false;
         foreach (var correlator in _correlators)
         {
             try
             {
-                correlator.OnInbound(received);
+                claimed |= correlator.OnInbound(received);
             }
             catch (Exception ex)
             {
@@ -297,6 +301,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
                     correlator.GetType().FullName, LogValues.Id(received.Id));
             }
         }
+        return claimed;
     }
 
     private void SafeLogWarning(Exception exception, string message, params object?[] args)
@@ -318,6 +323,7 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         DidCommOptions options,
         Task acknowledged,
         IReturnRouteSession? session,
+        bool claimed,
         CancellationToken ct)
     {
         // FR-PROTO-11: when Trace 2.0 is opted in via EnableTracing, exercise the decision logic
@@ -367,7 +373,11 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         {
             // The type is not written: it is the sender's text (a valid type URI can carry line breaks
             // and terminal escapes in its protocol name). It is on the handle span's message-type tag.
-            _logger?.LogInformation(
+            // Debug when a correlator claimed the message: on a host that only runs a client (the
+            // mediator client, the Discover Features initiator) every answer to its own requests lands
+            // here, and one Information line per answer would be noise this library caused.
+            _logger?.Log(
+                claimed ? LogLevel.Debug : LogLevel.Information,
                 "No protocol handler registered for the type of inbound message {MessageId} (FR-PROTO-03).",
                 LogValues.Id(received.Message.Id));
             return new DispatchOutcome(DispatchResult.NoHandler, Reply: null, Handler: null);

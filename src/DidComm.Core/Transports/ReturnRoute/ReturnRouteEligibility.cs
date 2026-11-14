@@ -1,5 +1,6 @@
 using DidComm.Consistency;
 using DidComm.Facade;
+using DidComm.Protocols;
 
 namespace DidComm.Transports.ReturnRoute;
 
@@ -106,4 +107,17 @@ internal static class ReturnRouteEligibility
         reason = ReturnRouteIneligibility.None;
         return true;
     }
+
+    /// <summary>
+    /// The same rule as <see cref="TryGetPeer(UnpackResult, out string, out string, out ReturnRouteIneligibility)"/>,
+    /// over the immutable inbound snapshot the dispatcher hands its correlators (the mediator client
+    /// uses it to tell a mediator's answer from other traffic). Both overloads share one core over the
+    /// same fields, so they cannot drift (L-041).
+    /// </summary>
+    /// <param name="inbound">The snapshot of the inbound message.</param>
+    /// <param name="peerDid">The DID subject of the authenticated sender.</param>
+    /// <param name="localDid">The DID subject of the decrypting key.</param>
+    /// <param name="reason">Why the inbound is ineligible; <see cref="ReturnRouteIneligibility.None"/> on success.</param>
+    public static bool TryGetPeer(InboundMessageSnapshot inbound, out string peerDid, out string localDid, out ReturnRouteIneligibility reason)
+        => throw new NotImplementedException("#96 engineer A: snapshot overload over a shared private core, with a parity test against the UnpackResult overload.");
 }

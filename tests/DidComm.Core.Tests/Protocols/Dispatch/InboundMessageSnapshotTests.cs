@@ -120,4 +120,50 @@ public sealed class InboundMessageSnapshotTests
         InboundMessageSnapshot.CreateFallback(synthetic).RecipientAddressing.Should().Be(
             RecipientAddressing.NotEvaluated);
     }
+
+    [Fact]
+    public void RegisterVerified_CarriesPthidAndIsVerified()
+    {
+        // #96: a problem report about a request is threaded by 'pthid' (FR-PICK-07), and the
+        // mediator client completes a request only from a snapshot unpack registered.
+        var message = new Message { Id = "m1", Type = "https://didcomm.org/report-problem/2.0/problem-report", Thid = "t1", Pthid = "request-1" };
+        Register(message, PlaintextJson);
+
+        InboundMessageSnapshot.TryGetFor(message, out var snapshot).Should().BeTrue();
+        snapshot.Pthid.Should().Be("request-1");
+        snapshot.Thid.Should().Be("t1");
+        snapshot.Verified.Should().BeTrue();
+    }
+
+    [Fact]
+    public void RegisterVerified_WithoutPthid_LeavesItNull()
+    {
+        RegisteredSnapshot().Pthid.Should().BeNull();
+    }
+
+    [Fact]
+    public void CreateFallback_CarriesPthidButIsNeverVerified()
+    {
+        // A hand-built result's trust fields are the caller's claims, however strong they look.
+        var synthetic = new UnpackResult(
+            Message: new Message { Id = "m1", Type = "https://didcomm.org/x/1.0/m", Pthid = "request-2" },
+            Stack: Array.Empty<DidComm.Jose.EnvelopeKind>(),
+            Encrypted: true,
+            Authenticated: true,
+            NonRepudiation: false,
+            AnonymousSender: false,
+            ContentEncryption: null,
+            KeyWrap: null,
+            SignatureAlgorithm: null,
+            SignerKid: null,
+            SenderKid: "did:example:mediator#key-1",
+            RecipientKid: "did:example:bob#key-1",
+            AllRecipientKids: Array.Empty<string>(),
+            FromPrior: null);
+
+        var snapshot = InboundMessageSnapshot.CreateFallback(synthetic);
+
+        snapshot.Pthid.Should().Be("request-2");
+        snapshot.Verified.Should().BeFalse();
+    }
 }
