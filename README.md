@@ -313,12 +313,12 @@ Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-0
 (`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
 packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
 eight shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
-intersects real execution hits with the public surface. Of the 985 public members, **629 are
-proven to execute**; 26 have no executable code at all (enums, const holders, two static readonly
-fields) and are itemized in the test output; the other 330 are the Phase 7 mediator surface, on
+intersects real execution hits with the public surface. Of the 1021 public members, **628 are
+proven to execute**; 27 have no executable code at all (enums, const holders, two static readonly
+fields) and are itemized in the test output; the other 366 are the Phase 7 mediator surface, on
 the execution gate's allowlist with a `TODO(#97)` marker until sample 11 and cookbook sections
 CC–FF demonstrate them. A cheaper metadata-reference gate runs alongside it as a first check and
-carries 12 justified entries for members no sample references directly, plus 385 `TODO(#97)`
+carries 12 justified entries for members no sample references directly, plus 421 `TODO(#97)`
 entries for the same Phase 7 surface.
 
 ## Specifications
