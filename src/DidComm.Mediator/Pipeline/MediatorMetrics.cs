@@ -22,8 +22,9 @@ internal static class PushOutcomes
     internal const string Pushed = "Pushed";
 
     /// <summary>
-    /// A push did not deliver and its record stays queued (tried again at the grant's next wake-up,
-    /// and always available to pickup): the live session did not take it or it was too large for the
+    /// A push did not deliver and its record stays queued (always available to pickup; a live push
+    /// that was given back is tried again at the grant's next wake-up, a direct push that was sent is
+    /// not tried again): the live session did not take it or it was too large for the
     /// session even alone (then passed over), the endpoint did not answer with a 2xx, a transport,
     /// store or session fault, or the deadline. At the deadline the worker stops waiting without
     /// knowing the result: the push runs on until its call ends and may still deliver (a direct
