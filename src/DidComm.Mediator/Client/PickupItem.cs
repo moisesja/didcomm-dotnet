@@ -18,6 +18,11 @@ namespace DidComm.Mediator.Client;
 /// <see cref="UnpackResult.Authenticated"/> before you trust it.
 /// </para>
 /// <para>
+/// <strong>No replay check.</strong> The message has not been through the replay check that messages
+/// arriving on the transport get (FR-RR-08). If you hand it on to your own protocol handlers, keep
+/// track of the message ids you have handled.
+/// </para>
+/// <para>
 /// <strong>One message to several of your DIDs.</strong> When a sender encrypted one message to
 /// several DIDs whose keys this agent holds, the mediator queues a copy for each. Fetched or
 /// received with the same <c>from</c>, you get one item for the message, not one per DID: the other
@@ -62,8 +67,15 @@ public sealed class PickupItem
 
     /// <summary>
     /// Why the message did not unpack (for example it was not encrypted for any DID whose keys this
-    /// agent holds, or it was for another DID than the one you asked for). Set exactly when
-    /// <see cref="Unpacked"/> is <c>null</c>; such an item was not acknowledged.
+    /// agent holds, it did not open within <see cref="MediatorClientOptions.UnpackTimeout"/>, or a
+    /// <c>recipientDid</c> filter's DID did not open it). Set exactly when <see cref="Unpacked"/> is
+    /// <c>null</c>; such an item was not acknowledged.
     /// </summary>
+    /// <remarks>
+    /// When the unpack failed, this is the unpack's own exception, and its message can quote DIDs and
+    /// key ids (the texts of this library's unpack do). Do not write it verbatim to a log or a store
+    /// that must not hold identifiers: log its type instead. The exceptions this client creates
+    /// itself (a timeout, a filter mismatch) name at most its own request id.
+    /// </remarks>
     public Exception? Error { get; }
 }

@@ -27,7 +27,7 @@ internal sealed class DeliveredOutcome
     /// <summary>The <see cref="DuplicateFilter"/> key of the message (<see cref="DuplicateFilter.KeyOf"/>), before the filter scopes it to the mailbox it was fetched from; meaningful only on success.</summary>
     internal UInt128 DedupeKey { get; }
 
-    /// <summary>Why the message did not unpack (the unpack exception, or a <see cref="TimeoutException"/> for the deadline and the abandoned-unpack bound); <c>null</c> on success.</summary>
+    /// <summary>Why the message did not unpack (the unpack exception, or a <see cref="TimeoutException"/> for the delivery's budget and the abandoned-unpack bound); <c>null</c> on success.</summary>
     internal Exception? Error { get; }
 
     /// <summary>Whether the message unpacked.</summary>

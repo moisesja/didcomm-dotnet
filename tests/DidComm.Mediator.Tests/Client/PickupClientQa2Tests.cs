@@ -438,7 +438,7 @@ public sealed class PickupClientQa2Tests
 
         public Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => inner.UnpackDeliveredAsync(payload, ct);
 
-        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct)
-            => inner.UnpackDeliveredBatchAsync(payloads, ct);
+        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+            => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);
     }
 }

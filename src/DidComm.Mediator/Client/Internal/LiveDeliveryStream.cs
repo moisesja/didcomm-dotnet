@@ -32,13 +32,18 @@ namespace DidComm.Mediator.Client.Internal;
 /// as <see cref="SecretNotFoundException"/>) ends it at once.
 /// </para>
 /// <para>
-/// <strong>Items.</strong> Pushes are read from the mailbox (at most 10 messages per delivery) and
-/// unpacked one at a time on the consumer's own <c>MoveNextAsync</c>, never on a receive loop. A
-/// message this stream already holds (buffered, or taken and not yet acknowledged) is skipped; one
-/// the duplicate filter remembers is acknowledged and not yielded; a failure is yielded, never
-/// acknowledged, and reported again when it comes back. A drain answered with a delivery in which
-/// no message has a usable id ends the stream (nothing in it could be acknowledged, so the drain
-/// would ask again for ever); such a push is ignored.
+/// <strong>Items.</strong> Pushes are read from the mailbox (at most 10 messages per delivery). Each
+/// delivery the stream takes — a drain round's answer or a push — is opened up front, all of its
+/// messages under one budget (<see cref="MediatorClientOptions.UnpackTimeout"/>, owner decision 2-A),
+/// on the consumer's own <c>MoveNextAsync</c> and never on a receive loop; then its results are
+/// yielded in delivery order. The consumer's time with an item is therefore never counted against
+/// the budget, and a message the budget runs out on is a failure item (a
+/// <see cref="TimeoutException"/> naming the drain's request id). A message this stream already
+/// holds (opened and not yet yielded, or taken and not yet acknowledged) is skipped and not opened
+/// again; one the duplicate filter remembers is acknowledged and not yielded; a failure is yielded,
+/// never acknowledged, and reported again when it comes back. A drain answered with a delivery in
+/// which no message has a usable id ends the stream (nothing in it could be acknowledged, so the
+/// drain would ask again for ever); such a push is ignored.
 /// </para>
 /// <para>
 /// <strong>Acknowledgement (R-2).</strong> A yielded message is taken — added to the duplicate filter
@@ -51,7 +56,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// the mailbox is closed. Buffered or drained messages never yielded are never acknowledged.
 /// </para>
 /// <para>
-/// <strong>Bounds.</strong> At most 10 messages ready (one delivery), the mailbox's 8 pushes, and at
+/// <strong>Bounds.</strong> At most 10 opened messages ready (one delivery), the mailbox's 8 pushes, and at
 /// most 100 taken waiting for an acknowledgement (10 unless acknowledgements fail); the set of held
 /// ids is bounded by their sum. Not thread-safe: one consumer, as <c>IAsyncEnumerator</c> requires.
 /// </para>
@@ -101,7 +106,7 @@ internal sealed class LiveDeliveryStream
     private readonly string _localDid;
     private readonly TimeProvider _time;
 
-    private readonly Queue<DeliveryEntry> _ready = new();
+    private readonly Queue<Opened> _ready = new();
     private readonly HashSet<string> _held = new(StringComparer.Ordinal);
     private readonly List<(string Id, long At)> _taken = new();
 
@@ -202,15 +207,15 @@ internal sealed class LiveDeliveryStream
                 await CycleAsync(ct).ConfigureAwait(false);
                 continue;
             }
-            if (_ready.TryDequeue(out var entry))
+            if (_ready.TryDequeue(out var opened))
             {
-                if (await OpenAsync(entry, ct).ConfigureAwait(false) is { } item)
+                if (Yield(opened) is { } item)
                     return item;
                 continue;
             }
             if (_registration.Pushes.TryRead(out var push))
             {
-                LoadPush(push);
+                await LoadPushAsync(push, ct).ConfigureAwait(false);
                 continue;
             }
             if (_draining && Now >= _notBefore)
@@ -323,7 +328,7 @@ internal sealed class LiveDeliveryStream
         // Nothing in it can be acknowledged, so the next round would get it again: not retried.
         if (contents.Entries.Count == 0)
             throw DeliveryReader.NoUsableIds(request.Id, spec);
-        Load(contents, request.Id);
+        await LoadAsync(contents, request.Id, ct).ConfigureAwait(false);
         if (++_drainRounds >= MaxDrainRounds)
             DrainDone();
     }
@@ -397,7 +402,7 @@ internal sealed class LiveDeliveryStream
 
     // ---- items ------------------------------------------------------------------------------
 
-    private void LoadPush(InboundMessageSnapshot push)
+    private async Task LoadPushAsync(InboundMessageSnapshot push, CancellationToken ct)
     {
         Message message;
         try
@@ -414,10 +419,13 @@ internal sealed class LiveDeliveryStream
             _log.PushIgnored("not a delivery");
             return;
         }
-        Load(DeliveryReader.ReadEntries(message.Attachments, MaxPerDelivery), requestId: null);
+        await LoadAsync(DeliveryReader.ReadEntries(message.Attachments, MaxPerDelivery), requestId: null, ct).ConfigureAwait(false);
     }
 
-    private void Load(DeliveryContents contents, string? requestId)
+    // Take one delivery: skip the ids this stream already holds, open the rest up front under one
+    // budget (the consumer's time with an item never counts against it), and queue the results in
+    // delivery order. Failures are logged once per delivery, with the drain's request id.
+    private async Task LoadAsync(DeliveryContents contents, string? requestId, CancellationToken ct)
     {
         if (contents.Excess > 0)
             _log.BeyondLimit(requestId, contents.Excess);
@@ -425,34 +433,55 @@ internal sealed class LiveDeliveryStream
             _log.UnusableIds(requestId, contents.Unusable);
         if (contents.RepeatedIds > 0)
             _log.RepeatedIds(requestId, contents.RepeatedIds);
+        var taken = new List<DeliveryEntry>(contents.Entries.Count);
         var skipped = 0;
         foreach (var entry in contents.Entries)
         {
             if (_held.Add(entry.Id))
-                _ready.Enqueue(entry);
+                taken.Add(entry);
             else
                 skipped++;
         }
         if (skipped > 0)
             _log.HeldSkipped(skipped);
+        if (taken.Count == 0)
+            return;
+
+        var payloads = new List<ReadOnlyMemory<byte>>(taken.Count);
+        foreach (var entry in taken)
+        {
+            if (entry.Payload is { } payload)
+                payloads.Add(payload);
+        }
+        var outcomes = payloads.Count == 0
+            ? Array.Empty<DeliveredOutcome>()
+            : await _exchange.UnpackDeliveredBatchAsync(payloads, requestId, ct).ConfigureAwait(false);
+        if (outcomes.Count != payloads.Count)
+            throw new InvalidOperationException("The unpacker returned another number of outcomes than it was given messages.");
+
+        var failures = new List<Exception>();
+        var next = 0;
+        foreach (var entry in taken)
+        {
+            var outcome = entry.Payload is null ? null : outcomes[next++];
+            if (outcome is null || outcome.Unpacked is null)
+                failures.Add(outcome?.Error ?? entry.Error!);
+            _ready.Enqueue(new Opened(entry, outcome));
+        }
+        _log.UnpackFailures(requestId, failures);
     }
 
-    // Unpack one message: a failure is yielded and let go (it comes back and is reported again); a
-    // repeat of a message already returned is taken (acknowledged) and not yielded.
-    private async Task<PickupItem?> OpenAsync(DeliveryEntry entry, CancellationToken ct)
+    // The next opened message: a failure is yielded and let go (it comes back and is reported
+    // again); a repeat of a message already returned from this mailbox is taken (acknowledged) and
+    // not yielded. The duplicate filter is asked now, not when the delivery was opened, so a copy
+    // that follows a message taken from the same delivery is recognised.
+    private PickupItem? Yield(Opened opened)
     {
-        if (entry.Payload is not { } payload)
+        var entry = opened.Entry;
+        if (opened.Outcome is not { } outcome || outcome.Unpacked is not { } unpacked)
         {
             _held.Remove(entry.Id);
-            _log.UnpackFailures(requestId: null, new[] { entry.Error! });
-            return new PickupItem(entry.Id, unpacked: null, entry.Error);
-        }
-        var outcome = await _exchange.UnpackDeliveredAsync(payload, ct).ConfigureAwait(false);
-        if (outcome.Unpacked is not { } unpacked)
-        {
-            _held.Remove(entry.Id);
-            _log.UnpackFailures(requestId: null, new[] { outcome.Error! });
-            return new PickupItem(entry.Id, unpacked: null, outcome.Error);
+            return new PickupItem(entry.Id, unpacked: null, opened.Outcome?.Error ?? entry.Error);
         }
         if (_exchange.Duplicates.Contains(_localDid, outcome.DedupeKey))
         {
@@ -464,6 +493,9 @@ internal sealed class LiveDeliveryStream
         _yieldedKey = outcome.DedupeKey;
         return item;
     }
+
+    /// <summary>A message of a delivery the stream took, opened (or not decodable: <see cref="Outcome"/> <c>null</c>, the entry's error).</summary>
+    private readonly record struct Opened(DeliveryEntry Entry, DeliveredOutcome? Outcome);
 
     /// <summary>The consumer asked for the item after <paramref name="item"/>: a message it was handed is taken.</summary>
     private void Take(PickupItem item)

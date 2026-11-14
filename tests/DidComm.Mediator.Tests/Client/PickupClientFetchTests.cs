@@ -595,6 +595,74 @@ public sealed class PickupClientFetchTests
         mailbox.Remaining.Should().Equal(new[] { "f1", "f2", "f3" }, "failures are never acknowledged (FR-PICK-11)");
     }
 
+    // ---- the delivery budget (owner decision 2-A) ----------------------------------------------
+
+    [Fact]
+    public async Task A_fetch_opens_its_delivery_as_one_batch_naming_its_request()
+    {
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1"), ("q2", "ok:m2")));
+
+        await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10);
+
+        exchange.Batches.Should().Equal(new[] { ((string?)exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id, 2) });
+    }
+
+    [Fact]
+    public async Task Messages_the_budget_runs_out_on_are_failures_naming_the_request_and_stay_queued_while_the_rest_is_returned_and_acknowledged()
+    {
+        var budget = new MediatorClientOptions().UnpackTimeout;
+        var exchange = new FakePickupExchange().UseBudget(budget).On(MessagePickup.DeliveryRequestType, r => Delivery(r,
+            ("q1", "ok:m1"), ("q2", "stall:m2"), ("q3", "ok:m3"), ("q4", "stall:m4"), ("q5", "ok:m5"), ("q6", "ok:m6")));
+        exchange.Unpacker = Stalling;
+
+        var fetch = PickupTest.Client(exchange).FetchAsync(M, L, limit: 10);
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        fetch.IsCompleted.Should().BeFalse();
+        exchange.Clock.Advance(budget);
+        var batch = await PickupTest.Within(fetch);
+
+        var requestId = exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id;
+        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", true), ("q2", false), ("q3", true), ("q4", false), ("q5", true), ("q6", true));
+        foreach (var failed in new[] { batch.Items[1], batch.Items[3] })
+            failed.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(requestId).And.Contain("UnpackTimeout").And.NotContain("m2").And.NotContain("m4");
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3", "q5", "q6" }, "the messages the budget ran out on are left with the mediator");
+    }
+
+    [Fact]
+    public async Task With_the_default_budget_a_loop_that_fetches_until_drained_gets_past_a_full_batch_of_stalling_senders_within_the_lease()
+    {
+        // ADV2-1 at the fetch level, with the defaults: ten messages whose senders never resolve fill
+        // the first batch; the fetch gives up on all of them within one budget, well inside the
+        // mediator's lease, so the next fetch passes over them and reaches what is behind them.
+        var stalls = Enumerable.Range(0, 10).Select(i => ($"s{i}", $"stall:{i}"));
+        var mailbox = new FakeMailbox(new ManualTimeProvider(), stalls.Append(("g1", "ok:good")).ToArray());
+        var exchange = mailbox.Attach(new FakePickupExchange(time: mailbox.Time).UseBudget(new MediatorClientOptions().UnpackTimeout));
+        exchange.Unpacker = Stalling;
+        var client = PickupTest.Client(exchange);
+        var started = mailbox.Time.GetUtcNow();
+
+        var first = client.FetchAsync(M, L, limit: 10);
+        await mailbox.Time.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        mailbox.Time.Advance(exchange.Options.UnpackTimeout);
+        (await PickupTest.Within(first)).Items.Should().HaveCount(10).And.OnlyContain(i => i.Error is TimeoutException);
+
+        var second = await client.FetchAsync(M, L, limit: 10);
+        var third = await client.FetchAsync(M, L, limit: 10);
+
+        (mailbox.Time.GetUtcNow() - started).Should().BeLessThan(FakeMailbox.Lease, "all of it happened while the stalled messages were still leased");
+        second.Items.Should().ContainSingle().Which.Unpacked!.Message.Id.Should().Be("good");
+        third.Drained.Should().BeTrue();
+        mailbox.Remaining.Should().BeEquivalentTo(stalls.Select(s => s.Item1), "failures are never acknowledged");
+    }
+
+    // An unpack step whose "stall:" messages wait until cancelled (a sender DID that never resolves).
+    private static async Task<DeliveredOutcome> Stalling(string text, CancellationToken ct)
+    {
+        if (text.StartsWith("stall:", StringComparison.Ordinal))
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        return DefaultOutcome(text);
+    }
+
     [Fact]
     public async Task A_caller_polling_slower_than_the_lease_with_more_failures_than_its_limit_sees_only_failures_until_it_discards_them()
     {

@@ -60,17 +60,129 @@ public sealed class PickupClientLiveStreamTests
         exchange.Registrations.Should().BeEmpty("the mailbox is closed at the end");
     }
 
+    // Owner decision 2-A: a delivery the stream takes is opened whole, under one budget, on the
+    // consumer's own MoveNextAsync, before its first item is yielded; then its items are yielded in
+    // order without opening anything more.
     [Fact]
-    public async Task Messages_are_unpacked_one_at_a_time_on_the_consumers_own_MoveNextAsync()
+    public async Task A_delivery_is_opened_whole_on_the_consumers_own_MoveNextAsync_before_its_first_item_is_yielded()
     {
         var (exchange, client) = Live();
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1"), ("q2", "ok:m2"), ("q3", "ok:m3")), r => Status(r));
         await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
 
-        await Next(stream);
-        exchange.Unpacked.Should().Equal("ok:m1");
-        await Next(stream);
-        exchange.Unpacked.Should().Equal("ok:m1", "ok:m2");
+        (await Next(stream)).Id.Should().Be("q1");
+        exchange.Unpacked.Should().Equal("ok:m1", "ok:m2", "ok:m3");
+        exchange.Batches.Should().ContainSingle().Which.Should().Be((exchange.SentOf(MessagePickup.DeliveryRequestType)[0].Request.Id, 3),
+            "one batch for the drain round's delivery, naming its request");
+        (await Next(stream)).Id.Should().Be("q2");
+        (await Next(stream)).Id.Should().Be("q3");
+        exchange.Unpacked.Should().Equal(new[] { "ok:m1", "ok:m2", "ok:m3" }, "nothing is opened again while the delivery's items are yielded");
+    }
+
+    [Fact]
+    public async Task A_push_is_opened_as_a_delivery_of_its_own_that_names_no_request()
+    {
+        var (exchange, client) = Live();
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var first = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        exchange.Registration!.TryPush(Push(("p1", "ok:p1"), ("p2", "ok:p2"))).Should().BeTrue();
+
+        (await PickupTest.Within(first)).Should().BeTrue();
+        stream.Current.Id.Should().Be("p1");
+        exchange.Batches.Should().Equal(new[] { ((string?)null, 2) });
+        var second = stream.MoveNextAsync().AsTask();
+        (await PickupTest.Within(second)).Should().BeTrue();
+        stream.Current.Id.Should().Be("p2");
+        var third = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await StopAsync(stream, third, cts);
+    }
+
+    // ---- the delivery budget (owner decision 2-A) ----------------------------------------------
+
+    [Fact]
+    public async Task A_message_the_budget_runs_out_on_is_a_failed_item_naming_the_drain_and_the_rest_of_its_delivery_is_yielded_and_acknowledged()
+    {
+        var budget = TimeSpan.FromSeconds(20);
+        var (exchange, client) = Live(o => o.UnpackTimeout = budget);
+        exchange.UseBudget(budget);
+        exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1"), ("q2", "stall:m2"), ("q3", "ok:m3")), r => Status(r));
+        exchange.Unpacker = async (text, ct) =>
+        {
+            if (text.StartsWith("stall:", StringComparison.Ordinal))
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return DefaultOutcome(text);
+        };
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+
+        var first = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout); // the delivery's budget
+        first.IsCompleted.Should().BeFalse("nothing of the delivery is yielded while it is being opened");
+        exchange.Clock.Advance(budget);
+        (await PickupTest.Within(first)).Should().BeTrue();
+
+        var drainId = exchange.SentOf(MessagePickup.DeliveryRequestType)[0].Request.Id;
+        stream.Current.Id.Should().Be("q1");
+        (await Next(stream)).Should().Match<PickupItem>(i => i.Id == "q2" && i.Error is TimeoutException);
+        stream.Current.Error!.Message.Should().Contain(drainId).And.Contain("UnpackTimeout").And.NotContain("m2");
+        (await Next(stream)).Id.Should().Be("q3");
+        var waiting = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3" }, "the rest of the delivery is acknowledged as usual; q2 failed and is never acknowledged");
+        await StopAsync(stream, waiting, cts);
+    }
+
+    [Fact]
+    public async Task Cancelled_while_a_later_delivery_is_being_opened_leaves_it_unacknowledged_and_unremembered_and_acknowledges_what_was_taken()
+    {
+        // The QA-2 property (a cancellation during an unpack), under up-front opening: q1 comes in one
+        // delivery, q2 in the next; the consumer cancels while q2's delivery is being opened.
+        var (exchange, client) = Live();
+        exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")), r => Delivery(r, ("q2", "ok:m2")), r => Status(r));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        exchange.Unpacker = async (text, ct) =>
+        {
+            if (text == "ok:m2")
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            return DefaultOutcome(text);
+        };
+        using var cts = new CancellationTokenSource();
+        await using var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        (await Next(stream)).Id.Should().Be("q1");
+
+        var second = stream.MoveNextAsync().AsTask();
+        await entered.Task.WaitAsync(PickupTest.Timeout);
+        await cts.CancelAsync();
+
+        await FluentActions.Awaiting(() => PickupTest.Within(second)).Should().ThrowAsync<OperationCanceledException>();
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q1" }, "q1 was taken when q2 was asked for; q2 never reached the consumer");
+        exchange.Duplicates.Contains(L, DefaultOutcome("ok:m2").DedupeKey).Should().BeFalse();
+        exchange.Registrations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_consumers_time_with_an_item_never_counts_against_the_budget()
+    {
+        var budget = TimeSpan.FromSeconds(20);
+        var (exchange, client) = Live(o => o.UnpackTimeout = budget);
+        exchange.UseBudget(budget);
+        exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1"), ("q2", "ok:m2")), r => Status(r));
+        await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
+
+        (await Next(stream)).Id.Should().Be("q1");
+        // The consumer works on q1 for longer than the budget (but less than the poll interval).
+        exchange.Clock.Advance(budget + budget);
+
+        var second = await Next(stream);
+        second.Id.Should().Be("q2");
+        second.Error.Should().BeNull("q2 was opened with the delivery, before q1 was handed over");
     }
 
     // ---- acknowledgement (R-2) ------------------------------------------------------------------
@@ -201,7 +313,7 @@ public sealed class PickupClientLiveStreamTests
         await PickupTest.Within(stream.DisposeAsync());
 
         exchange.SentOf(MessagePickup.MessagesReceivedType).Should().BeEmpty("q1 was the last item yielded; q2, q3, p1 and p2 were never yielded");
-        exchange.Unpacked.Should().Equal(new[] { "ok:m1" }, "messages are unpacked only when they are about to be yielded");
+        exchange.Unpacked.Should().Equal(new[] { "ok:m1", "ok:m2", "ok:m3" }, "the drained delivery was opened whole; the pushes the stream never took were never opened");
         exchange.Duplicates.Count.Should().Be(0);
     }
 

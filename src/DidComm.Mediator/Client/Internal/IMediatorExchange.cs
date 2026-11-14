@@ -73,13 +73,15 @@ internal interface IMediatorExchange
     /// <exception cref="ObjectDisposedException">The channel was disposed.</exception>
     LiveRegistration RegisterLiveStream(string mediatorDid, string localDid);
 
-    /// <summary>Unpack one delivered message under the unpack bounds (design D-19; the live stream's sequential path).</summary>
-    /// <param name="payload">The delivered bytes.</param>
-    /// <param name="ct">The caller's cancellation; it alone makes the call throw — a bad message is a failure outcome.</param>
-    Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct);
-
-    /// <summary>Unpack the messages of one delivery, at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> at a time (design D-19; the fetch path). Outcomes are in the order of <paramref name="payloads"/>.</summary>
+    /// <summary>
+    /// Open the messages of one delivery — a fetch's answer, a live drain round's answer, or a live
+    /// push — under one budget (<see cref="MediatorClientOptions.UnpackTimeout"/>, owner decision 2-A),
+    /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> at a time (design D-19). A
+    /// message the budget runs out on is a <see cref="TimeoutException"/> failure naming
+    /// <paramref name="requestId"/>. Outcomes are in the order of <paramref name="payloads"/>.
+    /// </summary>
     /// <param name="payloads">The delivered bytes, in delivery order.</param>
+    /// <param name="requestId">Our id of the request the delivery answers; <c>null</c> for a live push.</param>
     /// <param name="ct">The caller's cancellation; it alone makes the call throw — a bad message is a failure outcome.</param>
-    Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct);
+    Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct);
 }

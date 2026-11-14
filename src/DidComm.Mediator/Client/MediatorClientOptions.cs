@@ -5,7 +5,7 @@ namespace DidComm.Mediator.Client;
 /// <see cref="PickupClient"/>: how long a request waits for the mediator's answer, how many
 /// requests may wait at once, which Coordinate Mediation version to speak, how many delivered
 /// messages to remember so a repeat is not returned twice, how often a live stream polls, and how
-/// long one delivered message may take to unpack (FR-MED-09, FR-PICK-11).
+/// long opening one delivery may take (FR-MED-09, FR-PICK-11).
 /// </summary>
 /// <remarks>
 /// The settings are copied and checked once, when the clients are built (by
@@ -70,12 +70,46 @@ public sealed class MediatorClientOptions
     public TimeSpan LivePollInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
-    /// How long unpacking one delivered message may take, every re-wrap layer included (looking up
-    /// its sender's DID is usually the slow part). Default 30 seconds; greater than zero and at most
-    /// 10 minutes. A message that takes longer is reported as a failed item and left with the
-    /// mediator.
+    /// How long opening one delivery may take, all of its messages together and every re-wrap layer
+    /// included (looking up a sender's DID is usually the slow part): each
+    /// <see cref="PickupClient.FetchAsync"/>, and each delivery a live stream handles (a drain round
+    /// or a push). Default 20 seconds; greater than zero and at most 10 minutes.
     /// </summary>
-    public TimeSpan UnpackTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    /// <remarks>
+    /// <para>
+    /// The messages of a delivery are opened four at a time. Those still being opened, or still
+    /// waiting their turn, when the time is up are reported as failed items with a
+    /// <see cref="TimeoutException"/> (naming the request, never a message) and are not
+    /// acknowledged; the rest of the delivery is returned and acknowledged as usual. A live stream
+    /// opens a delivery before it yields any of its items, so the time you spend on an item never
+    /// counts against this.
+    /// </para>
+    /// <para>
+    /// <strong>Keep it well below the mediator's lease.</strong> A mediator sets aside what it
+    /// delivered for a while (this library's mediator for <c>MessagePickupOptions.LeaseTimeout</c>,
+    /// 60 seconds by default) and delivers it again only after that. While a message the client gave
+    /// up on is still set aside, the next fetch passes over it and gets what is queued behind it, so
+    /// a loop that fetches until drained gets past slow messages. The default, a third of this
+    /// library's default lease, leaves room for the fetch's request and acknowledgement. For a
+    /// third-party mediator, keep it below that mediator's lease. If the lease runs out first, the
+    /// mediator hands the messages still being opened to the next fetch as well (a message can then
+    /// reach you twice), though this library's mediator still accepts the acknowledgement of the
+    /// ones that were opened.
+    /// </para>
+    /// <para>
+    /// <strong>A message that keeps failing.</strong> Discard it with
+    /// <see cref="PickupClient.AckAsync"/>. A mediator that does not set fetched messages aside
+    /// delivers it first on every fetch, and this limit alone does not get you past it.
+    /// </para>
+    /// <para>
+    /// <strong>A DID resolver that ignores cancellation.</strong> A message whose opening ran out of
+    /// time keeps one of the container's 16 slots for abandoned unpacks until its sender's DID
+    /// lookup really ends. A resolver that ignores cancellation can hold all 16 (one slow sender is
+    /// enough), and until those lookups end every delivered message fails at once, for every DID
+    /// and tenant of the container. Use a resolver that honours its cancellation token.
+    /// </para>
+    /// </remarks>
+    public TimeSpan UnpackTimeout { get; set; } = TimeSpan.FromSeconds(20);
 
     /// <summary>Check the settings. <c>AddMediatorClient()</c> and the clients' constructors call it.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A setting is outside its range; the exception names the setting and the range.</exception>

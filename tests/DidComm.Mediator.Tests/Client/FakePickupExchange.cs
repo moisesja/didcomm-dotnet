@@ -71,6 +71,7 @@ internal sealed class FakePickupExchange : IMediatorExchange
     private readonly object _gate = new();
     private readonly List<SentRequest> _sent = new();
     private readonly List<string> _unpacked = new();
+    private readonly List<(string? RequestId, int Count)> _batches = new();
     private readonly ConcurrentDictionary<string, Func<SentRequest, Task<InboundMessageSnapshot>>> _handlers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, LiveRegistration> _live = new(StringComparer.Ordinal);
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -107,6 +108,26 @@ internal sealed class FakePickupExchange : IMediatorExchange
     /// <summary>The unpack step; the default reads the payload texts described on the class.</summary>
     public Func<string, CancellationToken, Task<DeliveredOutcome>> Unpacker { get; set; } = static (text, _) => Task.FromResult(DefaultOutcome(text));
 
+    /// <summary>
+    /// When set (<see cref="UseBudget"/>), batches go through the real <see cref="DeliveredMessageUnpacker"/>
+    /// on <see cref="Clock"/>, its unpack step being <see cref="Unpacker"/>: one budget per delivery,
+    /// four at a time. Otherwise a batch is opened one message after the other, without a budget.
+    /// </summary>
+    public DeliveredMessageUnpacker? Budgeted { get; private set; }
+
+    /// <summary>Open every batch under a real per-delivery budget of <paramref name="budget"/> on <see cref="Clock"/>.</summary>
+    public FakePickupExchange UseBudget(TimeSpan budget)
+    {
+        Budgeted = new DeliveredMessageUnpacker(async (text, ct) =>
+        {
+            lock (_gate)
+                _unpacked.Add(text);
+            var outcome = await Unpacker(text, ct);
+            return outcome.Unpacked is { } result ? new DeliveredUnpack(result, text, outcome.LayersOpened) : throw outcome.Error!;
+        }, budget, Clock);
+        return this;
+    }
+
     /// <summary>Runs inside <see cref="UnpackDeliveredBatchAsync"/> after the outcomes are known (to land a cancellation exactly there).</summary>
     public Action? AfterBatchUnpack { get; set; }
 
@@ -133,6 +154,16 @@ internal sealed class FakePickupExchange : IMediatorExchange
         {
             lock (_gate)
                 return _unpacked.ToArray();
+        }
+    }
+
+    /// <summary>Every batch handed to <see cref="UnpackDeliveredBatchAsync"/>: the request id it named (<c>null</c> for a push) and its size, in order.</summary>
+    public IReadOnlyList<(string? RequestId, int Count)> Batches
+    {
+        get
+        {
+            lock (_gate)
+                return _batches.ToArray();
         }
     }
 
@@ -217,6 +248,7 @@ internal sealed class FakePickupExchange : IMediatorExchange
         return registration;
     }
 
+    /// <summary>One message through <see cref="Unpacker"/>, recorded in <see cref="Unpacked"/> (the batch's step; not part of the exchange contract).</summary>
     public async Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -226,8 +258,16 @@ internal sealed class FakePickupExchange : IMediatorExchange
         return await Unpacker(text, ct);
     }
 
-    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
     {
+        lock (_gate)
+            _batches.Add((requestId, payloads.Count));
+        if (Budgeted is { } budgeted)
+        {
+            var opened = await budgeted.UnpackAllAsync(payloads, requestId, ct);
+            AfterBatchUnpack?.Invoke();
+            return opened;
+        }
         var outcomes = new List<DeliveredOutcome>(payloads.Count);
         foreach (var payload in payloads)
             outcomes.Add(await UnpackDeliveredAsync(payload, ct));

@@ -39,8 +39,17 @@ namespace DidComm.Mediator.Client;
 /// <para>
 /// <strong>Messages that do not unpack</strong> are returned as items with
 /// <see cref="PickupItem.Error"/> set and are not acknowledged: the mediator keeps them and delivers
-/// them again after its lease (60 seconds at this library's mediator). Discard one you have given
-/// up on with <see cref="AckAsync"/>.
+/// them again after its lease (60 seconds at this library's mediator). The clients never discard
+/// one on their own: discard one you have given up on with <see cref="AckAsync"/>. That includes a
+/// message that did not open in time: all the messages of one delivery share one
+/// <see cref="MediatorClientOptions.UnpackTimeout"/>. The error is the unpack's own exception, and
+/// its text can quote DIDs and key ids: log its type, not its message, wherever identifiers must not
+/// go.
+/// </para>
+/// <para>
+/// <strong>No replay check.</strong> Messages these clients return have not been through the
+/// replay check that messages arriving on the transport get (FR-RR-08). If you hand them on to your
+/// own protocol handlers, track the message ids you have handled.
 /// </para>
 /// <para>
 /// <strong>Several of your DIDs.</strong> A <c>recipientDid</c> filter accepts only a message that
@@ -189,6 +198,31 @@ public sealed class PickupClient
     /// <see cref="AckAsync"/>.
     /// </para>
     /// <para>
+    /// <strong>Time to open the messages.</strong> All the messages of one fetch share one budget,
+    /// <see cref="MediatorClientOptions.UnpackTimeout"/> (20 seconds by default), and are opened four
+    /// at a time. Those still being opened, or still waiting their turn, when it runs out are
+    /// returned as failed items with a <see cref="TimeoutException"/> that names the request (never a
+    /// message), and are not acknowledged; the others are returned and acknowledged as usual. So a
+    /// fetch ends within the budget even when some senders' DIDs resolve slowly or never, and while
+    /// the mediator still sets those messages aside the next fetch reaches what is behind them. A
+    /// message waiting its turn can fail because of slow ones in front of it; with a
+    /// <paramref name="limit"/> of 4 or less every message of a fetch is opened at once.
+    /// </para>
+    /// <para>
+    /// <strong>A message that keeps failing.</strong> Discard it with <see cref="AckAsync"/> once you
+    /// have given up on it: the client never does. A mediator that does not set fetched messages
+    /// aside delivers it first on every fetch, and then neither the budget nor a loop that fetches
+    /// until drained gets you past it; only discarding it does.
+    /// </para>
+    /// <para>
+    /// <strong>A DID resolver that ignores cancellation.</strong> A message whose budget ran out keeps
+    /// one of the container's 16 slots for abandoned unpacks until its sender's DID lookup really
+    /// ends. With a resolver that ignores its cancellation token, one slow sender can hold all 16,
+    /// and until those lookups end every delivered message fails at once ("unpack capacity
+    /// exhausted"), for every DID and tenant of the container. Use a resolver that honours
+    /// cancellation.
+    /// </para>
+    /// <para>
     /// <strong>Repeats.</strong> A message the clients already returned from this mailbox (this
     /// <paramref name="from"/>) is acknowledged again and left out while they remember it
     /// (<see cref="MediatorClientOptions.DedupeCapacity"/>). With
@@ -272,7 +306,7 @@ public sealed class PickupClient
         }
         var outcomes = payloads.Count == 0
             ? Array.Empty<DeliveredOutcome>()
-            : await Exchange.UnpackDeliveredBatchAsync(payloads, ct).ConfigureAwait(false);
+            : await Exchange.UnpackDeliveredBatchAsync(payloads, request.Id, ct).ConfigureAwait(false);
         if (outcomes.Count != payloads.Count)
             throw new InvalidOperationException("The unpacker returned another number of outcomes than it was given messages.");
 
@@ -442,8 +476,26 @@ public sealed class PickupClient
     /// are never acknowledged; they come back after the connection closes or the mediator's lease
     /// ends. On the way out the stream sends the acknowledgements still waiting and turns live
     /// delivery off, all within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever your
-    /// token says. Enumerate with <c>await foreach</c> (or dispose the enumerator): that is what
-    /// closes the stream and frees its place.
+    /// token says: a mediator that withholds its answers can hold up the enumerator's
+    /// <c>DisposeAsync</c> (the end of an <c>await foreach</c>) for up to one
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. Enumerate with <c>await foreach</c> (or
+    /// dispose the enumerator): that is what closes the stream and frees its place.
+    /// </para>
+    /// <para>
+    /// <strong>Opening.</strong> Each delivery the stream takes — the answer to a drain round, or a
+    /// push — is opened before any of its items is yielded, all of its messages within one
+    /// <see cref="MediatorClientOptions.UnpackTimeout"/> and four at a time, on your own
+    /// <c>MoveNextAsync</c>. The time you spend on an item never counts against it. Messages it runs
+    /// out on are yielded as failed items (<see cref="TimeoutException"/>) and not acknowledged; the
+    /// rest are yielded and acknowledged as usual.
+    /// </para>
+    /// <para>
+    /// <strong>A message that keeps failing</strong> is yielded again each time the mediator delivers
+    /// it again. Discard it with <c>AckAsync(mediatorDid, from, new[] { item.Id })</c> once you have
+    /// given up on it: the stream never does. A mediator that does not set delivered messages aside
+    /// delivers it on every drain, and the budget does not get the stream past it. The error's text
+    /// can quote DIDs and key ids (see <see cref="PickupItem.Error"/>), and the messages are not
+    /// replay-checked (see the class remarks).
     /// </para>
     /// <para>
     /// <strong>Polling is part of the design.</strong> A message whose sender delayed it is never

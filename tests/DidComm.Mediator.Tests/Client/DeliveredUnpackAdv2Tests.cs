@@ -68,45 +68,52 @@ public sealed class DeliveredUnpackAdv2Tests
     }
 
     /// <summary>
-    /// ADV2-1 companion (passes: pins the arithmetic the finding rests on). Ten stalling messages
-    /// need exactly three deadlines of clock time with four unpacks at a time.
+    /// ADV2-1 companion, updated by fix round 2 to the new arithmetic (owner decision 2-A: one
+    /// budget per delivery). Ten stalling messages, four opened at a time, all fail within one
+    /// budget of clock time: the four being opened and the six still waiting their turn.
     /// </summary>
     [Fact]
-    public async Task ADV2_1_ten_stalling_messages_take_three_unpack_timeouts()
+    public async Task ADV2_1_ten_stalling_messages_all_fail_within_one_delivery_budget()
     {
         var time = new ManualTimeProvider();
         var unpacker = new DeliveredMessageUnpacker(StallUntilCancelled, UnpackTimeout, time);
         var payloads = Enumerable.Range(0, 10).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes("stall-" + i)).ToArray();
 
         var batch = unpacker.UnpackAllAsync(payloads, default);
-        var waves = 0;
+        var budgets = 0;
         while (!batch.IsCompleted)
         {
             await time.WaitForScheduledTimersAsync(1, RealTime);
             time.Advance(UnpackTimeout);
-            waves++;
+            budgets++;
             await Task.Yield();
-            if (waves > 10)
+            if (budgets > 10)
                 break;
         }
         var outcomes = await batch.WaitAsync(RealTime);
 
-        waves.Should().Be(3);
+        budgets.Should().Be(1);
         outcomes.Should().HaveCount(10).And.OnlyContain(o => !o.Succeeded && o.Error is TimeoutException);
-        unpacker.Abandoned.Should().Be(0, "an unpack that honours cancellation gives its slot back");
+        outcomes.Take(DeliveredMessageUnpacker.FetchConcurrency).Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"));
+        outcomes.Skip(DeliveredMessageUnpacker.FetchConcurrency).Should().OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
+        // The budget lets the four unpacks go at once; each gives its slot back when it has noticed
+        // its cancellation (bounded wait: a missing give-back fails the test instead of parking it).
+        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, RealTime).Should().BeTrue("an unpack that honours cancellation gives its slot back");
     }
 
     /// <summary>
-    /// ADV2-2 (fails: defect, Low). Property broken — L-061 ("isolate per peer before bounding"):
-    /// the abandoned-unpack bound is one counter per container, not per sender. Attack: a sender
-    /// whose DID resolution ignores cancellation (a caching resolver whose shared lookup does not
-    /// take the caller's token) sends 16 messages; each is abandoned at its deadline and keeps its
-    /// slot. A message from another sender, which would unpack at once, then fails as "unpack
-    /// capacity exhausted" — for every local DID and tenant of the container, until the stalled
-    /// lookups end. The test asserts that the other sender's message still unpacks.
+    /// ADV2-2 (Low), a documented residual by owner decision on the L-063 stop (fix round 2
+    /// converted the defect test into this pin). The abandoned-unpack bound is one counter per
+    /// container, not per sender (L-061). A sender whose DID resolution ignores cancellation (a
+    /// caching resolver whose shared lookup does not take the caller's token) sends 16 messages;
+    /// each is abandoned at its budget and keeps its slot. A message from another sender, which
+    /// would unpack at once, then fails fast as "unpack capacity exhausted" without starting — for
+    /// every local DID and tenant of the container — until the stalled lookups end; then it unpacks
+    /// again. <c>MediatorClientOptions.UnpackTimeout</c> and <c>PickupClient.FetchAsync</c> document
+    /// it.
     /// </summary>
     [Fact]
-    public async Task ADV2_2_one_senders_stalled_lookups_refuse_every_other_senders_message()
+    public async Task ADV2_2_residual_a_resolver_that_ignores_cancellation_fills_the_shared_slots_and_every_senders_message_fails_fast_until_its_lookups_end()
     {
         var time = new ManualTimeProvider();
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -128,9 +135,17 @@ public sealed class DeliveredUnpackAdv2Tests
             }
             unpacker.Abandoned.Should().Be(DeliveredMessageUnpacker.MaxAbandoned);
 
-            var other = await unpacker.UnpackAsync(Encoding.UTF8.GetBytes("alice-1"), default).WaitAsync(RealTime);
+            var refused = await unpacker.UnpackAsync(Encoding.UTF8.GetBytes("alice-1"), default).WaitAsync(RealTime);
 
-            other.Succeeded.Should().BeTrue("another sender's message does not depend on the stalled sender's lookups");
+            refused.Succeeded.Should().BeFalse("the residual: the slots are shared, so another sender's message is refused while they are full");
+            refused.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted");
+            unpacker.Abandoned.Should().Be(DeliveredMessageUnpacker.MaxAbandoned, "the refused message never started");
+
+            // The stalled lookups end: their slots come back and the other sender's message unpacks.
+            never.TrySetCanceled();
+            SpinWait.SpinUntil(() => unpacker.Abandoned == 0, RealTime).Should().BeTrue("each slot is given back when its lookup ends");
+            var after = await unpacker.UnpackAsync(Encoding.UTF8.GetBytes("alice-1"), default).WaitAsync(RealTime);
+            after.Succeeded.Should().BeTrue();
         }
         finally
         {

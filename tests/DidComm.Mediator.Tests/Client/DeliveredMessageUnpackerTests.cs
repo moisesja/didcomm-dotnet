@@ -15,7 +15,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// <see cref="DeliveredMessageUnpacker"/> (#96 design D-19, §4.9): every delivered message becomes
 /// exactly one outcome — a bad one is a failure, never an exception, and only the caller's
-/// cancellation throws; one deadline on the injected clock covers every layer; a batch runs at most
+/// cancellation throws; one budget on the injected clock covers every layer of every message of a
+/// delivery (owner decision 2-A), and decides the delivery when it runs out; a batch runs at most
 /// four at a time and keeps the input order; and abandoned unpacks are bounded (L-059), the
 /// seventeenth failing fast without starting. The success path is the real
 /// <see cref="DidCommClient.UnpackDeliveredAsync"/> over real envelopes, with the duplicate key the
@@ -151,7 +152,74 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
         var outcome = await running;
         fake.Tokens.Single().IsCancellationRequested.Should().BeTrue();
         outcome.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("UnpackTimeout");
-        unpacker.Abandoned.Should().Be(0, "the unpack honoured cancellation and ended");
+        // The budget lets the unpack go at once; the unpack gives its slot back when it has noticed
+        // its cancellation, which host code may do a little later.
+        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue("the unpack honoured cancellation and ended");
+    }
+
+    // ---- one budget per delivery (owner decision 2-A) ----
+
+    [Fact]
+    public async Task One_budget_covers_all_of_a_deliverys_messages_not_each_one()
+    {
+        // Eight messages, each taking 12 s: four at a time, the second four start at 12 s and would
+        // be done at 24 s. With one budget of 20 s for the delivery they fail; with a per-message
+        // deadline of 20 s they would all pass.
+        var fake = new GatedUnpack(honoursCancellation: true);
+        var unpacker = new DeliveredMessageUnpacker(fake.UnpackAsync, TimeSpan.FromSeconds(20), _time);
+        var payloads = Enumerable.Range(0, 8).Select(i => (ReadOnlyMemory<byte>)Utf8("message-" + i)).ToArray();
+
+        var batch = unpacker.UnpackAllAsync(payloads, "request-1", default);
+        await fake.Started(DeliveredMessageUnpacker.FetchConcurrency);
+        _time.Advance(TimeSpan.FromSeconds(12));
+        for (var i = 0; i < DeliveredMessageUnpacker.FetchConcurrency; i++)
+            fake.ReleaseOldest();
+        await fake.Started(8);
+        _time.Advance(TimeSpan.FromSeconds(8));
+
+        batch.IsCompleted.Should().BeTrue("the delivery is decided when its budget runs out, not when host code notices");
+        var outcomes = await batch;
+        outcomes.Take(4).Should().OnlyContain(o => o.Succeeded);
+        outcomes.Skip(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("while it was being opened"));
+        outcomes.Skip(4).Should().OnlyContain(o => o.Error!.Message.Contains("'request-1'"), "the failure names our request id");
+        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Messages_still_waiting_their_turn_when_the_budget_runs_out_fail_without_starting()
+    {
+        var fake = new GatedUnpack(honoursCancellation: false);
+        var unpacker = new DeliveredMessageUnpacker(fake.UnpackAsync, Timeout, _time);
+        var payloads = Enumerable.Range(0, 6).Select(i => (ReadOnlyMemory<byte>)Utf8("message-" + i)).ToArray();
+
+        var batch = unpacker.UnpackAllAsync(payloads, default);
+        await fake.Started(DeliveredMessageUnpacker.FetchConcurrency);
+        _time.Advance(Timeout);
+
+        batch.IsCompleted.Should().BeTrue("decided by the budget, though the four unpacks ignore their cancellation");
+        var outcomes = await batch;
+        outcomes.Take(4).Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"));
+        outcomes.Skip(4).Should().OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
+        outcomes.Should().OnlyContain(o => !o.Error!.Message.Contains("request"), "a delivery without a request id names none");
+        fake.Calls.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "the two waiting their turn never started");
+        unpacker.Abandoned.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "the four still running keep their slots");
+
+        // What the abandoned unpacks do afterwards changes nothing that was returned.
+        fake.Release();
+        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue();
+        outcomes.Should().OnlyContain(o => !o.Succeeded);
+    }
+
+    [Fact]
+    public async Task A_delivery_that_ends_before_its_budget_stops_its_timer()
+    {
+        var unpacker = Real();
+        var good = await _w.PackAsync(Note(_w.Alice.Did), from: _w.Alice.Did);
+
+        var outcomes = await unpacker.UnpackAllAsync(new ReadOnlyMemory<byte>[] { Utf8(good), Utf8(good) }, default);
+
+        outcomes.Should().OnlyContain(o => o.Succeeded);
+        _time.ScheduledTimers.Should().Be(0, "the budget's timer is disposed with the delivery");
     }
 
     [Fact]
@@ -348,6 +416,18 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
                 foreach (var parked in _parked)
                     parked.TrySetResult();
                 _parked.Clear();
+            }
+        }
+
+        public void ReleaseOldest()
+        {
+            lock (_gate)
+            {
+                if (_parked.Count == 0)
+                    return;
+                var oldest = _parked[0];
+                _parked.RemoveAt(0);
+                oldest.TrySetResult();
             }
         }
 
