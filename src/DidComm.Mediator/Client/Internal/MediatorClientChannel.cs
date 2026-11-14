@@ -29,6 +29,14 @@ namespace DidComm.Mediator.Client.Internal;
 /// correlator (<c>receivesInbound: false</c>): HTTP works, a WebSocket route is refused (D-4).
 /// </para>
 /// <para>
+/// <strong>Routes it cannot receive on (D-4).</strong> A route that is not HTTP is refused before
+/// anything is sent when no answer could reach this channel: no inbound consumer is registered, or
+/// the transport the facade would send through says that what the peer pushes back does not reach
+/// it (<see cref="DidCommClient.ReceivesPushesOn"/>: the WebSocket transport with
+/// <c>ReceiveInbound</c> off, or under STOMP). When the facade cannot tell (a router or transport of
+/// the host's own) the route is allowed.
+/// </para>
+/// <para>
 /// <strong>Matching (§4.2).</strong> An inbound is looked at only when its type is a mediator answer
 /// type (<see cref="MediatorAnswerTypes"/>). Then, before any pending request or live stream is
 /// looked up, it must be a verified snapshot (never a hand-built one) authcrypted by its
@@ -214,7 +222,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         var scheme = endpoint.Scheme;
         var isHttp = scheme is "http" or "https";
         var isWebSocket = scheme is "ws" or "wss";
-        if (!isHttp && !ReceivesInbound)
+        if (!isHttp && !CanReceiveOn(endpoint))
             throw new InvalidOperationException(CannotReceiveRefusal);
         if (requireWebSocket && !isWebSocket)
             throw new InvalidOperationException(LiveNeedsWebSocketRefusal);
@@ -569,6 +577,11 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     // The shutdown token; a disposed channel's is already cancelled.
     private CancellationToken ShutdownToken => _shutdown.Token;
+
+    // Whether an answer to a request sent to a route that is not HTTP can reach this channel (D-4):
+    // an inbound consumer is registered, and the transport the facade would send through does not
+    // say that what the peer pushes back is discarded (null, cannot tell: allowed).
+    private bool CanReceiveOn(Uri endpoint) => ReceivesInbound && Client.ReceivesPushesOn(endpoint) != false;
 
     private static bool IsAddressedTo(IReadOnlyList<string> to, string local)
     {
