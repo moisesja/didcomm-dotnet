@@ -112,7 +112,7 @@ public sealed class PickupClientWebSocketEndToEndTests
         // Asking for the next item takes it, and it is acknowledged.
         var next = stream.MoveNextAsync().AsTask();
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 0, "the delayed message was acknowledged");
-        observer.KindsFrom(bob.Did).Should().Contain("messages-received");
+        await MediatorTestServer.WaitUntilAsync(() => observer.KindsFrom(bob.Did).Contains("messages-received"), "the observer recorded the acknowledgement (it runs off the reply path)");
         await PickupE2E.StopAsync(stream, next, cts);
     }
 
