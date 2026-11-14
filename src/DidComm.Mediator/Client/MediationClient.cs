@@ -1,7 +1,9 @@
+using System.Runtime.CompilerServices;
 using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Mediator.Client.Internal;
 using DidComm.Mediator.Coordination;
+using DidComm.Mediator.Internal;
 using DidComm.Resolution;
 using Microsoft.Extensions.Logging;
 
@@ -114,7 +116,11 @@ public sealed class MediationClient
     /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry).</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public Task<MediationGrant?> RequestMediationAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer B: MediationClient.RequestMediationAsync (design §4.4, §4.5).");
+    {
+        RequireDids(mediatorDid, from);
+        RequireOverride(serviceEndpointOverride);
+        return RequestMediationCoreAsync(mediatorDid, from, serviceEndpointOverride, ct);
+    }
 
     /// <summary>
     /// Add or remove DIDs the mediator accepts messages for under your grant
@@ -135,7 +141,12 @@ public sealed class MediationClient
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public Task<IReadOnlyList<RecipientUpdateResult>> UpdateRecipientsAsync(string mediatorDid, string from, IReadOnlyList<RecipientUpdate> updates, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer B: MediationClient.UpdateRecipientsAsync (design §4.5).");
+    {
+        RequireDids(mediatorDid, from);
+        var sent = CopyUpdates(updates);
+        RequireOverride(serviceEndpointOverride);
+        return UpdateRecipientsCoreAsync(mediatorDid, from, sent, serviceEndpointOverride, ct);
+    }
 
     /// <summary>
     /// One page of the DIDs registered under your grant (<c>recipient-query</c>; <c>keylist-query</c>
@@ -155,7 +166,12 @@ public sealed class MediationClient
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public Task<RecipientQueryResult> QueryRecipientsAsync(string mediatorDid, string from, RecipientQueryPaging? paginate = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer B: MediationClient.QueryRecipientsAsync (design §4.5).");
+    {
+        RequireDids(mediatorDid, from);
+        RequirePaging(paginate);
+        RequireOverride(serviceEndpointOverride);
+        return QueryRecipientsCoreAsync(mediatorDid, from, paginate, serviceEndpointOverride, ct);
+    }
 
     /// <summary>
     /// Every DID registered under your grant, fetched 100 per page while you enumerate, until the
@@ -172,5 +188,143 @@ public sealed class MediationClient
     /// <exception cref="TimeoutException">While enumerating: a page did not arrive in time.</exception>
     /// <exception cref="MediationProtocolException">While enumerating: a problem report or an inconsistent page.</exception>
     public IAsyncEnumerable<string> QueryAllRecipientsAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer B: MediationClient.QueryAllRecipientsAsync (design §4.5, page walker).");
+    {
+        RequireDids(mediatorDid, from);
+        RequireOverride(serviceEndpointOverride);
+        return WalkRecipientsAsync(mediatorDid, from, serviceEndpointOverride, ct);
+    }
+
+    // ---- operations -----------------------------------------------------------------------
+
+    private async Task<MediationGrant?> RequestMediationCoreAsync(string mediatorDid, string from, Uri? serviceEndpointOverride, CancellationToken ct)
+    {
+        var (route, version) = await StartAsync(mediatorDid, from, serviceEndpointOverride, ct).ConfigureAwait(false);
+        var (request, spec) = CoordinateMediationWire.MediateRequest(version, from, mediatorDid);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        var grant = CoordinateMediationWire.ReadMediateAnswer(version, CoordinateMediationWire.Deserialize(answer, request.Id, spec), request.Id, from);
+        Log(LogLevel.Debug, "Mediation request {RequestId} answered: {Outcome}.", MediatorLog.LogId(request.Id), grant is null ? "denied" : "granted");
+        return grant;
+    }
+
+    private async Task<IReadOnlyList<RecipientUpdateResult>> UpdateRecipientsCoreAsync(string mediatorDid, string from, RecipientUpdate[] sent, Uri? serviceEndpointOverride, CancellationToken ct)
+    {
+        var (route, version) = await StartAsync(mediatorDid, from, serviceEndpointOverride, ct).ConfigureAwait(false);
+        var (request, spec) = CoordinateMediationWire.UpdateRequest(version, from, mediatorDid, sent);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        return CoordinateMediationWire.ReadUpdateAnswer(version, CoordinateMediationWire.Deserialize(answer, request.Id, spec), request.Id, sent);
+    }
+
+    private async Task<RecipientQueryResult> QueryRecipientsCoreAsync(string mediatorDid, string from, RecipientQueryPaging? paginate, Uri? serviceEndpointOverride, CancellationToken ct)
+    {
+        var (route, version) = await StartAsync(mediatorDid, from, serviceEndpointOverride, ct).ConfigureAwait(false);
+        return await QueryPageAsync(route, version, mediatorDid, from, paginate, ct).ConfigureAwait(false);
+    }
+
+    // One route and one version for the whole walk (one operation, design D-3); one page per
+    // request. Stops when the mediator reports no position or nothing remaining, on an empty page
+    // (no progress, whatever it reports), or after MaxWalkerPages.
+    private async IAsyncEnumerable<string> WalkRecipientsAsync(string mediatorDid, string from, Uri? serviceEndpointOverride, [EnumeratorCancellation] CancellationToken ct)
+    {
+        var (route, version) = await StartAsync(mediatorDid, from, serviceEndpointOverride, ct).ConfigureAwait(false);
+        var offset = 0;
+        for (var page = 0; page < CoordinateMediationWire.MaxWalkerPages; page++)
+        {
+            var result = await QueryPageAsync(route, version, mediatorDid, from, new RecipientQueryPaging(CoordinateMediationWire.WalkerPageSize, offset), ct).ConfigureAwait(false);
+            foreach (var did in result.Dids)
+                yield return did;
+            if (result.Pagination is not { Remaining: > 0 } || result.Dids.Count == 0)
+                yield break;
+            offset += result.Dids.Count;
+        }
+        Log(LogLevel.Warning, "Recipient listing stopped after {Pages} pages; the mediator reports more.", CoordinateMediationWire.MaxWalkerPages);
+    }
+
+    private async Task<RecipientQueryResult> QueryPageAsync(MediatorRoute route, CoordinateMediationVersion version, string mediatorDid, string from, RecipientQueryPaging? paginate, CancellationToken ct)
+    {
+        var (request, spec) = CoordinateMediationWire.QueryRequest(version, from, mediatorDid, paginate);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        return CoordinateMediationWire.ReadQueryAnswer(version, CoordinateMediationWire.Deserialize(answer, request.Id, spec), request.Id, paginate);
+    }
+
+    // The route of the operation, resolved once, then the version to speak on it (design §4.4):
+    // the pinned one; else the one negotiated with this mediator within the hour; else a Discover
+    // Features query on the same route. A query that is not answered fails the call (no guessing).
+    private async Task<(MediatorRoute Route, CoordinateMediationVersion Version)> StartAsync(string mediatorDid, string from, Uri? serviceEndpointOverride, CancellationToken ct)
+    {
+        var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
+        var pinned = Exchange.Options.CoordinateMediationVersion;
+        if (pinned != CoordinateMediationVersion.Negotiate)
+            return (route, pinned);
+        if (Exchange.Versions.TryGet(mediatorDid, out var remembered))
+            return (route, remembered);
+
+        var query = FeatureNegotiation.CreateQuery(from, mediatorDid);
+        var answer = await Exchange.ExchangeAsync(route, query, FeatureNegotiation.QuerySpec, mediatorDid, from, ct).ConfigureAwait(false);
+        var version = FeatureNegotiation.Choose(CoordinateMediationWire.Deserialize(answer, query.Id, FeatureNegotiation.QuerySpec), query.Id);
+        Exchange.Versions.Set(mediatorDid, version);
+        Log(LogLevel.Debug, "Coordinate Mediation version negotiated by query {RequestId}: {Version}.", MediatorLog.LogId(query.Id), version);
+        return (route, version);
+    }
+
+    // ---- arguments (checked before anything is resolved or sent; never quoted) ------------
+
+    private static void RequireDids(string mediatorDid, string from)
+    {
+        RequireBareDid(mediatorDid, nameof(mediatorDid));
+        RequireBareDid(from, nameof(from));
+    }
+
+    private static void RequireBareDid(string value, string parameter)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameter);
+        if (!BareDid.IsBareDid(value))
+            throw new ArgumentException("The value must be a bare DID (no path, query or fragment) of at most 2048 characters.", parameter);
+    }
+
+    private static void RequireOverride(Uri? serviceEndpointOverride)
+    {
+        if (serviceEndpointOverride is null)
+            return;
+        if (!serviceEndpointOverride.IsAbsoluteUri)
+            throw new ArgumentException("The endpoint override must be an absolute URI.", nameof(serviceEndpointOverride));
+        if (!string.IsNullOrEmpty(serviceEndpointOverride.UserInfo))
+            throw new ArgumentException("The endpoint override must not carry user information.", nameof(serviceEndpointOverride));
+    }
+
+    private static void RequirePaging(RecipientQueryPaging? paginate)
+    {
+        if (paginate is null)
+            return;
+        if (paginate.Limit is < 0 or > CoordinateMediationWire.MaxPageLimit)
+            throw new ArgumentOutOfRangeException(nameof(paginate), $"The page limit must be between 0 and {CoordinateMediationWire.MaxPageLimit}.");
+        if (paginate.Offset < 0)
+            throw new ArgumentOutOfRangeException(nameof(paginate), "The page offset must not be negative.");
+    }
+
+    // The bound first, from the count alone (L-055); then a private copy, so what is checked is what
+    // is sent and what the answer is compared with, whatever the caller does with its list.
+    private static RecipientUpdate[] CopyUpdates(IReadOnlyList<RecipientUpdate> updates)
+    {
+        ArgumentNullException.ThrowIfNull(updates);
+        var count = updates.Count;
+        if (count is < 1 or > CoordinateMediationWire.MaxUpdates)
+            throw new ArgumentException($"Between 1 and {CoordinateMediationWire.MaxUpdates} updates are sent in one request.", nameof(updates));
+
+        var copy = new RecipientUpdate[count];
+        for (var i = 0; i < count; i++)
+            copy[i] = updates[i];
+        for (var i = 0; i < copy.Length; i++)
+        {
+            var update = copy[i];
+            if (update is null)
+                throw new ArgumentException($"Update {i} is null.", nameof(updates));
+            if (!BareDid.IsBareDid(update.RecipientDid))
+                throw new ArgumentException($"Update {i} must name a bare DID (no path, query or fragment) of at most 2048 characters.", nameof(updates));
+            if (!Enum.IsDefined(update.Action))
+                throw new ArgumentException($"Update {i} has an action the protocol does not define.", nameof(updates));
+        }
+        return copy;
+    }
+
+    private void Log(LogLevel level, string message, params object?[] args) => MediatorLog.Write(Logger, level, message, args);
 }
