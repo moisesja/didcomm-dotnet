@@ -150,7 +150,11 @@ internal sealed class DeliveredMessageUnpacker
     {
         Interlocked.Increment(ref _abandoned);
         work.ContinueWith(
-            static (_, state) => Interlocked.Decrement(ref ((DeliveredMessageUnpacker)state!)._abandoned),
+            static (t, state) =>
+            {
+                _ = t.Exception; // observed: a fault after the deadline is not an unobserved exception
+                Interlocked.Decrement(ref ((DeliveredMessageUnpacker)state!)._abandoned);
+            },
             this,
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,

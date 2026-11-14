@@ -190,12 +190,16 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         else
         {
             using var deadline = new GuardedDeadline(Time, Options.RequestTimeout, ct, ShutdownToken);
+            Task<Uri>? resolving = null;
             try
             {
-                endpoint = await _resolveEndpoint(mediatorDid, deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
+                resolving = _resolveEndpoint(mediatorDid, deadline.Token);
+                endpoint = await resolving.WaitAsync(deadline.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (deadline.Token.IsCancellationRequested)
             {
+                if (resolving is not null)
+                    GuardedDeadline.ObserveAbandoned(resolving);
                 if (IsDisposed)
                     throw Disposed();
                 if (ct.IsCancellationRequested)
@@ -283,16 +287,20 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
         MediatorLog.Write(Logger, LogLevel.Debug, "Mediator request {RequestId} ({Request}) sending.", pending.Id, pending.Spec.Name);
         SendResult? sent = null;
+        var options = new SendOptions(new[] { mediatorDid }, From: localDid, ServiceEndpointOverride: route.Endpoint)
+        {
+            ReturnRoute = ReturnRouteMode.All,
+        };
+        Task<SendResult>? sending = null;
         try
         {
-            var options = new SendOptions(new[] { mediatorDid }, From: localDid, ServiceEndpointOverride: route.Endpoint)
-            {
-                ReturnRoute = ReturnRouteMode.All,
-            };
-            sent = await _send(request, options, deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
+            sending = _send(request, options, deadline.Token);
+            sent = await sending.WaitAsync(deadline.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (deadline.Token.IsCancellationRequested)
         {
+            if (sending is not null)
+                GuardedDeadline.ObserveAbandoned(sending);
             // An answer that already won (over a WebSocket, before the send returned) holds.
             if (!pending.IsCompleted)
                 throw Unanswered(pending, deadline, ct);

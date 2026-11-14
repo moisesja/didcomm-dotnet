@@ -51,6 +51,21 @@ internal sealed class GuardedDeadline : IDisposable
         }
     }
 
+    /// <summary>
+    /// Observe the outcome of work that was abandoned at its deadline and may still fail later
+    /// (host code that ignored cancellation), so its exception is never reported as unobserved.
+    /// </summary>
+    /// <param name="work">The abandoned work.</param>
+    internal static void ObserveAbandoned(Task work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        work.ContinueWith(
+            static t => _ = t.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {

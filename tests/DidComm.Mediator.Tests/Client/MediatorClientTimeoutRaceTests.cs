@@ -92,6 +92,44 @@ public sealed class MediatorClientTimeoutRaceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_send_abandoned_at_the_deadline_that_fails_later_is_observed_not_reported_unobserved()
+    {
+        var marker = "late-send-fault-" + Guid.NewGuid().ToString("N");
+        var unobserved = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        EventHandler<UnobservedTaskExceptionEventArgs> onUnobserved = (_, e) =>
+        {
+            if (e.Exception.ToString().Contains(marker, StringComparison.Ordinal))
+                unobserved.Enqueue(e.Exception);
+        };
+        TaskScheduler.UnobservedTaskException += onUnobserved;
+        try
+        {
+            await AbandonThenFaultTheSendAsync(marker);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            unobserved.Should().BeEmpty("the abandoned send's fault was observed");
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= onUnobserved;
+        }
+    }
+
+    // In its own method, so nothing of the abandoned send stays reachable from the test.
+    private async Task AbandonThenFaultTheSendAsync(string marker)
+    {
+        var send = new TaskCompletionSource<SendResult>();
+        _send.Respond = (_, _, _) => send.Task; // ignores its token
+        var (_, exchange) = Start();
+        _time.Advance(_channel.Options.RequestTimeout);
+        await FluentActions.Awaiting(() => exchange).Should().ThrowAsync<TimeoutException>();
+        _send.Respond = (_, o, _) => Task.FromResult(FakeSend.Accepted(o.ServiceEndpointOverride!));
+        send.SetException(new InvalidOperationException(marker));
+    }
+
+    [Fact]
     public async Task A_throwing_callback_registered_on_the_sends_token_cannot_escape_the_timer_or_fault_the_call()
     {
         CancellationToken handed = default;
