@@ -44,17 +44,4 @@ public sealed record TransportRequest(Uri Endpoint, ReadOnlyMemory<byte> Payload
     /// reads at most this many bytes and never buffers more.
     /// </summary>
     public int? MaxResponseBytes { get; init; }
-
-    /// <summary>
-    /// Whether the transport makes exactly one attempt: a single request to exactly
-    /// <see cref="Endpoint"/>, with no retry, no redirect followed (a redirect answer is a failure,
-    /// not a delivery) and outside any circuit breaker (the attempt is neither counted by one nor
-    /// refused by one). The outbound endpoint guard and the transport's connect-time checks still
-    /// apply. <c>false</c> (the default) keeps the transport's own resilience rules. Set through
-    /// <see cref="Facade.DidCommClient.SendPackedAsync(ReadOnlyMemory{byte}, Uri, string, Facade.SendPackedOptions, CancellationToken)"/>
-    /// (the mediator's direct push uses it). The HTTP transport honours it; a transport that does
-    /// not may ignore it (the WebSocket transport, for example, still reconnects on a dropped
-    /// socket).
-    /// </summary>
-    public bool SingleAttempt { get; init; }
 }

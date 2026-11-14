@@ -837,39 +837,10 @@ public sealed partial class DidCommClient
     /// <exception cref="ArgumentException"><paramref name="packed"/> is empty, <paramref name="endpoint"/> is not absolute, or <paramref name="mediaType"/> is not a DIDComm media type.</exception>
     /// <exception cref="InvalidOperationException">No <see cref="ITransportRouter"/> is wired in.</exception>
     /// <exception cref="TransportException"><paramref name="endpoint"/> is the queue URI or a blocked destination, or the transport failed.</exception>
-    public Task<TransportResult> SendPackedAsync(ReadOnlyMemory<byte> packed, Uri endpoint, string mediaType, CancellationToken ct = default)
-        => SendPackedAsync(packed, endpoint, mediaType, DefaultSendPackedOptions, ct);
-
-    private static readonly SendPackedOptions DefaultSendPackedOptions = new();
-
-    /// <summary>
-    /// Deliver bytes that are already packed to <paramref name="endpoint"/>, as
-    /// <see cref="SendPackedAsync(ReadOnlyMemory{byte}, Uri, string, CancellationToken)"/> does, with
-    /// <paramref name="options"/> deciding how the transport delivers them: with
-    /// <see cref="SendPackedOptions.SingleAttempt"/>, exactly one request to exactly
-    /// <paramref name="endpoint"/>, with no retry, no redirect followed and outside the transport's
-    /// circuit breaker (the mediator's direct push, FR-PICK-09).
-    /// </summary>
-    /// <remarks>
-    /// The SSRF guard (<see cref="DidCommOptions.OutboundEndpointPolicy"/>) is always applied to
-    /// <paramref name="endpoint"/>, and the queue URI <c>didcomm:transport/queue</c> is refused
-    /// (FR-RR-06), whatever the options.
-    /// </remarks>
-    /// <param name="packed">The packed envelope bytes (UTF-8 JSON); must not be empty.</param>
-    /// <param name="endpoint">The absolute transport URI to deliver to.</param>
-    /// <param name="mediaType">The envelope's DIDComm media type: one of <see cref="MediaTypes.Encrypted"/>, <see cref="MediaTypes.Signed"/> or <see cref="MediaTypes.Plaintext"/> (the <c>application/</c> prefix may be omitted, FR-MSG-06).</param>
-    /// <param name="options">How the transport delivers the bytes.</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>The transport's result.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="endpoint"/>, <paramref name="mediaType"/> or <paramref name="options"/> is <c>null</c>.</exception>
-    /// <exception cref="ArgumentException"><paramref name="packed"/> is empty, <paramref name="endpoint"/> is not absolute, or <paramref name="mediaType"/> is not a DIDComm media type.</exception>
-    /// <exception cref="InvalidOperationException">No <see cref="ITransportRouter"/> is wired in.</exception>
-    /// <exception cref="TransportException"><paramref name="endpoint"/> is the queue URI or a blocked destination, or the transport failed (with <see cref="SendPackedOptions.SingleAttempt"/>, also a redirect answer).</exception>
-    public async Task<TransportResult> SendPackedAsync(ReadOnlyMemory<byte> packed, Uri endpoint, string mediaType, SendPackedOptions options, CancellationToken ct = default)
+    public async Task<TransportResult> SendPackedAsync(ReadOnlyMemory<byte> packed, Uri endpoint, string mediaType, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(mediaType);
-        ArgumentNullException.ThrowIfNull(options);
         using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.SendActivity);
         try
         {
@@ -894,7 +865,7 @@ public sealed partial class DidCommClient
 
             // A bounded vocabulary (https/wss/...), never the endpoint host or path (NFR-04).
             activity?.SetTag(DidCommDiagnostics.TransportSchemeTag, endpoint.Scheme);
-            return await _transportRouter.SendAsync(new TransportRequest(endpoint, packed, canonicalType) { SingleAttempt = options.SingleAttempt }, ct).ConfigureAwait(false);
+            return await _transportRouter.SendAsync(new TransportRequest(endpoint, packed, canonicalType), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
