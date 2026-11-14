@@ -405,7 +405,8 @@ public sealed class PickupClient
     /// next <c>MoveNextAsync</c>, which <c>await foreach</c> makes when your loop body has finished
     /// with the item. Nothing is acknowledged before it was handed to you. Acknowledgements are sent
     /// in batches (when ten are waiting, when nothing else is ready, or after ten seconds) of at most
-    /// ten ids per message, the fewest a mediator may insist on, and the stream remembers the item
+    /// ten ids per message, which a mediator that accepts no more ids per message than it delivers
+    /// at once (ten by default at this library's mediator) still takes. The stream remembers the item
     /// (<see cref="MediatorClientOptions.DedupeCapacity"/>) so a repeat is acknowledged and not
     /// yielded again.
     /// </para>
@@ -428,8 +429,9 @@ public sealed class PickupClient
     /// in a future version (FR-PICK-08). The drain when the stream starts and the one every
     /// <see cref="MediatorClientOptions.LivePollInterval"/> are how such a message reaches you, and
     /// how the stream recovers from a dropped connection: they are the lasting design, not a
-    /// stopgap. Poll at least as often as the longest delay you expect your senders to ask for (the
-    /// mediator's cap is 1 hour by default), or such a message waits up to one interval longer.
+    /// stopgap. Poll at least as often as the longest delay you expect your senders to ask for (this
+    /// library's mediator caps a delay at 1 hour by default, <c>MediatorOptions.MaxForwardDelay</c>),
+    /// or such a message waits up to one interval longer.
     /// </para>
     /// <para>
     /// <strong>Starting and failing.</strong> The arguments are checked when you call this method.
