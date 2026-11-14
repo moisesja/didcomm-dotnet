@@ -1162,3 +1162,20 @@ Format per entry:
 - **How to apply:** For every type that crosses from a budgeted stage to an unbudgeted one, list its
   fields and their bounds; test with maximal wire values and assert on retained size, not on what
   the logs show. See [[L-055]] and [[L-059]].
+
+## L-063 — When an optional feature draws a new defect on every pass, put descoping in front of the owner.
+
+- **Lesson:** A fix that every independent pass reopens is a signal about the design, not about
+  the last patch. After a second fix-and-break cycle on the same optional component, list its
+  findings side by side and offer the owner the option of deferring it to its own issue, with the
+  findings as that issue's design input. Do this before the next patch, while the rest of the PR
+  holds green.
+- **Why:** In #95 direct push (D6 step 3, off by default) drew findings in QA, both red-team
+  passes, review round 1, ADV-5 and ADV-6. Each fix moved the defect: per-message jobs, then a
+  retry at the next wake, then an in-memory cursor, then a cursor that an LRU could evict. Live push
+  and the queue came through the same passes clean. The owner deferred direct push to #110 after
+  a sixth pass. A seventh fix (a store-kept attempt mark) was already in progress and was dropped.
+- **How to apply:** Keep a per-component tally of the defects each pass confirms. When a component
+  gets a second post-fix break-it defect, write the side-by-side list into the hand-back with a
+  "defer to follow-up?" option before patching again. Keep public surface that only the deferrable
+  part uses easy to remove, so the removal is one clean change. See [[L-037]], [[L-038]] and [[L-058]].

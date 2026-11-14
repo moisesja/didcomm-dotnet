@@ -173,3 +173,10 @@ The dispatcher drew findings in round 1, in ADV-4 and now here (L-037/L-038). Bo
 **Stopped, not merged:** engineer B's round-9 spike — `a116828` and `2cf730f` on the local `eng-b-95` branch, a direct-attempt mark kept by the store on each record in place of the cursor. Its findings went into #110: the mark operation needs the caller's `now` (the store reads no clock); the in-memory store's implementation is a public member too; with the order "endpoint check → mark → send", a revoke-and-purge that lands before the mark sends nothing.
 
 Earlier direct-push lines in this plan stay as they are (history); the ones that read as if it shipped carry "(direct push removed from #95: see the scope-change section)".
+
+**Verification after the removal (orch-95 `778cf2c`):**
+- `dotnet build DidComm.sln -c Release /warnaserror` is clean.
+- `dotnet test -c Release`: Core 2 448, Mediator 3 475, Interop 1 256; 0 failed, 0 skipped. The DX gates pass 16/16 after allowlist commit `9a8d40d` (coverage 398 → 390, execution 331 → 324).
+- `dotnet pack` produces 8 packages.
+- Live legs: python 63/63; jvm 60/60 (+3 declared n/a). The "via a running dotnet mediator (pickup)" cell passes in both.
+- By owner decision, no further internal break-it pass this round. Lesson L-063.
