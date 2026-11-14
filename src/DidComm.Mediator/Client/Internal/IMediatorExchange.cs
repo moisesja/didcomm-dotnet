@@ -82,6 +82,8 @@ internal interface IMediatorExchange
     /// </summary>
     /// <param name="payloads">The delivered bytes, in delivery order.</param>
     /// <param name="requestId">Our id of the request the delivery answers; <c>null</c> for a live push.</param>
-    /// <param name="ct">The caller's cancellation; it alone makes the call throw — a bad message is a failure outcome.</param>
+    /// <param name="ct">The caller's cancellation; it and the channel's disposal alone make the call throw — a bad message is a failure outcome.</param>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
+    /// <exception cref="ObjectDisposedException">The channel was disposed, before or while the delivery was being opened (ADV3-7: the disposal cancels the host code opening it).</exception>
     Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct);
 }

@@ -267,7 +267,7 @@ public sealed class MediatorClientChannelAdv3Tests : IAsyncLifetime
     }
 
     /// <summary>
-    /// ADV3-7 (fails: defect, Low). Property broken — <see cref="MediatorClientChannel.Dispose"/>:
+    /// ADV3-7 (defect, Low; fixed in fix round 3: the delivery budget is linked to the channel's shutdown). Property broken — <see cref="MediatorClientChannel.Dispose"/>:
     /// "Stop: pending requests fail with <see cref="ObjectDisposedException"/> and live streams end";
     /// <see cref="PickupClient.FetchAsync"/>: "<see cref="ObjectDisposedException"/>: The container
     /// was disposed"; <see cref="GuardedDeadline"/>: the token handed to host code is cancelled by

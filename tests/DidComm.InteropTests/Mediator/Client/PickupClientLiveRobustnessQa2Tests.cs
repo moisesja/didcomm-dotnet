@@ -428,11 +428,14 @@ public sealed class PickupClientLiveRobustnessQa2Tests
             // mediator's pushes done): then move both clocks past the lease and the poll.
             while (!next.IsCompleted)
             {
-                await MediatorTestServer.WaitUntilAsync(() => next.IsCompleted || (harness.Channel.PendingCount == 0 && Volatile.Read(ref unpacking) == 0 && Mailbox(harness.Channel) == 0 && time.ScheduledTimers >= 1), "an item, or an idle stream");
+                // (The unpacks run on the thread pool since fix round 3, ADV3-4: a delivery whose
+                // unpacks are queued is being opened though the counting step has not started, so
+                // the unpacker's own count of deliveries being opened is checked too.)
+                await MediatorTestServer.WaitUntilAsync(() => next.IsCompleted || (harness.Channel.PendingCount == 0 && Volatile.Read(ref unpacking) == 0 && harness.Channel.Unpacker.Opening == 0 && Mailbox(harness.Channel) == 0 && time.ScheduledTimers >= 1), "an item, or an idle stream");
                 if (next.IsCompleted)
                     break;
                 await mediator.PushesIdleAsync();
-                if (next.IsCompleted || Mailbox(harness.Channel) > 0 || Volatile.Read(ref unpacking) > 0 || harness.Channel.PendingCount > 0)
+                if (next.IsCompleted || Mailbox(harness.Channel) > 0 || Volatile.Read(ref unpacking) > 0 || harness.Channel.Unpacker.Opening > 0 || harness.Channel.PendingCount > 0)
                     continue;
                 rounds++;
                 if (rounds >= 20)

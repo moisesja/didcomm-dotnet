@@ -152,7 +152,8 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         Logger = loggerFactory?.CreateLogger<MediatorClientChannel>();
         Duplicates = new DuplicateFilter(Options.DedupeCapacity);
         Versions = new NegotiatedVersionCache(time);
-        Unpacker = new DeliveredMessageUnpacker(unpack ?? client.UnpackDeliveredAsync, Options.UnpackTimeout, time);
+        // The shutdown reaches deliveries being opened (ADV3-7).
+        Unpacker = new DeliveredMessageUnpacker(unpack ?? client.UnpackDeliveredAsync, Options.UnpackTimeout, time, _shutdown.Token);
         _send = send ?? client.SendAsync;
         _resolveEndpoint = resolveEndpoint ?? client.ResolveDirectEndpointAsync;
     }
@@ -166,7 +167,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     /// <summary>The channel's logger (category <c>DidComm.Mediator.Client.Internal.MediatorClientChannel</c>), or <c>null</c>.</summary>
     internal ILogger? Logger { get; }
 
-    /// <summary>The unpack limiter behind <see cref="UnpackDeliveredBatchAsync"/>: one budget per delivery, 4 at a time, at most 16 abandoned unpacks.</summary>
+    /// <summary>The unpack limiter behind <see cref="UnpackDeliveredBatchAsync"/>: one budget per delivery, 4 at a time, a check against 16 abandoned unpacks, linked to this channel's shutdown.</summary>
     internal DeliveredMessageUnpacker Unpacker { get; }
 
     /// <summary>Whether <see cref="Dispose"/> or <see cref="DisposeAsync"/> has run.</summary>
@@ -399,10 +400,20 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     }
 
     /// <inheritdoc/>
-    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
-        return Unpacker.UnpackAllAsync(payloads, requestId, ct);
+        try
+        {
+            return await Unpacker.UnpackAllAsync(payloads, requestId, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (IsDisposed)
+        {
+            // The disposal cancelled the budget (ADV3-7): the caller sees the disposal, as it would
+            // in any other step, and wins over a cancellation of its own at the same time
+            // (Unanswered's order).
+            throw Disposed();
+        }
     }
 
     /// <summary>
@@ -571,9 +582,11 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     }
 
     /// <summary>
-    /// Stop: pending requests fail with <see cref="ObjectDisposedException"/> and live streams end
-    /// (their readers observe <see cref="ObjectDisposedException"/>). Idempotent (the container
-    /// disposes this instance once per registration it was resolved through).
+    /// Stop: pending requests fail with <see cref="ObjectDisposedException"/>, live streams end
+    /// (their readers observe <see cref="ObjectDisposedException"/>), and deliveries being opened end
+    /// at once with <see cref="ObjectDisposedException"/>, the host code opening them seeing its token
+    /// cancelled (ADV3-7). Idempotent (the container disposes this instance once per registration it
+    /// was resolved through).
     /// </summary>
     public void Dispose()
     {

@@ -617,6 +617,9 @@ public sealed class PickupClientFetchTests
 
         var fetch = PickupTest.Client(exchange).FetchAsync(M, L, limit: 10);
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        // The unpacks run on the thread pool (ADV3-4): the four that open at once are done before
+        // the clock moves.
+        SpinWait.SpinUntil(() => exchange.Budgeted!.Settled == 4, PickupTest.Timeout).Should().BeTrue();
         fetch.IsCompleted.Should().BeFalse();
         exchange.Clock.Advance(budget);
         var batch = await PickupTest.Within(fetch);
