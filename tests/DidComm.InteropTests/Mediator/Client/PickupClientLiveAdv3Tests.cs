@@ -205,6 +205,33 @@ public sealed class PickupClientLiveAdv3Tests
         PickupE2E.ShouldBeAlicesNote(third.Items.Should().ContainSingle().Subject, alice, recipient, behind);
     }
 
+    /// <summary>
+    /// Held (the transport capability check): a <c>ws://</c> route when the WebSocket transport allows
+    /// only <c>wss</c> (its default). No transport handles the scheme, so the facade "cannot tell" and
+    /// the route is allowed — but the send itself refuses at once with a
+    /// <see cref="DidComm.Exceptions.TransportException"/>: never a silent wait for an answer that
+    /// cannot come. Nothing is connected and nothing stays pending.
+    /// </summary>
+    [Fact]
+    public async Task A_ws_route_with_a_wss_only_transport_fails_at_once_and_leaves_nothing_pending()
+    {
+        await using var mediator = await MediatorTestServer.StartAsync();
+        await using var harness = await MediatorClientHarness.CreateAsync(mediator, o =>
+        {
+            o.UseWebSocket = true;
+            o.UseHttp = false;
+            o.WebSocket = w => w.AllowedSchemes = new[] { "wss" };
+            o.Client = c => c.RequestTimeout = TimeSpan.FromMinutes(10);
+        });
+        var bob = await harness.NewPeerAsync();
+
+        var thrown = await Record.ExceptionAsync(() => harness.Pickup.GetStatusAsync(mediator.Did, bob.Did, serviceEndpointOverride: harness.WebSocketEndpoint).WaitAsync(MediatorTestServer.Timeout));
+
+        thrown.Should().BeOfType<DidComm.Exceptions.TransportException>();
+        harness.Connects.Should().Be(0);
+        harness.Channel.PendingCount.Should().Be(0);
+    }
+
     private static int Drains(PickupRequestObserver observer, string bob) => observer.KindsFrom(bob).Count(k => k == "delivery-request");
 
     private static int Buffered(MediatorClientChannel channel)
