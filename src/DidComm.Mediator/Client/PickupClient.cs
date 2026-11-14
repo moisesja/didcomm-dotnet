@@ -1,7 +1,10 @@
+using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Mediator.Client.Internal;
+using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
+using DidComm.Messages;
 using Microsoft.Extensions.Logging;
 
 namespace DidComm.Mediator.Client;
@@ -105,13 +108,26 @@ public sealed class PickupClient
         ArgumentNullException.ThrowIfNull(exchange);
         Exchange = exchange;
         Logger = logger;
+        Log = new PickupLog(logger);
     }
+
+    /// <summary>The most messages one <see cref="FetchAsync"/> asks for (the mediator's default batch bound).</summary>
+    internal const int MaxFetchLimit = 100;
+
+    /// <summary>The most ids one <see cref="AckAsync"/> takes.</summary>
+    internal const int MaxAckIds = 10_000;
+
+    /// <summary>The most ids one <c>messages-received</c> carries (the mediator's default <c>MaxAckIds</c>).</summary>
+    internal const int AckChunk = 100;
 
     /// <summary>The exchange this client sends through.</summary>
     internal IMediatorExchange Exchange { get; }
 
     /// <summary>The client's logger, or <c>null</c>.</summary>
     internal ILogger<PickupClient>? Logger { get; }
+
+    /// <summary>The client's log lines (rate limits shared by its fetches and live streams).</summary>
+    internal PickupLog Log { get; }
 
     /// <summary>What the mediator holds for you (<c>status-request</c>).</summary>
     /// <param name="mediatorDid">The mediator's DID: a bare DID (no path, query or fragment).</param>
@@ -126,8 +142,19 @@ public sealed class PickupClient
     /// <exception cref="MediationProtocolException">The mediator answered with a problem report, or with a malformed status or one about another DID than <paramref name="recipientDid"/>.</exception>
     /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry).</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
-    public Task<PickupStatus> GetStatusAsync(string mediatorDid, string from, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer C: PickupClient.GetStatusAsync (design §3.3).");
+    public async Task<PickupStatus> GetStatusAsync(string mediatorDid, string from, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
+    {
+        RequireBareDid(mediatorDid, nameof(mediatorDid));
+        RequireBareDid(from, nameof(from));
+        RequireOptionalBareDid(recipientDid, nameof(recipientDid));
+        RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
+
+        var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
+        var spec = DeliveryReader.StatusRequestSpec;
+        var request = MessagePickup.CreateStatusRequest(from, mediatorDid, recipientDid, UuidV4MessageIdGenerator.Instance);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        return DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, recipientDid);
+    }
 
     /// <summary>
     /// Ask for up to <paramref name="limit"/> messages (<c>delivery-request</c>), unpack each, and
@@ -164,8 +191,106 @@ public sealed class PickupClient
     /// <exception cref="MediationProtocolException">A problem report, or an answer that is malformed or about another DID than <paramref name="recipientDid"/>.</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
-    public Task<PickupBatch> FetchAsync(string mediatorDid, string from, int limit, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer C: PickupClient.FetchAsync (design §4.7).");
+    public async Task<PickupBatch> FetchAsync(string mediatorDid, string from, int limit, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
+    {
+        RequireBareDid(mediatorDid, nameof(mediatorDid));
+        RequireBareDid(from, nameof(from));
+        if (limit is < 1 or > MaxFetchLimit)
+            throw new ArgumentOutOfRangeException(nameof(limit), "The limit must be from 1 to 100.");
+        RequireOptionalBareDid(recipientDid, nameof(recipientDid));
+        RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
+
+        var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
+        var spec = DeliveryReader.DeliveryRequestSpec;
+        var request = MessagePickup.CreateDeliveryRequest(from, mediatorDid, limit, recipientDid, UuidV4MessageIdGenerator.Instance);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        var message = DeliveryReader.Open(answer, request.Id, spec);
+
+        // Nothing deliverable: the mediator answered with its status.
+        if (DeliveryReader.IsStatus(message))
+            return new PickupBatch(Array.Empty<PickupItem>(), drained: true, DeliveryReader.ReadStatus(message, request.Id, spec, checkFilter: true, recipientDid));
+        if (!DeliveryReader.IsDelivery(message))
+            throw DeliveryReader.Unexpected(request.Id, spec);
+        DeliveryReader.RequireDeliveryFilterEcho(message, request.Id, spec, recipientDid);
+
+        // Only the first `limit` attachments are read (L-055): what the mediator sent beyond the
+        // request is not decoded, not unpacked and not acknowledged, so it stays queued.
+        var contents = DeliveryReader.ReadEntries(message.Attachments, limit);
+        if (contents.AttachmentCount == 0)
+            return new PickupBatch(Array.Empty<PickupItem>(), drained: true, status: null);
+        LogReading(contents, request.Id);
+
+        var payloads = new List<ReadOnlyMemory<byte>>(contents.Entries.Count);
+        foreach (var entry in contents.Entries)
+        {
+            if (entry.Payload is { } payload)
+                payloads.Add(payload);
+        }
+        var outcomes = payloads.Count == 0
+            ? Array.Empty<DeliveredOutcome>()
+            : await Exchange.UnpackDeliveredBatchAsync(payloads, ct).ConfigureAwait(false);
+        if (outcomes.Count != payloads.Count)
+            throw new InvalidOperationException("The unpacker returned another number of outcomes than it was given messages.");
+
+        // Classify in delivery order. Failures (did not decode, did not unpack, for another DID than
+        // the filter) are returned and never acknowledged (FR-PICK-11); a message already returned
+        // once, or earlier in this batch, is acknowledged and left out.
+        var items = new List<PickupItem>(contents.Entries.Count);
+        var acknowledge = new List<string>(contents.Entries.Count);
+        var commit = new List<UInt128>(contents.Entries.Count);
+        var seen = new HashSet<UInt128>();
+        var failures = new List<Exception>();
+        var mismatches = 0;
+        var repeats = 0;
+        var next = 0;
+        foreach (var entry in contents.Entries)
+        {
+            if (entry.Payload is null)
+            {
+                failures.Add(entry.Error!);
+                items.Add(new PickupItem(entry.Id, unpacked: null, entry.Error));
+                continue;
+            }
+            var outcome = outcomes[next++];
+            if (outcome.Unpacked is not { } unpacked)
+            {
+                failures.Add(outcome.Error!);
+                items.Add(new PickupItem(entry.Id, unpacked: null, outcome.Error));
+                continue;
+            }
+            if (recipientDid is not null && !IsFor(unpacked, recipientDid))
+            {
+                // D-20: the filter is enforced, not trusted to the mediator.
+                mismatches++;
+                items.Add(new PickupItem(entry.Id, unpacked: null, new MediationProtocolException(
+                    $"A message delivered for request '{request.Id}' was decrypted for another DID than its recipient_did filter; it was not acknowledged.", request.Id)));
+                continue;
+            }
+            if (Exchange.Duplicates.Contains(outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
+            {
+                repeats++;
+                acknowledge.Add(entry.Id);
+                continue;
+            }
+            items.Add(new PickupItem(entry.Id, unpacked, error: null));
+            acknowledge.Add(entry.Id);
+            commit.Add(outcome.DedupeKey);
+        }
+        Log.UnpackFailures(request.Id, failures);
+        if (mismatches > 0)
+            Log.FilterMismatches(request.Id, mismatches);
+
+        // The last cancellation point: nothing is acknowledged or remembered yet, so everything
+        // comes back. After it the batch is returned whatever happens to the acknowledgement.
+        ct.ThrowIfCancellationRequested();
+        foreach (var key in commit)
+            Exchange.Duplicates.Add(key);
+        if (acknowledge.Count > 0)
+            await AcknowledgeQuietlyAsync(route, mediatorDid, from, acknowledge).ConfigureAwait(false);
+
+        Log.Fetched(request.Id, commit.Count, failures.Count + mismatches, repeats);
+        return new PickupBatch(items, drained: false, status: null);
+    }
 
     /// <summary>
     /// Tell the mediator it may delete these messages (<c>messages-received</c>): usually items that
@@ -184,8 +309,25 @@ public sealed class PickupClient
     /// <exception cref="MediationProtocolException">A problem report or a malformed status.</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
-    public Task<PickupStatus> AckAsync(string mediatorDid, string from, IReadOnlyList<string> ids, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer C: PickupClient.AckAsync (design §2, chunks of 100).");
+    public async Task<PickupStatus> AckAsync(string mediatorDid, string from, IReadOnlyList<string> ids, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
+    {
+        RequireBareDid(mediatorDid, nameof(mediatorDid));
+        RequireBareDid(from, nameof(from));
+        var copy = RequireIds(ids, nameof(ids));
+        RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
+
+        var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
+        var spec = DeliveryReader.MessagesReceivedSpec;
+        PickupStatus? status = null;
+        for (var start = 0; start < copy.Length; start += AckChunk)
+        {
+            var chunk = copy.AsSpan(start, Math.Min(AckChunk, copy.Length - start)).ToArray();
+            var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, chunk, UuidV4MessageIdGenerator.Instance);
+            var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+            status = DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
+        }
+        return status!;
+    }
 
     /// <summary>
     /// Turn live delivery on or off for your WebSocket connection to the mediator
@@ -206,44 +348,158 @@ public sealed class PickupClient
     /// <exception cref="MediationProtocolException">A problem report (<see cref="MediationProtocolException.ProblemCode"/> <c>e.m.live-mode-not-supported</c> when the mediator cannot deliver live on this connection) or a malformed status.</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
-    public Task<PickupStatus> SetLiveDeliveryAsync(string mediatorDid, string from, bool liveDelivery, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer C: PickupClient.SetLiveDeliveryAsync (design §4.3: refused over HTTP before sending).");
+    public async Task<PickupStatus> SetLiveDeliveryAsync(string mediatorDid, string from, bool liveDelivery, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
+    {
+        RequireBareDid(mediatorDid, nameof(mediatorDid));
+        RequireBareDid(from, nameof(from));
+        RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
+
+        // Refused before anything is sent when the route is not a WebSocket (design §4.3).
+        var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: true, ct).ConfigureAwait(false);
+        var spec = DeliveryReader.LiveDeliveryChangeSpec;
+        var request = MessagePickup.CreateLiveDeliveryChange(from, mediatorDid, liveDelivery, UuidV4MessageIdGenerator.Instance);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        return DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
+    }
 
     /// <summary>
     /// Receive your messages as they arrive, over a WebSocket. The stream turns live delivery on,
-    /// takes what is already queued, then yields each message the mediator pushes; every
+    /// takes what is already queued, then yields each message the mediator pushes. Every
     /// <see cref="MediatorClientOptions.LivePollInterval"/> it turns live delivery on again and takes
-    /// what is queued, which also picks up messages whose delivery was delayed and recovers from a
-    /// dropped connection. Items that failed to unpack are yielded too, with
-    /// <see cref="PickupItem.Error"/> set, and are never acknowledged.
+    /// what is queued: that picks up messages whose delivery was delayed and recovers from a dropped
+    /// connection. Items that failed to unpack are yielded too, with <see cref="PickupItem.Error"/>
+    /// set; they are never acknowledged and are yielded again when the mediator delivers them again.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <strong>Acknowledgement.</strong> An item is acknowledged when you ask for the next one (the
-    /// next <c>MoveNextAsync</c>, which <c>await foreach</c> makes when your loop body finishes). The
-    /// last item before the enumeration ends — by <c>break</c>, <c>return</c>, an exception out of
-    /// your loop body, cancellation or disposal — is <strong>not</strong> acknowledged and comes back
-    /// later. To discard it before you stop, call
-    /// <c>AckAsync(mediatorDid, from, new[] { item.Id })</c>. When the enumeration ends the stream
-    /// acknowledges what you have taken and turns live delivery off.
+    /// <strong>Acknowledgement.</strong> An item is acknowledged when you ask for the next one: the
+    /// next <c>MoveNextAsync</c>, which <c>await foreach</c> makes when your loop body has finished
+    /// with the item. Nothing is acknowledged before it was handed to you. Acknowledgements are sent
+    /// in batches (when ten are waiting, when nothing else is ready, or after ten seconds), and the
+    /// stream remembers the item (<see cref="MediatorClientOptions.DedupeCapacity"/>) so a repeat is
+    /// acknowledged and not yielded again.
     /// </para>
     /// <para>
-    /// The arguments are checked when you call this method. The route is resolved, and refused when
-    /// it is not a WebSocket, at the first <c>MoveNextAsync</c>, before anything is sent. One stream
-    /// per mediator and DID may be open at a time, and at most 16 per container. A mediator that
-    /// keeps failing (five cycles in a row) ends the stream with the last exception.
+    /// <strong>Stopping.</strong> When the enumeration ends — by <c>break</c>, <c>return</c>, an
+    /// exception out of your loop body, cancellation, or a failure of the stream — the last item it
+    /// yielded is <strong>not</strong> acknowledged, because the stream cannot tell whether you handled
+    /// it: the mediator delivers it again later. To discard the last item before stopping, call
+    /// <c>AckAsync(mediatorDid, from, new[] { item.Id })</c>. A token cancelled while your loop body
+    /// runs leaves that item unacknowledged too. Items the stream had received but not yet yielded
+    /// are never acknowledged; they come back after the connection closes or the mediator's lease
+    /// ends. On the way out the stream sends the acknowledgements still waiting and turns live
+    /// delivery off, all within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever your
+    /// token says. Enumerate with <c>await foreach</c> (or dispose the enumerator): that is what
+    /// closes the stream and frees its place.
+    /// </para>
+    /// <para>
+    /// <strong>Delayed messages.</strong> A message whose sender delayed it is never pushed when it
+    /// falls due; the periodic poll picks it up (FR-PICK-08). Keep
+    /// <see cref="MediatorClientOptions.LivePollInterval"/> at or below the longest delay the mediator
+    /// allows (an hour by default at this library's mediator), or such a message waits up to one
+    /// interval longer.
+    /// </para>
+    /// <para>
+    /// <strong>Starting and failing.</strong> The arguments are checked when you call this method.
+    /// The route is resolved at the first <c>MoveNextAsync</c>, and refused when it is not a
+    /// WebSocket, before anything is sent. One stream per mediator and DID may be open at a time,
+    /// and at most 16 per container. A step that fails (no answer, a transport failure) is retried
+    /// after a pause that starts at one second and doubles up to 30; five failures in a row end the
+    /// stream with the last exception. A problem report from the mediator ends it at once.
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>); a <c>ws</c> or <c>wss</c> URI.</param>
-    /// <param name="ct">Cancellation token (also reachable through <c>WithCancellation</c>); cancelling ends the enumeration.</param>
+    /// <param name="ct">Cancellation token (combined with one passed through <c>WithCancellation</c>); cancelling ends the enumeration.</param>
     /// <returns>The items, as they arrive.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are.</exception>
+    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent.</exception>
     /// <exception cref="MediationProtocolException">While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>) or a malformed answer.</exception>
-    /// <exception cref="TimeoutException">While enumerating: five cycles in a row got no answer.</exception>
-    /// <exception cref="TransportException">While enumerating: five cycles in a row failed to send.</exception>
+    /// <exception cref="TimeoutException">While enumerating: five steps in a row got no answer.</exception>
+    /// <exception cref="TransportException">While enumerating: five steps in a row failed to send.</exception>
+    /// <exception cref="ObjectDisposedException">While enumerating: the container was disposed.</exception>
     public IAsyncEnumerable<PickupItem> ReceiveLiveAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
-        => throw new NotImplementedException("#96 engineer C: PickupClient.ReceiveLiveAsync (design §4.8, R-2 acknowledgement).");
+    {
+        // Checked here, when the method is called; the stream itself starts at the first MoveNextAsync.
+        RequireBareDid(mediatorDid, nameof(mediatorDid));
+        RequireBareDid(from, nameof(from));
+        RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
+        return LiveDeliveryStream.ReceiveAsync(Exchange, Log, mediatorDid, from, serviceEndpointOverride, ct);
+    }
+
+    // ---- helpers ------------------------------------------------------------------------------
+
+    // Acknowledge on a deadline of our own (RequestTimeout), not the caller's token: the batch is
+    // committed, so a cancellation now would only make the messages come back. Any failure is
+    // logged by type name; the messages come back and are then recognised as repeats.
+    private async Task AcknowledgeQuietlyAsync(MediatorRoute route, string mediatorDid, string from, IReadOnlyList<string> ids)
+    {
+        var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, ids, UuidV4MessageIdGenerator.Instance);
+        try
+        {
+            using var deadline = OwnDeadline.Start(Exchange.Time, Exchange.Options.RequestTimeout);
+            await Exchange.ExchangeAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.AckFailed(request.Id, ids.Count, ex);
+        }
+    }
+
+    private void LogReading(DeliveryContents contents, string requestId)
+    {
+        if (contents.Excess > 0)
+            Log.BeyondLimit(requestId, contents.Excess);
+        if (contents.Unusable > 0)
+            Log.UnusableIds(requestId, contents.Unusable);
+        if (contents.RepeatedIds > 0)
+            Log.RepeatedIds(requestId, contents.RepeatedIds);
+    }
+
+    // D-20: the DID that decrypted the innermost message (its subject) is the one asked about.
+    private static bool IsFor(UnpackResult unpacked, string recipientDid)
+        => string.Equals(DidSubject.DidSubjectOf(unpacked.RecipientKid), recipientDid, StringComparison.Ordinal);
+
+    private static void RequireBareDid(string? value, string parameter)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameter);
+        if (!BareDid.IsBareDid(value))
+            throw new ArgumentException("The value must be a bare DID (no path, query or fragment) of at most 2048 characters.", parameter);
+    }
+
+    private static void RequireOptionalBareDid(string? value, string parameter)
+    {
+        if (value is not null && !BareDid.IsBareDid(value))
+            throw new ArgumentException("The value must be a bare DID (no path, query or fragment) of at most 2048 characters, or null.", parameter);
+    }
+
+    private static void RequireEndpoint(Uri? endpoint, string parameter)
+    {
+        if (endpoint is null)
+            return;
+        if (!endpoint.IsAbsoluteUri)
+            throw new ArgumentException("The endpoint override must be an absolute URI.", parameter);
+        if (!string.IsNullOrEmpty(endpoint.UserInfo))
+            throw new ArgumentException("The endpoint override must not carry user information.", parameter);
+    }
+
+    // The count bound first, before any entry is looked at (L-055); then a copy, so what is checked
+    // is what is sent even if the caller's list changes meanwhile (L-039).
+    private static string[] RequireIds(IReadOnlyList<string> ids, string parameter)
+    {
+        ArgumentNullException.ThrowIfNull(ids, parameter);
+        var count = ids.Count;
+        if (count is < 1 or > MaxAckIds)
+            throw new ArgumentException("Between 1 and 10 000 ids are needed.", parameter);
+        var copy = new string[count];
+        for (var i = 0; i < count; i++)
+        {
+            var id = ids[i];
+            if (string.IsNullOrEmpty(id) || id.Length > PickupBodies.MaxIdLength || !UnreservedUriChars.IsUnreserved(id))
+                throw new ArgumentException($"Id {i} is empty, longer than 2048 characters or not made of unreserved URI characters.", parameter);
+            copy[i] = id;
+        }
+        return copy;
+    }
 }
