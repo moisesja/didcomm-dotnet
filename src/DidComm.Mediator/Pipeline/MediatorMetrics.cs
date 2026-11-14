@@ -7,7 +7,8 @@ namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
 /// The closed vocabulary of the <c>didcomm.mediator.push.outcomes</c> counter: one value per push
-/// attempt (a record taken from the store for a push, live or direct), and one per wake-up of a
+/// attempt (taking the grant's next record from the store and pushing it, live or direct; a fault or
+/// the deadline while taking counts as a failed attempt), and one per wake-up of a
 /// grant that was skipped or could push nothing it had, saying why. A wake-up that finds nothing
 /// left to push (its message already pushed by a running operation, or taken by a pickup) is no
 /// outcome. A message is never counted before a push takes it.
@@ -24,7 +25,9 @@ internal static class PushOutcomes
     /// A push did not deliver and its record stays queued (tried again at the grant's next wake-up,
     /// and always available to pickup): the live session did not take it or it was too large for the
     /// session even alone (then passed over), the endpoint did not answer with a 2xx, a transport,
-    /// store or session fault, or the deadline.
+    /// store or session fault, or the deadline. At the deadline the worker stops waiting without
+    /// knowing the result: the push runs on until its call ends and may still deliver (a direct
+    /// push's 2xx then removes the record; a live session that reports it sent keeps it leased).
     /// </summary>
     internal const string Failed = "Push-Failed";
 

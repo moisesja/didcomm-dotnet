@@ -36,8 +36,8 @@ namespace DidComm.Mediator.Pipeline;
 /// a separate, best-effort step after the message is stored: the grant is woken only for a message
 /// that is queued and already due, and only when something could push it (direct push is on, or
 /// the recipient has a live session with live delivery on right now); the wake-up is O(1) and never
-/// blocks, it carries nothing of the message (the push takes what the store holds), and whatever
-/// happens to the push the message stays queued until a live session or a direct push delivers it.
+/// blocks, it carries nothing of the message (the push takes what the store holds), and a message
+/// whose push fails stays queued, for pickup and for the grant's next wake-up.
 /// </para>
 /// <para>
 /// <strong>Dependencies (L-017).</strong> The queue, the push dispatcher, the counter and the

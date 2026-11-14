@@ -111,14 +111,16 @@ public static class MediatorBuilderExtensions
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>.</description></item>
     /// <item><description>Every relayed message is stored first; live and direct pushes follow on
     /// background workers (<see cref="MediatorOptions.PushConcurrency"/>), one at a time per
-    /// recipient and in order, so a recipient that is slow to take a push holds up no one else. Every
-    /// message stored while its recipient is live, and due when stored, gets a push (one with a
-    /// <c>delay_milli</c> hold never does); one that cannot be pushed stays queued for pickup.</description></item>
+    /// recipient and oldest first, so a recipient that is slow to take a push holds up no one else. A
+    /// live session is pushed what is stored since it turned live delivery on; no message is pushed
+    /// before it is due; one whose push fails stays queued for pickup and is tried again when its
+    /// recipient next receives a message.</description></item>
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
-    /// <item><description>Direct push makes one attempt per message, one POST to exactly the
-    /// directory's endpoint with no retry and no redirect followed: a recipient that relies on it
-    /// must also pick up. A plain <c>http</c> push endpoint needs <c>"http"</c> in
+    /// <item><description>Direct push sends each push as one POST to exactly the directory's
+    /// endpoint with no retry and no redirect followed; a message whose push fails is pushed again
+    /// only when its recipient next receives a message, so a recipient that relies on it must also
+    /// pick up. A plain <c>http</c> push endpoint needs <c>"http"</c> in
     /// <c>HttpTransportOptions.AllowedSchemes</c>. Forwards are outside replay protection, so with
     /// direct push on each replay of a captured forward is pushed again; recipients should drop
     /// messages whose id they have already seen.</description></item>
