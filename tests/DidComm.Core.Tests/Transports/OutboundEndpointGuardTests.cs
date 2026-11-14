@@ -38,6 +38,12 @@ public sealed class OutboundEndpointGuardTests
     [InlineData("64:ff9b::a9fe:a9fe")]  // NAT64 of 169.254.169.254
     [InlineData("64:ff9b::0a00:0001")]  // NAT64 of 10.0.0.1 (RFC 1918)
     [InlineData("2001:0:0:0:0:0:0:1")]  // Teredo 2001::/32
+    [InlineData("::ffff:0:a9fe:a9fe")]  // IPv4-translated (RFC 2765/6052) of 169.254.169.254 (#95 AD-8)
+    [InlineData("::ffff:0:7f00:1")]     // IPv4-translated of 127.0.0.1
+    [InlineData("::ffff:0:a00:1")]      // IPv4-translated of 10.0.0.1
+    [InlineData("64:ff9b:1::a9fe:a9fe")]          // RFC 8215 local-use NAT64, /96 layout, metadata
+    [InlineData("64:ff9b:1:a9fe:a9:fe00::")]      // the same prefix, /48 layout (RFC 6052 §2.2), metadata
+    [InlineData("64:ff9b:1::5db8:d822")]          // the local-use prefix is reserved as a whole, whatever it embeds
     public void IsPrivateOrReserved_blocks_non_public(string ip)
     {
         OutboundEndpointGuard.IsPrivateOrReserved(IPAddress.Parse(ip)).Should().BeTrue();
@@ -50,9 +56,26 @@ public sealed class OutboundEndpointGuardTests
     [InlineData("93.184.216.34")]            // example.com
     [InlineData("2606:4700:4700::1111")]     // public IPv6 (Cloudflare)
     [InlineData("2002:0808:0808::")]         // 6to4 wrapping public 8.8.8.8 — legitimately routable
+    [InlineData("::ffff:0:5db8:d822")]       // IPv4-translated of public 93.184.216.34 (#95 AD-8 control)
+    [InlineData("64:ff9b::5db8:d822")]       // well-known NAT64 of public 93.184.216.34
+    [InlineData("64:ff9b:2::1")]             // just outside the local-use /48
     public void IsPrivateOrReserved_allows_public(string ip)
     {
         OutboundEndpointGuard.IsPrivateOrReserved(IPAddress.Parse(ip)).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("https://[::ffff:0:a9fe:a9fe]/inbox", "[::ffff:0:a9fe:a9fe]")]
+    [InlineData("https://[64:ff9b:1::a9fe:a9fe]/inbox", "[64:ff9b:1::a9fe:a9fe]")]
+    public void A_translated_form_the_host_trusts_is_allowed_by_the_allowlist_or_the_opt_out(string endpoint, string host)
+    {
+        var uri = new Uri(endpoint);
+        new OutboundEndpointGuard(new OutboundEndpointPolicy()).Invoking(g => g.Validate(uri)).Should().Throw<TransportException>();
+
+        var allowlisted = new OutboundEndpointPolicy();
+        allowlisted.AllowedHosts.Add(uri.DnsSafeHost);
+        new OutboundEndpointGuard(allowlisted).Invoking(g => g.Validate(uri)).Should().NotThrow(host);
+        new OutboundEndpointGuard(new OutboundEndpointPolicy { BlockPrivateNetworks = false }).Invoking(g => g.Validate(uri)).Should().NotThrow();
     }
 
     [Fact]

@@ -8,7 +8,7 @@ using Xunit.Abstractions;
 namespace DidComm.InteropTests.DxCoverage;
 
 /// <summary>
-/// The execution half of the FR-DX-01 gate: every execution-measurable public member of the six
+/// The execution half of the FR-DX-01 gate: every execution-measurable public member of the eight
 /// shipped packages must genuinely <b>run</b> while the samples execute — measured by re-running
 /// all sample programs in-process against probe-instrumented copies of the shipped assemblies
 /// (see <see cref="ExecutionCoverage"/> for the mechanism and for why Coverlet-style collectors

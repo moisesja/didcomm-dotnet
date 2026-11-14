@@ -1129,3 +1129,53 @@ Format per entry:
   validated settings at construction instead of reading a mutable options object on every call. In
   adversarial briefs, ask explicitly for "readings out of order" and "settings changed after
   validation". See [[L-044]] and [[L-057]].
+
+## L-061 — A shared serial worker must never await something a peer controls; isolate per peer before bounding.
+
+- **Lesson:** For every awaited call on a shared queue worker (a pump, a single consumer), ask who
+  decides how long it takes. If a remote peer does — its endpoint, its DID document's resolution,
+  its socket — the work moves off the shared worker onto a per-peer line (fair, bounded, with a
+  stated saturation policy that is safe without the work), or onto that peer's own request. A
+  deadline alone only caps one message's stall: a peer that controls the delay pays the deadline on
+  every message addressed to it, and everyone queued behind waits.
+- **Why:** In #95 the forward pump awaited, in turn, the direct push (fixed by moving it to a bounded
+  per-grant dispatcher), the opening of self-addressed forwards (moved onto the sender's request),
+  and — found only by the PR #109 review — the live push, whose packing resolves the recipient's
+  DID: one live recipient with slow resolution stopped storage for every other recipient. Each fix
+  looked at the path in hand; none swept the pump for the same shape (L-039).
+- **How to apply:** When a review or red team finds one peer-controlled await on a shared worker,
+  list every await reachable from that worker (including inside collaborators: a session send that
+  packs, a store, a resolver) and classify each. In adversarial briefs, ask for "a peer that
+  controls the latency of any step the shared worker awaits". See [[L-059]] and [[L-039]].
+
+## L-062 — Work that outlives a reservation keeps only bounded values.
+
+- **Lesson:** When a byte or count reservation is released before the work it admitted is finished
+  (a job handed to another worker, a backlog entry, a cache), whatever that work retains must be
+  bounded by construction: copy the bounded form (a capped log id, our own record id), never the
+  wire value. Otherwise the budget that admitted the message no longer covers what it leaves behind.
+- **Why:** In #95 the forward sink put the forward's wire `id` (unbounded; 512 Ki characters passes
+  the syntax checks) into each direct-push job after the forward handler had released the
+  message's reservation; 1 024 queued jobs could retain about 1 GiB while the store counted bytes of
+  payload. The PR #109 review measured it; the bounded id was already computed one line earlier for
+  logging.
+- **How to apply:** For every type that crosses from a budgeted stage to an unbudgeted one, list its
+  fields and their bounds; test with maximal wire values and assert on retained size, not on what
+  the logs show. See [[L-055]] and [[L-059]].
+
+## L-063 — When an optional feature draws a new defect on every pass, put descoping in front of the owner.
+
+- **Lesson:** A fix that every independent pass reopens is a signal about the design, not about
+  the last patch. After a second fix-and-break cycle on the same optional component, list its
+  findings side by side and offer the owner the option of deferring it to its own issue, with the
+  findings as that issue's design input. Do this before the next patch, while the rest of the PR
+  holds green.
+- **Why:** In #95 direct push (D6 step 3, off by default) drew findings in QA, both red-team
+  passes, review round 1, ADV-5 and ADV-6. Each fix moved the defect: per-message jobs, then a
+  retry at the next wake, then an in-memory cursor, then a cursor that an LRU could evict. Live push
+  and the queue came through the same passes clean. The owner deferred direct push to #110 after
+  a sixth pass. A seventh fix (a store-kept attempt mark) was already in progress and was dropped.
+- **How to apply:** Keep a per-component tally of the defects each pass confirms. When a component
+  gets a second post-fix break-it defect, write the side-by-side list into the hand-back with a
+  "defer to follow-up?" option before patching again. Keep public surface that only the deferrable
+  part uses easy to remove, so the removal is one clean change. See [[L-037]], [[L-038]] and [[L-058]].

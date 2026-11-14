@@ -44,12 +44,14 @@ namespace DidComm.Protocols.Routing;
 /// <strong>Scheduling hints.</strong> <c>expires_time</c> is propagated; <c>delay_milli</c> is
 /// resolved to <see cref="ForwardProcessingResult.Delay"/> and, on the processor's
 /// <see cref="DidCommOptions"/> clock, to the absolute <see cref="ForwardProcessingResult.NotBefore"/>
-/// (FR-ROUTE-10). The public <c>ProcessAsync</c> overloads resolve the schedule when they are
-/// called — hosts such as <c>samples/04-MediatorAgent</c> call them at receipt, so that is the
-/// receipt time. <see cref="ForwardHandler"/> resolves it itself, inline at admission and before
-/// any queueing, and hands the fixed schedule to the internal overload, so a forward that waits
-/// behind a slow sink keeps the not-before it was given on arrival. The three-argument
-/// constructor uses the system clock.
+/// (FR-ROUTE-10). The hold honoured is at most <see cref="ForwardProcessorOptions.MaxDelay"/>: a
+/// longer positive hint is shortened to it, and for a negative hint the magnitude is limited to it
+/// before the one random draw. The public <c>ProcessAsync</c> overloads resolve the schedule when
+/// they are called — hosts such as <c>samples/04-MediatorAgent</c> call them at receipt, so that is
+/// the receipt time. <see cref="ForwardHandler"/> resolves it through the same processor, inline at
+/// admission and before any queueing, and hands the fixed schedule to the internal overload, so a
+/// forward that waits behind a slow sink keeps the not-before it was given on arrival. The
+/// three-argument constructor uses the system clock.
 /// </para>
 /// </remarks>
 /// <example>
@@ -61,6 +63,7 @@ public sealed class ForwardProcessor
     private readonly IDidKeyServiceForFacadeOnlyAlias _keyService; // alias so the public ctor reads cleanly.
     private readonly JoseCryptoProvider _cryptoProvider;
     private readonly ForwardProcessorOptions _options;
+    private readonly TimeSpan? _maxDelay;
     private readonly IRecipientRoutingKeyProvider _routingKeys;
     private readonly DidCommOptions _didCommOptions;
 
@@ -127,6 +130,7 @@ public sealed class ForwardProcessor
         _client = client;
         _keyService = new KeyServiceAdapter(keyService);
         _options = options;
+        _maxDelay = options.MaxDelay; // validated above; read once (L-060)
         _routingKeys = routingKeys;
         _didCommOptions = didCommOptions;
         _cryptoProvider = cryptoProvider;
@@ -159,7 +163,7 @@ public sealed class ForwardProcessor
     /// <param name="unpacked">The unpack outcome of the inbound envelope — envelope metadata included, so the FR-ROUTE-11 posture can be judged.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ConsistencyException">The message is not a <c>forward</c>; or the envelope was not encrypted (plaintext or signed-only); or it was not decrypted with a key this mediator holds (no <see cref="UnpackResult.RecipientKid"/>); or the forward carries more than one attachment or an attachment with no data (FR-ROUTE-05/11). None of these messages quote wire values.</exception>
-    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
+    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64 or decodes to no bytes, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
     /// <exception cref="DidResolutionException">Rewrap mode only: the next hop resolves to no usable <c>keyAgreement</c> key.</exception>
     /// <exception cref="CryptoException">Rewrap mode or extra routing keys: the onward envelope could not be built.</exception>
     public Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
@@ -173,7 +177,7 @@ public sealed class ForwardProcessor
     /// of <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>; only the schedule differs.
     /// </summary>
     /// <param name="unpacked">The unpack outcome of the inbound envelope.</param>
-    /// <param name="delay">The resolved <c>delay_milli</c> hint (<see cref="ExtractDelay"/>), or <c>null</c> when absent.</param>
+    /// <param name="delay">The resolved <c>delay_milli</c> hint (<see cref="ResolveDelay"/>), or <c>null</c> when absent.</param>
     /// <param name="notBefore">Receipt time plus <paramref name="delay"/>, or <c>null</c> when there is no delay.</param>
     /// <param name="ct">Cancellation token.</param>
     internal Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, TimeSpan? delay, DateTimeOffset? notBefore, CancellationToken ct)
@@ -244,6 +248,42 @@ public sealed class ForwardProcessor
     }
 
     /// <summary>
+    /// Open a forward addressed to this mediator itself — the receiver side of rewrapping
+    /// (FR-ROUTE-06; DIDComm v2.1 §Routing "Rewrapping": "the outer envelope is a forward message
+    /// where to is the receiver itself"): take its single attachment exactly as it is (no rewrap, no
+    /// extra routing keys) and unpack it with the mediator's own <see cref="DidCommClient"/>, which
+    /// holds the keys forwards to this mediator are encrypted to. The attachment rules are those of
+    /// <see cref="ProcessAsync(UnpackResult, CancellationToken)"/>: one attachment, decodable, not
+    /// empty. The layer must be exactly an anoncrypt envelope around a plaintext message without
+    /// <c>from_prior</c> — what a rewrapping mediator produces (<see cref="RewrapMode.ReanoncryptToNext"/>)
+    /// and what a sender's forward layers are (FR-ROUTE-02); anything else is refused as malformed
+    /// before any DID is resolved, so opening a layer costs one decryption and no resolution of a DID
+    /// the sender chose. The unpack otherwise applies every receive rule (size, FR-API-05 expiry,
+    /// consistency).
+    /// </summary>
+    /// <param name="selfAddressed">The forward whose <c>next</c> is the DID that decrypted it.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ConsistencyException">Not a forward, more than one attachment, or an attachment with no data.</exception>
+    /// <exception cref="MalformedMessageException">The attachment is not valid base64url or decodes to no bytes; the layer is not an anoncrypt envelope around a plaintext message without <c>from_prior</c>; or the unpack refuses what is inside.</exception>
+    /// <exception cref="DidCommException">Any other refusal of the unpack (it cannot be decrypted with a held key, a key cannot be resolved, ...).</exception>
+    internal async Task<UnpackResult> PeelAsync(UnpackResult selfAddressed, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(selfAddressed);
+        if (!ForwardMessage.TryParse(selfAddressed.Message, out _, out var attachments))
+        {
+            throw new ConsistencyException(
+                $"Only a {ForwardConstants.ForwardTypeUri} addressed to this mediator can be opened.");
+        }
+        if (attachments.Count > 1)
+        {
+            throw new ConsistencyException(
+                $"Forward message carries {attachments.Count} attachments; a forward addressed to this mediator must carry exactly one packed message (FR-ROUTE-05).");
+        }
+        var inner = ExtractAttachmentBytes(attachments[0]);
+        return await _client.UnpackAnoncryptedPlaintextAsync(Encoding.UTF8.GetString(inner), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Run a transformation that re-embeds the onward payload in a fresh forward. The forward
     /// builder parses the payload as JSON and requires a non-empty <c>to</c>, and it reports both
     /// as <see cref="ArgumentException"/> — the right type for its own callers, but here both inputs
@@ -271,6 +311,7 @@ public sealed class ForwardProcessor
 
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
         {
+            byte[] decoded;
             try
             {
                 // Relaxed decode: attachment data.base64 has no spec no-pad requirement (FR-ATT-02,
@@ -278,13 +319,18 @@ public sealed class ForwardProcessor
                 // re-parse strictly — so tolerate '=' padding rather than refuse a peer's forward.
                 // Genuinely-invalid base64 still maps to the documented malformed-input type (a raw
                 // FormatException must not escape ProcessAsync). (#24 + PR #38 review.)
-                return Base64Url.DecodeRelaxed(attachment.Data.Base64);
+                decoded = Base64Url.DecodeRelaxed(attachment.Data.Base64);
             }
             catch (FormatException ex)
             {
                 throw new MalformedMessageException(
                     "Forward attachment 'data.base64' is not valid base64url.", ex);
             }
+            // White space decodes to nothing: there is no packed message to relay, and an empty
+            // payload is not one (#95 Q-7). The sender's mistake, not the mediator's fault.
+            if (decoded.Length == 0)
+                throw new MalformedMessageException("Forward attachment 'data.base64' decodes to no bytes; there is no packed message to relay.");
+            return decoded;
         }
 
         throw new ConsistencyException(
@@ -293,55 +339,92 @@ public sealed class ForwardProcessor
 
     private (TimeSpan? Delay, DateTimeOffset? NotBefore) ResolveSchedule(Messages.Message message)
     {
-        var delay = ExtractDelay(message);
-        return (delay, delay is TimeSpan d ? _didCommOptions.Now() + d : null);
+        var delay = ResolveDelay(message);
+        return (delay, delay is null ? null : NotBeforeOf(_didCommOptions.Now(), delay));
     }
 
     /// <summary>
-    /// Resolve the forward's <c>delay_milli</c> header to a hold (FR-ROUTE-10): absent, non-integer
-    /// or non-numeric → <c>null</c>; a negative value is sampled uniformly in <c>[0, |n|]</c>; either
-    /// way the hold is capped at <see cref="int.MaxValue"/> milliseconds. Never throws. Shared with
-    /// <see cref="ForwardHandler"/>, which samples it once at admission.
+    /// The absolute not-before of a hold (FR-ROUTE-10): <paramref name="receivedAt"/> plus
+    /// <paramref name="delay"/>, pinned to <see cref="DateTimeOffset.MaxValue"/> when the sum would
+    /// run past the end of time (a clock set close to it), so it never throws; <c>null</c> when
+    /// there is no hold. The one sum the handler and the public overloads use.
+    /// </summary>
+    /// <param name="receivedAt">The receipt reading of the mediator's clock.</param>
+    /// <param name="delay">The resolved hold (never negative), or <c>null</c>.</param>
+    internal static DateTimeOffset? NotBeforeOf(DateTimeOffset receivedAt, TimeSpan? delay)
+    {
+        if (delay is not { } hold)
+            return null;
+        // Both the UTC instant and the clock reading in receivedAt's own offset must stay
+        // representable; the larger of the two leaves the least room.
+        var room = DateTime.MaxValue.Ticks - Math.Max(receivedAt.UtcTicks, receivedAt.Ticks);
+        return hold.Ticks > room ? DateTimeOffset.MaxValue : receivedAt + hold;
+    }
+
+    /// <summary>
+    /// Resolve the forward's <c>delay_milli</c> header to the hold this processor honours: the one
+    /// draw, under <see cref="ForwardProcessorOptions.MaxDelay"/> (see
+    /// <see cref="ExtractDelay(Messages.Message, TimeSpan?)"/>). <see cref="ForwardHandler"/> calls
+    /// it once per forward, inline at admission; the public overloads call it on the request they
+    /// serve. Never throws.
     /// </summary>
     /// <param name="message">The inbound forward.</param>
-    internal static TimeSpan? ExtractDelay(Messages.Message message)
+    internal TimeSpan? ResolveDelay(Messages.Message message) => ExtractDelay(message, _maxDelay);
+
+    /// <summary>
+    /// Resolve the forward's <c>delay_milli</c> header to a hold (FR-ROUTE-10): absent, non-integer
+    /// or non-numeric → <c>null</c>. The cap is <paramref name="maxDelay"/> in whole milliseconds
+    /// (floored, within <c>[0, int.MaxValue]</c>), or <see cref="int.MaxValue"/> milliseconds when it
+    /// is <c>null</c>. A non-negative value is held for <c>min(n, cap)</c>. A negative value asks for
+    /// a random hold of up to <c>|n|</c>: <c>|n|</c> is limited to the cap first, and only then is the
+    /// one uniform draw in <c>[0, min(|n|, cap)]</c> made — clamping after the draw would put most
+    /// of the probability exactly on the cap. All arithmetic is in <see cref="long"/>; never throws.
+    /// </summary>
+    /// <param name="message">The inbound forward.</param>
+    /// <param name="maxDelay">The longest hold honoured; <c>null</c> for the library bound of <see cref="int.MaxValue"/> milliseconds.</param>
+    internal static TimeSpan? ExtractDelay(Messages.Message message, TimeSpan? maxDelay)
     {
         if (message.AdditionalHeaders is null) return null;
         if (!message.AdditionalHeaders.TryGetValue("delay_milli", out var element)) return null;
         if (element.ValueKind != System.Text.Json.JsonValueKind.Number) return null;
         if (!element.TryGetInt64(out var millis)) return null;
 
-        // Spec: a negative value is randomized between 0 and |n|, uniform. Guard against
-        // overflow: long.MinValue has no positive magnitude, and |n| can exceed int range — the
-        // hold is capped at int.MaxValue ms (~24.8 days), far longer than any sane relay delay.
+        // The cap in whole milliseconds. Integer division floors a positive TimeSpan; a negative one
+        // (refused by Validate, but this method is static) clamps to zero. int.MaxValue ms (~24.8
+        // days) is the library's hard bound: a hostile hint past ~2^53 ms overflows TimeSpan, and one
+        // past the year 9999 overflows the NotBefore addition — neither may throw out of here.
+        long capMs = maxDelay is { } cap
+            ? Math.Clamp(cap.Ticks / TimeSpan.TicksPerMillisecond, 0L, int.MaxValue)
+            : int.MaxValue;
+
         if (millis < 0)
         {
+            // Spec: a negative value is randomized between 0 and |n|, uniform. long.MinValue has no
+            // positive magnitude. Clamp |n| to the cap BEFORE the draw, so the draw is uniform over
+            // the range actually honoured; int.MaxValue - 1 keeps the exclusive upper bound in range.
             var magnitude = millis == long.MinValue ? long.MaxValue : -millis;
-            var cappedInclusiveMax = Math.Min(magnitude, int.MaxValue - 1);
-            var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)cappedInclusiveMax + 1);
+            var inclusiveMax = Math.Min(Math.Min(magnitude, capMs), int.MaxValue - 1L);
+            var sample = System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)inclusiveMax + 1);
             return TimeSpan.FromMilliseconds(sample);
         }
-        // The same cap on the positive side: a hostile hint past ~2^53 ms overflows TimeSpan, and
-        // one past the year 9999 overflows the NotBefore addition — neither may throw out of here.
-        return TimeSpan.FromMilliseconds(Math.Min(millis, int.MaxValue));
-    }
 
-    private static string StripFragment(string didUrl)
-    {
-        var hash = didUrl.IndexOf('#');
-        return hash < 0 ? didUrl : didUrl[..hash];
+        return TimeSpan.FromMilliseconds(Math.Min(millis, capMs));
     }
 
     private async Task<byte[]> RewrapToNextAsync(byte[] innerPacked, string nextHop, CancellationToken ct)
     {
-        // FR-ROUTE-06 rewrap: build a fresh forward whose attachment is the inbound payload, then
-        // anoncrypt it to the next hop. The fresh forward is self-addressed — to == next == the
-        // next hop — which signals "peel this layer and process the attachment locally": the next
-        // hop unwraps the rewrap and then handles the inner payload exactly as it would have under
-        // pass-through (so the constant-size onion stays deliverable). `next` can arrive as a DID
-        // URL with a fragment (outer onion layers carry the routing-key kid), so strip it to the
-        // bare DID for the message headers and the keyAgreement lookup.
-        var nextDid = StripFragment(nextHop);
+        // FR-ROUTE-06 rewrap (DIDComm v2.1 §Routing "Rewrapping"): build a fresh forward whose
+        // attachment is the inbound payload, then anoncrypt it to the next hop. The fresh forward is
+        // addressed to the next hop itself — to == next == the next hop — so the next hop receives a
+        // double-packaged message: it opens this layer and handles what is inside, as its own
+        // message when it is the final recipient, or as a forward to relay when it is a mediator (a
+        // didcomm-dotnet mediator's ForwardHandler peels such a self-addressed layer). This mediator
+        // stays uncommitted to which the next hop is, and the onion keeps its size. `next` can arrive as a DID
+        // URL — a fragment (outer onion layers carry the routing-key kid), a path or a query — so it
+        // is reduced to its DID subject (PRD §4.3), the DID the handler found registered, for the
+        // message headers and the keyAgreement lookup. A `next` with no DID part is malformed.
+        var nextDid = DidSubject.DidSubjectOf(nextHop)
+            ?? throw new MalformedMessageException("Forward 'next' has no DID part; it cannot be rewrapped for the next hop (FR-ROUTE-01).");
         var freshForward = ForwardMessage.Create(
             mediator: nextDid, next: nextDid,
             packedPayloads: new[] { Encoding.UTF8.GetString(innerPacked) });

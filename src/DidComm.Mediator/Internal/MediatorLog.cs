@@ -10,8 +10,8 @@ namespace DidComm.Mediator.Internal;
 /// </summary>
 internal static class MediatorLog
 {
-    /// <summary>Message ids longer than this are replaced in log lines, not written.</summary>
-    internal const int MaxLoggedIdLength = 128;
+    /// <summary>Message ids longer than this are replaced in log lines, not written (Core's bound, shared).</summary>
+    internal const int MaxLoggedIdLength = DidComm.Diagnostics.LogValues.MaxIdLength;
 
     /// <summary>A line any stranger can cause is written at Warning the first time and every this-many-th time, at Debug otherwise.</summary>
     internal const long RateLimitEvery = 1000;
@@ -35,10 +35,7 @@ internal static class MediatorLog
     /// A message id for a log line. Ids are attacker-chosen and not length-bounded by the message
     /// model, so a long one is replaced, not written.
     /// </summary>
-    public static string LogId(string? messageId)
-        => messageId is null ? "(none)"
-            : messageId.Length <= MaxLoggedIdLength ? messageId
-            : $"(id of {messageId.Length} characters)";
+    public static string LogId(string? messageId) => DidComm.Diagnostics.LogValues.Id(messageId);
 
     /// <summary>
     /// Count one more occurrence of a stranger-triggerable event and say at which level to log it:

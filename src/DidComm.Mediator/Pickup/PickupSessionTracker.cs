@@ -17,7 +17,7 @@ internal sealed class PickupSessionState
     private int _hooked;
     private int _closed;
     private int _leasing;
-    private volatile Func<string, string, DeliveredMessage, Message>? _liveDelivery;
+    private volatile LiveMode? _live;
 
     public PickupSessionState(PickupSessionTracker tracker) => _tracker = tracker;
 
@@ -30,29 +30,39 @@ internal sealed class PickupSessionState
     /// <summary>The session has ended. Once <c>true</c> it stays <c>true</c>, and live delivery is off.</summary>
     public bool IsClosed => Volatile.Read(ref _closed) == 1;
 
+    // A full fence (Interlocked), not a volatile write: this write and the caller's later read of
+    // IsClosed must not be reordered (a store followed by a load is the one pair release/acquire
+    // semantics allow to swap), or a close running at the same time could miss this lease.
     /// <summary>
     /// Say that a lease is about to be taken under <see cref="OwnerToken"/>. Called before the
     /// store call that records the lease; the caller looks at <see cref="IsClosed"/> again once the
     /// lease is in use. A session that never took a lease has nothing to clean up when it closes,
     /// so a peer that only opens connections and toggles live mode costs the store nothing.
     /// </summary>
-    public void MarkLeasing() => Volatile.Write(ref _leasing, 1);
+    public void MarkLeasing() => Interlocked.Exchange(ref _leasing, 1);
 
     /// <summary>
-    /// How to build a live <c>delivery</c> (from, to, message) in the protocol version the recipient
-    /// turned live delivery on with; <c>null</c> while live delivery is off or the session closed.
+    /// Live delivery as the recipient turned it on: how to build a live <c>delivery</c> (from, to,
+    /// message) in its protocol version, and the arrival mark it went on at; <c>null</c> while live
+    /// delivery is off or the session closed. Only messages that arrived after
+    /// <see cref="LiveMode.AfterSequence"/> are pushed: what was queued before is picked up (FR-PICK-06).
     /// </summary>
-    public Func<string, string, DeliveredMessage, Message>? LiveDelivery => IsClosed ? null : _liveDelivery;
+    public LiveMode? Live => IsClosed ? null : _live;
 
-    /// <summary>Turn live delivery on (a framing) or off (<c>null</c>). Returns whether it is on afterwards: never on a closed session.</summary>
-    public bool SetLive(Func<string, string, DeliveredMessage, Message>? liveDelivery)
+    /// <summary>
+    /// Turn live delivery on (a framing) or off (<c>null</c>). Turned on while already on, it keeps
+    /// its first mark. Returns whether it is on afterwards: never on a closed session.
+    /// </summary>
+    /// <param name="liveDelivery">The framing, or <c>null</c> to turn live delivery off.</param>
+    /// <param name="afterSequence">The store's high-water arrival sequence read with the status that answers the change (<see cref="QueueStatus.HighWaterSequence"/>).</param>
+    public bool SetLive(Func<string, string, DeliveredMessage, Message>? liveDelivery, long afterSequence)
     {
-        _liveDelivery = liveDelivery;
+        _live = liveDelivery is null ? null : new LiveMode(liveDelivery, _live?.AfterSequence ?? afterSequence);
         // Closed after the write above: either this read sees it, or OnClosed runs after the write
         // and clears it. Live delivery can never stay on for a session that has ended.
         if (IsClosed)
-            _liveDelivery = null;
-        return LiveDelivery is not null;
+            _live = null;
+        return Live is not null;
     }
 
     /// <summary>Hook the session's end signal, once.</summary>
@@ -68,14 +78,21 @@ internal sealed class PickupSessionState
 
     private void OnClosed()
     {
-        Volatile.Write(ref _closed, 1);
-        _liveDelivery = null;
         // Closed is written before the flag is read, and a taker writes the flag before it reads
         // Closed: one of the two always sees the other, so no lease is left to its timeout by a race.
+        // Both writes are full fences (Interlocked), so neither side's write can be reordered after
+        // its read.
+        Interlocked.Exchange(ref _closed, 1);
+        _live = null;
         if (Volatile.Read(ref _leasing) == 1)
             _tracker.ReleaseLeasesInBackground(OwnerToken);
     }
 }
+
+/// <summary>Live delivery on a session: the framing of a live <c>delivery</c> and the arrival mark it went on at.</summary>
+/// <param name="Build">Builds a live <c>delivery</c> (from, to, message) in the protocol version live delivery was turned on with.</param>
+/// <param name="AfterSequence">The store's high-water arrival sequence when the status answering the change was read: only messages with a greater <see cref="QueuedMessage.Sequence"/> — which arrived after that status, so it did not count them — are pushed. Arrival order, not a clock: a clock step or a slow enqueue cannot hide a message from it.</param>
+internal sealed record LiveMode(Func<string, string, DeliveredMessage, Message> Build, long AfterSequence);
 
 /// <summary>
 /// The per-session state of the pickup role (FR-PICK-06): one <see cref="PickupSessionState"/> per

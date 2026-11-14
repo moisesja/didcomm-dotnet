@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Threading.Channels;
+using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Transports.ReturnRoute;
@@ -181,7 +182,7 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
             return ReturnRouteSendResult.NotSent;
         if (!TryReservePushSlot())
         {
-            SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session has no free push slot.", message.Id);
+            SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session has no free push slot.", LogValues.Id(message.Id));
             return ReturnRouteSendResult.NotSent;
         }
 
@@ -202,12 +203,16 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
             // a downgrade or close landed during the pack (the caller's next send is then NotSent).
             if (frame.Length > maxPackedBytes)
             {
-                SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: its packed envelope is {PackedBytes} bytes, over the caller's bound of {MaxPackedBytes}.", snapshot.Id, frame.Length, maxPackedBytes);
+                SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: its packed envelope is {PackedBytes} bytes, over the caller's bound of {MaxPackedBytes}.", LogValues.Id(snapshot.Id), frame.Length, maxPackedBytes);
                 return ReturnRouteSendResult.TooLarge;
             }
 
             if (Mode != ReturnRouteMode.All)
                 return ReturnRouteSendResult.NotSent;
+
+            // A caller that gave up during the pack (a deadline it set) gets nothing queued: the last
+            // look at its token before the frame is handed to the writer, after the pack's own.
+            ct.ThrowIfCancellationRequested();
 
             // Never awaits the socket (JC-9). On success the slot passes to the queued frame, and the
             // writer gives it back when it dequeues the frame; a completed (closed) queue refuses.
@@ -216,7 +221,7 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
                 slotHeld = false;
                 return ReturnRouteSendResult.Sent;
             }
-            SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session's writer queue is full or closed.", snapshot.Id);
+            SafeLog.Write(_logger, LogLevel.Debug, "Return-route push {MessageId} not queued: the session's writer queue is full or closed.", LogValues.Id(snapshot.Id));
             return ReturnRouteSendResult.NotSent;
         }
         finally

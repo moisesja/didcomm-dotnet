@@ -103,6 +103,12 @@ mint_pair keyed    --method key --key-crv Ed25519 # did:key, signing
 mint_pair med1                                    # mediator 1 (both sides)
 mint_pair med2                                    # mediator 2 (both sides)
 
+# The mediator of the "through a running didcomm-dotnet mediator" cell. Its DID document names an
+# https DIDCommMessaging endpoint because the mediator's FR-MED-07 start-up check requires an
+# http(s)/ws(s) one (the scheme only); nothing dials it — mediator-pickup serves the mediator on a
+# loopback port of its own.
+"$INTEROP_CLI" mint --out "$WORK/dotnet-medsvc.json" --endpoint https://mediator.invalid/didcomm >"$WORK/dotnet-medsvc.did"
+
 # Routed recipients: a did:peer:2 whose .S service segment advertises the mediators as
 # routingKeys. didcomm-dotnet reads those routingKeys to build its outbound forward onion
 # (PackEncryptedOptions.Forward = true), so the OUTBOUND mediation cells address these DIDs.
@@ -396,6 +402,40 @@ for cell in "${CELLS[@]}"; do
     printf '%-28s %-14s %-14s outbound=%-5s inbound=%s\n' \
         "$label" "$enc" "$routing_label" "${row[0]}" "${row[1]}"
 done
+
+# ── through a running didcomm-dotnet mediator (#95; inbound only) ─────────────────────────
+# The python side authcrypts for dotnet-base and wraps one forward for the dotnet mediator with its
+# own forward code (--route). InteropCli mediator-pickup then starts a real didcomm-dotnet
+# mediator (AddMediator + MapDidCommMediator over Kestrel), enrols dotnet-base with it, posts the
+# forward to its HTTP endpoint (202), picks the message up (Message Pickup 3.0), unpacks it as
+# dotnet-base and acknowledges it (the queue must end empty). There is no outbound half: the
+# mediator is didcomm-dotnet's, so the counterpart only sends through it.
+run_mediator_pickup_cell() {
+    local tag="inbound-authcrypt-via-dotnet-mediator"
+    local msg="$WORK/$tag.msg.json" env="$WORK/$tag.env.json" un="$WORK/$tag.unpacked.json"
+    local log="$WORK/$tag.log" result=0
+    "${PEER[@]}" gen-message --to "$(id dotnet base)" --from "$(id python base)" --out "$msg" 2>>"$log" &&
+    "${PEER[@]}" pack --identity "$(id python base)" --to "$(id dotnet base)" --mode authcrypt \
+        --enc A256CBC-HS512 --message "$msg" --out "$env" --route "$WORK/dotnet-medsvc.json" 2>>"$log" &&
+    "$INTEROP_CLI" mediator-pickup --mediator "$WORK/dotnet-medsvc.json" --recipient "$(id dotnet base)" \
+        --in "$env" --out "$un" 2>>"$log" &&
+    "${PEER[@]}" assert --mode authcrypt --enc A256CBC-HS512 --sig-alg EdDSA \
+        --expected "$msg" --unpacked "$un" 2>>"$log" || result=1
+    if [ "$result" = 0 ]; then
+        CELL_RESULT="PASS"
+    else
+        CELL_RESULT="FAIL"
+        echo "--- $tag failed; log: ---" >&2
+        cat "$log" >&2 || true
+    fi
+}
+run_mediator_pickup_cell
+EXECUTED=$((EXECUTED + 1))
+[ "$CELL_RESULT" = "FAIL" ] && FAILURES=$((FAILURES + 1))
+printf '| %s | %s | %s | %s | %s |\n' \
+    "authcrypt via a running dotnet mediator (pickup)" "A256CBC-HS512" "dotnet mediator service" "—" "$CELL_RESULT" >> "$SUMMARY"
+printf '%-28s %-14s %-14s outbound=%-5s inbound=%s\n' \
+    "authcrypt via dotnet mediator" "A256CBC-HS512" "running (pickup)" "—" "$CELL_RESULT"
 
 # ── run the published-vector verification (FR-IX-06) ──────────────────────────────────────
 echo

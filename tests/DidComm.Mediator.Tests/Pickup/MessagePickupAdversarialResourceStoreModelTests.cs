@@ -97,11 +97,11 @@ public sealed class MessagePickupAdversarialResourceStoreModelTests
                         random.Next(-1, 6),
                         random.Next(5) == 0 ? random.Next(-10, 5) : random.Next(1, 160),
                         now,
-                        NewLease(random, now, leaseIds));
+                        NewLease(random, now, leaseIds)) { AfterSequence = random.Next(4) == 0 ? random.Next(0, step + 1) : null };
 
                     var actual = await store.LeaseAsync(request, none);
                     var expected = model.Lease(request);
-                    actual.Select(m => m.Id).Should().Equal(expected, where);
+                    actual.Select(m => $"{m.Id}#{m.Sequence}").Should().Equal(expected, where);
                     break;
                 }
                 case < 70:
@@ -210,6 +210,7 @@ public sealed class MessagePickupAdversarialResourceStoreModelTests
 
         // Every held record in arrival order (per grant it is the same order).
         private readonly List<Record> _records = new();
+        private long _sequence;
 
         public int Count => _records.Count;
         public long Bytes => _records.Sum(r => (long)r.Message.Payload.Length);
@@ -243,7 +244,7 @@ public sealed class MessagePickupAdversarialResourceStoreModelTests
             if (_records.Count >= MaxStoreMessages || Bytes + size > MaxStoreBytes)
                 return EnqueueOutcome.StoreLimitReached;
 
-            var record = new Record(message);
+            var record = new Record(message with { Sequence = ++_sequence });
             if (lease is not null)
                 Mark(record, lease);
             _records.Add(record);
@@ -263,6 +264,8 @@ public sealed class MessagePickupAdversarialResourceStoreModelTests
                 var message = record.Message;
                 if (request.RecipientDid is not null && message.RecipientDid != request.RecipientDid)
                     continue;
+                if (message.Sequence <= request.AfterSequence)
+                    continue;
                 if (message.NotBefore is { } notBefore && notBefore > request.Now)
                     continue;
                 if (record.LeaseId is not null && record.LeaseExpiresAt > request.Now)
@@ -271,7 +274,7 @@ public sealed class MessagePickupAdversarialResourceStoreModelTests
                 if (taken.Count > 0 && total + size > budget)
                     break;
                 Mark(record, request.Lease);
-                taken.Add(message.Id);
+                taken.Add($"{message.Id}#{message.Sequence}");
                 total += size;
                 if (taken.Count >= request.MaxMessages)
                     break;
@@ -313,9 +316,9 @@ public sealed class MessagePickupAdversarialResourceStoreModelTests
                 .Where(r => r.Message.NotBefore is not { } notBefore || notBefore <= now)
                 .Select(r => r.Message)
                 .ToArray();
-            return seen.Length == 0
+            return (seen.Length == 0
                 ? QueueStatus.Empty
-                : new QueueStatus(seen.Length, seen.Sum(m => (long)m.Payload.Length), seen.Min(m => m.ReceivedAt), seen.Max(m => m.ReceivedAt));
+                : new QueueStatus(seen.Length, seen.Sum(m => (long)m.Payload.Length), seen.Min(m => m.ReceivedAt), seen.Max(m => m.ReceivedAt))) with { HighWaterSequence = _sequence };
         }
 
         public int PurgeWhere(Func<Record, bool> match) => _records.RemoveAll(r => match(r));

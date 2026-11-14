@@ -1,7 +1,6 @@
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Mediator.Coordination;
-using DidComm.Messages;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -28,9 +27,9 @@ public static class MessagePickupBuilderExtensions
     /// <see cref="InvalidOperationException"/>.
     /// </para>
     /// <para>
-    /// Messages enter the queue through <see cref="MessagePickupQueue.DeliverAsync"/>, which a
-    /// delivery pipeline (a forward sink) calls for each message addressed to a registered
-    /// recipient. Replies and deliveries travel on the return-route session of the request, so the
+    /// Messages enter the queue through <see cref="MessagePickupQueue.DeliverAsync"/>, which the
+    /// mediator's forward sink (registered by <c>AddMediator()</c>) calls for each forward addressed
+    /// to a registered recipient, and which a host can call itself. Replies and deliveries travel on the return-route session of the request, so the
     /// receive endpoints must offer one: the HTTP endpoint does for every authenticated
     /// <c>return_route: all</c> request; the WebSocket endpoint only when its
     /// <c>AllowSameSocketReplies</c> option is on — without it pickup over a WebSocket stays silent
@@ -105,6 +104,7 @@ public static class MessagePickupBuilderExtensions
             sp.GetRequiredService<IReturnRouteSessionRegistry>(),
             sp.GetRequiredService<IOptions<MessagePickupOptions>>(),
             sp.GetRequiredService<IOptions<DidCommOptions>>(),
-            sp.GetService<IMessageIdGenerator>(),
-            sp.GetService<ILogger<MessagePickupQueue>>());
+            sp.GetService<ILogger<MessagePickupQueue>>(),
+            // The queue mints its own random ids; only the internal test seam can replace them.
+            sp.GetService<PickupIdSource>()?.Next);
 }

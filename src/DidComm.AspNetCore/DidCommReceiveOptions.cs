@@ -92,4 +92,17 @@ public sealed class DidCommReceiveOptions
     /// tracking issue #44.</para>
     /// </summary>
     public TimeSpan ReceiveRejectionFloor { get; set; } = TimeSpan.FromMilliseconds(5);
+
+    /// <summary>
+    /// A copy of these options for the mediator's WebSocket endpoint: same-socket replies on (pickup
+    /// over a WebSocket answers on the socket) and STOMP off (a STOMP session can never push). The
+    /// other settings are copied unchanged. A property added to this class must be copied here.
+    /// </summary>
+    internal DidCommReceiveOptions ForMediatorEndpoint() => new()
+    {
+        AcceptedMediaTypes = AcceptedMediaTypes,
+        ReceiveRejectionFloor = ReceiveRejectionFloor,
+        AllowSameSocketReplies = true,
+        UseStomp = false,
+    };
 }

@@ -30,8 +30,8 @@ public sealed class MessagePickupStoreContractTests
     private static async Task RequireUntouchedAsync(InMemoryMessageStore store)
     {
         (store.MessageCount, store.TotalBytes).Should().Be((4, 40L));
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(3, 30, T0, T0));
-        (await store.GetStatusAsync(Bob, null, T0, None)).Should().Be(new QueueStatus(1, 10, T0, T0));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(3, 30, T0, T0));
+        (await store.GetStatusAsync(Bob, null, T0, None)).Counts().Should().Be(new QueueStatus(1, 10, T0, T0));
         // A lease that is over as it is taken shows what is deliverable without holding it.
         (await store.LeaseIdsAsync(Take(Alice, until: T0))).Should().Equal(new[] { "c" }, "\"a\" and \"b\" are still leased, \"c\" is still waiting");
         (await store.LeaseIdsAsync(Take(Bob, until: T0))).Should().Equal("x");

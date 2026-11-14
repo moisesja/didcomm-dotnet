@@ -918,10 +918,33 @@ public sealed partial class DidCommClient
     public async Task<UnpackResult> UnpackAsync(string packed, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
+        return await UnpackInstrumentedAsync(packed, anoncryptOfPlaintextOnly: false, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Unpack a layer a mediator opens out of a forward addressed to itself (FR-ROUTE-06): it must be
+    /// exactly an anoncrypt envelope around a plaintext message without <c>from_prior</c> — what a
+    /// rewrapping mediator produces, and what a sender's forward layers are (FR-ROUTE-02). A plaintext
+    /// or signed layer, an authcrypt layer, a signature or another envelope inside, and
+    /// <c>from_prior</c> are refused with <see cref="MalformedMessageException"/> before any DID is
+    /// resolved: no sender or signer key lookup is supplied, so no DID the sender chose can be. The
+    /// receive rules otherwise apply unchanged (size, FR-API-05 expiry, addressing consistency).
+    /// </summary>
+    /// <param name="packed">The packed layer.</param>
+    /// <param name="ct">Cancellation token.</param>
+    internal async Task<UnpackResult> UnpackAnoncryptedPlaintextAsync(string packed, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(packed);
+        return await UnpackInstrumentedAsync(packed, anoncryptOfPlaintextOnly: true, ct).ConfigureAwait(false);
+    }
+
+    // The span and failure log around both unpack entry points.
+    private async Task<UnpackResult> UnpackInstrumentedAsync(string packed, bool anoncryptOfPlaintextOnly, CancellationToken ct)
+    {
         using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.UnpackActivity);
         try
         {
-            var result = await UnpackCoreAsync(packed, ct).ConfigureAwait(false);
+            var result = await UnpackCoreAsync(packed, anoncryptOfPlaintextOnly, ct).ConfigureAwait(false);
             if (activity is not null)
             {
                 // Tags are only knowable after the envelope is opened; all header-level (NFR-04).
@@ -946,7 +969,7 @@ public sealed partial class DidCommClient
 
     // The un-instrumented body of UnpackAsync; the public wrapper above owns the span and
     // failure log.
-    private async Task<UnpackResult> UnpackCoreAsync(string packed, CancellationToken ct)
+    private async Task<UnpackResult> UnpackCoreAsync(string packed, bool anoncryptOfPlaintextOnly, CancellationToken ct)
     {
         if (Encoding.UTF8.GetByteCount(packed) > _options.MaxReceiveBytes)
         {
@@ -973,10 +996,18 @@ public sealed partial class DidCommClient
         // SyncSecretsAdapter sync-over-async bridge is gone. Sender/signer lookups stay sync — they are
         // public-key DID resolutions and DataProofs' IJweSenderKeyResolver / JwsParser contracts for
         // them are synchronous (not a secret-key path).
+        // The restricted shape supplies no sender or signer lookup: no DID a sender chose is resolved.
         var internalResult = await EnvelopeReader.UnpackAsync(
-            packed, _keyOps, senderLookup, signerLookup, _cryptoProvider, resolverCheck, bindingContext,
-            _ownDidSubjects, ct).ConfigureAwait(false);
+            packed, _keyOps,
+            anoncryptOfPlaintextOnly ? null : senderLookup,
+            anoncryptOfPlaintextOnly ? null : signerLookup,
+            _cryptoProvider, resolverCheck, bindingContext,
+            _ownDidSubjects, anoncryptOfPlaintextOnly, ct).ConfigureAwait(false);
         var message = internalResult.Message;
+
+        // from_prior names an issuer DID to resolve; the restricted shape refuses it before that.
+        if (anoncryptOfPlaintextOnly && message.FromPrior is not null)
+            throw new MalformedMessageException("This layer must not carry 'from_prior'.");
 
         if (message.From is not null)
             _keyService.RejectUnsupportedMethod(message.From);
@@ -993,7 +1024,10 @@ public sealed partial class DidCommClient
             if (nowSeconds - skewSeconds > expires)
             {
                 throw new MalformedMessageException(
-                    $"Message expired at {expires} (epoch seconds); current clock {nowSeconds} exceeds it with skew={skewSeconds}s (FR-API-05).");
+                    $"Message expired at {expires} (epoch seconds); current clock {nowSeconds} exceeds it with skew={skewSeconds}s (FR-API-05).")
+                {
+                    Expired = true,
+                };
             }
         }
 

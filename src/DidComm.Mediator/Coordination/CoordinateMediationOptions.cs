@@ -18,7 +18,8 @@ public sealed class CoordinateMediationOptions
     /// The mediator DIDs a <c>mediate-grant</c> carries as <c>routing_did</c>. Empty by default: the
     /// grant then carries the DID that decrypted the request. Each must be a bare DID (no path,
     /// query or fragment) of at most 2048 characters. Ignored when the host registers its own
-    /// <see cref="IMediatorIdentity"/>.
+    /// <see cref="IMediatorIdentity"/>. A complete mediator (<c>AddMediator()</c>) needs at least
+    /// one, here or from the host's <see cref="IMediatorIdentity"/>; the first is the primary one.
     /// </summary>
     public IList<string> RoutingDids { get; } = new List<string>();
 

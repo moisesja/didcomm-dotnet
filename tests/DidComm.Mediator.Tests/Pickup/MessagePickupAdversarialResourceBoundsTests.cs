@@ -190,7 +190,13 @@ public sealed class MessagePickupAdversarialResourceBoundsTests
     [Fact]
     public async Task With_the_clock_at_the_end_of_time_nothing_leaves_dispatch_and_nothing_is_left_leased()
     {
-        await using var fixture = PickupFixture.Create(pickup: o => o.LeaseTimeout = TimeSpan.FromHours(24));
+        // The subject is overflow at the end of time, not aging: a jump to the last instant would age
+        // the first message out under the mailbox age limit (#95; PickupMessageAgeTests covers that).
+        await using var fixture = PickupFixture.Create(pickup: o =>
+        {
+            o.LeaseTimeout = TimeSpan.FromHours(24);
+            o.MaxMessageAge = null;
+        });
         var (mediator, peer) = await fixture.EnrolledAsync();
         var id = await fixture.QueueAsync(peer, PickupFixture.Payload(40, 1));
         var live = fixture.Session(peer, mediator, live: true);

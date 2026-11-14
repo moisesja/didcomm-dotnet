@@ -272,7 +272,7 @@ public sealed class MessagePickupStoreSelectionTests
 
         store.MessageCount.Should().Be(1);
         store.TotalBytes.Should().Be(7);
-        (await store.GetStatusAsync(Alice, null, at, None)).Should().Be(new QueueStatus(1, 7, T0, T0));
+        (await store.GetStatusAsync(Alice, null, at, None)).Counts().Should().Be(new QueueStatus(1, 7, T0, T0));
         (await store.AcknowledgeAsync(Alice, new[] { "expiring" }, None)).Should().Be(0);
         (await store.ReleaseAsync(Alice, new[] { "expiring" }, None)).Should().Be(0);
         (await store.PurgeExpiredAsync(at, None)).Should().Be(0);

@@ -4,6 +4,7 @@ using System.Net.Mime;
 using System.Net.WebSockets;
 using System.Text.Json;
 using DidComm.Consistency;
+using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Json;
@@ -141,7 +142,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             }
             catch (Exception ex)
             {
-                logger?.LogError(ex, "DidComm receive: onReceive callback threw after a successful unpack; acknowledging anyway (one-way receive).");
+                // Type names only: the callback runs on a stranger's message and its exception text can
+                // quote wire values. A host that wants its own stack traces logs inside its callback.
+                SafeLog.Write(logger, LogLevel.Error, "DidComm receive: inbound {MessageId}: onReceive callback threw {ExceptionType} (innermost: {InnerExceptionType}) after a successful unpack; acknowledging anyway (one-way receive).", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
             }
 
             return Results.StatusCode(StatusCodes.Status202Accepted);
@@ -281,7 +284,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // request still answers 202 — never a 400 after dispatch (JC-13).
                     returned = await session.TrySendAsync(outcome.Reply, httpContext.RequestAborted).ConfigureAwait(false);
                     if (!returned && session.HasResponse)
-                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the handler's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", unpacked.Message.Id);
+                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the handler's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", LogValues.Id(unpacked.Message.Id));
                 }
                 LogOutcome(logger, outcome, returnedOnSession: returned);
 
@@ -419,7 +422,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // The callback is the host's own code: log by type name, answer 202, send nothing it
                 // may have pushed (a fault must not become a 500 or a partial response).
                 session?.TakeResponseAndClose();
-                SafeLog.Write(logger, LogLevel.Error, "Inbound {MessageId}: onReceive callback threw {ExceptionType} after a successful unpack; acknowledging with 202.", unpacked.Message.Id, ex.GetType().Name);
+                SafeLog.Write(logger, LogLevel.Error, "Inbound {MessageId}: onReceive callback threw {ExceptionType} after a successful unpack; acknowledging with 202.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name);
                 return Results.StatusCode(StatusCodes.Status202Accepted);
             }
 
@@ -427,7 +430,7 @@ public static class DidCommEndpointRouteBuilderExtensions
             {
                 if (session is null)
                 {
-                    SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: callback reply not returned: no return-route session for this request.", unpacked.Message.Id);
+                    SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: callback reply not returned: no return-route session for this request.", LogValues.Id(unpacked.Message.Id));
                 }
                 else
                 {
@@ -442,7 +445,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                         throw;
                     }
                     if (!returned && session.HasResponse)
-                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the callback's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", unpacked.Message.Id);
+                        SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: the callback's returned reply was dropped: the HTTP session already holds a message (FR-RR-04).", LogValues.Id(unpacked.Message.Id));
                 }
             }
 
@@ -577,6 +580,22 @@ public static class DidCommEndpointRouteBuilderExtensions
     public static IEndpointConventionBuilder MapDidCommWebSocket(
         this IEndpointRouteBuilder endpoints,
         string pattern)
+        => MapDidCommWebSocketCore(endpoints, pattern, mediatorEndpoint: false);
+
+    /// <summary>
+    /// The registry-aware WebSocket endpoint behind <see cref="MapDidCommWebSocket(IEndpointRouteBuilder, string)"/>.
+    /// With <paramref name="mediatorEndpoint"/> <c>true</c> (the mediator package's endpoint) each
+    /// connection uses <see cref="DidCommReceiveOptions.ForMediatorEndpoint"/> — same-socket replies
+    /// on, STOMP off — for this endpoint only; the host's other WebSocket endpoints keep the
+    /// configured options.
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern.</param>
+    /// <param name="mediatorEndpoint"><c>true</c> to force the mediator endpoint's receive options; <c>false</c> for the public overload's behaviour.</param>
+    internal static IEndpointConventionBuilder MapDidCommWebSocketCore(
+        IEndpointRouteBuilder endpoints,
+        string pattern,
+        bool mediatorEndpoint)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
@@ -597,6 +616,8 @@ public static class DidCommEndpointRouteBuilderExtensions
             var client = sp.GetRequiredService<DidCommClient>();
             var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
+            if (mediatorEndpoint)
+                receiveOptions = receiveOptions.ForMediatorEndpoint();
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
             var loggerFactory = sp.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
@@ -718,12 +739,12 @@ public static class DidCommEndpointRouteBuilderExtensions
                 }
                 catch (MalformedMessageException ex)
                 {
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding malformed envelope");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding malformed envelope ({ExceptionType}).", ex.GetType().Name);
                     continue;
                 }
                 catch (CryptoException ex)
                 {
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding undecryptable envelope");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding undecryptable envelope ({ExceptionType}).", ex.GetType().Name);
                     continue;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -739,7 +760,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // HTTP path already collapses every unpack failure into one opaque rejection for
                     // the same reason; this is the socket equivalent. A genuine shutdown (our token
                     // cancelled) still propagates and ends the loop.
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding rejected envelope");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding rejected envelope ({ExceptionType}, innermost: {InnerExceptionType}).", ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
 
@@ -761,7 +782,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                         if (admission.SessionEligible && !stompNoticeLogged)
                         {
                             stompNoticeLogged = true;
-                            SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return_route all is not available under STOMP (FR-RR-05); no session is opened on this connection.", unpacked.Message.Id);
+                            SafeLog.Write(logger, LogLevel.Information, "Inbound {MessageId}: return_route all is not available under STOMP (FR-RR-05); no session is opened on this connection.", LogValues.Id(unpacked.Message.Id));
                         }
                     }
                     else if (returnRoute.Registry is not null)
@@ -807,14 +828,14 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // FR-THR-04 rule 2 violation in a handler (a bug). Don't tear down the
                     // socket — log and keep serving the connection so a buggy protocol doesn't
                     // poison every other protocol sharing the connection.
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: handler bug (FR-THR-04 rule 2); dropping inbound and continuing.");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: inbound {MessageId}: handler bug (FR-THR-04 rule 2, {ExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name);
                     continue;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // Same posture as above for any other handler-thrown exception: log + keep
                     // the connection alive. Cancellation propagates so the loop can exit cleanly.
-                    logger?.LogError(ex, "MapDidCommWebSocket: handler threw an unhandled exception; dropping inbound and continuing.");
+                    SafeLog.Write(logger, LogLevel.Error, "MapDidCommWebSocket: inbound {MessageId}: handler threw {ExceptionType} (innermost: {InnerExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
 
@@ -935,13 +956,15 @@ public static class DidCommEndpointRouteBuilderExtensions
         if (ex is DidCommException)
         {
             // Expected, peer-triggered category (malformed / crypto / consistency / resolution /
-            // unsupported-method / secret-missing) — it's the peer's envelope, not our bug.
-            logger?.LogWarning(ex, "DidComm receive: rejecting inbound envelope ({Reason}).", ex.GetType().Name);
+            // unsupported-method / secret-missing) — it's the peer's envelope, not our bug. Type
+            // names only: the exception text quotes the peer's values (an id, a DID, a line break).
+            SafeLog.Write(logger, LogLevel.Warning, "DidComm receive: rejecting inbound envelope ({Reason}, innermost: {InnerExceptionType}).", ex.GetType().Name, LogValues.InnermostTypeName(ex));
         }
         else
         {
-            // A handler bug (FR-THR-04 InvalidOperationException) or any other unexpected throw.
-            logger?.LogError(ex, "DidComm receive: inbound processing failed ({Reason}).", ex.GetType().Name);
+            // A handler bug (FR-THR-04 InvalidOperationException) or any other unexpected throw,
+            // on a stranger's message: type names only, for the same reason.
+            SafeLog.Write(logger, LogLevel.Error, "DidComm receive: inbound processing failed ({Reason}, innermost: {InnerExceptionType}).", ex.GetType().Name, LogValues.InnermostTypeName(ex));
         }
 
         await DelayToRejectionFloorAsync(startTimestamp, rejectionFloor).ConfigureAwait(false);
@@ -1051,12 +1074,12 @@ public static class DidCommEndpointRouteBuilderExtensions
                 }
                 catch (MalformedMessageException ex)
                 {
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding malformed envelope");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding malformed envelope ({ExceptionType}).", ex.GetType().Name);
                     continue;
                 }
                 catch (CryptoException ex)
                 {
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding undecryptable envelope");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding undecryptable envelope ({ExceptionType}).", ex.GetType().Name);
                     continue;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -1068,7 +1091,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // not supposed to emit but might: a parse fault nothing upstream has mapped yet,
                     // and a DID-resolution timeout, which arrives as TaskCanceledException with our
                     // token NOT cancelled. A genuine shutdown (our token cancelled) still ends the loop.
-                    logger?.LogWarning(ex, "MapDidCommWebSocket: discarding rejected envelope");
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding rejected envelope ({ExceptionType}, innermost: {InnerExceptionType}).", ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
 
@@ -1080,7 +1103,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 {
                     // The receive callback is the host's own code; a fault in it is the host's
                     // concern, and it must not take the connection (or the next message) down.
-                    logger?.LogError(ex, "MapDidCommWebSocket: receive callback threw; continuing");
+                    SafeLog.Write(logger, LogLevel.Error, "MapDidCommWebSocket: inbound {MessageId}: receive callback threw {ExceptionType} (innermost: {InnerExceptionType}); continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
                 }
             }
         }

@@ -13,10 +13,12 @@ namespace DidComm.Mediator.Pickup;
 /// <see cref="MessagePickupOptions.MaxStoreBytes"/> payload bytes in all. Every retained record
 /// counts, whatever its state. Worst-case memory is the store-wide byte bound plus the keys of the
 /// store-wide record bound (two DIDs of up to 2048 characters and an id per record, about 8 KiB):
-/// roughly 170 MiB at the defaults. Records without an expiry stay until they are acknowledged or
-/// purged; with a mediation policy that grants anyone, self-made grants can fill the store-wide
-/// bounds, after which new messages are refused for everyone while what is already held stays
-/// deliverable.
+/// roughly 170 MiB at the defaults. Every record the queue stores expires at the latest when the
+/// mailbox age limit runs out (<see cref="MessagePickupOptions.MaxMessageAge"/>, folded into
+/// <see cref="QueuedMessage.ExpiresAt"/>); with the limit turned off, records without an expiry
+/// stay until they are acknowledged or purged. With a mediation policy that grants anyone,
+/// self-made grants can fill the store-wide bounds, after which new messages are refused for
+/// everyone while what is already held stays deliverable.
 /// </para>
 /// <para>
 /// <strong>Concurrency.</strong> One lock guards everything, so the bound check and the insert, and
@@ -46,6 +48,8 @@ public sealed class InMemoryMessageStore : IMessageStore
     private readonly long _maxStoreBytes;
     private int _count;
     private long _bytes;
+    // The last arrival sequence assigned (IMessageStore: one counter for the whole store).
+    private long _sequence;
 
     // The earliest expiry any held record may have (never later than the truth; reset by a full sweep).
     private DateTimeOffset _nextExpiry = DateTimeOffset.MaxValue;
@@ -123,7 +127,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 _grants.Add(message.GrantPeerDid, queue);
             }
 
-            var entry = new Entry(message);
+            var entry = new Entry(message with { Sequence = ++_sequence });
             entry.Node = queue.Order.AddLast(entry);
             queue.ById.Add(message.Id, entry);
             queue.Bytes += size;
@@ -175,6 +179,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                 if (entry.LeaseExpiresAt > request.Now)
                     continue;
                 if (entry.PassedOverUntil > request.Now)
+                    continue;
+                if (request.AfterSequence is { } after && message.Sequence <= after)
                     continue;
 
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
@@ -301,7 +307,7 @@ public sealed class InMemoryMessageStore : IMessageStore
         lock (_gate)
         {
             if (!_grants.TryGetValue(grantPeerDid, out var queue))
-                return new ValueTask<QueueStatus>(QueueStatus.Empty);
+                return new ValueTask<QueueStatus>(QueueStatus.Empty with { HighWaterSequence = _sequence });
             PurgeExpired(queue, now);
             DropIfEmpty(grantPeerDid, queue);
 
@@ -323,7 +329,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 if (newest is null || message.ReceivedAt > newest)
                     newest = message.ReceivedAt;
             }
-            return new ValueTask<QueueStatus>(count == 0 ? QueueStatus.Empty : new QueueStatus(count, bytes, oldest, newest));
+            return new ValueTask<QueueStatus>((count == 0 ? QueueStatus.Empty : new QueueStatus(count, bytes, oldest, newest)) with { HighWaterSequence = _sequence });
         }
     }
 

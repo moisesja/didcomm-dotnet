@@ -73,8 +73,28 @@ public sealed class MessagePickupOptions
     /// </summary>
     public long MaxStoreBytes { get; set; } = 128L * 1024 * 1024;
 
+    /// <summary>
+    /// The mailbox age limit: how long the queue keeps a message for its recipient, counted from
+    /// when the queue accepted it, on the mediator's clock. It applies to every message held,
+    /// whether waiting, delivered but not yet acknowledged, or passed over for being too large. A
+    /// message older than this is never delivered and is removed the same way an expired message is
+    /// (FR-PICK-10). Default 30 days; <c>null</c> turns the limit off. A recipient that stays offline
+    /// longer than the limit loses those messages without notice, so set it to the longest absence
+    /// your recipients need to survive. A message whose own <c>expires_time</c> comes first expires
+    /// then. Must be greater than zero.
+    /// </summary>
+    /// <remarks>
+    /// The queue reads this once, when it is built, and writes the resulting instant onto each
+    /// record as it accepts it (<see cref="QueuedMessage.ExpiresAt"/>): the limit in force at
+    /// admission is fixed on the record. Changing the setting later — or restarting with another
+    /// value over a persistent <see cref="IMessageStore"/> — does not shorten or lengthen what is
+    /// already held. A message whose not-before time (a forward's <c>delay_milli</c>) lies beyond
+    /// the limit ages out before it is due, so keep the limit longer than the longest delay honoured.
+    /// </remarks>
+    public TimeSpan? MaxMessageAge { get; set; } = TimeSpan.FromDays(30);
+
     /// <summary>Check the settings; called when the role is registered and when it is first used.</summary>
-    /// <exception cref="ArgumentException">A bound is below 1, <see cref="MaxAckIds"/> is below <see cref="MaxDeliveryBatch"/>, <see cref="LeaseTimeout"/> is not within (0, 24 h], a store-wide bound is below its per-grant bound, or <see cref="MaxDeliveryBytes"/> is too small to carry any message.</exception>
+    /// <exception cref="ArgumentException">A bound is below 1, <see cref="MaxAckIds"/> is below <see cref="MaxDeliveryBatch"/>, <see cref="LeaseTimeout"/> is not within (0, 24 h], <see cref="MaxMessageAge"/> is set and not greater than zero, a store-wide bound is below its per-grant bound, or <see cref="MaxDeliveryBytes"/> is too small to carry any message.</exception>
     public void Validate()
     {
         RequirePositive(MaxDeliveryBatch, nameof(MaxDeliveryBatch));
@@ -87,6 +107,8 @@ public sealed class MessagePickupOptions
             throw new ArgumentException($"The value must be at least {nameof(MaxDeliveryBatch)}, so a full batch can be acknowledged in one message.", nameof(MaxAckIds));
         if (LeaseTimeout <= TimeSpan.Zero || LeaseTimeout > TimeSpan.FromHours(24))
             throw new ArgumentException("The value must be greater than zero and at most 24 hours.", nameof(LeaseTimeout));
+        if (MaxMessageAge is { } maxMessageAge && maxMessageAge <= TimeSpan.Zero)
+            throw new ArgumentException("The value must be greater than zero, or null for no limit.", nameof(MaxMessageAge));
         if (MaxStoreMessages < MaxQueueMessages)
             throw new ArgumentException($"The value must be at least {nameof(MaxQueueMessages)}.", nameof(MaxStoreMessages));
         if (MaxStoreBytes < MaxQueueBytes)

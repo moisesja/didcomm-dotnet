@@ -152,6 +152,15 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
     /// <summary>How many admissions were refused as <see cref="ReplayAdmission.Saturated"/> since construction (the FR-RR-08 metric).</summary>
     public long SaturationCount => Interlocked.Read(ref _saturated);
 
+    /// <summary>
+    /// How many timestamped messages were refused as <see cref="ReplayAdmission.TooOld"/> since
+    /// construction because the clock reading they were judged by was more than
+    /// <c>Window + ClockSkew</c> behind the latest purge instant (the refusals logged as a clock far
+    /// behind; see the class remarks on the clock). A growing value means the host clock stepped back, and
+    /// in-scope messages are refused until it catches up or the guard is rebuilt.
+    /// </summary>
+    public long ClockBehindRefusalCount => Interlocked.Read(ref _behind);
+
     /// <inheritdoc />
     public ReplayAdmission TryAdmit(string peerDidSubject, string messageId, long? createdTimeEpochSeconds, DateTimeOffset now)
     {

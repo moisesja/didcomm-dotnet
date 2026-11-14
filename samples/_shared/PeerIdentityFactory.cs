@@ -1,5 +1,5 @@
-using System.Text.Json;
 using DidComm.Jose;
+using DidComm.Resolution;
 using NetCrypto;
 using NetDid.Core;
 using NetDid.Core.Model;
@@ -46,11 +46,38 @@ public static class PeerIdentityFactory
     /// <param name="keyGenerator">A key generator (NetCrypto). Same DI container.</param>
     /// <param name="cryptoProvider">A crypto provider (NetCrypto). Same DI container.</param>
     /// <param name="service">OPTIONAL <c>DIDCommMessaging</c> service to embed in the DID — set it when the identity must be reachable (its inbox URL, or a mediator route). Omitted, the DID carries keys only.</param>
-    public static async Task<PeerIdentity> CreateAsync(
+    public static Task<PeerIdentity> CreateAsync(
         IDidManager manager,
         IKeyGenerator keyGenerator,
         ICryptoProvider cryptoProvider,
         DidCommServiceSpec? service = null)
+        => CreateCoreAsync(manager, keyGenerator, cryptoProvider, service is null ? null : BuildDidCommService(service));
+
+    /// <summary>
+    /// Mint a new identity exactly like <see cref="CreateAsync"/>, but embed a service entry the
+    /// caller built itself instead of one described by a <see cref="DidCommServiceSpec"/>. For
+    /// tests that need a DID whose service the library's <see cref="DidCommServiceBuilder"/> would
+    /// refuse to build (an unsupported scheme, for instance); samples use <see cref="CreateAsync"/>.
+    /// </summary>
+    /// <param name="manager">net-did's DID manager.</param>
+    /// <param name="keyGenerator">A key generator (NetCrypto).</param>
+    /// <param name="cryptoProvider">A crypto provider (NetCrypto).</param>
+    /// <param name="serviceEntry">The service entry to embed, as is.</param>
+    public static Task<PeerIdentity> CreateWithServiceEntryAsync(
+        IDidManager manager,
+        IKeyGenerator keyGenerator,
+        ICryptoProvider cryptoProvider,
+        Service serviceEntry)
+    {
+        ArgumentNullException.ThrowIfNull(serviceEntry);
+        return CreateCoreAsync(manager, keyGenerator, cryptoProvider, serviceEntry);
+    }
+
+    private static async Task<PeerIdentity> CreateCoreAsync(
+        IDidManager manager,
+        IKeyGenerator keyGenerator,
+        ICryptoProvider cryptoProvider,
+        Service? serviceEntry)
     {
         ArgumentNullException.ThrowIfNull(manager);
         ArgumentNullException.ThrowIfNull(keyGenerator);
@@ -70,7 +97,7 @@ public static class PeerIdentityFactory
                 new PeerKeyPurpose(kxSigner, PeerPurpose.KeyAgreement),
                 new PeerKeyPurpose(authSigner, PeerPurpose.Authentication),
             },
-            Services = service is null ? null : new[] { BuildDidCommService(service) },
+            Services = serviceEntry is null ? null : new[] { serviceEntry },
         };
 
         var result = await manager.CreateAsync(options).ConfigureAwait(false);
@@ -87,29 +114,25 @@ public static class PeerIdentityFactory
     }
 
     /// <summary>
-    /// Build the DID-Core service entry for a <see cref="DidCommServiceSpec"/>: type
-    /// <c>DIDCommMessaging</c> with the object-form <c>serviceEndpoint</c> the DIDComm v2.1
-    /// spec defines (<c>uri</c> + optional <c>routingKeys</c>/<c>accept</c>). did:peer:2
+    /// Build the DID-Core service entry for a <see cref="DidCommServiceSpec"/> with the library's
+    /// <see cref="DidCommServiceBuilder"/>: type <c>DIDCommMessaging</c> with the object-form
+    /// <c>serviceEndpoint</c> the DIDComm v2.1 spec defines (<c>uri</c> + optional
+    /// <c>routingKeys</c>/<c>accept</c>). A DID as the endpoint means "reach me through this
+    /// mediator"; anything else must be an absolute http(s) or ws(s) address. did:peer:2
     /// base64url-encodes the whole block into the DID string, so the service resolves offline
     /// like everything else about the DID.
     /// </summary>
     private static Service BuildDidCommService(DidCommServiceSpec spec)
     {
-        var endpoint = new Dictionary<string, JsonElement>
-        {
-            ["uri"] = JsonSerializer.SerializeToElement(spec.EndpointUriOrDid),
-        };
+        var builder = spec.EndpointUriOrDid.StartsWith("did:", StringComparison.Ordinal)
+            ? DidCommServiceBuilder.ForMediator(spec.EndpointUriOrDid)
+            : DidCommServiceBuilder.ForEndpoint(new Uri(spec.EndpointUriOrDid, UriKind.Absolute));
         if (spec.RoutingKeys is { Count: > 0 })
-            endpoint["routingKeys"] = JsonSerializer.SerializeToElement(spec.RoutingKeys);
-        if (spec.Accept is { Count: > 0 })
-            endpoint["accept"] = JsonSerializer.SerializeToElement(spec.Accept);
-
-        return new Service
-        {
-            Id = "#didcomm",
-            Type = "DIDCommMessaging",
-            ServiceEndpoint = ServiceEndpointValue.FromMap(endpoint),
-        };
+            builder.WithRoutingKeys([.. spec.RoutingKeys]);
+        // The spec's accept is optional: none given means none published (the builder's own
+        // default would publish didcomm/v2).
+        builder.WithAccept(spec.Accept is { Count: > 0 } ? [.. spec.Accept] : []);
+        return builder.Build();
     }
 
     private static Jwk BuildPrivateJwk(KeyPair keyPair, string did, DidDocument doc)

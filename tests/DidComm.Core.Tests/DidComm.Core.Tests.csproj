@@ -22,6 +22,8 @@
     <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
     <ProjectReference Include="..\..\src\DidComm.Adapters.NetDid\DidComm.Adapters.NetDid.csproj" />
     <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <!-- PeerIdentityFactory: its DIDCommMessaging service is built by DidCommServiceBuilder (#95). -->
+    <ProjectReference Include="..\..\samples\_shared\_shared.csproj" />
   </ItemGroup>
 
 </Project>

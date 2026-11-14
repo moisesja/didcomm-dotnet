@@ -37,7 +37,8 @@ internal sealed class StompServerSession
         }
         catch (MalformedMessageException ex)
         {
-            logger?.LogWarning(ex, "MapDidCommWebSocket(STOMP): malformed STOMP frame; closing with 1002.");
+            // Type name only: the parser's message can quote the peer's frame.
+            SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket(STOMP): malformed STOMP frame ({ExceptionType}); closing with 1002.", ex.GetType().Name);
             await CloseAsync(socket, WebSocketCloseStatus.ProtocolError, "malformed STOMP frame").ConfigureAwait(false);
             return (null, true);
         }

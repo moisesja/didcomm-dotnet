@@ -23,6 +23,41 @@ internal enum PickupReply
     LiveModeNotSupported,
 }
 
+/// <summary>What <see cref="PickupCoordinator.TakeNextAsync"/> found.</summary>
+internal enum TakeResult
+{
+    /// <summary>A record is leased to the caller.</summary>
+    Taken,
+
+    /// <summary>The store handed nothing out: nothing is due, unleased and not passed over.</summary>
+    Empty,
+
+    /// <summary>The record it handed out was removed: its recipient DID is no longer registered under the grant.</summary>
+    Removed,
+}
+
+/// <summary>What <see cref="PickupCoordinator.PushNextLiveAsync"/> did.</summary>
+internal enum LiveStep
+{
+    /// <summary>The peer has no live session with live delivery on: nothing was taken.</summary>
+    NoSession,
+
+    /// <summary>Nothing that arrived after live delivery went on is deliverable now.</summary>
+    Empty,
+
+    /// <summary>The record taken was removed: its recipient DID is no longer registered under the grant.</summary>
+    Removed,
+
+    /// <summary>The session took the <c>delivery</c>; the record stays leased to it until acknowledged, closed or timed out.</summary>
+    Sent,
+
+    /// <summary>Too large for the session's envelope even alone: passed over, as a pickup does.</summary>
+    PassedOver,
+
+    /// <summary>The session did not take it (no free push slot, downgraded or closing); the lease was given back.</summary>
+    NotSent,
+}
+
 /// <summary>The queue state a <c>status</c> reports, before a protocol version puts it into its own units and member names.</summary>
 /// <param name="Queue">What the store reports for the scope.</param>
 /// <param name="Now">The instant the state was read at.</param>
@@ -49,7 +84,7 @@ internal readonly record struct PickupOutcome(PickupReply Reply, PickupStatusVie
 /// </summary>
 /// <remarks>
 /// <para>
-/// Nothing here throws for a store, registry, session or id-generator fault: the fault is logged by
+/// Nothing here throws for a store, registry, session or id-source fault: the fault is logged by
 /// exception type name and turned into "no reply" (a request) or
 /// <see cref="PickupDeliveryOutcome.Faulted"/> (a delivery). Whatever a store returns is copied and
 /// checked inside the fault boundary before it is used. Leases taken by a request that then fails
@@ -70,9 +105,10 @@ internal sealed class PickupCoordinator
     private readonly PickupSizing _sizing;
     private readonly int _maxDeliveryBatch;
     private readonly TimeSpan _leaseTimeout;
+    private readonly TimeSpan? _maxMessageAge;
     private readonly int _maxAckIds;
     private readonly DidCommOptions _didCommOptions;
-    private readonly IMessageIdGenerator _ids;
+    private readonly Func<string> _newId;
     private readonly ILogger? _logger;
     private long _unauthenticated;
     private long _tooLarge;
@@ -85,7 +121,7 @@ internal sealed class PickupCoordinator
         IReturnRouteSessionRegistry sessions,
         MessagePickupOptions options,
         DidCommOptions didCommOptions,
-        IMessageIdGenerator? idGenerator,
+        Func<string>? newId,
         ILogger? logger)
     {
         ArgumentNullException.ThrowIfNull(store);
@@ -100,11 +136,15 @@ internal sealed class PickupCoordinator
         // Read once, after validation: a host that changes the options object later changes nothing here.
         _maxDeliveryBatch = options.MaxDeliveryBatch;
         _leaseTimeout = options.LeaseTimeout;
+        _maxMessageAge = options.MaxMessageAge;
         _maxAckIds = options.EffectiveMaxAckIds;
+        MaxQueueMessages = options.MaxQueueMessages;
+        MaxStoreMessages = options.MaxStoreMessages;
         _didCommOptions = didCommOptions;
         _sizing = new PickupSizing(options, didCommOptions.MaxReceiveBytes);
         _tracker = new PickupSessionTracker(store, logger);
-        _ids = idGenerator ?? UuidV4MessageIdGenerator.Instance;
+        // The queue's own CSPRNG (FR-PICK-04), never the container's IMessageIdGenerator.
+        _newId = newId ?? PickupIds.NewRandomId;
         _logger = logger;
         Log(LogLevel.Information,
             "Message pickup: a delivery is at most {MaxDeliveryBytes} packed bytes and {MaxDeliveryBatch} messages; the largest message accepted into the queue is {MaxAdmissiblePayloadBytes} bytes.",
@@ -113,6 +153,15 @@ internal sealed class PickupCoordinator
 
     /// <summary>The largest <c>message_id_list</c> a <c>messages-received</c> may carry.</summary>
     public int MaxAckIds => _maxAckIds;
+
+    /// <summary>The most messages one <c>delivery</c> carries (<see cref="MessagePickupOptions.MaxDeliveryBatch"/>).</summary>
+    public int MaxDeliveryBatch => _maxDeliveryBatch;
+
+    /// <summary>The per-grant message quota in effect (<see cref="MessagePickupOptions.MaxQueueMessages"/>).</summary>
+    public int MaxQueueMessages { get; }
+
+    /// <summary>The store-wide message quota in effect (<see cref="MessagePickupOptions.MaxStoreMessages"/>).</summary>
+    public int MaxStoreMessages { get; }
 
     /// <summary>The sizing in effect.</summary>
     public PickupSizing Sizing => _sizing;
@@ -271,7 +320,13 @@ internal sealed class PickupCoordinator
             var owned = await OwnsAsync(peerDid, null, ct).ConfigureAwait(false);
             var queue = await ReadQueueAsync(peerDid, null, owned, now, ct).ConfigureAwait(false);
 
-            var live = state is not null && state.SetLive(liveDelivery ? buildLiveDelivery : null);
+            // The mark is the status's own high-water sequence: a message is either counted in the
+            // status this change answers with, or arrives after it and is pushed. (A peer with no
+            // grant reads an empty status without a store call, so its mark is zero: it has no
+            // records, and whatever it is sent once granted arrives after any mark.)
+            var live = state is not null && state.SetLive(liveDelivery ? buildLiveDelivery : null, queue.HighWaterSequence);
+            if (live)
+                RaiseLiveDeliveryStarted(peerDid);
             return PickupOutcome.Of(new PickupStatusView(queue, now, live, null));
         }
         catch (Exception ex)
@@ -305,9 +360,15 @@ internal sealed class PickupCoordinator
         try
         {
             var now = _didCommOptions.Now();
+            // "Expired at admission" is the message's own expiry only: the age limit, counted from
+            // now, cannot have passed yet.
             var expiresAt = ExpiryInstant(options.ExpiresTime);
             if (expiresAt is { } at && now >= at)
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Expired, null, null);
+            // The mailbox age limit is folded into the record's expiry (FR-PICK-10): every expiry
+            // path of the store — lease selection, status, the sweeps, PurgeExpiredAsync — then
+            // applies it to waiting, leased and passed-over records alike, by time only.
+            var storedExpiry = Earliest(expiresAt, AgedOutAt(now));
 
             // A DID URL is not normalised into its DID, and an over-long value is never looked up.
             if (!BareDid.IsBareDid(recipientDid))
@@ -328,7 +389,7 @@ internal sealed class PickupCoordinator
             for (var attempt = 0; attempt < 2 && outcome == EnqueueOutcome.DuplicateId; attempt++)
             {
                 id = NewMessageId();
-                var record = new QueuedMessage(id, peerDid, recipientDid, payload, now, options.NotBefore, expiresAt);
+                var record = new QueuedMessage(id, peerDid, recipientDid, payload, now, options.NotBefore, storedExpiry);
                 outcome = await _store.EnqueueAsync(record, lease, now, ct).ConfigureAwait(false);
             }
 
@@ -346,13 +407,37 @@ internal sealed class PickupCoordinator
                     return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
             }
 
+            // The grant may have been revoked, and its records purged, between the lookup above and
+            // the enqueue (L-057): a purge that ran first cannot have removed this record. Look again,
+            // and when the DID no longer belongs to this grant remove exactly the record stored here.
+            switch (await RecheckRegistrationAsync(recipientDid, peerDid, ct).ConfigureAwait(false))
+            {
+                case Registration.Gone:
+                    if (await RemoveQuietlyAsync(peerDid, id!).ConfigureAwait(false))
+                    {
+                        Log(LogLevel.Information, "Message pickup: a message was not kept: its recipient DID stopped being registered while it was stored (a revoked grant or a removed DID).");
+                        return new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null);
+                    }
+                    // Could not be removed: it stays retained (and is reported so), under no lease.
+                    if (lease is not null)
+                        await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
+                    return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+                case Registration.Unknown:
+                    // The check failed: keep the record (never lose an accepted message; expiry or the
+                    // age limit reclaims it if it is never picked up), but push nothing live on an
+                    // unconfirmed registration.
+                    if (lease is not null)
+                        await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
+                    return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+            }
+
             if (target is null || lease is null)
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
 
             // Admitted and leased to the live session in one step; now the push (FR-PICK-08/09).
             var (session, state) = target.Value;
             var sent = ReturnRouteSendResult.NotSent;
-            if (state.LiveDelivery is { } build)
+            if (state.Live?.Build is { } build)
             {
                 var delivery = build(session.LocalDid, peerDid, new DeliveredMessage(id!, payload));
                 sent = await session.TrySendAsync(delivery, _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
@@ -367,14 +452,173 @@ internal sealed class PickupCoordinator
         }
         catch (Exception ex)
         {
-            if (stored && lease is not null)
-                await ReleaseQuietlyAsync(peerDid!, new[] { id! }, lease.Id).ConfigureAwait(false);
+            if (stored)
+            {
+                // Once stored, the message is held whatever ends this call, and the answer says so:
+                // a cancellation here (a caller shutting down during the re-check or the live push)
+                // must not make a queued message look dropped (#95 Q-6). The live lease, if any, is
+                // given back so a delivery-request gets it.
+                if (lease is not null)
+                    await ReleaseQuietlyAsync(peerDid!, new[] { id! }, lease.Id).ConfigureAwait(false);
+                if (ct.IsCancellationRequested)
+                    Log(LogLevel.Information, "Message pickup: a delivery was cancelled after its message was stored; the message stays queued.");
+                else
+                    Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType} after it was stored; the message stays queued.", ex.GetType().Name);
+                return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
+            }
             MediatorLog.ThrowIfCancelled(ct);
-            Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType}; retained: {Retained}.", ex.GetType().Name, stored);
-            return stored
-                ? new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid)
-                : new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
+            Log(LogLevel.Error, "Message pickup: delivering a message failed with {ExceptionType}; nothing was stored.", ex.GetType().Name);
+            return new PickupDeliveryResult(PickupDeliveryOutcome.Faulted, null, peerDid);
         }
+    }
+
+    /// <summary>
+    /// Raised with the peer's DID when a session turns live delivery on (after the status that
+    /// answers it was read): the mediator's push workers wake the grant, so a message that arrived
+    /// after that status — and found no live session when it arrived — is pushed now rather than at
+    /// the grant's next message. A handler that throws is ignored.
+    /// </summary>
+    public event Action<string>? LiveDeliveryStarted;
+
+    private void RaiseLiveDeliveryStarted(string peerDid)
+    {
+        try
+        {
+            LiveDeliveryStarted?.Invoke(peerDid);
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Warning, "Message pickup: waking the pushes after live delivery went on failed with {ExceptionType}.", ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="grantPeerDid"/> has, right now, the live session a live push would go
+    /// to (the newest of its sessions with live delivery on). Synchronous and cheap; the answer may
+    /// be stale by the time a push runs, which is why <see cref="PushNextLiveAsync"/> looks again.
+    /// </summary>
+    /// <param name="grantPeerDid">The grant's peer DID.</param>
+    public bool HasLiveTarget(string grantPeerDid) => FindLiveTarget(grantPeerDid) is not null;
+
+    /// <summary>
+    /// Take the next message of <paramref name="grantPeerDid"/> the store hands out now — due,
+    /// unexpired, unleased, not passed over, oldest first and, when <paramref name="afterSequence"/>
+    /// is given, arrived after it — under <paramref name="lease"/>, one record at a time
+    /// (FR-PICK-03/09). Registration is checked at delivery time, exactly as for a pickup: a record
+    /// whose recipient DID no longer belongs to the grant is removed, by id, and not handed over.
+    /// </summary>
+    /// <param name="grantPeerDid">The grant.</param>
+    /// <param name="lease">The lease to take the record under; the caller ends it (acknowledge, release, pass over) or lets it run on.</param>
+    /// <param name="afterSequence">Only records with a greater arrival sequence (<see cref="QueuedMessage.Sequence"/>); <c>null</c> for any.</param>
+    /// <param name="now">The instant the store judges by.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The record, now leased to the caller; or why there is none.</returns>
+    public async ValueTask<(TakeResult Result, QueuedMessage? Record)> TakeNextAsync(string grantPeerDid, MessageLease lease, long? afterSequence, DateTimeOffset now, CancellationToken ct)
+    {
+        var request = new MessageLeaseRequest(grantPeerDid, null, 1, long.MaxValue, now, lease) { AfterSequence = afterSequence };
+        var taken = await _store.LeaseAsync(request, ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The message store returned no lease list.");
+        // Copied before anything is checked: what the store handed out is held from here on.
+        var leased = new List<QueuedMessage>();
+        var held = new List<string>();
+        foreach (var record in taken)
+        {
+            if (record?.Id is { } heldId)
+                held.Add(heldId);
+            leased.Add(record!);
+        }
+        try
+        {
+            var settled = new HashSet<string>(StringComparer.Ordinal);
+            RequireLeasedWithinContract(leased, grantPeerDid, null, 1, settled);
+            // The arrival sequence is the store's to assign (from 1) and to filter by: a record
+            // without one, or not after the one asked for, is outside the contract and not pushed.
+            if (leased.Exists(record => record.Sequence < 1 || record.Sequence <= afterSequence))
+                throw new InvalidOperationException("The message store returned a record without an arrival sequence after the one it was asked for.");
+            if (leased.Count == 0)
+                return (TakeResult.Empty, null);
+            await DropUnregisteredAsync(grantPeerDid, leased, held, settled, ct).ConfigureAwait(false);
+            if (leased.Count == 0)
+                return (TakeResult.Removed, null);
+            held.Clear(); // the caller's from here on
+            return (TakeResult.Taken, leased[0]);
+        }
+        finally
+        {
+            if (held.Count > 0)
+                await ReleaseQuietlyAsync(grantPeerDid, held, lease.Id).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Push the next message that arrived for <paramref name="grantPeerDid"/> after its live session
+    /// turned live delivery on, over that session (FR-PICK-08, step 1 of the delivery order). The mediator's
+    /// push workers call this, never the forward pump: the send packs a <c>delivery</c> for the peer,
+    /// which resolves the peer's DID, and the peer controls how long that takes.
+    /// </summary>
+    /// <remarks>
+    /// The session is the one <see cref="DeliverAsync"/> would use: the newest live session of the
+    /// peer, in <c>return_route: all</c>, with live delivery on. Only messages that arrived after
+    /// the status that answered its turning live delivery on are pushed (by arrival sequence,
+    /// <see cref="LiveMode.AfterSequence"/>): what that status counted is the recipient's to pick
+    /// up (FR-PICK-06). The record
+    /// is taken with <see cref="TakeNextAsync"/> under a lease owned by that session
+    /// (<see cref="MessagePickupOptions.LeaseTimeout"/>) and sent as a one-message <c>delivery</c>
+    /// in the session's framing, bounded by <c>max_delivery_bytes</c>. Taken by the session, it
+    /// stays leased until <c>messages-received</c>, the session's close or the lease timeout. Too
+    /// large for the session's envelope even alone, it is passed over, as a pickup does. Anything
+    /// else — not taken, the session closing, a fault, a cancellation — gives the lease back, once
+    /// the send has ended, however long that takes. Faults and cancellation propagate after that.
+    /// </remarks>
+    /// <param name="grantPeerDid">The grant; its peer gets the push.</param>
+    /// <param name="ct">Cancellation token: the push's deadline.</param>
+    /// <returns>What happened; see <see cref="LiveStep"/>.</returns>
+    public async ValueTask<LiveStep> PushNextLiveAsync(string grantPeerDid, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        // The live mode is read once: it is cleared when live delivery is turned off or the session closes.
+        if (FindLiveTarget(grantPeerDid) is not { } target || target.State.Live is not { } live)
+            return LiveStep.NoSession;
+        var (session, state) = target;
+
+        var now = _didCommOptions.Now();
+        var lease = new MessageLease(state.OwnerToken, now + _leaseTimeout);
+        // Before the lease exists: the session's close then knows there may be leases to end.
+        state.MarkLeasing();
+        var (taken, record) = await TakeNextAsync(grantPeerDid, lease, live.AfterSequence, now, ct).ConfigureAwait(false);
+        if (record is null)
+            return taken == TakeResult.Removed ? LiveStep.Removed : LiveStep.Empty;
+
+        var step = LiveStep.NotSent;
+        try
+        {
+            // A take that came back after the deadline sends nothing: the record goes straight back.
+            ct.ThrowIfCancellationRequested();
+            if (!state.IsClosed)
+            {
+                var delivery = live.Build(session.LocalDid, grantPeerDid, new DeliveredMessage(record.Id, record.Payload));
+                var sent = await session.TrySendAsync(delivery, _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
+                // Looked at again once the lease is in use: a session that closed meanwhile may have
+                // run its clean-up before the lease existed.
+                if (sent == ReturnRouteSendResult.Sent && !state.IsClosed)
+                {
+                    step = LiveStep.Sent;
+                }
+                else if (sent == ReturnRouteSendResult.TooLarge)
+                {
+                    await _store.PassOverAsync(grantPeerDid, new[] { record.Id }, lease.Id, PassedOverUntil(now, record.PassOvers), ct).ConfigureAwait(false);
+                    step = LiveStep.PassedOver;
+                    var level = MediatorLog.RateLimited(ref _undeliverable, out var n);
+                    Log(level, "Message pickup: a queued message of {Bytes} bytes does not fit the live session's envelope within max_delivery_bytes; it stays queued and is passed over for a period that doubles each time. {Count} such messages.", record.Payload.Length, n);
+                }
+            }
+        }
+        finally
+        {
+            if (step == LiveStep.NotSent)
+                await ReleaseQuietlyAsync(grantPeerDid, new[] { record.Id }, lease.Id).ConfigureAwait(false);
+        }
+        return step;
     }
 
     /// <summary>See <see cref="MessagePickupQueue.RemoveAsync"/>.</summary>
@@ -395,6 +639,24 @@ internal sealed class PickupCoordinator
 
     /// <summary>See <see cref="MessagePickupQueue.PurgeExpiredAsync"/>.</summary>
     public ValueTask<int> PurgeExpiredAsync(CancellationToken ct) => _store.PurgeExpiredAsync(_didCommOptions.Now(), ct);
+
+    /// <summary>See <see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>. Store faults propagate: a host API.</summary>
+    public async ValueTask<GrantRevocation> RevokeAndPurgeAsync(string peerDid, CancellationToken ct)
+    {
+        // Checked first, so a value that is not a bare DID is never handed to a store (and never quoted).
+        if (!BareDid.IsBareDid(peerDid))
+            throw new ArgumentException("The peer must be named by a bare DID of at most 2048 characters (no path, query or fragment).", nameof(peerDid));
+        ct.ThrowIfCancellationRequested();
+
+        // Revoke first: from here every delivery's re-check finds the DID unregistered and removes
+        // what it stored, so nothing stored after the purge below survives (L-057).
+        var revoked = await _mediation.RevokeAsync(peerDid, ct).ConfigureAwait(false);
+        var purged = await _store.PurgeGrantAsync(peerDid, ct).ConfigureAwait(false);
+        if (purged < 0)
+            throw new InvalidOperationException("The message store returned a purge count outside its contract.");
+        Log(LogLevel.Information, "Message pickup: a grant was revoked ({Revoked}) and {Purged} queued message(s) held under it were removed.", revoked, purged);
+        return new GrantRevocation(revoked, purged);
+    }
 
     /// <summary>Write a log line; a throwing logging provider changes nothing.</summary>
     public void Log(LogLevel level, string message, params object?[] args) => MediatorLog.Write(_logger, level, message, args);
@@ -427,13 +689,13 @@ internal sealed class PickupCoordinator
         if (!owned)
             return QueueStatus.Empty;
         var queue = await _store.GetStatusAsync(peerDid, recipientDid, now, ct).ConfigureAwait(false);
-        if (queue is null || queue.MessageCount < 0 || queue.TotalBytes < 0)
+        if (queue is null || queue.MessageCount < 0 || queue.TotalBytes < 0 || queue.HighWaterSequence < 0)
             throw new InvalidOperationException("The message store returned a status outside its contract.");
         return queue;
     }
 
     private bool IsLive(IReturnRouteSession? session)
-        => session is not null && _tracker.Find(session)?.LiveDelivery is not null;
+        => session is not null && _tracker.Find(session)?.Live is not null;
 
     // Lease, check, push, trim — and look further when a batch came to nothing. Returns the
     // outcome when the request is settled here, or null when nothing could be delivered and the
@@ -648,7 +910,7 @@ internal sealed class PickupCoordinator
                 if (!string.Equals(session.PeerDid, peerDid, StringComparison.Ordinal) || !session.IsLive || session.Mode != ReturnRouteMode.All)
                     continue;
                 var state = _tracker.Find(session);
-                if (state?.LiveDelivery is not null)
+                if (state?.Live is not null)
                     return (session, state);
             }
         }
@@ -659,16 +921,35 @@ internal sealed class PickupCoordinator
         return null;
     }
 
+    // Whatever produced the id, it is checked before it is stored: a test seam can hand back
+    // anything, and an id goes on the wire as an attachment id.
     private string NewMessageId()
     {
-        var id = _ids.NewId();
+        var id = _newId();
         if (!IsUsableId(id, PickupSizing.MaxMintedIdLength))
-            throw new InvalidOperationException("The message id generator returned an id that cannot be used as an attachment id.");
+            throw new InvalidOperationException("The message id source returned an id that cannot be used as an attachment id.");
         return id;
     }
 
     private static bool IsUsableId(string? id, int maxLength)
         => !string.IsNullOrEmpty(id) && id.Length <= maxLength && UnreservedUriChars.IsUnreserved(id);
+
+    // The mailbox age limit as an instant on the mediator's clock: admission time plus the limit,
+    // with no skew (the clock that admits is the clock that sweeps). Saturating: a limit that would
+    // run past the end of time ends there (a clock set close to DateTimeOffset.MaxValue).
+    private DateTimeOffset? AgedOutAt(DateTimeOffset now)
+    {
+        if (_maxMessageAge is not { } age)
+            return null;
+        return age.Ticks >= DateTimeOffset.MaxValue.UtcTicks - now.UtcTicks
+            ? DateTimeOffset.MaxValue
+            : new DateTimeOffset(now.UtcTicks + age.Ticks, TimeSpan.Zero);
+    }
+
+    private static DateTimeOffset? Earliest(DateTimeOffset? first, DateTimeOffset? second)
+        => first is not { } a ? second
+            : second is not { } b ? a
+            : a <= b ? a : b;
 
     // FR-ROUTE-09 as an instant: expires_time counts whole seconds and is expired once
     // now - skew > expires, i.e. from the start of second (expires + skew + 1).
@@ -684,6 +965,48 @@ internal sealed class PickupCoordinator
         if (first >= DateTimeOffset.MaxValue.ToUnixTimeSeconds())
             return DateTimeOffset.MaxValue;
         return DateTimeOffset.FromUnixTimeSeconds((long)first);
+    }
+
+    private enum Registration
+    {
+        Registered,
+        Gone,
+        Unknown,
+    }
+
+    // The post-enqueue check: does the recipient DID still belong to the grant the message was stored
+    // under? A store fault is Unknown (the caller keeps the record); a cancellation of the caller's
+    // token leaves as itself, and the caller, having stored the record, reports it Queued.
+    private async ValueTask<Registration> RecheckRegistrationAsync(string recipientDid, string peerDid, CancellationToken ct)
+    {
+        try
+        {
+            var grant = await _mediation.FindGrantByRecipientDidAsync(recipientDid, ct).ConfigureAwait(false);
+            return string.Equals(grant?.PeerDid, peerDid, StringComparison.Ordinal) ? Registration.Registered : Registration.Gone;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            Log(LogLevel.Warning, "Message pickup: the registration check after storing a message failed with {ExceptionType}; the message is kept and not pushed live.", ex.GetType().Name);
+            return Registration.Unknown;
+        }
+    }
+
+    // Remove exactly the record this delivery stored (by its id, under its grant). Never throws,
+    // never cancelled: it is the clean-up of a delivery that already decided not to keep the
+    // message. True when the record is gone — removed here, or already removed by a purge or an
+    // acknowledgement; false when the store failed and the record may still be held.
+    private async ValueTask<bool> RemoveQuietlyAsync(string peerDid, string id)
+    {
+        try
+        {
+            await _store.AcknowledgeAsync(peerDid, new[] { id }, CancellationToken.None).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Error, "Message pickup: a message stored for a recipient that is no longer registered could not be removed ({ExceptionType}); it stays queued until it expires or the grant is purged.", ex.GetType().Name);
+            return false;
+        }
     }
 
     // On a path that is already failing or cleaning up: never throws, never cancelled. Only the

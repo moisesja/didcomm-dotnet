@@ -5,11 +5,13 @@ namespace DidComm.Diagnostics;
 /// <summary>
 /// Names the library's OpenTelemetry instrumentation (NFR-05). The library emits
 /// <see cref="Activity"/> spans through a single <see cref="ActivitySource"/> named
-/// <see cref="ActivitySourceName"/>; consumers subscribe to it from their own OpenTelemetry
-/// (or plain <see cref="ActivityListener"/>) pipeline — the library itself references no
-/// OpenTelemetry SDK and exports nothing on its own. When nothing listens, every
-/// instrumentation point is a no-op (<c>StartActivity</c> returns <c>null</c>), so the
-/// telemetry is zero-cost for hosts that never opt in.
+/// <see cref="ActivitySourceName"/>, and metrics through a meter named <see cref="MeterName"/>
+/// (a routing mediator's forward outcomes, and the mediator service's instruments);
+/// consumers subscribe to them from their own OpenTelemetry (or plain
+/// <see cref="ActivityListener"/> / <c>MeterListener</c>) pipeline — the library itself
+/// references no OpenTelemetry SDK and exports nothing on its own. When nothing listens, every
+/// span is a no-op (<c>StartActivity</c> returns <c>null</c>), so the tracing is zero-cost for
+/// hosts that never opt in.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -36,6 +38,42 @@ public static class DidCommDiagnostics
     /// <c>ShouldListenTo</c>) to receive the library's spans.
     /// </summary>
     public const string ActivitySourceName = "didcomm-dotnet";
+
+    /// <summary>
+    /// The exact name of the library's <see cref="System.Diagnostics.Metrics.Meter"/> (NFR-05). Pass
+    /// this to <c>MeterProviderBuilder.AddMeter(...)</c> (or a <c>MeterListener</c>) to receive the
+    /// library's metrics. When the host's container provides an <c>IMeterFactory</c> (ASP.NET Core
+    /// does), the meter is created through it.
+    /// </summary>
+    /// <remarks>
+    /// <para>The instruments, all with a closed, low-cardinality set of tag values and never a DID:</para>
+    /// <list type="bullet">
+    /// <item><description><c>didcomm.forward.outcomes</c> (counter, unit <c>{forward}</c>): one count per forward that
+    /// reaches a routing mediator's forward handler (one refused earlier, at unpack, is not counted),
+    /// tagged <c>didcomm.forward.outcome</c> with how it ended:
+    /// <c>Queued</c>, <c>Dropped-Malformed</c>, <c>Dropped-NotEncrypted</c>,
+    /// <c>Dropped-Expired</c>, <c>Dropped-Unknown</c>, <c>Dropped-Saturated</c>,
+    /// <c>Dropped-Unacknowledged</c>, <c>Dropped-Shutdown</c>, <c>Dropped-TooLarge</c>,
+    /// <c>Dropped-Quota</c> or <c>Faulted</c>.</description></item>
+    /// <item><description><c>didcomm.mediator.push.outcomes</c> (counter): one count per stored message a
+    /// mediator hands to its push workers, tagged <c>didcomm.push.outcome</c> with how the push
+    /// ended (<c>Pushed-Live</c> over the recipient's live connection, <c>Pushed</c> to its endpoint,
+    /// <c>Push-Failed</c>, or a <c>Push-Skipped-</c> reason).</description></item>
+    /// <item><description><c>didcomm.mediator.queue.purged</c> (counter): expired and aged-out messages
+    /// removed from the pickup queue by the periodic purge.</description></item>
+    /// <item><description><c>didcomm.replay.saturated</c> and <c>didcomm.replay.clock_behind_refusals</c>
+    /// (observable counters): replay-guard refusals because the guard was full, or because the
+    /// host clock was far behind (only for the in-memory guard).</description></item>
+    /// <item><description><c>didcomm.return_route.dropped_notifications</c> (observable counter): session
+    /// lifecycle notifications dropped under backpressure (only for the in-memory session
+    /// registry).</description></item>
+    /// <item><description><c>didcomm.mediator.queue.messages</c> and <c>didcomm.mediator.queue.bytes</c>
+    /// (observable gauges): what the in-memory pickup store currently holds.</description></item>
+    /// </list>
+    /// <para>The <c>didcomm.mediator.*</c>, replay and session instruments are published by a
+    /// mediator host (<c>AddMediator()</c>).</para>
+    /// </remarks>
+    public const string MeterName = "didcomm-dotnet";
 
     /// <summary>The single source every didcomm-dotnet span is started from. Thread-safe (NFR-03).</summary>
     internal static readonly ActivitySource Source = new(ActivitySourceName);

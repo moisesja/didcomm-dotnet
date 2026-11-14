@@ -130,9 +130,10 @@ public sealed class MessagePickupAdversarialResourceSeamTests
             return outcome;
         };
 
-        var act = async () => await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 1), ct: cts.Token);
+        // #95 Q-6: stored before the cancellation, so reported Queued rather than thrown.
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 1), ct: cts.Token);
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
         live.Sent.Should().BeEmpty();
         fixture.Memory.MessageCount.Should().Be(1, "cancelling after the message was stored leaves it stored");
         (await MessagePickupAdversarialResource.FetchIdsAsync(fixture, peer, mediator)).Should().HaveCount(1, "the lease of a push that never happened is given back");
@@ -262,7 +263,7 @@ public sealed class MessagePickupAdversarialResourceSeamTests
     public async Task An_id_generator_that_returns_one_id_for_ever_costs_two_attempts_per_message_and_stores_nothing_more()
     {
         var generator = new OneIdGenerator();
-        await using var fixture = PickupFixture.Create(fakeStore: true, services: c => c.AddSingleton<IMessageIdGenerator>(generator));
+        await using var fixture = PickupFixture.Create(fakeStore: true, services: c => c.AddSingleton(new PickupIdSource(generator.NewId)));
         var (mediator, peer) = await fixture.EnrolledAsync();
         var other = (await fixture.NewPeerAsync()).Did;
         await fixture.EnrolAsync(other, mediator, other);
@@ -285,7 +286,7 @@ public sealed class MessagePickupAdversarialResourceSeamTests
         fixture.Memory.MessageCount.Should().Be(1, "acknowledging an id removes it under the caller's grant only");
     }
 
-    private sealed class OneIdGenerator : IMessageIdGenerator
+    private sealed class OneIdGenerator
     {
         public string NewId() => "the-one-id";
     }

@@ -116,7 +116,7 @@ public sealed class MessagePickupStorePassOverTests
 
         // Counted in status and against the bounds: nothing changed but who may be handed it.
         (store.MessageCount, store.TotalBytes).Should().Be((2, 35L));
-        (await store.GetStatusAsync(Alice, null, T0, None)).Should().Be(new QueueStatus(2, 35, T0, T0));
+        (await store.GetStatusAsync(Alice, null, T0, None)).Counts().Should().Be(new QueueStatus(2, 35, T0, T0));
         (await TryAddAsync(store, Message("c"))).Should().Be(EnqueueOutcome.GrantMessageLimitReached);
 
         // Its expiry still removes it, and so do an acknowledgement and the purges.

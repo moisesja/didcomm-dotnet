@@ -22,6 +22,14 @@ namespace DidComm.Transports.Http;
 /// return-route send, FR-RR-07): a final <c>200</c> with a DIDComm <c>Content-Type</c> then has its
 /// body read, capped and time-bounded, into <see cref="TransportResult.ResponsePayload"/>. Any other
 /// response body is never read.
+/// <para>
+/// Its own log lines carry the scheme and the status, never the endpoint URI: an endpoint can be a
+/// secret (a capability URL) or identify a recipient. The <see cref="IHttpClientFactory"/> request
+/// logging of the framework (categories <c>System.Net.Http.HttpClient.*</c>) writes the full URI at
+/// Information; filter those categories where endpoints must not reach the logs. A
+/// <see cref="TransportException"/>'s message names the endpoint, so log such an exception by its
+/// type.
+/// </para>
 /// </remarks>
 /// <example>
 /// Sends the packed envelope in <c>samples/04-MediatorAgent</c> and <c>samples/02-Cookbook</c> (section P).
@@ -103,19 +111,7 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             {
                 var status = (int)response.StatusCode;
                 if (status >= 200 && status < 300)
-                {
-                    _logger.LogDebug("HttpDidCommTransport POST {Uri} → {Status}", currentUri, status);
-                    // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and
-                    // only when the request carries a cap, which the facade sets only for a send that
-                    // asked for a return route. Otherwise the body is never touched.
-                    if (status == 200
-                        && request.MaxResponseBytes is int cap
-                        && TryDidCommMediaType(response.Content.Headers.ContentType?.MediaType, out var canonical))
-                    {
-                        return await ReadCappedAsync(response.Content, cap, canonical, ct).ConfigureAwait(false);
-                    }
-                    return new TransportResult(Accepted: true, HttpStatusCode: status);
-                }
+                    return await AcceptedAsync(response, status, currentUri, request, ct).ConfigureAwait(false);
 
                 // FR-TRN-06: only the 307 (Temporary Redirect) is followed. 308 Permanent Redirect
                 // and 301 Moved Permanently are explicitly refused — endpoint discovery happens at
@@ -153,6 +149,42 @@ public sealed class HttpDidCommTransport : IDidCommTransport
             $"HTTP send exceeded {_options.MaxRedirectHops} redirect hops starting from '{request.Endpoint}'.",
             httpStatusCode: 307,
             scheme: request.Endpoint.Scheme);
+    }
+
+    /// <summary>
+    /// The 2xx answer: one Debug line (a throwing logging provider changes nothing), then the
+    /// in-band body when one was asked for (FR-RR-07), else accepted.
+    /// </summary>
+    /// <param name="response">The 2xx response.</param>
+    /// <param name="status">Its status code.</param>
+    /// <param name="uri">The URI that answered (only its scheme is logged).</param>
+    /// <param name="request">The request.</param>
+    /// <param name="ct">The caller's cancellation token.</param>
+    private async Task<TransportResult> AcceptedAsync(HttpResponseMessage response, int status, Uri uri, TransportRequest request, CancellationToken ct)
+    {
+        // The scheme and the status only: an endpoint can be a host secret (a capability URL) or
+        // name a recipient, so the URI never reaches a log line. Guarded: the request was
+        // delivered, and a logging provider that throws (host code) must not turn that into a
+        // failure, which a caller would retry and so deliver twice.
+        try
+        {
+            _logger.LogDebug("HttpDidCommTransport POST over {Scheme} → {Status}", uri.Scheme, status);
+        }
+        catch
+        {
+            // Logging providers are host code; they must not change the send's outcome.
+        }
+
+        // FR-RR-07 (JC-3): the body is read only for a 200 with a DIDComm media type, and only when
+        // the request carries a cap, which the facade sets only for a send that asked for a return
+        // route. Otherwise the body is never touched.
+        if (status == 200
+            && request.MaxResponseBytes is int cap
+            && TryDidCommMediaType(response.Content.Headers.ContentType?.MediaType, out var canonical))
+        {
+            return await ReadCappedAsync(response.Content, cap, canonical, ct).ConfigureAwait(false);
+        }
+        return new TransportResult(Accepted: true, HttpStatusCode: status);
     }
 
     /// <summary>The 16 KiB unit a body of unknown (or large declared) length is read in.</summary>
