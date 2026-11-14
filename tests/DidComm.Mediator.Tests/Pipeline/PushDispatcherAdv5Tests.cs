@@ -218,7 +218,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- D-3: one operation per grant ------------------------------------------------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 5 (P3): PruneLocked removes the dictionary entry by key, not by identity; a worker that still holds a pruned GrantState (here: the saturated-skip path, parked in its log line) later drops the grant's NEW busy entry, so the next wake creates a third entry and a second operation of the same grant runs concurrently (D-3; also loses a cooldown set on the orphaned entry).")]
+    // ADV-5 DEFECT 5 (P3), fixed in round 8: PruneLocked removes an entry only when the map holds
+    // that very entry, so a worker holding a dropped one cannot remove its busy replacement.
+    [Fact]
     public async Task Defect5_a_stale_grant_entry_never_lets_a_second_operation_of_the_same_grant_start()
     {
         MessagePickupLive.RaiseThreadPoolFloor(2);
@@ -461,7 +463,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- clock: the cooldown -------------------------------------------------------------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 6 (P3): the cooldown is judged on TimeProvider.GetUtcNow() (wall clock); a backward step of the host clock lengthens the pause by the size of the step (here one hour instead of 2 x PushTimeout). Same at 755c497; not on main (no dispatcher).")]
+    // ADV-5 DEFECT 6 (P3), fixed in round 8: the cooldown is measured on the monotonic clock
+    // (TimeProvider.GetTimestamp / GetElapsedTime).
+    [Fact]
     public async Task Defect6_a_backward_step_of_the_wall_clock_does_not_lengthen_a_cooldown()
     {
         WallStepClock? wall = null;
@@ -496,10 +500,46 @@ public sealed class PushDispatcherAdv5Tests
 
         wall!.Step(TimeSpan.FromHours(-1)); // an NTP correction; the monotonic clock is unaffected
         fixture.Time.Advance(PushTimeout * (PushDispatcher.CooldownPushTimeouts + 1));
+        // Round 8: the timed-out message had its one direct attempt (the cursor); a new one shows the grant is served.
+        await fixture.StoreAsync(Recipient, PushFixture.Payload(64, 2));
 
         fixture.Dispatcher.Wake(Peer).Should().BeTrue("2 x PushTimeout has passed on the monotonic clock");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.Pushes(PushOutcomes.Pushed).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_forward_step_of_the_wall_clock_does_not_shorten_a_cooldown()
+    {
+        // Round 8, with Defect6: the pause is measured on the monotonic clock in both directions.
+        WallStepClock? wall = null;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fixture = PushFixture.Create(
+            async (_, ct) =>
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct); // reaches the deadline
+                return new TransportResult(true, 202);
+            },
+            directory: _ => Inbox,
+            services: s =>
+            {
+                var manual = (ManualTimeProvider)s.Last(x => x.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
+                wall = new WallStepClock(manual);
+                s.AddSingleton<TimeProvider>(wall);
+            });
+        await fixture.EnrolAsync(Peer, Recipient);
+        await fixture.StoreAsync(Recipient);
+
+        fixture.Dispatcher.Wake(Peer).Should().BeTrue();
+        await entered.Task.WaitAsync(Wait);
+        fixture.Time.Advance(PushTimeout);
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the timed-out push settled");
+
+        wall!.Step(TimeSpan.FromHours(1));
+        fixture.Dispatcher.Wake(Peer).Should().BeFalse("no time has passed on the monotonic clock: the grant is still paused");
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown);
     }
 
     // ---- support ---------------------------------------------------------------------------------------------

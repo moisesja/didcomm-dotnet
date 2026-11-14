@@ -88,25 +88,29 @@ namespace DidComm.Mediator.Pipeline;
 /// <c>try</c> (never <c>CancelAfter</c>). At the deadline the worker stops waiting and serves other
 /// grants; the push counts as <c>Push-Failed</c>, and its grant is paused for
 /// <see cref="CooldownPushTimeouts"/> × <see cref="MediatorOptions.PushTimeout"/> (one minute at the
-/// defaults): wake-ups meanwhile are skipped (<c>Push-Skipped-Cooldown</c>), and their messages wait
-/// for pickup. The abandoned push still ends its lease exactly once when it ends, and its grant is
-/// not served again before that. A session that ignores cancellation and later reports the message
-/// sent keeps it leased, as for any live push; a direct push whose 2xx arrives late removes it
-/// (at-least-once). A peer that
-/// stalls on purpose holds a worker at most once per cooldown. The residual: with K grants that
-/// stall every push and W workers, a healthy recipient's push can wait up to about ceil(K / W) ×
-/// <see cref="MediatorOptions.PushTimeout"/>, and once K reaches 3 × W that wait recurs; nothing is
-/// lost, pickup always works, and a mediation policy that enrols only known peers closes it.
+/// defaults), measured on the monotonic clock (<see cref="TimeProvider.GetTimestamp"/>), so a step of
+/// the wall clock neither lengthens nor shortens it: wake-ups meanwhile are skipped
+/// (<c>Push-Skipped-Cooldown</c>), and their messages wait for pickup. The abandoned push still ends
+/// its lease exactly once when it ends, and its grant is not served again before that. A session
+/// that ignores cancellation and later reports the message sent keeps it leased, as for any live
+/// push; a direct push whose 2xx arrives late removes it (at-least-once). When a stalled push does
+/// end at its deadline, a peer that stalls on purpose holds a worker at most once per cooldown: with
+/// K grants that stall every push this way and W workers, a healthy recipient's push can wait up to
+/// about ceil(K / W) × <see cref="MediatorOptions.PushTimeout"/>, and once K reaches 3 × W that wait
+/// recurs; nothing is lost, pickup always works, and a mediation policy that enrols only known peers
+/// closes it. A push that does not end at its deadline is the next paragraph's case.
 /// </para>
 /// <para>
 /// <strong>Bounded (D-4).</strong> <see cref="MediatorOptions.PushConcurrency"/> workers; at most
 /// <see cref="UnsettledPerWorker"/> × <see cref="MediatorOptions.PushConcurrency"/> operations
 /// between their start and the end of the work they started (abandoned ones included). When that
 /// many exist, a wake-up starts nothing (<c>Push-Skipped-Saturated</c>) and its messages wait for
-/// pickup or the grant's next wake-up. A call that never ends (a host session, DID resolver,
-/// transport or store that ignores cancellation) keeps its operation, and its grant, unsettled
-/// until it does; once that many operations are so held, no push starts, and pickup still works.
-/// Each operation holds at most one record at a time. The
+/// pickup or the grant's next wake-up. A host collaborator — a return-route session, the DID
+/// resolver, a transport, the endpoint directory or the store — that never completes a call after
+/// it was cancelled keeps that call's operation, and its grant, unsettled until it does complete;
+/// <see cref="UnsettledPerWorker"/> × <see cref="MediatorOptions.PushConcurrency"/> such calls hold
+/// every operation there is, and then no push starts, for any recipient, until one of them
+/// completes. Pickup keeps working throughout. Each operation holds at most one record at a time. The
 /// dispatcher holds one small entry per grant that is woken, busy or cooling down (its DID, at most
 /// 2048 characters), dropped when it is none of these, and at most
 /// <see cref="CoordinateMediationOptions.MaxGrants"/> direct-push cursors (a DID and a number each).
@@ -189,7 +193,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     /// <param name="didCommOptions">Supplies the clock the store judges records by.</param>
     /// <param name="metrics">The push counter.</param>
     /// <param name="logger">Optional logger.</param>
-    /// <param name="timeProvider">The clock behind the deadlines and the cooldown.</param>
+    /// <param name="timeProvider">The clock behind the deadlines and the cooldown (its monotonic timestamps).</param>
     public PushDispatcher(
         IServiceProvider services,
         IOptions<MediatorOptions> options,
@@ -667,8 +671,9 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         }
     }
 
-    // Under _gate.
-    private bool IsCoolingLocked(GrantState grant) => grant.CoolUntil > _time.GetUtcNow();
+    // Under _gate. On the monotonic clock: a step of the wall clock does not move it.
+    private bool IsCoolingLocked(GrantState grant)
+        => grant.CoolingSince is { } since && _time.GetElapsedTime(since) < _cooldown;
 
     // Under _gate: put a woken, idle grant in line; false when it is already in line or busy (it is
     // served after its operation settles).
@@ -683,11 +688,17 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         return true;
     }
 
-    // Under _gate: drop the entry of a grant that is neither woken, in line, busy nor cooling.
+    // Under _gate: drop the entry of a grant that is neither woken, in line, busy nor cooling — that
+    // very entry only. A worker may still hold an entry that was dropped and replaced meanwhile (a
+    // saturated skip that has not finished yet); removing by key would drop the replacement, which
+    // may be busy, and let a second operation of the grant start (D-3).
     private void PruneLocked(GrantState grant)
     {
-        if (!grant.Woken && !grant.Queued && !grant.Busy && !IsCoolingLocked(grant))
+        if (!grant.Woken && !grant.Queued && !grant.Busy && !IsCoolingLocked(grant)
+            && _grants.TryGetValue(grant.GrantPeerDid, out var held) && ReferenceEquals(held, grant))
+        {
             _grants.Remove(grant.GrantPeerDid);
+        }
     }
 
     // A worker is done with the grant it took off the line.
@@ -736,10 +747,9 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     {
         lock (_gate)
         {
-            var now = _time.GetUtcNow();
             foreach (var other in _grants.Values.ToArray())
                 PruneLocked(other);
-            grant.CoolUntil = SaturatingAdd(now, _cooldown);
+            grant.CoolingSince = _time.GetTimestamp();
         }
         var level = MediatorLog.RateLimited(ref _cooldownLines, out var n);
         MediatorLog.Write(_logger, level, "Pushes to a recipient paused for {Cooldown}: its push reached the deadline. Its messages stay queued for pickup meanwhile. {Count} such pauses.", _cooldown, n);
@@ -834,8 +844,8 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         /// <summary>An operation started and its work has not ended.</summary>
         public bool Busy { get; set; }
 
-        /// <summary>Paused until this instant (on the dispatcher's clock).</summary>
-        public DateTimeOffset CoolUntil { get; set; } = DateTimeOffset.MinValue;
+        /// <summary>When its last cooldown started (<see cref="TimeProvider.GetTimestamp"/>); <c>null</c> if it never had one.</summary>
+        public long? CoolingSince { get; set; }
     }
 
     /// <summary>Stop admission, cancel the running pushes and drop the waiting wake-ups; does not wait.</summary>
