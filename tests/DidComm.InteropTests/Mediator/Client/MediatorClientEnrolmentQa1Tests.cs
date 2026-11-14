@@ -530,10 +530,14 @@ public sealed class MediatorClientEnrolmentQa1Tests
         });
         var bob = await harness.NewPeerAsync();
 
-        var act = () => harness.Mediation.RequestMediationAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint).WaitAsync(Qa1.Wait);
+        var thrown = await Record.ExceptionAsync(() => harness.Mediation.RequestMediationAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint).WaitAsync(Qa1.Wait));
+        var granted = await mediator.Mediation.GetGrantAsync(bob.Did, default) is not null;
 
-        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Contain("ReceiveInbound");
+        thrown.Should().BeOfType<InvalidOperationException>(
+            "the route cannot be received on (observed instead: {0}; request sent to the mediator: {1}; mediator granted: {2})",
+            thrown?.GetType().Name, atMediator.From(bob.Did).Count > 0, granted);
+        thrown!.Message.Should().Contain("ReceiveInbound");
         atMediator.From(bob.Did).Should().BeEmpty("nothing is sent on a route the client cannot receive on");
-        (await mediator.Mediation.GetGrantAsync(bob.Did, default)).Should().BeNull();
+        granted.Should().BeFalse();
     }
 }

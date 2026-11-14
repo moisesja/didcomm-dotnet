@@ -305,6 +305,118 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
         await channel.DisposeAsync();
     }
 
+    // ---- unobserved task exceptions ----------------------------------------------------------
+
+    /// <summary>
+    /// Q1-3. Over HTTP, a response without an answer fails the request through
+    /// <c>PendingRequest.TryFail(noAnswer)</c> — which faults the pending request's
+    /// <c>TaskCompletionSource</c> with the <see cref="TimeoutException"/> — and then throws the
+    /// same exception directly (<c>MediatorClientChannel.ExchangeCoreAsync</c>), never awaiting or
+    /// observing the faulted task. Every HTTP no-answer (a 202, an identity-refused or
+    /// non-correlating response, FR-RR-04/R-7) therefore leaves a faulted task that the finalizer
+    /// reports through <see cref="TaskScheduler.UnobservedTaskException"/>, which hosts log as an
+    /// error and which this repository's own "without unobserved exceptions" tests catch (they fail
+    /// in a full interop run: <c>InboundDispatchDiTests.Disposing_the_container_ends_session_loops_without_unobserved_exceptions</c>
+    /// saw "Mediator request '…' (mediate-request) got no answer in the HTTP response").
+    /// </summary>
+    [Fact]
+    public async Task Q1_3_An_HTTP_response_without_an_answer_leaves_no_unobserved_task_exception()
+    {
+        var ids = new ConcurrentBag<string>();
+        var seen = new ConcurrentQueue<Exception>();
+        EventHandler<UnobservedTaskExceptionEventArgs> handler = (_, e) =>
+        {
+            foreach (var ex in e.Exception.InnerExceptions)
+                seen.Enqueue(ex);
+        };
+        TaskScheduler.UnobservedTaskException += handler;
+        try
+        {
+            for (var i = 0; i < 20; i++)
+                ids.Add(await RunHttpNoAnswerAsync());
+            for (var i = 0; i < 3; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            seen.Where(ex => ids.Any(id => ex.Message.Contains(id, StringComparison.Ordinal)))
+                .Should().BeEmpty("the failure was thrown to the caller; nothing may be left for the finalizer to report");
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= handler;
+        }
+    }
+
+    /// <summary>
+    /// Q1-3 (second path). <c>Dispose</c> fails every waiting request with
+    /// <c>PendingRequest.TryFail(ObjectDisposedException)</c>. A request still in its send at that
+    /// moment never awaits its completion task: the shutdown cancels the send, and
+    /// <c>Unanswered</c> throws a fresh <see cref="ObjectDisposedException"/>, so the one stored in the
+    /// faulted completion task is never observed and is reported by the finalizer.
+    /// </summary>
+    [Fact]
+    public async Task Q1_3_Disposal_during_a_send_leaves_no_unobserved_task_exception()
+    {
+        var seen = new ConcurrentQueue<Exception>();
+        EventHandler<UnobservedTaskExceptionEventArgs> handler = (_, e) =>
+        {
+            foreach (var ex in e.Exception.InnerExceptions)
+                seen.Enqueue(ex);
+        };
+        TaskScheduler.UnobservedTaskException += handler;
+        try
+        {
+            for (var i = 0; i < 20; i++)
+                await RunDisposedDuringSendAsync();
+            for (var i = 0; i < 3; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            seen.OfType<ObjectDisposedException>().Where(ex => ex.ObjectName == nameof(MediatorClientChannel))
+                .Should().BeEmpty("the caller saw the disposal; nothing may be left for the finalizer to report");
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= handler;
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private async Task<string> RunHttpNoAnswerAsync()
+    {
+        _send.Respond = (_, options, _) => Task.FromResult(FakeSend.Accepted(options.ServiceEndpointOverride!));
+        var request = _w.Request();
+        try
+        {
+            await _channel.ExchangeAsync(HttpRoute, request, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+        }
+        catch (TimeoutException)
+        {
+        }
+        return request.Id;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private async Task RunDisposedDuringSendAsync()
+    {
+        var send = new FakeSend { Respond = (_, _, ct) => Task.Delay(Timeout.Infinite, ct).ContinueWith<SendResult>(_ => throw new OperationCanceledException(ct), TaskScheduler.Default) };
+        var channel = Create(_w, send, time: _time);
+        var exchange = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+        await send.FirstCall;
+        channel.Dispose();
+        try
+        {
+            await exchange;
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
     // ---- the request deadline's documented scope ---------------------------------------------
 
     /// <summary>
