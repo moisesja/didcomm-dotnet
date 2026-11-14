@@ -31,9 +31,9 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   step of a call, below), `MaxPendingRequests` (64; 1 to 4096; both clients together; a request
   beyond it is refused before it is sent), `CoordinateMediationVersion` (`Negotiate`, `V3` or `V2`;
   default `Negotiate`), `DedupeCapacity` (4096; 0 turns it off; at most 1 000 000),
-  `LivePollInterval` (1 minute; 1 second to 24 hours), `UnpackTimeout` (30 seconds; above 0, at most
-  10 minutes; per delivered message, every layer) and `Validate()`. The settings are copied when the
-  clients are built.
+  `LivePollInterval` (1 minute; 1 second to 24 hours), `UnpackTimeout` (20 seconds; above 0, at most
+  10 minutes; how long opening one whole delivery may take, below) and `Validate()`. The settings are
+  copied when the clients are built.
 - **`MediationClient`** (FR-MED-09). `RequestMediationAsync(mediatorDid, from)` returns the
   `MediationGrant`, or **`null` when the mediator denies**: a deny is a result, not an exception.
   `UpdateRecipientsAsync(mediatorDid, from, updates)` sends 1 to 1024 add/remove updates in one
@@ -77,12 +77,46 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   so the mediator deletes them and **you then hold the only copy**: handle them before your process
   can stop, or use `ReceiveLiveAsync`. **A message that does not unpack is returned as an item with
   `Error`, with its id, and is not acknowledged**: the mediator keeps it and delivers it again after
-  its lease (60 seconds at this library's mediator). Discard one you have given up on with
-  `AckAsync` (1 to 10 000 ids, sent 100 per message). Cancelling before the acknowledgement is sent
-  leaves everything queued; if the acknowledgement itself fails, the batch is still returned and
-  those messages come back as repeats. A loop that fetches until `Drained` gets past failures to
-  what is behind them. A `recipientDid` filter is sent and also enforced: a message whose sender did
-  not encrypt it to that DID is a failed item.
+  its lease (60 seconds at this library's mediator). The clients never discard one on their own:
+  discard one you have given up on with `AckAsync` (1 to 10 000 ids, sent 100 per message).
+  Cancelling before the acknowledgement is sent leaves everything queued; if the acknowledgement
+  itself fails, the batch is still returned and those messages come back as repeats. A loop that
+  fetches until `Drained` gets past failures to what is behind them, while the mediator still sets
+  them aside (below). `Error` is the unpack's own exception, and its text can quote DIDs and key
+  ids: log its type, not its message, wherever identifiers must not go.
+- **The `recipientDid` filter accepts only what one of that DID's own keys opened.** The filter is
+  sent and also enforced: a message counts as that DID's only when the key that decrypted it
+  belongs to that DID. The other recipients an envelope lists are not evidence, because whoever
+  encrypts an envelope writes that list. Any other message is a failed item (a
+  `MediationProtocolException`, "for another of your DIDs") and is not acknowledged.
+- **One message encrypted to two of your DIDs.** The mediator queues a copy for each DID, and every
+  copy opens with the key its envelope lists first among those this agent holds. So the message is
+  accepted by a fetch without a filter, or under the filter of that first DID. Under the second
+  DID's filter its copy is a failed item, "for another of your DIDs", and it stays queued: fetch
+  without a filter to take it, discard it with `AckAsync`, or let it age out at the mediator.
+  (Decrypting with the filter DID's key first would change which key Core's unpack chooses. It is a
+  candidate follow-up, not built.)
+- **Opening a delivery has one time budget, `UnpackTimeout`.** All the messages of one delivery
+  share it: a fetch, a live stream's drain round, or a push. Messages are opened four at a time, and
+  each gets an equal share: the budget divided by the rounds of four the delivery needs. That is the
+  whole budget for up to four messages, half for five to eight, a third for nine to twelve (a live
+  delivery holds at most ten), so a smaller `limit` gives each message a larger share. A message
+  that is not open when its share is up is a failed item with a `TimeoutException`. That happens
+  when its sender's DID resolves slowly, or never. The exception's text names at most our request
+  id, never a DID or a message. The item is not acknowledged and stays queued, and the next message
+  takes its place, so slow messages cannot keep the ones behind them from being opened. The rest of
+  the delivery is returned and acknowledged as usual.
+- **Keep `UnpackTimeout` well below the mediator's lease.** While a message the client gave up on
+  is still set aside by the mediator, the next fetch passes over it and reaches what is queued
+  behind it. The default of 20 seconds is a third of this library's default lease
+  (`MessagePickupOptions.LeaseTimeout`, 60 seconds), which leaves room for the fetch's request and
+  acknowledgement. For another mediator, keep it below that mediator's lease. If the lease runs out
+  first, this library's mediator hands the messages still being opened to the next fetch as well, so
+  a message can then reach you twice. It still accepts the late acknowledgement of the ones that
+  were opened, because it deletes by id.
+- **A message that keeps failing:** discard it with `AckAsync` once you have given up on it; the
+  clients never do. A mediator that does not set fetched messages aside delivers it first on every
+  fetch, and then neither the budget nor a fetch-until-drained loop gets you past it.
 - **Live delivery needs a WebSocket.** `SetLiveDeliveryAsync` and `ReceiveLiveAsync` refuse a route
   that is not `ws`/`wss` with `InvalidOperationException` before anything is sent (`ReceiveLiveAsync`
   at its first `MoveNextAsync`). A mediator that cannot deliver live on the connection answers with
@@ -96,7 +130,11 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   whether you handled it: the mediator delivers it again later. To discard it before you stop, call
   `AckAsync(mediatorDid, from, new[] { item.Id })`. On the way out the stream sends the
   acknowledgements still waiting and turns live delivery off, within one `RequestTimeout` whatever
-  your token says. Items that failed to unpack are yielded with `Error` and never acknowledged.
+  your token says. Each delivery the stream takes, a drain round's answer or a push, is opened
+  whole, under the budget above, on your own `MoveNextAsync` and before any of its items is
+  yielded, so the time you spend on an item never counts against it. Items that failed to unpack
+  are yielded with `Error` and never acknowledged; one that keeps failing is yielded again each time
+  the mediator delivers it, until you discard it with `AckAsync`.
   Acknowledgements go out at most 10 ids per message (when 10 are waiting, when nothing else is
   ready, or after 10 seconds). One stream per mediator and DID may be open at a time, and at most 16
   per container. A step that gets no answer (`TimeoutException`), fails in the transport
@@ -114,11 +152,14 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
 - **Delivery is at-least-once.** A message can arrive twice: after a lost acknowledgement, a dropped
   connection, a lease that ran out or a replayed forward. The clients remember recent messages
   (`DedupeCapacity`) and acknowledge a repeat without returning it again. A message is remembered by
-  a fixed-size hash of its sender, the DID it was decrypted for and its id (of its bytes when the
-  sender is anonymous), so a stranger who reuses a message id cannot hide someone else's message. A
-  message encrypted to several of your DIDs is returned once; the other copies are acknowledged as
-  repeats. An application that must never act twice on a message should still keep the ids it has
-  handled.
+  a fixed-size hash of the mailbox it came from (the `from` of the fetch or stream), its sender, the
+  DID it was decrypted for and its id (of its bytes when the sender is anonymous). So a stranger who
+  reuses a message id cannot hide someone else's message. A copy that reaches another of your DIDs'
+  mailboxes (a third party can relay one there) is returned from that mailbox too, and never makes
+  the first mailbox's own copy count as a repeat. Fetched or received with the same `from`, a
+  message encrypted to several of your DIDs is returned once, and the other copies are acknowledged
+  as repeats. An application that must never act twice on a message should still keep the ids it
+  has handled.
 - **Re-wrapped deliveries are opened** (FR-ROUTE-06, receiver side). Through a mediator in
   `RewrapMode.ReanoncryptToNext`, a delivered message is a forward re-wrapped for you. The client
   opens it with the mediator's own acceptance rule — an anoncrypted plaintext `forward` with one
@@ -127,14 +168,16 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
 - **Timeouts and retries.** Each step of a call has its own `RequestTimeout`: finding the mediator's
   endpoint in its DID document, the Discover Features query (only when the version is neither pinned
   nor remembered), and each request (one per page in the walk). A call can therefore take longer
-  than `RequestTimeout` in total. A step that runs out throws `TimeoutException`. For a request its
-  message names our request id (never a DID), and the mediator may still have acted on it, so retry:
-  every request these clients send is safe to repeat (a repeated `mediate-request` gets the same
-  grant, a repeated `add` `no_change`, a repeated `remove` `client_error`). **Over HTTP, a response
-  without the answer** (a 202, or a body that does not answer this request) **fails at once with
-  `TimeoutException`**, without waiting: HTTP returns at most one message. A `TransportException`
-  with status 200 means the mediator took the request but its answer was larger than
-  `MaxReceiveBytes`, stalled or unreadable (FR-RR-07): retry, with a smaller `limit` for a fetch.
+  than `RequestTimeout` in total (and a fetch also opens its delivery, within `UnpackTimeout`,
+  where a message out of time is a failed item, not an exception). A step that runs out throws
+  `TimeoutException`. For a request its message names our request id (never a DID), and the
+  mediator may still have acted on it, so retry: every request these clients send is safe to
+  repeat (a repeated `mediate-request` gets the same grant, a repeated `add` `no_change`, a
+  repeated `remove` `client_error`). **Over HTTP, a response without the answer** (a 202, or a body
+  that does not answer this request) **fails at once with `TimeoutException`**, without waiting:
+  HTTP returns at most one message. A `TransportException` with status 200 means the mediator took
+  the request but its answer was larger than `MaxReceiveBytes`, stalled or unreadable (FR-RR-07):
+  retry, with a smaller `limit` for a fetch.
 - **Which endpoint.** The first `DIDCommMessaging` entry of the mediator's DID decides the address,
   and so the transport; a mediator reached through routing keys or another mediator is refused before
   anything is sent. Pass `serviceEndpointOverride` to use another of its addresses, for example its
@@ -185,7 +228,11 @@ added the `*Qa1Tests` and `*Qa2Tests` suites (component and end-to-end permutati
 `MediatorClientChannelQa1Tests`, `MediationClientQa1Tests`, `PickupClientQa2Tests`,
 `PickupClientUnobservedQa2Tests`, `MediatorClientEnrolmentQa1Tests`, `PickupClientAcceptanceQa2Tests`,
 `PickupClientClockSkewQa2Tests`, `PickupClientDedupeQa2Tests`, `PickupClientDelayedQa2Tests`,
-`PickupClientFetchAndRewrapQa2Tests`, `PickupClientLiveRobustnessQa2Tests`).
+`PickupClientFetchAndRewrapQa2Tests`, `PickupClientLiveRobustnessQa2Tests`). Two red-team passes
+added `MediatorClientChannelAdv1Tests` and `PickupClientAdv1Tests` (with `Adv1Support`),
+`DeliveredUnpackAdv2Tests`, `PickupClientHostileMediatorAdv2Tests` and, end to end,
+`MediatorClientHostEndpointAdv1Tests`. The decrypt budget against this library's mediator and its
+lease is pinned end to end by `PickupClientBudgetLeaseTests`.
 
 ### Changed — recipient-side mediator client (#96)
 
@@ -213,15 +260,18 @@ added the `*Qa1Tests` and `*Qa2Tests` suites (component and end-to-end permutati
 ### Security — recipient-side client threat model and residuals (#96)
 
 - **Only the mediator's own answers count.** Before the client looks for a waiting request, an
-  answer must be a message the library unpacked (never one that host code built), authcrypted by the
-  mediator to the DID that sent the request, with `from` = the mediator and a `to`, when it has one,
-  naming that DID. Every check runs, without stopping at the first that fails. Only then is it
-  matched: by the request id in its `thid` (`pthid` for a problem report), or, without a thread, as
-  the only waiting request of that (mediator, DID) pair that expects its type. So a post-sign tamper
-  or a self-consistent forgery (a stranger's authcrypt carrying our request's `thid`) completes and
-  cancels nothing, and the real answer still completes. Over a WebSocket a thread-less `delivery`
-  goes only to a live stream; a `delivery` with a thread never does. Request ids are fresh UUID v4
-  values, never from the host's id generator, so a captured answer matches no request.
+  answer must be a message the library unpacked (never one that host code built). It must be
+  authcrypted, its `from` must be the DID whose key encrypted it, and its `to`, when it has one,
+  must name the DID that decrypted it. Every check runs, without stopping at the first that fails.
+  Only then is it matched: by the request id in its `thid` (`pthid` for a problem report), or,
+  without a thread, as the only waiting request of that (mediator, DID) pair that expects its type.
+  The request it names must have been sent by the DID that decrypted the answer, to the DID that
+  sent it. So a post-sign tamper completes and cancels nothing, and neither does a self-consistent
+  forgery: a stranger's own authcrypt carrying our request's `thid` reaches the lookup and is refused
+  by that pair check, with the same result and the same log line as a miss. The real answer still
+  completes. Over a WebSocket a thread-less `delivery` goes only to a live stream; a `delivery` with
+  a thread never does. Request ids are fresh UUID v4 values, never from the host's id generator, so
+  a captured answer with a thread matches no request.
 - **A hostile mediator is bounded.** It decides its own answers, within these limits: each answer at
   most `MaxReceiveBytes`; at most 64 waiting requests; at most `limit` messages opened per fetch (the
   rest not opened or acknowledged), 10 per live delivery and 8 buffered pushes per stream; at most
@@ -234,36 +284,95 @@ added the `*Qa1Tests` and `*Qa2Tests` suites (component and end-to-end permutati
   fetch loop. Residual: the routing DID of a grant is the mediator's word; publish it only for a
   mediator you trust.
 - **Misaddressed messages.** A message encrypted to someone else fails to unpack and is reported.
-  Residual: without a `recipientDid` filter, a message encrypted to another DID this agent holds is
-  returned, so a host serving several tenants checks `Unpacked.RecipientKid` or uses the filter.
+  Under a `recipientDid` filter, a message that a key of another DID opened is a failed item.
+  Residual: without a filter, a message encrypted to another DID this agent holds is returned, so a
+  host serving several tenants checks `Unpacked.RecipientKid` or uses the filter. Checking
+  `RecipientKid` after the fetch costs the other DID nothing: a copy returned from one mailbox never
+  makes another mailbox's copy a repeat (ADV1-1, below).
 - **Who sent a message.** The message inside an item can be plaintext or anoncrypted, so its `from`
   may be anyone's claim: check `UnpackResult.Authenticated` before you trust it.
 - **Resources and peer-controlled latency.** Everything the client keeps is bounded: 64 waiting
   requests, 16 live streams, the duplicate memory at 16 bytes per message (4096 by default), 64
-  remembered versions, 16 unpacks abandoned at their deadline per container (beyond that a new
-  unpack fails at once). The receive path is never held: the correlator hands an answer over and
-  never waits. Resolving a sender's DID runs on the caller's own await, bounded by `UnpackTimeout`
-  and, in a fetch, 4 at a time. Residual: a sender whose DID resolves slowly delays a live stream by
-  up to `UnpackTimeout` per message it sends, and its failures come back once per lease until the
-  application discards them.
+  remembered versions, 16 unpacks abandoned when their time ran out, per container (beyond that a
+  new unpack fails at once). The receive path is never held: the correlator hands an answer over and
+  never waits. Resolving a sender's DID runs on the caller's own await, a fetch's or the stream
+  consumer's `MoveNextAsync`. It is bounded by one `UnpackTimeout` per delivery, four messages at a
+  time with an equal share each, in a fetch and in a live stream alike. Residual: each message from
+  a sender whose DID resolves slowly or never costs the delivery that carries it up to its share,
+  and its failures come back once per lease until the application discards them with `AckAsync`.
 - **Found by the two QA passes and fixed before any release.** A WebSocket route under
   `ReceiveInbound` off was sent and timed out; it is now refused before anything is sent, on the
   transport's own answer. An HTTP request without an answer, a disposal during a send and an unpack
-  that ended as its deadline fired left unobserved task exceptions. A message encrypted to two of
-  our DIDs never passed the second DID's `recipientDid` filter. The live stream retried permanent
-  failures (a key of `from` it does not hold) with back-off instead of ending at once. The same round
-  made answers without `to` count (`to` is optional), made a delivery with no usable id an error,
-  bounded a page by 1000 DIDs whatever limit was asked for, made the walk throw instead of
+  that ended as its deadline fired left unobserved task exceptions. The live stream retried
+  permanent failures (a key of `from` it does not hold) with back-off instead of ending at once. The
+  same round made answers without `to` count (`to` is optional), made a delivery with no usable id
+  an error, bounded a page by 1000 DIDs whatever limit was asked for, made the walk throw instead of
   truncating, and limited live acknowledgements to 10 ids per message (a mediator may accept no more
-  than its batch size).
-- **Residuals, documented.** Clocks: a mediator more than 60 seconds ahead has its WebSocket answers
-  dropped although it acted (the call times out; retry), and a client more than 5 minutes behind
-  the mediator (its replay `Window`) has its requests refused: keep clocks within a minute. The last
-  item of a live stream comes back after the stream ends. A live consumer that holds an item longer
-  than the mediator's lease can be delivered taken items again (the duplicate memory recognises
-  them). A burst re-pushed after the push buffer overflowed clears over several cycles (latency
-  only). A host `IInboundFrameConsumer` of its own that never dispatches cannot be detected:
-  WebSocket calls time out. For the interop gate (#98): a mediator that does not stamp
+  than its batch size). QA-2 also found that a message encrypted to two of our DIDs never passed the
+  second DID's `recipientDid` filter (Q2-1). Its first fix also accepted a message whose envelope
+  lists the filter DID; the red team broke that fix (ADV1-2, ADV1-3, below). The owner replaced it
+  with the strict rule, so this is now documented behaviour, not a defect: under the second DID's
+  filter such a message is a failed item "for another of your DIDs" (Added, above).
+- **Found by the two red-team passes and resolved before any release.**
+  - ADV1-2 (Medium): a co-recipient re-encrypted a message Alice signed for it and for one of our
+    DIDs, T. It listed T first and another of our DIDs, F, second, and relayed it into F's mailbox.
+    T's key opened it, the label F passed F's filter, and F's application got a non-repudiable
+    message Alice never addressed to F; T's own copy was then dropped as a repeat. ADV1-3 (Low): a
+    relay (the mediator, or any hop before it) appended F's label to a message for T alone whose
+    sender wrote no `apv`, so nothing committed to the label, and the message passed F's filter.
+    Both are resolved by the strict rule (owner decision on #88, 2026-11-14): a filter accepts only
+    what one of the filter DID's own keys opened, and an envelope's recipient list is never
+    evidence.
+  - ADV1-1 (Medium): the duplicate memory was keyed by the DID that decrypted a message, not by the
+    mailbox fetched. A copy of T's message relayed into F's mailbox and fetched there without a
+    filter was remembered, so T's own copy was then acknowledged as a repeat and never returned.
+    Resolved: the memory is keyed by the mailbox too (the `from` of the fetch or stream).
+  - ADV2-1 (Medium): each message had its own `UnpackTimeout` (30 seconds then). Ten messages from
+    senders whose DIDs resolve slowly took one fetch three rounds of four, each a full
+    `UnpackTimeout` (90 seconds), longer than this library's 60-second lease, so a
+    fetch-until-drained loop never reached what was queued behind them. A live stream, which opened
+    one message at a time, was worse. Resolved (owner decision on #88, 2026-11-14): one budget per
+    delivery, 20 seconds by default, in fetch and live alike. The fix round then found that four never-resolving senders at the front of a delivery
+    kept the messages behind them from ever starting, at every redelivery. That is fixed by giving
+    each message an equal share of the budget.
+- **Residuals, documented (red team).**
+  - **Abandoned unpacks share 16 slots per container (ADV2-2, Low).** An unpack that ran out of time
+    keeps its slot until its sender's DID lookup really ends. Only a host DID resolver that ignores
+    cancellation can hold slots that way, and one slow sender is then enough to hold all 16. Until
+    those lookups end, every delivered message fails at once ("unpack capacity exhausted"), for
+    every DID and tenant of the container. Use a resolver that honours its cancellation token.
+  - **`PickupItem.Error` is the unpack's own exception**, and the texts of Core's unpack can quote
+    DIDs and key ids (pre-existing in Core). Log its type, not its message, wherever identifiers
+    must not go. The exceptions the client creates itself (a timeout, a filter mismatch) name at
+    most our request id.
+  - **No replay check on picked-up messages.** FR-RR-08 runs on the transport path only. A message
+    a host takes from a `PickupItem` and hands to its own protocol handlers has not been
+    replay-checked, so track the message ids you have handled.
+  - **A mediator that withholds its answers** can hold up a live stream's `DisposeAsync` (the end of
+    an `await foreach`) for up to one `RequestTimeout`, while the stream sends the last
+    acknowledgements and turns live delivery off.
+  - **A thread-less `disclose`** from a mediator that leaves out `thid`, which DIDComm requires, is
+    outside replay admission, since `disclose` is not a mediator-service type. A captured copy of
+    such an authcrypted answer, replayed to the host, can then answer every later Discover Features
+    query of its (mediator, DID) pair through the thread-less fallback. Only a non-conformant
+    mediator exposes this.
+  - **One replay budget per sender.** Over a WebSocket, the client's replay admission keeps at most
+    `ReplayProtectionOptions.MaxEntriesPerPeer` entries per sender (1024 by default), each for about
+    6 minutes, and a mediator is one sender. A mediator that sends one host more Coordinate
+    Mediation and Pickup messages than that within those minutes, for all of its DIDs together, has
+    the rest of its answers and pushes refused (`Saturated`): pushes then arrive by polling, and
+    calls time out. Raise the setting on a busy recipient host.
+  - Pre-existing, outside #96 (a follow-up): `DiscoverFeaturesClient`'s Warning for a rejected
+    `disclose` on a known thread quotes the message id, `from`, `to`, the recipient key id and the
+    requester's and responder's DIDs.
+- **Other residuals, documented.** Clocks: a mediator more than 60 seconds ahead has its WebSocket
+  answers dropped although it acted (the call times out; retry), and a client more than 5 minutes
+  behind the mediator (its replay `Window`) has its requests refused: keep clocks within a minute.
+  The last item of a live stream comes back after the stream ends. A live consumer that holds an
+  item longer than the mediator's lease can be delivered taken items again (the duplicate memory
+  recognises them). A burst re-pushed after the push buffer overflowed clears over several cycles
+  (latency only). A host `IInboundFrameConsumer` of its own that never dispatches cannot be
+  detected: WebSocket calls time out. For the interop gate (#98): a mediator that does not stamp
   `created_time` on its WebSocket answers has them dropped; one that answers `delivery-request`
   without `thid` works over HTTP only; one that puts a `thid` on its live pushes is reached by
   polling only; one without Discover Features needs a pinned version.
