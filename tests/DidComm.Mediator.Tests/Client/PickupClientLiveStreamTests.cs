@@ -120,6 +120,8 @@ public sealed class PickupClientLiveStreamTests
 
         var first = stream.MoveNextAsync().AsTask();
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout); // the delivery's budget
+        // The unpacks run on the thread pool (ADV3-4): q1 and q3 are open before the clock moves.
+        SpinWait.SpinUntil(() => exchange.Budgeted!.Settled == 2, PickupTest.Timeout).Should().BeTrue();
         first.IsCompleted.Should().BeFalse("nothing of the delivery is yielded while it is being opened");
         exchange.Clock.Advance(budget);
         (await PickupTest.Within(first)).Should().BeTrue();

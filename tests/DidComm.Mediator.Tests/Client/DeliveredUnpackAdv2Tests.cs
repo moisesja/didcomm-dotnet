@@ -142,7 +142,8 @@ public sealed class DeliveredUnpackAdv2Tests
     /// would unpack at once, then fails fast as "unpack capacity exhausted" without starting — for
     /// every local DID and tenant of the container — until the stalled lookups end; then it unpacks
     /// again. <c>MediatorClientOptions.UnpackTimeout</c> and <c>PickupClient.FetchAsync</c> document
-    /// it.
+    /// it. A known limit deferred to #111 (slow-sender hardening): invert this pin once the slots are
+    /// isolated per sender.
     /// </summary>
     [Fact]
     public async Task ADV2_2_residual_a_resolver_that_ignores_cancellation_fills_the_shared_slots_and_every_senders_message_fails_fast_until_its_lookups_end()

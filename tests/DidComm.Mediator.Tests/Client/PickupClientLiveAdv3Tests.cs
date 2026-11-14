@@ -20,7 +20,7 @@ public sealed class PickupClientLiveAdv3Tests
     private static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout;
 
     /// <summary>
-    /// ADV3-1 (fails: defect, Medium). Property broken — <see cref="PickupClient.ReceiveLiveAsync"/>
+    /// ADV3-1 (defect, Medium; fixed in fix round 3: once a cycle drains, its drain rounds and the pushes take turns, a drain round first). Property broken — <see cref="PickupClient.ReceiveLiveAsync"/>
     /// summary: "Every <see cref="MediatorClientOptions.LivePollInterval"/> it turns live delivery on
     /// again and takes what is queued: that picks up messages whose delivery was delayed and
     /// recovers from a dropped connection"; and its remarks: "The drain when the stream starts and
@@ -71,6 +71,12 @@ public sealed class PickupClientLiveAdv3Tests
         var items = new List<PickupItem>();
         try
         {
+            // Fix round 3: the cycle's drain round runs before the stream takes the attacker's first
+            // push (s0, pushed while live mode went on), so the queued message is the first item.
+            (await PickupTest.Within(move)).Should().BeTrue();
+            stream.Current.Id.Should().Be("queued-1");
+            move = stream.MoveNextAsync().AsTask();
+
             for (var i = 0; i < rounds; i++)
             {
                 // The push being opened: its budget and its message's share.
@@ -112,7 +118,7 @@ public sealed class PickupClientLiveAdv3Tests
     }
 
     /// <summary>
-    /// ADV3-5 (fails: defect, Low). Property broken — <see cref="MediatorClientOptions.LivePollInterval"/>:
+    /// ADV3-5 (defect, Low; fixed in fix round 3: a clock reading below a stored one counts as due). Property broken — <see cref="MediatorClientOptions.LivePollInterval"/>:
     /// "How often a live stream ... turns live delivery on again and collects what is queued"; and the
     /// project's own rule for clocks that step back (L-060; <c>NegotiatedVersionCache</c> treats "a
     /// clock that stepped back" as expired, at the cost of one more query). Attack (a host condition,

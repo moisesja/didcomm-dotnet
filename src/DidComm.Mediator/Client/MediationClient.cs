@@ -22,8 +22,11 @@ namespace DidComm.Mediator.Client;
 /// the response. Over a WebSocket it arrives on the connection and is handed to this client by the
 /// inbound dispatcher, so the container also needs
 /// <c>UseWebSocketTransport(o =&gt; o.ReceiveInbound = true)</c> and <c>UseInboundDispatch()</c>;
-/// without them a WebSocket route is refused before anything is sent. Constructed without
-/// dependency injection (<c>new MediationClient(didComm)</c>), the client works over HTTP only.
+/// without them a WebSocket route is refused before anything is sent. (An
+/// <c>IInboundFrameConsumer</c> of your own counts as one that receives: if it does not hand what it
+/// receives to the <c>ProtocolDispatcher</c>, WebSocket requests time out instead of being
+/// refused.) Constructed without dependency injection (<c>new MediationClient(didComm)</c>), the
+/// client works over HTTP only.
 /// </para>
 /// <para>
 /// <strong>Which endpoint.</strong> The first <c>DIDCommMessaging</c> service entry of the
