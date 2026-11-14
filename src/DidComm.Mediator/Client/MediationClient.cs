@@ -28,9 +28,12 @@ namespace DidComm.Mediator.Client;
 /// <para>
 /// <strong>Which endpoint.</strong> The first <c>DIDCommMessaging</c> service entry of the
 /// mediator's DID decides the address and so the transport (<c>http</c>/<c>https</c> or
-/// <c>ws</c>/<c>wss</c>); a mediator reached through routing keys or another mediator is refused.
-/// Pass <c>serviceEndpointOverride</c> to use another of its addresses, for example its
-/// <c>wss</c> one when its DID document lists <c>https</c> first.
+/// <c>ws</c>/<c>wss</c>). Before anything is sent, a mediator reached through routing keys or
+/// another mediator is refused with <see cref="InvalidOperationException"/>, a DID without a
+/// <c>DIDCommMessaging</c> entry with <see cref="DidResolutionException"/>, and an address that is a
+/// queue URI, not absolute, or blocked by <c>DidCommOptions.OutboundEndpointPolicy</c> with
+/// <see cref="TransportException"/>. Pass <c>serviceEndpointOverride</c> to use another of its
+/// addresses, for example its <c>wss</c> one when its DID document lists <c>https</c> first.
 /// </para>
 /// <para>
 /// <strong>Which version.</strong> Unless you pin one, the first call to a mediator sends a
@@ -43,9 +46,20 @@ namespace DidComm.Mediator.Client;
 /// the version it speaks, and no query is sent.
 /// </para>
 /// <para>
-/// <strong>Retrying is safe.</strong> A <see cref="TimeoutException"/> means the answer did not
-/// arrive, not that nothing happened: the mediator may have acted. Repeat the call. A repeated
-/// <c>mediate-request</c> is answered with the same grant and a repeated <c>add</c> with
+/// <strong>Timeouts.</strong> A call has up to three steps, and each has its own
+/// <see cref="MediatorClientOptions.RequestTimeout"/>: finding the mediator's endpoint in its DID
+/// document (skipped when you pass <c>serviceEndpointOverride</c>), the Discover Features query (only
+/// when the version is neither pinned nor remembered), and the request itself
+/// (<see cref="QueryAllRecipientsAsync"/> sends one request per page, each with its own timeout). A
+/// step that runs out of time fails the call with <see cref="TimeoutException"/>. While the endpoint
+/// is being found nothing has been sent yet, so that message names no request id; for the query or
+/// the request it names that message's id. Over HTTP an answer missing from the response fails the
+/// step at once.
+/// </para>
+/// <para>
+/// <strong>Retrying is safe.</strong> A <see cref="TimeoutException"/> for a request means its
+/// answer did not arrive, not that nothing happened: the mediator may have acted. Repeat the call.
+/// A repeated <c>mediate-request</c> is answered with the same grant and a repeated <c>add</c> with
 /// <c>no_change</c>; a repeated <c>remove</c> answers <c>client_error</c> because the DID is already
 /// gone.
 /// </para>
@@ -69,8 +83,11 @@ namespace DidComm.Mediator.Client;
 ///     ?? throw new InvalidOperationException("The mediator refused.");
 /// // Mint the DID others will write to, with this service entry:
 /// var service = DidCommServiceBuilder.ForMediation(grant).Build();
-/// await mediation.UpdateRecipientsAsync(mediatorDid, myDid,
+/// // Register it; the mediator answers each update with its own result.
+/// var results = await mediation.UpdateRecipientsAsync(mediatorDid, myDid,
 ///     new[] { new RecipientUpdate(publicDid, RecipientUpdateAction.Add) });
+/// if (results[0].Result is not (RecipientUpdateOutcome.Success or RecipientUpdateOutcome.NoChange))
+///     throw new InvalidOperationException("The mediator did not register the DID.");
 /// </code>
 /// </example>
 public sealed class MediationClient
@@ -119,11 +136,12 @@ public sealed class MediationClient
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The grant (<see cref="MediationGrant.PeerDid"/> is <paramref name="from"/>), or <c>null</c> when the mediator refused (<c>mediate-deny</c>).</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information (<see cref="ArgumentNullException"/> for a <c>null</c> DID).</exception>
-    /// <exception cref="InvalidOperationException">A WebSocket route this client cannot receive on, a mediator reached through routing, no service endpoint resolver, or too many requests already waiting; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response); the message names the request id. Retry. The unanswered request may be the Discover Features query: a mediator that never answers one needs a pinned <see cref="MediatorClientOptions.CoordinateMediationVersion"/>.</exception>
-    /// <exception cref="MediationNotSupportedException">The mediator speaks neither Coordinate Mediation 3.0 nor 2.0.</exception>
+    /// <exception cref="InvalidOperationException">A WebSocket route this client cannot receive on, a mediator reached through routing, or no service endpoint resolver: nothing was sent. Or too many requests already waiting (<see cref="MediatorClientOptions.MaxPendingRequests"/>): that request was not sent, though the Discover Features query before it may have been.</exception>
+    /// <exception cref="TimeoutException">A step did not finish within its own <see cref="MediatorClientOptions.RequestTimeout"/> (see Timeouts in the class remarks). Finding the endpoint: nothing was sent, and the message names no request id. The Discover Features query or the request: no answer in time, or over HTTP none in the response; the message names that message's id, and the mediator may have acted, so retry. A mediator that never answers the query needs a pinned <see cref="MediatorClientOptions.CoordinateMediationVersion"/>.</exception>
+    /// <exception cref="MediationNotSupportedException">The mediator's Discover Features answer discloses neither Coordinate Mediation 3.0 nor 2.0 in the mediator role (only when the version is negotiated).</exception>
     /// <exception cref="MediationProtocolException">The mediator answered with a problem report, or with an answer that is malformed or does not match the request.</exception>
-    /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry).</exception>
+    /// <exception cref="DidResolutionException">The mediator's DID names no <c>DIDCommMessaging</c> service entry; nothing was sent.</exception>
+    /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry). Or the mediator's address is a queue URI, not absolute, or blocked by the outbound endpoint policy: nothing was sent.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public Task<MediationGrant?> RequestMediationAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
     {
@@ -142,13 +160,20 @@ public sealed class MediationClient
     /// <param name="updates">1 to 1024 updates, each a bare DID with <see cref="RecipientUpdateAction.Add"/> or <see cref="RecipientUpdateAction.Remove"/>.</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="RequestMediationAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>One result per update, in the order given (the client checks that the mediator answered each one).</returns>
+    /// <returns>
+    /// One result per update, in the order given (the client checks that the mediator answered each
+    /// one, naming its DID and action). Check each <see cref="RecipientUpdateResult.Result"/>: the
+    /// mediator refuses an entry with <c>client_error</c> rather than failing the message. This
+    /// library's mediator answers <c>client_error</c> for every entry when you hold no grant, and for
+    /// an <c>add</c> beyond its limit of DIDs per grant (256 by default).
+    /// </returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="updates"/> is empty or longer than 1024 or has an invalid entry (the message names its index), or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">As for <see cref="RequestMediationAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer in time; retry (see the class remarks for what a repeat answers).</exception>
-    /// <exception cref="MediationNotSupportedException">The mediator speaks neither Coordinate Mediation 3.0 nor 2.0.</exception>
-    /// <exception cref="MediationProtocolException">A problem report (for example: you hold no grant), or an answer that does not match the updates sent.</exception>
-    /// <exception cref="TransportException">The transport failed.</exception>
+    /// <exception cref="InvalidOperationException">As for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="TimeoutException">As for <see cref="RequestMediationAsync"/>; retry (the class remarks say what a repeat answers).</exception>
+    /// <exception cref="MediationNotSupportedException">As for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="MediationProtocolException">A problem report, or an answer that is malformed or does not match the updates sent.</exception>
+    /// <exception cref="DidResolutionException">As for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="TransportException">As for <see cref="RequestMediationAsync"/>.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public Task<IReadOnlyList<RecipientUpdateResult>> UpdateRecipientsAsync(string mediatorDid, string from, IReadOnlyList<RecipientUpdate> updates, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
     {
@@ -164,16 +189,21 @@ public sealed class MediationClient
     /// </summary>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
-    /// <param name="paginate">Which page: <see cref="RecipientQueryPaging.Limit"/> 0 to 1000, <see cref="RecipientQueryPaging.Offset"/> 0 or more; <c>null</c> for the mediator's default page.</param>
+    /// <param name="paginate">Which page: <see cref="RecipientQueryPaging.Limit"/> 0 to 1000, <see cref="RecipientQueryPaging.Offset"/> 0 or more; <c>null</c> for the mediator's default page. The mediator may send fewer DIDs than the limit, or more (up to 1000 are accepted, as from a mediator that ignores <c>paginate</c>).</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="RequestMediationAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>The page; its position is checked against the request.</returns>
+    /// <returns>
+    /// The page. A position the mediator reports is checked against the page and the request; a page
+    /// without one is returned as it came, and nothing then says where it sits in the list. This
+    /// library's mediator answers an empty page when you hold no grant.
+    /// </returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="paginate"/> is out of range, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">As for <see cref="RequestMediationAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer in time; retry.</exception>
-    /// <exception cref="MediationNotSupportedException">The mediator speaks neither Coordinate Mediation 3.0 nor 2.0.</exception>
-    /// <exception cref="MediationProtocolException">A problem report, or a page that is larger than asked for or whose position does not match the request.</exception>
-    /// <exception cref="TransportException">The transport failed.</exception>
+    /// <exception cref="InvalidOperationException">As for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="TimeoutException">As for <see cref="RequestMediationAsync"/>; retry.</exception>
+    /// <exception cref="MediationNotSupportedException">As for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="MediationProtocolException">A problem report, or a page that is malformed, holds more than 1000 DIDs, or reports a position that does not agree with the page or with the offset asked for.</exception>
+    /// <exception cref="DidResolutionException">As for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="TransportException">As for <see cref="RequestMediationAsync"/>.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public Task<RecipientQueryResult> QueryRecipientsAsync(string mediatorDid, string from, RecipientQueryPaging? paginate = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
     {
@@ -184,10 +214,26 @@ public sealed class MediationClient
     }
 
     /// <summary>
-    /// Every DID registered under your grant, fetched 100 per page while you enumerate, until the
-    /// mediator reports none remaining (at most 1000 pages). The arguments are checked when you call
-    /// this method; nothing is sent before the first <c>MoveNextAsync</c>.
+    /// Every DID registered under your grant, fetched page by page while you enumerate: 100 asked for
+    /// per page (a mediator may send more, up to 1000), the next page starting after the DIDs
+    /// received, until the mediator reports none remaining or reports no position at all (a mediator
+    /// that ignores paging sends its whole list in the first page, and the walk ends there). The
+    /// arguments are checked when you call this method; nothing is sent before the first
+    /// <c>MoveNextAsync</c>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The walk never ends early in silence. When it cannot list everything — an empty page while the
+    /// mediator reports DIDs remaining, a page of more than 1000 DIDs or whose position disagrees with
+    /// the request, or DIDs still remaining after 1000 pages — it throws
+    /// <see cref="MediationProtocolException"/> after the DIDs already yielded, and those are then not
+    /// the whole list.
+    /// </para>
+    /// <para>
+    /// The pages are separate requests, not one snapshot: DIDs added or removed during the walk can
+    /// shift the pages, so a DID can be missed or listed twice.
+    /// </para>
+    /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="RequestMediationAsync"/>).</param>
@@ -195,8 +241,12 @@ public sealed class MediationClient
     /// <returns>The DIDs, page by page, in the order the mediator lists them.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">While enumerating: as for <see cref="RequestMediationAsync"/>.</exception>
-    /// <exception cref="TimeoutException">While enumerating: a page did not arrive in time.</exception>
-    /// <exception cref="MediationProtocolException">While enumerating: a problem report or an inconsistent page.</exception>
+    /// <exception cref="TimeoutException">While enumerating: a step did not finish in time — finding the endpoint, the Discover Features query, or one page's request, each with its own <see cref="MediatorClientOptions.RequestTimeout"/> (as for <see cref="RequestMediationAsync"/>). The DIDs already yielded are not the whole list.</exception>
+    /// <exception cref="MediationNotSupportedException">While enumerating: as for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="MediationProtocolException">While enumerating: a problem report, a malformed or inconsistent page, or a walk that cannot list everything (see the remarks). The DIDs already yielded are not the whole list.</exception>
+    /// <exception cref="DidResolutionException">While enumerating: as for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="TransportException">While enumerating: as for <see cref="RequestMediationAsync"/>.</exception>
+    /// <exception cref="ObjectDisposedException">While enumerating: the container was disposed.</exception>
     public IAsyncEnumerable<string> QueryAllRecipientsAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
     {
         RequireDids(mediatorDid, from);

@@ -18,13 +18,14 @@ public sealed class RecipientQueryResult
         Pagination = pagination;
     }
 
-    /// <summary>The DIDs of this page, in the order the mediator listed them.</summary>
+    /// <summary>The DIDs of this page (at most 1000), in the order the mediator listed them.</summary>
     public IReadOnlyList<string> Dids { get; }
 
     /// <summary>
-    /// Where the page sits in the whole list, when the mediator said: how many DIDs it holds, its
-    /// offset, and how many remain after it. <c>null</c> when the answer carried no pagination; the
-    /// client has checked that a reported position agrees with the page and the request.
+    /// Where the page sits in the whole list, when the mediator said: how many DIDs the page holds,
+    /// its offset, and how many remain after it. The client has checked that a reported position
+    /// agrees with the page and with the offset asked for. <c>null</c> when the answer carried no
+    /// pagination: then nothing says where the page sits or whether more DIDs follow.
     /// </summary>
     public RecipientPagination? Pagination { get; }
 }

@@ -53,7 +53,7 @@ internal static class FeatureNegotiation
 
     /// <summary>What the query expects back: a Discover Features 2.x <c>disclose</c>.</summary>
     internal static readonly MediatorExchangeSpec QuerySpec = new(
-        "discover-features queries",
+        "discover-features query",
         Array.AsReadOnly(new[] { MessageTypeUri.Parse(DiscoverFeatures.DiscloseType) }),
         ExpectsDelivery: false);
 
