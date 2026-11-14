@@ -10,15 +10,15 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 
 | Package (`src/`) | What it holds |
 | --- | --- |
-| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, shared with `DidComm.AspNetCore` and `DidComm.Mediator`), `Exceptions`, `Json`, `Protocols`, `Transports`. |
-| `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri`; built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter) and `RateLimitedLog`), `Trace`, `TrustPing`. |
-| `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility`, `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`. |
+| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, shared with `DidComm.AspNetCore` and `DidComm.Mediator`), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
+| `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter) and `RateLimitedLog`), `Trace`, `TrustPing`. |
+| `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), and `TransportRouter.Select` (the one transport selection for a send and for questions about it). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
 | `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options) and `DidCommReceiveOptions.ForMediatorEndpoint()`. |
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator` — which also registers the shared `ForwardMetrics` and a cycle-guarded `ForwardHandler` factory — `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions`, `HttpResiliencePipelineFactory`, `UseHttpTransport()`. |
-| `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. |
-| `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0**, namespace `DidComm.Mediator.Coordination` — public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums, `IMediationStore` / `InMemoryMediationStore`, `MediationGrant`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationBodies` (body codecs), `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `BareDid`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`, `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupBodies` (body and attachment codecs), `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). Shared by both roles, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule), `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). References `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. |
+| `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
+| `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0**, namespace `DidComm.Mediator.Coordination` — public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums, `IMediationStore` / `InMemoryMediationStore`, `MediationGrant`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationBodies` (body codecs), `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `BareDid`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`, `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupBodies` (body and attachment codecs), `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). **The recipient-side client** (#96), namespace `DidComm.Mediator.Client` — public: `MediationClient`, `PickupClient`, `MediatorClientOptions`, `CoordinateMediationVersion`, `PickupBatch`, `PickupItem`, `RecipientQueryResult`, `MediationProtocolException`, `MediationNotSupportedException`, `AddMediatorClient()` (`MediatorClientBuilderExtensions`) and `DidCommServiceBuilder.ForMediation(grant)` (`MediationServiceBuilderExtensions`, a C# 14 static extension member); internal, namespace `DidComm.Mediator.Client.Internal`: `MediatorClientChannel` (the correlator: pending map, matcher, routes, live-stream registry) behind `IMediatorExchange`, with `PendingRequest`, `MediatorAnswerTypes`, `MediatorExchangeSpec`, `MediatorRoute`, `GuardedDeadline`, `OwnDeadline`, `MediatorBusyException`, `MediatorProblemCode`, `SingleLoggerFactory`; `FeatureNegotiation`, `NegotiatedVersionCache` and `CoordinateMediationWire` (Coordinate Mediation); `DeliveryReader`, `LiveRegistration`, `LiveDeliveryStream` and `PickupLog` (pickup); `DeliveredMessageUnpacker`, `DeliveredOutcome` and `DuplicateFilter`; plus the internal 2.0 client codec `Coordination/CoordinateMediation20` and `PickupBodies.ReadAttachmentsEach` (`DeliveredAttachment`). Shared by both roles, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule), `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). References `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. |
 | `DidComm.Mediator.AspNetCore` | The mediator's endpoints: `MediatorEndpointRouteBuilderExtensions` (`MapDidCommMediator`, `InvitationOobId`); internal `CompositeEndpointConventionBuilder` and `MediatorInvitationStore`. References `DidComm.Mediator` and `DidComm.AspNetCore`, and calls internals of both, so they ship in lockstep. |
 
 ## Tests and tools
@@ -30,7 +30,12 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   mediator itself is `ForwardSelfAddressedTests`, rewrap's DID subject `ForwardRewrapNextTests`, the
   QA permutations of the forward core `ForwardPipelineQaTests`, and the adversarial ones
   `ForwardPeelAdvTests`, `ForwardPeelAdv3Tests` and `ForwardHandlerPumpContextTests` (with
-  `Observability/LogValuesTests` and `Transports/OutboundEndpointGuardAdv3Tests`).
+  `Observability/LogValuesTests` and `Transports/OutboundEndpointGuardAdv3Tests`). The Core
+  internals of the recipient-side client (#96) are `Facade/UnpackDeliveredTests` (opening re-wrapped
+  deliveries) and `Facade/ResolveDirectEndpointTests` (parity with `SendAsync`'s endpoint selection),
+  both over `Facade/MediatedClientTestWorld`, `Transports/ReturnRouteEligibilitySnapshotParityTests`
+  and `Protocols/Dispatch/ProtocolDispatcherClaimedLogLevelTests` (the no-handler line at Debug for a
+  claimed message).
 - `tests/DidComm.InteropTests`: fixture-driven conformance (`fixtures/` with `manifest`, `packed`,
   `payloads`, `diddocs`, `secrets`, `schema`, `spec`; `FixtureCatalog`, `Runner/FixtureDispatcher`),
   plus the `AspNetCore`, `Routing`, `Transports`, `Protocols` and `Facade` suites, `Mediator` (the
@@ -46,7 +51,16 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`, `MediatorLivePushAdv4Tests`); the
   timing measurements run in the `QaSerialTiming` collection, alone and after the parallel tests;
   `Transports/HttpTransportAcceptedLogTests` pins the HTTP transport's guarded 2xx line),
-  `DxCoverage` (public-API coverage of the eight shipped assemblies, and quickstart drift checks)
+  `Mediator/Client` (the recipient-side client against that mediator, through
+  `MediatorClientHarness`: enrolment `MediatorClientEnrolmentTests`, pickup over HTTP and WebSocket
+  `PickupClientHttpEndToEndTests` and `PickupClientWebSocketEndToEndTests`, re-wrapped deliveries
+  `PickupClientRewrapTests`, a Coordinate Mediation 2.0 host `MediatorClientCoordinateMediation20Tests`
+  on `FakeCoordinateMediation20Mediator`, the channel `MediatorClientChannelEndToEndTests`, routes
+  `MediatorClientReceiveRouteInteropTests`, clock skew `MediatorClientClockSkewTests`, a host that is
+  both `MediatorAndRecipientHostTests`; the QA permutations `*Qa1Tests.cs` / `*Qa2Tests.cs` with
+  `Qa1Support`, `Qa2Support` and `PickupClientEndToEndSupport`),
+  `DxCoverage` (public-API coverage of the eight shipped assemblies, and quickstart drift checks;
+  `ExtensionMemberSurfaceTests` pins how a C# 14 extension member surfaces to the scanner)
   and `Samples` (one smoke test per sample). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
   same-socket / STOMP scoping of the mediator WebSocket endpoint against the public
   `MapDidCommWebSocket`.
@@ -60,8 +74,16 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   invariants D-1..D-5 (`PushDispatcherInvariantTests`), arrival order (`PushArrivalOrderTests`), the
   hosted service and `RoutingDidValidator`, a real generic host, the QA permutations in the
   `*QaTests.cs` files, and the adversarial `MediatorLifetimeAdvTests`, `OutboundGuardAdvTests`,
-  `LivePushAdv4Tests`, `PushDispatcherAdv5Tests` and `PushDispatcherAdv6Tests`) with
-  `fixtures/coordinate-mediation-3.0` and `fixtures/messagepickup-3.0` (the didcomm.org page
+  `LivePushAdv4Tests`, `PushDispatcherAdv5Tests` and `PushDispatcherAdv6Tests`; `Client`: the
+  recipient-side client against fake exchanges (`FakeMediatorExchange`, `FakePickupExchange`) and the
+  real channel — the matcher (`MediatorResponseMatcherTests`), the channel, its deadlines and races,
+  routes, DI, options, log levels and unobserved exceptions (`MediatorClient*Tests`), negotiation,
+  recipients and timeouts (`MediationClient*Tests`), `ForMediation`
+  (`MediationServiceBuilderExtensionsTests`), fetch, acknowledgement and the live stream
+  (`PickupClient*Tests`), `DeliveredMessageUnpackerTests`, `DeliveryReaderTests`,
+  `DuplicateFilterTests`, `NegotiatedVersionCacheTests`; `Coordination/CoordinateMediation20CodecTests`
+  and `CoordinateMediation20FixtureTests`) with `fixtures/coordinate-mediation-3.0`,
+  `fixtures/coordinate-mediation-2.0` and `fixtures/messagepickup-3.0` (the didcomm.org page
   examples normalized to valid JSON). The cases that need a real endpoint are in
   `tests/DidComm.InteropTests/AspNetCore`: `CoordinateMediationHttpTests.cs` (FR-MED-03),
   `MessagePickupHttpTests.cs` and `MessagePickupWebSocketTests.cs` (FR-PICK over HTTP and
@@ -104,7 +126,9 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 
 Messages a peer pushes back on a return-route session socket this agent opened as a client do not
 come through these endpoints: the WebSocket transport's receive loop hands them to the
-`IInboundFrameConsumer` (see "Return-route client side" below).
+`IInboundFrameConsumer` (see "Return-route client side" below). The recipient-side mediator client
+takes its answers and live pushes from there, through its correlator (see "Recipient-side client"
+below).
 
 ## Outbound flow
 
@@ -902,9 +926,10 @@ Documented limits:
   message arrives and again after storing it, and a live push checks once more before it sends
   (#95; "Message Pickup 3.0" and "Mediator service" below). `MessagePickupQueue.RevokeAndPurgeAsync`
   revokes and drops what is queued in one call.
-- **Not here yet:** the recipient role (#96) and the 2.0 handler (#99, which reuses
-  `MediationBodies` and `MediationCoordinator`). The start-up check of routing DIDs against their DID
-  documents (FR-MED-07) is `AddMediator()`'s (#95, below).
+- **Not here yet:** the 2.0 handler (#99, which reuses `MediationBodies`, `MediationCoordinator`
+  and the 2.0 type constants and codecs of `CoordinateMediation20`). The recipient role is
+  `MediationClient` (#96, "Recipient-side client" below), and the start-up check of routing DIDs
+  against their DID documents (FR-MED-07) is `AddMediator()`'s (#95, below).
 
 ## Message Pickup 3.0, mediator role (Phase 7, #94)
 
@@ -1613,11 +1638,554 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   step of the wall clock changes neither.
 - **Outside a generic host** there are no start-up checks, no invitation and no purge (above).
 
+## Recipient-side client: `MediationClient`, `PickupClient` (Phase 7, #96)
+
+The other end of the two mediator roles (PRD FR-MED-09, FR-MED-10 on the client side, FR-PICK-11,
+FR-ROUTE-06 receiver side): a recipient asks a mediator for mediation, builds the service entry of
+the DID it publishes from the grant, registers that DID, and then fetches what the mediator holds
+for it or receives it live. It lives in `DidComm.Mediator`, namespace `DidComm.Mediator.Client`
+(internals in `DidComm.Mediator.Client.Internal`), with the package's references unchanged: no
+ASP.NET Core. So a wallet that uses the client also carries the mediator roles of the package.
+Two thin public facades, `MediationClient` and `PickupClient`, share one internal
+`MediatorClientChannel` per container. `DidComm.Core` gains internals only; no released member
+changes.
+
+### Wiring
+
+`MediatorClientBuilderExtensions.AddMediatorClient(configure?)` on `DidCommBuilder`, in this order:
+
+1. The delegate runs once on a scratch `MediatorClientOptions` and `Validate()` checks it: a setting
+   out of range throws `ArgumentOutOfRangeException` at registration.
+2. `AddOptions<MediatorClientOptions>().Configure(configure)`. Repeated calls compose in order;
+   the delegate may run more than once, on different instances, and must only assign values.
+3. `TryAddSingleton` of the channel, built from `DidCommClient`, a validated copy of
+   `IOptions<MediatorClientOptions>.Value` (L-060), `receivesInbound` =
+   `IServiceProviderIsService.IsService(typeof(IInboundFrameConsumer))` (registrations are read,
+   nothing is resolved), the container's `TimeProvider` (else `TimeProvider.System`) and
+   `ILoggerFactory`.
+4. `TryAddEnumerable` of `IInboundCorrelator` → that same instance (the Discover Features client's
+   pattern), so a repeated call registers one correlator.
+5. `TryAddSingleton` of `MediationClient` and `PickupClient`, through internal constructors over
+   the channel.
+
+| Setting (`MediatorClientOptions`) | Default | Allowed |
+| --- | --- | --- |
+| `RequestTimeout` | 30 seconds | above 0, at most 10 minutes; one for each step of a call (below) |
+| `MaxPendingRequests` | 64 | 1 to 4096; both clients of the container together |
+| `CoordinateMediationVersion` | `Negotiate` | `Negotiate`, `V3`, `V2` |
+| `DedupeCapacity` | 4096 | 0 (off) to 1 000 000 |
+| `LivePollInterval` | 1 minute | 1 second to 24 hours |
+| `UnpackTimeout` | 30 seconds | above 0, at most 10 minutes; per delivered message, every layer |
+
+- **Transports.** Nothing is added for the host. Over HTTP, `UseHttpTransport()` is enough: the
+  answer is the response body. Over a WebSocket the answers and live pushes arrive on the session
+  socket S(E, L, M), so the host registers `UseWebSocketTransport(o => o.ReceiveInbound = true)` and
+  `UseInboundDispatch()`; the dispatcher hands every verified inbound to the channel's correlator
+  before any handler. Without that pair, a WebSocket route is refused before anything is sent
+  (Routes, below).
+- **Dependency walk (L-017).** Dispatcher factory → correlators → channel → `DidCommClient` →
+  router → transports → `WebSocketDidCommTransport` → `IInboundFrameConsumer`
+  (`InboundDispatchConsumer` takes the provider and a logger, and resolves the dispatcher per
+  message). Nothing leads back to the dispatcher, the registry or a handler, so an application
+  handler may take `MediationClient` or `PickupClient` in its constructor.
+- **Disposal.** The container disposes the channel (idempotent; once per registration it was
+  resolved through): waiting requests fail with `ObjectDisposedException`, live streams end with
+  it, the shutdown token cancels sends and resolutions in flight, and new work is refused with it.
+  The public clients are not disposable.
+- **Without DI.** `new MediationClient(didComm, options?, logger?)` and
+  `new PickupClient(didComm, options?, logger?)` each build a private channel that is not a
+  correlator (`receivesInbound: false`): HTTP only, every other route refused before sending. It
+  runs on `TimeProvider.System`, and its lines go to the caller's logger (`SingleLoggerFactory`
+  hands that logger to every category). Each private channel has its own pending bound, duplicate
+  filter, version cache and unpack limiter.
+- **A mediator in the same host.** The mediator's handlers own the Coordinate Mediation and pickup
+  PIURIs and ignore the answer types, and correlators run before handlers, so `AddMediator()` and
+  `AddMediatorClient()` compose (`MediatorAndRecipientHostTests`). Both roles share one replay
+  cache, keyed (sender subject, id), so they do not collide.
+- **The receive-loop rule.** A session socket's loop reads its next frame only after the consumer
+  returns (`IInboundFrameConsumer`). A handler or observer running for a message on S(E, L, M) must
+  therefore never call these clients for the same session: the answer would wait behind it until
+  the call times out. An `AsyncLocal` guard was rejected, because it flows into child tasks.
+- **`DidCommServiceBuilder.ForMediation(grant)`** is a C# 14 `extension(DidCommServiceBuilder)`
+  static member in `MediationServiceBuilderExtensions`. It compiles to the plain static method
+  `MediationServiceBuilderExtensions.ForMediation(MediationGrant)`, which F#, Visual Basic and
+  C# below 14 call directly. A `null` grant throws `ArgumentNullException`, a grant with no routing
+  DID `ArgumentException`; otherwise it returns `DidCommServiceBuilder.ForMediator(grant.RoutingDids[0])`
+  with that method's own checks (a bare DID of at most 2048 characters; `WithRoutingKeys` counts the
+  mediator's layer toward the 8-layer bound). The DX scanner sees the static class and that method
+  only; it skips the compiler's `<G>$…` grouping type (`ExtensionMemberSurfaceTests`).
+
+### One request, one answer (`MediatorClientChannel.ExchangeAsync`)
+
+1. **Refused before anything is registered or sent:** a disposed channel (`ObjectDisposedException`);
+   a spec whose expected types are outside the answer-type table (`MediatorAnswerTypes.Validate`,
+   `ArgumentException`: a facade's programming error); a request id that is empty or longer than
+   64 characters (ours are 36-character UUID v4 ids from `UuidV4MessageIdGenerator.Instance`, never
+   the host's generator); `MaxPendingRequests` already waiting (the internal `MediatorBusyException`,
+   an `InvalidOperationException` to callers).
+2. **Registered before the send** (`TryAdd`), because over a WebSocket the answer can arrive before
+   `SendAsync` returns; an id already waiting → `InvalidOperationException`. A `PendingRequest`
+   holds our id, the static spec, the two DID subjects of the (mediator, local DID) pair and a start
+   timestamp, never a wire value. Its outcome is one terminal compare-and-swap (Waiting → Completed,
+   Abandoned or Failed), the Discover Features client's `PendingQuery` pattern, over a
+   `TaskCompletionSource` with `RunContinuationsAsynchronously`.
+3. **Deadline** (`GuardedDeadline`): a timer on the injected `TimeProvider` at `RequestTimeout`, plus
+   registrations of the caller's token and the channel's shutdown token. Each cancels inside a
+   `try`, so a callback host code registered on the token cannot escape onto a timer thread or into
+   the caller's `Cancel()`. It is never `CancelAfter` or a linked source handed to host code (#92
+   follow-up 1). Its token is the send's; ending it abandons the pending request through the same
+   compare-and-swap.
+4. **Send.** `SendAsync(request, new SendOptions([mediatorDid], From: localDid,
+   ServiceEndpointOverride: route.Endpoint) { ReturnRoute = All })`, awaited with `WaitAsync` on the
+   deadline. `SendAsync` stamps `created_time` on its own copy (FR-RR-09); the request the channel was
+   handed is never stamped by hand or modified. A send abandoned at the deadline is observed
+   (`GuardedDeadline.ObserveAbandoned`), so a later fault never becomes an unobserved task
+   exception.
+5. **HTTP.** The verified snapshot of `SendResult.Returned` is offered to the matcher, bound to this
+   request. If the request is still waiting after that, it fails at once (`PendingRequest.TryFail`,
+   which marks its fault observed) with `TimeoutException`: "got no answer in the HTTP response;
+   the mediator may still have acted on it, so retry it". HTTP returns at most one message
+   (FR-RR-04), so a 202, an identity-refused body or a body that answers nothing leaves nothing to
+   wait for. A `TransportException` (status 200: over the cap, stalled or unreadable, FR-RR-07)
+   propagates as it is.
+6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
+   has already completed the request in step 5). It is awaited; then the continuation yields
+   (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
+7. **A problem report** answering the request (by `pthid`, or `thid`) → `MediationProtocolException`
+   with `ProblemCode` sanitized (`MediatorProblemCode`: at most 128 characters of `a`–`z`, `0`–`9`,
+   `.`, `_`, `-` that parse as a problem code, else `null`). The body is read on the caller's
+   continuation.
+8. **No answer:** a disposed channel → `ObjectDisposedException`; the caller's cancellation →
+   `OperationCanceledException` (it wins over a deadline that fired at the same time); the deadline
+   → `TimeoutException` naming our request id and the message name, never a DID.
+9. **Finally:** abandon, remove exactly this entry (a `KeyValuePair` removal), release the counts.
+   A late answer then finds no waiting request and is dropped. A late `delivery` is never
+   acknowledged, so it comes back after its lease; a late grant or update was applied, and a retry
+   is idempotent.
+
+Each step of a public call has its own `RequestTimeout`: finding the mediator's endpoint (its own
+deadline in `ResolveRouteAsync`; running out names no request, because nothing was sent), the
+Discover Features query when the version is neither pinned nor remembered, and each request (one
+per page in the walker). A call can therefore take longer than `RequestTimeout` in total.
+
+### Matching answers (`Offer`)
+
+The correlator calls `Offer(snapshot, boundTo: null)` for every verified inbound the dispatcher
+sees (`IInboundCorrelator.OnInbound`, which returns whether the message was claimed); the HTTP
+exchange calls `Offer(returned, pending)`. The matcher never awaits, never parses a body, completes
+at most one request and never removes or cancels one, so a forgery can neither answer nor cancel a
+request.
+
+1. **Idle.** An unbound offer with nothing pending and no live stream open costs one volatile read
+   (a host that is also a mediator pays that per inbound).
+2. **Type.** The type is parsed once and matched against the twelve answer types of
+   `MediatorAnswerTypes`: Discover Features 2.0 `disclose`; Coordinate Mediation 3.0 `mediate-grant`,
+   `mediate-deny`, `recipient-update-response`, `recipient`; Coordinate Mediation 2.0 `mediate-grant`,
+   `mediate-deny`, `keylist-update-response`, `keylist`; Message Pickup 3.0 `status` and `delivery`;
+   Report Problem 2.0 `problem-report`. Matching is the registry's (case and punctuation ignored, any
+   minor of the major). Anything else is not looked at. Log lines name the type by its constant,
+   never by the wire value.
+3. **Identity before any lookup** (D-7). Every comparison runs, combined with a non-short-circuit
+   `&`: the snapshot is `Verified` (registered by unpack, never a `CreateFallback` snapshot, whose
+   fields are the caller's claims); `ReturnRouteEligibility.TryGetPeer(snapshot, …)` passes
+   (authcrypt; the sender key's DID subject is the peer; a signer, if any, agrees; the decrypting
+   key's subject is the local DID; not a forward), the same rule as the receive side and
+   `Returned`, now with a snapshot overload over one shared core; the `from`'s DID subject is the
+   peer; and `to` is absent or empty (it is optional in DIDComm v2.1, and the decrypting key already
+   names the local DID) or one of its first 64 entries names the local DID. A failure is other
+   traffic: it returns silently and is not logged.
+4. **Thread.** `pthid`, else `thid`, for a problem report; `thid` otherwise. A thread longer than
+   64 characters is never looked up.
+
+| The snapshot (identity passed) | Unbound: through the dispatcher (WebSocket) | Bound: in the HTTP response to request R |
+| --- | --- | --- |
+| thread = a waiting request P of the same pair; a type P expects, or a problem report | completes P | completes P (P may be another request than R; R then fails as no answer) |
+| thread = a waiting request P of the same pair; a type P does not expect | dropped (Warning); P keeps waiting | dropped (Warning); R fails as no answer |
+| thread names no waiting request of the pair | dropped (quiet) | dropped; R fails as no answer |
+| no thread, `delivery` | the live stream of (peer, local), never a request; no stream, or its buffer full → dropped, not acknowledged | completes R when R expects a `delivery` (else dropped, Warning); never a stream |
+| no thread, problem report | dropped (`pthid` is required) | completes R (it fails with the code) |
+| no thread, another answer type | the only waiting request of the pair expecting the type takes it; none → dropped; two or more → dropped, they keep waiting (Warning) | completes R when R expects the type, else dropped (Warning) |
+
+"Warning" and "quiet" are the rate-limited levels under Logging, below. So a thread-less live push
+never answers a waiting `delivery-request`, and a `delivery` with a thread is never taken for a
+push. Over HTTP the exchange binds the body to its request, so a
+third-party mediator that answers without `thid` works there; over a WebSocket a thread-less
+`delivery` reaches only a live stream (R-10, an interop point for #98).
+
+### Routes (`ResolveRouteAsync`)
+
+One route per operation: the Discover Features query and the request, every page of a walk, a fetch
+and its acknowledgement, every request of a live stream.
+
+- **The endpoint** is the caller's `serviceEndpointOverride` (absolute, without user information;
+  trusted, not checked against `OutboundEndpointPolicy`, as `SendOptions.ServiceEndpointOverride`
+  is), or `DidCommClient.ResolveDirectEndpointAsync(mediatorDid)` under its own deadline. That
+  Core internal selects the endpoint exactly as `SendAsync` selects a direct return-route endpoint,
+  with `SendAsync`'s refusals in its order and with its exception types: the recipient entry's shape
+  (`ArgumentException`), no service resolver (`InvalidOperationException`), `did:web`
+  (`UnsupportedDidMethodException`), one read of the service entries and none
+  (`DidResolutionException`), a first entry that needs forward layers (`InvalidOperationException`,
+  `RoutedReturnRouteRefusal`), the queue URI or a URI that is not absolute (`TransportException`),
+  then `OutboundEndpointGuard` (`TransportException`), applied here because the override the send
+  will carry skips it. The send uses that URI as its override, so the HTTP-or-WebSocket decision and
+  the send come from one read of one entry (L-041). There is no automatic "prefer `wss`": a mediator
+  whose first entry is `https` is reached over HTTP unless the caller passes its `wss` address.
+- **The scheme:** `http`/`https` — the answer is the response; `ws`/`wss` — the answer arrives
+  through the dispatcher; any other scheme is treated like a WebSocket.
+- **A route that is not HTTP is refused** with `InvalidOperationException`, before anything is
+  sent, when no answer could reach the channel. The message names the fix:
+  `UseWebSocketTransport(o => o.ReceiveInbound = true)` and `UseInboundDispatch()`. The route is
+  refused when `receivesInbound` is false (without DI, or no `IInboundFrameConsumer` registered),
+  or when `DidCommClient.ReceivesPushesOn(endpoint)` is `false`. That Core internal asks the
+  transport `TransportRouter.Select` picks for the endpoint (the one `SendAsync` would use, L-041)
+  through the internal `IInboundReceivingTransport`. `WebSocketDidCommTransport` implements it
+  through `InternalsVisibleTo` and answers `ReceiveInbound && !UseStomp` (STOMP opens no session
+  socket and reads nothing back). A router or transport of the host's own, no router, the queue URI
+  or a scheme no transport handles is `null`, "cannot tell", and the route is allowed (the send then
+  refuses what it must). Before this check a WebSocket route with `ReceiveInbound` off sent the
+  request and timed out (QA-1, Q1-1).
+- **Live delivery** (`SetLiveDeliveryAsync`, `ReceiveLiveAsync`) also refuses a route that is not
+  `ws`/`wss`, with `InvalidOperationException` and nothing sent.
+
+### Coordinate Mediation (`MediationClient`)
+
+- **Arguments** are checked when the method is called, before anything is resolved or sent (L-008),
+  and never quoted: `mediatorDid` and `from` are bare DIDs of at most 2048 characters
+  (`ArgumentNullException` for `null`); the override is absolute and has no user information;
+  `updates` holds 1 to 1024 entries (the count first, then a private copy, so what is checked is what
+  is sent; each entry non-null, a bare DID, a defined action; the message names the index);
+  `paginate.Limit` is 0 to 1000 and `Offset` 0 or more. There is no client-side splitting of
+  updates.
+- **Version** (`StartAsync`, after the route): a pinned `V3` or `V2` sends no query. Otherwise the
+  `NegotiatedVersionCache` answers: keyed by the mediator's DID subject, at most 64 entries, each
+  used for 1 hour on the monotonic clock; when full, expired entries are dropped first and a full
+  cache of live entries takes no new one; an entry stamped ahead of the clock counts as expired; the
+  clock is read inside the lock. Otherwise a Discover Features query
+  (`feature-type: protocol`, `match: https://didcomm.org/coordinate-mediation/*`) goes through the
+  exchange on the same route. `FeatureNegotiation` reads the `disclose`: at most the first 256
+  disclosures; `feature-type` `protocol`; an `id` of at most 256 printable ASCII characters that
+  parses as a PIURI; `roles` absent or `null` counts, and present it must name `mediator` (ignoring
+  case, among its first 32 entries); Coordinate Mediation 3.x wins over 2.x, matched by major.
+  Neither → `MediationNotSupportedException`, whose text carries only a count and whose
+  `DisclosedProtocols` lists up to 32 distinct clean protocol ids among those inspected, in any
+  role (D-11). A query that is not answered → `TimeoutException`: the client does not guess. Pin the
+  version for a mediator without Discover Features (Identus, for example).
+- **Coordinate Mediation 2.0** (`Coordination/CoordinateMediation20`, internal): the 2.0 type URIs,
+  builders for `mediate-request`, `keylist-update` and `keylist-query`, and strict parsers for
+  `mediate-grant` (a string `routing_did`; an array is accepted too), `mediate-deny`,
+  `keylist-update-response` and `keylist` (the list is `keys`). It writes and reads through
+  `MediationBodies`, since the entries are the same as in 3.0. Its remarks list what the 2.0
+  mediator role (#99) reuses and what it adds. The seven didcomm.org 2.0 examples, normalized, are
+  `fixtures/coordinate-mediation-2.0` in `DidComm.Mediator.Tests`.
+- **Answer checks** (`CoordinateMediationWire`). Each refusal is a `MediationProtocolException`
+  naming our request id and the rule; a shape error carries the parser's `MalformedMessageException`
+  inside.
+  - Grant: `routing_did` is a string, or an array of at most 16, counted before any entry is read
+    (L-055); each entry is a bare DID of at most 2048 characters. It returns
+    `MediationGrant(PeerDid: from, RoutingDids)`. A deny returns `null`.
+  - `recipient-update-response` / `keylist-update-response`: a list longer than the request is
+    refused from its length; the count must be the request's, and the entry at each index must name
+    the same `recipient_did` (ordinal) and `action` as the update there (every position compared).
+  - `recipient` / `keylist`: at most 1000 DIDs whatever limit was asked for (counted first; a
+    mediator that ignores `paginate` still works). With `pagination`, `count` must be the page's
+    size, `offset` the one asked for (0 without `paginate`) and `remaining` not negative. A page
+    without `pagination` is returned as it came.
+  - The walker (`QueryAllRecipientsAsync`) uses one route and one version for the whole walk. It
+    asks for pages of 100 from offset 0 and advances by what each page held. It ends normally when
+    the mediator reports no position or nothing remaining. An empty page while DIDs remain, or DIDs
+    still remaining after 1000 pages, throws `MediationProtocolException` after the DIDs already
+    yielded: the walk never stops early in silence. Nothing is sent before the first
+    `MoveNextAsync`.
+- **Retrying is safe:** a repeated `mediate-request` gets the same grant, a repeated `add`
+  `no_change`, a repeated `remove` `client_error`.
+
+### Status, fetch and acknowledgement (`PickupClient`)
+
+`GetStatusAsync` sends `status-request{recipient_did?}`. Whenever the request carried a filter or
+could have, a `recipient_did` in the answer (`status` or `delivery`) must be absent or name the DID
+asked about (as a DID subject). One present without a filter is refused too, as a
+`MediationProtocolException`.
+
+`FetchAsync(mediatorDid, from, limit, recipientDid?)`:
+
+1. Arguments (`limit` 1 to 100; `recipientDid` a bare DID or `null`), then the route.
+2. `delivery-request{limit, recipient_did?}`; the spec expects `delivery` or `status`.
+3. `status` → `PickupBatch(Items: [], Drained: true, Status)`.
+4. `delivery`: its `recipient_did` is checked before anything is unpacked.
+   `PickupBodies.ReadAttachmentsEach` reads at most the first `limit` attachments, one at a time.
+   The rest are not looked at, not even their ids: never decoded, unpacked or acknowledged, so they
+   stay queued (a log line counts them). An attachment without a usable id (empty, over 2048
+   characters, not unreserved URI characters) is ignored, because it could not be acknowledged. A
+   repeated id: the first wins. A payload that does not decode is a failure item. No attachments →
+   drained, no status. Attachments of which none has a usable id → `MediationProtocolException` (a
+   hostile mediator cannot spin a fetch-until-drained loop).
+5. Unpack through the limiter, at most 4 at a time; the outcomes keep delivery order.
+6. **The filter** (D-20, as fixed for Q2-1). With `recipientDid`, a message is that DID's when its
+   `RecipientKid`, or any of its `AllRecipientKids`, has the filter DID's subject. Each kid is held
+   to the FR-API-09 bound before it is parsed, and the check is one pass with no early exit. A
+   message for another DID is a failure item (`MediationProtocolException`) and is not acknowledged.
+   (Before Q2-1, a message encrypted to two of our DIDs never passed the second DID's filter,
+   because the unpack opens it with the first held key the envelope names.)
+7. **Classify.** A key the duplicate filter remembers, or one already seen in this batch, is a
+   repeat: acknowledged and left out. Otherwise it is new.
+8. `ct.ThrowIfCancellationRequested()`: the last cancellation point. Nothing is acknowledged or
+   remembered yet, so everything comes back.
+9. **Commit:** the new keys go into the duplicate filter.
+10. **Acknowledge** the new messages and the repeats in one `messages-received` (at most 100 ids) on
+    the client's own deadline (`OwnDeadline`, `RequestTimeout`), not the caller's token. A failure is
+    logged by exception type name, and the batch is still returned; those messages come back and
+    are repeats then.
+11. Return `PickupBatch(Items, Drained: false, Status: null)`: the messages that unpacked
+    (acknowledged) and the failures (left queued), in delivery order.
+
+Once `FetchAsync` returns, the caller holds the only copy: the acknowledgement is inside the call
+(FR-PICK-11; no opt-out, R-6). A failed item stays leased for the mediator's lease (60 s at ours) and
+is not delivered again within it, so a loop that fetches until `Drained` gets past the failures to
+what is behind them; a caller that polls more slowly than the lease, with more failures than
+`limit`, sees only the failures until it discards them with `AckAsync` (L-058).
+
+`AckAsync(ids)` takes 1 to 10 000 ids (the count first, then a copy; each non-empty, at most 2048
+characters and unreserved URI characters). It sends 100 per `messages-received` and returns the last
+`status`; a failing chunk ends the call after the earlier chunks were sent. A mediator configured
+to accept fewer ids per message refuses a longer one as malformed, so call it with at most as many.
+`SetLiveDeliveryAsync` needs a WebSocket route, sends `live-delivery-change` and returns the
+`status`; a problem report is a `MediationProtocolException` with `ProblemCode`, for example
+`e.m.live-mode-not-supported`.
+
+### The live stream (`ReceiveLiveAsync`, `LiveDeliveryStream`)
+
+The arguments are checked when the method is called. At the first `MoveNextAsync`, the route is
+resolved with `requireWebSocket` and the stream's mailbox is registered
+(`MediatorClientChannel.RegisterLiveStream`): one per (mediator, local DID) pair and at most 16 per
+channel, else `InvalidOperationException`; nothing was sent. The mailbox (`LiveRegistration`) is a
+bounded `Channel` of 8 snapshots. The matcher writes to it with `TryWrite`, so the receive path never
+waits; a push that finds it full is dropped and was never acknowledged. Each stream also keeps a
+ready queue (one delivery, at most 10 messages), the ids it holds (buffered or taken), and the taken
+ids waiting for an acknowledgement (at most 100).
+
+Each `MoveNextAsync` loops, in this order: flush the acknowledgements when due; run the cycle when
+due; open the next ready message; load a buffered push; run a drain round while draining (and not
+backing off); otherwise wait. The wait is one awaited `WaitToReadAsync` on a token that an
+`OwnDeadline` timer cancels when the next cycle is due, linked to the caller's token. One awaited
+operation leaves no losing task of a `WhenAny` race to fault unobserved.
+
+- **The cycle** runs at the start, every `LivePollInterval` on the monotonic clock, and after a
+  failed step once the back-off has passed. It sends `live-delivery-change{true}` → `status`; a
+  status with live delivery off is logged once as a Warning, and the stream keeps polling. Then it
+  drains: `delivery-request{10}` until a `status` (or a delivery without attachments), at most 50
+  rounds. Live mode goes on before the drain, so a message that arrives in between is after the
+  mediator's arrival mark and is pushed, or is drained, never neither (#95, FR-PICK-06). Turning it
+  on again keeps the first mark and wakes the grant (#95). A dropped socket is reopened by the next
+  send (`ReturnRoute: All`); the new session starts with live mode off, and the next cycle turns it
+  back on.
+- **Polling is the permanent design** (owner decision D2 on #88, 2026-11-14). A delayed message is
+  never pushed when it falls due, and no scheduler will push it (FR-PICK-08). The start-up drain and
+  the periodic cycle are how it arrives, and how the stream recovers a dropped connection. Keep
+  `LivePollInterval` at or below the longest delay senders ask for (the mediator caps it at 1 hour
+  by default, `MediatorOptions.MaxForwardDelay`).
+- **Items.** A push that is not a readable `delivery` is ignored. At most 10 attachments are read
+  from one delivery (push or drain). An id the stream already holds is skipped (not unpacked, not
+  acknowledged). Messages are unpacked one at a time, on the consumer's own `MoveNextAsync`, under
+  `UnpackTimeout` and the abandoned-unpack bound. A failure is yielded with `Error` set, is never
+  taken or acknowledged, leaves the held set, and is reported again when it comes back. A repeat the
+  duplicate filter remembers is taken (acknowledged) and not yielded. A drain answered with a
+  delivery in which no message has a usable id ends the stream (`MediationProtocolException`); such
+  a push is ignored. The `recipient_did` of a delivery or status is not checked here (the stream
+  sends no filter).
+- **Acknowledgement (R-2).** A yielded message is taken when the consumer asks for the next item
+  (the next `MoveNextAsync`) with its token not cancelled: its key goes into the duplicate filter
+  and its id joins the ids waiting for an acknowledgement. They are flushed when 10 are waiting,
+  when nothing is ready (no ready message and no buffered push), or when the oldest has waited
+  10 s. That is checked at the next `MoveNextAsync`, never during a back-off, and sent at most 10
+  ids per `messages-received`: a mediator may lower its `MaxAckIds` to its batch size (10 by
+  default at ours), and a longer message would be refused as malformed. A failed flush keeps the
+  ids and backs off. While acknowledgements keep failing, at most 100 taken ids are kept, and the
+  oldest is forgotten unacknowledged (logged); it comes back and the duplicate filter recognises
+  it.
+- **Failures.** A step that fails with `TimeoutException`, `TransportException`,
+  `MediatorBusyException` (the pending bound), or an `OperationCanceledException` the caller did not
+  cause is retried after a back-off of 1 s, doubling up to 30 s. Five failed steps in a row (cycle,
+  drain round or flush; the count starts again when a drain completes) end the stream with the last
+  exception. Anything else ends it at once, as it ends a fetch: a `MediationProtocolException` (a
+  problem report such as `e.m.live-mode-not-supported`, a malformed answer), every other
+  `InvalidOperationException` (the send path's configuration refusals), a pack-stage error such as
+  `SecretNotFoundException`, `ObjectDisposedException`, the caller's cancellation. (Before the fix
+  round, permanent pack-stage failures were retried with back-off, QA-2 Q2-2, and the busy refusal
+  was told apart from configuration refusals by whether the mediator had answered yet; it now has
+  its own type.)
+- **The end**, whatever ended the enumeration (`break`, `return`, an exception out of the loop body,
+  cancellation, a failure of the stream, disposal of the enumerator). The last yielded message is
+  not taken: the stream cannot tell whether the consumer handled it, and an acknowledgement cannot
+  be undone (L-056), so it comes back later. Then what was taken is acknowledged (10 ids per
+  message), and live delivery is turned off when it was turned on, all within one `RequestTimeout`
+  on an `OwnDeadline` independent of the caller's token; failures are logged. Last, the mailbox is
+  disposed (exactly this entry is removed). Buffered or drained messages that were never yielded are
+  never acknowledged; they come back after the session closes or their lease ends. A consumer that
+  wants the last item gone calls `AckAsync(item.Id)` before it stops.
+- **Bounds.** What a stream holds unacknowledged: at most 8 buffered pushes, 10 ready messages and
+  the taken ones (10; up to 100 while acknowledgements fail). Against this library's mediator, which
+  pushes one message per `delivery`, that is 28 messages in normal operation, well below its quota of
+  100 per recipient. Ordering is first in, first out within each source; there is no global order.
+  One consumer per enumeration, as `IAsyncEnumerator` requires.
+
+### Opening re-wrapped deliveries (`DidCommClient.UnpackDeliveredAsync`)
+
+A Core internal (`Facade/DidCommClient.Mediated.cs`), used for every delivered message, fetched or
+live (FR-ROUTE-06, receiver side). It unpacks the delivered text with `UnpackAsync`. While the result
+is a `forward` (`ForwardMessage.TryParse`; a structurally broken forward is malformed), the layer
+must be one a re-wrapping mediator added for this agent (`IsRewrapLayerForThisAgent`, every condition
+evaluated): an envelope stack of exactly anoncrypt around plaintext; anonymous (no sender or signer
+key, neither authenticated nor non-repudiable); no `from_prior` (header or parsed); exactly one
+attachment; and a `next` whose DID subject is the subject of the key that decrypted the layer. That
+is what `RewrapMode.ReanoncryptToNext` produces and what the mediator itself opens (`ForwardHandler`).
+Otherwise the message fails with `ConsistencyException`. After 8 layers opened, one more
+self-addressed forward fails with `MalformedMessageException`, so at most nine unpacks per message.
+The attachment is decoded by `ForwardProcessor.ExtractAttachmentBytes` (now internal: the one
+attachment-decoding rule, relaxed base64 or `data.json`; empty or invalid base64 is malformed, no
+data a consistency failure). Each layer is unpacked with the full `UnpackAsync` rules (size cap,
+FR-API-05 expiry, consistency), not the mediator's restricted unpack, because the innermost message
+may legitimately be authcrypt. Only the DID that decrypted a layer counts as this agent: a forward
+naming another DID, another DID this agent holds included, is not opened. The result is
+`DeliveredUnpack(Result, InnermostPacked, LayersOpened)`; a pass-through delivery opens no layer.
+The released `UnpackAsync` is unchanged.
+
+### The duplicate filter and the unpack limiter
+
+- **`DuplicateFilter`.** Delivery is at-least-once, so a message can come again after a lost
+  acknowledgement, a dropped connection or a lease that ran out. The key is SHA-256, truncated to
+  128 bits, over length-prefixed fields. An authenticated or signed message is keyed by the sender's
+  DID subject (the authcrypt sender key's, else the verified signer's), the decrypting DID subject
+  and the inner message id: message ids are unique per sender, so a stranger who reuses an id
+  produces another key and cannot suppress the message. An anonymous message is keyed by its
+  innermost packed text, so only a byte-identical copy matches. One lock, a `HashSet<UInt128>` and a
+  `Queue<UInt128>`: first in, first out at `DedupeCapacity` (4096; 0 turns the memory between calls
+  off, while a fetch still returns a message that comes twice in one delivery once), O(capacity ×
+  16 B) whatever the wire values (L-062). A key is added only at a commit point: in a fetch right
+  before the acknowledgement, in a live stream when the item is taken. Fetches and live streams of
+  one channel share it; the local DID is in the key, so its scope is per local DID.
+- **`DeliveredMessageUnpacker`.** The payload is decoded as strict UTF-8 (invalid or empty is a
+  malformed failure). One `GuardedDeadline` at `UnpackTimeout` covers every layer, awaited with
+  `WaitAsync`. A fetch unpacks at most 4 at a time. At most 16 abandoned unpacks per channel may
+  still be running, an unpack whose deadline passed but which ignores cancellation; beyond that a
+  new unpack fails at once, without starting, as a `TimeoutException` failure (L-059). An abandoned
+  unpack's outcome is observed when it ends, and it keeps its slot until then. A bad message is
+  always a failure outcome; only the caller's cancellation throws.
+
+### Logging
+
+Categories `DidComm.Mediator.Client.MediationClient`, `DidComm.Mediator.Client.PickupClient` and
+`DidComm.Mediator.Client.Internal.MediatorClientChannel`. A line carries our request ids (bounded),
+constant message names, counts, enum names and exception type names. It never carries a DID, a key
+id, an attachment or queue id, a message id the mediator or a sender chose, or an exception object
+or text. Every call goes through `MediatorLog.Write`, so a throwing provider changes nothing.
+
+- **Rate-limited, Warning the first time and every 1000th, Debug otherwise:** drops that point at the
+  mediator (an answer from a request's pair of a type it does not expect, an HTTP response whose
+  thread-less answer does not fit its request, an ambiguous thread-less answer, a push its stream's
+  full buffer refuses), problem reports received, and the pickup lines (messages beyond the limit,
+  unusable or repeated ids, unpack failures, filter mismatches, acknowledgement failures, cycle
+  failures, ignored pushes, taken ids forgotten, failures at a stream's end). The pickup counters
+  are per client, shared by its fetches and streams.
+- **Quiet, Debug the first time and every 1000th, Trace otherwise:** a message of an answer type that
+  no waiting request takes (late, or meant for another part of this agent, such as a `disclose` for
+  the Discover Features client), and a push with no stream or after its stream ended.
+- **Debug:** a request sent, answered or ended (id, name, elapsed milliseconds, exception type); the
+  negotiated version; a fetch's counts; a stream's start and end. **Warning, once per stream:** the
+  mediator answered live-on with live delivery off.
+- **Not logged:** a message that fails the identity rule (other traffic).
+- **The dispatcher (R-3).** When a correlator claimed a message (it completed a waiting request or
+  reached a live stream; the Discover Features client claims a `disclose` that completed a query),
+  the dispatcher's "No protocol handler registered" line is written at Debug instead of
+  Information. Otherwise a host that only runs the client would log one Information line per
+  mediator answer. Unclaimed messages keep the Information line.
+
+### Threat model
+
+- **Registration surface.** Host code at start-up only (`AddMediatorClient`): no runtime seam, no
+  callbacks, no public correlator. `IInboundCorrelator` and `InboundMessageSnapshot` stay internal
+  (R-1): a public inline hook would see every decrypted inbound and could stall the receive path.
+  The correlator sees every verified inbound, does no I/O and no body parsing, and performs one
+  `TrySetResult` or one `TryWrite`.
+- **A hostile or compromised mediator** is authoritative for its own answers, within these bounds:
+  each answer at most `MaxReceiveBytes`; at most `MaxPendingRequests` waiting; at most `limit`
+  attachments read per fetch and 10 per live delivery, 8 buffered pushes per stream; at most 16
+  routing DIDs, each a bare DID of at most 2048 characters; at most 1000 DIDs per page, pagination
+  that must agree with the page and the request, at most 1000 pages per walk; update answers equal
+  to the request in count, order, DID and action; at most 256 disclosures inspected and 32 reported,
+  cleaned; problem codes sanitized; attachment ids validated before they are sent back, and never
+  logged. The acknowledgement is exactly what unpacked plus the repeats, so a mediator cannot make
+  the client acknowledge a failure or an id it never delivered. A delivery whose messages all lack a
+  usable id is refused rather than spinning a loop. Unsolicited answers complete nothing unless a
+  waiting request matches (its thread, or the one candidate of its pair). The routing DID of a grant
+  is the mediator's word (publish it only for a mediator you trust).
+- **Misaddressed payloads.** A message encrypted to someone else fails to unpack and is reported.
+  Under a `recipientDid` filter, a message for another of our DIDs is a failure; without a filter it
+  is returned, so a multi-tenant host checks `Unpacked.RecipientKid` or uses the filter.
+- **Third parties** cannot write on S(E, L, M); only E writes there. Through the host's own receive
+  endpoints: a post-sign tamper fails to unpack and reaches nothing (over HTTP a tampered body is
+  `TransportException` status 200; over a WebSocket the frame is dropped and the call times out); a
+  self-consistent forgery (Mallory's authcrypt with `from` = Mallory and our waiting `thid`) fails
+  the identity rule before any lookup, and the real answer still completes; `from` = the mediator
+  with Mallory's sender key is refused at unpack (FR-CONSIST); anoncrypt, signed-only and
+  `anoncrypt(sign)` fail the identity rule; authcrypt from the mediator to another of our DIDs fails
+  the pair; a hand-built `UnpackResult` dispatched by host code has `Verified = false`
+  (`MediatorResponseMatcherTests`).
+- **Replays.** A captured genuine answer can only complete a request id that is waiting now (a fresh
+  UUID v4 per request). A captured thread-less push replayed to a host endpoint meets the shared
+  FR-RR-08 cache (duplicate, or too old); if admitted, the duplicate filter recognises it, and it is
+  acknowledged again harmlessly.
+- **Resources.** Pending requests ≤ 64; live streams ≤ 16, each ≤ 8 buffered snapshots of at most
+  `MaxReceiveBytes`; the ids a stream holds are bounded by its ready, buffered and taken bounds
+  (10 + 8 + 100), each id at most 2048 characters; duplicate filter ≤ 4096 × 16 B; version cache
+  ≤ 64; abandoned unpacks ≤ 16; an idle correlator costs one volatile read.
+- **Timing.** Identity is decided before any dictionary is probed, with `&`-combined compares; the
+  thread lookup runs only for messages a mediator authcrypted to us.
+- **Peer-controlled latency (L-061).** The correlator never awaits, and the receive loop is never
+  held by the client. Resolving an inner sender's DID runs on the caller's own await (a fetch) or
+  the stream consumer's, bounded by `UnpackTimeout`, by 4 at a time in a fetch and by the
+  abandoned-unpack bound. A mediator's latency is bounded by `RequestTimeout`, the mediator's DID
+  resolution by the endpoint step's own deadline.
+- **Clocks.** Over a WebSocket, answers and pushes pass the client's own replay admission: a
+  mediator more than `ReplayProtectionOptions.ClockSkew` (60 s by default) ahead has them dropped
+  (`FutureDated`) although it acted, so the call times out; retries are idempotent, and live pushes
+  come back after their lease. Requests pass the mediator's admission: a client more than the
+  mediator's `ClockSkew` ahead (`FutureDated`), or more than its `Window` (5 minutes by default)
+  behind (`TooOld`), is refused unexecuted and times out. Over HTTP, `Returned` is not admitted, so skew decides nothing for answers there. Keep the
+  clocks within a minute of each other by default (`MediatorClientClockSkewTests`,
+  `PickupClientClockSkewQa2Tests`).
+- **Unobserved task exceptions** (QA-1 Q1-3, QA-2 Q2-3, fixed): a failed pending request that nobody
+  awaits (HTTP no-answer, disposal during a send), a send or resolution abandoned at its deadline, and
+  an unpack that ended as its deadline fired are all observed (`MediatorClientUnobservedTests`,
+  `PickupClientUnobservedQa2Tests`).
+
+### Documented limits
+
+- **At-least-once.** Repeats are recognised while the duplicate filter remembers them; an
+  application that must never act twice tracks the message ids it handled.
+- **A fetch is at-most-once to the application** once it returns (above); `ReceiveLiveAsync`, or the
+  caller's own `AckAsync`, gives at-least-once to the application.
+- **The last item of a live stream is not acknowledged** when the enumeration ends; it comes back.
+- **The 10-second flush is checked at the next `MoveNextAsync`.** A consumer that holds an item longer
+  than the mediator's lease (60 s at ours) leaves the taken ids before it unacknowledged that long,
+  and they can be delivered again; the duplicate filter recognises them.
+- **A burst re-pushed after the push buffer overflowed** is cleared over several cycles: latency
+  only, nothing is lost.
+- **A slow sender DID** delays a live stream by up to `UnpackTimeout` per message it sends, and its
+  failures come back once per lease period until the application discards them.
+- **A host `IInboundFrameConsumer` that never dispatches** cannot be detected: the route is admitted
+  and WebSocket calls time out.
+- **Only the first service entry** of the mediator's DID decides the route; pass an override for
+  another.
+- **Interop points for #98.** A mediator that does not stamp `created_time` on its WebSocket answers
+  has them dropped by the client's admission. A mediator that answers `delivery-request` without
+  `thid` works over HTTP only (R-10). A mediator that puts a `thid` on its live pushes, or pushes raw
+  messages instead of `delivery` (DD-13), is not taken as a push; the stream still gets those
+  messages by polling. A mediator without Discover Features needs a pinned version.
+
 ## Phase 7: still to build
 
-Open under epic #88: the recipient-side client (#96: `MediationClient`, `PickupClient` and the
-grant-based service entry); sample 11 with cookbook sections CC–FF (#97), which also retires the
+Open under epic #88: sample 11 with cookbook sections CC–FF (#97), which also retires the
 `TODO(#97)` entries of the DX allowlists; the live interop and adversarial gate (#98); Coordinate
-Mediation 2.0 compatibility (#99); Message Pickup 4.0 (#100), a second thin handler over the
-same `MessagePickupQueue`; and the push to a host-registered recipient endpoint, deferred from #95
-(#110).
+Mediation 2.0 compatibility for the mediator role (#99; the recipient-side client already speaks
+2.0, #96); Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; and
+the push to a host-registered recipient endpoint, deferred from #95 (#110).
