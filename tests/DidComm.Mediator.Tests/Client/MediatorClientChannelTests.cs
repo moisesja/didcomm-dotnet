@@ -543,8 +543,8 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         }
         var unclaimed = lines.Where(l => l.Formatted.Contains("no waiting request takes", StringComparison.Ordinal)).ToArray();
         unclaimed.Should().HaveCountGreaterThanOrEqualTo(3);
-        unclaimed[0].Level.Should().Be(LogLevel.Warning, "the first of a peer-repeatable line");
-        unclaimed.Skip(1).Should().OnlyContain(l => l.Level == LogLevel.Debug, "the rest until the 1000th");
+        unclaimed[0].Level.Should().Be(LogLevel.Debug, "the first of a peer-repeatable line that is not a mediator problem");
+        unclaimed.Skip(1).Should().OnlyContain(l => l.Level == LogLevel.Trace, "the rest until the 1000th");
         lines.Should().Contain(l => l.Formatted.Contains("more than one waiting request", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Formatted.Contains("live delivery push", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Formatted.Contains("problem report", StringComparison.Ordinal));

@@ -40,9 +40,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>Matching (§4.2).</strong> An inbound is looked at only when its type is a mediator answer
 /// type (<see cref="MediatorAnswerTypes"/>). Then, before any pending request or live stream is
 /// looked up, it must be a verified snapshot (never a hand-built one) authcrypted by its
-/// <c>from</c> to a DID in its <c>to</c> (<see cref="ReturnRouteEligibility"/>, the return-route
-/// identity rule): every comparison runs, combined without short-circuit, and a failure returns
-/// silently. Only then is its thread (<c>pthid</c>, else <c>thid</c>, for a problem report) looked
+/// <c>from</c> to one of our DIDs (<see cref="ReturnRouteEligibility"/>, the return-route identity
+/// rule: the key that decrypted it names the DID), and a <c>to</c>, when it has one (it is optional
+/// in DIDComm v2.1), must name that DID: every comparison runs, combined without short-circuit, and
+/// a failure returns silently. Only then is its thread (<c>pthid</c>, else <c>thid</c>, for a problem report) looked
 /// up — never when it is longer than <see cref="MaxThreadIdLength"/> — and the request completes
 /// only when its (mediator, local DID) pair and expected types agree. A message without a thread
 /// completes the one HTTP request whose response carried it, or the only waiting request of its
@@ -55,6 +56,13 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>Deadlines.</strong> Every wait — the mediator's endpoint, the send and the answer — runs
 /// under a <see cref="GuardedDeadline"/> on the injected <see cref="TimeProvider"/>; the token the
 /// send receives is cancelled inside a <c>try</c>, so nothing host code registers on it can escape.
+/// </para>
+/// <para>
+/// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
+/// every 1000th, Debug otherwise): an answer to a waiting request that does not fit it, an ambiguous
+/// thread-less answer, a live push its stream's full buffer refuses. A message of an answer type
+/// that simply is not for a waiting request (late, or another part of this agent's) is a Debug line
+/// (the first and every 1000th, Trace otherwise). Neither ever claims the message.
 /// </para>
 /// </remarks>
 internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExchange, IDisposable, IAsyncDisposable
@@ -87,8 +95,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     private int _active;
     private int _disposed;
     private long _unclaimedAnswers;
+    private long _mismatchedAnswers;
     private long _ambiguousAnswers;
     private long _droppedPushes;
+    private long _strayPushes;
     private long _problemReports;
     private long _lookups;
 
@@ -441,9 +451,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
         // 2. Identity before any lookup (D-7): a verified snapshot (never a hand-built one),
         //    authcrypted by the sender key's DID (the return-route rule: signer agrees, not a
-        //    forward), whose `from` is that DID and whose `to` names the DID that decrypted it.
-        //    Every comparison runs; they are combined without short-circuit. A failure is other
-        //    traffic: returned silently, not logged.
+        //    forward), whose `from` is that DID and whose `to`, when present, names the DID that
+        //    decrypted it. Every comparison runs; they are combined without short-circuit. A
+        //    failure is other traffic: returned silently, not logged.
         var eligible = ReturnRouteEligibility.TryGetPeer(received, out var peer, out var local, out _);
         var fromOk = string.Equals(DidSubject.DidSubjectOf(received.From), peer, StringComparison.Ordinal);
         var toOk = IsAddressedTo(received.To, local);
@@ -467,6 +477,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             var typeOk = (kind == MediatorAnswerKind.ProblemReport) | MediatorAnswerTypes.Expects(pending.Spec, type);
             if (pairOk & typeOk && pending.TryComplete(received))
                 return true;
+            // From the request's mediator to its DID, naming it, yet of a type it does not expect:
+            // the mediator's mistake (the request keeps waiting and times out).
+            if (pairOk & !typeOk)
+            {
+                LogMismatched(name, pending);
+                return false;
+            }
         }
         LogUnclaimed(name);
         return false;
@@ -486,7 +503,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 MediatorAnswerKind.ProblemReport => true,
                 _ => MediatorAnswerTypes.Expects(boundTo.Spec, type),
             };
-            if (pairOk & typeOk && boundTo.TryComplete(received))
+            if (!(pairOk & typeOk))
+            {
+                // The response to our own request carried something that does not answer it.
+                LogMismatched(name, boundTo);
+                return false;
+            }
+            if (boundTo.TryComplete(received))
                 return true;
             LogUnclaimed(name);
             return false;
@@ -500,10 +523,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 {
                     if (stream.TryPush(received))
                         return true;
-                    LogDroppedPush("its stream's buffer is full or the stream has ended");
+                    if (stream.IsEnded)
+                        LogStrayPush("its stream has ended");
+                    else
+                        LogDroppedPush("its stream's buffer is full");
                     return false;
                 }
-                LogDroppedPush("no live stream is open for its mediator and DID");
+                LogStrayPush("no live stream is open for its mediator and DID");
                 return false;
 
             case MediatorAnswerKind.ProblemReport:
@@ -583,9 +609,12 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     // say that what the peer pushes back is discarded (null, cannot tell: allowed).
     private bool CanReceiveOn(Uri endpoint) => ReceivesInbound && Client.ReceivesPushesOn(endpoint) != false;
 
+    // `to` is optional (DIDComm v2.1) and the key that decrypted the answer already names `local`:
+    // an answer without one (or with an empty one) is addressed to `local`; one with a `to` that
+    // does not name it is not. Single pass, no early exit.
     private static bool IsAddressedTo(IReadOnlyList<string> to, string local)
     {
-        var found = false;
+        var found = to.Count == 0;
         var inspected = Math.Min(to.Count, MaxAddresseesInspected);
         for (var i = 0; i < inspected; i++)
             found |= string.Equals(DidSubject.DidSubjectOf(to[i]), local, StringComparison.Ordinal);
@@ -647,17 +676,42 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     private long ElapsedMs(PendingRequest pending) => (long)Time.GetElapsedTime(pending.StartedAt).TotalMilliseconds;
 
-    // A mediator (or anyone the identity rule admits) can repeat these: first and every 1000th at
-    // Warning, Debug otherwise. The answer is named by its constant, never by the wire type or id.
+    // A mediator (or anyone the identity rule admits) can repeat every line below, so each is
+    // rate-limited. The answer is named by its constant, never by the wire type or id.
+
+    // Not a mediator problem: a late answer, or a message of an answer type meant for another part
+    // of this agent (an application's problem report, a disclose the Discover Features client
+    // takes). Debug for the first and every 1000th, Trace otherwise.
     private void LogUnclaimed(string answer)
     {
-        var level = MediatorLog.RateLimited(ref _unclaimedAnswers, out var count);
-        MediatorLog.Write(Logger, level, "Dropped a mediator answer ({Answer}) that no waiting request takes: late, unknown or not matching its request. {Count} so far.", answer, count);
+        var level = QuietlyRateLimited(ref _unclaimedAnswers, out var count);
+        MediatorLog.Write(Logger, level, "Ignored a message of a mediator answer type ({Answer}) that no waiting request takes: late, or not an answer to this client. {Count} so far.", answer, count);
     }
 
+    // A mediator problem: the answer names (or came back in the response to) a waiting request of
+    // ours from its pair, but does not fit it. Warning for the first and every 1000th.
+    private void LogMismatched(string answer, PendingRequest request)
+    {
+        var level = MediatorLog.RateLimited(ref _mismatchedAnswers, out var count);
+        MediatorLog.Write(Logger, level, "Dropped a mediator answer ({Answer}) to request {RequestId} ({Request}) that does not fit it: a type it does not expect, or not from its mediator to its DID. {Count} so far.",
+            answer, request.Id, request.Spec.Name, count);
+    }
+
+    // A mediator problem only in so far as it pushes faster than the stream reads: Warning.
     private void LogDroppedPush(string reason)
     {
         var level = MediatorLog.RateLimited(ref _droppedPushes, out var count);
         MediatorLog.Write(Logger, level, "Dropped a live delivery push: {Reason}. It was not acknowledged, so the mediator delivers it again. {Count} so far.", reason, count);
     }
+
+    // A push that arrives as a stream ends, or after: expected, quiet.
+    private void LogStrayPush(string reason)
+    {
+        var level = QuietlyRateLimited(ref _strayPushes, out var count);
+        MediatorLog.Write(Logger, level, "Dropped a live delivery push: {Reason}. It was not acknowledged, so the mediator delivers it again. {Count} so far.", reason, count);
+    }
+
+    // MediatorLog.RateLimited one level down: Debug for the first and every 1000th, Trace otherwise.
+    private static LogLevel QuietlyRateLimited(ref long counter, out long count)
+        => MediatorLog.RateLimited(ref counter, out count) == LogLevel.Warning ? LogLevel.Debug : LogLevel.Trace;
 }

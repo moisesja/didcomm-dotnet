@@ -131,6 +131,59 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         (await act.Should().ThrowAsync<TimeoutException>()).Which.Message.Should().Contain("no answer in the HTTP response");
     }
 
+    // ---- `to` is optional (DIDComm v2.1): the key that decrypted the answer binds it ----
+
+    [Fact]
+    public async Task An_answer_without_a_to_header_completes_the_request_it_names_when_it_was_decrypted_for_the_requests_DID()
+    {
+        var (request, exchange) = Start(ClientSpecs.MediateRequest);
+        var grant = WithoutTo(_w.Grant(request.Id));
+
+        var snapshot = await _w.SnapshotAsync(grant);
+
+        snapshot.To.Should().BeEmpty("the answer carries no to header");
+        _channel.AsCorrelator().OnInbound(snapshot).Should().BeTrue();
+        (await exchange).Id.Should().Be(grant.Id);
+    }
+
+    [Fact]
+    public async Task An_answer_with_an_empty_to_completes_the_request_and_one_whose_to_names_only_another_DID_does_not()
+    {
+        var (request, exchange) = Start(ClientSpecs.MediateRequest);
+        var elsewhere = CraftedSnapshot.Verified(_w.Grant(request.Id, to: _w.OtherLocal.Did), senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid);
+        var empty = _w.Grant(request.Id);
+        empty.To = new List<string>();
+
+        _channel.AsCorrelator().OnInbound(elsewhere).Should().BeFalse("a to that is present must name the DID that decrypted the answer");
+        exchange.IsCompleted.Should().BeFalse();
+        _channel.AsCorrelator().OnInbound(CraftedSnapshot.Verified(empty, senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid)).Should().BeTrue();
+        await exchange;
+    }
+
+    [Fact]
+    public async Task Without_a_to_header_an_answer_decrypted_for_another_of_our_DIDs_does_not_complete_the_request()
+    {
+        var (request, exchange) = Start(ClientSpecs.MediateRequest);
+
+        var forOther = await _w.SnapshotAsync(WithoutTo(_w.Grant(request.Id)), to: _w.OtherLocal.Did);
+
+        _channel.AsCorrelator().OnInbound(forOther).Should().BeFalse("the decrypting key names the other DID, not the request's");
+        exchange.IsCompleted.Should().BeFalse();
+        _channel.PendingCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Without_a_to_header_a_threadless_answer_still_finds_the_only_waiting_request_of_its_pair()
+    {
+        var (_, forLocal) = Start(ClientSpecs.MediateRequest);
+        var (_, forOther) = Start(ClientSpecs.MediateRequest, local: _w.OtherLocal.Did);
+
+        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(WithoutTo(_w.Grant(thid: null)), to: _w.OtherLocal.Did)).Should().BeTrue();
+
+        await forOther;
+        forLocal.IsCompleted.Should().BeFalse("the key that decrypted it chose the pair");
+    }
+
     // ---- row 1: the thread names a pending request ----
 
     [Fact]
@@ -479,6 +532,13 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         var exchange = _channel.ExchangeAsync(WebSocketRoute, request, spec, _w.Mediator.Did, local ?? _w.Local.Did, default);
         exchange.IsCompleted.Should().BeFalse("the request waits for its answer");
         return (request, exchange);
+    }
+
+    // The same message without its `to` header.
+    private static Message WithoutTo(Message message)
+    {
+        message.To = null;
+        return message;
     }
 
     private async Task<InboundMessageSnapshot> ImpostorAsync(string impostor, string thid)
