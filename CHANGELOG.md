@@ -46,50 +46,57 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   push workers (below), otherwise it waits for a `delivery-request`. Every other outcome (unknown
   recipient, expired, too large, over quota, a fault) is a logged drop, counted, with nothing sent
   back to the sender.
-- **Live pushes on the push workers** (FR-PICK-08/09). A stored message that is already due is
-  handed to a small pool of background workers when its recipient has, at that moment, a live
-  session with live delivery on, or when direct push is on; the hand-over never blocks the pump. A
-  worker checks the registration again, then pushes the message over the recipient's newest live
-  session — taking exactly that stored message under a lease owned by the session and sending it as
-  a one-message `delivery` through the session's size-bounded send; the session keeps it leased
-  until `messages-received`, its close or `LeaseTimeout` — and, when no live session took it and
-  direct push is on, pushes it to the recipient's endpoint (below); otherwise it stays queued for
-  pickup. A message a `delivery-request` took first is pushed by neither path. **What a live
-  recipient can rely on:** every message stored, already due, while it is live is pushed to it, in
-  the order it was stored, one at a time — unless its push fails or reaches the deadline, in which
-  case that message, and any stored during the cooldown that follows a deadline, stays queued for
-  pickup; delivery is at-least-once. The work is bounded and fair: `PushConcurrency` workers, one
-  `PushTimeout` deadline per push that holds even against a session, transport or store that ignores
-  cancellation, recipients served in turn with at most one push in flight each, and a backlog sized
-  from the pickup quotas (`MaxQueueMessages` per grant, `MaxStoreMessages` in all), so a slow
-  recipient holds one worker, never all, and every message the queue stores can have its push; a
-  push beyond a bound (possible only with a host store that admits more than the pickup settings
-  say, or behind jobs of messages a pickup already removed) is skipped and its message stays queued.
+- **Live pushes on the push workers** (FR-PICK-08/09). When a stored message is already due and its
+  recipient has, at that moment, a live session with live delivery on, or direct push is on, the
+  sink wakes the recipient's grant: O(1), never blocking the pump, carrying nothing of the message;
+  wake-ups coalesce into one per grant. A small pool of background workers then serves the grant:
+  one operation takes, one at a time, the next message the store hands out at that moment — due,
+  unexpired, not leased or passed over, oldest first, its recipient DID still registered under the
+  grant — and pushes it over the recipient's newest live session, under a lease owned by the
+  session, as a one-message `delivery` through the session's size-bounded send; the session keeps
+  it leased until `messages-received`, its close or `LeaseTimeout`. A live session is pushed only
+  what was stored since it turned live delivery on (what was queued before is picked up,
+  FR-PICK-06); a message too large for its envelope even alone is passed over, as a pickup does; one
+  the session does not take is given back and ends the operation. Then, when direct push is on, the
+  grant's other due messages go to the recipient's endpoint (below). A message that expired, was
+  acknowledged or purged, or that a `delivery-request` took, is never pushed and never takes another
+  message's place. **What a live recipient can rely on:** every due message stored since it turned
+  live delivery on is pushed to it, oldest first, one at a time, as long as its pushes succeed; a
+  message whose push fails, or that arrives during a cooldown, a saturation or shutdown, stays
+  queued and is tried again when the recipient next receives a message; a delayed message is never
+  pushed before it is due and goes with the next push once due; delivery is at-least-once. The work
+  is bounded and fair: `PushConcurrency` workers; one operation per grant from its start until the
+  work it started has ended, so a slow recipient holds one worker, never all; at most
+  `MaxDeliveryBatch` pushes per turn, then the grant takes its turn again behind the others; at most
+  2 × `PushConcurrency` operations unsettled, abandoned ones included, beyond which a wake-up starts
+  nothing (`Push-Skipped-Saturated`) and its messages wait for pickup or the next wake-up; per
+  active grant the dispatcher keeps the grant's DID and a few flags, nothing of any message. One
+  `PushTimeout` deadline per push holds even against a session, DID resolver, transport or store
+  that ignores cancellation: the worker moves on, the push counts as failed, and the grant gets no
+  other push until the abandoned call ends, its message staying under the push's lease meanwhile.
   A recipient whose push reaches the deadline has its pushes paused for 2 × `PushTimeout` (its
   messages wait for pickup meanwhile), so a peer that stalls its own pushes holds a worker at most
-  once every three push timeouts. A push job holds a few bounded ids (two DIDs, the queue's record
-  id, the forward's id shortened for logs) and no payload. `MessagePickupQueue.DeliverAsync` called
-  by a host with `AllowLive: true`, the default, still pushes live itself, on the caller's thread.
+  once every three push timeouts. `MessagePickupQueue.DeliverAsync` called by a host with
+  `AllowLive: true`, the default, still pushes live itself, on the caller's thread.
 - **Direct push** (opt-in: `MediatorOptions.DirectPush` and a host `IRecipientEndpointDirectory`).
-  After a message is queued, if it is already due and no live session of the recipient took it, it
-  is pushed by the push workers to the endpoint the host's directory names for the recipient's
-  grant — never one taken from the message — through `DidCommClient.SendPackedAsync`, so the
-  outbound endpoint guard always applies. Just
-  before sending, the push takes exactly that stored message under a lease of its own (new
-  `IMessageStore.LeaseByIdAsync`), so it never sends a message that has expired or aged out, is
-  being fetched by the recipient, or was acknowledged or purged meanwhile
-  (`Push-Skipped-NotHeld`), and it sends the payload the queue holds. Only an HTTP 2xx answer counts
-  as delivered and removes the message; anything else gives the message back to pickup at once.
-  Only `http` and `https` endpoints are pushed to, because a WebSocket write gives no receipt, and a
-  plain `http` endpoint also needs `"http"` in `HttpTransportOptions.AllowedSchemes` (the HTTP
-  transport sends to `https` only by default). One attempt per message, and it is a single request:
-  one POST to exactly the directory's endpoint, no retry, no redirect followed (a 3xx is a failed
-  push), outside the HTTP transport's circuit breaker, so one recipient's failing endpoint stops
-  neither the pushes to the others nor the host's other HTTP sends. A recipient that relies on push
-  must also pick up, and should drop messages whose id it has already seen (see Security). The
-  push deadline holds even against a transport or store that ignores cancellation: the call is
-  abandoned and the message given back to pickup, and an abandoned send may still land later. The
-  bounds, the fairness and the cooldown are the push workers' (above).
+  After any live push, an operation pushes the grant's other due messages — with a live session,
+  those queued before it turned live delivery on — to the endpoint the host's directory names for
+  the recipient's grant, never one taken from the message, through `DidCommClient.SendPackedAsync`,
+  so the outbound endpoint guard always applies. Each message is first taken from the queue under a
+  lease of its own (`PushTimeout` + 30 s), and the directory is then asked for it, so the push never
+  sends a message that has expired or aged out, is being fetched by the recipient, or was
+  acknowledged or purged, and it sends the payload the queue holds. Only an HTTP 2xx answer counts
+  as delivered and removes the message (also one that arrives after the deadline); anything else
+  gives the message back to pickup at once and ends the operation. Only `http` and `https` endpoints
+  are pushed to, because a WebSocket write gives no receipt, and a plain `http` endpoint also needs
+  `"http"` in `HttpTransportOptions.AllowedSchemes` (the HTTP transport sends to `https` only by
+  default). Each push is a single request: one POST to exactly the directory's endpoint, no retry,
+  no redirect followed (a 3xx is a failed push), outside the HTTP transport's circuit breaker, so
+  one recipient's failing endpoint stops neither the pushes to the others nor the host's other HTTP
+  sends. A message whose push failed is pushed again only when its recipient next receives a
+  message, so a recipient that relies on push must also pick up, and should drop messages whose id
+  it has already seen (see Security). An abandoned send may still land later. The bounds, the
+  fairness and the cooldown are the push workers' (above).
 - **Start-up checks** (FR-MED-07). In a generic host (`WebApplication`, `Host`) a hosted service
   checks, before the server starts listening, that there is at least one routing DID and that each
   resolves to a document whose first `DIDCommMessaging` entry names an `http`, `https`, `ws` or
@@ -121,9 +128,13 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   revokes a peer's grant and drops everything held under it in one call (a message being stored for
   the peer meanwhile is removed again); `MessagePickupOptions.MaxMessageAge` and
   `ForwardProcessorOptions.MaxDelay` (both under Changed, below);
-  `InMemoryReplayGuard.ClockBehindRefusalCount`; and `IMessageStore.LeaseByIdAsync`, which takes one
-  record by id under the same rules as `LeaseAsync` — the mediator's live and direct pushes take
-  their message with it (an interface member on an unreleased type: a custom store has to add it).
+  `InMemoryReplayGuard.ClockBehindRefusalCount`; and `MessageLeaseRequest.ReceivedAtOrAfter`
+  (init-only, `null` by default: any record), which limits a lease to the records stored at or after
+  an instant — the mediator's live push asks for what arrived since the session turned live
+  delivery on. A custom `IMessageStore` applies it in `LeaseAsync`; the mediator refuses a record
+  stored before the instant as outside the store's contract (`MessageLeaseRequest` is an unreleased
+  type). Earlier builds of this change added `IMessageStore.LeaseByIdAsync` instead; it is gone and
+  was never released.
 - **A single-attempt send** (`DidComm.Core`): `SendPackedOptions { SingleAttempt }` and the overload
   `DidCommClient.SendPackedAsync(packed, endpoint, mediaType, SendPackedOptions, ct)`, which sets the
   new init-only `TransportRequest.SingleAttempt`. The HTTP transport then makes exactly one POST to
@@ -146,17 +157,20 @@ Coordinate Mediation 2.0 (#99) and Pickup 4.0 (#100).
   `Dropped-Saturated`, `Dropped-Unacknowledged`, `Dropped-Shutdown`, `Dropped-TooLarge`,
   `Dropped-Quota`, `Faulted` — `Dropped-Unknown` also counts a rewrap next hop that cannot be
   reached, and `Faulted` is kept for faults of the mediator's own collaborators);
-  `didcomm.mediator.push.outcomes`, one count per stored message handed to the push workers or
-  refused by them, tagged `didcomm.push.outcome` (`Pushed-Live`, `Pushed`, `Push-Failed`,
-  `Push-Skipped-Saturated`, `Push-Skipped-NoEndpoint`, `Push-Skipped-NoLiveSession`,
-  `Push-Skipped-Scheme`, `Push-Skipped-Unregistered`, `Push-Skipped-NotHeld`,
-  `Push-Skipped-Cooldown`, `Push-Skipped-Shutdown`); `didcomm.mediator.queue.purged`; and, for the
+  `didcomm.mediator.push.outcomes`, one count per push attempt (a take and its push, live or
+  direct) and per wake-up that was skipped or could push nothing it had — a wake-up that finds
+  nothing left is not counted — tagged `didcomm.push.outcome` (`Pushed-Live`, `Pushed`,
+  `Push-Failed`, `Push-Skipped-Saturated`, `Push-Skipped-NoEndpoint`, `Push-Skipped-NoLiveSession`,
+  `Push-Skipped-Scheme`, `Push-Skipped-Unregistered`, `Push-Skipped-Cooldown`,
+  `Push-Skipped-Shutdown`); `didcomm.mediator.queue.purged`; and, for the
   library's in-memory types, `didcomm.replay.saturated`, `didcomm.replay.clock_behind_refusals`,
   `didcomm.return_route.dropped_notifications`, `didcomm.mediator.queue.messages` and
   `didcomm.mediator.queue.bytes`. No tag carries a DID. Earlier builds of this change named the push
   settings `DirectPushConcurrency` / `DirectPushTimeout` and the push counter
   `didcomm.mediator.direct_push.outcomes`, and counted a live push as a `Delivered-Live` forward;
-  none of these was released.
+  later ones made a push job per stored message, counted one outcome per message (with
+  `Push-Skipped-NotHeld` for one the queue no longer held), tried each message once and fell back
+  to a direct push when the live session refused one; none of these was released.
 - DX gate: `DidComm.Mediator.AspNetCore` joins the shipped-assembly list (eight assemblies); the new
   public members are allow-listed with a `TODO(#97)` marker until sample 11 demonstrates them, and
   the two `MessagePickupQueue` constructor entries follow its new signature.
@@ -173,15 +187,19 @@ Tests: `AddMediatorDiTests`, `MediatorOptionsTests`, `MediatorIdentityTests`,
 `MediatorRewrapAndRoutingKeysTests`, `MediatorStartupTests`, `MediatorTwoHopTests` and
 `MediatorUnknownNextTests` (the known/unknown `next` timing, run alone in a serial collection).
 Two independent QA passes added the `*QaTests` suites (component and end-to-end permutations);
-`MessageStoreLeaseByIdTests`, `ForwardSelfAddressedTests` and `ForwardRewrapNextTests` cover the
-fixes they led to. Two adversarial passes added the `*AdvTests` suites (`ForwardPeelAdvTests`,
+`ForwardSelfAddressedTests` and `ForwardRewrapNextTests` cover the fixes they led to. Two
+adversarial passes added the `*AdvTests` suites (`ForwardPeelAdvTests`,
 `MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
 `MediatorLifetimeAdvTests`, `OutboundGuardAdvTests`); `HttpTransportSingleAttemptTests`,
 `ForwardHandlerPumpContextTests` and `LogValuesTests` cover the fixes they led to. The PR #109
 review's fixes added `LivePushTests` (`DidComm.Mediator.Tests/Pipeline`) and
 `MediatorLiveIsolationTests` (over the real endpoints: a live recipient whose key resolution stalls
 holds up no other recipient's storage or pickup), and a third adversarial pass on them added
-`LivePushAdv4Tests` and `MediatorLivePushAdv4Tests`.
+`LivePushAdv4Tests` and `MediatorLivePushAdv4Tests`. The review's second round added
+`PushDispatcherInvariantTests` (the dispatcher's invariants) and the reviewer's two reproductions,
+`MediatorLivePushAdv4Tests.Review_round_2_an_expired_message_queued_ahead_never_costs_a_later_message_its_live_push`
+and
+`LivePushAdv4Tests.Review_round_2_live_sends_that_ignore_cancellation_never_pile_up_across_deadlines_session_churn_and_cooldowns`.
 
 ### Changed — mediator service (#95)
 
@@ -329,20 +347,25 @@ holds up no other recipient's storage or pickup), and a third adversarial pass o
   `RevokeAndPurgeAsync` and `PurgeExpiredAsync` are host APIs, not reachable from the wire.
 - **Where pushes go, and what.** Direct push sends only to the endpoint the host's directory names,
   never one from the message; only `http`/`https`; always through the outbound endpoint guard; only
-  a message the queue still holds for delivery, taken by id under the push's own lease just before
-  it is sent, so an expired, aged-out, acknowledged or purged message is never pushed and a message
-  a recipient is fetching is not sent twice; one push per message, after the 202 and off the
-  forward pump, as one request to exactly that endpoint — no retry, no redirect followed (a
-  redirect could otherwise send the push to a host the directory never named), outside the HTTP
-  transport's circuit breaker (which one recipient's failing endpoint could otherwise open for every
-  send of the host). Concurrency, backlog, per-grant jobs and the time of each push are bounded —
-  the deadline holds even against a callee that ignores cancellation — recipients are served in
-  turn with one push in flight each, and a skipped push leaves the message queued. Residuals: a push
-  abandoned at its deadline may still land later (delivery is at-least-once); anyone can make the mediator
-  post up to `MaxAdmissiblePayloadBytes` to a registered recipient's push endpoint, as they could
-  post there directly; a directory that points at the mediator itself allows a bounded onion
-  re-entry (a misconfiguration); `IHttpClientFactory`'s request logging writes push endpoints at
-  Information unless the host filters it (see Fixed, above).
+  a message the queue still holds for delivery, taken from it under the push's own lease just
+  before it is sent, so an expired, aged-out, acknowledged or purged message is never pushed and a
+  message a recipient is fetching is not sent twice; after the 202 and off the forward pump, each
+  push as one request to exactly that endpoint — no retry, no redirect followed (a redirect could
+  otherwise send the push to a host the directory never named), outside the HTTP transport's
+  circuit breaker (which one recipient's failing endpoint could otherwise open for every send of the
+  host). The workers, the push operations not yet ended (2 × `PushConcurrency`, abandoned ones
+  included) and the time a worker waits for each push are bounded — the deadline holds even against
+  a callee that ignores cancellation — the dispatcher keeps nothing of any message, recipients are
+  served in turn with one push in flight each, and a skipped push leaves the message queued.
+  Residuals: a push abandoned at its deadline may still land later (delivery is at-least-once); a
+  push whose call never ends (a host session, DID resolver, transport or store that ignores
+  cancellation and never returns) keeps its grant from further pushes and holds one of the
+  2 × `PushConcurrency` operations until it ends, and that many such grants stop every push while
+  pickup keeps working; anyone can make the mediator post up to `MaxAdmissiblePayloadBytes` to a
+  registered recipient's push endpoint, as they could post there directly; a directory that points
+  at the mediator itself allows a bounded onion re-entry (a misconfiguration);
+  `IHttpClientFactory`'s request logging writes push endpoints at Information unless the host
+  filters it (see Fixed, above).
 - **No recipient holds up the others** (PR #109 review). The forward pump only stores. Earlier
   builds of this change made the live push on the pump, and packing a `delivery` resolves the
   recipient's DID — a network method lets the recipient decide how long that takes — so one live
@@ -350,25 +373,41 @@ holds up no other recipient's storage or pickup), and a third adversarial pass o
   and could get them dropped once the forward backlog filled. Live and direct pushes now run on the
   push workers, per grant, one in flight each, under the push deadline. A third adversarial pass on
   that design found two more gaps, both fixed: a per-grant backlog of 16 left part of a live
-  recipient's burst never pushed (the backlog is now sized from the pickup quotas), and grants
-  whose resolution stalls could hold every worker push after push (they are now paused for
-  2 × `PushTimeout` after a deadline). Residual: the workers are shared, so with K grants that stall
-  every push and W workers a healthy recipient's push can wait about ceil(K / W) × `PushTimeout`,
-  and once K reaches 3 × W the stalled grants, each back after its pause, can keep every worker busy
-  and that wait recurs; nothing is lost and pickup always works; an allow-list `IMediationPolicy`
+  recipient's burst never pushed, and grants whose resolution stalls could hold every worker push
+  after push (they are now paused for 2 × `PushTimeout` after a deadline). The review's second round
+  found two more defects in that fix, both fixed in this PR before any release, from one root — the
+  dispatcher kept a job per stored message beside what the store already knew, and released its
+  accounting at the deadline instead of when the work ended: (1) a job whose message had expired or
+  been removed still held its grant's place, so a newly stored message's live push was refused
+  (`Push-Skipped-Saturated`) and never happened, a regression against `bbb1fee`, the build the first
+  round reviewed; (2) a push abandoned at its deadline was forgotten while its send still ran, so
+  sends that ignore cancellation piled up without bound across cooldowns and session replacement
+  (regressions: `MediatorLivePushAdv4Tests` and `LivePushAdv4Tests`, `Review_round_2_…`). The
+  dispatcher now keeps no jobs: the store decides what is pushed (a wake-up per grant, and each push
+  takes the next message the store holds), a grant has one operation until the work it started has
+  ended (keyed by grant, so a new session does not reset it), and at most 2 × `PushConcurrency`
+  operations are unsettled. Residual: the workers are shared, so with K grants that stall every
+  push and W workers a healthy recipient's push can wait about ceil(K / W) × `PushTimeout`, and
+  once K reaches 3 × W the stalled grants, each back after its pause, can keep every worker busy and
+  that wait recurs; nothing is lost and pickup always works; an allow-list `IMediationPolicy`
   closes it (grants are free under the default policy).
-- **Push jobs hold bounded values** (PR #109 review). A push job outlives the forward handler's
-  byte reservation. Earlier builds of this change kept the forward's id as it arrived, which the
-  message model does not bound: 16 jobs with 524 288-character ids kept 16 MiB alive while the store
-  counted only the payloads, up to about 1 GiB across the backlog those builds allowed. A job now
-  keeps two bare DIDs of at most 2 048 characters, the queue's record id (at most 64) and the
-  forward's id shortened for logs (at most 128), and refuses anything wider.
-- **A push abandoned at its deadline.** A direct push gives its lease back at once. A live push's
-  lease is the session's: it is given back when the abandoned send ends without the message going
-  out (at once for the library's WebSocket session, which honours the cancellation); a host session
-  that ignores the cancellation and reports the message sent later keeps it leased until
-  `messages-received`, its close or the lease timeout. An abandoned send may still reach the
-  recipient, which may then see the message twice (at-least-once).
+- **The push workers hold bounded values** (PR #109 review). What the push workers keep outlives
+  the forward handler's byte reservation. Earlier builds of this change kept the forward's id as it
+  arrived in each push job, which the message model does not bound: 16 jobs with 524 288-character
+  ids kept 16 MiB alive while the store counted only the payloads, up to about 1 GiB across the
+  backlog those builds allowed. The dispatcher now keeps nothing of any message: per grant that is
+  woken, busy or cooling down, its DID (at most 2 048 characters) and a few flags.
+- **A push abandoned at its deadline.** The worker stops waiting, but the push runs on until its
+  call ends, and its message stays under the push's lease meanwhile, so a pickup does not get it
+  while the send may still land (a direct push's lease runs at most `PushTimeout` + 30 s; a live
+  push's is the session's). When the call ends the message is removed (a direct 2xx that came
+  late), given back, or left leased to the session — a host session that ignores the cancellation
+  and reports the message sent later keeps it until `messages-received`, its close or the lease
+  timeout; the library's WebSocket session honours the cancellation and queues nothing once it is
+  cancelled. The grant gets no other push before that. An abandoned send may still reach the
+  recipient, which may then see the message twice (at-least-once); a direct send that outlasts its
+  lease lets a pickup take the message meanwhile, and a 2xx that arrives after that still removes
+  it.
 - **Filling a recipient's quota.** Delays are capped (residual, accepted by the owner: a sender can
   keep a recipient's quota occupied with messages it cannot see for at most `MaxForwardDelay` after
   it stops sending). Queue ids are 128-bit random, so they cannot be predicted from one grant to
@@ -386,9 +425,10 @@ holds up no other recipient's storage or pickup), and a third adversarial pass o
   unknown `next` differ by a queue reservation against a log line that is now rate-limited; the
   re-check and the pushes run after the 202.
 - **Revocation race.** Closed for the pipeline: a forward admitted before `RevokeAndPurgeAsync` that
-  stores its record after the purge removes that record itself, and a push, live or direct, checks
-  the registration again and takes the record by id before sending, so it never sends what the
-  purge removed. Residuals: a delivery or push already being sent completes; a
+  stores its record after the purge removes that record itself, and a push, live or direct, takes
+  its record from the store and checks the registration before sending, so it never sends what the
+  purge removed before the push took it. Residuals: a delivery, or a push that has taken its record,
+  completes (a direct push asks the directory after the take, so a revocation then is not seen); a
   peer granted mediation again during the call loses what was stored for the new grant before the
   purge (deny it in the policy first); if the second lookup or the removal fails, the record stays
   until it expires or ages out.
@@ -434,7 +474,9 @@ holds up no other recipient's storage or pickup), and a third adversarial pass o
   endpoints keep replay admission.
 - **Clock.** Aging is judged by each caller's clock reading inside the store, so a request that read
   the clock just before a sweep can still deliver a record that has just aged out (reading skew
-  only; a removed record never comes back). Settings are copied when each part is built.
+  only; a removed record never comes back). A clock that steps back after a session turned live
+  delivery on keeps the messages stored before it reads that instant again from being pushed live
+  (they wait for pickup, or a direct push). Settings are copied when each part is built.
 
 ### Changed — replay admission has its own clock-skew tolerance, 60 seconds by default (FR-RR-08, #105, epic #88)
 

@@ -71,8 +71,9 @@ namespace DidComm.Mediator.Pipeline;
 /// <see cref="CooldownPushTimeouts"/> × <see cref="MediatorOptions.PushTimeout"/> (one minute at the
 /// defaults): wake-ups meanwhile are skipped (<c>Push-Skipped-Cooldown</c>), and their messages wait
 /// for pickup. The abandoned push still ends its lease exactly once when it ends, and its grant is
-/// not served again before that. A session or transport that ignores cancellation and later
-/// reports the message sent keeps it leased, as for any live push (at-least-once). A peer that
+/// not served again before that. A session that ignores cancellation and later reports the message
+/// sent keeps it leased, as for any live push; a direct push whose 2xx arrives late removes it
+/// (at-least-once). A peer that
 /// stalls on purpose holds a worker at most once per cooldown. The residual: with K grants that
 /// stall every push and W workers, a healthy recipient's push can wait up to about ceil(K / W) ×
 /// <see cref="MediatorOptions.PushTimeout"/>, and once K reaches 3 × W that wait recurs; nothing is
@@ -83,7 +84,10 @@ namespace DidComm.Mediator.Pipeline;
 /// <see cref="UnsettledPerWorker"/> × <see cref="MediatorOptions.PushConcurrency"/> operations
 /// between their start and the end of the work they started (abandoned ones included). When that
 /// many exist, a wake-up starts nothing (<c>Push-Skipped-Saturated</c>) and its messages wait for
-/// pickup or the grant's next wake-up. Each operation holds at most one record at a time. The
+/// pickup or the grant's next wake-up. A call that never ends (a host session, DID resolver,
+/// transport or store that ignores cancellation) keeps its operation, and its grant, unsettled
+/// until it does; once that many operations are so held, no push starts, and pickup still works.
+/// Each operation holds at most one record at a time. The
 /// dispatcher holds one small entry per grant that is woken, busy or cooling down (its DID, at most
 /// 2048 characters), dropped when it is none of these.
 /// </para>

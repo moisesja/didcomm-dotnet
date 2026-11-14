@@ -56,20 +56,21 @@ namespace DidComm.Mediator;
 /// <item><description>A forwarded message is always stored first; a recipient with live delivery
 /// on gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
 /// <see cref="PushTimeout"/>), so a recipient that is slow to take a push holds up no one else's
-/// messages. Each recipient's pushes go one at a time, in the order its messages were stored, and
-/// every message stored while it is live, and already due when stored, is pushed (a message with a
-/// <c>delay_milli</c> hold is never pushed; it waits for pickup): the push backlog is sized from the queue's
-/// quotas (<see cref="MessagePickupOptions.MaxQueueMessages"/>,
-/// <see cref="MessagePickupOptions.MaxStoreMessages"/>). A message whose push fails or reaches
-/// <see cref="PushTimeout"/> stays queued, so a recipient in live mode should still ask for its
-/// queued messages (a <c>status-request</c> shows them) after a reconnect or a slow
-/// period.</description></item>
+/// messages. A push takes what the queue holds when it runs: each recipient's messages go one at a
+/// time, oldest first, and a live session is pushed only those stored since it turned live
+/// delivery on (what was queued before is picked up). A message with a <c>delay_milli</c> hold is
+/// never pushed before it is due; once due it goes with the recipient's next push. A message whose
+/// push fails, or that arrives while the recipient's pushes are paused after one reached
+/// <see cref="PushTimeout"/>, stays queued and is tried again when the recipient next receives a
+/// message, so a recipient in live mode should still ask for its queued messages (a
+/// <c>status-request</c> shows them) after a reconnect or a slow period.</description></item>
 /// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
-/// <item><description>Direct push (<see cref="DirectPush"/>) makes one attempt per message: one
-/// request to exactly the directory's endpoint, never retried and never redirected. A recipient
-/// that relies on it must also pick up, or the messages a push could not deliver stay in its queue
+/// <item><description>Direct push (<see cref="DirectPush"/>) sends each push as one request to
+/// exactly the directory's endpoint, never retried and never redirected. A message whose push fails
+/// stays queued and is pushed again only when its recipient next receives a message, so a
+/// recipient that relies on direct push must also pick up, or those messages can stay in its queue
 /// until they expire or reach the mailbox age limit.</description></item>
 /// <item><description>Forwards are outside replay protection. With direct push on, each replay of a
 /// captured forward is stored and pushed again, and since a delivered push frees its place in the
@@ -159,12 +160,15 @@ public sealed class MediatorOptions
     /// <summary>
     /// Whether the mediator also pushes each queued message straight to the recipient's own
     /// endpoint, found through a registered <see cref="IRecipientEndpointDirectory"/> (FR-PICK-09).
-    /// Default <c>false</c>. A message that is due, still held and not pushed live gets at most one
-    /// push attempt, in the background, after it is queued: a single POST to exactly the directory's endpoint, with no retry, no redirect
-    /// followed and outside the HTTP transport's circuit breaker (so one recipient's failing
-    /// endpoint cannot stop the host's other sends). An <c>http(s)</c> 2xx answer removes the
-    /// message from the queue; anything else, a redirect included, leaves it there for pickup, so a
-    /// recipient that relies on push must also pick up now and then. A push sends
+    /// Default <c>false</c>. When a message is queued for a recipient, the push workers push, in the
+    /// background and after any live push, the recipient's other due messages (with a live session,
+    /// those queued before it turned live delivery on), oldest first, each as a single POST to
+    /// exactly the directory's endpoint, with no retry, no redirect followed and outside the HTTP
+    /// transport's circuit breaker (so one recipient's failing endpoint cannot stop the host's other
+    /// sends). An <c>http(s)</c> 2xx answer removes the message from the queue; anything else, a
+    /// redirect included, leaves it there for pickup and ends that run of pushes: it is tried again
+    /// when the recipient next receives a message, so a recipient that relies on push must also pick
+    /// up now and then. A push sends
     /// only what the queue still holds for delivery when the push starts: it takes the message
     /// under a lease of its own first, so a message that has expired, aged out, been acknowledged,
     /// or is being fetched by the recipient is not pushed. A plain <c>http</c> endpoint also needs
@@ -176,19 +180,25 @@ public sealed class MediatorOptions
     public bool DirectPush { get; set; }
 
     /// <summary>
-    /// How many pushes may run at the same time: live pushes over a recipient's WebSocket
-    /// connection and, when <see cref="DirectPush"/> is on, direct pushes to its endpoint. Default 4;
-    /// from 1 to 64. Pushes run in the background, never on the forward pump, so a recipient that is
-    /// slow to take a push (a slow endpoint, or a DID that is slow to resolve) never holds up the
-    /// storing of other recipients' messages. Recipients take turns, with at most one push in flight
-    /// per mediation grant, so a slow recipient holds one of them at a time, never all.
+    /// How many push workers run: live pushes over a recipient's WebSocket connection and, when
+    /// <see cref="DirectPush"/> is on, direct pushes to its endpoint. Default 4; from 1 to 64. Pushes
+    /// run in the background, never on the forward pump, so a recipient that is slow to take a push
+    /// (a slow endpoint, or a DID that is slow to resolve) never holds up the storing of other
+    /// recipients' messages. Recipients take turns, with at most one push in flight per mediation
+    /// grant, so a slow recipient holds one of them at a time, never all. A push abandoned at
+    /// <see cref="PushTimeout"/> frees its worker but counts until its call ends: at most twice this
+    /// many recipients' pushes are unfinished at once, and while that many are, a new message starts
+    /// no push and waits for pickup or its recipient's next message.
     /// </summary>
     public int PushConcurrency { get; set; } = 4;
 
     /// <summary>
-    /// How long one push (live or direct) may take before it is abandoned and the message left
-    /// queued for pickup. Default 30 seconds; greater than zero and at most 5 minutes. A recipient
-    /// whose push reaches it has its pushes paused for twice as long (its messages wait for pickup
+    /// How long a push worker waits for one push (live or direct) before it gives up on it and
+    /// serves other recipients; the message stays queued. Default 30 seconds; greater than zero and
+    /// at most 5 minutes. The abandoned call runs on until it ends, holding the message under its
+    /// lease meanwhile (for a direct push at most this plus 30 seconds; for a live push as any live
+    /// delivery), and its recipient gets no other push before it ends. A recipient whose push
+    /// reaches the deadline has its pushes paused for twice as long (its messages wait for pickup
     /// meanwhile), so a recipient that stalls its own pushes cannot hold a push worker continuously.
     /// </summary>
     public TimeSpan PushTimeout { get; set; } = TimeSpan.FromSeconds(30);
