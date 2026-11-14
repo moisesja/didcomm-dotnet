@@ -107,12 +107,15 @@ public sealed class PickupClientLiveStreamTests
             r => Status(r));
 
         var seen = new List<string>();
-        await foreach (var item in client.ReceiveLiveAsync(M, L).WithCancellation(CancellationToken.None))
+        await PickupTest.Within(Task.Run(async () =>
         {
-            seen.Add(item.Id);
-            if (seen.Count == 2)
-                break;
-        }
+            await foreach (var item in client.ReceiveLiveAsync(M, L).WithCancellation(CancellationToken.None))
+            {
+                seen.Add(item.Id);
+                if (seen.Count == 2)
+                    break;
+            }
+        }));
 
         seen.Should().Equal("q1", "q2");
         exchange.AcknowledgedIds.Should().Equal("q1");
@@ -140,7 +143,7 @@ public sealed class PickupClientLiveStreamTests
             }
         };
 
-        await act.Should().ThrowAsync<InvalidDataException>();
+        await FluentActions.Awaiting(() => PickupTest.Within(act())).Should().ThrowAsync<InvalidDataException>();
         exchange.AcknowledgedIds.Should().Equal("q1");
         exchange.Sent[^1].Should().Match<SentRequest>(s => s.Is(MessagePickup.LiveDeliveryChangeType) && !s.Live);
     }
@@ -161,7 +164,7 @@ public sealed class PickupClientLiveStreamTests
             }
         };
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        await FluentActions.Awaiting(() => PickupTest.Within(act())).Should().ThrowAsync<OperationCanceledException>();
         exchange.AcknowledgedIds.Should().Equal("q1");
         var end = exchange.Sent.Where(s => s.Is(MessagePickup.MessagesReceivedType) || (s.Is(MessagePickup.LiveDeliveryChangeType) && !s.Live)).ToArray();
         end.Should().OnlyContain(s => !s.Ct.IsCancellationRequested, "the end runs on its own deadline, not the caller's token");
@@ -423,11 +426,14 @@ public sealed class PickupClientLiveStreamTests
             r => Status(r, live: false));
         exchange.On(MessagePickup.LiveDeliveryChangeType, r => Status(r, live: false));
 
-        await foreach (var item in client.ReceiveLiveAsync(M, L))
+        await PickupTest.Within(Task.Run(async () =>
         {
-            if (item.Id == "attachment-9")
-                break;
-        }
+            await foreach (var item in client.ReceiveLiveAsync(M, L))
+            {
+                if (item.Id == "attachment-9")
+                    break;
+            }
+        }));
 
         logs.Entries.Should().Contain(e => e.Message.Contains("live delivery off"));
         foreach (var value in new[] { M, L, A, "attachment-", "message-" })

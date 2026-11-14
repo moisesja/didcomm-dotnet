@@ -389,4 +389,7 @@ internal static class PickupTest
 
     /// <summary>Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in real time.</summary>
     public static async Task Within(ValueTask task) => await task.AsTask().WaitAsync(Timeout);
+
+    /// <summary>Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in real time.</summary>
+    public static async Task Within(Task task) => await task.WaitAsync(Timeout);
 }

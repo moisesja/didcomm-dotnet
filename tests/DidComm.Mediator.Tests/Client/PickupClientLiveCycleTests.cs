@@ -48,7 +48,7 @@ public sealed class PickupClientLiveCycleTests
         exchange.Route = HttpRoute;
         await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
 
-        await FluentActions.Awaiting(() => stream.MoveNextAsync().AsTask()).Should().ThrowAsync<InvalidOperationException>();
+        await FluentActions.Awaiting(() => PickupTest.Within(stream.MoveNextAsync())).Should().ThrowAsync<InvalidOperationException>();
 
         exchange.RouteCalls.Should().ContainSingle().Which.RequireWebSocket.Should().BeTrue();
         exchange.Sent.Should().BeEmpty("no live-on, and no live-off for a stream that never started");
@@ -82,7 +82,7 @@ public sealed class PickupClientLiveCycleTests
         var registration = exchange.Registration;
 
         await using (var second = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator())
-            await FluentActions.Awaiting(() => second.MoveNextAsync().AsTask()).Should().ThrowAsync<InvalidOperationException>();
+            await FluentActions.Awaiting(() => PickupTest.Within(second.MoveNextAsync())).Should().ThrowAsync<InvalidOperationException>();
 
         exchange.Sent.Should().HaveCount(sentBefore, "the refused stream turned nothing on, so it turns nothing off");
         exchange.Registration.Should().BeSameAs(registration);
