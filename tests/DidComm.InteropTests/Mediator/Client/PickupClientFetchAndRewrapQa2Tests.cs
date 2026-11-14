@@ -191,6 +191,7 @@ public sealed class PickupClientFetchAndRewrapQa2Tests
         batch.Items.Skip(1).Should().OnlyContain(i => i.Unpacked == null && i.Error != null);
         (await mediator.StatusAsync(bob)).MessageCount.Should().Be(5, "every hostile shape is left queued and counted");
         mediator.LeakingLogLines(b1.Did, b2.Did, carol.Did).Should().BeEmpty();
+        Qa2.LinesWithAny(mediator, batch.Items.Select(i => i.Id).Append(note.Id)).Should().BeEmpty("no queue id or inner message id in any line");
     }
 
     [Fact]
@@ -232,5 +233,35 @@ public sealed class PickupClientFetchAndRewrapQa2Tests
         (await harness.Pickup.AckAsync(mediator.Did, bob.Did, ids.Take(10).ToArray())).MessageCount.Should().Be(0);
         var refused = (await FluentActions.Awaiting(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, ids)).Should().ThrowAsync<DidComm.Exceptions.TransportException>()).Which;
         refused.HttpStatusCode.Should().Be(400);
+    }
+
+    /// <summary>
+    /// Observation (FR-RR-07 over-cap reply): a recipient whose own <c>MaxReceiveBytes</c> is smaller
+    /// than the mediator's delivery cap gets <see cref="DidComm.Exceptions.TransportException"/> (status
+    /// 200) for a batch over its cap; the mediator has leased that batch, so the advised retry with the
+    /// same <c>limit</c> answers <c>Drained</c> while the messages are still counted, and after the lease
+    /// the same batch is over the cap again. Only a smaller <c>limit</c> makes progress; the client does
+    /// not fall back by itself. Pinned so a change is visible.
+    /// </summary>
+    [Fact]
+    public async Task Observation_a_batch_over_the_recipients_own_receive_cap_fails_and_only_a_smaller_limit_makes_progress()
+    {
+        await using var mediator = await MediatorTestServer.StartAsync();
+        await using var harness = await MediatorClientHarness.CreateAsync(mediator, o => o.DidComm = b => b.Configure(x => x.MaxReceiveBytes = 64 * 1024));
+        var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
+        var alice = await harness.NewAliceAsync();
+        for (var i = 0; i < 4; i++)
+            await PickupE2E.SendAsync(mediator, alice, recipient, new string('x', 20_000) + i);
+
+        var refused = (await FluentActions.Awaiting(() => harness.Pickup.FetchAsync(mediator.Did, bob.Did, 10)).Should().ThrowAsync<DidComm.Exceptions.TransportException>()).Which;
+        refused.HttpStatusCode.Should().Be(200);
+        var retry = await harness.Pickup.FetchAsync(mediator.Did, bob.Did, 10);
+        retry.Drained.Should().BeTrue();
+        retry.Status!.MessageCount.Should().Be(4, "the refused batch is leased, not gone");
+
+        mediator.Clock.Advance(TimeSpan.FromSeconds(61));
+        await FluentActions.Awaiting(() => harness.Pickup.FetchAsync(mediator.Did, bob.Did, 10)).Should().ThrowAsync<DidComm.Exceptions.TransportException>();
+        mediator.Clock.Advance(TimeSpan.FromSeconds(61));
+        (await harness.Pickup.FetchAsync(mediator.Did, bob.Did, 1)).Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
     }
 }
