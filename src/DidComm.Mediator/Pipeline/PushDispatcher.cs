@@ -27,12 +27,17 @@ namespace DidComm.Mediator.Pipeline;
 /// </para>
 /// <para>
 /// <strong>In the delivery order (D6).</strong> First, while the grant's peer has a live session
-/// with live delivery on, the messages stored since it turned live delivery on go over that session
-/// (<see cref="PickupCoordinator.PushNextLiveAsync"/>, <c>Pushed-Live</c>): each stays leased to the
-/// session until <c>messages-received</c>, its close or the lease timeout; one too large for the
-/// session's envelope is passed over, as a pickup does; one the session does not take is given back
-/// and ends the operation. Messages stored before live delivery went on are the recipient's to pick
-/// up (FR-PICK-06). Then, when direct push is on and the host's
+/// with live delivery on, the messages that arrived after it turned live delivery on go over that
+/// session (<see cref="PickupCoordinator.PushNextLiveAsync"/>, <c>Pushed-Live</c>): each stays leased
+/// to the session until <c>messages-received</c>, its close or the lease timeout; one too large for
+/// the session's envelope is passed over, as a pickup does; one the session does not take is given
+/// back and ends the operation. "Arrived after" is arrival order, not time: the store numbers every
+/// record as it stores it (<see cref="QueuedMessage.Sequence"/>), and the session's mark is the
+/// highest number in the status that answered its turning live delivery on — so a message is either
+/// counted in that status, and the recipient's to pick up (FR-PICK-06), or pushed, whatever the
+/// clocks do. Turning live delivery on wakes the grant
+/// (<see cref="PickupCoordinator.LiveDeliveryStarted"/>), for a message that arrived after that
+/// status but before the session was live. Then, when direct push is on and the host's
 /// <see cref="IRecipientEndpointDirectory"/> names an absolute <c>http</c> or <c>https</c> endpoint
 /// (a WebSocket write gives no receipt), the grant's other due messages go to it: each is taken
 /// under a lease of its own (<see cref="MediatorOptions.PushTimeout"/> + <see cref="LeaseMargin"/>)
@@ -201,6 +206,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         _logger = logger;
         _time = timeProvider;
         _shutdownToken = _shutdown.Token;
+        _pickup.LiveDeliveryStarted += OnLiveDeliveryStarted;
 
         // The workers must not carry the context of whoever happened to build this singleton (a
         // request's activity, its async-locals): start them with the flow suppressed.
@@ -271,6 +277,10 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         _metrics.RecordPush(skipped);
         return false;
     }
+
+    // A session turned live delivery on: a message that arrived after the status it was answered
+    // with, while no session was live, is pushed now (a wake-up like any other).
+    private void OnLiveDeliveryStarted(string grantPeerDid) => Wake(grantPeerDid);
 
     /// <summary>Test seam: complete when no wake-up waits and no worker serves a grant (abandoned work may still run).</summary>
     /// <param name="timeout">How long to wait.</param>
@@ -492,7 +502,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     {
         var now = _didComm.Now();
         var lease = new MessageLease(Owner: null, ExpiresAt: SaturatingAdd(now, _timeout + LeaseMargin));
-        var (taken, record) = await _pickup.TakeNextAsync(grantPeerDid, lease, storedSince: null, now, ct).ConfigureAwait(false);
+        var (taken, record) = await _pickup.TakeNextAsync(grantPeerDid, lease, afterSequence: null, now, ct).ConfigureAwait(false);
         if (record is null)
             return taken == TakeResult.Removed ? Step.Removed : Step.Empty;
 
@@ -698,6 +708,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
             if (_stopped != 0)
                 return;
             _stopped = 1;
+            _pickup.LiveDeliveryStarted -= OnLiveDeliveryStarted;
             while (_ready.TryDequeue(out var grant))
             {
                 grant.Queued = false;

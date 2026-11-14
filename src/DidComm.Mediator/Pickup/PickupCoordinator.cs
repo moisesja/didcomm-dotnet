@@ -42,7 +42,7 @@ internal enum LiveStep
     /// <summary>The peer has no live session with live delivery on: nothing was taken.</summary>
     NoSession,
 
-    /// <summary>Nothing stored since live delivery went on is deliverable now.</summary>
+    /// <summary>Nothing that arrived after live delivery went on is deliverable now.</summary>
     Empty,
 
     /// <summary>The record taken was removed: its recipient DID is no longer registered under the grant.</summary>
@@ -320,7 +320,13 @@ internal sealed class PickupCoordinator
             var owned = await OwnsAsync(peerDid, null, ct).ConfigureAwait(false);
             var queue = await ReadQueueAsync(peerDid, null, owned, now, ct).ConfigureAwait(false);
 
-            var live = state is not null && state.SetLive(liveDelivery ? buildLiveDelivery : null, now);
+            // The mark is the status's own high-water sequence: a message is either counted in the
+            // status this change answers with, or arrives after it and is pushed. (A peer with no
+            // grant reads an empty status without a store call, so its mark is zero: it has no
+            // records, and whatever it is sent once granted arrives after any mark.)
+            var live = state is not null && state.SetLive(liveDelivery ? buildLiveDelivery : null, queue.HighWaterSequence);
+            if (live)
+                RaiseLiveDeliveryStarted(peerDid);
             return PickupOutcome.Of(new PickupStatusView(queue, now, live, null));
         }
         catch (Exception ex)
@@ -467,6 +473,26 @@ internal sealed class PickupCoordinator
     }
 
     /// <summary>
+    /// Raised with the peer's DID when a session turns live delivery on (after the status that
+    /// answers it was read): the mediator's push workers wake the grant, so a message that arrived
+    /// after that status — and found no live session when it arrived — is pushed now rather than at
+    /// the grant's next message. A handler that throws is ignored.
+    /// </summary>
+    public event Action<string>? LiveDeliveryStarted;
+
+    private void RaiseLiveDeliveryStarted(string peerDid)
+    {
+        try
+        {
+            LiveDeliveryStarted?.Invoke(peerDid);
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Warning, "Message pickup: waking the pushes after live delivery went on failed with {ExceptionType}.", ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
     /// Whether <paramref name="grantPeerDid"/> has, right now, the live session a live push would go
     /// to (the newest of its sessions with live delivery on). Synchronous and cheap; the answer may
     /// be stale by the time a push runs, which is why <see cref="PushNextLiveAsync"/> looks again.
@@ -476,20 +502,20 @@ internal sealed class PickupCoordinator
 
     /// <summary>
     /// Take the next message of <paramref name="grantPeerDid"/> the store hands out now — due,
-    /// unexpired, unleased, not passed over, oldest first and, when <paramref name="storedSince"/>
-    /// is given, stored at or after it — under <paramref name="lease"/>, one record at a time
+    /// unexpired, unleased, not passed over, oldest first and, when <paramref name="afterSequence"/>
+    /// is given, arrived after it — under <paramref name="lease"/>, one record at a time
     /// (FR-PICK-03/09). Registration is checked at delivery time, exactly as for a pickup: a record
     /// whose recipient DID no longer belongs to the grant is removed, by id, and not handed over.
     /// </summary>
     /// <param name="grantPeerDid">The grant.</param>
     /// <param name="lease">The lease to take the record under; the caller ends it (acknowledge, release, pass over) or lets it run on.</param>
-    /// <param name="storedSince">Only records stored at or after this instant; <c>null</c> for any.</param>
+    /// <param name="afterSequence">Only records with a greater arrival sequence (<see cref="QueuedMessage.Sequence"/>); <c>null</c> for any.</param>
     /// <param name="now">The instant the store judges by.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The record, now leased to the caller; or why there is none.</returns>
-    public async ValueTask<(TakeResult Result, QueuedMessage? Record)> TakeNextAsync(string grantPeerDid, MessageLease lease, DateTimeOffset? storedSince, DateTimeOffset now, CancellationToken ct)
+    public async ValueTask<(TakeResult Result, QueuedMessage? Record)> TakeNextAsync(string grantPeerDid, MessageLease lease, long? afterSequence, DateTimeOffset now, CancellationToken ct)
     {
-        var request = new MessageLeaseRequest(grantPeerDid, null, 1, long.MaxValue, now, lease) { ReceivedAtOrAfter = storedSince };
+        var request = new MessageLeaseRequest(grantPeerDid, null, 1, long.MaxValue, now, lease) { AfterSequence = afterSequence };
         var taken = await _store.LeaseAsync(request, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The message store returned no lease list.");
         // Copied before anything is checked: what the store handed out is held from here on.
@@ -505,8 +531,10 @@ internal sealed class PickupCoordinator
         {
             var settled = new HashSet<string>(StringComparer.Ordinal);
             RequireLeasedWithinContract(leased, grantPeerDid, null, 1, settled);
-            if (storedSince is { } since && leased.Exists(record => record.ReceivedAt < since))
-                throw new InvalidOperationException("The message store returned a record stored before the instant it was asked for.");
+            // The arrival sequence is the store's to assign (from 1) and to filter by: a record
+            // without one, or not after the one asked for, is outside the contract and not pushed.
+            if (leased.Exists(record => record.Sequence < 1 || record.Sequence <= afterSequence))
+                throw new InvalidOperationException("The message store returned a record without an arrival sequence after the one it was asked for.");
             if (leased.Count == 0)
                 return (TakeResult.Empty, null);
             await DropUnregisteredAsync(grantPeerDid, leased, held, settled, ct).ConfigureAwait(false);
@@ -523,15 +551,17 @@ internal sealed class PickupCoordinator
     }
 
     /// <summary>
-    /// Push the next message stored for <paramref name="grantPeerDid"/> since its live session turned
-    /// live delivery on, over that session (FR-PICK-08, step 1 of the delivery order). The mediator's
+    /// Push the next message that arrived for <paramref name="grantPeerDid"/> after its live session
+    /// turned live delivery on, over that session (FR-PICK-08, step 1 of the delivery order). The mediator's
     /// push workers call this, never the forward pump: the send packs a <c>delivery</c> for the peer,
     /// which resolves the peer's DID, and the peer controls how long that takes.
     /// </summary>
     /// <remarks>
     /// The session is the one <see cref="DeliverAsync"/> would use: the newest live session of the
-    /// peer, in <c>return_route: all</c>, with live delivery on. Messages stored before it turned
-    /// live delivery on are not pushed: they are the recipient's to pick up (FR-PICK-06). The record
+    /// peer, in <c>return_route: all</c>, with live delivery on. Only messages that arrived after
+    /// the status that answered its turning live delivery on are pushed (by arrival sequence,
+    /// <see cref="LiveMode.AfterSequence"/>): what that status counted is the recipient's to pick
+    /// up (FR-PICK-06). The record
     /// is taken with <see cref="TakeNextAsync"/> under a lease owned by that session
     /// (<see cref="MessagePickupOptions.LeaseTimeout"/>) and sent as a one-message <c>delivery</c>
     /// in the session's framing, bounded by <c>max_delivery_bytes</c>. Taken by the session, it
@@ -555,7 +585,7 @@ internal sealed class PickupCoordinator
         var lease = new MessageLease(state.OwnerToken, now + _leaseTimeout);
         // Before the lease exists: the session's close then knows there may be leases to end.
         state.MarkLeasing();
-        var (taken, record) = await TakeNextAsync(grantPeerDid, lease, live.Since, now, ct).ConfigureAwait(false);
+        var (taken, record) = await TakeNextAsync(grantPeerDid, lease, live.AfterSequence, now, ct).ConfigureAwait(false);
         if (record is null)
             return taken == TakeResult.Removed ? LiveStep.Removed : LiveStep.Empty;
 
@@ -659,7 +689,7 @@ internal sealed class PickupCoordinator
         if (!owned)
             return QueueStatus.Empty;
         var queue = await _store.GetStatusAsync(peerDid, recipientDid, now, ct).ConfigureAwait(false);
-        if (queue is null || queue.MessageCount < 0 || queue.TotalBytes < 0)
+        if (queue is null || queue.MessageCount < 0 || queue.TotalBytes < 0 || queue.HighWaterSequence < 0)
             throw new InvalidOperationException("The message store returned a status outside its contract.");
         return queue;
     }

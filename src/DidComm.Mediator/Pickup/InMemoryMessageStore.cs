@@ -48,6 +48,8 @@ public sealed class InMemoryMessageStore : IMessageStore
     private readonly long _maxStoreBytes;
     private int _count;
     private long _bytes;
+    // The last arrival sequence assigned (IMessageStore: one counter for the whole store).
+    private long _sequence;
 
     // The earliest expiry any held record may have (never later than the truth; reset by a full sweep).
     private DateTimeOffset _nextExpiry = DateTimeOffset.MaxValue;
@@ -125,7 +127,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 _grants.Add(message.GrantPeerDid, queue);
             }
 
-            var entry = new Entry(message);
+            var entry = new Entry(message with { Sequence = ++_sequence });
             entry.Node = queue.Order.AddLast(entry);
             queue.ById.Add(message.Id, entry);
             queue.Bytes += size;
@@ -178,7 +180,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                     continue;
                 if (entry.PassedOverUntil > request.Now)
                     continue;
-                if (request.ReceivedAtOrAfter is { } since && message.ReceivedAt < since)
+                if (request.AfterSequence is { } after && message.Sequence <= after)
                     continue;
 
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
@@ -305,7 +307,7 @@ public sealed class InMemoryMessageStore : IMessageStore
         lock (_gate)
         {
             if (!_grants.TryGetValue(grantPeerDid, out var queue))
-                return new ValueTask<QueueStatus>(QueueStatus.Empty);
+                return new ValueTask<QueueStatus>(QueueStatus.Empty with { HighWaterSequence = _sequence });
             PurgeExpired(queue, now);
             DropIfEmpty(grantPeerDid, queue);
 
@@ -327,7 +329,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 if (newest is null || message.ReceivedAt > newest)
                     newest = message.ReceivedAt;
             }
-            return new ValueTask<QueueStatus>(count == 0 ? QueueStatus.Empty : new QueueStatus(count, bytes, oldest, newest));
+            return new ValueTask<QueueStatus>((count == 0 ? QueueStatus.Empty : new QueueStatus(count, bytes, oldest, newest)) with { HighWaterSequence = _sequence });
         }
     }
 

@@ -27,20 +27,6 @@ public sealed class MessagePickupStoreSelectionTests
     }
 
     [Fact]
-    public async Task A_stored_since_filter_selects_only_records_received_at_or_after_it_and_marks_no_others()
-    {
-        // MessageLeaseRequest.ReceivedAtOrAfter (PR #109 review round 2): what the mediator's live
-        // push asks for, so a session in live mode is pushed only what arrived since it went live.
-        var store = NewStore();
-        await store.AddAsync(Message("before", receivedAt: T0.AddSeconds(-1)));
-        await store.AddAsync(Message("at", receivedAt: T0));
-        await store.AddAsync(Message("after", receivedAt: T0.AddSeconds(1)));
-
-        (await store.LeaseIdsAsync(Take() with { ReceivedAtOrAfter = T0 })).Should().Equal("at", "after");
-        (await store.LeaseIdsAsync(Take())).Should().Equal(new[] { "before" }, "the filtered lease marked nothing else");
-    }
-
-    [Fact]
     public async Task A_leased_record_is_the_record_that_was_stored_with_its_payload_unchanged()
     {
         var store = NewStore();
@@ -286,7 +272,7 @@ public sealed class MessagePickupStoreSelectionTests
 
         store.MessageCount.Should().Be(1);
         store.TotalBytes.Should().Be(7);
-        (await store.GetStatusAsync(Alice, null, at, None)).Should().Be(new QueueStatus(1, 7, T0, T0));
+        (await store.GetStatusAsync(Alice, null, at, None)).Counts().Should().Be(new QueueStatus(1, 7, T0, T0));
         (await store.AcknowledgeAsync(Alice, new[] { "expiring" }, None)).Should().Be(0);
         (await store.ReleaseAsync(Alice, new[] { "expiring" }, None)).Should().Be(0);
         (await store.PurgeExpiredAsync(at, None)).Should().Be(0);

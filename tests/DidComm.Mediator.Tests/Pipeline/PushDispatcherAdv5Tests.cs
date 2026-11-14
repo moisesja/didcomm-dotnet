@@ -38,7 +38,9 @@ public sealed class PushDispatcherAdv5Tests
 
     // ---- D-1 / liveness: which messages a live push takes --------------------------------------------
 
-    [Fact(Skip = "ADV-5 DEFECT 1 (P2): a live push takes only records whose ReceivedAt >= LiveMode.Since, two readings of the wall clock; after the clock steps back, every message stored for a healthy live session is never pushed (regression vs 755c497, which pushed by event order).")]
+    // ADV-5 DEFECT 1 (P2), fixed in round 8: "arrived after live-on" was two readings of the wall
+    // clock; it is now the store's arrival sequence against the live-on status's high-water mark.
+    [Fact]
     public async Task Defect1_after_the_clock_steps_back_a_message_stored_for_a_live_recipient_is_still_pushed_live()
     {
         await using var peers = new PipelinePeers();
@@ -70,7 +72,9 @@ public sealed class PushDispatcherAdv5Tests
         Deliveries(session).Should().HaveCount(2);
     }
 
-    [Fact(Skip = "ADV-5 DEFECT 2 (P2): DeliverAsync reads the clock before its grant lookup and its enqueue; live delivery turned on in between gets Since > ReceivedAt, so a message enqueued after live-on (and after the live-on status, which did not count it) is never pushed (regression vs 755c497).")]
+    // ADV-5 DEFECT 2 (P2), fixed in round 8: the message is numbered when it is stored, after the
+    // live-on status read, so it is after the mark whenever its clock reading was taken.
+    [Fact]
     public async Task Defect2_a_message_stored_after_live_delivery_went_on_is_pushed_even_when_its_clock_reading_came_first()
     {
         await using var peers = new PipelinePeers();
@@ -116,13 +120,13 @@ public sealed class PushDispatcherAdv5Tests
     }
 
     [Fact]
-    public async Task A_store_that_ignores_ReceivedAtOrAfter_is_refused_and_no_record_from_before_live_delivery_is_pushed_or_left_leased()
+    public async Task A_store_that_ignores_AfterSequence_is_refused_and_no_record_from_before_live_delivery_is_pushed_or_left_leased()
     {
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
         var peer = await peers.NewAsync();
         var store = new ScriptedMessageStore();
-        store.OnLease = (request, ct) => store.Inner.LeaseAsync(request with { ReceivedAtOrAfter = null }, ct);
+        store.OnLease = (request, ct) => store.Inner.LeaseAsync(request with { AfterSequence = null }, ct);
         await using var fixture = PushFixture.Create(
             configure: o => o.DirectPush = false,
             services: s => s.AddSingleton<IMessageStore>(store),
@@ -138,7 +142,8 @@ public sealed class PushDispatcherAdv5Tests
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         Deliveries(session).Should().BeEmpty("the record the store handed out was stored before live delivery went on");
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
+        // Round 8: turning live delivery on wakes the grant too, so the store's refused take is counted twice.
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.Failed);
         var now = fixture.Time.GetUtcNow();
         var free = await store.Inner.LeaseAsync(new MessageLeaseRequest(peer.Did, null, 10, int.MaxValue, now, new MessageLease("adv5-pickup", now + TimeSpan.FromMinutes(1))), CancellationToken.None);
         free.Select(r => r.Id).Should().Contain(before.MessageId).And.HaveCount(2, "the refused take gave its lease back: both wait for pickup");

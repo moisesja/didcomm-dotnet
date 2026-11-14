@@ -305,7 +305,9 @@ public sealed class LivePushTests
         live.Fixture.Dispatcher.Wake(after.GrantPeerDid).Should().BeTrue();
         await live.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.PushedLive, PushOutcomes.Pushed);
+        // L-020 (round 8): turning live delivery on wakes the grant, and that operation's direct step
+        // sends the message queued before; the later wake-up pushes the new one live.
+        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed, PushOutcomes.PushedLive);
         Deliveries(session).Select(d => d.Id).Should().Equal(after.MessageId);
         live.Fixture.Router.Requests.Should().ContainSingle().Which.Endpoint.Should().Be(Inbox);
         live.Fixture.Store.MessageCount.Should().Be(1, "the live one is held for its acknowledgement; the direct one is removed");

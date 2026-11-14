@@ -272,7 +272,7 @@ public sealed class MessagePickupAdversarialResourceStoreTests(ITestOutputHelper
 
         // Expired at every instant: admitted (the store judges the bounds, not the record), never returned, never counted.
         (await store.EnqueueAsync(Record(grant, "born-expired", DateTimeOffset.MinValue), null, DateTimeOffset.MinValue, None)).Should().Be(EnqueueOutcome.Enqueued);
-        (await store.GetStatusAsync(grant, null, DateTimeOffset.MinValue, None)).Should().Be(QueueStatus.Empty);
+        (await store.GetStatusAsync(grant, null, DateTimeOffset.MinValue, None)).Should().Be(QueueStatus.Empty with { HighWaterSequence = 1 }, "it took the first arrival sequence");
         store.MessageCount.Should().Be(0);
 
         // Never expires before the last instant; expired AT the last instant (now >= ExpiresAt).

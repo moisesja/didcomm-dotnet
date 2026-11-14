@@ -43,21 +43,21 @@ internal sealed class PickupSessionState
 
     /// <summary>
     /// Live delivery as the recipient turned it on: how to build a live <c>delivery</c> (from, to,
-    /// message) in its protocol version, and since when (on <c>DidCommOptions.Clock</c>);
-    /// <c>null</c> while live delivery is off or the session closed. Only messages stored at or
-    /// after <see cref="LiveMode.Since"/> are pushed: what was queued before is picked up (FR-PICK-06).
+    /// message) in its protocol version, and the arrival mark it went on at; <c>null</c> while live
+    /// delivery is off or the session closed. Only messages that arrived after
+    /// <see cref="LiveMode.AfterSequence"/> are pushed: what was queued before is picked up (FR-PICK-06).
     /// </summary>
     public LiveMode? Live => IsClosed ? null : _live;
 
     /// <summary>
     /// Turn live delivery on (a framing) or off (<c>null</c>). Turned on while already on, it keeps
-    /// its first instant. Returns whether it is on afterwards: never on a closed session.
+    /// its first mark. Returns whether it is on afterwards: never on a closed session.
     /// </summary>
     /// <param name="liveDelivery">The framing, or <c>null</c> to turn live delivery off.</param>
-    /// <param name="now">The instant live delivery goes on.</param>
-    public bool SetLive(Func<string, string, DeliveredMessage, Message>? liveDelivery, DateTimeOffset now)
+    /// <param name="afterSequence">The store's high-water arrival sequence read with the status that answers the change (<see cref="QueueStatus.HighWaterSequence"/>).</param>
+    public bool SetLive(Func<string, string, DeliveredMessage, Message>? liveDelivery, long afterSequence)
     {
-        _live = liveDelivery is null ? null : new LiveMode(liveDelivery, _live?.Since ?? now);
+        _live = liveDelivery is null ? null : new LiveMode(liveDelivery, _live?.AfterSequence ?? afterSequence);
         // Closed after the write above: either this read sees it, or OnClosed runs after the write
         // and clears it. Live delivery can never stay on for a session that has ended.
         if (IsClosed)
@@ -89,10 +89,10 @@ internal sealed class PickupSessionState
     }
 }
 
-/// <summary>Live delivery on a session: the framing of a live <c>delivery</c> and the instant it went on.</summary>
+/// <summary>Live delivery on a session: the framing of a live <c>delivery</c> and the arrival mark it went on at.</summary>
 /// <param name="Build">Builds a live <c>delivery</c> (from, to, message) in the protocol version live delivery was turned on with.</param>
-/// <param name="Since">When live delivery went on, on <c>DidCommOptions.Clock</c>: only messages stored at or after it are pushed.</param>
-internal sealed record LiveMode(Func<string, string, DeliveredMessage, Message> Build, DateTimeOffset Since);
+/// <param name="AfterSequence">The store's high-water arrival sequence when the status answering the change was read: only messages with a greater <see cref="QueuedMessage.Sequence"/> — which arrived after that status, so it did not count them — are pushed. Arrival order, not a clock: a clock step or a slow enqueue cannot hide a message from it.</param>
+internal sealed record LiveMode(Func<string, string, DeliveredMessage, Message> Build, long AfterSequence);
 
 /// <summary>
 /// The per-session state of the pickup role (FR-PICK-06): one <see cref="PickupSessionState"/> per

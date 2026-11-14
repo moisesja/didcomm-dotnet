@@ -98,9 +98,16 @@ internal static class MessagePickupStoreKit
     public static async Task<string[]> LeaseIdsAsync(this IMessageStore store, MessageLeaseRequest request)
         => (await store.LeaseAsync(request, None)).Select(m => m.Id).ToArray();
 
-    /// <summary>What the store holds as its counters and a grant's status report it: the triple no lease or release may change.</summary>
+    /// <summary>What the store holds as its counters and a grant's status report it (its counts, <see cref="Counts"/>): the triple no lease or release may change.</summary>
     public static async Task<(int Count, long Bytes, QueueStatus Status)> HeldAsync(this InMemoryMessageStore store, string grant = Alice, DateTimeOffset? now = null)
-        => (store.MessageCount, store.TotalBytes, await store.GetStatusAsync(grant, null, now ?? T0, None));
+        => (store.MessageCount, store.TotalBytes, (await store.GetStatusAsync(grant, null, now ?? T0, None)).Counts());
+
+    /// <summary>
+    /// A status's counts and times without its arrival mark (<see cref="QueueStatus.HighWaterSequence"/>,
+    /// which every status carries since #95's round 8 and which has tests of its own): what the tests
+    /// written about the counts compare.
+    /// </summary>
+    public static QueueStatus Counts(this QueueStatus status) => status with { HighWaterSequence = 0 };
 
     /// <summary>
     /// Raise (never lower) the thread-pool floor so that <paramref name="parties"/> workers parked on
