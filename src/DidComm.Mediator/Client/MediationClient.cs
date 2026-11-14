@@ -87,7 +87,7 @@ public sealed class MediationClient
     /// <exception cref="ArgumentNullException"><paramref name="client"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A setting of <paramref name="options"/> is outside its range (<see cref="MediatorClientOptions.Validate"/>).</exception>
     public MediationClient(DidCommClient client, MediatorClientOptions? options = null, ILogger<MediationClient>? logger = null)
-        : this(new MediatorClientChannel(client, options ?? new MediatorClientOptions(), receivesInbound: false, TimeProvider.System, loggerFactory: null), logger)
+        : this(new MediatorClientChannel(client, options ?? new MediatorClientOptions(), receivesInbound: false, TimeProvider.System, SingleLoggerFactory.For(logger)), logger)
     {
     }
 
@@ -120,7 +120,7 @@ public sealed class MediationClient
     /// <returns>The grant (<see cref="MediationGrant.PeerDid"/> is <paramref name="from"/>), or <c>null</c> when the mediator refused (<c>mediate-deny</c>).</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information (<see cref="ArgumentNullException"/> for a <c>null</c> DID).</exception>
     /// <exception cref="InvalidOperationException">A WebSocket route this client cannot receive on, a mediator reached through routing, no service endpoint resolver, or too many requests already waiting; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response); the message names the request id. Retry. The unanswered request may be the Discover Features query: a mediator that never answers one needs a pinned <see cref="MediatorClientOptions.CoordinateMediationVersion"/>.</exception>
+    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response); the message names the request id. Retry. (Running out of time while finding the mediator's endpoint names none: nothing was sent.) The unanswered request may be the Discover Features query: a mediator that never answers one needs a pinned <see cref="MediatorClientOptions.CoordinateMediationVersion"/>.</exception>
     /// <exception cref="MediationNotSupportedException">The mediator speaks neither Coordinate Mediation 3.0 nor 2.0.</exception>
     /// <exception cref="MediationProtocolException">The mediator answered with a problem report, or with an answer that is malformed or does not match the request.</exception>
     /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry).</exception>

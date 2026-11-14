@@ -1,4 +1,5 @@
 using AwesomeAssertions;
+using DidComm.Mediator.Client;
 using DidComm.Mediator.Client.Internal;
 using DidComm.Mediator.Tests.Pipeline;
 using DidComm.Messages;
@@ -267,6 +268,74 @@ public sealed class MediatorClientTimeoutRaceTests : IAsyncLifetime
         for (var i = 0; i < count; i++)
             (await started[i].Exchange).Should().BeSameAs(answers[i]);
         _channel.PendingCount.Should().Be(0);
+    }
+
+    // ---- each step has its own RequestTimeout (MediatorClientOptions.RequestTimeout, QA Q1-2) ----
+
+    [Fact]
+    public async Task Finding_the_endpoint_and_the_request_each_get_a_whole_RequestTimeout()
+    {
+        var (resolving, resolverCalled, channel) = SlowResolver();
+        var mediation = new MediationClient(channel, logger: null);
+        try
+        {
+            var call = mediation.RequestMediationAsync(_w.Mediator.Did, _w.Local.Did);
+            await resolverCalled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            _time.Advance(TimeSpan.FromSeconds(20));
+            resolving.SetResult(Wss);
+            await _send.FirstCall.WaitAsync(TimeSpan.FromSeconds(10));
+            await _time.WaitForScheduledTimersAsync(1, TimeSpan.FromSeconds(10));
+
+            _time.Advance(TimeSpan.FromSeconds(20));
+            call.IsCompleted.Should().BeFalse("the request has had 20 s of its own 30 s; the 20 s spent finding the endpoint were the endpoint's");
+            _time.Advance(TimeSpan.FromSeconds(10));
+
+            var thrown = (await FluentActions.Awaiting(() => call).Should().ThrowAsync<TimeoutException>()).Which;
+            thrown.Message.Should().Contain(_send.Calls.Single().Message.Id, "a request that ran out names its id");
+        }
+        finally
+        {
+            await channel.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Running_out_while_finding_the_endpoint_names_no_request_and_sends_nothing()
+    {
+        var (_, resolverCalled, channel) = SlowResolver();
+        var mediation = new MediationClient(channel, logger: null);
+        try
+        {
+            var call = mediation.RequestMediationAsync(_w.Mediator.Did, _w.Local.Did);
+            await resolverCalled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            _time.Advance(channel.Options.RequestTimeout);
+
+            var thrown = (await FluentActions.Awaiting(() => call).Should().ThrowAsync<TimeoutException>()).Which;
+            thrown.Message.Should().Contain("Finding the mediator's endpoint").And.Contain("RequestTimeout").And.Contain("nothing was sent");
+            foreach (var identifier in _w.Identifiers)
+                thrown.Message.Should().NotContain(identifier);
+            _send.Count.Should().Be(0);
+            channel.PendingCount.Should().Be(0);
+        }
+        finally
+        {
+            await channel.DisposeAsync();
+        }
+    }
+
+    // A channel (Coordinate Mediation pinned, so one request per call) whose endpoint resolution
+    // waits for the test: the resolver's result and a rendezvous for its call.
+    private (TaskCompletionSource<Uri> Resolving, TaskCompletionSource Called, MediatorClientChannel Channel) SlowResolver()
+    {
+        var resolving = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var called = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var channel = Create(_w, _send, c => c.CoordinateMediationVersion = CoordinateMediationVersion.V3, time: _time,
+            resolveEndpoint: (_, _) =>
+            {
+                called.TrySetResult();
+                return resolving.Task;
+            });
+        return (resolving, called, channel);
     }
 
     private (Message Request, Task<InboundMessageSnapshot> Exchange) Start(CancellationToken ct = default)

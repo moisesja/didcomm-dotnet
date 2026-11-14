@@ -16,11 +16,14 @@ namespace DidComm.Mediator.Client;
 public sealed class MediatorClientOptions
 {
     /// <summary>
-    /// How long one request waits for the mediator's answer, the send included (and, for the first
-    /// request of a call, finding the mediator's endpoint). Default 30 seconds; greater than zero and
-    /// at most 10 minutes. When it passes without an answer the call fails with
-    /// <see cref="TimeoutException"/>. The mediator may still have acted on the request, so retry
-    /// it: every request these clients send is safe to repeat.
+    /// How long each step of a call may take: finding the mediator's endpoint in its DID document,
+    /// then each request the call sends, from the send until the mediator's answer (a call may send
+    /// more than one: a Discover Features query first, or one request per page). Every step gets the
+    /// whole of it, so a call can take longer than this in total. Default 30 seconds; greater than
+    /// zero and at most 10 minutes. When a step runs out the call fails with
+    /// <see cref="TimeoutException"/>. A request that ran out names its id, and the mediator may
+    /// still have acted on it, so retry: every request these clients send is safe to repeat. Running
+    /// out while finding the endpoint names no request: nothing was sent yet.
     /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
 

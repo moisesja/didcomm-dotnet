@@ -26,7 +26,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// </para>
 /// <para>
 /// <strong>Non-DI.</strong> Each public facade constructor builds a private instance that is not a
-/// correlator (<c>receivesInbound: false</c>): HTTP works, a WebSocket route is refused (D-4).
+/// correlator (<c>receivesInbound: false</c>): HTTP works, a WebSocket route is refused (D-4). Its
+/// log lines go to the logger the caller passed to the facade.
 /// </para>
 /// <para>
 /// <strong>Routes it cannot receive on (D-4).</strong> A route that is not HTTP is refused before
@@ -56,6 +57,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>Deadlines.</strong> Every wait — the mediator's endpoint, the send and the answer — runs
 /// under a <see cref="GuardedDeadline"/> on the injected <see cref="TimeProvider"/>; the token the
 /// send receives is cancelled inside a <c>try</c>, so nothing host code registers on it can escape.
+/// Finding the endpoint and each request have a <see cref="MediatorClientOptions.RequestTimeout"/>
+/// of their own.
 /// </para>
 /// <para>
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
