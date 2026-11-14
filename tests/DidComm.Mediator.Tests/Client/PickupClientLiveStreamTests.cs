@@ -413,6 +413,48 @@ public sealed class PickupClientLiveStreamTests
         await stream.DisposeAsync();
     }
 
+    [Fact]
+    public async Task While_acknowledgements_fail_at_most_100_taken_messages_are_kept_and_the_oldest_are_let_go_unacknowledged()
+    {
+        // L-062: what the stream keeps for a later acknowledgement is bounded, whatever the consumer takes.
+        var logs = new PickupTestLogs();
+        var exchange = new FakePickupExchange { Route = WebSocketRoute };
+        var client = PickupTest.Client(exchange, logs);
+        var acks = 0;
+        exchange.On(MessagePickup.MessagesReceivedType, r => ++acks == 1
+            ? Task.FromException<InboundMessageSnapshot>(new TimeoutException())
+            : Task.FromResult(Status(r)));
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var first = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        exchange.Registration!.TryPush(Push(("p0", "ok:p0"))).Should().BeTrue();
+        (await PickupTest.Within(first)).Should().BeTrue();
+        exchange.Registration!.TryPush(Push(("p1", "ok:p1"))).Should().BeTrue();
+        (await Next(stream)).Id.Should().Be("p1");
+
+        // A push is always waiting when the next item is asked for, so the first flush comes at ten
+        // taken; it fails and the stream backs off (the clock is frozen) while the consumer goes on.
+        for (var i = 2; i < 122; i++)
+        {
+            exchange.Registration!.TryPush(Push(($"p{i}", $"ok:p{i}"))).Should().BeTrue();
+            (await Next(stream)).Id.Should().Be($"p{i}");
+        }
+        exchange.SentOf(MessagePickup.MessagesReceivedType).Should().ContainSingle("no acknowledgement is sent during the back-off");
+
+        var waiting = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        exchange.Clock.Advance(LiveDeliveryStream.FirstBackoff);
+        await exchange.WaitForSentAsync(6);
+
+        var acknowledged = exchange.SentOf(MessagePickup.MessagesReceivedType);
+        acknowledged.Should().HaveCount(2);
+        acknowledged[0].Ids.Should().Equal(Enumerable.Range(0, 10).Select(i => $"p{i}"));
+        acknowledged[1].Ids.Should().Equal(Enumerable.Range(22, 100).Select(i => $"p{i}"), "the 100 most recent are kept; p0..p21 were let go");
+        logs.Entries.Should().Contain(e => e.Message.Contains("forgotten unacknowledged"));
+        await StopAsync(stream, waiting, cts);
+    }
+
     // ---- logs ---------------------------------------------------------------------------------
 
     [Fact]
