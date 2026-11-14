@@ -180,6 +180,51 @@ public sealed class MediatorClientDiTests
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
+    [Fact]
+    public async Task The_non_DI_clients_write_their_channels_lines_to_the_logger_they_were_given()
+    {
+        await using var world = await ClientWorld.CreateAsync();
+        var client = new DidCommClient(world.Secrets, world.Services.GetRequiredService<Resolution.IDidKeyService>(), world.Services.GetRequiredService<Resolution.IServiceEndpointResolver>(),
+            new AcceptingRouter(), new DidCommOptions());
+        var logs = new ClientLogCapture();
+        var pickup = new PickupClient(client, logger: new Logger<PickupClient>(logs));
+        var mediation = new MediationClient(client, logger: new Logger<MediationClient>(logs));
+
+        await FluentActions.Awaiting(() => pickup.GetStatusAsync(world.Mediator.Did, world.Local.Did, serviceEndpointOverride: new Uri("https://mediator.example/didcomm")))
+            .Should().ThrowAsync<TimeoutException>("the router answers 202 with nothing");
+
+        // The channel's own lines (its category would be MediatorClientChannel under DI) arrive
+        // through the logger the facade was given.
+        logs.Of<PickupClient>().Should().Contain(l => l.Formatted.Contains("status-request", StringComparison.Ordinal) && l.Formatted.Contains("sending", StringComparison.Ordinal));
+        logs.Of<PickupClient>().Should().Contain(l => l.Formatted.Contains("ended without a usable answer", StringComparison.Ordinal));
+        logs.Of<MediatorClientChannel>().Should().BeEmpty();
+        ((MediatorClientChannel)mediation.Exchange).Logger.Should().NotBeNull();
+        ((MediatorClientChannel)new PickupClient(client).Exchange).Logger.Should().BeNull("no logger, no logging");
+    }
+
+    [Fact]
+    public void The_non_DI_logger_factory_hands_out_the_callers_logger_for_every_category_and_owns_nothing()
+    {
+        var logs = new ClientLogCapture();
+        var logger = new Logger<PickupClient>(logs);
+
+        SingleLoggerFactory.For(null).Should().BeNull();
+        using var factory = SingleLoggerFactory.For(logger)!;
+        factory.CreateLogger("any").Should().BeSameAs(logger);
+        factory.CreateLogger<MediatorClientChannel>().Should().NotBeNull();
+        FluentActions.Invoking(() => factory.AddProvider(logs)).Should().Throw<NotSupportedException>();
+        factory.Dispose();
+        logger.LogInformation("still usable after the factory was disposed");
+        logs.Entries.Should().ContainSingle();
+    }
+
+    /// <summary>A router that accepts every request with an HTTP 202 and returns nothing.</summary>
+    private sealed class AcceptingRouter : ITransportRouter
+    {
+        public Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
+            => Task.FromResult(new TransportResult(Accepted: true, HttpStatusCode: 202));
+    }
+
     private static ServiceProvider Build(Action<DidCommBuilder> configure, Action<IServiceCollection>? services = null)
     {
         var collection = new ServiceCollection();

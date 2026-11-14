@@ -86,8 +86,8 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
     public async Task The_pending_bound_is_refused_before_anything_is_sent()
     {
         using var channel = Create(_w, _send, o => o.MaxPendingRequests = 2, time: _time);
-        var first = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
-        var second = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+        var first = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default).Observed();
+        var second = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default).Observed();
         var third = _w.Request();
 
         var act = () => channel.ExchangeAsync(WebSocketRoute, third, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
@@ -110,7 +110,7 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(request.Id))).Should().BeTrue();
         await first;
 
-        var next = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+        var next = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default).Observed();
 
         next.IsCompleted.Should().BeFalse("it was admitted and sent");
         _send.Count.Should().Be(2);
@@ -543,8 +543,8 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         }
         var unclaimed = lines.Where(l => l.Formatted.Contains("no waiting request takes", StringComparison.Ordinal)).ToArray();
         unclaimed.Should().HaveCountGreaterThanOrEqualTo(3);
-        unclaimed[0].Level.Should().Be(LogLevel.Warning, "the first of a peer-repeatable line");
-        unclaimed.Skip(1).Should().OnlyContain(l => l.Level == LogLevel.Debug, "the rest until the 1000th");
+        unclaimed[0].Level.Should().Be(LogLevel.Debug, "the first of a peer-repeatable line that is not a mediator problem");
+        unclaimed.Skip(1).Should().OnlyContain(l => l.Level == LogLevel.Trace, "the rest until the 1000th");
         lines.Should().Contain(l => l.Formatted.Contains("more than one waiting request", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Formatted.Contains("live delivery push", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Formatted.Contains("problem report", StringComparison.Ordinal));

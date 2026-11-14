@@ -71,6 +71,31 @@ public sealed partial class DidCommClient
     }
 
     /// <summary>
+    /// Whether a message a peer pushes back on the connection a return-route send to
+    /// <paramref name="endpoint"/> uses reaches the registered inbound consumer (PRD §8a, FR-RR-07).
+    /// The mediator client asks before sending a request whose answer can only come back that way
+    /// (#96). The transport asked is the one <see cref="SendAsync"/> would send through: the one this
+    /// facade's own <see cref="TransportRouter"/> selects for the endpoint (L-041). Reads state only;
+    /// resolves and sends nothing.
+    /// </summary>
+    /// <param name="endpoint">The absolute endpoint the send will carry as its override.</param>
+    /// <returns>
+    /// <c>true</c> or <c>false</c> when that transport says (<see cref="IInboundReceivingTransport"/>:
+    /// the WebSocket transport answers <c>false</c> unless <c>ReceiveInbound</c> is on and STOMP is
+    /// off); <c>null</c> when this facade cannot tell — a router of the host's own, a transport that
+    /// does not say, or no router, no transport for the scheme or the queue URI, which the send then
+    /// refuses itself.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="endpoint"/> is <c>null</c>.</exception>
+    internal bool? ReceivesPushesOn(Uri endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        if (_transportRouter is not TransportRouter router || QueueTransport.IsQueueTransport(endpoint))
+            return null;
+        return router.Select(endpoint) is IInboundReceivingTransport receiving ? receiving.ReceivesInbound : null;
+    }
+
+    /// <summary>
     /// Unpack a message a mediator delivered (Message Pickup <c>delivery</c> attachment or live
     /// push), opening the forward layers a re-wrapping mediator added for this agent (FR-ROUTE-06,
     /// receiver side). A layer is opened only when it has the shape the mediator's own acceptance

@@ -22,6 +22,7 @@ internal sealed class LiveRegistration : IDisposable
     private readonly Channel<InboundMessageSnapshot> _pushes;
     private readonly Action<LiveRegistration>? _onDispose;
     private int _disposed;
+    private int _ended;
 
     /// <summary>Create a registration.</summary>
     /// <param name="mediatorSubject">The mediator's DID subject.</param>
@@ -69,6 +70,9 @@ internal sealed class LiveRegistration : IDisposable
     /// <summary>Whether <see cref="Dispose"/> has run.</summary>
     internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
+    /// <summary>Whether the queue was ended (<see cref="Complete"/> or <see cref="Dispose"/>): a push it refuses was refused because the stream ended, not because its buffer is full.</summary>
+    internal bool IsEnded => Volatile.Read(ref _ended) != 0;
+
     /// <summary>Buffer a push for the stream. Never blocks; <c>false</c> when the buffer is full or the stream has ended (the push is dropped, not acknowledged).</summary>
     /// <param name="snapshot">The verified snapshot of the thid-less <c>delivery</c>.</param>
     internal bool TryPush(InboundMessageSnapshot snapshot)
@@ -79,13 +83,18 @@ internal sealed class LiveRegistration : IDisposable
 
     /// <summary>End the queue without removing the entry (the channel's own disposal, which clears the registry itself); a reader then sees <paramref name="error"/> once the buffer is empty.</summary>
     /// <param name="error">The error readers observe (for example <see cref="ObjectDisposedException"/>), or <c>null</c> for a normal end.</param>
-    internal void Complete(Exception? error = null) => _pushes.Writer.TryComplete(error);
+    internal void Complete(Exception? error = null)
+    {
+        Volatile.Write(ref _ended, 1);
+        _pushes.Writer.TryComplete(error);
+    }
 
     /// <summary>End the queue and remove this exact entry from the registry. Idempotent. Buffered pushes are dropped unacknowledged.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        Volatile.Write(ref _ended, 1);
         _pushes.Writer.TryComplete();
         _onDispose?.Invoke(this);
     }

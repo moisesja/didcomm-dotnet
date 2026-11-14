@@ -63,7 +63,7 @@ namespace DidComm.Transports.WebSocket;
 /// <example>
 /// Bidirectional chat with reconnect runs in <c>samples/05-WebSocketChat</c>; one-message-per-frame receive in <c>samples/02-Cookbook</c> (section R).
 /// </example>
-public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposable
+public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposable, IInboundReceivingTransport
 {
     private readonly WebSocketTransportOptions _options;
     private readonly ILogger<WebSocketDidCommTransport> _logger;
@@ -302,6 +302,15 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
     /// <summary>Whole pushed messages read and dropped without reaching the consumer (diagnostics for tests).</summary>
     internal long InboundMessagesDropped => Interlocked.Read(ref _inboundMessagesDropped);
+
+    /// <summary>
+    /// Whether a message a peer pushes on a session socket reaches the inbound consumer: only with
+    /// <see cref="WebSocketTransportOptions.ReceiveInbound"/> on (read once, at construction) and
+    /// <see cref="WebSocketTransportOptions.UseStomp"/> off (read as every send reads it), since under
+    /// STOMP no session socket is opened and pooled sockets are never read. The recipient-side
+    /// mediator client asks before a send whose answer can only come back this way (#96).
+    /// </summary>
+    bool IInboundReceivingTransport.ReceivesInbound => _receiveInbound && !_options.UseStomp;
 
     /// <inheritdoc />
     public string Scheme => "wss";

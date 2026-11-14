@@ -267,6 +267,20 @@ internal static class ClientChannels
 
     /// <summary>The channel as the dispatcher sees it.</summary>
     public static IInboundCorrelator AsCorrelator(this MediatorClientChannel channel) => channel;
+
+    /// <summary>
+    /// Mark <paramref name="exchange"/>'s failure observed whenever it comes, for a test that may
+    /// leave the request waiting when its fixture disposes the channel (the disposal fails it): a
+    /// task no one awaits must not reach <see cref="TaskScheduler.UnobservedTaskException"/>, where
+    /// the tests that check for unobserved exceptions, running in parallel, would count it.
+    /// Awaiting the task still throws.
+    /// </summary>
+    public static Task<T> Observed<T>(this Task<T> exchange)
+    {
+        exchange.ContinueWith(static t => _ = t.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return exchange;
+    }
 }
 
 /// <summary>
