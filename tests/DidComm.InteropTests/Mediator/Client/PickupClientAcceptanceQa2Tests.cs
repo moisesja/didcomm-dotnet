@@ -101,6 +101,9 @@ public sealed class PickupClientAcceptanceQa2Tests
         // Asking for the fourth takes the third; nothing else is ready, so the three are acknowledged.
         var fourth = stream.MoveNextAsync().AsTask();
         await Qa2.StoreHoldsAsync(mediator, 0, "the three drained items were acknowledged once the fourth was asked for");
+        // The drain's last round has been answered (status): from here on, arrivals are pushed.
+        await observer.WaitForAsync(bob.Did, 4);
+        await MediatorTestServer.WaitUntilAsync(() => harness.Channel.PendingCount == 0, "the stream waits for a push");
         var pushed = new List<Message>();
         for (var i = 0; i < 2; i++)
         {

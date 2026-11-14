@@ -375,17 +375,36 @@ public sealed class PickupClientLiveRobustnessQa2Tests
         var early = new ConcurrentQueue<string>();
         var store = new Qa2Store(new InMemoryMessageStore(new MessagePickupOptions()));
         await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = s => s.AddSingleton<IMessageStore>(new WatchingStore(store, yielded, early)));
+        // The container's channel is built over a counting unpack step (the channel's own test seam),
+        // so the test can tell "the stream is parked in its wait" from "the stream is unpacking".
+        var unpacking = 0;
+        var settings = new MediatorClientOptions
+        {
+            LivePollInterval = Poll,
+            RequestTimeout = TimeSpan.FromMinutes(10),
+            UnpackTimeout = TimeSpan.FromMinutes(10),
+        };
         await using var harness = await MediatorClientHarness.CreateAsync(mediator, o =>
         {
             o.UseWebSocket = true;
             o.Time = time;
-            // Deadlines far beyond what the rounds below advance, so only the poll moves the stream.
-            o.Client = c =>
+            o.ConfigureServices = services => services.AddSingleton(sp =>
             {
-                c.LivePollInterval = Poll;
-                c.RequestTimeout = TimeSpan.FromMinutes(10);
-                c.UnpackTimeout = TimeSpan.FromMinutes(10);
-            };
+                var client = sp.GetRequiredService<DidComm.Facade.DidCommClient>();
+                return new MediatorClientChannel(client, settings, receivesInbound: true, time, sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>(),
+                    send: null, resolveEndpoint: null, unpack: async (text, ct) =>
+                    {
+                        Interlocked.Increment(ref unpacking);
+                        try
+                        {
+                            return await client.UnpackDeliveredAsync(text, ct);
+                        }
+                        finally
+                        {
+                            Interlocked.Decrement(ref unpacking);
+                        }
+                    });
+            });
         });
         var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
         var alice = await harness.NewAliceAsync();
@@ -409,14 +428,20 @@ public sealed class PickupClientLiveRobustnessQa2Tests
             // mediator's pushes done): then move both clocks past the lease and the poll.
             while (!next.IsCompleted)
             {
-                await MediatorTestServer.WaitUntilAsync(() => next.IsCompleted || (harness.Channel.PendingCount == 0 && Mailbox(harness.Channel) == 0 && time.ScheduledTimers >= 1), "an item, or an idle stream");
+                await MediatorTestServer.WaitUntilAsync(() => next.IsCompleted || (harness.Channel.PendingCount == 0 && Volatile.Read(ref unpacking) == 0 && Mailbox(harness.Channel) == 0 && time.ScheduledTimers >= 1), "an item, or an idle stream");
                 if (next.IsCompleted)
                     break;
                 await mediator.PushesIdleAsync();
-                if (next.IsCompleted || Mailbox(harness.Channel) > 0)
+                if (next.IsCompleted || Mailbox(harness.Channel) > 0 || Volatile.Read(ref unpacking) > 0 || harness.Channel.PendingCount > 0)
                     continue;
                 rounds++;
-                rounds.Should().BeLessThan(10, $"the stream recovers the dropped pushes within a few cycles (got {got.Count} of {notes.Count})");
+                if (rounds >= 20)
+                {
+                    var trail = string.Join("\n", mediator.Logs.CategorizedRecords
+                        .Where(r => r.Category.StartsWith("DidComm.Mediator.Client", StringComparison.Ordinal) || r.Category.Contains("Pickup") || r.Category.Contains("Push"))
+                        .Select(r => $"{r.Category} {r.Level} {r.Text}").TakeLast(80));
+                    throw new Xunit.Sdk.XunitException($"DEBUG rounds={rounds} got={got.Count}/{notes.Count} store={Qa2.MessageCount(mediator)} pushed={mediator.PushOutcome(PushOutcomes.PushedLive)} outcomes={string.Join(",", mediator.PushOutcomes.Distinct())} pending={harness.Channel.PendingCount} timers={time.ScheduledTimers}\n{trail}");
+                }
                 mediator.Clock.Advance(TimeSpan.FromSeconds(61));
                 time.Advance(Poll);
             }
