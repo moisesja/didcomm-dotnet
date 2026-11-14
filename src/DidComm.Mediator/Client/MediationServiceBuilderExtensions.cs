@@ -16,8 +16,9 @@ public static class MediationServiceBuilderExtensions
         /// Start the service entry of a DID reached through the mediator that issued
         /// <paramref name="grant"/>: the grant's first routing DID becomes the entry's <c>uri</c>, as
         /// <see cref="DidCommServiceBuilder.ForMediator"/> does with it. Register the DID with the
-        /// mediator (<see cref="MediationClient.UpdateRecipientsAsync"/>) before you publish it, or
-        /// the mediator refuses the messages sent to it.
+        /// mediator (<see cref="MediationClient.UpdateRecipientsAsync"/>) before you publish it: a
+        /// mediator does not accept messages for a DID it does not know (this library's mediator
+        /// drops them).
         /// </summary>
         /// <param name="grant">The grant <see cref="MediationClient.RequestMediationAsync"/> returned.</param>
         /// <returns>A builder for the entry; set what differs from the defaults and call <see cref="DidCommServiceBuilder.Build"/>.</returns>

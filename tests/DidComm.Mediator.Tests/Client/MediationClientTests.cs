@@ -221,6 +221,14 @@ public sealed class MediationClientTests
                 CoordinateMediationWire.MediateSpec2, CoordinateMediationWire.UpdateSpec2, CoordinateMediationWire.QuerySpec2,
                 FeatureNegotiation.QuerySpec }
             .Should().AllSatisfy(s => s.ExpectsDelivery.Should().BeFalse());
+        // The names timeout and refusal texts carry: the request's message name, singular.
+        new[] { CoordinateMediationWire.MediateSpec3, CoordinateMediationWire.UpdateSpec3, CoordinateMediationWire.QuerySpec3,
+                CoordinateMediationWire.MediateSpec2, CoordinateMediationWire.UpdateSpec2, CoordinateMediationWire.QuerySpec2,
+                FeatureNegotiation.QuerySpec }
+            .Select(s => s.Name).Should().Equal(
+                "mediate-request", "recipient-update", "recipient-query",
+                "mediate-request", "keylist-update", "keylist-query",
+                "discover-features query");
     }
 
     // ---- mediate-request ------------------------------------------------------------------

@@ -27,13 +27,17 @@ internal static class CoordinateMediationWire
     /// <summary>The most updates in one <c>recipient-update</c> (the mediator's <c>MaxUpdatesPerMessage</c> default).</summary>
     internal const int MaxUpdates = 1024;
 
-    /// <summary>The largest page asked for, and the largest page accepted without a <c>paginate</c>.</summary>
+    /// <summary>
+    /// The largest page a caller may ask for (<c>paginate.limit</c>), and the most DIDs one answer may
+    /// carry whatever was asked for: a mediator may page larger than asked (a 2.0 one that ignores
+    /// <c>paginate</c> sends its whole list), so the bound is this constant, not the request's limit.
+    /// </summary>
     internal const int MaxPageLimit = 1000;
 
-    /// <summary>The page size of <see cref="MediationClient.QueryAllRecipientsAsync"/>.</summary>
+    /// <summary>The page size <see cref="MediationClient.QueryAllRecipientsAsync"/> asks for.</summary>
     internal const int WalkerPageSize = 100;
 
-    /// <summary>The most pages <see cref="MediationClient.QueryAllRecipientsAsync"/> fetches.</summary>
+    /// <summary>The most pages <see cref="MediationClient.QueryAllRecipientsAsync"/> fetches; a walk that needs more fails.</summary>
     internal const int MaxWalkerPages = 1000;
 
     private static readonly MessageTypeUri Grant3 = MessageTypeUri.Parse(CoordinateMediation.MediateGrantType);
@@ -171,22 +175,23 @@ internal static class CoordinateMediationWire
 
     /// <summary>
     /// The page in <paramref name="answer"/> for <paramref name="asked"/>: at most
-    /// <c>asked.Limit</c> DIDs (<see cref="MaxPageLimit"/> without a <c>paginate</c>; counted before
-    /// any entry is read) and, when it reports a position, <c>count</c> equal to the page's size,
-    /// <c>offset</c> equal to the one asked for (0 without a <c>paginate</c>) and <c>remaining</c> not
-    /// negative.
+    /// <see cref="MaxPageLimit"/> DIDs whatever <c>asked.Limit</c> was (counted from the list's length
+    /// before any entry is read, L-055), and, when it reports a position, <c>count</c> equal to the
+    /// page's size, <c>offset</c> equal to the one asked for (0 without a <c>paginate</c>) and
+    /// <c>remaining</c> not negative. A page without a position is taken as it came.
     /// </summary>
     internal static RecipientQueryResult ReadQueryAnswer(CoordinateMediationVersion version, Message answer, string requestId, RecipientQueryPaging? asked)
     {
         var spec = version == CoordinateMediationVersion.V2 ? QuerySpec2 : QuerySpec3;
-        var limit = asked?.Limit ?? MaxPageLimit;
         IReadOnlyList<string> dids;
         RecipientPagination? pagination;
         try
         {
+            // The bound is MaxPageLimit, not asked.Limit: a mediator may page larger than asked, and
+            // the walker advances by what it got. It still comes before any entry is read.
             if (version == CoordinateMediationVersion.V2)
             {
-                if (!CoordinateMediation20.TryParseKeylist(answer, out var keys, out pagination, limit))
+                if (!CoordinateMediation20.TryParseKeylist(answer, out var keys, out pagination, MaxPageLimit))
                     throw UnexpectedType(requestId, spec);
                 dids = keys;
             }
@@ -194,7 +199,7 @@ internal static class CoordinateMediationWire
             {
                 if (!WireJson.IsType(answer, Recipient3))
                     throw UnexpectedType(requestId, spec);
-                (dids, pagination) = MediationBodies.ReadRecipients(MediationBodies.ToElement(answer.Body), "dids", "recipient", limit);
+                (dids, pagination) = MediationBodies.ReadRecipients(MediationBodies.ToElement(answer.Body), "dids", "recipient", MaxPageLimit);
             }
         }
         catch (MalformedMessageException ex)
@@ -211,6 +216,17 @@ internal static class CoordinateMediationWire
                 throw Mismatch(requestId, spec, "its pagination does not agree with the page or with the position asked for");
         }
         return new RecipientQueryResult(Array.AsReadOnly(dids.ToArray()), pagination);
+    }
+
+    /// <summary>
+    /// The refusal of a recipient walk that cannot list everything, after the page of our request
+    /// <paramref name="requestId"/>: the caller must not take the DIDs already yielded for the whole
+    /// list. <paramref name="rule"/> is a constant text (counts at most), never a wire value.
+    /// </summary>
+    internal static MediationProtocolException IncompleteWalk(CoordinateMediationVersion version, string requestId, string rule)
+    {
+        var spec = version == CoordinateMediationVersion.V2 ? QuerySpec2 : QuerySpec3;
+        return new($"The recipient listing cannot be completed after request '{requestId}' ({spec.Name}): {rule}; the DIDs listed so far are not the whole list.", requestId);
     }
 
     /// <summary>The answer as a message, deserialized here, on the caller's continuation.</summary>

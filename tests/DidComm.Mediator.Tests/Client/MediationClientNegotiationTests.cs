@@ -229,7 +229,7 @@ public sealed class MediationClientNegotiationTests
 
         var thrown = (await FluentActions.Awaiting(() => exchange.Client().RequestMediationAsync(Mediator, Me)).Should().ThrowAsync<TimeoutException>()).Which;
 
-        thrown.Message.Should().Contain(exchange.Queries.Single().Message.Id);
+        thrown.Message.Should().Contain(exchange.Queries.Single().Message.Id).And.Contain("(discover-features query)");
         exchange.Operations.Should().BeEmpty("no version is guessed");
         exchange.Versions.Count.Should().Be(0);
     }

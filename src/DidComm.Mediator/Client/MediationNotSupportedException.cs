@@ -24,8 +24,9 @@ public sealed class MediationNotSupportedException : MediationProtocolException
 
     /// <summary>
     /// The protocols the mediator disclosed, cleaned: at most 32 distinct entries, each at most
-    /// 256 printable ASCII characters and a valid protocol identifier URI. Anything else the
-    /// mediator sent is left out.
+    /// 256 printable ASCII characters and a valid protocol identifier URI, whatever role it was
+    /// disclosed in (so a Coordinate Mediation version disclosed only in another role than mediator
+    /// is listed). Anything else the mediator sent is left out.
     /// </summary>
     public IReadOnlyList<string> DisclosedProtocols { get; }
 }

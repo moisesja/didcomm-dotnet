@@ -11,11 +11,13 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// Listing the DIDs registered under a grant (#96 design §4.5; FR-MED-09): the page asked for is
-/// range-checked before anything is sent; an answer's list is bounded by the limit asked for from
-/// its count before any entry is read (L-055); a reported position must agree with the page and the
-/// request; the walker pages by 100 from offset 0, advances by what it received, stops on no
-/// position, nothing remaining, an empty page or 1000 pages, checks its arguments when called and
-/// sends nothing before the first <c>MoveNextAsync</c>.
+/// range-checked before anything is sent; an answer's list is bounded by a hard 1000 entries
+/// whatever limit was asked for, from its count before any entry is read (L-055); a reported
+/// position must agree with the page and the request; the walker pages by 100 from offset 0,
+/// advances by what it received, ends normally only on no position or nothing remaining, and fails
+/// with <see cref="MediationProtocolException"/> — never a silent end — on an empty page that
+/// reports DIDs remaining or when DIDs still remain after 1000 pages; it checks its arguments when
+/// called and sends nothing before the first <c>MoveNextAsync</c>.
 /// </summary>
 public sealed class MediationClientRecipientsTests
 {
@@ -72,22 +74,50 @@ public sealed class MediationClientRecipientsTests
         page.Pagination.Should().BeNull();
     }
 
+    public static TheoryData<CoordinateMediationVersion, int?> VersionsAndLimits => new()
+    {
+        { CoordinateMediationVersion.V3, null },
+        { CoordinateMediationVersion.V3, 0 },
+        { CoordinateMediationVersion.V3, 2 },
+        { CoordinateMediationVersion.V3, 1000 },
+        { CoordinateMediationVersion.V2, null },
+        { CoordinateMediationVersion.V2, 0 },
+        { CoordinateMediationVersion.V2, 2 },
+        { CoordinateMediationVersion.V2, 1000 },
+    };
+
     [Theory]
-    [InlineData(CoordinateMediationVersion.V3)]
-    [InlineData(CoordinateMediationVersion.V2)]
-    public async Task A_page_longer_than_the_limit_is_refused_from_the_count_before_the_poisoned_extra_entry_is_read(CoordinateMediationVersion version)
+    [MemberData(nameof(VersionsAndLimits))]
+    public async Task A_page_larger_than_the_limit_asked_for_is_accepted_up_to_1000_entries(CoordinateMediationVersion version, int? limit)
     {
         var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(version));
-        var (type, list) = version == CoordinateMediationVersion.V3
-            ? (CoordinateMediation.RecipientType, "dids")
-            : (CoordinateMediation20.KeylistType, CoordinateMediation20.KeysList);
-        exchange.Respond = r => ScriptedMediator.Raw(type, Mediator, Me, r.Message.Id,
-            new JsonObject { [list] = JsonNode.Parse("""[{"recipient_did":"did:example:a"},{"recipient_did":"did:example:b"},{"recipient_did":99}]""") });
+        var dids = Enumerable.Range(0, 1000).Select(i => $"did:example:r{i}").ToArray();
+        exchange.Respond = r => ScriptedMediator.Raw(TypeOf(version), Mediator, Me, r.Message.Id,
+            MediationBodies.WriteRecipients(ListOf(version), dids, new RecipientPagination(1000, 0, 0)));
 
-        var thrown = (await FluentActions.Awaiting(() => exchange.Client().QueryRecipientsAsync(Mediator, Me, new RecipientQueryPaging(2, 0)))
+        var page = await exchange.Client().QueryRecipientsAsync(Mediator, Me, limit is { } l ? new RecipientQueryPaging(l, 0) : null);
+
+        page.Dids.Should().Equal(dids, "a mediator may page larger than asked (one that ignores paginate does)");
+        page.Pagination.Should().Be(new RecipientPagination(1000, 0, 0));
+    }
+
+    [Theory]
+    [MemberData(nameof(VersionsAndLimits))]
+    public async Task A_page_of_1001_is_refused_from_the_count_before_the_poisoned_1001st_entry_is_read(CoordinateMediationVersion version, int? limit)
+    {
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(version));
+        var list = new JsonArray();
+        for (var i = 0; i < 1000; i++)
+            list.Add(new JsonObject { ["recipient_did"] = $"did:example:r{i}" });
+        list.Add(new JsonObject { ["recipient_did"] = 99 }); // read, this entry would fail differently
+        exchange.Respond = r => ScriptedMediator.Raw(TypeOf(version), Mediator, Me, r.Message.Id, new JsonObject { [ListOf(version)] = list.DeepClone() });
+
+        var thrown = (await FluentActions.Awaiting(() => exchange.Client().QueryRecipientsAsync(Mediator, Me, limit is { } l ? new RecipientQueryPaging(l, 0) : null))
             .Should().ThrowAsync<MediationProtocolException>()).Which;
 
-        thrown.InnerException.Should().BeOfType<MalformedMessageException>().Which.Message.Should().Contain("more than 2 entries");
+        thrown.InnerException.Should().BeOfType<MalformedMessageException>().Which.Message.Should().Contain("more than 1000 entries", "the count is refused, not the poisoned entry");
+        thrown.RequestId.Should().Be(exchange.Operations.Single().Message.Id);
+        thrown.Message.Should().NotContain("did:example");
     }
 
     [Fact]
@@ -228,19 +258,85 @@ public sealed class MediationClientRecipientsTests
         exchange.Operations.Should().ContainSingle();
     }
 
-    [Fact]
-    public async Task The_walker_stops_on_an_empty_page_whatever_it_says_remains()
+    [Theory]
+    [InlineData(CoordinateMediationVersion.V3, true)]
+    [InlineData(CoordinateMediationVersion.V3, false)]
+    [InlineData(CoordinateMediationVersion.V2, true)]
+    [InlineData(CoordinateMediationVersion.V2, false)]
+    public async Task A_mediator_that_ignores_paginate_is_walked_in_one_page_larger_than_asked_for(CoordinateMediationVersion version, bool reportsPosition)
     {
-        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(CoordinateMediationVersion.V3));
-        exchange.Respond = r => ScriptedMediator.Raw(CoordinateMediation.RecipientType, Mediator, Me, r.Message.Id,
-            MediationBodies.WriteRecipients("dids", Array.Empty<string>(), new RecipientPagination(0, 0, 5000)));
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(version));
+        var all = Enumerable.Range(0, 250).Select(i => $"did:example:r{i}").ToArray();
+        exchange.Respond = r => ScriptedMediator.Raw(TypeOf(version), Mediator, Me, r.Message.Id,
+            MediationBodies.WriteRecipients(ListOf(version), all, reportsPosition ? new RecipientPagination(all.Length, 0, 0) : null));
 
-        (await Collect(exchange.Client().QueryAllRecipientsAsync(Mediator, Me))).Should().BeEmpty();
-        exchange.Operations.Should().ContainSingle("no progress, no second request");
+        (await Collect(exchange.Client().QueryAllRecipientsAsync(Mediator, Me))).Should().Equal(all);
+        exchange.Operations.Should().ContainSingle("the first page says the list is complete");
     }
 
     [Fact]
-    public async Task The_walker_stops_after_1000_pages_and_says_so()
+    public async Task The_walker_advances_by_what_it_received_when_the_mediator_pages_larger()
+    {
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(CoordinateMediationVersion.V3));
+        var all = Enumerable.Range(0, 250).Select(i => $"did:example:r{i}").ToArray();
+        exchange.Respond = r =>
+        {
+            var asked = MediationBodies.ReadPaginate(MediationBodies.ToElement(r.Message.Body), "q")!;
+            var page = all.Skip(asked.Offset).Take(150).ToArray();
+            return ScriptedMediator.Raw(CoordinateMediation.RecipientType, Mediator, Me, r.Message.Id,
+                MediationBodies.WriteRecipients("dids", page, new RecipientPagination(page.Length, asked.Offset, all.Length - asked.Offset - page.Length)));
+        };
+
+        (await Collect(exchange.Client().QueryAllRecipientsAsync(Mediator, Me))).Should().Equal(all);
+        exchange.Operations.Select(o => o.Message.Body!.ToJsonString()).Should().Equal(
+            """{"paginate":{"limit":100,"offset":0}}""",
+            """{"paginate":{"limit":100,"offset":150}}""");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_empty_page_that_reports_nothing_remaining_or_no_position_ends_the_walk(bool reportsPosition)
+    {
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(CoordinateMediationVersion.V3));
+        exchange.Respond = r => ScriptedMediator.Raw(CoordinateMediation.RecipientType, Mediator, Me, r.Message.Id,
+            MediationBodies.WriteRecipients("dids", Array.Empty<string>(), reportsPosition ? new RecipientPagination(0, 0, 0) : null));
+
+        (await Collect(exchange.Client().QueryAllRecipientsAsync(Mediator, Me))).Should().BeEmpty();
+        exchange.Operations.Should().ContainSingle();
+    }
+
+    [Theory]
+    [InlineData(CoordinateMediationVersion.V3, 0)]
+    [InlineData(CoordinateMediationVersion.V3, 100)]
+    [InlineData(CoordinateMediationVersion.V2, 0)]
+    [InlineData(CoordinateMediationVersion.V2, 100)]
+    public async Task An_empty_page_that_reports_DIDs_remaining_fails_the_walk_instead_of_ending_it(CoordinateMediationVersion version, int before)
+    {
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(version));
+        var first = Enumerable.Range(0, before).Select(i => $"did:example:r{i}").ToArray();
+        exchange.Respond = r =>
+        {
+            var asked = MediationBodies.ReadPaginate(MediationBodies.ToElement(r.Message.Body), "q")!;
+            var page = asked.Offset == 0 ? first : Array.Empty<string>();
+            return ScriptedMediator.Raw(TypeOf(version), Mediator, Me, r.Message.Id,
+                MediationBodies.WriteRecipients(ListOf(version), page, new RecipientPagination(page.Length, asked.Offset, 7)));
+        };
+        var listed = new List<string>();
+
+        var thrown = (await FluentActions.Awaiting(() => CollectInto(exchange.Client().QueryAllRecipientsAsync(Mediator, Me), listed))
+            .Should().ThrowAsync<MediationProtocolException>()).Which;
+
+        listed.Should().Equal(first, "what came before the empty page was handed over");
+        var empty = exchange.Operations.Last();
+        exchange.Operations.Should().HaveCount(before == 0 ? 1 : 2, "no progress, no further request");
+        thrown.RequestId.Should().Be(empty.Message.Id);
+        thrown.Message.Should().Contain(empty.Message.Id).And.Contain("empty page").And.Contain("not the whole list").And.NotContain("did:example");
+        thrown.ProblemCode.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_walk_that_still_reports_DIDs_remaining_after_1000_pages_fails_after_yielding_them()
     {
         var sink = new HandlerLogSink();
         var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(CoordinateMediationVersion.V3));
@@ -250,13 +346,32 @@ public sealed class MediationClientRecipientsTests
             return ScriptedMediator.Raw(CoordinateMediation.RecipientType, Mediator, Me, r.Message.Id,
                 MediationBodies.WriteRecipients("dids", new[] { $"did:example:r{asked.Offset}" }, new RecipientPagination(1, asked.Offset, 1)));
         };
+        var listed = new List<string>();
 
-        var listed = await Collect(exchange.Client(new HandlerCapturingLogger<MediationClient>(sink)).QueryAllRecipientsAsync(Mediator, Me));
+        var thrown = (await FluentActions.Awaiting(() => CollectInto(exchange.Client(new HandlerCapturingLogger<MediationClient>(sink)).QueryAllRecipientsAsync(Mediator, Me), listed))
+            .Should().ThrowAsync<MediationProtocolException>()).Which;
 
         listed.Should().HaveCount(1000);
+        exchange.Operations.Should().HaveCount(1000, "the cap is 1000 pages, and no 1001st request is sent");
+        thrown.RequestId.Should().Be(exchange.Operations.Last().Message.Id);
+        thrown.Message.Should().Contain("1000 pages").And.Contain("not the whole list").And.NotContain("did:example");
+        sink.Entries.Should().AllSatisfy(e => e.Everything.Should().NotContain("did:"));
+    }
+
+    [Fact]
+    public async Task A_walk_whose_1000th_page_reports_nothing_remaining_ends_normally()
+    {
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(CoordinateMediationVersion.V3));
+        exchange.Respond = r =>
+        {
+            var asked = MediationBodies.ReadPaginate(MediationBodies.ToElement(r.Message.Body), "q")!;
+            var remaining = asked.Offset == 999 ? 0 : 1;
+            return ScriptedMediator.Raw(CoordinateMediation.RecipientType, Mediator, Me, r.Message.Id,
+                MediationBodies.WriteRecipients("dids", new[] { $"did:example:r{asked.Offset}" }, new RecipientPagination(1, asked.Offset, remaining)));
+        };
+
+        (await Collect(exchange.Client().QueryAllRecipientsAsync(Mediator, Me))).Should().HaveCount(1000);
         exchange.Operations.Should().HaveCount(1000);
-        sink.Entries.Should().ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
-            .Which.Everything.Should().Contain("1000").And.NotContain("did:");
     }
 
     [Fact]
@@ -336,8 +451,20 @@ public sealed class MediationClientRecipientsTests
     private static async Task<List<string>> Collect(IAsyncEnumerable<string> dids)
     {
         var list = new List<string>();
-        await foreach (var did in dids)
-            list.Add(did);
+        await CollectInto(dids, list);
         return list;
     }
+
+    // Keeps what was yielded when the walk then throws.
+    private static async Task CollectInto(IAsyncEnumerable<string> dids, List<string> into)
+    {
+        await foreach (var did in dids)
+            into.Add(did);
+    }
+
+    private static string TypeOf(CoordinateMediationVersion version)
+        => version == CoordinateMediationVersion.V2 ? CoordinateMediation20.KeylistType : CoordinateMediation.RecipientType;
+
+    private static string ListOf(CoordinateMediationVersion version)
+        => version == CoordinateMediationVersion.V2 ? CoordinateMediation20.KeysList : "dids";
 }
