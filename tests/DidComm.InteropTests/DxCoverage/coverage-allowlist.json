@@ -1046,7 +1046,15 @@
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:ReceivedAtOrAfter",
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessageLeaseRequest::prop:AfterSequence",
+      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueuedMessage::prop:Sequence",
+      "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
+    },
+    {
+      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.QueueStatus::prop:HighWaterSequence",
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
