@@ -1179,3 +1179,23 @@ Format per entry:
   gets a second post-fix break-it defect, write the side-by-side list into the hand-back with a
   "defer to follow-up?" option before patching again. Keep public surface that only the deferrable
   part uses easy to remove, so the removal is one clean change. See [[L-037]], [[L-038]] and [[L-058]].
+
+## L-064 — A time bound on peer-controlled work moves the starvation; it does not remove it.
+
+- **Lesson:** When a peer controls how long each item of a batch takes (a sender whose DID resolves
+  slowly), bounding the batch only decides *where* the peer's delay lands. A per-item deadline let
+  the batch outlast the lease; one budget per batch let the items at the front starve the rest; an
+  equal share per item, fixed from the count, let instant failures starve an honest slow item; a
+  serial worker that served pushes first let one slow push per budget freeze its drain, and its
+  turn flag, cleared by the periodic cycle, let a short poll interval freeze its pushes. Each fix
+  was right for the client it was tested with. What actually ends the attack is progress that
+  outlives the request (L-058): remembering which items were slow, per tenant, with a back-off.
+- **Why:** #96's decrypt budget drew a defect on every break-it pass (ADV2-1, the same-delivery
+  starvation, ADV3-1/2/3/4/6, ADV4-1..4) and was stopped twice under L-063; the cross-fetch memory
+  and the remaining bounds went to #111 with the findings as design input.
+- **How to apply:** For every bound on work a peer can slow down, write down (a) what is starved
+  when the bound fires — the items behind it, the next request, another source on the same worker —
+  and (b) what remembers the peer's cost across requests. If (b) is "nothing", say so in the docs
+  as a known limit instead of claiming the bound makes progress. Size shares from the time and the
+  items left, never from a count fixed up front, and check every turn-taking flag against every
+  event that can reset it. See [[L-058]], [[L-061]] and [[L-063]].
