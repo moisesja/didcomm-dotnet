@@ -529,7 +529,7 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     private (Message Request, Task<InboundMessageSnapshot> Exchange) Start(MediatorExchangeSpec spec, string? local = null)
     {
         var request = _w.Request(from: local);
-        var exchange = _channel.ExchangeAsync(WebSocketRoute, request, spec, _w.Mediator.Did, local ?? _w.Local.Did, default);
+        var exchange = _channel.ExchangeAsync(WebSocketRoute, request, spec, _w.Mediator.Did, local ?? _w.Local.Did, default).Observed();
         exchange.IsCompleted.Should().BeFalse("the request waits for its answer");
         return (request, exchange);
     }

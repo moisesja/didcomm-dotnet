@@ -147,7 +147,7 @@ public sealed class MediatorClientLogLevelTests : IAsyncLifetime
     private (Messages.Message Request, Task<InboundMessageSnapshot> Exchange) Start()
     {
         var request = _w.Request(CoordinateMediation.MediateRequestType);
-        return (request, _channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, default));
+        return (request, _channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, default).Observed());
     }
 
     private async Task<InboundMessageSnapshot> SnapshotAsync(string message, string requestId) => message switch

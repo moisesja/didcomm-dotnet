@@ -68,7 +68,10 @@ public sealed class MediatorClientUnobservedTests : IAsyncLifetime
     {
         var seen = await CollectUnobservedAsync(null, () => DisposeDuringSendAndWaitAsync(_w));
 
-        seen.OfType<ObjectDisposedException>().Where(e => e.ObjectName == nameof(MediatorClientChannel))
+        // The disposal's exception stored in a pending request and never thrown has no stack trace;
+        // one with a stack trace was thrown to a caller (another test's, running in parallel, may
+        // leave its own exchange unawaited).
+        seen.OfType<ObjectDisposedException>().Where(e => e.ObjectName == nameof(MediatorClientChannel) && e.StackTrace is null)
             .Should().BeEmpty("the callers saw the disposal; nothing is left for the finalizer");
     }
 

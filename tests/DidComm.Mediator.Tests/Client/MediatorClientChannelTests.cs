@@ -86,8 +86,8 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
     public async Task The_pending_bound_is_refused_before_anything_is_sent()
     {
         using var channel = Create(_w, _send, o => o.MaxPendingRequests = 2, time: _time);
-        var first = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
-        var second = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+        var first = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default).Observed();
+        var second = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default).Observed();
         var third = _w.Request();
 
         var act = () => channel.ExchangeAsync(WebSocketRoute, third, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
@@ -110,7 +110,7 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(request.Id))).Should().BeTrue();
         await first;
 
-        var next = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+        var next = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default).Observed();
 
         next.IsCompleted.Should().BeFalse("it was admitted and sent");
         _send.Count.Should().Be(2);
