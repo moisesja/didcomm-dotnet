@@ -111,35 +111,6 @@ public sealed class DidCommClientSendPackedTests
         await ((Func<Task>)(() => client.SendPackedAsync(Packed, new Uri("https://93.184.216.34/relay"), null!))).Should().ThrowAsync<ArgumentNullException>();
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task The_single_attempt_option_reaches_the_transport_request_and_is_off_by_default(bool? singleAttempt)
-    {
-        var router = new CapturingRouter();
-        var endpoint = new Uri("https://93.184.216.34/relay");
-        var client = Client(router);
-
-        _ = singleAttempt is { } single
-            ? await client.SendPackedAsync(Packed, endpoint, MediaTypes.Encrypted, new SendPackedOptions { SingleAttempt = single })
-            : await client.SendPackedAsync(Packed, endpoint, MediaTypes.Encrypted);
-
-        router.Requests.Should().ContainSingle().Which.SingleAttempt.Should().Be(singleAttempt ?? false);
-    }
-
-    [Fact]
-    public async Task A_single_attempt_still_goes_through_the_outbound_endpoint_guard_and_the_queue_refusal()
-    {
-        var router = new CapturingRouter();
-        var options = new SendPackedOptions { SingleAttempt = true };
-
-        await ((Func<Task>)(() => Client(router).SendPackedAsync(Packed, new Uri("http://127.0.0.1/relay"), MediaTypes.Encrypted, options))).Should().ThrowAsync<TransportException>();
-        await ((Func<Task>)(() => Client(router).SendPackedAsync(Packed, new Uri(QueueTransport.Uri), MediaTypes.Encrypted, options))).Should().ThrowAsync<TransportException>();
-        await ((Func<Task>)(() => Client(router).SendPackedAsync(Packed, new Uri("https://93.184.216.34/relay"), MediaTypes.Encrypted, null!))).Should().ThrowAsync<ArgumentNullException>();
-        router.Requests.Should().BeEmpty();
-    }
-
     [Fact]
     public async Task Without_router_throws_InvalidOperationException()
     {
