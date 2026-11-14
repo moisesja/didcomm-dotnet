@@ -177,19 +177,38 @@ public sealed class PickupClient
     /// <paramref name="limit"/>, keeps seeing only the failures until it discards them with
     /// <see cref="AckAsync"/>.
     /// </para>
+    /// <para>
+    /// <strong>Repeats.</strong> A message the clients already returned is acknowledged again and
+    /// left out while they remember it (<see cref="MediatorClientOptions.DedupeCapacity"/>). With
+    /// <c>DedupeCapacity</c> set to 0 nothing is remembered from one call to the next, but a message
+    /// that comes twice in the same delivery is still returned only once.
+    /// </para>
+    /// <para>
+    /// <strong>One message to several of your DIDs.</strong> A sender can encrypt one message to
+    /// several DIDs whose keys this agent holds, and the mediator then queues a copy for each. Every
+    /// copy opens with the first of those keys the message names, so the copies are the same message:
+    /// it is returned once (its <see cref="UnpackResult.RecipientKid"/> names that first DID) and the
+    /// other copies are acknowledged as repeats. Under a <paramref name="recipientDid"/> filter such a
+    /// message is that DID's when its sender encrypted it to that DID too, whichever key opened it.
+    /// </para>
+    /// <para>
+    /// <strong>Who sent it.</strong> The message inside an item can be plaintext or anoncrypted, so
+    /// its <c>from</c> may be anyone's claim: check <see cref="UnpackResult.Authenticated"/> before you
+    /// trust it.
+    /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="limit">The most messages to take, 1 to 100. Anything the mediator sends beyond it is not opened and not acknowledged.</param>
-    /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message that unpacks for another DID is returned as a failed item.</param>
+    /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message is this DID's when this DID's key opened it or its sender encrypted it to this DID too; any other is returned as a failed item and not acknowledged.</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The batch: the items in delivery order, whether the queue was drained, and the mediator's <c>status</c> when it answered with one.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="limit"/> is outside 1 to 100, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">As for <see cref="GetStatusAsync"/>; nothing was sent.</exception>
     /// <exception cref="TimeoutException">No answer in time; retry (nothing was acknowledged).</exception>
-    /// <exception cref="MediationProtocolException">A problem report, or an answer that is malformed or about another DID than <paramref name="recipientDid"/>.</exception>
-    /// <exception cref="TransportException">The transport failed.</exception>
+    /// <exception cref="MediationProtocolException">A problem report; an answer that is malformed or about another DID than <paramref name="recipientDid"/>; or a delivery in which no message has a usable id, so nothing in it could be acknowledged.</exception>
+    /// <exception cref="TransportException">The transport failed. Over HTTP with <see cref="TransportException.HttpStatusCode"/> 200, the mediator answered but its delivery was larger than this agent's <c>DidCommOptions.MaxReceiveBytes</c>, or could not be read: retry with a smaller <paramref name="limit"/>, or raise <c>MaxReceiveBytes</c>.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public async Task<PickupBatch> FetchAsync(string mediatorDid, string from, int limit, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
     {
@@ -218,6 +237,10 @@ public sealed class PickupClient
         var contents = DeliveryReader.ReadEntries(message.Attachments, limit);
         if (contents.AttachmentCount == 0)
             return new PickupBatch(Array.Empty<PickupItem>(), drained: true, status: null);
+        // A delivery of messages none of which can be acknowledged is not an empty batch: returned
+        // as one (not drained, no items), it would keep a fetch-until-drained loop spinning.
+        if (contents.Entries.Count == 0)
+            throw DeliveryReader.NoUsableIds(request.Id, spec);
         LogReading(contents, request.Id);
 
         var payloads = new List<ReadOnlyMemory<byte>>(contents.Entries.Count);
@@ -260,7 +283,7 @@ public sealed class PickupClient
             }
             if (recipientDid is not null && !IsFor(unpacked, recipientDid))
             {
-                // D-20: the filter is enforced, not trusted to the mediator.
+                // D-20: the filter is enforced, not trusted to the mediator (IsFor).
                 mismatches++;
                 items.Add(new PickupItem(entry.Id, unpacked: null, new MediationProtocolException(
                     $"A message delivered for request '{request.Id}' was decrypted for another DID than its recipient_did filter; it was not acknowledged.", request.Id)));
@@ -297,6 +320,12 @@ public sealed class PickupClient
     /// failed and that you have given up on, or a live item you want gone before you stop a stream.
     /// Sent 100 ids per message.
     /// </summary>
+    /// <remarks>
+    /// 100 ids per message is what this library's mediator accepts by default. A mediator can be
+    /// configured to accept fewer (this library's down to its delivery batch size, 10 by default);
+    /// such a mediator refuses a longer message as malformed, so call this method with at most as
+    /// many ids as it accepts.
+    /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="ids">1 to 10 000 ids, each exactly as <see cref="PickupItem.Id"/> gave it.</param>
@@ -375,9 +404,11 @@ public sealed class PickupClient
     /// <strong>Acknowledgement.</strong> An item is acknowledged when you ask for the next one: the
     /// next <c>MoveNextAsync</c>, which <c>await foreach</c> makes when your loop body has finished
     /// with the item. Nothing is acknowledged before it was handed to you. Acknowledgements are sent
-    /// in batches (when ten are waiting, when nothing else is ready, or after ten seconds), and the
-    /// stream remembers the item (<see cref="MediatorClientOptions.DedupeCapacity"/>) so a repeat is
-    /// acknowledged and not yielded again.
+    /// in batches (when ten are waiting, when nothing else is ready, or after ten seconds) of at most
+    /// ten ids per message, which a mediator that accepts no more ids per message than it delivers
+    /// at once (ten by default at this library's mediator) still takes. The stream remembers the item
+    /// (<see cref="MediatorClientOptions.DedupeCapacity"/>) so a repeat is acknowledged and not
+    /// yielded again.
     /// </para>
     /// <para>
     /// <strong>Stopping.</strong> When the enumeration ends — by <c>break</c>, <c>return</c>, an
@@ -393,19 +424,27 @@ public sealed class PickupClient
     /// closes the stream and frees its place.
     /// </para>
     /// <para>
-    /// <strong>Delayed messages.</strong> A message whose sender delayed it is never pushed when it
-    /// falls due; the periodic poll picks it up (FR-PICK-08). Keep
-    /// <see cref="MediatorClientOptions.LivePollInterval"/> at or below the longest delay the mediator
-    /// allows (an hour by default at this library's mediator), or such a message waits up to one
-    /// interval longer.
+    /// <strong>Polling is part of the design.</strong> A message whose sender delayed it is never
+    /// pushed when it falls due, and the mediator has no scheduler that would push it later, now or
+    /// in a future version (FR-PICK-08). The drain when the stream starts and the one every
+    /// <see cref="MediatorClientOptions.LivePollInterval"/> are how such a message reaches you, and
+    /// how the stream recovers from a dropped connection: they are the lasting design, not a
+    /// stopgap. Poll at least as often as the longest delay you expect your senders to ask for (this
+    /// library's mediator caps a delay at 1 hour by default, <c>MediatorOptions.MaxForwardDelay</c>),
+    /// or such a message waits up to one interval longer.
     /// </para>
     /// <para>
     /// <strong>Starting and failing.</strong> The arguments are checked when you call this method.
     /// The route is resolved at the first <c>MoveNextAsync</c>, and refused when it is not a
     /// WebSocket, before anything is sent. One stream per mediator and DID may be open at a time,
-    /// and at most 16 per container. A step that fails (no answer, a transport failure) is retried
-    /// after a pause that starts at one second and doubles up to 30; five failures in a row end the
-    /// stream with the last exception. A problem report from the mediator ends it at once.
+    /// and at most 16 per container. A step that got no answer (<see cref="TimeoutException"/>) or
+    /// failed in the transport (<see cref="TransportException"/>) is retried after a pause that
+    /// starts at one second and doubles up to 30; so is a request refused because too many of the
+    /// container's requests are already waiting (<see cref="InvalidOperationException"/>), once the
+    /// mediator has answered this stream. Five failures in a row end the stream with the last
+    /// exception. Any other failure ends it at once with its exception: a problem report from the
+    /// mediator, a malformed answer, a key of <paramref name="from"/> this agent does not hold, the
+    /// container's disposal.
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
@@ -414,10 +453,11 @@ public sealed class PickupClient
     /// <param name="ct">Cancellation token (combined with one passed through <c>WithCancellation</c>); cancelling ends the enumeration.</param>
     /// <returns>The items, as they arrive.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent.</exception>
-    /// <exception cref="MediationProtocolException">While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>) or a malformed answer.</exception>
+    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent. While enumerating: a refusal of the send path before the mediator first answered (at once), or five refusals in a row because too many requests were waiting.</exception>
+    /// <exception cref="MediationProtocolException">While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>), a malformed answer, or a drain answered with a delivery in which no message has a usable id.</exception>
     /// <exception cref="TimeoutException">While enumerating: five steps in a row got no answer.</exception>
     /// <exception cref="TransportException">While enumerating: five steps in a row failed to send.</exception>
+    /// <exception cref="SecretNotFoundException">While enumerating: this agent holds no key for <paramref name="from"/> (at once, like any failure that no retry can fix).</exception>
     /// <exception cref="ObjectDisposedException">While enumerating: the container was disposed.</exception>
     public IAsyncEnumerable<PickupItem> ReceiveLiveAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
     {
@@ -457,9 +497,27 @@ public sealed class PickupClient
             Log.RepeatedIds(requestId, contents.RepeatedIds);
     }
 
-    // D-20: the DID that decrypted the innermost message (its subject) is the one asked about.
+    // D-20 (as refined for Q2-1): whether a message that unpacked is the filter's DID's. It is when
+    // that DID's key opened the innermost message, or when the innermost envelope names that DID
+    // among its recipients: a sender that encrypted one message to two of our DIDs addressed it to
+    // both, and the unpack opens it with the first held key the envelope names, which may be the
+    // other DID's. A message whose envelope does not name the filter's DID at all (a mediator
+    // handing over another of our DIDs' messages, or another tenant's, under this filter) is not.
+    // One pass over every kid, no early exit (`|`, not `||`); each kid is checked against the
+    // FR-API-09 bound the unpack applies to recipient kids before it is parsed (L-055).
     private static bool IsFor(UnpackResult unpacked, string recipientDid)
-        => string.Equals(DidSubject.DidSubjectOf(unpacked.RecipientKid), recipientDid, StringComparison.Ordinal);
+    {
+        var match = NamesDid(unpacked.RecipientKid, recipientDid);
+        foreach (var kid in unpacked.AllRecipientKids)
+            match |= NamesDid(kid, recipientDid);
+        return match;
+    }
+
+    // Whether a key id's DID subject is the bare DID `did` (L-034: subjects, never raw strings).
+    private static bool NamesDid(string? kid, string did)
+        => kid is not null
+           && IdentifierLimits.IsWithinKeyIdLimits(kid)
+           && string.Equals(DidSubject.DidSubjectOf(kid), did, StringComparison.Ordinal);
 
     private static void RequireBareDid(string? value, string parameter)
     {

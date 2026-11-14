@@ -33,6 +33,14 @@ internal sealed record SentRequest(MediatorRoute Route, Message Request, Mediato
 
     /// <summary>The <c>recipient_did</c> filter, or <c>null</c>.</summary>
     public string? RecipientDid => Request.Body?[PickupBodies.RecipientDid]?.GetValue<string>();
+
+    // A failed assertion prints the request by its type and id only: the generated printer would read
+    // every property, and Ids / Live / Limit throw on requests of the other types.
+    private bool PrintMembers(System.Text.StringBuilder builder)
+    {
+        builder.Append("Type = ").Append(Type).Append(", Id = ").Append(Request.Id);
+        return true;
+    }
 }
 
 /// <summary>

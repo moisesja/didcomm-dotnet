@@ -153,6 +153,18 @@ internal static class DeliveryReader
     internal static MediationProtocolException Unexpected(string requestId, MediatorExchangeSpec spec)
         => new($"The mediator answered request '{requestId}' ({spec.Name}) with a message of another type.", requestId);
 
+    /// <summary>
+    /// The refusal for a delivery that carried messages of which none can be handed out (every one
+    /// read lacked a usable id; <see cref="DeliveryContents.Entries"/> is empty while
+    /// <see cref="DeliveryContents.AttachmentCount"/> is not). Nothing in it can be acknowledged, so
+    /// a mediator that keeps answering this way would keep a fetch-until-drained loop, or a live
+    /// stream's drain, spinning.
+    /// </summary>
+    /// <param name="requestId">Our request's id.</param>
+    /// <param name="spec">The request's spec.</param>
+    internal static MediationProtocolException NoUsableIds(string requestId, MediatorExchangeSpec spec)
+        => new($"The mediator answered request '{requestId}' ({spec.Name}) with a delivery in which no message has a usable id; nothing in it could be acknowledged.", requestId);
+
     private static void RequireFilterEcho(string? echo, string? filter, string requestId, MediatorExchangeSpec spec)
     {
         // Both values evaluated, no short circuit: present, and not the DID asked about.

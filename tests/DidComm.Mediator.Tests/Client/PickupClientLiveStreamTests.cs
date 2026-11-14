@@ -445,14 +445,52 @@ public sealed class PickupClientLiveStreamTests
         var waiting = stream.MoveNextAsync().AsTask();
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
         exchange.Clock.Advance(LiveDeliveryStream.FirstBackoff);
-        await exchange.WaitForSentAsync(6);
+        // live-on, drain, the failed acknowledgement; then ten acknowledgements of ten, the cycle's
+        // live-on and its drain; then the stream waits.
+        await exchange.WaitForSentAsync(15);
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
 
         var acknowledged = exchange.SentOf(MessagePickup.MessagesReceivedType);
-        acknowledged.Should().HaveCount(2);
+        acknowledged.Should().HaveCount(11);
         acknowledged[0].Ids.Should().Equal(Enumerable.Range(0, 10).Select(i => $"p{i}"));
-        acknowledged[1].Ids.Should().Equal(Enumerable.Range(22, 100).Select(i => $"p{i}"), "the 100 most recent are kept; p0..p21 were let go");
+        acknowledged.Skip(1).Should().OnlyContain(a => a.Ids.Count == LiveDeliveryStream.MaxAckIds, "a mediator may accept no more than ten ids per message");
+        acknowledged.Skip(1).SelectMany(a => a.Ids).Should().Equal(Enumerable.Range(22, 100).Select(i => $"p{i}"), "the 100 most recent are kept; p0..p21 were let go");
         logs.Entries.Should().Contain(e => e.Message.Contains("forgotten unacknowledged"));
         await StopAsync(stream, waiting, cts);
+    }
+
+    [Fact]
+    public async Task At_the_end_more_than_ten_taken_messages_are_acknowledged_ten_ids_per_message()
+    {
+        // A mediator may accept no more than its delivery batch size (ten) per messages-received.
+        var exchange = new FakePickupExchange { Route = WebSocketRoute };
+        var client = PickupTest.Client(exchange);
+        var acks = 0;
+        exchange.On(MessagePickup.MessagesReceivedType, r => ++acks == 1
+            ? Task.FromException<InboundMessageSnapshot>(new TimeoutException())
+            : Task.FromResult(Status(r)));
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var first = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        exchange.Registration!.TryPush(Push(("p0", "ok:p0"))).Should().BeTrue();
+        (await PickupTest.Within(first)).Should().BeTrue();
+        for (var i = 1; i <= 25; i++)
+        {
+            exchange.Registration!.TryPush(Push(($"p{i}", $"ok:p{i}"))).Should().BeTrue();
+            (await Next(stream)).Id.Should().Be($"p{i}");
+        }
+        exchange.SentOf(MessagePickup.MessagesReceivedType).Should().ContainSingle("the flush at ten taken failed, and the stream backs off");
+
+        var waiting = stream.MoveNextAsync().AsTask(); // takes p25
+        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await StopAsync(stream, waiting, cts);
+
+        var sent = exchange.SentOf(MessagePickup.MessagesReceivedType);
+        sent[0].Ids.Should().Equal(Enumerable.Range(0, 10).Select(i => $"p{i}"));
+        sent.Skip(1).Select(a => a.Ids.Count).Should().Equal(10, 10, 6);
+        sent.Skip(1).SelectMany(a => a.Ids).Should().Equal(Enumerable.Range(0, 26).Select(i => $"p{i}"));
+        exchange.Sent[^1].Is(MessagePickup.LiveDeliveryChangeType).Should().BeTrue();
     }
 
     // ---- logs ---------------------------------------------------------------------------------

@@ -47,13 +47,13 @@ public sealed class PickupClientRewrapTests
         using var cts = new CancellationTokenSource();
         var stream = harness.Pickup.ReceiveLiveAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint, cts.Token).GetAsyncEnumerator();
         PickupE2E.ShouldBeAlicesNote(await PickupE2E.NextAsync(stream), alice, recipient, queued);
-        var next = stream.MoveNextAsync().AsTask();
+        var next = PickupE2E.MoveNext(stream);
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 0, "the drained message was acknowledged");
         var pushed = await PickupE2E.SendAsync(mediator, alice, recipient, "pushed");
 
         (await PickupE2E.Within(next)).Should().BeTrue();
         PickupE2E.ShouldBeAlicesNote(stream.Current, alice, recipient, pushed);
-        var last = stream.MoveNextAsync().AsTask();
+        var last = PickupE2E.MoveNext(stream);
         await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 0, "the pushed message was acknowledged");
         await PickupE2E.StopAsync(stream, last, cts);
     }

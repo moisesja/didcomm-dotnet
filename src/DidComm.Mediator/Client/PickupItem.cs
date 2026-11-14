@@ -7,9 +7,24 @@ namespace DidComm.Mediator.Client;
 /// <see cref="Unpacked"/> holds it, or it did not, and <see cref="Error"/> says why.
 /// </summary>
 /// <remarks>
+/// <para>
 /// A failed item is not acknowledged: the mediator keeps it and delivers it again after its lease
 /// ends (60 seconds at this library's mediator). When you have given up on it, discard it with
 /// <see cref="PickupClient.AckAsync"/> and its <see cref="Id"/>.
+/// </para>
+/// <para>
+/// <strong>Who sent it.</strong> The message in <see cref="Unpacked"/> can be plaintext or
+/// anoncrypted, and then its <c>from</c> is anyone's claim: check
+/// <see cref="UnpackResult.Authenticated"/> before you trust it.
+/// </para>
+/// <para>
+/// <strong>One message to several of your DIDs.</strong> When a sender encrypted one message to
+/// several DIDs whose keys this agent holds, the mediator queues a copy for each, and you get one
+/// item for the message, not one per DID: the other copies are acknowledged as repeats (while the
+/// clients remember the message, <see cref="MediatorClientOptions.DedupeCapacity"/>).
+/// <see cref="UnpackResult.RecipientKid"/> then names the first of those DIDs the message lists,
+/// even when the item came from a fetch filtered on another of them.
+/// </para>
 /// </remarks>
 public sealed class PickupItem
 {

@@ -186,6 +186,29 @@ public sealed class PickupClientFetchTests
     }
 
     [Fact]
+    public async Task A_delivery_in_which_no_message_has_a_usable_id_is_a_MediationProtocolException_naming_our_request()
+    {
+        // Returned as a batch it would be neither drained nor carry an item, and a loop that fetches
+        // until drained would ask again for ever (QA-2 observation 7).
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => RawDelivery(r, new Attachment?[]
+        {
+            Entry(null, "ok:a"),
+            Entry(string.Empty, "ok:b"),
+            Entry("has space", "ok:c"),
+            null,
+        }));
+
+        var thrown = (await FluentActions.Awaiting(() => PickupTest.Client(exchange).FetchAsync(M, L, limit: 10))
+            .Should().ThrowAsync<MediationProtocolException>()).Which;
+
+        thrown.RequestId.Should().Be(exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id);
+        thrown.Message.Should().NotContain("has space").And.NotContain(L).And.NotContain(M);
+        exchange.Unpacked.Should().BeEmpty();
+        exchange.SentOf(MessagePickup.MessagesReceivedType).Should().BeEmpty();
+        exchange.Duplicates.Count.Should().Be(0);
+    }
+
+    [Fact]
     public async Task A_repeated_attachment_id_is_read_once_and_the_first_wins()
     {
         var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => RawDelivery(r, new Attachment?[]
@@ -230,6 +253,71 @@ public sealed class PickupClientFetchTests
         var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "to:did:example:carol:m1")));
         var batch = await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10);
         batch.Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
+    }
+
+    // Q2-1: one message encrypted to two of our DIDs (carol first, then L) opens with carol's key, the
+    // first held key it names. Under a filter on L it is still L's message: the sender addressed it to
+    // L too. One whose envelope does not name L at all is not, whichever of our keys opened it.
+    [Fact]
+    public async Task Under_a_filter_a_message_its_sender_also_encrypted_to_the_filters_DID_is_returned_whichever_key_opened_it()
+    {
+        const string carol = "did:example:carol";
+        const string dave = "did:example:dave";
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r,
+            ("q1", "multi:m1"),
+            ("q2", "elsewhere:m2"),
+            ("q3", "multi-last:m3")));
+        exchange.Unpacker = (text, _) => Task.FromResult(text switch
+        {
+            "multi:m1" => Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", L + "#key-1"),
+            "elsewhere:m2" => Encrypted(text, "m2", decryptedFor: carol, carol + "#key-1", dave + "#key-1"),
+            "multi-last:m3" => Encrypted(text, "m3", decryptedFor: carol, carol + "#key-1", dave + "#key-1", L + "#key-2"),
+            _ => DefaultOutcome(text),
+        });
+
+        var batch = await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10, recipientDid: L);
+
+        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", true), ("q2", false), ("q3", true));
+        batch.Items[0].Unpacked!.RecipientKid.Should().Be(carol + "#key-1", "the item reports the key that opened it");
+        batch.Items[1].Error.Should().BeOfType<MediationProtocolException>("its envelope does not name the filter's DID");
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3" }, "only the messages that are the filter's DID's");
+    }
+
+    [Fact]
+    public async Task Under_a_filter_an_envelope_kid_over_the_identifier_bounds_does_not_count_even_when_it_starts_with_the_filters_DID()
+    {
+        const string carol = "did:example:carol";
+        var overLong = L + "#" + new string('k', 4096);           // over 4096 characters in all
+        var longDid = "did:example:" + new string('b', 2048);    // a DID part over 2048 characters
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "long:m1"), ("q2", "longdid:m2")));
+        exchange.Unpacker = (text, _) => Task.FromResult(text switch
+        {
+            "long:m1" => Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", overLong),
+            "longdid:m2" => Encrypted(text, "m2", decryptedFor: carol, carol + "#key-1", longDid + "#key-1"),
+            _ => DefaultOutcome(text),
+        });
+
+        var batch = await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10, recipientDid: L);
+
+        batch.Items.Should().HaveCount(2).And.OnlyContain(i => i.Error is MediationProtocolException);
+        exchange.SentOf(MessagePickup.MessagesReceivedType).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Without_a_filter_the_copies_of_a_message_encrypted_to_two_of_our_DIDs_are_returned_once_and_all_acknowledged()
+    {
+        // The mediator queues one copy per DID; both open with the same key, so they are the same message.
+        var exchange = new FakePickupExchange().OnSequence(MessagePickup.DeliveryRequestType,
+            r => Delivery(r, ("for-carol", "multi:m1"), ("for-bob", "multi:m1")),
+            r => Delivery(r, ("for-bob-again", "multi:m1")));
+        exchange.Unpacker = (text, _) => Task.FromResult(text == "multi:m1"
+            ? Encrypted(text, "m1", decryptedFor: "did:example:carol", "did:example:carol#key-1", L + "#key-1")
+            : DefaultOutcome(text));
+        var client = PickupTest.Client(exchange);
+
+        (await client.FetchAsync(M, L, limit: 10)).Items.Should().ContainSingle().Which.Id.Should().Be("for-carol");
+        (await client.FetchAsync(M, L, limit: 10)).Items.Should().BeEmpty("a later copy is a repeat");
+        exchange.AcknowledgedIds.Should().Equal("for-carol", "for-bob", "for-bob-again");
     }
 
     [Theory]
@@ -296,6 +384,18 @@ public sealed class PickupClientFetchTests
 
         (await client.FetchAsync(M, L, 10)).Items.Should().ContainSingle();
         (await client.FetchAsync(M, L, 10)).Items.Should().ContainSingle().Which.Id.Should().Be("q9");
+    }
+
+    [Fact]
+    public async Task With_the_duplicate_filter_off_a_message_twice_in_one_delivery_is_still_returned_once()
+    {
+        var exchange = new FakePickupExchange(o => o.DedupeCapacity = 0).On(MessagePickup.DeliveryRequestType,
+            r => Delivery(r, ("q1", "ok:m1"), ("q2", "ok:m1")));
+
+        var batch = await PickupTest.Client(exchange).FetchAsync(M, L, 10);
+
+        batch.Items.Should().ContainSingle().Which.Id.Should().Be("q1");
+        exchange.AcknowledgedIds.Should().Equal("q1", "q2");
     }
 
     // ---- the commit point -----------------------------------------------------------------------
@@ -548,6 +648,10 @@ public sealed class PickupClientFetchTests
         foreach (var value in new[] { M, L, A, "did:example:carol", "attachment-", "message-", "lost" })
             logs.Entries.Should().NotContain(e => e.Message.Contains(value), "no log line carries {0}", value);
     }
+
+    /// <summary>Alice's authcrypted message <paramref name="id"/>, opened with <paramref name="decryptedFor"/>'s key, from an envelope naming <paramref name="envelopeKids"/>.</summary>
+    private static DeliveredOutcome Encrypted(string packed, string id, string decryptedFor, params string[] envelopeKids)
+        => Success(Authcrypt(A, decryptedFor, id) with { AllRecipientKids = envelopeKids }, packed);
 }
 
 /// <summary>
