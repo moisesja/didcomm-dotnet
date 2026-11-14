@@ -57,55 +57,9 @@ internal static class ReturnRouteEligibility
     public static bool TryGetPeer(UnpackResult inbound, out string peerDid, out string localDid, out ReturnRouteIneligibility reason)
     {
         ArgumentNullException.ThrowIfNull(inbound);
-        peerDid = string.Empty;
-        localDid = string.Empty;
-
-        if (!inbound.Encrypted || !inbound.Authenticated)
-        {
-            reason = ReturnRouteIneligibility.NotEncryptedAndAuthenticated;
-            return false;
-        }
-        if (string.IsNullOrEmpty(inbound.SenderKid))
-        {
-            reason = ReturnRouteIneligibility.NoSenderKid;
-            return false;
-        }
-        var sender = DidSubject.DidSubjectOf(inbound.SenderKid);
-        if (sender is null)
-        {
-            reason = ReturnRouteIneligibility.SenderKidNotDid;
-            return false;
-        }
-        if (!string.IsNullOrEmpty(inbound.SignerKid))
-        {
-            var signer = DidSubject.DidSubjectOf(inbound.SignerKid);
-            if (signer is null)
-            {
-                reason = ReturnRouteIneligibility.SignerKidNotDid;
-                return false;
-            }
-            if (!string.Equals(signer, sender, StringComparison.Ordinal))
-            {
-                reason = ReturnRouteIneligibility.SignerMismatch;
-                return false;
-            }
-        }
-        var local = DidSubject.DidSubjectOf(inbound.RecipientKid);
-        if (local is null)
-        {
-            reason = ReturnRouteIneligibility.RecipientKidNotDid;
-            return false;
-        }
-        if (MediatorServiceProtocols.IsReplayExempt(inbound.Message?.Type))
-        {
-            reason = ReturnRouteIneligibility.Forward;
-            return false;
-        }
-
-        peerDid = sender;
-        localDid = local;
-        reason = ReturnRouteIneligibility.None;
-        return true;
+        return TryGetPeerCore(
+            inbound.Encrypted, inbound.Authenticated, inbound.SenderKid, inbound.SignerKid, inbound.RecipientKid, inbound.Message?.Type,
+            out peerDid, out localDid, out reason);
     }
 
     /// <summary>
@@ -119,5 +73,74 @@ internal static class ReturnRouteEligibility
     /// <param name="localDid">The DID subject of the decrypting key.</param>
     /// <param name="reason">Why the inbound is ineligible; <see cref="ReturnRouteIneligibility.None"/> on success.</param>
     public static bool TryGetPeer(InboundMessageSnapshot inbound, out string peerDid, out string localDid, out ReturnRouteIneligibility reason)
-        => throw new NotImplementedException("#96 engineer A: snapshot overload over a shared private core, with a parity test against the UnpackResult overload.");
+    {
+        ArgumentNullException.ThrowIfNull(inbound);
+        return TryGetPeerCore(
+            inbound.Encrypted, inbound.Authenticated, inbound.SenderKid, inbound.SignerKid, inbound.RecipientKid, inbound.Type,
+            out peerDid, out localDid, out reason);
+    }
+
+    // The one rule, over the fields both inputs carry. Each overload only reads its own fields into
+    // it, so the two cannot apply different rules (L-041).
+    private static bool TryGetPeerCore(
+        bool encrypted,
+        bool authenticated,
+        string? senderKid,
+        string? signerKid,
+        string? recipientKid,
+        string? messageType,
+        out string peerDid,
+        out string localDid,
+        out ReturnRouteIneligibility reason)
+    {
+        peerDid = string.Empty;
+        localDid = string.Empty;
+
+        if (!encrypted || !authenticated)
+        {
+            reason = ReturnRouteIneligibility.NotEncryptedAndAuthenticated;
+            return false;
+        }
+        if (string.IsNullOrEmpty(senderKid))
+        {
+            reason = ReturnRouteIneligibility.NoSenderKid;
+            return false;
+        }
+        var sender = DidSubject.DidSubjectOf(senderKid);
+        if (sender is null)
+        {
+            reason = ReturnRouteIneligibility.SenderKidNotDid;
+            return false;
+        }
+        if (!string.IsNullOrEmpty(signerKid))
+        {
+            var signer = DidSubject.DidSubjectOf(signerKid);
+            if (signer is null)
+            {
+                reason = ReturnRouteIneligibility.SignerKidNotDid;
+                return false;
+            }
+            if (!string.Equals(signer, sender, StringComparison.Ordinal))
+            {
+                reason = ReturnRouteIneligibility.SignerMismatch;
+                return false;
+            }
+        }
+        var local = DidSubject.DidSubjectOf(recipientKid);
+        if (local is null)
+        {
+            reason = ReturnRouteIneligibility.RecipientKidNotDid;
+            return false;
+        }
+        if (MediatorServiceProtocols.IsReplayExempt(messageType))
+        {
+            reason = ReturnRouteIneligibility.Forward;
+            return false;
+        }
+
+        peerDid = sender;
+        localDid = local;
+        reason = ReturnRouteIneligibility.None;
+        return true;
+    }
 }
