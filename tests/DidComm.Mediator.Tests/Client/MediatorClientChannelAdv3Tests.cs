@@ -266,6 +266,54 @@ public sealed class MediatorClientChannelAdv3Tests : IAsyncLifetime
         }
     }
 
+    /// <summary>
+    /// ADV3-7 (fails: defect, Low). Property broken — <see cref="MediatorClientChannel.Dispose"/>:
+    /// "Stop: pending requests fail with <see cref="ObjectDisposedException"/> and live streams end";
+    /// <see cref="PickupClient.FetchAsync"/>: "<see cref="ObjectDisposedException"/>: The container
+    /// was disposed"; <see cref="GuardedDeadline"/>: the token handed to host code is cancelled by
+    /// "the caller's token and the channel's shutdown token". Attack (shutdown, not remote): the
+    /// delivery budget is a <see cref="GuardedDeadline"/> on the caller's token only — the unpacker
+    /// is not given the channel's shutdown token — so disposing the container while a fetch (or a
+    /// live stream) is opening a delivery cancels nothing: the host's DID resolutions keep running on
+    /// an uncancelled token against a disposed container, and the call waits out the whole budget
+    /// (20 s) before it returns — normally, with its acknowledgement failing quietly — instead of
+    /// ending with <see cref="ObjectDisposedException"/>. A live stream yields the delivery's items
+    /// after the disposal in the same way.
+    /// </summary>
+    [Fact]
+    public async Task ADV3_7_disposing_the_container_while_a_delivery_is_opened_cancels_nothing_and_the_fetch_waits_out_the_budget()
+    {
+        var time = new ManualTimeProvider();
+        var send = new FakeSend();
+        var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var channel = Create(_w, send, time: time, unpack: async (_, ct) =>
+        {
+            entered.TrySetResult(ct);
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct); // a DID lookup that honours its token
+            throw new InvalidOperationException("unreachable");
+        });
+        send.ReturnWith(request => Task.FromResult<UnpackResult?>(Returned(DidComm.Mediator.Pickup.MessagePickup.CreateDelivery(
+            _w.Mediator.Did, _w.Local.Did, new[] { new DidComm.Mediator.Pickup.DeliveredMessage("q1", System.Text.Encoding.UTF8.GetBytes("packed")) }, thid: request.Id))));
+        var pickup = new PickupClient(channel, logger: null);
+
+        var fetch = pickup.FetchAsync(_w.Mediator.Did, _w.Local.Did, 10, serviceEndpointOverride: Https);
+        _ = fetch.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        var token = await entered.Task.WaitAsync(PickupTest.Timeout);
+        try
+        {
+            await channel.DisposeAsync();
+
+            token.IsCancellationRequested.Should().BeTrue("the container is gone: the host code opening its delivery must be told to stop");
+            await FluentActions.Awaiting(() => fetch.WaitAsync(TimeSpan.FromSeconds(5))).Should().ThrowAsync<ObjectDisposedException>(
+                "a fetch running when its container is disposed ends with ObjectDisposedException, not after its budget");
+        }
+        finally
+        {
+            time.Advance(channel.Options.UnpackTimeout);
+            await Record.ExceptionAsync(() => fetch.WaitAsync(PickupTest.Timeout));
+        }
+    }
+
     // ---- helpers ------------------------------------------------------------------------------
 
     private Task<InboundMessageSnapshot> Start(MediatorClientChannel channel, MediatorRoute route, Message request, CancellationToken ct)
