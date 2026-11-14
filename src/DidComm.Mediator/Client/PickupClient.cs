@@ -40,6 +40,14 @@ namespace DidComm.Mediator.Client;
 /// up on with <see cref="AckAsync"/>.
 /// </para>
 /// <para>
+/// <strong>Several of your DIDs.</strong> A <c>recipientDid</c> filter accepts only a message that
+/// one of that DID's own keys opened. A message a sender encrypted to two of your DIDs opens with
+/// the key its envelope lists first among those this agent holds, so it is accepted without a
+/// filter or under that first DID's filter; under the second DID's filter it is a failed item,
+/// "for another of your DIDs", and stays queued: discard it with <see cref="AckAsync"/>, or it ages
+/// out at the mediator.
+/// </para>
+/// <para>
 /// <strong>Which endpoint.</strong> The first <c>DIDCommMessaging</c> service entry of the
 /// mediator's DID decides the address and so the transport; a mediator reached through routing
 /// keys or another mediator is refused. Pass <c>serviceEndpointOverride</c> to use another of its
@@ -184,12 +192,21 @@ public sealed class PickupClient
     /// that comes twice in the same delivery is still returned only once.
     /// </para>
     /// <para>
+    /// <strong>The <paramref name="recipientDid"/> filter.</strong> Under a filter a message counts as
+    /// that DID's only when one of that DID's own keys opened it. The other recipients an envelope
+    /// lists are not proof: whoever writes an envelope can list anyone, so a message is never
+    /// accepted for a DID because its envelope names that DID.
+    /// </para>
+    /// <para>
     /// <strong>One message to several of your DIDs.</strong> A sender can encrypt one message to
     /// several DIDs whose keys this agent holds, and the mediator then queues a copy for each. Every
-    /// copy opens with the first of those keys the message names, so the copies are the same message:
-    /// it is returned once (its <see cref="UnpackResult.RecipientKid"/> names that first DID) and the
-    /// other copies are acknowledged as repeats. Under a <paramref name="recipientDid"/> filter such a
-    /// message is that DID's when its sender encrypted it to that DID too, whichever key opened it.
+    /// copy opens with the first of those keys the envelope lists (its
+    /// <see cref="UnpackResult.RecipientKid"/> names that DID). Fetched with the same
+    /// <paramref name="from"/>, the copies are the same message: it is returned once and the other
+    /// copies are acknowledged as repeats. Such a message is accepted without a filter, or under the
+    /// filter of the DID whose key opened it. Under the filter of another of those DIDs its copy is
+    /// a failed item, "for another of your DIDs", and stays queued: fetch without a filter to take
+    /// it, discard it with <see cref="AckAsync"/>, or let it age out at the mediator.
     /// </para>
     /// <para>
     /// <strong>Who sent it.</strong> The message inside an item can be plaintext or anoncrypted, so
@@ -200,7 +217,7 @@ public sealed class PickupClient
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="limit">The most messages to take, 1 to 100. Anything the mediator sends beyond it is not opened and not acknowledged.</param>
-    /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message is this DID's when this DID's key opened it or its sender encrypted it to this DID too; any other is returned as a failed item and not acknowledged.</param>
+    /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message is this DID's only when one of this DID's own keys opened it; any other is returned as a failed item and not acknowledged (see the remarks for a message encrypted to two of your DIDs).</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The batch: the items in delivery order, whether the queue was drained, and the mediator's <c>status</c> when it answered with one.</returns>
@@ -286,7 +303,8 @@ public sealed class PickupClient
                 // D-20: the filter is enforced, not trusted to the mediator (IsFor).
                 mismatches++;
                 items.Add(new PickupItem(entry.Id, unpacked: null, new MediationProtocolException(
-                    $"A message delivered for request '{request.Id}' was decrypted for another DID than its recipient_did filter; it was not acknowledged.", request.Id)));
+                    $"A message delivered for request '{request.Id}' is for another of your DIDs: a key of another DID than the recipient_did filter's opened it. " +
+                    "It was not acknowledged and stays queued: discard it with AckAsync, or it ages out at the mediator.", request.Id)));
                 continue;
             }
             if (Exchange.Duplicates.Contains(outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
@@ -497,27 +515,22 @@ public sealed class PickupClient
             Log.RepeatedIds(requestId, contents.RepeatedIds);
     }
 
-    // D-20 (as refined for Q2-1): whether a message that unpacked is the filter's DID's. It is when
-    // that DID's key opened the innermost message, or when the innermost envelope names that DID
-    // among its recipients: a sender that encrypted one message to two of our DIDs addressed it to
-    // both, and the unpack opens it with the first held key the envelope names, which may be the
-    // other DID's. A message whose envelope does not name the filter's DID at all (a mediator
-    // handing over another of our DIDs' messages, or another tenant's, under this filter) is not.
-    // One pass over every kid, no early exit (`|`, not `||`); each kid is checked against the
-    // FR-API-09 bound the unpack applies to recipient kids before it is parsed (L-055).
+    // D-20 (owner decision 1-A on the L-063 stop): a message that unpacked is the filter's DID's only
+    // when one of that DID's own keys opened it: the DID subject of the key that decrypted the
+    // innermost envelope (UnpackResult.RecipientKid) is the filter's DID. The envelope's other
+    // recipient labels are not evidence (L-040): a co-recipient that re-encrypts a message, or a
+    // relay that appends a label to an envelope without `apv`, can write any of them (ADV1-2,
+    // ADV1-3). The consequence for a message a sender encrypted to two of our DIDs is documented on
+    // FetchAsync: it passes the filter of the DID whose key opened it (the first held key the
+    // envelope lists), not the other one's. One comparison, no early exit; the key id is checked
+    // against the FR-API-09 bound before it is parsed (L-055).
     private static bool IsFor(UnpackResult unpacked, string recipientDid)
     {
-        var match = NamesDid(unpacked.RecipientKid, recipientDid);
-        foreach (var kid in unpacked.AllRecipientKids)
-            match |= NamesDid(kid, recipientDid);
-        return match;
+        var kid = unpacked.RecipientKid;
+        return kid is not null
+               && IdentifierLimits.IsWithinKeyIdLimits(kid)
+               && string.Equals(DidSubject.DidSubjectOf(kid), recipientDid, StringComparison.Ordinal);
     }
-
-    // Whether a key id's DID subject is the bare DID `did` (L-034: subjects, never raw strings).
-    private static bool NamesDid(string? kid, string did)
-        => kid is not null
-           && IdentifierLimits.IsWithinKeyIdLimits(kid)
-           && string.Equals(DidSubject.DidSubjectOf(kid), did, StringComparison.Ordinal);
 
     private static void RequireBareDid(string? value, string parameter)
     {

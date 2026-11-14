@@ -115,17 +115,18 @@ public sealed class PickupClientDedupeQa2Tests
     }
 
     /// <summary>
-    /// <b>Q2-1</b> (FR-PICK-11 "acknowledges only the attachments that unpacked … a failed unpack is
-    /// reported"; #96 design D-20: "the <c>recipientDid</c> filter is enforced: an unpacked message whose
-    /// innermost decrypting DID subject ≠ the filter is a failure"). One message Alice encrypts to two
-    /// DIDs Bob holds, b1 and b2 (one JWE, relayed in one forward per DID: two queue entries), is queued for
-    /// b2 as much as for b1. Fetching with <c>recipientDid: b2</c> must return b2's copy. The client
-    /// unpacks it with the first held key the JWE names (b1's) and then judges the filter by that
-    /// decrypting key, so b2's copy is a failure, never acknowledged, and stays queued for ever under
-    /// that filter — though it is b2's message and the agent can decrypt it.
+    /// <b>Q2-1</b>, as decided by the owner on the L-063 stop (#88, option 1-A): the <c>recipientDid</c>
+    /// filter passes a message only when one of the filter DID's own keys opened it; the envelope's
+    /// recipient labels are not evidence (ADV1-2, ADV1-3). One message Alice encrypts to two DIDs Bob
+    /// holds, b1 and b2 (one JWE, relayed in one forward per DID: two queue entries), opens with b1's
+    /// key, the first held key the JWE lists. So under b2's filter b2's copy is a failure "for another
+    /// of your DIDs" and stays queued; the message is accepted under b1's filter (b1's copy) or
+    /// without a filter; and the host discards b2's copy with <c>AckAsync</c>.
     /// </summary>
-    [Fact]
-    public async Task Q2_1_A_message_encrypted_to_two_of_our_DIDs_is_fetched_for_the_second_under_its_recipient_filter()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Q2_1_A_message_encrypted_to_two_of_our_DIDs_fails_under_the_second_DIDs_filter_is_accepted_under_the_first_or_unfiltered_and_is_discarded_with_AckAsync(bool unfiltered)
     {
         await using var mediator = await MediatorTestServer.StartAsync();
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
@@ -141,12 +142,26 @@ public sealed class PickupClientDedupeQa2Tests
         await PostToBothAsync(mediator, alice, note, b1.Did, b2.Did);
         (await mediator.StatusAsync(bob, b2.Did)).MessageCount.Should().Be(1, "the mediator queued a copy for b2");
 
+        // Under b2's filter: b1's key opened b2's copy, so it is reported as another DID's and kept.
         var forB2 = await harness.Pickup.FetchAsync(mediator.Did, bob.Did, 10, recipientDid: b2.Did);
+        var failed = forB2.Items.Should().ContainSingle().Subject;
+        var error = failed.Error.Should().BeOfType<MediationProtocolException>().Subject;
+        error.Message.Should().Contain("another of your DIDs").And.Contain("AckAsync").And.Contain(error.RequestId!);
+        error.Message.Should().NotContain(b1.Did).And.NotContain(b2.Did).And.NotContain(bob.Did);
+        (await mediator.StatusAsync(bob, b2.Did)).MessageCount.Should().Be(1, "a failure is not acknowledged: b2's copy stays queued");
 
-        var item = forB2.Items.Should().ContainSingle().Subject;
-        item.Error.Should().BeNull("b2's copy is b2's message and this agent holds b2's keys");
+        // Under b1's filter, or without one, the message is accepted (b1's copy; b2's is still leased
+        // to the failed fetch, so the mediator passes over it).
+        var taken = await harness.Pickup.FetchAsync(mediator.Did, bob.Did, 10, recipientDid: unfiltered ? null : b1.Did);
+        var item = taken.Items.Should().ContainSingle().Subject;
+        item.Error.Should().BeNull();
         item.Unpacked!.Message.Id.Should().Be(note.Id);
-        (await mediator.StatusAsync(bob, b2.Did)).MessageCount.Should().Be(0, "b2's copy was acknowledged");
+        item.Unpacked.RecipientKid.Should().StartWith(b1.Did + "#", "b1's key opened it");
+        (await mediator.StatusAsync(bob, b1.Did)).MessageCount.Should().Be(0, "b1's copy was acknowledged");
+
+        // The host gives up on b2's copy.
+        await harness.Pickup.AckAsync(mediator.Did, bob.Did, new[] { failed.Id });
+        (await mediator.StatusAsync(bob)).MessageCount.Should().Be(0, "AckAsync discarded b2's copy");
     }
 
     /// <summary>

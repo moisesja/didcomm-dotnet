@@ -19,11 +19,15 @@ namespace DidComm.Mediator.Client;
 /// </para>
 /// <para>
 /// <strong>One message to several of your DIDs.</strong> When a sender encrypted one message to
-/// several DIDs whose keys this agent holds, the mediator queues a copy for each, and you get one
-/// item for the message, not one per DID: the other copies are acknowledged as repeats (while the
-/// clients remember the message, <see cref="MediatorClientOptions.DedupeCapacity"/>).
-/// <see cref="UnpackResult.RecipientKid"/> then names the first of those DIDs the message lists,
-/// even when the item came from a fetch filtered on another of them.
+/// several DIDs whose keys this agent holds, the mediator queues a copy for each. Fetched or
+/// received with the same <c>from</c>, you get one item for the message, not one per DID: the other
+/// copies are acknowledged as repeats (while the clients remember the message,
+/// <see cref="MediatorClientOptions.DedupeCapacity"/>). <see cref="UnpackResult.RecipientKid"/>
+/// names the first of those DIDs the envelope lists: its key opened every copy. A fetch filtered on
+/// another of those DIDs reports that DID's copy as a failed item, "for another of your DIDs",
+/// because a filter accepts only what one of the filter DID's own keys opened; that copy stays
+/// queued until you fetch it without a filter, discard it with <see cref="PickupClient.AckAsync"/>,
+/// or it ages out at the mediator.
 /// </para>
 /// </remarks>
 public sealed class PickupItem

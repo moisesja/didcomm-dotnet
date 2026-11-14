@@ -255,45 +255,73 @@ public sealed class PickupClientFetchTests
         batch.Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
     }
 
-    // Q2-1: one message encrypted to two of our DIDs (carol first, then L) opens with carol's key, the
-    // first held key it names. Under a filter on L it is still L's message: the sender addressed it to
-    // L too. One whose envelope does not name L at all is not, whichever of our keys opened it.
+    // Owner decision 1-A (L-063 stop): under a filter on L only a message one of L's own keys opened
+    // is L's. The envelope's other recipient labels are not evidence (L-040; ADV1-2, ADV1-3): one a
+    // sender encrypted to carol and L opens with carol's key (the first held key it lists) and is a
+    // failure under L's filter, though its envelope names L; it is accepted unfiltered or under
+    // carol's filter. A message L's key opened passes whatever else its envelope lists.
     [Fact]
-    public async Task Under_a_filter_a_message_its_sender_also_encrypted_to_the_filters_DID_is_returned_whichever_key_opened_it()
+    public async Task Under_a_filter_only_a_message_one_of_the_filter_DIDs_own_keys_opened_passes_whatever_its_envelope_lists()
     {
         const string carol = "did:example:carol";
         const string dave = "did:example:dave";
         var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r,
             ("q1", "multi:m1"),
-            ("q2", "elsewhere:m2"),
+            ("q2", "mine:m2"),
             ("q3", "multi-last:m3")));
         exchange.Unpacker = (text, _) => Task.FromResult(text switch
         {
             "multi:m1" => Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", L + "#key-1"),
-            "elsewhere:m2" => Encrypted(text, "m2", decryptedFor: carol, carol + "#key-1", dave + "#key-1"),
+            "mine:m2" => Encrypted(text, "m2", decryptedFor: L, carol + "#key-1", dave + "#key-1", L + "#key-1"),
             "multi-last:m3" => Encrypted(text, "m3", decryptedFor: carol, carol + "#key-1", dave + "#key-1", L + "#key-2"),
             _ => DefaultOutcome(text),
         });
 
         var batch = await PickupTest.Client(exchange).FetchAsync(M, L, limit: 10, recipientDid: L);
 
-        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", true), ("q2", false), ("q3", true));
-        batch.Items[0].Unpacked!.RecipientKid.Should().Be(carol + "#key-1", "the item reports the key that opened it");
-        batch.Items[1].Error.Should().BeOfType<MediationProtocolException>("its envelope does not name the filter's DID");
-        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q3" }, "only the messages that are the filter's DID's");
+        var requestId = exchange.SentOf(MessagePickup.DeliveryRequestType).Single().Request.Id;
+        batch.Items.Select(i => (i.Id, Ok: i.Unpacked != null)).Should().Equal(("q1", false), ("q2", true), ("q3", false));
+        batch.Items[1].Unpacked!.RecipientKid.Should().Be(L + "#key-1");
+        foreach (var refused in new[] { batch.Items[0], batch.Items[2] })
+        {
+            var error = refused.Error.Should().BeOfType<MediationProtocolException>("carol's key opened it, though its envelope names L").Subject;
+            error.RequestId.Should().Be(requestId);
+            error.Message.Should().Contain(requestId).And.Contain("another of your DIDs").And.Contain("AckAsync");
+            error.Message.Should().NotContain(L).And.NotContain(carol).And.NotContain(dave);
+        }
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q2" }, "only the message L's own key opened is L's");
     }
 
     [Fact]
-    public async Task Under_a_filter_an_envelope_kid_over_the_identifier_bounds_does_not_count_even_when_it_starts_with_the_filters_DID()
+    public async Task A_message_its_sender_encrypted_to_two_of_our_DIDs_is_accepted_unfiltered_or_under_the_filter_of_the_DID_whose_key_opened_it()
     {
         const string carol = "did:example:carol";
+        var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "multi:m1")));
+        exchange.Unpacker = (text, _) => Task.FromResult(text == "multi:m1"
+            ? Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", L + "#key-1")
+            : DefaultOutcome(text));
+        var client = PickupTest.Client(exchange);
+
+        (await client.FetchAsync(M, L, limit: 10, recipientDid: L)).Items.Should().ContainSingle().Which.Error.Should().BeOfType<MediationProtocolException>();
+        (await client.FetchAsync(M, L, limit: 10, recipientDid: carol)).Items.Should().ContainSingle().Which.Unpacked!.RecipientKid.Should().Be(carol + "#key-1");
+        exchange.AcknowledgedIds.Should().Equal("q1");
+
+        var unfiltered = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "multi:m1")));
+        unfiltered.Unpacker = exchange.Unpacker;
+        (await PickupTest.Client(unfiltered).FetchAsync(M, L, limit: 10)).Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull();
+        unfiltered.AcknowledgedIds.Should().Equal("q1");
+    }
+
+    [Fact]
+    public async Task Under_a_filter_a_decrypting_key_id_over_the_identifier_bounds_does_not_pass_even_when_it_starts_with_the_filters_DID()
+    {
         var overLong = L + "#" + new string('k', 4096);           // over 4096 characters in all
         var longDid = "did:example:" + new string('b', 2048);    // a DID part over 2048 characters
         var exchange = new FakePickupExchange().On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "long:m1"), ("q2", "longdid:m2")));
         exchange.Unpacker = (text, _) => Task.FromResult(text switch
         {
-            "long:m1" => Encrypted(text, "m1", decryptedFor: carol, carol + "#key-1", overLong),
-            "longdid:m2" => Encrypted(text, "m2", decryptedFor: carol, carol + "#key-1", longDid + "#key-1"),
+            "long:m1" => Success(Authcrypt(A, L, "m1") with { RecipientKid = overLong, AllRecipientKids = new[] { overLong } }, text),
+            "longdid:m2" => Success(Authcrypt(A, L, "m2") with { RecipientKid = longDid + "#key-1", AllRecipientKids = new[] { longDid + "#key-1" } }, text),
             _ => DefaultOutcome(text),
         });
 
