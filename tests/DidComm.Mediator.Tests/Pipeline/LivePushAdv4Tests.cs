@@ -1,17 +1,9 @@
-using System.Collections.Concurrent;
 using AwesomeAssertions;
-using DidComm.Facade;
-using DidComm.Jose;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
 using DidComm.Mediator.Tests.Coordination;
 using DidComm.Mediator.Tests.Pickup;
-using DidComm.Messages;
-using DidComm.Protocols;
 using DidComm.Protocols.Routing;
-using DidComm.Samples.Shared;
-using DidComm.Threading;
-using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -37,7 +29,7 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task Isolation_a_grant_whose_live_push_never_returns_holds_up_neither_the_sink_nor_another_grants_live_push()
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var b = await world.GrantAsync("b");
         var sessionA = await world.LiveAsync(a);
@@ -57,59 +49,21 @@ public sealed class LivePushAdv4Tests
 
         // B: stored, handed over and pushed live by a free worker while A's push is still parked.
         await world.ForwardAsync(b.Recipient, 100).WaitAsync(Wait);
-        await MessagePickupLive.UntilAsync(() => Task.FromResult(Deliveries(sessionB).Count == 1), "B is pushed live while A's push is parked");
+        await MessagePickupLive.UntilAsync(() => Task.FromResult(LivePushWorld.Deliveries(sessionB).Count == 1), "B is pushed live while A's push is parked");
 
         world.Fixture.ForwardOutcomeLog.Should().HaveCount(21).And.OnlyContain(o => o == ForwardOutcomes.Queued);
         // L-020 (ADV-4 D1): A's share of the backlog is now its queue quota, so none of its twenty is refused.
         world.Fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(0, "every stored message of A keeps its job");
         world.Fixture.Pushes(PushOutcomes.PushedLive).Should().Be(1);
         (await world.StatusAsync(a.Peer)).Should().Be(20, "every forward for A is stored");
-        Deliveries(sessionA).Should().BeEmpty();
+        LivePushWorld.Deliveries(sessionA).Should().BeEmpty();
         never.Task.IsCompleted.Should().BeFalse("all of this happened with A's push still parked");
-    }
-
-    [Fact]
-    public async Task Isolation_with_direct_push_on_a_stalled_endpoint_holds_up_neither_a_live_push_nor_another_direct_push()
-    {
-        var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var never = new TaskCompletionSource<TransportResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var world = await World.StartAsync(
-            o => o.DirectPush = true,
-            send: (request, _) =>
-            {
-                if (request.Endpoint.Host.StartsWith("a.", StringComparison.Ordinal))
-                {
-                    parked.TrySetResult();
-                    return never.Task; // A's endpoint never answers and ignores the token
-                }
-                return Task.FromResult(new TransportResult(true, 202));
-            });
-        var a = await world.GrantAsync("a");
-        var b = await world.GrantAsync("b");
-        var c = await world.GrantAsync("c");
-        var sessionB = await world.LiveAsync(b);
-
-        await world.ForwardAsync(a.Recipient, 1).WaitAsync(Wait);
-        await parked.Task.WaitAsync(Wait);
-        await world.ForwardAsync(b.Recipient, 2).WaitAsync(Wait);
-        await world.ForwardAsync(c.Recipient, 3).WaitAsync(Wait);
-
-        await MessagePickupLive.UntilAsync(() => Task.FromResult(world.Fixture.Pushes(PushOutcomes.PushedLive) == 1 && world.Fixture.Pushes(PushOutcomes.Pushed) == 1), "B is pushed live and C directly while A's endpoint hangs");
-        Deliveries(sessionB).Should().ContainSingle();
-        world.Fixture.Router.Requests.Select(r => r.Endpoint.Host).Should().BeEquivalentTo(new[] { "a.adv4.example", "c.adv4.example" });
-        (await world.StatusAsync(c.Peer)).Should().Be(0, "C's pushed copy was removed");
-        (await world.PickupAsync(a.Peer)).Should().BeEmpty("A's record is under the direct push's lease");
-        world.Fixture.Store.MessageCount.Should().Be(2, "A's (leased to its push) and B's (leased to its session)");
     }
 
     [Fact]
     public async Task With_every_worker_held_by_a_stalled_grant_another_live_recipient_is_pushed_within_one_push_timeout()
     {
-        await using var world = await World.StartAsync(o =>
-        {
-            o.DirectPush = false;
-            o.PushConcurrency = 2;
-        });
+        await using var world = await LivePushWorld.StartAsync(o => o.PushConcurrency = 2);
         var a1 = await world.GrantAsync("a1");
         var a2 = await world.GrantAsync("a2");
         var b = await world.GrantAsync("b");
@@ -133,7 +87,7 @@ public sealed class LivePushAdv4Tests
         world.Fixture.Time.Advance(PushTimeout);
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        Deliveries(sessionB).Should().ContainSingle("B waits for a worker at most one push timeout");
+        LivePushWorld.Deliveries(sessionB).Should().ContainSingle("B waits for a worker at most one push timeout");
         world.Fixture.PushOutcomeLog.Should().BeEquivalentTo(new[] { PushOutcomes.Failed, PushOutcomes.Failed, PushOutcomes.PushedLive });
     }
 
@@ -143,7 +97,7 @@ public sealed class LivePushAdv4Tests
     public async Task A_lease_the_live_push_records_after_the_sessions_close_time_release_ran_is_given_back_at_once()
     {
         var store = new ScriptedMessageStore();
-        await using var world = await World.StartAsync(o => o.DirectPush = false, services: s => s.AddSingleton<IMessageStore>(store));
+        await using var world = await LivePushWorld.StartAsync(services: s => s.AddSingleton<IMessageStore>(store));
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var inTake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -170,7 +124,7 @@ public sealed class LivePushAdv4Tests
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        Deliveries(session).Should().BeEmpty("a closed session is sent nothing");
+        LivePushWorld.Deliveries(session).Should().BeEmpty("a closed session is sent nothing");
         (await world.PickupFromAsync(store.Inner, a.Peer)).Should().ContainSingle("the lease recorded after the close-time release is given back by the push itself, not left to its timeout");
     }
 
@@ -178,7 +132,7 @@ public sealed class LivePushAdv4Tests
     public async Task A_pickup_that_takes_the_record_while_the_live_push_is_inside_its_take_wins_and_nothing_is_sent_twice()
     {
         var store = new ScriptedMessageStore();
-        await using var world = await World.StartAsync(o => o.DirectPush = false, services: s => s.AddSingleton<IMessageStore>(store));
+        await using var world = await LivePushWorld.StartAsync(services: s => s.AddSingleton<IMessageStore>(store));
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var inTake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -204,14 +158,14 @@ public sealed class LivePushAdv4Tests
 
         // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
         world.Fixture.PushOutcomeLog.Should().BeEmpty();
-        Deliveries(session).Should().BeEmpty();
+        LivePushWorld.Deliveries(session).Should().BeEmpty();
         (await world.PickupFromAsync(store.Inner, a.Peer)).Should().BeEmpty("it stays with the pickup that took it");
     }
 
     [Fact]
     public async Task An_acknowledgement_that_lands_while_the_live_push_is_in_flight_leaves_nothing_behind_and_one_outcome()
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -236,7 +190,7 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task An_abandoned_live_send_that_still_goes_out_is_not_delivered_again_within_its_lease_and_returns_to_pickup_when_the_lease_ends()
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -254,7 +208,7 @@ public sealed class LivePushAdv4Tests
         world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
 
         release.SetResult(ReturnRouteSendResult.Sent);
-        await MessagePickupLive.UntilAsync(() => Task.FromResult(Deliveries(session).Count == 1), "the abandoned send went out");
+        await MessagePickupLive.UntilAsync(() => Task.FromResult(LivePushWorld.Deliveries(session).Count == 1), "the abandoned send went out");
         (await world.PickupAsync(a.Peer)).Should().BeEmpty("the session that was sent it holds it: no second copy within the lease");
         world.Fixture.Time.Advance(LeaseTimeout);
         (await world.PickupAsync(a.Peer)).Should().ContainSingle("unacknowledged, it returns to pickup when the lease ends (at-least-once)");
@@ -263,7 +217,7 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task An_abandoned_live_send_that_reports_sent_after_its_session_closed_gives_the_lease_back()
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -291,7 +245,7 @@ public sealed class LivePushAdv4Tests
     [InlineData(true)]
     public async Task A_job_waiting_while_its_grant_is_revoked_and_purged_sends_nothing_even_when_the_peer_is_granted_again(bool regrant)
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -317,7 +271,7 @@ public sealed class LivePushAdv4Tests
 
         // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
         world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        Deliveries(session).Should().BeEmpty("a purged record is never pushed, not even to the same peer granted again");
+        LivePushWorld.Deliveries(session).Should().BeEmpty("a purged record is never pushed, not even to the same peer granted again");
         world.Fixture.Store.MessageCount.Should().Be(0);
     }
 
@@ -331,11 +285,7 @@ public sealed class LivePushAdv4Tests
         // operation until its work has actually ended (D-3), so at most one send is ever pending,
         // while a healthy recipient keeps getting its pushes and the stalled one its pickups.
         const int Cycles = 8;
-        await using var world = await World.StartAsync(o =>
-        {
-            o.DirectPush = false;
-            o.PushConcurrency = 1;
-        });
+        await using var world = await LivePushWorld.StartAsync(o => o.PushConcurrency = 1);
         var a = await world.GrantAsync("a");
         var b = await world.GrantAsync("b");
         var healthy = await world.LiveAsync(b);
@@ -367,8 +317,8 @@ public sealed class LivePushAdv4Tests
 
             // A healthy recipient still gets its live push, and acknowledges it.
             await world.ForwardAsync(b.Recipient, (byte)(100 + cycle));
-            await MessagePickupLive.UntilAsync(() => Task.FromResult(Deliveries(healthy).Count == cycle + 1), "the healthy recipient's push goes out");
-            await world.Fixture.Queue.RemoveAsync(b.Peer, Deliveries(healthy)[^1].Id);
+            await MessagePickupLive.UntilAsync(() => Task.FromResult(LivePushWorld.Deliveries(healthy).Count == cycle + 1), "the healthy recipient's push goes out");
+            await world.Fixture.Queue.RemoveAsync(b.Peer, LivePushWorld.Deliveries(healthy)[^1].Id);
 
             // The stalled recipient still picks up and acknowledges what it was sent.
             var picked = new List<string>();
@@ -383,7 +333,7 @@ public sealed class LivePushAdv4Tests
 
         Volatile.Read(ref maxPending).Should().Be(1, "one operation per grant until its work has ended: the abandoned send is never joined by another");
         world.Fixture.Dispatcher.Unsettled.Should().Be(1, "and the dispatcher still counts it");
-        Deliveries(healthy).Should().HaveCount(Cycles);
+        LivePushWorld.Deliveries(healthy).Should().HaveCount(Cycles);
         (await world.StatusAsync(a.Peer)).Should().Be(0, "every message of the stalled recipient was picked up and acknowledged");
     }
 
@@ -395,7 +345,7 @@ public sealed class LivePushAdv4Tests
         // L-056/L-058: the slowest honest client. The live session takes every push and never
         // acknowledges or closes (a backgrounded app); the recipient polls on another connection
         // once per lease period plus a second, while a message arrives before every poll.
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var fetched = new List<string>();
@@ -411,8 +361,8 @@ public sealed class LivePushAdv4Tests
             fetched.AddRange(ids);
         }
 
-        Deliveries(session).Should().HaveCount(5, "each message was pushed once");
-        fetched.Should().BeEquivalentTo(Deliveries(session).Select(d => d.Id), "each lease ended before the next poll, so every poll got what was pushed before it");
+        LivePushWorld.Deliveries(session).Should().HaveCount(5, "each message was pushed once");
+        fetched.Should().BeEquivalentTo(LivePushWorld.Deliveries(session).Select(d => d.Id), "each lease ended before the next poll, so every poll got what was pushed before it");
         world.Fixture.Store.MessageCount.Should().Be(0);
     }
 
@@ -421,7 +371,7 @@ public sealed class LivePushAdv4Tests
     {
         // L-020 (ADV-4 D1): this test asserted the defect — sixteen pushed, four refused by the
         // 16-job share and left for pickup. The share is now the queue quota: all twenty are pushed.
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -440,7 +390,7 @@ public sealed class LivePushAdv4Tests
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         // Order: the pushes go out in the order the forwards arrived, all twenty.
-        Deliveries(session).Select(d => d.Payload.Span[0]).Should().Equal(Enumerable.Range(0, 20).Select(i => Seed(i)));
+        LivePushWorld.Deliveries(session).Select(d => d.Payload.Span[0]).Should().Equal(Enumerable.Range(0, 20).Select(i => LivePushWorld.Seed(i)));
         // Accounting: one forward outcome and one push outcome per message.
         world.Fixture.ForwardOutcomeLog.Should().HaveCount(20).And.OnlyContain(o => o == ForwardOutcomes.Queued);
         world.Fixture.Pushes(PushOutcomes.PushedLive).Should().Be(20);
@@ -453,8 +403,8 @@ public sealed class LivePushAdv4Tests
         // A later message is pushed live again once the line drained.
         await world.ForwardAsync(a.Recipient, 50);
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
-        Deliveries(session).Should().HaveCount(21);
-        Deliveries(session)[^1].Payload.Span[0].Should().Be(Seed(50));
+        LivePushWorld.Deliveries(session).Should().HaveCount(21);
+        LivePushWorld.Deliveries(session)[^1].Payload.Span[0].Should().Be(LivePushWorld.Seed(50));
     }
 
     [Fact]
@@ -463,7 +413,7 @@ public sealed class LivePushAdv4Tests
         // Pickup 3.0: live mode is "delivering newly arriving messages directly to a connected
         // recipient"; a recipient in its mode 2 retrieves the queue once, then turns live mode on and
         // never polls again. Before the redesign (bbb1fee) the sink pushed every due message inline.
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -481,13 +431,13 @@ public sealed class LivePushAdv4Tests
         open.SetResult();
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        Deliveries(session).Should().HaveCount(20, "all twenty arrived while the session had live delivery on");
+        LivePushWorld.Deliveries(session).Should().HaveCount(20, "all twenty arrived while the session had live delivery on");
     }
 
     [Fact]
     public async Task The_push_backlog_retains_bounded_values_for_a_forward_with_a_hostile_id()
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -517,7 +467,7 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task A_host_live_delivery_concurrent_with_the_workers_live_push_to_the_same_peer_delivers_each_message_once()
     {
-        await using var world = await World.StartAsync(o => o.DirectPush = false);
+        await using var world = await LivePushWorld.StartAsync();
         var a = await world.GrantAsync("a");
         var session = await world.LiveAsync(a);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -533,13 +483,13 @@ public sealed class LivePushAdv4Tests
 
         await world.ForwardAsync(a.Recipient, 1);
         await entered.Task.WaitAsync(Wait);
-        var host = await world.Fixture.Queue.DeliverAsync(a.Recipient, PushFixture.Payload(64, Seed(2)));
+        var host = await world.Fixture.Queue.DeliverAsync(a.Recipient, PushFixture.Payload(64, LivePushWorld.Seed(2)));
         host.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive, "the host's own live delivery is not held up by the worker's push");
         release.SetResult(ReturnRouteSendResult.Sent);
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.PushedLive);
-        Deliveries(session).Select(d => d.Id).Should().OnlyHaveUniqueItems().And.HaveCount(2);
+        LivePushWorld.Deliveries(session).Select(d => d.Id).Should().OnlyHaveUniqueItems().And.HaveCount(2);
         (await world.PickupAsync(a.Peer)).Should().BeEmpty("both are leased to the session that was sent them");
         world.Fixture.Store.MessageCount.Should().Be(2);
     }
@@ -547,7 +497,7 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task Disposing_the_container_while_a_live_push_ignores_its_cancellation_returns_promptly_and_loses_nothing()
     {
-        var world = await World.StartAsync(o => o.DirectPush = false);
+        var world = await LivePushWorld.StartAsync();
         try
         {
             var a = await world.GrantAsync("a");
@@ -589,119 +539,6 @@ public sealed class LivePushAdv4Tests
         finally
         {
             await world.DisposeAsync();
-        }
-    }
-
-    // ---- support --------------------------------------------------------------------------------------
-
-    private static byte Seed(int i) => (byte)(7 + i);
-
-    private static IReadOnlyList<DeliveredMessage> Deliveries(LiveTestSession session)
-        => session.Sent.SelectMany(m => MessagePickup.TryParseDelivery(m, out var delivered, out _) ? delivered : Array.Empty<DeliveredMessage>()).ToList();
-
-    private sealed record Grant(PeerIdentity Identity, string Recipient)
-    {
-        public string Peer => Identity.Did;
-    }
-
-    /// <summary>A container (<c>AddMediator()</c>, no generic host), its routing DID with real keys, and grants minted on demand.</summary>
-    private sealed class World : IAsyncDisposable
-    {
-        private readonly ConcurrentDictionary<string, Uri> _endpoints = new(StringComparer.Ordinal);
-        private int _sessions;
-
-        private World(PipelinePeers peers, PeerIdentity mediator)
-        {
-            Peers = peers;
-            Mediator = mediator;
-        }
-
-        public PipelinePeers Peers { get; }
-        public PeerIdentity Mediator { get; }
-        public PushFixture Fixture { get; private set; } = null!;
-
-        public static async Task<World> StartAsync(
-            Action<MediatorOptions>? configure = null,
-            Func<TransportRequest, CancellationToken, Task<TransportResult>>? send = null,
-            Action<IServiceCollection>? services = null)
-        {
-            var peers = new PipelinePeers();
-            var mediator = await peers.NewAsync();
-            var world = new World(peers, mediator);
-            world.Fixture = PushFixture.Create(
-                send,
-                directory: grant => world._endpoints.TryGetValue(grant, out var endpoint) ? endpoint : null,
-                configure: configure,
-                services: services,
-                secrets: peers.Secrets,
-                mediatorDid: mediator.Did);
-            return world;
-        }
-
-        /// <summary>A new peer, enrolled, with one recipient DID; its endpoint is https://{label}.adv4.example/inbox.</summary>
-        public async Task<Grant> GrantAsync(string label)
-        {
-            var peer = await Peers.NewAsync();
-            var recipient = $"did:example:adv4-{label}-recipient";
-            await Fixture.EnrolAsync(peer.Did, recipient);
-            _endpoints[peer.Did] = new Uri($"https://{label}.adv4.example/inbox");
-            return new Grant(peer, recipient);
-        }
-
-        public async Task<LiveTestSession> LiveAsync(Grant grant)
-        {
-            Interlocked.Increment(ref _sessions);
-            var session = new LiveTestSession(grant.Peer, Mediator.Did);
-            await Fixture.GoLiveAsync(session);
-            return session;
-        }
-
-        /// <summary>What the forward pump does with a relayed forward: hand it to the mediator's sink.</summary>
-        public Task ForwardAsync(string recipient, byte index, string? forwardId = null)
-            => Fixture.Sink.AcceptAsync(
-                new ForwardProcessingResult(recipient, PushFixture.Payload(64, Seed(index)), null, Delay: null),
-                Context(forwardId ?? $"fwd-adv4-{index}"),
-                CancellationToken.None);
-
-        /// <summary>The ids a delivery-request on another connection would be handed now (under a lease of its own).</summary>
-        public Task<IReadOnlyList<string>> PickupAsync(string peer) => PickupFromAsync(Fixture.Store, peer);
-
-        public async Task<IReadOnlyList<string>> PickupFromAsync(IMessageStore store, string peer)
-        {
-            var now = Fixture.Time.GetUtcNow();
-            var leased = await store.LeaseAsync(new MessageLeaseRequest(peer, null, 32, int.MaxValue, now, new MessageLease("adv4-pickup-" + Guid.NewGuid().ToString("N"), now + TimeSpan.FromMinutes(1))), CancellationToken.None);
-            return leased.Select(m => m.Id).ToList();
-        }
-
-        public async Task<int> StatusAsync(string peer)
-            => (await Fixture.Services.GetRequiredService<IMessageStore>().GetStatusAsync(peer, null, Fixture.Time.GetUtcNow(), CancellationToken.None)).MessageCount;
-
-        private ProtocolContext Context(string forwardId)
-            => new(
-                new UnpackResult(
-                    new Message { Id = forwardId, Type = ForwardConstants.ForwardTypeUri },
-                    new[] { EnvelopeKind.Encrypted, EnvelopeKind.Plaintext },
-                    Encrypted: true,
-                    Authenticated: false,
-                    NonRepudiation: false,
-                    AnonymousSender: true,
-                    ContentEncryption: null,
-                    KeyWrap: null,
-                    SignatureAlgorithm: null,
-                    SignerKid: null,
-                    SenderKid: null,
-                    RecipientKid: Mediator.Did + "#key-1",
-                    AllRecipientKids: new[] { Mediator.Did + "#key-1" },
-                    FromPrior: null),
-                new DidComm.Threading.ThreadState(forwardId),
-                Client: null,
-                Fixture.Options,
-                new InMemoryThreadStateStore());
-
-        public async ValueTask DisposeAsync()
-        {
-            await Fixture.DisposeAsync();
-            await Peers.DisposeAsync();
         }
     }
 }

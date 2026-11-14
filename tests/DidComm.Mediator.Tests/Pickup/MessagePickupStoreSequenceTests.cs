@@ -47,8 +47,7 @@ public sealed class MessagePickupStoreSequenceTests
     [Fact]
     public async Task AfterSequence_selects_only_the_records_that_arrived_after_it_by_arrival_not_ReceivedAt_and_marks_no_others()
     {
-        // What the mediator's pushes ask for: the live push the records after the live-on status, the
-        // direct push the records after the last one it attempted.
+        // What the mediator's live push asks for: the records after the live-on status.
         var store = NewStore();
         await store.AddAsync(Message("first", receivedAt: T0.AddMinutes(5)));
         await store.AddAsync(Message("second", receivedAt: T0.AddMinutes(-5)));

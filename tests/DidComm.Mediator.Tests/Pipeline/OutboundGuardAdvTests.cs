@@ -6,9 +6,10 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// ADV-2 (#95): the outbound endpoint guard every direct push goes through
+/// ADV-2 (#95): the outbound endpoint guard every relay goes through
 /// (<c>DidCommClient.SendPackedAsync</c> → <see cref="OutboundEndpointGuard.Validate"/>), fed the
-/// spellings of loopback and the cloud-metadata address a recipient's endpoint could use.
+/// spellings of loopback and the cloud-metadata address a next hop's endpoint could use; tested on
+/// the guard itself. The translated forms are AD-8 (also on <c>main</c>).
 /// </summary>
 public sealed class OutboundGuardAdvTests
 {

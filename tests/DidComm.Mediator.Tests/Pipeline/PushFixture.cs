@@ -1,4 +1,3 @@
-using DidComm.Exceptions;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Mediator.Coordination;
@@ -6,7 +5,6 @@ using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
 using DidComm.Mediator.Tests.Coordination;
 using DidComm.TestSupport;
-using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,23 +13,21 @@ using System.Diagnostics.Metrics;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// A real container with <c>AddMediator()</c> and direct push on, a scripted transport router behind
-/// the real <c>DidCommClient</c>, a scripted endpoint directory, a manual clock for the push
-/// deadline, a meter factory of its own and captured logs. No network.
+/// A real container with <c>AddMediator()</c>, a manual clock for the push deadline, a meter factory
+/// of its own and captured logs. No network: pushes go over the <see cref="LiveTestSession"/>s a
+/// test registers (<see cref="GoLiveAsync"/>).
 /// </summary>
 internal sealed class PushFixture : IAsyncDisposable
 {
     public const string MediatorDid = "did:example:push-mediator";
 
-    private PushFixture(ServiceProvider services, ManualTimeProvider time, TestMeterFactory meters, HandlerLogSink logs, ScriptedTransportRouter router, ScriptedDirectory? directory)
+    private PushFixture(ServiceProvider services, ManualTimeProvider time, TestMeterFactory meters, HandlerLogSink logs)
     {
         Services = services;
         Time = time;
         Meters = meters;
         Recorder = new MeasurementRecorder(meters);
         Logs = logs;
-        Router = router;
-        Directory = directory;
     }
 
     public ServiceProvider Services { get; }
@@ -39,8 +35,6 @@ internal sealed class PushFixture : IAsyncDisposable
     public TestMeterFactory Meters { get; }
     public MeasurementRecorder Recorder { get; }
     public HandlerLogSink Logs { get; }
-    public ScriptedTransportRouter Router { get; }
-    public ScriptedDirectory? Directory { get; }
 
     public PushDispatcher Dispatcher => Services.GetRequiredService<PushDispatcher>();
     public MessagePickupQueue Queue => Services.GetRequiredService<MessagePickupQueue>();
@@ -58,20 +52,14 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <summary>Every push outcome recorded, in order.</summary>
     public IReadOnlyList<string?> PushOutcomeLog => Recorder.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
 
-    /// <param name="send">What the transport does with each push; default: accept with 202.</param>
-    /// <param name="directory">The endpoint per grant; <c>null</c> registers no directory at all.</param>
-    /// <param name="configure">More mediator settings (direct push is already on).</param>
+    /// <param name="configure">More mediator settings.</param>
     /// <param name="services">More registrations, made before <c>AddDidComm</c>.</param>
-    /// <param name="blockPrivateNetworks">The SSRF guard's switch; off by default so the scripted endpoints need no DNS.</param>
     /// <param name="didComm">More facade settings; the facade clock is already the manual clock.</param>
     /// <param name="secrets">The private keys the container holds; an empty set when not given.</param>
     /// <param name="mediatorDid">The routing DID.</param>
     public static PushFixture Create(
-        Func<TransportRequest, CancellationToken, Task<TransportResult>>? send = null,
-        Func<string, Uri?>? directory = null,
         Action<MediatorOptions>? configure = null,
         Action<IServiceCollection>? services = null,
-        bool blockPrivateNetworks = false,
         Action<DidCommOptions>? didComm = null,
         InMemorySecretsResolver? secrets = null,
         string mediatorDid = MediatorDid)
@@ -79,17 +67,12 @@ internal sealed class PushFixture : IAsyncDisposable
         var time = new ManualTimeProvider();
         var meters = new TestMeterFactory();
         var logs = new HandlerLogSink();
-        var router = new ScriptedTransportRouter(send ?? ((_, _) => Task.FromResult(new TransportResult(true, 202))));
-        var scripted = directory is null ? null : new ScriptedDirectory(directory);
 
         var collection = new ServiceCollection();
         collection.AddSingleton(logs);
         collection.AddSingleton(typeof(ILogger<>), typeof(HandlerCapturingLogger<>));
         collection.AddSingleton<TimeProvider>(time);
         collection.AddSingleton<IMeterFactory>(meters);
-        collection.AddSingleton<ITransportRouter>(router);
-        if (scripted is not null)
-            collection.AddSingleton<IRecipientEndpointDirectory>(scripted);
         services?.Invoke(collection);
         collection.AddDidComm(b =>
         {
@@ -97,18 +80,16 @@ internal sealed class PushFixture : IAsyncDisposable
             b.UseSecretsResolver(secrets ?? new InMemorySecretsResolver());
             b.Configure(o =>
             {
-                o.OutboundEndpointPolicy.BlockPrivateNetworks = blockPrivateNetworks;
                 o.Clock = time.GetUtcNow;
                 didComm?.Invoke(o);
             });
             b.AddMediator(o =>
             {
                 o.CoordinateMediation.RoutingDids.Add(mediatorDid);
-                o.DirectPush = true;
                 configure?.Invoke(o);
             });
         });
-        return new PushFixture(collection.BuildServiceProvider(), time, meters, logs, router, scripted);
+        return new PushFixture(collection.BuildServiceProvider(), time, meters, logs);
     }
 
     /// <summary>Enrol <paramref name="peerDid"/> (straight through the store) and register <paramref name="recipientDids"/> under its grant.</summary>
@@ -157,11 +138,8 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <summary>A second dispatcher over this container's stores; the caller disposes it.</summary>
     public PushDispatcher NewDispatcher()
         => new(
-            Services,
             Services.GetRequiredService<IOptions<MediatorOptions>>(),
             Queue,
-            Services.GetRequiredService<IMessageStore>(),
-            Services.GetRequiredService<IOptions<DidCommOptions>>(),
             Services.GetRequiredService<MediatorMetrics>(),
             Services.GetService<ILogger<PushDispatcher>>(),
             Time);
@@ -174,10 +152,6 @@ internal sealed class PushFixture : IAsyncDisposable
         return bytes;
     }
 
-    /// <summary>A transport failure whose text names the endpoint, as the HTTP transport's does.</summary>
-    public static TransportException TransportFailure(TransportRequest request, int status)
-        => new($"POST {request.Endpoint} failed with {status}.", status, request.Endpoint.Scheme);
-
     public async ValueTask DisposeAsync()
     {
         Recorder.Dispose();
@@ -189,7 +163,7 @@ internal sealed class PushFixture : IAsyncDisposable
 /// <summary>A message the queue holds: its grant (what a push wakes) and its record id.</summary>
 internal sealed record StoredMessage(string GrantPeerDid, string RecipientDid, string MessageId);
 
-/// <summary>A gate a scripted transport waits on: it records arrivals and lets the test release them.</summary>
+/// <summary>A gate a scripted push waits on: it records arrivals and lets the test release them.</summary>
 internal sealed class PushGate
 {
     private readonly TaskCompletionSource _open = new(TaskCreationOptions.RunContinuationsAsynchronously);

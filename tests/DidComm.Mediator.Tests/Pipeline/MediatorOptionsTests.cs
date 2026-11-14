@@ -18,7 +18,6 @@ public sealed class MediatorOptionsTests
         options.RewrapMode.Should().Be(RewrapMode.PassThrough);
         options.MaxForwardDelay.Should().Be(TimeSpan.FromHours(1));
         options.PurgeInterval.Should().Be(TimeSpan.FromMinutes(5));
-        options.DirectPush.Should().BeFalse();
         options.PushConcurrency.Should().Be(4);
         options.PushTimeout.Should().Be(TimeSpan.FromSeconds(30));
         options.Pickup.MaxMessageAge.Should().Be(TimeSpan.FromDays(30));
@@ -161,7 +160,6 @@ public sealed class MediatorOptionsTests
             RewrapMode = RewrapMode.ReanoncryptToNext,
             MaxForwardDelay = TimeSpan.FromMinutes(3),
             PurgeInterval = TimeSpan.FromSeconds(7),
-            DirectPush = true,
             PushConcurrency = 9,
             PushTimeout = TimeSpan.FromSeconds(11),
         };
@@ -179,7 +177,6 @@ public sealed class MediatorOptionsTests
         effective.RewrapMode.Should().Be(RewrapMode.ReanoncryptToNext);
         effective.MaxForwardDelay.Should().Be(TimeSpan.FromMinutes(3));
         effective.PurgeInterval.Should().Be(TimeSpan.FromSeconds(7));
-        effective.DirectPush.Should().BeTrue();
         effective.PushConcurrency.Should().Be(9);
         effective.PushTimeout.Should().Be(TimeSpan.FromSeconds(11));
         effective.Invoking(o => o.Validate()).Should().Throw<ArgumentException>().Which.ParamName.Should().Be("Pickup.MaxMessageAge",

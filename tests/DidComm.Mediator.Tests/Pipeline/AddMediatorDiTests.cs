@@ -205,7 +205,8 @@ public sealed class AddMediatorDiTests
             b.AddMediator(o => o.CoordinateMediation.RoutingDids.Add(Mediator1));
         });
 
-        act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("IForwardSink");
+        act.Should().Throw<InvalidOperationException>().Which.Message.Should().Contain("IForwardSink")
+            .And.Contain("AddRoutingMediator()", "a host that pushes forwards itself keeps its own sink with the routing mediator");
     }
 
     [Fact]
@@ -426,30 +427,5 @@ public sealed class AddMediatorDiTests
         });
 
         sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<MediatorHostedService>().Should().ContainSingle();
-    }
-
-    [Fact]
-    public async Task With_direct_push_on_the_graph_resolves_and_a_directory_taking_the_dispatcher_is_not_built_early()
-    {
-        await using var sp = Build(
-            b => b.AddMediator(o =>
-            {
-                o.CoordinateMediation.RoutingDids.Add(Mediator1);
-                o.DirectPush = true;
-            }),
-            before: s => s.AddSingleton<IRecipientEndpointDirectory, DirectoryTakingTheDispatcher>());
-
-        await Task.Run(() =>
-        {
-            sp.GetRequiredService<ProtocolDispatcher>();
-            sp.GetRequiredService<IForwardSink>();
-        }).WaitAsync(Timeout);
-
-        await Task.Run(() => sp.GetRequiredService<IRecipientEndpointDirectory>()).WaitAsync(Timeout);
-    }
-
-    private sealed class DirectoryTakingTheDispatcher(ProtocolDispatcher dispatcher) : IRecipientEndpointDirectory
-    {
-        public Uri? Find(string grantPeerDid) => dispatcher is null ? null : null;
     }
 }

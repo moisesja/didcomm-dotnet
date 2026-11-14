@@ -12,7 +12,6 @@ using DidComm.Protocols;
 using DidComm.Protocols.Routing;
 using DidComm.Samples.Shared;
 using DidComm.Threading;
-using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -24,14 +23,12 @@ namespace DidComm.Mediator.Tests.Pipeline;
 /// ADV-5 (#95, PR #109 review round 2): a break-it pass on the redesigned push dispatcher and its
 /// invariants D-1..D-5. Every test drives the real sink (as the forward pump calls it) or the real
 /// dispatcher in a container built by <c>AddMediator()</c> (no generic host), with a manual clock
-/// for the deadlines and a rendezvous for each interleaving (L-044). Tests marked <c>Skip</c> are
-/// confirmed defects: each fails when the skip is removed.
+/// for the deadlines and a rendezvous for each interleaving (L-044); every push is a live push.
+/// Tests marked <c>Skip</c> are confirmed defects: each fails when the skip is removed.
 /// </summary>
 public sealed class PushDispatcherAdv5Tests
 {
-    private const string Peer = "did:example:adv5-peer";
     private const string Recipient = "did:example:adv5-recipient";
-    private static readonly Uri Inbox = new("https://adv5-inbox.example/inbox");
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PushTimeout = new MediatorOptions().PushTimeout;
     private static readonly int PerRun = new MessagePickupOptions().MaxDeliveryBatch;
@@ -48,7 +45,6 @@ public sealed class PushDispatcherAdv5Tests
         var peer = await peers.NewAsync();
         var clock = new SteppableClock(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
         await using var fixture = PushFixture.Create(
-            configure: o => o.DirectPush = false,
             didComm: o => o.Clock = clock.Now,
             secrets: peers.Secrets,
             mediatorDid: mediator.Did);
@@ -82,7 +78,6 @@ public sealed class PushDispatcherAdv5Tests
         var peer = await peers.NewAsync();
         var mediation = new ScriptedMediationStore();
         await using var fixture = PushFixture.Create(
-            configure: o => o.DirectPush = false,
             services: s => s.AddSingleton<IMediationStore>(mediation),
             secrets: peers.Secrets,
             mediatorDid: mediator.Did);
@@ -128,7 +123,6 @@ public sealed class PushDispatcherAdv5Tests
         var store = new ScriptedMessageStore();
         store.OnLease = (request, ct) => store.Inner.LeaseAsync(request with { AfterSequence = null }, ct);
         await using var fixture = PushFixture.Create(
-            configure: o => o.DirectPush = false,
             services: s => s.AddSingleton<IMessageStore>(store),
             secrets: peers.Secrets,
             mediatorDid: mediator.Did);
@@ -149,73 +143,6 @@ public sealed class PushDispatcherAdv5Tests
         free.Select(r => r.Id).Should().Contain(before.MessageId).And.HaveCount(2, "the refused take gave its lease back: both wait for pickup");
     }
 
-    // ---- direct push: what a refused record does to the grant's later messages ------------------------
-
-    // ADV-5 DEFECT 3 (P2), fixed in round 8: the direct step takes only records after the grant's
-    // cursor, which passes every record it attempted, so a refused one blocks nothing.
-    [Fact]
-    public async Task Defect3_a_message_the_endpoint_refuses_does_not_keep_the_grants_later_messages_from_being_pushed()
-    {
-        const int PoisonSize = 4096;
-        await using var fixture = PushFixture.Create(
-            (request, _) => Task.FromResult(new TransportResult(true, request.Payload.Length == PoisonSize ? 400 : 202)),
-            directory: _ => Inbox);
-        await fixture.EnrolAsync(Peer, Recipient);
-
-        await ForwardAsync(fixture, PushFixture.MediatorDid, Recipient, PushFixture.Payload(PoisonSize, 1), "fwd-adv5-poison");
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        for (var i = 0; i < 5; i++)
-        {
-            await ForwardAsync(fixture, PushFixture.MediatorDid, Recipient, PushFixture.Payload(64, (byte)(10 + i)), $"fwd-adv5-{i}");
-            await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        }
-
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(5, "each message the endpoint accepts is pushed");
-        fixture.Store.MessageCount.Should().Be(1, "only the refused one waits for pickup");
-    }
-
-    // ADV-5 DEFECT 4 (P2), fixed in round 8: one direct attempt per message (the cursor), so a
-    // refused message is never sent again with the grant's later ones.
-    [Fact]
-    public async Task Defect4_a_refused_message_is_not_sent_again_at_full_size_for_every_later_forward()
-    {
-        await using var fixture = PushFixture.Create((_, _) => Task.FromResult(new TransportResult(true, 503)), directory: _ => Inbox);
-        await fixture.EnrolAsync(Peer, Recipient);
-        var large = fixture.Queue.MaxAdmissiblePayloadBytes;
-
-        await ForwardAsync(fixture, PushFixture.MediatorDid, Recipient, PushFixture.Payload(large, 1), "fwd-adv5-large");
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        for (var i = 0; i < 20; i++)
-        {
-            await ForwardAsync(fixture, PushFixture.MediatorDid, Recipient, PushFixture.Payload(64, (byte)(10 + i)), $"fwd-adv5-tiny-{i}");
-            await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        }
-
-        var sentBytes = fixture.Router.Requests.Sum(r => (long)r.Payload.Length);
-        var forwardedBytes = large + 20L * 64;
-        fixture.Router.Requests.Count(r => r.Payload.Length == large).Should().Be(1, "direct push makes one attempt per message (MediatorOptions.DirectPush, PRD FR-PICK-09)");
-        sentBytes.Should().BeLessThanOrEqualTo(forwardedBytes, "a forward never costs the mediator more egress than what was forwarded");
-    }
-
-    [Fact]
-    public async Task A_failing_endpoint_costs_at_most_one_request_per_wake_and_a_fast_failure_starts_no_cooldown()
-    {
-        await using var fixture = PushFixture.Create((_, _) => Task.FromResult(new TransportResult(true, 503)), directory: _ => Inbox);
-        await fixture.EnrolAsync(Peer, Recipient);
-
-        for (var i = 0; i < 12; i++)
-        {
-            await ForwardAsync(fixture, PushFixture.MediatorDid, Recipient, PushFixture.Payload(64, (byte)i), $"fwd-adv5-fail-{i}");
-            await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        }
-
-        fixture.Router.Requests.Should().HaveCount(12, "one operation per wake, ended by its first failure");
-        // L-020 (round 8): each operation takes the record after the cursor, not the oldest again.
-        fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().Equal(Enumerable.Range(0, 12).Select(i => PushFixture.Payload(64, (byte)i)), (a, b) => a.SequenceEqual(b), "each message gets one attempt, in the order they were stored");
-        fixture.Pushes(PushOutcomes.SkippedCooldown).Should().Be(0);
-        fixture.Store.MessageCount.Should().Be(12);
-    }
-
     // ---- D-3: one operation per grant ------------------------------------------------------------------
 
     // ADV-5 DEFECT 5 (P3), fixed in round 8: PruneLocked removes an entry only when the map holds
@@ -225,67 +152,62 @@ public sealed class PushDispatcherAdv5Tests
     {
         MessagePickupLive.RaiseThreadPoolFloor(2);
         var logger = new SaturationParkingLogger();
-        var script = new HostScript("a", "b", "c", "h");
-        await using var fixture = PushFixture.Create(
-            script.SendAsync,
-            directory: peer => new Uri($"https://{Label(peer)}.adv5.example/inbox"),
-            configure: o => o.PushConcurrency = 2,
-            services: s => s.AddSingleton<ILogger<PushDispatcher>>(logger));
-        foreach (var label in new[] { "a", "b", "c", "h", "k", "g" })
-            await fixture.EnrolAsync(PeerOf(label), RecipientOf(label));
-        var d = fixture.Dispatcher;
+        var script = new LiveScript("a", "b", "c", "h");
+        await using var world = await LivePushWorld.StartAsync(o => o.PushConcurrency = 2, services: s => s.AddSingleton<ILogger<PushDispatcher>>(logger));
+        var grants = await LiveGrantsAsync(world, script, "a", "b", "c", "h", "k", "g");
+        var d = world.Fixture.Dispatcher;
         d.MaxUnsettled.Should().Be(4);
         try
         {
-            // Three pushes whose endpoints never answer and ignore their token: abandoned at the deadline.
-            await StoreAndWakeAsync(fixture, "a");
-            await StoreAndWakeAsync(fixture, "b");
+            // Three pushes whose sessions never take them and ignore their token: abandoned at the deadline.
+            await StoreAndWakeAsync(world, grants, "a");
+            await StoreAndWakeAsync(world, grants, "b");
             await script.Arrived("a").WaitAsync(Wait);
             await script.Arrived("b").WaitAsync(Wait);
-            fixture.Time.Advance(PushTimeout);
+            world.Fixture.Time.Advance(PushTimeout);
             await d.WaitForIdleAsync(Wait);
-            await StoreAndWakeAsync(fixture, "c");
+            await StoreAndWakeAsync(world, grants, "c");
             await script.Arrived("c").WaitAsync(Wait);
-            fixture.Time.Advance(PushTimeout);
+            world.Fixture.Time.Advance(PushTimeout);
             await d.WaitForIdleAsync(Wait);
             d.Unsettled.Should().Be(3);
 
             // H holds one worker: the bound is reached.
-            await StoreAndWakeAsync(fixture, "h");
+            await StoreAndWakeAsync(world, grants, "h");
             await script.Arrived("h").WaitAsync(Wait);
             d.Unsettled.Should().Be(4);
 
             // G's wake meets the bound; the worker that took it is parked in its log line, holding G's entry.
             logger.Armed = true;
-            await StoreAndWakeAsync(fixture, "g");
+            await StoreAndWakeAsync(world, grants, "g");
             await logger.Parked.Task.WaitAsync(Wait);
 
             // H ends; the free worker serves G's next wake on that same entry, whose end prunes it.
-            script.Release("h", new TransportResult(true, 202));
+            script.Release("h", ReturnRouteSendResult.Sent);
             await MessagePickupLive.UntilAsync(() => d.Unsettled == 3, "H settled");
-            d.Wake(PeerOf("g")).Should().BeTrue();
+            d.Wake(grants["g"].Peer).Should().BeTrue();
             await MessagePickupLive.UntilAsync(() => script.Calls("g") == 1 && d.Unsettled == 3 && d.GrantEntries == 3, "G's first operation pushed and settled; only A, B and C (cooling) keep entries");
 
-            // G again: a new entry, its push parked (the endpoint ignores its token).
+            // G again: a new entry, its push parked (the session ignores its token).
             script.ParkNext("g");
-            await StoreAndWakeAsync(fixture, "g");
+            await StoreAndWakeAsync(world, grants, "g");
             await script.Arrived("g").WaitAsync(Wait);
             d.Unsettled.Should().Be(4);
 
             // One abandoned push ends (room for one operation), then the parked worker finishes its skip.
-            script.Release("a", new TransportResult(true, 500));
+            script.Release("a", ReturnRouteSendResult.NotSent);
             await MessagePickupLive.UntilAsync(() => d.Unsettled == 3, "A's abandoned push settled");
             logger.Release.Set();
             // The only free worker is the one that was parked: K's push shows it has finished the skip.
-            await StoreAndWakeAsync(fixture, "k");
+            await StoreAndWakeAsync(world, grants, "k");
             await MessagePickupLive.UntilAsync(() => script.Calls("k") == 1, "K pushed by the worker that was parked");
 
             // A third message for G while G's operation is still in flight, then K again, served after it.
-            await StoreAndWakeAsync(fixture, "g");
-            await StoreAndWakeAsync(fixture, "k");
+            await StoreAndWakeAsync(world, grants, "g");
+            await StoreAndWakeAsync(world, grants, "k");
             await MessagePickupLive.UntilAsync(() => script.Calls("k") == 2, "K's second push, queued behind G's wake-up");
 
-            script.Release("g", new TransportResult(true, 202));
+            script.Release("g", ReturnRouteSendResult.Sent);
             await d.WaitForIdleAsync(Wait);
 
             script.MaxInFlight("g").Should().Be(1, "a grant has at most one operation at a time (D-3; MediatorOptions.PushConcurrency: at most one push in flight per grant)");
@@ -301,34 +223,33 @@ public sealed class PushDispatcherAdv5Tests
     [Fact]
     public async Task A_revoked_and_re_granted_peer_gets_no_second_operation_while_its_abandoned_push_runs()
     {
-        var script = new HostScript();
-        await using var fixture = PushFixture.Create(script.SendAsync, directory: _ => new Uri("https://g.adv5.example/inbox"));
-        await fixture.EnrolAsync(Peer, Recipient);
-        var first = await fixture.StoreAsync(Recipient, PushFixture.Payload(64, 1));
+        var script = new LiveScript();
+        await using var world = await LivePushWorld.StartAsync();
+        var grants = await LiveGrantsAsync(world, script, "g");
+        var (grant, session) = (grants["g"], script.Session("g"));
+        var fixture = world.Fixture;
+        await world.StoreAsync(grant, 1);
         script.ParkNext("g");
 
-        fixture.Dispatcher.Wake(Peer).Should().BeTrue();
+        fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue();
         await script.Arrived("g").WaitAsync(Wait);
         fixture.Time.Advance(PushTimeout);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.Dispatcher.Unsettled.Should().Be(1);
 
-        (await fixture.Queue.RevokeAndPurgeAsync(Peer)).Purged.Should().Be(1);
-        await fixture.EnrolAsync(Peer, Recipient);
+        (await fixture.Queue.RevokeAndPurgeAsync(grant.Peer)).Purged.Should().Be(1);
+        await fixture.EnrolAsync(grant.Peer, grant.Recipient);
         fixture.Time.Advance(PushTimeout * PushDispatcher.CooldownPushTimeouts);
-        var second = await fixture.StoreAsync(Recipient, PushFixture.Payload(64, 2));
-        fixture.Dispatcher.Wake(Peer).Should().BeTrue("held until the abandoned push settles");
+        var second = await world.StoreAsync(grant, 2);
+        fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue("held until the abandoned push settles");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         script.Calls("g").Should().Be(1, "no second operation for the re-granted peer while the first one's send runs");
 
-        script.Release("g", new TransportResult(true, 202));
+        script.Release("g", ReturnRouteSendResult.NotSent);
         await MessagePickupLive.UntilAsync(() => script.Calls("g") == 2, "the held wake-up is served once the abandoned push settles");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.Dispatcher.Unsettled.Should().Be(0);
-        fixture.Router.Requests.Last().Payload.ToArray().Should().Equal(PushFixture.Payload(64, 2));
-        fixture.Store.MessageCount.Should().Be(0);
-        _ = first;
-        _ = second;
+        LivePushWorld.Deliveries(session).Select(m => m.Id).Should().Equal(new[] { second.MessageId }, "the purged record is never pushed; the new grant's is");
     }
 
     // ---- D-4: the bound on unsettled work, and what it costs ---------------------------------------------
@@ -339,19 +260,16 @@ public sealed class PushDispatcherAdv5Tests
         // The bound (D-4) holds; the documented residual ("a healthy recipient's push can wait up to
         // about ceil(K / W) x PushTimeout") does not: 2 x W pushes that ignore cancellation and never
         // end stop every push of every other recipient for as long as they run. Pickup still works.
-        var script = new HostScript("a", "b");
-        await using var fixture = PushFixture.Create(
-            script.SendAsync,
-            directory: peer => new Uri($"https://{Label(peer)}.adv5.example/inbox"),
-            configure: o => o.PushConcurrency = 1);
-        foreach (var label in new[] { "a", "b", "k" })
-            await fixture.EnrolAsync(PeerOf(label), RecipientOf(label));
+        var script = new LiveScript("a", "b");
+        await using var world = await LivePushWorld.StartAsync(o => o.PushConcurrency = 1);
+        var grants = await LiveGrantsAsync(world, script, "a", "b", "k");
+        var fixture = world.Fixture;
         var d = fixture.Dispatcher;
         try
         {
             foreach (var stalled in new[] { "a", "b" })
             {
-                await StoreAndWakeAsync(fixture, stalled);
+                await StoreAndWakeAsync(world, grants, stalled);
                 await script.Arrived(stalled).WaitAsync(Wait);
                 fixture.Time.Advance(PushTimeout);
                 await d.WaitForIdleAsync(Wait);
@@ -360,7 +278,7 @@ public sealed class PushDispatcherAdv5Tests
 
             for (var round = 0; round < 10; round++)
             {
-                await StoreAndWakeAsync(fixture, "k");
+                await StoreAndWakeAsync(world, grants, "k");
                 await d.WaitForIdleAsync(Wait);
                 fixture.Time.Advance(TimeSpan.FromMinutes(10));
             }
@@ -370,14 +288,14 @@ public sealed class PushDispatcherAdv5Tests
             d.Unsettled.Should().Be(2, "the bound held");
             d.GrantEntries.Should().BeLessThanOrEqualTo(2, "only the two busy grants keep an entry");
             var now = fixture.Time.GetUtcNow();
-            (await fixture.Store.LeaseAsync(new MessageLeaseRequest(PeerOf("k"), null, 32, int.MaxValue, now, new MessageLease(null, now + TimeSpan.FromMinutes(1))), CancellationToken.None))
+            (await fixture.Store.LeaseAsync(new MessageLeaseRequest(grants["k"].Peer, null, 32, int.MaxValue, now, new MessageLease(null, now + TimeSpan.FromMinutes(1))), CancellationToken.None))
                 .Should().HaveCount(10, "pickup still gets every message");
 
             // One stalled push ends: K's next wake-up is served (the pickup's lease above has run out by then).
-            script.Release("a", new TransportResult(true, 500));
+            script.Release("a", ReturnRouteSendResult.NotSent);
             await MessagePickupLive.UntilAsync(() => d.Unsettled == 1, "A settled");
             fixture.Time.Advance(TimeSpan.FromMinutes(2));
-            await StoreAndWakeAsync(fixture, "k");
+            await StoreAndWakeAsync(world, grants, "k");
             await d.WaitForIdleAsync(Wait);
             script.Calls("k").Should().BeGreaterThan(0, "pushes resume once an unsettled operation ends");
         }
@@ -390,29 +308,26 @@ public sealed class PushDispatcherAdv5Tests
     [Fact]
     public async Task A_busy_grant_yields_its_worker_after_MaxDeliveryBatch_pushes_and_another_grant_is_served_in_between()
     {
-        var script = new HostScript();
-        await using var fixture = PushFixture.Create(
-            script.SendAsync,
-            directory: peer => new Uri($"https://{Label(peer)}.adv5.example/inbox"),
-            configure: o => o.PushConcurrency = 1);
-        await fixture.EnrolAsync(PeerOf("p"), RecipientOf("p"));
-        await fixture.EnrolAsync(PeerOf("q"), RecipientOf("q"));
+        var script = new LiveScript();
+        await using var world = await LivePushWorld.StartAsync(o => o.PushConcurrency = 1);
+        var grants = await LiveGrantsAsync(world, script, "p", "q");
+        var fixture = world.Fixture;
         for (var i = 0; i < 2 * PerRun + 5; i++)
-            await fixture.StoreAsync(RecipientOf("p"), PushFixture.Payload(64, (byte)i));
-        await fixture.StoreAsync(RecipientOf("q"), PushFixture.Payload(64, 200));
+            await world.StoreAsync(grants["p"], (byte)i);
+        await world.StoreAsync(grants["q"], 200);
         script.ParkNext("p");
 
-        fixture.Dispatcher.Wake(PeerOf("p")).Should().BeTrue();
+        fixture.Dispatcher.Wake(grants["p"].Peer).Should().BeTrue();
         await script.Arrived("p").WaitAsync(Wait); // P's first push holds the only worker
-        fixture.Dispatcher.Wake(PeerOf("q")).Should().BeTrue();
-        script.Release("p", new TransportResult(true, 202));
+        fixture.Dispatcher.Wake(grants["q"].Peer).Should().BeTrue();
+        script.Release("p", ReturnRouteSendResult.Sent);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        var hosts = fixture.Router.Requests.Select(r => Label(r.Endpoint.Host)).ToList();
-        hosts.Should().HaveCount(2 * PerRun + 6);
-        hosts.IndexOf("q").Should().Be(PerRun, "Q is served as soon as P has made one run of MaxDeliveryBatch pushes");
-        fixture.Router.Requests.Where(r => r.Endpoint.Host.StartsWith("p.", StringComparison.Ordinal)).Select(r => r.Payload.ToArray()[0])
-            .Should().BeInAscendingOrder("P's messages go out in the order they were stored, across its runs");
+        var labels = script.Order.Select(o => o.Label).ToList();
+        labels.Should().HaveCount(2 * PerRun + 6);
+        labels.IndexOf("q").Should().Be(PerRun, "Q is served as soon as P has made one run of MaxDeliveryBatch pushes");
+        script.Order.Where(o => o.Label == "p").Select(o => o.First)
+            .Should().Equal(Enumerable.Range(0, 2 * PerRun + 5).Select(i => LivePushWorld.Seed(i)), "P's messages go out in the order they were stored, across its runs");
     }
 
     // ---- liveness across a cooldown ---------------------------------------------------------------------
@@ -426,7 +341,7 @@ public sealed class PushDispatcherAdv5Tests
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
         var peer = await peers.NewAsync();
-        await using var fixture = PushFixture.Create(configure: o => o.DirectPush = false, secrets: peers.Secrets, mediatorDid: mediator.Did);
+        await using var fixture = PushFixture.Create(secrets: peers.Secrets, mediatorDid: mediator.Did);
         await fixture.EnrolAsync(peer.Did, Recipient);
         var session = new LiveTestSession(peer.Did, mediator.Did);
         await fixture.GoLiveAsync(session);
@@ -469,30 +384,14 @@ public sealed class PushDispatcherAdv5Tests
     public async Task Defect6_a_backward_step_of_the_wall_clock_does_not_lengthen_a_cooldown()
     {
         WallStepClock? wall = null;
-        var calls = 0;
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var fixture = PushFixture.Create(
-            async (_, ct) =>
-            {
-                if (Interlocked.Increment(ref calls) == 1)
-                {
-                    entered.TrySetResult();
-                    await Task.Delay(Timeout.InfiniteTimeSpan, ct); // the first push reaches the deadline
-                }
-                return new TransportResult(true, 202);
-            },
-            directory: _ => Inbox,
-            services: s =>
-            {
-                var manual = (ManualTimeProvider)s.Last(x => x.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
-                wall = new WallStepClock(manual);
-                s.AddSingleton<TimeProvider>(wall);
-            });
-        await fixture.EnrolAsync(Peer, Recipient);
-        await fixture.StoreAsync(Recipient);
+        await using var world = await LivePushWorld.StartAsync(services: s => wall = StepWall(s));
+        var (grant, session) = await world.LiveGrantAsync("wall-back");
+        var entered = SlowOnce(session);
+        var fixture = world.Fixture;
+        await world.StoreAsync(grant, 1);
 
-        fixture.Dispatcher.Wake(Peer).Should().BeTrue();
-        await entered.Task.WaitAsync(Wait);
+        fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue();
+        await entered.WaitAsync(Wait);
         fixture.Time.Advance(PushTimeout);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the timed-out push settled");
@@ -500,12 +399,11 @@ public sealed class PushDispatcherAdv5Tests
 
         wall!.Step(TimeSpan.FromHours(-1)); // an NTP correction; the monotonic clock is unaffected
         fixture.Time.Advance(PushTimeout * (PushDispatcher.CooldownPushTimeouts + 1));
-        // Round 8: the timed-out message had its one direct attempt (the cursor); a new one shows the grant is served.
-        await fixture.StoreAsync(Recipient, PushFixture.Payload(64, 2));
+        await world.StoreAsync(grant, 2);
 
-        fixture.Dispatcher.Wake(Peer).Should().BeTrue("2 x PushTimeout has passed on the monotonic clock");
+        fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue("2 x PushTimeout has passed on the monotonic clock");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(1);
+        fixture.Pushes(PushOutcomes.PushedLive).Should().Be(2, "the timed-out message (given back) and the new one, oldest first");
     }
 
     [Fact]
@@ -513,48 +411,68 @@ public sealed class PushDispatcherAdv5Tests
     {
         // Round 8, with Defect6: the pause is measured on the monotonic clock in both directions.
         WallStepClock? wall = null;
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var fixture = PushFixture.Create(
-            async (_, ct) =>
-            {
-                entered.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, ct); // reaches the deadline
-                return new TransportResult(true, 202);
-            },
-            directory: _ => Inbox,
-            services: s =>
-            {
-                var manual = (ManualTimeProvider)s.Last(x => x.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
-                wall = new WallStepClock(manual);
-                s.AddSingleton<TimeProvider>(wall);
-            });
-        await fixture.EnrolAsync(Peer, Recipient);
-        await fixture.StoreAsync(Recipient);
+        await using var world = await LivePushWorld.StartAsync(services: s => wall = StepWall(s));
+        var (grant, session) = await world.LiveGrantAsync("wall-forward");
+        var entered = SlowOnce(session);
+        var fixture = world.Fixture;
+        await world.StoreAsync(grant, 1);
 
-        fixture.Dispatcher.Wake(Peer).Should().BeTrue();
-        await entered.Task.WaitAsync(Wait);
+        fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue();
+        await entered.WaitAsync(Wait);
         fixture.Time.Advance(PushTimeout);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the timed-out push settled");
 
         wall!.Step(TimeSpan.FromHours(1));
-        fixture.Dispatcher.Wake(Peer).Should().BeFalse("no time has passed on the monotonic clock: the grant is still paused");
+        fixture.Dispatcher.Wake(grant.Peer).Should().BeFalse("no time has passed on the monotonic clock: the grant is still paused");
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown);
     }
 
     // ---- support ---------------------------------------------------------------------------------------------
 
-    private static string PeerOf(string label) => $"did:example:adv5-{label}";
-
-    private static string RecipientOf(string label) => $"did:example:adv5-{label}-r";
-
-    private static string Label(string peerOrHost)
-        => peerOrHost.StartsWith("did:example:adv5-", StringComparison.Ordinal) ? peerOrHost["did:example:adv5-".Length..] : peerOrHost.Split('.')[0];
-
-    private static async Task StoreAndWakeAsync(PushFixture fixture, string label)
+    /// <summary>A live grant per label, each session's pushes answered by <paramref name="script"/>.</summary>
+    private static async Task<Dictionary<string, LivePushGrant>> LiveGrantsAsync(LivePushWorld world, LiveScript script, params string[] labels)
     {
-        var stored = await fixture.StoreAsync(RecipientOf(label));
-        fixture.Dispatcher.Wake(stored.GrantPeerDid);
+        var grants = new Dictionary<string, LivePushGrant>(StringComparer.Ordinal);
+        foreach (var label in labels)
+        {
+            var (grant, session) = await world.LiveGrantAsync("adv5-" + label);
+            script.Attach(label, session);
+            grants[label] = grant;
+        }
+        return grants;
+    }
+
+    private static async Task StoreAndWakeAsync(LivePushWorld world, IReadOnlyDictionary<string, LivePushGrant> grants, string label)
+    {
+        var stored = await world.StoreAsync(grants[label]);
+        world.Fixture.Dispatcher.Wake(stored.GrantPeerDid);
+    }
+
+    /// <summary>The session's first push waits until the deadline cancels it (a slow resolution, once); later ones go out.</summary>
+    private static Task SlowOnce(LiveTestSession session)
+    {
+        var slowOnce = 1;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        session.OnPush = async (_, ct) =>
+        {
+            if (Interlocked.Exchange(ref slowOnce, 0) == 1)
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct); // honours the deadline
+            }
+            return ReturnRouteSendResult.Sent;
+        };
+        return entered.Task;
+    }
+
+    /// <summary>Make the dispatcher's clock the manual one with a steppable wall-clock reading.</summary>
+    private static WallStepClock StepWall(IServiceCollection services)
+    {
+        var manual = (ManualTimeProvider)services.Last(x => x.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
+        var wall = new WallStepClock(manual);
+        services.AddSingleton<TimeProvider>(wall);
+        return wall;
     }
 
     private static IReadOnlyList<DeliveredMessage> Deliveries(LiveTestSession session)
@@ -613,59 +531,71 @@ public sealed class PushDispatcherAdv5Tests
     }
 
     /// <summary>
-    /// The push endpoints of several grants, keyed by the first label of the host: the hosts named at
-    /// construction never answer and ignore their token until released; a host armed with
-    /// <see cref="ParkNext"/> parks its next request the same way; everything else answers 202 at once.
-    /// Counts calls and the most requests in flight per host.
+    /// The live sessions of several grants, keyed by label: the labels named at construction never
+    /// take a push and ignore their token until released; a label armed with <see cref="ParkNext"/>
+    /// parks its next push the same way; every other push is taken at once. Counts pushes and the
+    /// most in flight per label, and records each push's label and first payload byte in order.
     /// </summary>
-    private sealed class HostScript(params string[] alwaysPark)
+    private sealed class LiveScript(params string[] alwaysPark)
     {
         private readonly ConcurrentDictionary<string, TaskCompletionSource> _arrived = new();
-        private readonly ConcurrentDictionary<string, TaskCompletionSource<TransportResult>> _release = new();
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<ReturnRouteSendResult>> _release = new();
         private readonly ConcurrentDictionary<string, int> _armed = new();
         private readonly ConcurrentDictionary<string, int> _calls = new();
         private readonly ConcurrentDictionary<string, int> _inFlight = new();
         private readonly ConcurrentDictionary<string, int> _maxInFlight = new();
+        private readonly ConcurrentDictionary<string, LiveTestSession> _sessions = new();
 
-        public Task Arrived(string host) => _arrived.GetOrAdd(host, _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+        public ConcurrentQueue<(string Label, byte First)> Order { get; } = new();
 
-        public void Release(string host, TransportResult result) => Gate(host).TrySetResult(result);
+        public void Attach(string label, LiveTestSession session)
+        {
+            _sessions[label] = session;
+            session.OnPush = (message, _) => PushAsync(label, message);
+        }
+
+        public LiveTestSession Session(string label) => _sessions[label];
+
+        public Task Arrived(string label) => _arrived.GetOrAdd(label, _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+
+        public void Release(string label, ReturnRouteSendResult result) => Gate(label).TrySetResult(result);
 
         public void ReleaseAll()
         {
             foreach (var gate in _release.Values)
-                gate.TrySetResult(new TransportResult(true, 500));
+                gate.TrySetResult(ReturnRouteSendResult.NotSent);
         }
 
-        public void ParkNext(string host) => _armed[host] = 1;
+        public void ParkNext(string label) => _armed[label] = 1;
 
-        public int Calls(string host) => _calls.TryGetValue(host, out var n) ? n : 0;
+        public int Calls(string label) => _calls.TryGetValue(label, out var n) ? n : 0;
 
-        public int MaxInFlight(string host) => _maxInFlight.TryGetValue(host, out var n) ? n : 0;
+        public int MaxInFlight(string label) => _maxInFlight.TryGetValue(label, out var n) ? n : 0;
 
-        public async Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
+        private async Task<ReturnRouteSendResult> PushAsync(string label, Message message)
         {
-            var host = Label(request.Endpoint.Host);
-            _calls.AddOrUpdate(host, 1, (_, n) => n + 1);
-            var now = _inFlight.AddOrUpdate(host, 1, (_, n) => n + 1);
-            _maxInFlight.AddOrUpdate(host, now, (_, n) => Math.Max(n, now));
+            _calls.AddOrUpdate(label, 1, (_, n) => n + 1);
+            var now = _inFlight.AddOrUpdate(label, 1, (_, n) => n + 1);
+            _maxInFlight.AddOrUpdate(label, now, (_, n) => Math.Max(n, now));
+            if (MessagePickup.TryParseDelivery(message, out var delivered, out _) && delivered.Count > 0)
+                Order.Enqueue((label, delivered[0].Payload.Span[0]));
             try
             {
-                var park = Array.IndexOf(alwaysPark, host) >= 0 || _armed.TryRemove(host, out _);
+                var park = Array.IndexOf(alwaysPark, label) >= 0 || _armed.TryRemove(label, out _);
                 if (!park)
-                    return new TransportResult(true, 202);
-                var gate = Gate(host);
-                _arrived.GetOrAdd(host, _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
+                    return ReturnRouteSendResult.Sent;
+                var gate = Gate(label);
+                _arrived.GetOrAdd(label, _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
                 return await gate.Task; // ignores its token
             }
             finally
             {
-                _inFlight.AddOrUpdate(host, 0, (_, n) => n - 1);
+                _inFlight.AddOrUpdate(label, 0, (_, n) => n - 1);
             }
         }
 
-        private TaskCompletionSource<TransportResult> Gate(string host)
-            => _release.GetOrAdd(host, _ => new TaskCompletionSource<TransportResult>(TaskCreationOptions.RunContinuationsAsynchronously));
+        private TaskCompletionSource<ReturnRouteSendResult> Gate(string label)
+            => _release.GetOrAdd(label, _ => new TaskCompletionSource<ReturnRouteSendResult>(TaskCreationOptions.RunContinuationsAsynchronously));
     }
 
     /// <summary>The dispatcher's logger: parks the thread that writes the first "saturated" line after it is armed, until released.</summary>

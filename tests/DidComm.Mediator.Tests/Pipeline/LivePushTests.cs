@@ -6,7 +6,6 @@ using DidComm.Mediator.Tests.Coordination;
 using DidComm.Mediator.Tests.Pickup;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
-using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -15,17 +14,16 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// The push workers' live push (PR #109 review R1-2, FR-PICK-08/09, D6 step 1): the forward pump only
-/// stores, and a worker pushes the stored record over the peer's live session — taken by id under
-/// the session's own lease, given back at once when the session does not take it, at the deadline,
-/// when the session closes or at shutdown; never sent when a pickup took it first; the newest live
-/// session gets it; with direct push on, the live session is tried first and a live push that does
-/// not go out falls back to the direct push.
+/// The push workers' live push (PR #109 review R1-2, FR-PICK-08, D6 step 1): the forward pump only
+/// stores, and a worker pushes the stored record over the peer's live session — taken under the
+/// session's own lease, given back at once when the session does not take it, at the deadline, when
+/// the session closes or at shutdown; never sent when a pickup took it first; the newest live
+/// session gets it; a live push the session does not take ends the operation and is tried again at
+/// the grant's next wake-up.
 /// </summary>
 public sealed class LivePushTests
 {
     private const string Recipient = "did:example:live-push-recipient";
-    private static readonly Uri Inbox = new("https://live-push-host.example/inbox");
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
 
     // A container whose mediator and peer hold real keys, the peer enrolled with Recipient, and one
@@ -45,15 +43,13 @@ public sealed class LivePushTests
         public PeerIdentity Peer { get; }
         public PushFixture Fixture { get; }
 
-        public static async Task<Live> StartAsync(bool directPush = false, Func<TransportRequest, CancellationToken, Task<TransportResult>>? send = null)
+        public static async Task<Live> StartAsync(Action<IServiceCollection>? services = null)
         {
             var peers = new PipelinePeers();
             var mediator = await peers.NewAsync();
             var peer = await peers.NewAsync();
             var fixture = PushFixture.Create(
-                send,
-                directory: _ => Inbox,
-                configure: o => o.DirectPush = directPush,
+                services: services,
                 secrets: peers.Secrets,
                 mediatorDid: mediator.Did);
             await fixture.EnrolAsync(peer.Did, Recipient);
@@ -221,9 +217,9 @@ public sealed class LivePushTests
     }
 
     [Fact]
-    public async Task A_record_a_pickup_took_first_is_pushed_neither_live_nor_directly()
+    public async Task A_record_a_pickup_took_first_is_not_pushed()
     {
-        await using var live = await Live.StartAsync(directPush: true);
+        await using var live = await Live.StartAsync();
         var session = await live.SessionAsync();
         var job = await live.StoredJobAsync();
         (await live.PickupAsync()).Should().Equal(job.MessageId);
@@ -234,7 +230,6 @@ public sealed class LivePushTests
         // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
         live.Fixture.PushOutcomeLog.Should().BeEmpty();
         Deliveries(session).Should().BeEmpty();
-        live.Fixture.Router.Requests.Should().BeEmpty();
         live.Fixture.Store.MessageCount.Should().Be(1, "it stays with the pickup that took it");
     }
 
@@ -274,51 +269,9 @@ public sealed class LivePushTests
     }
 
     [Fact]
-    public async Task With_direct_push_on_the_live_session_is_tried_first()
-    {
-        await using var live = await Live.StartAsync(directPush: true);
-        var session = await live.SessionAsync();
-        var job = await live.StoredJobAsync();
-
-        live.Fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
-        await live.Fixture.Dispatcher.WaitForIdleAsync(Wait);
-
-        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.PushedLive);
-        Deliveries(session).Should().ContainSingle();
-        live.Fixture.Router.Requests.Should().BeEmpty();
-        live.Fixture.Directory!.Calls.Should().Be(0, "the directory is asked only when no live session took the message");
-    }
-
-    [Fact]
-    public async Task With_direct_push_on_the_messages_queued_before_live_delivery_went_on_go_to_the_endpoint()
-    {
-        // L-020 (PR #109 review round 2, D-1): this test pinned "a live push the session does not take
-        // falls back to the direct push". A live push the session does not take now ends the
-        // operation (the message is tried again at the next wake-up); the direct push takes what the
-        // live push may not — the messages stored before live delivery went on.
-        await using var live = await Live.StartAsync(directPush: true);
-        var before = await live.StoredJobAsync("fwd-before");
-        live.Fixture.Time.Advance(TimeSpan.FromSeconds(1));
-        var session = await live.SessionAsync();
-        var after = await live.StoredJobAsync("fwd-after");
-
-        live.Fixture.Dispatcher.Wake(after.GrantPeerDid).Should().BeTrue();
-        await live.Fixture.Dispatcher.WaitForIdleAsync(Wait);
-
-        // L-020 (round 8): turning live delivery on wakes the grant, and that operation's direct step
-        // sends the message queued before; the later wake-up pushes the new one live.
-        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed, PushOutcomes.PushedLive);
-        Deliveries(session).Select(d => d.Id).Should().Equal(after.MessageId);
-        live.Fixture.Router.Requests.Should().ContainSingle().Which.Endpoint.Should().Be(Inbox);
-        live.Fixture.Store.MessageCount.Should().Be(1, "the live one is held for its acknowledgement; the direct one is removed");
-        (await live.PickupAsync()).Should().BeEmpty();
-        _ = before;
-    }
-
-    [Fact]
     public async Task A_live_push_the_session_does_not_take_ends_the_operation_and_is_tried_again_at_the_next_wake_up()
     {
-        await using var live = await Live.StartAsync(directPush: true);
+        await using var live = await Live.StartAsync();
         var session = await live.SessionAsync();
         var refuse = 1;
         session.OnPush = (_, _) => Task.FromResult(Interlocked.Exchange(ref refuse, 0) == 1 ? ReturnRouteSendResult.NotSent : ReturnRouteSendResult.Sent);
@@ -327,7 +280,7 @@ public sealed class LivePushTests
         live.Fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await live.Fixture.Dispatcher.WaitForIdleAsync(Wait);
         live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        live.Fixture.Router.Requests.Should().BeEmpty("a refused live push does not turn into a direct one");
+        Deliveries(session).Should().BeEmpty();
 
         live.Fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await live.Fixture.Dispatcher.WaitForIdleAsync(Wait);
@@ -360,7 +313,7 @@ public sealed class LivePushTests
     }
 
     [Fact]
-    public async Task The_sink_hands_over_nothing_when_direct_push_is_off_and_the_peer_is_not_live()
+    public async Task The_sink_hands_over_nothing_when_the_peer_is_not_live()
     {
         await using var live = await Live.StartAsync();
 
@@ -420,15 +373,21 @@ public sealed class LivePushTests
     }
 
     [Fact]
-    public async Task A_direct_push_that_reaches_the_deadline_pauses_the_grant_too_and_its_grant_waits_for_the_abandoned_send()
+    public async Task A_live_push_that_ignores_its_deadline_keeps_its_grant_waiting_and_a_wake_up_held_meanwhile_falls_in_the_cooldown()
     {
+        // Re-homed when the push to an endpoint left #95 (now #110): the same dispatcher path,
+        // driven through a live session whose send never looks at its token.
+        await using var live = await Live.StartAsync();
+        var session = await live.SessionAsync();
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var never = new TaskCompletionSource<TransportResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var live = await Live.StartAsync(directPush: true, send: (_, _) =>
+        var never = new TaskCompletionSource<ReturnRouteSendResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        session.OnPush = (_, _) =>
         {
+            Interlocked.Increment(ref calls);
             parked.TrySetResult();
-            return never.Task; // the recipient's endpoint never answers and ignores the token
-        });
+            return never.Task; // the peer never takes it and ignores the token
+        };
         var first = await live.StoredJobAsync("fwd-first");
 
         live.Fixture.Dispatcher.Wake(first.GrantPeerDid).Should().BeTrue();
@@ -439,11 +398,12 @@ public sealed class LivePushTests
 
         live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
         live.Fixture.Dispatcher.Unsettled.Should().Be(1, "the abandoned send never ended");
-        live.Fixture.Router.Requests.Should().ContainSingle("the grant is not served again while its push is unsettled");
+        Volatile.Read(ref calls).Should().Be(1, "the grant is not served again while its push is unsettled");
         live.Fixture.Dispatcher.Wake(first.GrantPeerDid).Should().BeFalse("and it is paused");
-        never.TrySetResult(new TransportResult(true, 500));
+        never.TrySetResult(ReturnRouteSendResult.NotSent);
         await MessagePickupLive.UntilAsync(() => live.Fixture.Dispatcher.Unsettled == 0, "the abandoned send ended");
-        live.Fixture.Router.Requests.Should().ContainSingle("the wake-up held during the operation fell in the cooldown");
+        Volatile.Read(ref calls).Should().Be(1, "the wake-up held during the operation fell in the cooldown");
+        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown, PushOutcomes.SkippedCooldown);
         (await live.PickupAsync()).Should().Equal(first.MessageId);
     }
 
@@ -478,9 +438,10 @@ public sealed class LivePushTests
         // no longer tells that step apart, so a deadline there pauses the grant like any other.
         var mediation = new ScriptedMediationStore();
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMediationStore>(mediation));
-        await fixture.EnrolAsync("did:example:check-peer", Recipient);
-        var first = await fixture.StoreAsync(Recipient);
+        await using var live = await Live.StartAsync(services: s => s.AddSingleton<IMediationStore>(mediation));
+        var session = await live.SessionAsync();
+        var fixture = live.Fixture;
+        var first = await live.StoredJobAsync();
         mediation.OnFind = async (_, ct) =>
         {
             parked.TrySetResult();
@@ -494,7 +455,7 @@ public sealed class LivePushTests
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
-        fixture.Router.Requests.Should().BeEmpty();
+        Deliveries(session).Should().BeEmpty();
         fixture.Dispatcher.Wake(first.GrantPeerDid).Should().BeFalse("paused");
         await MessagePickupLive.UntilAsync(async () => (await fixture.Store.GetStatusAsync(first.GrantPeerDid, null, fixture.Time.GetUtcNow(), CancellationToken.None)).MessageCount == 1, "the record went back to the queue");
     }
@@ -502,14 +463,20 @@ public sealed class LivePushTests
     [Fact]
     public async Task The_grant_entries_drop_the_cooldowns_that_ran_out()
     {
+        await using var world = await LivePushWorld.StartAsync();
         var arrivals = new PushGate();
-        await using var fixture = PushFixture.Create(
-            async (_, ct) => { await arrivals.PassAsync(ct); return new TransportResult(true, 202); },
-            directory: _ => Inbox);
-        await fixture.EnrolAsync("did:example:cool-1", "did:example:cool-1-r");
-        await fixture.EnrolAsync("did:example:cool-2", "did:example:cool-2-r");
+        var fixture = world.Fixture;
+        foreach (var label in new[] { "cool-1", "cool-2" })
+        {
+            var (_, session) = await world.LiveGrantAsync(label);
+            session.OnPush = async (_, ct) =>
+            {
+                await arrivals.PassAsync(ct); // each grant's push reaches the deadline
+                return ReturnRouteSendResult.Sent;
+            };
+        }
 
-        fixture.Dispatcher.Wake((await fixture.StoreAsync("did:example:cool-1-r")).GrantPeerDid).Should().BeTrue();
+        await world.ForwardAsync("did:example:live-cool-1-recipient", 1);
         await arrivals.WaitForArrivalsAsync(1, Wait);
         fixture.Time.Advance(PushTimeout);
         await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the first push settled");
@@ -517,7 +484,7 @@ public sealed class LivePushTests
 
         // The first grant's cooldown runs out; the second grant's deadline drops it from the entries.
         fixture.Time.Advance(PushTimeout * PushDispatcher.CooldownPushTimeouts);
-        fixture.Dispatcher.Wake((await fixture.StoreAsync("did:example:cool-2-r")).GrantPeerDid).Should().BeTrue();
+        await world.ForwardAsync("did:example:live-cool-2-recipient", 2);
         await arrivals.WaitForArrivalsAsync(2, Wait);
         fixture.Time.Advance(PushTimeout);
         await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the second push settled");

@@ -123,7 +123,7 @@ public sealed class MailboxAgeQaTests
     {
         var store = new HookedMessageStore();
         await using var fixture = PushFixture.Create(
-            configure: o => { o.DirectPush = false; o.Pickup.MaxMessageAge = null; },
+            configure: o => o.Pickup.MaxMessageAge = null,
             services: s => s.AddSingleton<IMessageStore>(store),
             didComm: o => o.ExpiresClockSkew = TimeSpan.FromSeconds(skewSeconds) + TimeSpan.FromMilliseconds(999));
         await fixture.EnrolAsync(Peer, Recipient);
@@ -139,7 +139,7 @@ public sealed class MailboxAgeQaTests
     {
         var store = new HookedMessageStore();
         await using var fixture = PushFixture.Create(
-            configure: o => { o.DirectPush = false; o.Pickup.MaxMessageAge = null; },
+            configure: o => o.Pickup.MaxMessageAge = null,
             services: s => s.AddSingleton<IMessageStore>(store));
         await fixture.EnrolAsync(Peer, Recipient);
 
@@ -216,7 +216,7 @@ public sealed class MailboxAgeQaTests
     {
         var store = new HookedMessageStore();
         await using var fixture = PushFixture.Create(
-            configure: o => { o.DirectPush = false; o.Pickup.MaxMessageAge = TimeSpan.MaxValue; },
+            configure: o => o.Pickup.MaxMessageAge = TimeSpan.MaxValue,
             services: s => s.AddSingleton<IMessageStore>(store));
         await fixture.EnrolAsync(Peer, Recipient);
 
@@ -245,11 +245,7 @@ public sealed class MailboxAgeQaTests
 
     private static PushFixture AgeFixture(Action<IServiceCollection>? services = null, Action<DidComm.Facade.DidCommOptions>? didComm = null)
         => PushFixture.Create(
-            configure: o =>
-            {
-                o.DirectPush = false;
-                o.Pickup.MaxMessageAge = Age;
-            },
+            configure: o => o.Pickup.MaxMessageAge = Age,
             services: services,
             didComm: o =>
             {
