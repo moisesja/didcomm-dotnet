@@ -237,7 +237,6 @@ public static class MediatorBuilderExtensions
                 sp.GetRequiredService<IOptions<MediatorOptions>>(),
                 sp.GetRequiredService<MessagePickupQueue>(),
                 sp.GetRequiredService<IMessageStore>(),
-                sp.GetRequiredService<IMediationStore>(),
                 sp.GetRequiredService<IOptions<DidCommOptions>>(),
                 sp.GetRequiredService<MediatorMetrics>(),
                 sp.GetService<ILogger<PushDispatcher>>(),

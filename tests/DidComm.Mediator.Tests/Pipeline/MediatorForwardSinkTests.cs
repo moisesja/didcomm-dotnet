@@ -5,6 +5,7 @@ using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
 using DidComm.Mediator.Tests.Coordination;
+using DidComm.Mediator.Tests.Pickup;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.Routing;
@@ -367,7 +368,9 @@ public sealed class MediatorForwardSinkTests
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
         fixture.Router.Requests.Should().ContainSingle().Which.Payload.ToArray().Should().Equal(payload);
         fixture.Store.MessageCount.Should().Be(0);
-        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().Contain(e => e.Everything.Contains("fwd-push", StringComparison.Ordinal));
+        // L-020 (PR #109 review round 2, D-1): the push takes what the store holds and knows no forward;
+        // its lines carry no forward id (the sink's line does).
+        PipelineLogs.Of<PushDispatcher>(fixture.Logs).Should().NotContain(e => e.Everything.Contains("fwd-push", StringComparison.Ordinal));
         NoLeaks(fixture);
     }
 
@@ -396,7 +399,7 @@ public sealed class MediatorForwardSinkTests
         if (kind != "unknown")
             await fixture.EnrolAsync(Peer, Recipient);
         if (kind == "quota")
-            await fixture.QueuedJobAsync(Recipient);
+            await fixture.StoreAsync(Recipient);
         var expires = kind == "expired" ? fixture.Time.GetUtcNow().ToUnixTimeSeconds() - 1 : (long?)null;
 
         await fixture.Sink.AcceptAsync(Forward(Recipient, expiresTime: expires), Context(fixture), CancellationToken.None);
@@ -428,20 +431,22 @@ public sealed class MediatorForwardSinkTests
         fixture.ForwardOutcomeLog.Take(Quota).Should().OnlyContain(o => o == ForwardOutcomes.Queued);
         fixture.ForwardOutcomeLog.Last().Should().Be(ForwardOutcomes.DroppedQuota);
         fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(0);
-        fixture.Dispatcher.Outstanding.Should().Be(Quota);
+        await gate.WaitForArrivalsAsync(1, Wait);
+        fixture.Dispatcher.Unsettled.Should().Be(1, "one operation for the grant, its first push stuck; the other wake-ups coalesced");
         gate.Open();
+        await MessagePickupLive.UntilAsync(() => fixture.Pushes(PushOutcomes.Pushed) == Quota, "every stored message is pushed");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(Quota);
         fixture.Store.MessageCount.Should().Be(0, "every stored message was pushed and its copy removed");
     }
 
     [Fact]
     public async Task Push_jobs_waiting_behind_a_blocked_push_retain_only_bounded_values_whatever_the_forward_ids_length()
     {
-        // PR #109 review R1-1: a job outlives the forward handler's byte reservation and nothing but
-        // the job count bounds the backlog, so a job must not keep the forward's wire id alive (the
-        // reviewer's 16 ids of 524 288 characters kept 15 MiB in 15 waiting jobs while the store
-        // counted 1 280 bytes).
+        // PR #109 review R1-1: what the dispatcher keeps outlives the forward handler's byte
+        // reservation, so it must not keep the forward's wire id alive (the reviewer's 16 ids of
+        // 524 288 characters kept 15 MiB in 15 waiting jobs while the store counted 1 280 bytes).
+        // L-020 (PR #109 review round 2, D-1): there are no jobs any more; per grant the dispatcher
+        // keeps the grant's DID and nothing of any message.
         const int IdLength = 524_288;
         const int Forwards = 16;
         var gate = new PushGate();
@@ -454,16 +459,14 @@ public sealed class MediatorForwardSinkTests
             await fixture.Sink.AcceptAsync(Forward(Recipient), Context(fixture, new string((char)('a' + i), IdLength)), CancellationToken.None);
         await gate.WaitForArrivalsAsync(1, Wait);
 
-        // Every forward has returned (its reservation is given back); one push hangs, fifteen wait.
-        fixture.Dispatcher.Outstanding.Should().Be(Forwards);
-        var perJob = Peer.Length + Recipient.Length + PickupSizing.MaxMintedIdLength + DidComm.Diagnostics.LogValues.MaxIdLength;
-        fixture.Dispatcher.RetainedCharacters.Should().BeLessThanOrEqualTo(
-            (long)Forwards * perJob,
-            "a job holds two DIDs, the queue's record id and the forward's id in its bounded log form, never the wire id");
+        // Every forward has returned (its reservation is given back); one push hangs, fifteen wait in the store.
+        fixture.Dispatcher.Unsettled.Should().Be(1);
+        fixture.Dispatcher.RetainedCharacters.Should().Be(Peer.Length, "one entry for the grant: its DID, never a wire id");
 
         gate.Open();
+        await MessagePickupLive.UntilAsync(() => fixture.Pushes(PushOutcomes.Pushed) == Forwards, "every stored message is pushed");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(Forwards);
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the last operation settled");
         fixture.Dispatcher.RetainedCharacters.Should().Be(0);
     }
 

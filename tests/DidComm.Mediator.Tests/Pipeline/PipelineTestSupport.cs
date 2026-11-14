@@ -302,7 +302,9 @@ internal sealed class ScriptedMessageStore : IMessageStore
     }
 
     public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct) => Inner.EnqueueAsync(message, lease, now, ct);
-    public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => Inner.LeaseAsync(request, ct);
+    /// <summary>Replaces the lease (the take before a push or a pickup); the default leases in the inner store.</summary>
+    public Func<MessageLeaseRequest, CancellationToken, ValueTask<IReadOnlyList<QueuedMessage>>>? OnLease { get; set; }
+    public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => OnLease is { } hook ? hook(request, ct) : Inner.LeaseAsync(request, ct);
     /// <summary>Replaces the acknowledgement (the removal after a direct push); the default acknowledges in the inner store.</summary>
     public Func<string, IReadOnlyList<string>, CancellationToken, ValueTask<int>>? OnAcknowledge { get; set; }
 

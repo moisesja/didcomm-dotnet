@@ -133,17 +133,16 @@ public sealed class MediatorDirectPushTests
     }
 
     [Fact]
-    public async Task A_registration_revoked_between_queueing_and_pushing_is_not_pushed()
+    public async Task A_revoke_and_purge_that_lands_while_the_push_is_being_sent_does_not_stop_it_and_leaves_nothing_queued()
     {
+        // L-020 (PR #109 review round 2, D-1): the directory is now asked after the push took its
+        // record (and checked its registration, as a pickup does), so a revocation hooked into the
+        // directory lands during the send — the documented residual of RevokeAndPurgeAsync: a push
+        // already being sent completes. A revocation before the push takes the message sends
+        // nothing: MediatorRevocationQaTests.A_push_job_waiting_when_the_grant_is_revoked_is_never_sent.
         await using var fixture = await PushFixture.StartAsync();
         var (mediator, inbox, bob, b, alice) = (fixture.Mediator, fixture.Inbox, fixture.Bob, fixture.B, fixture.Alice);
         fixture.Directory.Map(bob.Did, inbox.Endpoint("/bob-inbox"));
-        // The host revokes the grant while the push is under way: after the message was stored, the
-        // push job taken and its registration checked, when the worker asks the directory.
-        // L-020 (PR #109 review R1-2): the job now checks the registration and tries the live session
-        // before it asks the directory (D6), so this hook runs after the check (which the dispatcher
-        // tests cover with Push-Skipped-Unregistered) and it is the purge that keeps the push away:
-        // the take by id finds nothing (Push-Skipped-NotHeld), and nothing is sent either way.
         GrantRevocation? revocation = null;
         fixture.Directory.OnFind = grant => revocation = mediator.Queue.RevokeAndPurgeAsync(grant).AsTask().GetAwaiter().GetResult();
 
@@ -153,9 +152,9 @@ public sealed class MediatorDirectPushTests
 
         revocation.Should().Be(new GrantRevocation(Revoked: true, Purged: 1));
         mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
-        mediator.PushOutcomes.Should().Equal(PushOutcomes.SkippedNotHeld);
-        inbox.Entered.Should().Be(0, "nothing reaches a recipient whose registration ended");
-        mediator.Store.MessageCount.Should().Be(0);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
+        inbox.Entered.Should().Be(1);
+        mediator.Store.MessageCount.Should().Be(0, "nothing is left queued for the revoked grant");
     }
 
     [Fact]
@@ -182,11 +181,13 @@ public sealed class MediatorDirectPushTests
         var delivered = await mediator.FetchAsync(carol);
         (await MediatorRecipient.UnpackFromSenderAsync(carol, delivered.Should().ContainSingle().Subject.Payload, alice)).Message.Id.Should().Be(forCarol.Id);
         gate.Task.IsCompleted.Should().BeFalse("Carol's message was delivered while Bob's push was still hanging");
-        mediator.Pushes.Outstanding.Should().BeGreaterThanOrEqualTo(1);
+        mediator.Pushes.Unsettled.Should().Be(1, "Bob's push, still hanging");
 
         gate.SetResult();
         await mediator.PushesIdleAsync();
-        mediator.PushOutcomes.Should().BeEquivalentTo(new[] { PushOutcomes.Pushed, PushOutcomes.SkippedNoEndpoint });
+        // L-020 (PR #109 review round 2, D-1): the directory is asked only for a message a push took;
+        // Carol's was taken by her pickup first, so her wake-up found nothing to push (no outcome).
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
         mediator.Store.MessageCount.Should().Be(1, "Bob's copy was removed by the push; Carol's waits for her acknowledgement");
     }
 

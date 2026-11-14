@@ -35,6 +35,9 @@ public sealed class MediatorRevocationQaTests
         await Qa.SendNoteAsync(mediator, alice, bob, content: "leased");
         var leased = (await mediator.FetchAsync(bob)).Should().ContainSingle().Subject;
         await Qa.SendNoteAsync(mediator, alice, b, content: "queued");
+        // L-020 (PR #109 review round 2, D-1): a live push takes only what was stored since live
+        // delivery went on; the test clock moves so "queued" is stored strictly before it.
+        mediator.Clock.Advance(TimeSpan.FromSeconds(1));
         using var socket = await mediator.ConnectAsync();
         await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob);
         await Qa.SendNoteAsync(mediator, alice, bob, content: "live");
@@ -94,7 +97,9 @@ public sealed class MediatorRevocationQaTests
         gate.SetResult();
         await f.Mediator.PushesIdleAsync();
 
-        f.Mediator.PushOutcomes.Should().BeEquivalentTo(new[] { PushOutcomes.Pushed, PushOutcomes.SkippedUnregistered });
+        // L-020 (PR #109 review round 2, D-1): the purge removed Bob's message, so his wake-up finds
+        // nothing to push, which is no outcome (it was Push-Skipped-Unregistered for the job).
+        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed);
         f.Inbox.Received.Should().ContainSingle().Which.Path.Should().Be("/carol");
         f.Mediator.Store.MessageCount.Should().Be(0);
         f.ShouldNotLeak(carol.Did);

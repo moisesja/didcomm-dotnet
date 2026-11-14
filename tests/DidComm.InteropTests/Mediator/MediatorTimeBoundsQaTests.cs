@@ -142,20 +142,26 @@ public sealed class MediatorTimeBoundsQaTests
     }
 
     [Fact]
-    public async Task A_delayed_message_is_never_pushed_directly_before_or_after_it_is_due()
+    public async Task A_delayed_message_is_never_pushed_before_it_is_due_and_goes_with_the_grants_next_push_once_due()
     {
+        // L-020 (PR #109 review round 2, D-1): a push takes what the store hands out now, so a delayed
+        // message is never pushed before it is due (FR-ROUTE-10) and, once due, goes with the grant's
+        // next push like any queued message; it used to stay pickup-only for good.
         await using var f = await QaPushFixture.StartAsync(m => m.MaxForwardDelay = Cap);
 
         var note = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, Qa.Delay(1));
         await f.Mediator.PushesIdleAsync();
         f.Mediator.PushOutcomes.Should().BeEmpty("one millisecond of delay is enough to skip the push");
         f.Mediator.Clock.Advance(TimeSpan.FromMilliseconds(1));
-        await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "undelayed");
+        var undelayed = await Qa.SendNoteAsync(f.Mediator, f.Alice, f.B, content: "undelayed");
         await f.Mediator.PushesIdleAsync();
 
-        f.Mediator.PushOutcomes.Should().Equal(new[] { PushOutcomes.Pushed }, "only the undelayed message is pushed");
-        var delivered = (await f.Mediator.FetchAsync(f.Bob)).Should().ContainSingle().Subject;
-        (await MediatorRecipient.UnpackFromSenderAsync(f.B, delivered.Payload, f.Alice)).Message.Id.Should().Be(note.Id);
+        f.Mediator.PushOutcomes.Should().Equal(PushOutcomes.Pushed, PushOutcomes.Pushed);
+        var pushed = new List<string>();
+        foreach (var (_, body) in f.Inbox.Received)
+            pushed.Add((await MediatorRecipient.UnpackFromSenderAsync(f.B, body, f.Alice)).Message.Id);
+        pushed.Should().Equal(note.Id, undelayed.Id);
+        (await f.Mediator.FetchAsync(f.Bob)).Should().BeEmpty();
     }
 
     // ---- mailbox age limit -------------------------------------------------------------------------

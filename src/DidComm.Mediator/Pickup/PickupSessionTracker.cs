@@ -17,7 +17,7 @@ internal sealed class PickupSessionState
     private int _hooked;
     private int _closed;
     private int _leasing;
-    private volatile Func<string, string, DeliveredMessage, Message>? _liveDelivery;
+    private volatile LiveMode? _live;
 
     public PickupSessionState(PickupSessionTracker tracker) => _tracker = tracker;
 
@@ -42,20 +42,27 @@ internal sealed class PickupSessionState
     public void MarkLeasing() => Interlocked.Exchange(ref _leasing, 1);
 
     /// <summary>
-    /// How to build a live <c>delivery</c> (from, to, message) in the protocol version the recipient
-    /// turned live delivery on with; <c>null</c> while live delivery is off or the session closed.
+    /// Live delivery as the recipient turned it on: how to build a live <c>delivery</c> (from, to,
+    /// message) in its protocol version, and since when (on <c>DidCommOptions.Clock</c>);
+    /// <c>null</c> while live delivery is off or the session closed. Only messages stored at or
+    /// after <see cref="LiveMode.Since"/> are pushed: what was queued before is picked up (FR-PICK-06).
     /// </summary>
-    public Func<string, string, DeliveredMessage, Message>? LiveDelivery => IsClosed ? null : _liveDelivery;
+    public LiveMode? Live => IsClosed ? null : _live;
 
-    /// <summary>Turn live delivery on (a framing) or off (<c>null</c>). Returns whether it is on afterwards: never on a closed session.</summary>
-    public bool SetLive(Func<string, string, DeliveredMessage, Message>? liveDelivery)
+    /// <summary>
+    /// Turn live delivery on (a framing) or off (<c>null</c>). Turned on while already on, it keeps
+    /// its first instant. Returns whether it is on afterwards: never on a closed session.
+    /// </summary>
+    /// <param name="liveDelivery">The framing, or <c>null</c> to turn live delivery off.</param>
+    /// <param name="now">The instant live delivery goes on.</param>
+    public bool SetLive(Func<string, string, DeliveredMessage, Message>? liveDelivery, DateTimeOffset now)
     {
-        _liveDelivery = liveDelivery;
+        _live = liveDelivery is null ? null : new LiveMode(liveDelivery, _live?.Since ?? now);
         // Closed after the write above: either this read sees it, or OnClosed runs after the write
         // and clears it. Live delivery can never stay on for a session that has ended.
         if (IsClosed)
-            _liveDelivery = null;
-        return LiveDelivery is not null;
+            _live = null;
+        return Live is not null;
     }
 
     /// <summary>Hook the session's end signal, once.</summary>
@@ -76,11 +83,16 @@ internal sealed class PickupSessionState
         // Both writes are full fences (Interlocked), so neither side's write can be reordered after
         // its read.
         Interlocked.Exchange(ref _closed, 1);
-        _liveDelivery = null;
+        _live = null;
         if (Volatile.Read(ref _leasing) == 1)
             _tracker.ReleaseLeasesInBackground(OwnerToken);
     }
 }
+
+/// <summary>Live delivery on a session: the framing of a live <c>delivery</c> and the instant it went on.</summary>
+/// <param name="Build">Builds a live <c>delivery</c> (from, to, message) in the protocol version live delivery was turned on with.</param>
+/// <param name="Since">When live delivery went on, on <c>DidCommOptions.Clock</c>: only messages stored at or after it are pushed.</param>
+internal sealed record LiveMode(Func<string, string, DeliveredMessage, Message> Build, DateTimeOffset Since);
 
 /// <summary>
 /// The per-session state of the pickup role (FR-PICK-06): one <see cref="PickupSessionState"/> per

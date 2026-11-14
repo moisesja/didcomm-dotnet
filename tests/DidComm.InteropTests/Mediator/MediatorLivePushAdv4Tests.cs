@@ -98,6 +98,46 @@ public sealed class MediatorLivePushAdv4Tests
         received.Should().Equal(notes.Select(n => n.Id));
     }
 
+    [Fact]
+    public async Task Review_round_2_an_expired_message_queued_ahead_never_costs_a_later_message_its_live_push()
+    {
+        // PR #109 review round 2, finding 1, over the real endpoints: MaxQueueMessages = 2; the first
+        // live push is held in its key resolution; a second forward expires one second later; the
+        // clock moves two seconds and a third forward arrives (the store drops the expired record and
+        // accepts the third). On 755c497 the dispatcher still counted the expired record's job and
+        // refused the third (Push-Skipped-Saturated): it was never pushed. The push now takes what the
+        // store holds (D-1), so the third goes out live once the first push moves.
+        var (mediator, keys) = await StartAsync(honourCancellation: true, mediatorOptions: m => m.Pickup.MaxQueueMessages = 2);
+        await using var _ = mediator;
+        var bob = await mediator.NewPeerAsync();
+        var a = await mediator.NewRecipientAsync();
+        await mediator.EnrolAsync(bob, a.Did);
+        var alice = await mediator.NewSenderAsync();
+        using var socket = await mediator.ConnectAsync();
+        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob);
+        keys.Pause(bob.Did);
+
+        var first = await Qa.SendNoteAsync(mediator, alice, a, content: "first");
+        await MediatorTestServer.WaitUntilAsync(() => keys.Arrivals >= 1, "the first push is packing");
+        await Qa.SendNoteAsync(mediator, alice, a, Qa.Expires(mediator.Clock.Now.AddSeconds(1)), content: "expires");
+        mediator.Clock.Advance(TimeSpan.FromSeconds(2));
+        var third = await Qa.SendNoteAsync(mediator, alice, a, content: "third");
+        mediator.Outcomes.Should().Equal(new[] { ForwardOutcomes.Queued, ForwardOutcomes.Queued, ForwardOutcomes.Queued }, "the store dropped the expired record and accepted the third");
+        keys.Release();
+
+        var received = new List<string>();
+        for (var i = 0; i < 2; i++)
+        {
+            var pushed = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
+            received.Add((await MediatorRecipient.UnpackFromSenderAsync(a, pushed.Payload, alice)).Message.Id);
+        }
+        received.Should().Equal(first.Id, third.Id);
+        await mediator.PushesIdleAsync();
+        mediator.PushOutcome(PushOutcomes.SkippedSaturated).Should().Be(0);
+        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(2);
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
+    }
+
     // ---- isolation: grants that stall their own resolution vs another live recipient ---------------
 
     [Fact]
@@ -194,11 +234,10 @@ public sealed class MediatorLivePushAdv4Tests
     [Fact]
     public async Task Grants_whose_resolution_stalls_cannot_make_the_push_backlog_refuse_another_live_recipients_push()
     {
-        // ADV-4 D1/D3 (global form), rewritten for the bounds sized from the queue: 64 grants whose
-        // DID resolution stalls each get sixteen forwards — 1 024 jobs, the old backlog's whole
-        // capacity. B's message is still stored and handed over (no Push-Skipped-Saturated: the
-        // backlog is as large as the store, so only the store's own quota can refuse a message, as
-        // a Dropped-Quota forward). Its push then waits for a worker: with K = 64 stalled grants
+        // ADV-4 D1/D3 (global form): 64 grants whose DID resolution stalls each get sixteen forwards
+        // (1 024, the old backlog's whole capacity). B's message is still stored and its grant woken
+        // (no Push-Skipped-Saturated: there is no per-message backlog any more, PR #109 review round
+        // 2; the stalled grants' abandoned pushes settle as soon as they see their deadline). Its push then waits for a worker: with K = 64 stalled grants
         // ahead of it in the turn and W = 4 workers, ceil(K / W) = 16 rounds of PushTimeout.
         const int Stalled = 64;
         const int PerStalled = 16;
@@ -227,12 +266,11 @@ public sealed class MediatorLivePushAdv4Tests
                 await Qa.SendNoteAsync(mediator, alice, grant.Recipient, flush: false, content: "filler");
         }
         await mediator.FlushAsync();
-        mediator.Pushes.Outstanding.Should().Be(Stalled * PerStalled);
+        mediator.Pushes.Unsettled.Should().BeLessThanOrEqualTo(mediator.Pushes.MaxUnsettled);
 
         var forB = await Qa.SendNoteAsync(mediator, alice, b.Recipient, content: "b");
         mediator.PushOutcome(PushOutcomes.SkippedSaturated).Should().Be(0, "another grant's stalled pushes must not refuse B's");
         mediator.Outcomes.Should().OnlyContain(o => o == ForwardOutcomes.Queued);
-        mediator.Pushes.Outstanding.Should().Be(Stalled * PerStalled + 1);
 
         // Round by round: each round's stalled pushes have started before the clock moves.
         var receive = mediator.ReceiveOverSocketAsync(socketB, b.Peer);

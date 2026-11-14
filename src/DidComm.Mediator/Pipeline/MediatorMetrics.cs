@@ -6,53 +6,47 @@ using DidComm.Transports.ReturnRoute;
 namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
-/// The closed vocabulary of the <c>didcomm.mediator.push.outcomes</c> counter: exactly one value per
-/// stored message the forward sink handed to the push workers (or that they refused to take).
+/// The closed vocabulary of the <c>didcomm.mediator.push.outcomes</c> counter: one value per push
+/// attempt (a record taken from the store for a push, live or direct), and one per wake-up of a
+/// grant that was skipped or could push nothing it had, saying why. A wake-up that finds nothing
+/// left to push (its message already pushed by a running operation, or taken by a pickup) is no
+/// outcome. A message is never counted before a push takes it.
 /// </summary>
 internal static class PushOutcomes
 {
-    /// <summary>The recipient's live session took the <c>delivery</c>; the record stays leased to the session until acknowledged.</summary>
+    /// <summary>A record was pushed over the recipient's live session; it stays leased to the session until acknowledged.</summary>
     internal const string PushedLive = "Pushed-Live";
 
-    /// <summary>Direct push: the recipient's endpoint answered with a 2xx status; the queued copy was removed.</summary>
+    /// <summary>A record was pushed to the recipient's endpoint, which answered with a 2xx status; the queued copy was removed.</summary>
     internal const string Pushed = "Pushed";
 
     /// <summary>
-    /// The last push tried did not deliver, and the message stays queued: a live session that did
-    /// not take the <c>delivery</c> (with direct push off), or a direct push that failed (a transport
-    /// error, a non-2xx answer); or the deadline, a store, session or client fault ended the push.
+    /// A push did not deliver and its record stays queued (tried again at the grant's next wake-up,
+    /// and always available to pickup): the live session did not take it or it was too large for the
+    /// session even alone (then passed over), the endpoint did not answer with a 2xx, a transport,
+    /// store or session fault, or the deadline.
     /// </summary>
     internal const string Failed = "Push-Failed";
 
-    /// <summary>The push backlog, or the grant's share of it, was full; the message stays queued.</summary>
+    /// <summary>A wake-up started nothing: <c>2 × PushConcurrency</c> push operations had not ended yet. The messages stay queued.</summary>
     internal const string SkippedSaturated = "Push-Skipped-Saturated";
 
-    /// <summary>Direct push: the message was not pushed live (no live session, or the session did not take it), and there is no directory, no endpoint for the grant, or the directory failed; the message stays queued.</summary>
+    /// <summary>A wake-up with direct push on pushed nothing: no live push applied, and there is no directory, no endpoint for the grant, or the directory failed.</summary>
     internal const string SkippedNoEndpoint = "Push-Skipped-NoEndpoint";
 
-    /// <summary>Direct push is off and the recipient no longer had a live session with live delivery on when the push ran; the message stays queued.</summary>
+    /// <summary>A wake-up with direct push off pushed nothing: the recipient no longer had a live session with live delivery on.</summary>
     internal const string SkippedNoLiveSession = "Push-Skipped-NoLiveSession";
 
-    /// <summary>Direct push: the directory named an endpoint that is not absolute <c>http</c> or <c>https</c>; the message stays queued.</summary>
+    /// <summary>A wake-up with direct push on pushed nothing: the directory named an endpoint that is not absolute <c>http</c> or <c>https</c>.</summary>
     internal const string SkippedScheme = "Push-Skipped-Scheme";
 
-    /// <summary>The recipient DID was no longer registered under the grant when the push was about to run.</summary>
+    /// <summary>A record taken for a push was removed instead: its recipient DID is no longer registered under the grant.</summary>
     internal const string SkippedUnregistered = "Push-Skipped-Unregistered";
 
-    /// <summary>
-    /// The queue no longer held the message for delivery when the push was about to take it:
-    /// expired or aged out, not yet due, leased to a pickup, passed over, acknowledged or purged.
-    /// Nothing was sent; whatever the queue still holds stays for pickup.
-    /// </summary>
-    internal const string SkippedNotHeld = "Push-Skipped-NotHeld";
-
-    /// <summary>
-    /// The recipient's pushes were paused: one of its pushes (live or direct) reached the deadline
-    /// shortly before, so its waiting and new pushes skip the workers for a cooldown; the message stays queued.
-    /// </summary>
+    /// <summary>A wake-up was skipped: the grant is paused after one of its pushes reached the deadline. The messages stay queued.</summary>
     internal const string SkippedCooldown = "Push-Skipped-Cooldown";
 
-    /// <summary>The mediator was shutting down: the push was abandoned or never started; the message stays queued.</summary>
+    /// <summary>The mediator was shutting down: a waiting wake-up was dropped, or a running push abandoned. The messages stay queued.</summary>
     internal const string SkippedShutdown = "Push-Skipped-Shutdown";
 }
 

@@ -10,10 +10,11 @@ namespace DidComm.Mediator.Pipeline;
 
 /// <summary>
 /// The mediator's <see cref="IForwardSink"/> (FR-ROUTE-11, FR-PICK-08/09): every forward the
-/// routing mediator relays is stored in the recipient's pickup queue, and a stored message that is
-/// due is then handed to <see cref="PushDispatcher"/>, whose workers push it over the recipient's
-/// live connection (when it has one with live delivery on) or, when direct push is on, to the
-/// recipient's own endpoint. Otherwise it waits for a <c>delivery-request</c>.
+/// routing mediator relays is stored in the recipient's pickup queue, and when the stored message is
+/// due its grant is woken in <see cref="PushDispatcher"/>, whose workers push what the store then
+/// holds over the recipient's live connection (when it has one with live delivery on) or, when
+/// direct push is on, to the recipient's own endpoint. Otherwise it waits for a
+/// <c>delivery-request</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -32,12 +33,11 @@ namespace DidComm.Mediator.Pipeline;
 /// push packs a <c>delivery</c> for the peer, which resolves the peer's DID, and the peer controls
 /// how long that takes. The push workers do it instead, per grant and bounded, so one recipient
 /// that is slow to take a push never holds up the storing of other recipients' messages. Pushing is
-/// a separate, best-effort step after the message is stored: only a message that is queued and
-/// already due is handed over, and only when something could push it (direct push is on, or the
-/// recipient has a live session with live delivery on right now); the hand-over never blocks, and
-/// whatever happens to the push the message stays queued until a live session or a direct push
-/// delivers it. Each handed-over message ends with one outcome on
-/// <c>didcomm.mediator.push.outcomes</c>.
+/// a separate, best-effort step after the message is stored: the grant is woken only for a message
+/// that is queued and already due, and only when something could push it (direct push is on, or
+/// the recipient has a live session with live delivery on right now); the wake-up is O(1) and never
+/// blocks, it carries nothing of the message (the push takes what the store holds), and whatever
+/// happens to the push the message stays queued until a live session or a direct push delivers it.
 /// </para>
 /// <para>
 /// <strong>Dependencies (L-017).</strong> The queue, the push dispatcher, the counter and the
@@ -153,11 +153,11 @@ internal sealed class MediatorForwardSink : IForwardSink
 
     // Best-effort and after the message is stored: a not-yet-due message waits in the queue and is
     // picked up once due (never pushed early, live or direct); a message nothing could push (direct
-    // push off and no live session now) gets no job; a failure here changes nothing about the
+    // push off and no live session now) wakes nothing; a failure here changes nothing about the
     // forward, which is already counted as Queued. Synchronous: it never awaits a session.
     private void HandToPush(ForwardProcessingResult result, ProtocolContext context, string subject, PickupDeliveryResult delivery, string forwardId)
     {
-        if (delivery.MessageId is not { } messageId || delivery.GrantPeerDid is not { } grantPeerDid)
+        if (delivery.MessageId is null || delivery.GrantPeerDid is not { } grantPeerDid)
             return;
         try
         {
@@ -168,11 +168,11 @@ internal sealed class MediatorForwardSink : IForwardSink
             }
             if (!_directPush && !_queue.Coordinator.HasLiveTarget(grantPeerDid))
                 return;
-            _pushes.TryEnqueue(new PushJob(grantPeerDid, subject, messageId, forwardId));
+            _pushes.Wake(grantPeerDid);
         }
         catch (Exception ex)
         {
-            MediatorLog.Write(_logger, LogLevel.Warning, "Forward {ForwardId} queued; the push hand-over failed with {ExceptionType}. The message waits for pickup.", forwardId, ex.GetType().Name);
+            MediatorLog.Write(_logger, LogLevel.Warning, "Forward {ForwardId} queued; waking its push failed with {ExceptionType}. The message waits for pickup.", forwardId, ex.GetType().Name);
         }
     }
 

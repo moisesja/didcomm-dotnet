@@ -148,15 +148,16 @@ public sealed class LivePushAdv4Tests
         var session = await world.LiveAsync(a);
         var inTake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        store.OnLeaseById = (grant, id, lease, now, _) =>
+        // L-020 (PR #109 review round 2, D-1): the push takes the next record with LeaseAsync, no longer by id.
+        store.OnLease = (request, _) =>
         {
             inTake.TrySetResult();
-            return new ValueTask<QueuedMessage?>(TakeAsync());
+            return new ValueTask<IReadOnlyList<QueuedMessage>>(TakeAsync());
 
-            async Task<QueuedMessage?> TakeAsync()
+            async Task<IReadOnlyList<QueuedMessage>> TakeAsync()
             {
                 await proceed.Task;
-                return await store.Inner.LeaseByIdAsync(grant, id, lease, now, CancellationToken.None);
+                return await store.Inner.LeaseAsync(request, CancellationToken.None);
             }
         };
 
@@ -182,15 +183,16 @@ public sealed class LivePushAdv4Tests
         var session = await world.LiveAsync(a);
         var inTake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        store.OnLeaseById = (grant, id, lease, now, _) =>
+        // L-020 (PR #109 review round 2, D-1): the push takes the next record with LeaseAsync, no longer by id.
+        store.OnLease = (request, _) =>
         {
             inTake.TrySetResult();
-            return new ValueTask<QueuedMessage?>(TakeAsync());
+            return new ValueTask<IReadOnlyList<QueuedMessage>>(TakeAsync());
 
-            async Task<QueuedMessage?> TakeAsync()
+            async Task<IReadOnlyList<QueuedMessage>> TakeAsync()
             {
                 await proceed.Task;
-                return await store.Inner.LeaseByIdAsync(grant, id, lease, now, CancellationToken.None);
+                return await store.Inner.LeaseAsync(request, CancellationToken.None);
             }
         };
 
@@ -200,7 +202,8 @@ public sealed class LivePushAdv4Tests
         proceed.SetResult();
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedNotHeld);
+        // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
+        world.Fixture.PushOutcomeLog.Should().BeEmpty();
         Deliveries(session).Should().BeEmpty();
         (await world.PickupFromAsync(store.Inner, a.Peer)).Should().BeEmpty("it stays with the pickup that took it");
     }
@@ -219,7 +222,7 @@ public sealed class LivePushAdv4Tests
             return release.Task;
         };
         var stored = await world.Fixture.Queue.DeliverAsync(a.Recipient, PushFixture.Payload(64), new PickupDeliveryOptions(AllowLive: false));
-        world.Fixture.Dispatcher.TryEnqueue(new PushJob(stored.GrantPeerDid!, a.Recipient, stored.MessageId!, "fwd-ack")).Should().BeTrue();
+        world.Fixture.Dispatcher.Wake(stored.GrantPeerDid!).Should().BeTrue();
         await entered.Task.WaitAsync(Wait);
 
         (await world.Fixture.Queue.RemoveAsync(a.Peer, stored.MessageId!)).Should().BeTrue();
@@ -304,7 +307,7 @@ public sealed class LivePushAdv4Tests
 
         await world.ForwardAsync(a.Recipient, 1);
         await entered.Task.WaitAsync(Wait);
-        await world.ForwardAsync(a.Recipient, 2); // waits in A's line behind the parked push
+        await world.ForwardAsync(a.Recipient, 2); // its wake-up waits behind the parked push
 
         (await world.Fixture.Queue.RevokeAndPurgeAsync(a.Peer)).Purged.Should().Be(2);
         if (regrant)
@@ -312,9 +315,76 @@ public sealed class LivePushAdv4Tests
         release.SetResult(ReturnRouteSendResult.NotSent);
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, regrant ? PushOutcomes.SkippedNotHeld : PushOutcomes.SkippedUnregistered);
+        // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
+        world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
         Deliveries(session).Should().BeEmpty("a purged record is never pushed, not even to the same peer granted again");
         world.Fixture.Store.MessageCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Review_round_2_live_sends_that_ignore_cancellation_never_pile_up_across_deadlines_session_churn_and_cooldowns()
+    {
+        // PR #109 review round 2, finding 2, through the real sink and dispatcher: a live send that
+        // ignores cancellation, its deadline, the session closed and reopened, the cooldown run out,
+        // a pickup and an acknowledgement — cycle after cycle. On 755c497 every cycle left one more
+        // send pending (6 after six cycles) while the dispatcher counted none. Now a grant has one
+        // operation until its work has actually ended (D-3), so at most one send is ever pending,
+        // while a healthy recipient keeps getting its pushes and the stalled one its pickups.
+        const int Cycles = 8;
+        await using var world = await World.StartAsync(o =>
+        {
+            o.DirectPush = false;
+            o.PushConcurrency = 1;
+        });
+        var a = await world.GrantAsync("a");
+        var b = await world.GrantAsync("b");
+        var healthy = await world.LiveAsync(b);
+        var pending = 0;
+        var maxPending = 0;
+        var firstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        for (var cycle = 0; cycle < Cycles; cycle++)
+        {
+            var stalled = await world.LiveAsync(a);
+            stalled.OnPush = (_, _) =>
+            {
+                var now = Interlocked.Increment(ref pending);
+                int seen;
+                while ((seen = Volatile.Read(ref maxPending)) < now && Interlocked.CompareExchange(ref maxPending, now, seen) != seen)
+                {
+                }
+                firstSend.TrySetResult();
+                return new TaskCompletionSource<ReturnRouteSendResult>().Task; // never ends, never looks at its token
+            };
+
+            await world.ForwardAsync(a.Recipient, (byte)cycle);
+            if (cycle == 0)
+                await firstSend.Task.WaitAsync(Wait);
+            world.Fixture.Time.Advance(PushTimeout);
+            await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
+            stalled.Close();
+            world.Fixture.Time.Advance(PushTimeout * PushDispatcher.CooldownPushTimeouts);
+
+            // A healthy recipient still gets its live push, and acknowledges it.
+            await world.ForwardAsync(b.Recipient, (byte)(100 + cycle));
+            await MessagePickupLive.UntilAsync(() => Task.FromResult(Deliveries(healthy).Count == cycle + 1), "the healthy recipient's push goes out");
+            await world.Fixture.Queue.RemoveAsync(b.Peer, Deliveries(healthy)[^1].Id);
+
+            // The stalled recipient still picks up and acknowledges what it was sent.
+            var picked = new List<string>();
+            await MessagePickupLive.UntilAsync(async () =>
+            {
+                picked.AddRange(await world.PickupAsync(a.Peer));
+                return picked.Count > 0;
+            }, "the stalled recipient picks up its message");
+            foreach (var id in picked)
+                await world.Fixture.Queue.RemoveAsync(a.Peer, id);
+        }
+
+        Volatile.Read(ref maxPending).Should().Be(1, "one operation per grant until its work has ended: the abandoned send is never joined by another");
+        world.Fixture.Dispatcher.Unsettled.Should().Be(1, "and the dispatcher still counts it");
+        Deliveries(healthy).Should().HaveCount(Cycles);
+        (await world.StatusAsync(a.Peer)).Should().Be(0, "every message of the stalled recipient was picked up and acknowledged");
     }
 
     // ---- 3. loss and starvation; 4. order; 5. accounting ----------------------------------------------
@@ -491,16 +561,23 @@ public sealed class LivePushAdv4Tests
             };
             var store = world.Fixture.Store;
             var outcomes = world.Fixture.Recorder;
+            var dispatcher = world.Fixture.Dispatcher;
 
             await world.ForwardAsync(a.Recipient, 1);
-            await world.ForwardAsync(a.Recipient, 2);
             await entered.Task.WaitAsync(Wait);
+            await world.ForwardAsync(a.Recipient, 2);
             await world.Fixture.Services.DisposeAsync().AsTask().WaitAsync(Wait);
 
+            // L-020 (PR #109 review round 2, D-2/D-3): the second forward's wake-up waits behind the
+            // push in flight (its grant is busy until that push settles), so it is counted when the
+            // abandoned push ends, not at the shutdown.
             outcomes.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag)
-                .Should().Equal(PushOutcomes.SkippedShutdown, PushOutcomes.SkippedShutdown);
+                .Should().Equal(PushOutcomes.SkippedShutdown);
             store.MessageCount.Should().Be(2, "nothing is lost by the shutdown");
             release.SetResult(ReturnRouteSendResult.NotSent);
+            await MessagePickupLive.UntilAsync(() => Task.FromResult(dispatcher.Unsettled == 0), "the abandoned push settled");
+            outcomes.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag)
+                .Should().Equal(PushOutcomes.SkippedShutdown, PushOutcomes.SkippedShutdown);
             var seen = new HashSet<string>(StringComparer.Ordinal);
             await MessagePickupLive.UntilAsync(async () =>
             {

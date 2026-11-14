@@ -3,6 +3,7 @@ using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
 using DidComm.Mediator.Tests.Coordination;
+using DidComm.Mediator.Tests.Pickup;
 using DidComm.Exceptions;
 using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
@@ -61,9 +62,9 @@ public sealed class DirectPushQaTests
     {
         await using var fixture = PushFixture.Create((_, _) => Task.FromResult(new TransportResult(accepted, status)), directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Should().ContainSingle();
@@ -82,9 +83,9 @@ public sealed class DirectPushQaTests
     {
         await using var fixture = PushFixture.Create((r, _) => Task.FromException<TransportResult>(PushFixture.TransportFailure(r, status)), directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
@@ -119,9 +120,9 @@ public sealed class DirectPushQaTests
     {
         await using var fixture = PushFixture.Create(directory: _ => new Uri(endpoint, UriKind.RelativeOrAbsolute));
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(expected);
@@ -138,7 +139,7 @@ public sealed class DirectPushQaTests
             directory: _ => new Uri("https://qa-user:qa-secret-pw@qa-recipient-host.example/qa-inbox"));
         await fixture.EnrolAsync(Peer, Recipient);
 
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
@@ -151,7 +152,7 @@ public sealed class DirectPushQaTests
         await using var fixture = PushFixture.Create(directory: _ => new Uri("http://127.0.0.1:9/qa-inbox"), blockPrivateNetworks: true);
         await fixture.EnrolAsync(Peer, Recipient);
 
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient)).Should().BeTrue();
+        fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Should().BeEmpty("the guard runs before the transport");
@@ -173,9 +174,13 @@ public sealed class DirectPushQaTests
         });
         await fixture.EnrolAsync(Peer, Recipient);
 
+        // L-020 (PR #109 review round 2, D-2): wake-ups coalesce, so each is served on its own here;
+        // the directory is asked for each message a push takes, again every time.
         for (var i = 0; i < 3; i++)
-            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"f{i}")).Should().BeTrue();
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        {
+            fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
+            await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        }
 
         calls.Should().Be(3);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedNoEndpoint, PushOutcomes.SkippedNoEndpoint, PushOutcomes.SkippedNoEndpoint);
@@ -190,10 +195,10 @@ public sealed class DirectPushQaTests
         var mediation = new ScriptedMediationStore();
         await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMediationStore>(mediation));
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
         mediation.OnFind = (_, _) => throw new HandlerBoomException(HandlerBoomException.Marker + " " + Recipient);
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Should().BeEmpty("a registration that cannot be confirmed is never pushed to");
@@ -209,7 +214,7 @@ public sealed class DirectPushQaTests
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMediationStore>(mediation));
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
         mediation.OnFind = async (_, ct) =>
         {
             parked.TrySetResult();
@@ -217,7 +222,7 @@ public sealed class DirectPushQaTests
             return null;
         };
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await parked.Task.WaitAsync(Wait);
         fixture.Time.Advance(TimeSpan.FromSeconds(30));
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
@@ -233,10 +238,10 @@ public sealed class DirectPushQaTests
         var mediation = new ScriptedMediationStore();
         await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMediationStore>(mediation));
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
         mediation.OnFind = (_, _) => ValueTask.FromResult<MediationGrant?>(new MediationGrant(Peer + "x", new[] { PushFixture.MediatorDid }));
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Should().BeEmpty();
@@ -246,83 +251,69 @@ public sealed class DirectPushQaTests
     // ── saturation and recovery ──────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task After_a_saturated_grant_drains_it_is_accepted_again()
+    public async Task With_every_operation_unsettled_a_wake_up_starts_nothing_and_the_next_one_after_they_settle_is_served()
     {
+        // L-020 (PR #109 review round 2, D-4): the per-grant and total job bounds are gone with the
+        // jobs; what is bounded now is the work that has not ended — at most 2 x PushConcurrency
+        // operations between start and settlement, abandoned ones included. Beyond it a wake-up
+        // starts nothing (Push-Skipped-Saturated) and its message stays queued.
         var gate = new PushGate();
         await using var fixture = PushFixture.Create(
-            async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
-            directory: _ => Inbox,
-            configure: o => o.Pickup.MaxQueueMessages = 40);
-        await fixture.EnrolAsync(Peer, Recipient);
-        // L-020 (ADV-4 D1): the dispatcher is now sized from the queue's quotas, not 16 / 1 024; these bounds' mechanics are exercised on a dispatcher built with the old values through the test seam.
-        const int PerGrant = 16;
-        await using var dispatcher = fixture.NewDispatcher(capacity: 1_024, perGrant: PerGrant);
-
-        for (var i = 0; i < PerGrant; i++)
-            dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"s{i}")).Should().BeTrue();
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "over")).Should().BeFalse();
-
-        gate.Open();
-        await dispatcher.WaitForIdleAsync(Wait);
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "after")).Should().BeTrue("the grant's share is given back as its jobs end");
-        await dispatcher.WaitForIdleAsync(Wait);
-
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(PerGrant + 1);
-        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(1);
-        fixture.Store.MessageCount.Should().Be(1, "only the refused job's message waits for pickup");
-    }
-
-    [Fact]
-    public async Task Count_bounds_refuse_exactly_at_the_bound_and_recover()
-    {
-        // L-020: this test also covered a 300-byte pinned-payload budget. That bound is gone with the
-        // payload in the job (Q-1: a job names a stored record, whose bytes the store already holds
-        // under its own quota), so only the count bounds remain to test.
-        var gate = new PushGate();
-        await using var fixture = PushFixture.Create(
-            async (_, ct) => { await gate.PassAsync(ct); return new TransportResult(true, 202); },
+            async (_, _) => { await gate.PassAsync(CancellationToken.None); return new TransportResult(true, 202); }, // ignores the deadline
             directory: _ => Inbox,
             configure: o => o.PushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
-        await using var dispatcher = fixture.NewDispatcher(capacity: 3, perGrant: 2);
+        await fixture.EnrolAsync("did:example:qa-third-peer", "did:example:qa-third-recipient");
+        fixture.Dispatcher.MaxUnsettled.Should().Be(2);
 
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(100), "b1")).Should().BeTrue();
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, PushFixture.Payload(100), "b2")).Should().BeTrue();
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(100), "b3")).Should().BeTrue("exactly at the grant's share is allowed");
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(1), "b4-over-grant")).Should().BeFalse("the per-grant bound");
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, PushFixture.Payload(1), "b4-over-count")).Should().BeFalse("the total bound");
+        foreach (var (recipient, n) in new[] { (Recipient, 1), (OtherRecipient, 2) })
+        {
+            fixture.Dispatcher.Wake((await fixture.StoreAsync(recipient)).GrantPeerDid).Should().BeTrue();
+            await gate.WaitForArrivalsAsync(n, Wait);
+            fixture.Time.Advance(TimeSpan.FromSeconds(30));
+            await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        }
+        fixture.Dispatcher.Unsettled.Should().Be(2, "both abandoned sends still run");
+
+        var third = await fixture.StoreAsync("did:example:qa-third-recipient");
+        fixture.Dispatcher.Wake(third.GrantPeerDid).Should().BeTrue();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(1);
+        fixture.Router.Requests.Should().HaveCount(2, "the third grant's message was not sent");
 
         gate.Open();
-        await dispatcher.WaitForIdleAsync(Wait);
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(300), "after")).Should().BeTrue("everything was given back");
-        await dispatcher.WaitForIdleAsync(Wait);
-
-        fixture.Pushes(PushOutcomes.SkippedSaturated).Should().Be(2);
-        fixture.Pushes(PushOutcomes.Pushed).Should().Be(4);
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the abandoned sends ended");
+        fixture.Dispatcher.Wake(third.GrantPeerDid).Should().BeTrue();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(1, "the third grant's message, at its next wake-up");
+        fixture.Store.MessageCount.Should().Be(0, "the abandoned sends' late 2xx removed their copies too");
     }
 
     [Fact]
     public async Task A_payload_of_any_admissible_size_is_taken_when_idle()
     {
-        // L-020: this test pinned the refusal of a payload larger than the pinned-bytes budget. A job
-        // pins no payload any more (Q-1), so any message the queue admitted can be pushed.
+        // L-020: this test pinned the refusal of a payload larger than the pinned-bytes budget. A push
+        // pins no payload (it takes what the store holds), so any message the queue admitted can be pushed.
         await using var fixture = PushFixture.Create(directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
-        await using var dispatcher = fixture.NewDispatcher(capacity: 10, perGrant: 10);
 
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(fixture.Queue.MaxAdmissiblePayloadBytes))).Should().BeTrue();
-        await dispatcher.WaitForIdleAsync(Wait);
+        fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient, PushFixture.Payload(fixture.Queue.MaxAdmissiblePayloadBytes))).GrantPeerDid).Should().BeTrue();
+        await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
         fixture.Store.MessageCount.Should().Be(0);
     }
 
-    // ── exactly one outcome per job ───────────────────────────────────────────────────────
+    // ── exactly one outcome per push attempt ──────────────────────────────────────────────
 
     [Fact]
-    public async Task A_mixed_batch_ends_with_exactly_one_outcome_per_job()
+    public async Task A_failed_push_ends_its_operation_and_the_message_is_tried_again_at_the_next_wake_up_with_one_outcome_per_attempt()
     {
+        // L-020 (PR #109 review round 2, D-1/D-2): this test counted one outcome per job. Wake-ups
+        // now coalesce and an operation stops at its first failure, so the property is one outcome
+        // per push attempt (and one per wake-up that pushed nothing), and a failed message's retry
+        // at the grant's next wake-up.
         var n = 0;
         await using var fixture = PushFixture.Create(
             (r, _) => Interlocked.Increment(ref n) % 2 == 0
@@ -332,22 +323,22 @@ public sealed class DirectPushQaTests
             configure: o => o.Pickup.MaxQueueMessages = 50);
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
-
-        var accepted = 0;
         for (var i = 0; i < 12; i++)
-        {
-            var job = await fixture.QueuedJobAsync(i % 3 == 0 ? OtherRecipient : Recipient, forwardId: $"m{i}");
-            if (fixture.Dispatcher.TryEnqueue(job))
-                accepted++;
-        }
-        await fixture.Dispatcher.WaitForIdleAsync(Wait);
+            await fixture.StoreAsync(i % 3 == 0 ? OtherRecipient : Recipient);
 
-        accepted.Should().Be(12);
-        fixture.PushOutcomeLog.Should().HaveCount(12);
-        fixture.Pushes(PushOutcomes.SkippedScheme).Should().Be(4);
-        (fixture.Pushes(PushOutcomes.Pushed) + fixture.Pushes(PushOutcomes.Failed)).Should().Be(8);
-        fixture.Store.MessageCount.Should().Be(12 - (int)fixture.Pushes(PushOutcomes.Pushed));
-        fixture.Dispatcher.Outstanding.Should().Be(0);
+        fixture.Dispatcher.Wake(OtherPeer).Should().BeTrue();
+        for (var wake = 0; wake < 3; wake++)
+        {
+            fixture.Dispatcher.Wake(Peer).Should().BeTrue();
+            await fixture.Dispatcher.WaitForIdleAsync(Wait);
+        }
+
+        fixture.Pushes(PushOutcomes.SkippedScheme).Should().Be(1, "one wake-up of the grant whose endpoint is not http(s)");
+        fixture.Pushes(PushOutcomes.Failed).Should().Be(3, "each of the three operations stopped at its failure");
+        fixture.Pushes(PushOutcomes.Pushed).Should().Be(2, "the failed message went out at the next wake-up");
+        fixture.Router.Requests.Should().HaveCount(5, "one request per counted attempt");
+        fixture.Store.MessageCount.Should().Be(10);
+        fixture.Dispatcher.Unsettled.Should().Be(0);
     }
 
     // ── shutdown ──────────────────────────────────────────────────────────────────────────
@@ -367,16 +358,18 @@ public sealed class DirectPushQaTests
             configure: o => o.PushConcurrency = 1);
         await fixture.EnrolAsync(Peer, Recipient);
         var dispatcher = fixture.Dispatcher;
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "in-flight")).Should().BeTrue();
+        dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "waiting")).Should().BeTrue();
+        dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
 
         dispatcher.Invoking(d => d.Dispose()).Should().NotThrow("the shutdown cancels inside a try");
         await dispatcher.WaitForIdleAsync(Wait);
+        await MessagePickupLive.UntilAsync(() => dispatcher.Unsettled == 0, "the cancelled push settled");
 
+        // The push in flight, and the wake-up that arrived during it: each skipped once.
         fixture.PushOutcomeLog.Should().HaveCount(2).And.OnlyContain(o => o == PushOutcomes.SkippedShutdown);
         fixture.Store.MessageCount.Should().Be(2, "both messages stay queued for pickup");
-        dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "late")).Should().BeFalse();
+        dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeFalse();
         fixture.Pushes(PushOutcomes.SkippedShutdown).Should().Be(3);
         NoLeaks(fixture);
     }
@@ -419,9 +412,9 @@ public sealed class DirectPushQaTests
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
 
         for (var i = 0; i < 4; i++)
-            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"slow-{i}")).Should().BeTrue();
+            fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, forwardId: "fast")).Should().BeTrue();
+        fixture.Dispatcher.Wake((await fixture.StoreAsync(OtherRecipient)).GrantPeerDid).Should().BeTrue();
 
         await fastPushed.Task.WaitAsync(TimeSpan.FromSeconds(5));
         gate.Arrived.Should().Be(1, "the slow grant has one push in flight; its other three wait their turn");
@@ -446,16 +439,22 @@ public sealed class DirectPushQaTests
                 return new TransportResult(true, 202);
             },
             directory: peer => new Uri(peer == Peer ? "https://qa-recipient-host.example/a" : "https://qa-recipient-host.example/b"),
-            configure: o => o.PushConcurrency = 1);
+            configure: o =>
+            {
+                o.PushConcurrency = 1;
+                // L-020 (PR #109 review round 2, D-4): grants now take turns per operation, of at
+                // most MaxDeliveryBatch pushes; with one push per operation the turns are per push.
+                o.Pickup.MaxDeliveryBatch = 1;
+            });
         await fixture.EnrolAsync(Peer, Recipient);
         await fixture.EnrolAsync(OtherPeer, OtherRecipient);
 
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "a0")).Should().BeTrue();
+        fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
         for (var i = 1; i <= 3; i++)
-            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: $"a{i}")).Should().BeTrue();
+            fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         for (var i = 0; i < 3; i++)
-            fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(OtherRecipient, forwardId: $"b{i}")).Should().BeTrue();
+            fixture.Dispatcher.Wake((await fixture.StoreAsync(OtherRecipient)).GrantPeerDid).Should().BeTrue();
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
@@ -477,7 +476,7 @@ public sealed class DirectPushQaTests
         await using var _ = fixture;
         var now = fixture.Time.GetUtcNow();
         var expiring = await QueueAsync(fixture, Recipient, new PickupDeliveryOptions(ExpiresTime: now.ToUnixTimeSeconds() + 10), "expiring");
-        fixture.Dispatcher.TryEnqueue(expiring.Job).Should().BeTrue();
+        fixture.Dispatcher.Wake(expiring.Job.GrantPeerDid).Should().BeTrue();
 
         fixture.Time.Advance(TimeSpan.FromSeconds(60)); // the forward has expired; no push deadline (5 min) has passed
         // L-020: the QA draft expected 0 here, but the blocker (no expiry, being pushed) is still held
@@ -487,7 +486,8 @@ public sealed class DirectPushQaTests
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().NotContain(p => p.SequenceEqual(expiring.Payload), "an expired message is never pushed");
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed, PushOutcomes.SkippedNotHeld);
+        // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
     }
 
     [Fact]
@@ -500,7 +500,7 @@ public sealed class DirectPushQaTests
         });
         await using var _ = fixture;
         var aging = await QueueAsync(fixture, Recipient, null, "aging");
-        fixture.Dispatcher.TryEnqueue(aging.Job).Should().BeTrue();
+        fixture.Dispatcher.Wake(aging.Job.GrantPeerDid).Should().BeTrue();
 
         fixture.Time.Advance(TimeSpan.FromSeconds(31)); // aged out; the blocker's 5-minute deadline has not passed
         (await fixture.Store.GetStatusAsync(Peer, null, fixture.Time.GetUtcNow(), CancellationToken.None)).MessageCount.Should().Be(0, "the queue no longer reports it");
@@ -508,7 +508,8 @@ public sealed class DirectPushQaTests
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Select(r => r.Payload.ToArray()).Should().NotContain(p => p.SequenceEqual(aging.Payload), "an aged-out message is never pushed");
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed, PushOutcomes.SkippedNotHeld);
+        // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
     }
 
     [Fact]
@@ -519,14 +520,15 @@ public sealed class DirectPushQaTests
         var (fixture, gate) = await BlockedSingleWorkerAsync();
         await using var _ = fixture;
         var acked = await QueueAsync(fixture, Recipient, null, "acked");
-        fixture.Dispatcher.TryEnqueue(acked.Job).Should().BeTrue();
+        fixture.Dispatcher.Wake(acked.Job.GrantPeerDid).Should().BeTrue();
         (await fixture.Store.AcknowledgeAsync(acked.Job.GrantPeerDid, new[] { acked.Job.MessageId }, CancellationToken.None)).Should().Be(1);
 
         gate.Open();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.Router.Requests.Should().ContainSingle("only the blocker is sent");
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed, PushOutcomes.SkippedNotHeld);
+        // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────
@@ -552,16 +554,16 @@ public sealed class DirectPushQaTests
             },
             didComm: o => o.ExpiresClockSkew = TimeSpan.Zero);
         await fixture.EnrolAsync(Peer, Recipient);
-        fixture.Dispatcher.TryEnqueue(await fixture.QueuedJobAsync(Recipient, forwardId: "blocker")).Should().BeTrue();
+        fixture.Dispatcher.Wake((await fixture.StoreAsync(Recipient)).GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
         return (fixture, gate);
     }
 
-    private static async Task<(PushJob Job, byte[] Payload)> QueueAsync(PushFixture fixture, string recipientDid, PickupDeliveryOptions? options, string forwardId)
+    private static async Task<(StoredMessage Job, byte[] Payload)> QueueAsync(PushFixture fixture, string recipientDid, PickupDeliveryOptions? options, string forwardId)
     {
         var payload = PushFixture.Payload(70, seed: (byte)forwardId.Length);
         var result = await fixture.Queue.DeliverAsync(recipientDid, payload, options);
         result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
-        return (new PushJob(result.GrantPeerDid!, recipientDid, result.MessageId!, forwardId), payload);
+        return (new StoredMessage(result.GrantPeerDid!, recipientDid, result.MessageId!), payload);
     }
 }

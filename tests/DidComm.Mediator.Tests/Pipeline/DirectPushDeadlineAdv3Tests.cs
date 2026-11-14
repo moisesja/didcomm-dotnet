@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
+using DidComm.Mediator.Tests.Pickup;
 using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -8,8 +9,8 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Pipeline;
 
 /// <summary>
-/// ADV-3 (#95): the push deadline (<c>PushDispatcher.BoundedAsync</c>) abandons a store or
-/// transport call that ignores its token. What an abandoned call does when it finally returns:
+/// ADV-3 (#95): the push deadline abandons a store or transport call that ignores its token (the
+/// worker stops waiting; the push itself runs on until the call returns, PR #109 review round 2). What an abandoned call does when it finally returns:
 /// can it corrupt the queue (a late 2xx removing a record a pickup holds, a late take holding a
 /// lease a pickup needs) or give a job a second outcome? Deterministic: every call is a gate the test
 /// opens, every deadline the manual clock the test moves.
@@ -23,50 +24,58 @@ public sealed class DirectPushDeadlineAdv3Tests
     private static readonly TimeSpan PastDeadline = TimeSpan.FromSeconds(31); // PushTimeout is 30 s
 
     [Fact]
-    public async Task A_take_that_returns_after_the_deadline_sends_nothing_and_holds_the_record_only_until_its_lease_ends()
+    public async Task A_take_that_returns_after_the_deadline_sends_nothing_and_gives_the_record_back_at_once()
     {
+        // L-020 (PR #109 review round 2, D-3/D-5): the abandoned take used to keep its record until
+        // its lease ran out. The push now runs on after the deadline only to end what it took: the
+        // take returns, sees the deadline passed, sends nothing and gives the record back; the grant
+        // is not served again before that.
         var store = new ScriptedMessageStore();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task<QueuedMessage?>? lateTake = null;
+        Task<IReadOnlyList<QueuedMessage>>? lateTake = null;
         await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMessageStore>(store));
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
-        store.OnLeaseById = (grant, id, lease, now, _) =>
+        var job = await fixture.StoreAsync(Recipient);
+        store.OnLease = (request, _) =>
         {
             entered.TrySetResult();
             lateTake = TakeLateAsync();
-            return new ValueTask<QueuedMessage?>(lateTake);
+            return new ValueTask<IReadOnlyList<QueuedMessage>>(lateTake);
 
-            async Task<QueuedMessage?> TakeLateAsync()
+            async Task<IReadOnlyList<QueuedMessage>> TakeLateAsync()
             {
                 await release.Task; // ignores its token
-                return await store.Inner.LeaseByIdAsync(grant, id, lease, now, CancellationToken.None);
+                return await store.Inner.LeaseAsync(request, CancellationToken.None);
             }
         };
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await entered.Task.WaitAsync(Wait);
         fixture.Time.Advance(PastDeadline);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
+        fixture.Dispatcher.Unsettled.Should().Be(1, "the take still runs");
 
+        store.OnLease = null;
         release.SetResult();
-        (await lateTake!.WaitAsync(Wait)).Should().NotBeNull("the abandoned take did lease the record when it finally ran");
+        (await lateTake!.WaitAsync(Wait)).Should().ContainSingle("the abandoned take did lease the record when it finally ran");
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the push ended what it took");
 
         var now = fixture.Options.Now();
-        (await store.Inner.LeaseAsync(PickupRequest(now), CancellationToken.None)).Should().BeEmpty("the abandoned take holds it until its lease ends");
-        fixture.Time.Advance(TimeSpan.FromSeconds(30)); // the push's lease: the deadline plus the 30 s margin, from the take
-        (await store.Inner.LeaseAsync(PickupRequest(fixture.Options.Now()), CancellationToken.None)).Should().ContainSingle()
+        (await store.Inner.LeaseAsync(PickupRequest(now), CancellationToken.None)).Should().ContainSingle("given back at once, not left to its lease")
             .Which.Id.Should().Be(job.MessageId);
-
         fixture.Router.Requests.Should().BeEmpty("an abandoned take never leads to a send");
-        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Failed }, "one outcome per job, whatever the abandoned call did later");
+        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Failed }, "one outcome per push attempt, whatever the abandoned call did later");
     }
 
     [Fact]
-    public async Task A_2xx_that_arrives_after_the_deadline_is_ignored_and_never_touches_the_record_a_pickup_took_since()
+    public async Task A_2xx_that_arrives_after_the_deadline_removes_the_record_it_delivered_and_a_pickup_never_held_it_meanwhile()
     {
+        // L-020 (PR #109 review round 2, D-5): the push used to give its lease back at the deadline,
+        // so a pickup could take the record while the abandoned send ran on, and the late 2xx had to
+        // be ignored. The lease now ends exactly once, when the send ends: a pickup does not get the
+        // record meanwhile, and the late 2xx — a delivery — removes it.
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task<TransportResult>? lateSend = null;
@@ -84,41 +93,39 @@ public sealed class DirectPushDeadlineAdv3Tests
             },
             directory: _ => Inbox);
         await fixture.EnrolAsync(Peer, Recipient);
-        var job = await fixture.QueuedJobAsync(Recipient);
+        var job = await fixture.StoreAsync(Recipient);
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await entered.Task.WaitAsync(Wait);
         fixture.Time.Advance(PastDeadline);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
 
-        // The push gave its lease back at once; a pickup takes the record.
         var now = fixture.Options.Now();
-        var picked = await fixture.Store.LeaseAsync(PickupRequest(now), CancellationToken.None);
-        picked.Should().ContainSingle().Which.Id.Should().Be(job.MessageId);
+        (await fixture.Store.LeaseAsync(PickupRequest(now), CancellationToken.None)).Should().BeEmpty("the record stays under the push's lease while its send runs");
 
-        // Now the abandoned send answers 202.
         release.SetResult();
         (await lateSend!.WaitAsync(Wait)).HttpStatusCode.Should().Be(202);
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the abandoned push settled");
 
-        (await fixture.Store.GetStatusAsync(Peer, null, now, CancellationToken.None)).MessageCount.Should().Be(1, "the late 2xx removed nothing");
-        (await fixture.Store.LeaseAsync(PickupRequest(now) with { Lease = new MessageLease("another-session", now + TimeSpan.FromSeconds(60)) }, CancellationToken.None))
-            .Should().BeEmpty("the pickup's lease is intact");
-        (await fixture.Store.AcknowledgeAsync(Peer, new[] { job.MessageId }, CancellationToken.None)).Should().Be(1, "the pickup acknowledges what it delivered");
-        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Failed }, "one outcome per job");
+        (await fixture.Store.GetStatusAsync(Peer, null, now, CancellationToken.None)).MessageCount.Should().Be(0, "the late 2xx was a delivery: its record is removed");
+        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Failed }, "counted once, at the deadline");
     }
 
     [Fact]
-    public async Task A_removal_that_returns_after_the_deadline_removes_exactly_the_delivered_record_and_the_job_keeps_one_outcome()
+    public async Task A_removal_that_returns_after_the_deadline_removes_exactly_the_delivered_record_and_the_push_keeps_one_outcome()
     {
+        // L-020 (PR #109 review round 2, D-3): the removal is part of the push now, so the push that
+        // reached its deadline inside the removal counts as failed (the worker cannot tell it was
+        // delivered); the removal still takes exactly the delivered record when it returns.
         var store = new ScriptedMessageStore();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task<int>? lateRemoval = null;
         await using var fixture = PushFixture.Create(directory: _ => Inbox, services: s => s.AddSingleton<IMessageStore>(store));
         await fixture.EnrolAsync(Peer, Recipient);
-        var pushed = await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(32, seed: 1), forwardId: "fwd-pushed");
-        var other = await fixture.QueuedJobAsync(Recipient, PushFixture.Payload(32, seed: 2), forwardId: "fwd-other");
+        var pushed = await fixture.StoreAsync(Recipient, PushFixture.Payload(32, seed: 1));
+        var other = await fixture.StoreAsync(Recipient, PushFixture.Payload(32, seed: 2));
         store.OnAcknowledge = (grant, ids, _) =>
         {
             entered.TrySetResult();
@@ -132,11 +139,11 @@ public sealed class DirectPushDeadlineAdv3Tests
             }
         };
 
-        fixture.Dispatcher.TryEnqueue(pushed).Should().BeTrue();
+        fixture.Dispatcher.Wake(pushed.GrantPeerDid).Should().BeTrue();
         await entered.Task.WaitAsync(Wait);
         fixture.Time.Advance(PastDeadline);
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Pushed);
+        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
 
         // A pickup meanwhile leases what it can: only the other record (the pushed one is still under
         // the push's lease, never given back after a 2xx).
@@ -145,11 +152,12 @@ public sealed class DirectPushDeadlineAdv3Tests
 
         release.SetResult();
         (await lateRemoval!.WaitAsync(Wait)).Should().Be(1);
+        await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "the push settled");
 
         var status = await store.Inner.GetStatusAsync(Peer, null, now, CancellationToken.None);
         status.MessageCount.Should().Be(1, "the late removal took exactly the delivered record");
         (await store.Inner.AcknowledgeAsync(Peer, new[] { other.MessageId }, CancellationToken.None)).Should().Be(1, "the pickup's record was untouched");
-        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Pushed }, "one outcome per job");
+        fixture.PushOutcomeLog.Should().Equal(new[] { PushOutcomes.Failed }, "one outcome per push attempt");
         fixture.Router.Requests.Should().ContainSingle();
     }
 

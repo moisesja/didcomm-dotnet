@@ -139,30 +139,29 @@ internal sealed class PushFixture : IAsyncDisposable
         await Services.GetRequiredService<DidComm.Protocols.ProtocolDispatcher>().DispatchAsync(await client.UnpackAsync(packed.Message), client, Options, Task.CompletedTask, session, CancellationToken.None);
     }
 
-    /// <summary>Queue a message for <paramref name="recipientDid"/> and build the push job the sink would hand over.</summary>
-    public async Task<PushJob> QueuedJobAsync(string recipientDid, byte[]? payload = null, string forwardId = "fwd-1")
+    /// <summary>
+    /// Store a message for <paramref name="recipientDid"/> as the forward sink does (no live push of
+    /// the queue's own) and say where it is held; wake its grant with <c>Dispatcher.Wake</c>.
+    /// </summary>
+    public async Task<StoredMessage> StoreAsync(string recipientDid, byte[]? payload = null, PickupDeliveryOptions? options = null)
     {
-        payload ??= Payload(64);
-        var result = await Queue.DeliverAsync(recipientDid, payload);
+        var result = await Queue.DeliverAsync(recipientDid, payload ?? Payload(64), options ?? new PickupDeliveryOptions(AllowLive: false));
         if (result.Outcome != PickupDeliveryOutcome.Queued || result.MessageId is null || result.GrantPeerDid is null)
             throw new InvalidOperationException($"Not queued ({result.Outcome}).");
-        return new PushJob(result.GrantPeerDid, recipientDid, result.MessageId, forwardId);
+        return new StoredMessage(result.GrantPeerDid, recipientDid, result.MessageId);
     }
 
-    /// <summary>A second dispatcher over this container's stores with explicit bounds (the test seam); the caller disposes it.</summary>
-    public PushDispatcher NewDispatcher(int capacity, int perGrant)
+    /// <summary>A second dispatcher over this container's stores; the caller disposes it.</summary>
+    public PushDispatcher NewDispatcher()
         => new(
             Services,
             Services.GetRequiredService<IOptions<MediatorOptions>>(),
             Queue,
             Services.GetRequiredService<IMessageStore>(),
-            Mediation,
             Services.GetRequiredService<IOptions<DidCommOptions>>(),
             Services.GetRequiredService<MediatorMetrics>(),
             Services.GetService<ILogger<PushDispatcher>>(),
-            Time,
-            capacity,
-            perGrant);
+            Time);
 
     public static byte[] Payload(int size, byte seed = 7)
     {
@@ -183,6 +182,9 @@ internal sealed class PushFixture : IAsyncDisposable
         Meters.Dispose();
     }
 }
+
+/// <summary>A message the queue holds: its grant (what a push wakes) and its record id.</summary>
+internal sealed record StoredMessage(string GrantPeerDid, string RecipientDid, string MessageId);
 
 /// <summary>A gate a scripted transport waits on: it records arrivals and lets the test release them.</summary>
 internal sealed class PushGate

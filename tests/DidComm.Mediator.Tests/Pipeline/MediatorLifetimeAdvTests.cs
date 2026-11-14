@@ -37,26 +37,26 @@ public sealed class MediatorLifetimeAdvTests
     public async Task A_store_that_never_returns_from_the_take_holds_a_worker_only_until_the_push_deadline()
     {
         var store = new ScriptedMessageStore();
-        var never = new TaskCompletionSource<QueuedMessage?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var never = new TaskCompletionSource<IReadOnlyList<QueuedMessage>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var fixture = PushFixture.Create(directory: _ => Inbox, configure: m => m.PushConcurrency = 1, services: s => s.AddSingleton<IMessageStore>(store));
         try
         {
             await fixture.EnrolAsync(PeerA, RecipientA);
             await fixture.EnrolAsync(PeerB, RecipientB);
-            var jobA = await fixture.QueuedJobAsync(RecipientA, forwardId: "fwd-a");
-            var jobB = await fixture.QueuedJobAsync(RecipientB, forwardId: "fwd-b");
-            store.OnLeaseById = (grant, id, lease, now, ct) =>
+            var jobA = await fixture.StoreAsync(RecipientA);
+            var jobB = await fixture.StoreAsync(RecipientB);
+            store.OnLease = (request, ct) =>
             {
-                if (grant != PeerA)
-                    return store.Inner.LeaseByIdAsync(grant, id, lease, now, ct);
+                if (request.GrantPeerDid != PeerA)
+                    return store.Inner.LeaseAsync(request, ct);
                 entered.TrySetResult();
-                return new ValueTask<QueuedMessage?>(never.Task); // a store call that never returns and never looks at its token
+                return new ValueTask<IReadOnlyList<QueuedMessage>>(never.Task); // a store call that never returns and never looks at its token
             };
 
-            fixture.Dispatcher.TryEnqueue(jobA).Should().BeTrue();
+            fixture.Dispatcher.Wake(jobA.GrantPeerDid).Should().BeTrue();
             await entered.Task.WaitAsync(Wait);
-            fixture.Dispatcher.TryEnqueue(jobB).Should().BeTrue();
+            fixture.Dispatcher.Wake(jobB.GrantPeerDid).Should().BeTrue();
             fixture.Time.Advance(TimeSpan.FromMinutes(5)); // well past PushTimeout (30 s) and the lease margin
 
             await fixture.Dispatcher.WaitForIdleAsync(Wait);
@@ -65,7 +65,7 @@ public sealed class MediatorLifetimeAdvTests
         }
         finally
         {
-            never.TrySetResult(null);
+            never.TrySetResult(Array.Empty<QueuedMessage>());
         }
     }
 
@@ -83,9 +83,9 @@ public sealed class MediatorLifetimeAdvTests
             },
             directory: _ => Inbox);
         await fixture.EnrolAsync(PeerA, RecipientA);
-        var job = await fixture.QueuedJobAsync(RecipientA);
+        var job = await fixture.StoreAsync(RecipientA);
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
 
         var now = fixture.Options.Now();
@@ -107,14 +107,15 @@ public sealed class MediatorLifetimeAdvTests
     {
         await using var fixture = PushFixture.Create(directory: _ => Inbox);
         await fixture.EnrolAsync(PeerA, RecipientA);
-        var job = await fixture.QueuedJobAsync(RecipientA);
+        var job = await fixture.StoreAsync(RecipientA);
         var now = fixture.Options.Now();
         (await fixture.Store.LeaseAsync(PickupRequest(now), CancellationToken.None)).Should().ContainSingle();
 
-        fixture.Dispatcher.TryEnqueue(job).Should().BeTrue();
+        fixture.Dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
-        fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedNotHeld);
+        // L-020 (PR #109 review round 2): a wake-up that finds nothing to push is no outcome any more (Push-Skipped-NotHeld is gone).
+        fixture.PushOutcomeLog.Should().BeEmpty();
         fixture.Router.Requests.Should().BeEmpty();
         fixture.Store.MessageCount.Should().Be(1, "the pickup's acknowledgement removes it, not the push");
     }
@@ -133,11 +134,11 @@ public sealed class MediatorLifetimeAdvTests
             },
             directory: _ => Inbox);
         await fixture.EnrolAsync(PeerA, RecipientA);
-        var job = await fixture.QueuedJobAsync(RecipientA);
+        var job = await fixture.StoreAsync(RecipientA);
         var dispatcher = fixture.Dispatcher;
         var store = fixture.Store;
         var options = fixture.Options;
-        dispatcher.TryEnqueue(job).Should().BeTrue();
+        dispatcher.Wake(job.GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
 
         FluentActions.Invoking(() => fixture.Services.Dispose()).Should().NotThrow();
@@ -147,7 +148,7 @@ public sealed class MediatorLifetimeAdvTests
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.SkippedShutdown);
         store.MessageCount.Should().Be(1);
         (await store.LeaseAsync(PickupRequest(options.Now()), CancellationToken.None)).Should().ContainSingle("the push gave its lease back on the way out");
-        dispatcher.TryEnqueue(job).Should().BeFalse("nothing is taken after disposal");
+        dispatcher.Wake(job.GrantPeerDid).Should().BeFalse("nothing is taken after disposal");
         await fixture.DisposeAsync();
     }
 
