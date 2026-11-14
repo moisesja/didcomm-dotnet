@@ -30,6 +30,13 @@ public static class MediatorClientBuilderExtensions
     /// they send.
     /// </para>
     /// <para>
+    /// <strong>An inbound frame consumer of your own.</strong> The clients take any registered
+    /// <c>IInboundFrameConsumer</c> as the sign that answers arriving on a WebSocket reach them. A
+    /// consumer of your own in place of <c>UseInboundDispatch()</c>'s must hand what it receives to
+    /// the <c>ProtocolDispatcher</c>; if it does not, WebSocket requests are sent and time out
+    /// instead of being refused, and live streams receive nothing pushed.
+    /// </para>
+    /// <para>
     /// <strong>Settings.</strong> <paramref name="configure"/> may run several times, on different
     /// instances (once here to check the settings, once when the container builds them), so it must
     /// only assign values. Calling this method again is harmless: nothing is registered twice and

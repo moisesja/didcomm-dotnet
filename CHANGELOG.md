@@ -105,7 +105,11 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   when its sender's DID resolves slowly, or never. The exception's text names at most our request
   id, never a DID or a message. The item is not acknowledged and stays queued, and the next message
   takes its place, so slow messages cannot keep the ones behind them from being opened. The rest of
-  the delivery is returned and acknowledged as usual.
+  the delivery is returned and acknowledged as usual. Each message is opened on a thread-pool work
+  item of its own, never on your thread, so a fetch or a stream gets its result at the budget even
+  when your DID or secrets resolver blocks its thread. Blocking itself cannot be bounded: the
+  blocked thread and its work stay the resolver's until it returns (holding an abandoned-unpack
+  slot meanwhile), so use resolvers that are asynchronous and honour their cancellation token.
 - **Keep `UnpackTimeout` well below the mediator's lease.** While a message the client gave up on
   is still set aside by the mediator, the next fetch passes over it and reaches what is queued
   behind it. The default of 20 seconds is a third of this library's default lease
@@ -116,7 +120,11 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   were opened, because it deletes by id.
 - **A message that keeps failing:** discard it with `AckAsync` once you have given up on it; the
   clients never do. A mediator that does not set fetched messages aside delivers it first on every
-  fetch, and then neither the budget nor a fetch-until-drained loop gets you past it.
+  fetch, and then neither the budget nor a fetch-until-drained loop gets you past it. Until it is
+  discarded, or ages out at the mediator (30 days by default), it stays queued and counts against
+  your mailbox's quota there (this library's mediator: `MessagePickupOptions.MaxQueueMessages`, 100
+  by default), so junk that never opens can fill your mailbox for honest senders until you discard
+  it. Slow messages have known limits too (Security, below).
 - **Live delivery needs a WebSocket.** `SetLiveDeliveryAsync` and `ReceiveLiveAsync` refuse a route
   that is not `ws`/`wss` with `InvalidOperationException` before anything is sent (`ReceiveLiveAsync`
   at its first `MoveNextAsync`). A mediator that cannot deliver live on the connection answers with
@@ -132,7 +140,12 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   acknowledgements still waiting and turns live delivery off, within one `RequestTimeout` whatever
   your token says. Each delivery the stream takes, a drain round's answer or a push, is opened
   whole, under the budget above, on your own `MoveNextAsync` and before any of its items is
-  yielded, so the time you spend on an item never counts against it. Items that failed to unpack
+  yielded, so the time you spend on an item never counts against it. Once a cycle is draining, its
+  drain rounds and the pushes take turns, a drain round first: a push that waits stays leased to
+  your connection at the mediator, and neither a steady flow of pushes that are slow to open nor a
+  drain that keeps meeting slow messages keeps the other from its turn. With `DedupeCapacity` 0 the
+  stream remembers nothing, so a message that comes twice in one delivery is yielded twice (a fetch
+  returns it once). Items that failed to unpack
   are yielded with `Error` and never acknowledged; one that keeps failing is yielded again each time
   the mediator delivers it, until you discard it with `AckAsync`.
   Acknowledgements go out at most 10 ids per message (when 10 are waiting, when nothing else is
@@ -141,7 +154,9 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   (`TransportException`) or is refused because too many requests are waiting is retried after a
   pause that starts at 1 second and doubles up to 30; five failures in a row end the stream with the
   last exception. Any other failure ends it at once: a problem report, a malformed answer, a key of
-  `from` this agent does not hold, the container's disposal.
+  `from` this agent does not hold, the container's disposal (also while a delivery is being opened:
+  a fetch or a stream then ends at once with `ObjectDisposedException`, and the resolvers opening
+  the delivery see their token cancelled).
 - **Polling is the permanent design** (owner decision on #88, 2026-11-14). A message whose sender
   delayed it is never pushed when it falls due, and the mediator has no scheduler that would push it
   later, now or in a future version (FR-PICK-08). The drain when a stream starts and the one every
@@ -232,7 +247,11 @@ added the `*Qa1Tests` and `*Qa2Tests` suites (component and end-to-end permutati
 added `MediatorClientChannelAdv1Tests` and `PickupClientAdv1Tests` (with `Adv1Support`),
 `DeliveredUnpackAdv2Tests`, `PickupClientHostileMediatorAdv2Tests` and, end to end,
 `MediatorClientHostEndpointAdv1Tests`. The decrypt budget against this library's mediator and its
-lease is pinned end to end by `PickupClientBudgetLeaseTests`.
+lease is pinned end to end by `PickupClientBudgetLeaseTests`. A third red-team pass added
+`PickupClientLiveAdv3Tests` (unit and end to end), `DeliveredUnpackAdv3Tests`,
+`MediatorClientChannelAdv3Tests` and `PickupClientFilterAdv3Tests`; the reproductions of the limits
+deferred to #111 are checked in skipped, their skip reason naming #111. Fix round 3's regressions are
+`PickupClientLiveFix3Tests` and `DeliveredUnpackFix3Tests`.
 
 ### Changed — recipient-side mediator client (#96)
 
@@ -293,13 +312,15 @@ lease is pinned end to end by `PickupClientBudgetLeaseTests`.
   may be anyone's claim: check `UnpackResult.Authenticated` before you trust it.
 - **Resources and peer-controlled latency.** Everything the client keeps is bounded: 64 waiting
   requests, 16 live streams, the duplicate memory at 16 bytes per message (4096 by default), 64
-  remembered versions, 16 unpacks abandoned when their time ran out, per container (beyond that a
-  new unpack fails at once). The receive path is never held: the correlator hands an answer over and
-  never waits. Resolving a sender's DID runs on the caller's own await, a fetch's or the stream
-  consumer's `MoveNextAsync`. It is bounded by one `UnpackTimeout` per delivery, four messages at a
-  time with an equal share each, in a fetch and in a live stream alike. Residual: each message from
-  a sender whose DID resolves slowly or never costs the delivery that carries it up to its share,
-  and its failures come back once per lease until the application discards them with `AckAsync`.
+  remembered versions. Unpacks abandoned when their time ran out are checked against 16 per
+  container when an unpack starts (at or beyond it a new unpack fails at once; a check, not a
+  reservation: known limits, below). The receive path is never held: the correlator hands an answer
+  over and never waits. Resolving a sender's DID happens during the caller's own await, a fetch's or
+  the stream consumer's `MoveNextAsync`, on a thread-pool work item of its own. It is bounded by one
+  `UnpackTimeout` per delivery, four messages at a time with an equal share each, in a fetch and in
+  a live stream alike. Residual: each message from a sender whose DID resolves slowly or never costs
+  the delivery that carries it up to its share, and its failures come back once per lease until the
+  application discards them with `AckAsync`.
 - **Found by the two QA passes and fixed before any release.** A WebSocket route under
   `ReceiveInbound` off was sent and timed out; it is now refused before anything is sent, on the
   transport's own answer. An HTTP request without an answer, a disposal during a send and an unpack
@@ -335,12 +356,59 @@ lease is pinned end to end by `PickupClientBudgetLeaseTests`.
     delivery, 20 seconds by default, in fetch and live alike. The fix round then found that four never-resolving senders at the front of a delivery
     kept the messages behind them from ever starting, at every redelivery. That is fixed by giving
     each message an equal share of the budget.
+  - A third red-team pass (ADV-3) found seven more ways for a hostile sender, or the host's own
+    conditions, to delay mail; none loses a message. Four were fixed before any release (owner
+    decision on #88, 2026-11-14); the other three are known limits, below.
+    - ADV3-1 (Medium): a steady flow of pushes that each took the whole budget to open (one message
+      every 20 seconds from a sender whose DID never resolves) kept the live stream from ever running
+      its drain, because a waiting push went first. Messages queued before the stream started,
+      delayed ones and pushes the full buffer dropped never arrived while it lasted. Fixed: once a
+      cycle is draining, its drain rounds and the pushes take turns, a drain round first.
+    - ADV3-5 (Low): a host clock that stepped back (an NTP correction, a restored snapshot)
+      postponed the stream's next poll, its back-off and its 10-second acknowledgement flush by the
+      step. Fixed: they are judged by the time elapsed since they were set, and a reading lower than
+      the stored one counts as due.
+    - ADV3-7 (Low): disposing the container did not reach a delivery being opened. The resolvers
+      kept running on an uncancelled token, and the fetch waited out the whole budget and then
+      returned normally. Fixed: the delivery's budget is linked to the container's shutdown, so the
+      fetch or stream ends at once with `ObjectDisposedException` and the resolvers' tokens are
+      cancelled.
+    - ADV3-4 (Low): a DID resolver that blocked its thread held the caller past the budget, because
+      the first unpacks ran on the caller's own stack, and such an unpack held no abandoned slot.
+      Fixed: every unpack runs on a thread-pool work item of its own, so the caller gets its task
+      back and the outcome is decided at the budget. A blocked unpack now keeps its slot like any
+      other; the blocked thread itself is the resolver's until it returns (blocking host code cannot
+      be bounded).
+- **Known limits with slow senders, deferred to #111** (slow-sender hardening,
+  https://github.com/moisesja/didcomm-dotnet/issues/111; owner decision on #88, 2026-11-14). The
+  budget bounds one delivery; these are about what it does not bound. Their reproductions are
+  checked in as skipped tests naming #111. None loses a message.
+  - **Slow messages are not remembered between fetches (ADV3-6, Medium).** A fetch of slow
+    messages takes its whole budget, so within one lease (60 seconds at this library's mediator) a
+    loop makes about three fetches and passes over about three times `limit` slow messages at most.
+    More slow messages than that in front of yours, and the oldest come back first as their lease
+    ends: a fetch-until-drained loop (or a live stream's drain) keeps meeting them and does not reach
+    what is behind them. Discard what keeps failing with `AckAsync`.
+  - **A message's share is fixed up front (ADV3-3, Low).** The share is set from the delivery's size
+    before any message is opened, so messages that fail at once leave an honest message only its own
+    share: one whose sender's DID takes 2 seconds to resolve can fail behind 99 junk messages while
+    most of the budget goes unused.
+  - **The abandoned-unpack bound is a check, not a reservation (ADV3-2, Low).** It is checked when an
+    unpack starts, so deliveries opened at the same moment (several fetches or live streams) can
+    together leave more than 16 abandoned unpacks running.
+  - **Abandoned unpacks share their slots per container (ADV2-2, Low).** An unpack that ran out of
+    time keeps its slot until its sender's DID lookup really ends. Only a host DID resolver that
+    ignores cancellation can hold slots that way, and one slow sender is then enough to hold all 16.
+    Until those lookups end, every delivered message fails at once ("unpack capacity exhausted"),
+    for every DID and tenant of the container. Use a resolver that honours its cancellation token.
 - **Residuals, documented (red team).**
-  - **Abandoned unpacks share 16 slots per container (ADV2-2, Low).** An unpack that ran out of time
-    keeps its slot until its sender's DID lookup really ends. Only a host DID resolver that ignores
-    cancellation can hold slots that way, and one slow sender is then enough to hold all 16. Until
-    those lookups end, every delivered message fails at once ("unpack capacity exhausted"), for
-    every DID and tenant of the container. Use a resolver that honours its cancellation token.
+  - **Junk that never opens fills the mailbox until discarded.** The clients never discard a
+    failure on their own, so a message that never opens stays queued until the host discards it
+    with `AckAsync` or it ages out (30 days by default at this library's mediator), and counts
+    against the recipient's mailbox quota there (`MaxQueueMessages`, 100 by default): anyone who can
+    address the recipient can fill it for honest senders until the host discards the junk.
+  - **Blocking host code cannot be bounded.** The outcome of a delivery is decided at its budget,
+    but a resolver that blocks its thread keeps that thread until it returns.
   - **`PickupItem.Error` is the unpack's own exception**, and the texts of Core's unpack can quote
     DIDs and key ids (pre-existing in Core). Log its type, not its message, wherever identifiers
     must not go. The exceptions the client creates itself (a timeout, a filter mismatch) name at
@@ -371,8 +439,10 @@ lease is pinned end to end by `PickupClientBudgetLeaseTests`.
   The last item of a live stream comes back after the stream ends. A live consumer that holds an
   item longer than the mediator's lease can be delivered taken items again (the duplicate memory
   recognises them). A burst re-pushed after the push buffer overflowed clears over several cycles
-  (latency only). A host `IInboundFrameConsumer` of its own that never dispatches cannot be
-  detected: WebSocket calls time out. For the interop gate (#98): a mediator that does not stamp
+  (latency only). A host `IInboundFrameConsumer` of its own makes the clients believe answers
+  arriving on a WebSocket reach them: if it does not hand them to the `ProtocolDispatcher`, WebSocket
+  requests time out instead of being refused. With `DedupeCapacity` 0 a live stream yields a message
+  that comes twice in one delivery twice. For the interop gate (#98): a mediator that does not stamp
   `created_time` on its WebSocket answers has them dropped; one that answers `delivery-request`
   without `thid` works over HTTP only; one that puts a `thid` on its live pushes is reached by
   polling only; one without Discover Features needs a pinned version.
