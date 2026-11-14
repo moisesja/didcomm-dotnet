@@ -101,7 +101,10 @@ public sealed class PickupClientQa2Tests
     public async Task Live_cancelled_during_an_unpack_leaves_that_message_and_acknowledges_the_one_taken_before()
     {
         var (exchange, client) = PickupClientLiveStreamTests.Live();
-        exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1"), ("q2", "ok:m2")), r => Status(r));
+        // Aligned by the orchestrator (fix round 2, owner decision 2-A): a live stream opens a whole
+        // delivery before yielding any of it, so q1 and q2 come in separate drain rounds here to keep
+        // "q2 is being opened while q1 was handed out" reachable.
+        exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")), r => Delivery(r, ("q2", "ok:m2")), r => Status(r));
         var gate = new Gate();
         exchange.Unpacker = async (text, ct) =>
         {

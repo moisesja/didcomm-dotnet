@@ -90,7 +90,11 @@ public sealed class PickupClientAdv1Tests : IAsyncLifetime
         {
             forT.Items.Should().ContainSingle(i => i.Unpacked != null && i.Unpacked.Message.Id == note.Id,
                 "T's genuine copy of Alice's message must reach T; a copy a third party relayed into F's queue must not consume it");
-            _mediator.Queued(T).Should().Contain("t-genuine", "a message T never received must not be acknowledged on T's behalf");
+            // Aligned by the orchestrator (fix round 2): T's own fetch acknowledges what it returns
+            // (R-6), so "received" and "still queued" cannot both hold; the property is "either T
+            // received it, or it is still queued for T".
+            (forT.Items.Any(i => i.Id == "t-genuine" && i.Unpacked != null) || _mediator.Queued(T).Contains("t-genuine"))
+                .Should().BeTrue("a message T never received must not be acknowledged on T's behalf");
         }
     }
 
