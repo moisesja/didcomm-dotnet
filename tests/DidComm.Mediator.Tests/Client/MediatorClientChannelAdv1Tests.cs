@@ -141,6 +141,37 @@ public sealed class MediatorClientChannelAdv1Tests : IAsyncLifetime
         pushed.Should().BeSameAs(genuine);
     }
 
+    // ---- a residual: thread-less answers outside the FR-RR-08 scope --------------------------------
+
+    /// <summary>
+    /// Residual, pinned (not a defect of the matcher): the plan's §7 says "a captured genuine answer
+    /// can match only a request id that is pending now … so in practice none". That holds for a
+    /// threaded answer. A thread-less one (the type + mediator fallback, for mediators that omit
+    /// <c>thid</c>) matches whichever request of its pair is waiting for its type; and a
+    /// <c>disclose</c> is not a mediator-service type, so FR-RR-08 does not admit it once — the
+    /// same genuine thread-less <c>disclose</c> answers every later Discover Features query of the
+    /// pair. Exploiting it needs a mediator that omits <c>thid</c> on <c>disclose</c> (which DIDComm
+    /// requires) and a captured envelope of its authcrypt to us.
+    /// </summary>
+    [Fact]
+    public async Task A_threadless_disclose_is_outside_replay_admission_and_answers_every_later_query_of_its_pair()
+    {
+        var answer = await _w.ReceiveAsync(new MessageBuilder()
+            .WithType(DiscoverFeatures.DiscloseType).WithFrom(M).WithTo(L)
+            .WithBody(new System.Text.Json.Nodes.JsonObject { ["disclosures"] = new System.Text.Json.Nodes.JsonArray() }).Build());
+        DidComm.Transports.ReturnRoute.InboundReplayGate.IsInScope(answer, DidComm.Transports.ReturnRoute.ReturnRouteHeader.None)
+            .Should().BeFalse("a disclose without return_route is not in the FR-RR-08 scope");
+        var snapshot = ClientWorld.SnapshotOf(answer);
+
+        for (var i = 0; i < 2; i++)
+        {
+            var query = FeatureNegotiation.CreateQuery(L, M);
+            var exchange = _channel.ExchangeAsync(WebSocketRoute, query, FeatureNegotiation.QuerySpec, M, L, default).Observed();
+            Offer(snapshot).Should().BeTrue("the same thread-less disclose answers query {0}", i + 1);
+            (await exchange).Should().BeSameAs(snapshot);
+        }
+    }
+
     // ---- probing a pending thread id ---------------------------------------------------------------
 
     /// <summary>
