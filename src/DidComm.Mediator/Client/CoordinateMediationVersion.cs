@@ -12,7 +12,8 @@ public enum CoordinateMediationVersion
     /// the mediator role, 2.0 otherwise. The answer is remembered per mediator for an hour. A
     /// mediator that answers neither version fails the call with
     /// <see cref="MediationNotSupportedException"/>; one that does not answer the query at all fails
-    /// it with <see cref="TimeoutException"/> — pin a version for such a mediator.
+    /// it with <see cref="TimeoutException"/> — pin a version for such a mediator (Identus, for
+    /// example, has no Discover Features).
     /// </summary>
     Negotiate = 0,
 

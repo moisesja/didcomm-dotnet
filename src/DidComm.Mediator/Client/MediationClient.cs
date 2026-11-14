@@ -33,6 +33,16 @@ namespace DidComm.Mediator.Client;
 /// <c>wss</c> one when its DID document lists <c>https</c> first.
 /// </para>
 /// <para>
+/// <strong>Which version.</strong> Unless you pin one, the first call to a mediator sends a
+/// Discover Features query for <c>coordinate-mediation/*</c> on the same route and uses 3.0 when the
+/// mediator discloses it in the mediator role, else 2.0; the answer is remembered for an hour (for
+/// up to 64 mediators). A mediator that discloses neither fails the call with
+/// <see cref="MediationNotSupportedException"/>. A mediator that does not answer Discover Features
+/// at all (Identus, for example) fails it with <see cref="TimeoutException"/>: the client does not
+/// guess. For such a mediator set <see cref="MediatorClientOptions.CoordinateMediationVersion"/> to
+/// the version it speaks, and no query is sent.
+/// </para>
+/// <para>
 /// <strong>Retrying is safe.</strong> A <see cref="TimeoutException"/> means the answer did not
 /// arrive, not that nothing happened: the mediator may have acted. Repeat the call. A repeated
 /// <c>mediate-request</c> is answered with the same grant and a repeated <c>add</c> with
@@ -110,7 +120,7 @@ public sealed class MediationClient
     /// <returns>The grant (<see cref="MediationGrant.PeerDid"/> is <paramref name="from"/>), or <c>null</c> when the mediator refused (<c>mediate-deny</c>).</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information (<see cref="ArgumentNullException"/> for a <c>null</c> DID).</exception>
     /// <exception cref="InvalidOperationException">A WebSocket route this client cannot receive on, a mediator reached through routing, no service endpoint resolver, or too many requests already waiting; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response); the message names the request id. Retry.</exception>
+    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response); the message names the request id. Retry. The unanswered request may be the Discover Features query: a mediator that never answers one needs a pinned <see cref="MediatorClientOptions.CoordinateMediationVersion"/>.</exception>
     /// <exception cref="MediationNotSupportedException">The mediator speaks neither Coordinate Mediation 3.0 nor 2.0.</exception>
     /// <exception cref="MediationProtocolException">The mediator answered with a problem report, or with an answer that is malformed or does not match the request.</exception>
     /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry).</exception>
