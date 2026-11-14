@@ -239,6 +239,58 @@ internal static class PickupBodies
         return messages;
     }
 
+    /// <summary>
+    /// The messages a <c>delivery</c> carries, read one attachment at a time for the recipient
+    /// (#96): where <see cref="ReadAttachments"/> refuses the whole delivery for one bad attachment
+    /// (what the mediator role needs), here each attachment becomes its own reading, so one bad
+    /// attachment is one failed message and the others are still read. Only the first
+    /// <paramref name="max"/> attachments are looked at; the rest are not read at all, not even
+    /// their ids (L-055). An attachment's id is usable when it can be sent back in
+    /// <c>messages-received</c>: non-empty, within the FR-API-09 bound and made of unreserved URI
+    /// characters (FR-ATT-04). An attachment without a usable id has a <c>null</c>
+    /// <see cref="DeliveredAttachment.Id"/> and its data is not decoded. Otherwise the data is
+    /// decoded as <see cref="ReadAttachments"/> decodes it, and a failure is the reading's
+    /// <see cref="DeliveredAttachment.Error"/>. Error texts never quote a wire value.
+    /// </summary>
+    /// <param name="attachments">The delivery's attachments, or <c>null</c>.</param>
+    /// <param name="max">How many attachments, from the first, to read; zero or more.</param>
+    /// <param name="message">The message name for the error texts.</param>
+    /// <returns>One reading per attachment read, in delivery order: at most <paramref name="max"/>.</returns>
+    public static IReadOnlyList<DeliveredAttachment> ReadAttachmentsEach(IList<Attachment>? attachments, int max, string message)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(max);
+        if (attachments is null || attachments.Count == 0 || max == 0)
+            return Array.Empty<DeliveredAttachment>();
+
+        // The bound first, from the count alone: nothing beyond it is visited (L-055).
+        var count = Math.Min(attachments.Count, max);
+        var readings = new DeliveredAttachment[count];
+        for (var i = 0; i < count; i++)
+            readings[i] = ReadOne(attachments[i], message);
+        return readings;
+    }
+
+    private static DeliveredAttachment ReadOne(Attachment? attachment, string message)
+    {
+        if (attachment is null)
+            return new DeliveredAttachment(null, null, new MalformedMessageException($"{message} attachments must be JSON objects."));
+        var id = attachment.Id;
+        if (string.IsNullOrEmpty(id))
+            return new DeliveredAttachment(null, null, new MalformedMessageException($"{message} attachment is missing the REQUIRED 'id' member."));
+        if (id.Length > MaxIdLength)
+            return new DeliveredAttachment(null, null, new MalformedMessageException($"{message} attachment 'id' exceeds the maximum length of {MaxIdLength} characters (FR-API-09)."));
+        if (!UnreservedUriChars.IsUnreserved(id))
+            return new DeliveredAttachment(null, null, new MalformedMessageException($"{message} attachment 'id' must consist of unreserved URI characters (FR-ATT-04)."));
+        try
+        {
+            return new DeliveredAttachment(id, ReadPayload(attachment.Data, message), null);
+        }
+        catch (MalformedMessageException ex)
+        {
+            return new DeliveredAttachment(id, null, ex);
+        }
+    }
+
     // ---- shared pieces --------------------------------------------------------------------
 
     /// <summary>Whether <paramref name="value"/> is acceptable where an API takes a DID or id to put on the wire: non-empty and within the FR-API-09 bound.</summary>
@@ -317,3 +369,12 @@ internal static class PickupBodies
     private static MalformedMessageException TooManyIds(int maxIds, string message)
         => new($"{message} '{MessageIdList}' has more than {maxIds} entries.");
 }
+
+/// <summary>
+/// One attachment of a <c>delivery</c> as the recipient reads it (<see cref="PickupBodies.ReadAttachmentsEach"/>):
+/// its id when usable, and either its decoded payload or why it did not decode.
+/// </summary>
+/// <param name="Id">The attachment id when it can be acknowledged (non-empty, within 2048 characters, unreserved URI characters); <c>null</c> otherwise, and then nothing was decoded.</param>
+/// <param name="Payload">The decoded message bytes; <c>null</c> when the id is unusable or the data did not decode.</param>
+/// <param name="Error">Why the attachment is unusable or did not decode; <c>null</c> when <paramref name="Payload"/> is set. Its text quotes no wire value.</param>
+internal readonly record struct DeliveredAttachment(string? Id, byte[]? Payload, MalformedMessageException? Error);
