@@ -84,35 +84,35 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
 ## Checklist
 
 ### A. The move
-- [ ] A1 `git mv` the 41 files (J-1, J-8); split `MediationGrant.cs` (J-2) and `BareDid` (J-3); the two cref edits (J-5).
-- [ ] A2 New `src/DidComm.Mediator.Client/DidComm.Mediator.Client.csproj` (J-7, `EnablePackageValidation=false`, lockstep version, IVTs J-6).
-- [ ] A3 `DidComm.Mediator.csproj` gains the client reference; `DidComm.Core.csproj` gains the IVT with a comment.
-- [ ] A4 Solution entry under the `src` folder; test projects reference the client (J-9).
-- [ ] A5 Build green under `/warnaserror`.
+- [x] A1 `git mv` the 41 files (J-1, J-8); split `MediationGrant.cs` (J-2) and `BareDid` (J-3); the two cref edits (J-5).
+- [x] A2 New `src/DidComm.Mediator.Client/DidComm.Mediator.Client.csproj` (J-7, `EnablePackageValidation=false`, lockstep version, IVTs J-6).
+- [x] A3 `DidComm.Mediator.csproj` gains the client reference; `DidComm.Core.csproj` gains the IVT with a comment.
+- [x] A4 Solution entry under the `src` folder; test projects reference the client (J-9).
+- [x] A5 Build green under `/warnaserror`.
 
 ### B. Gates and tests
-- [ ] B1 DX gate: `ShippedAssemblies` + "nine"; `ExtensionMemberSurfaceTests` prefix and dll; allowlist rewrite by script (J-11), counts recorded.
-- [ ] B2 Dependency pin test (J-10), red first to read the real reference list, then green.
+- [x] B1 DX gate: `ShippedAssemblies` + "nine"; `ExtensionMemberSurfaceTests` prefix and dll; allowlist rewrite by script (J-11), counts recorded.
+- [x] B2 Dependency pin test (J-10), red first to read the real reference list, then green.
 - [ ] B3 Full test run; counts against the baseline.
-- [ ] B4 Pack: 9 `.nupkg` + 9 `.snupkg`; nuspec dependencies per package.
+- [x] B4 Pack: 9 `.nupkg` + 9 `.snupkg`; nuspec dependencies per package.
 
 ### C. Negative controls (run once, record, revert; re-diff csproj after, L-023)
-- [ ] C1 NC-1 unused Hosting.Abstractions PackageReference on the client → deps walk red.
-- [ ] C2 NC-2 NC-1 + a use of `IHostedService` → metadata pin red too.
-- [ ] C3 NC-3 `DidComm.AspNetCore` ProjectReference on the client → walk/precondition red.
-- [ ] C4 NC-5 `DidComm.Mediator` ProjectReference on the client → restore fails NU1108.
+- [x] C1 NC-1 unused Hosting.Abstractions PackageReference on the client → deps walk red.
+- [x] C2 NC-2 NC-1 + a use of `IHostedService` → metadata pin red too.
+- [x] C3 NC-3 `DidComm.AspNetCore` ProjectReference on the client → walk/precondition red.
+- [x] C4 NC-5 `DidComm.Mediator` ProjectReference on the client → restore fails NU1108.
 - [ ] C5 API-equivalence diff fails when one moved public member is renamed.
-- [ ] C6 DX gate fails when one allowlist entry is dropped.
-- [ ] C7 Interop fixtures populated (149–150 files).
-- [ ] C8 Pack validation still bites on a released package (CP0002 on a renamed released member).
+- [x] C6 DX gate fails when one allowlist entry is dropped.
+- [x] C7 Interop fixtures populated (149–150 files).
+- [x] C8 Pack validation still bites on a released package (CP0002 on a renamed released member).
 
 ### D. Docs
-- [ ] D1 PRD §3.1 package rows (+ scope-table row).
-- [ ] D2 Architecture doc: Packages rows, "nine shipped assemblies", Coordination/Pickup/client section locations, tests list.
-- [ ] D3 README: package tables, tree, "nine shipped assemblies".
-- [ ] D4 RELEASING: table, "nine" ×2, lockstep IVT paragraph, New-package-ids paragraph (three ids).
-- [ ] D5 CHANGELOG (Unreleased): what a wallet references, what a mediator references; older Unreleased lines aligned.
-- [ ] D6 Source comments that name the package.
+- [x] D1 PRD §3.1 package rows (+ scope-table row).
+- [x] D2 Architecture doc: Packages rows, "nine shipped assemblies", Coordination/Pickup/client section locations, tests list.
+- [x] D3 README: package tables, tree, "nine shipped assemblies".
+- [x] D4 RELEASING: table, "nine" ×2, lockstep IVT paragraph, New-package-ids paragraph (three ids).
+- [x] D5 CHANGELOG (Unreleased): what a wallet references, what a mediator references; older Unreleased lines aligned.
+- [x] D6 Source comments that name the package.
 
 ### E. Independent passes
 - [ ] E1 QA pass: API equivalence, restore graph + wallet-only consumer enrols and picks up against the #95 test server, counts, DX gate, pack/nuspecs.
@@ -124,4 +124,28 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
 
 ## Results
 
-(filled in as the work lands)
+### Implementation (orchestrator, directly)
+- Commits: `b5c6c5c` (move), `122e958` (DX gate + pin test), `f4f9e3d` (docs).
+- Build `/warnaserror` green first time after the move (no fix beyond J-5 needed).
+- Pin test: the client's non-BCL references are exactly `DidComm.Core`, `DidComm.Extensions.DependencyInjection`,
+  `Microsoft.Extensions.DependencyInjection.Abstractions`, `Microsoft.Extensions.Logging.Abstractions`, `Microsoft.Extensions.Options`.
+- Allowlist rewrite: coverage 111 entries changed (client 111 / server 165 / total 433; 43 of 43 `#96`-tagged now client);
+  execution 108 changed (client 108 / server 165 / total 366; 42 of 42).
+- First full run: Core 2,548 passed; Interop 1,370 passed + 1 skipped; Mediator 4,257 passed + 1 failed + 8 skipped
+  (4,251 + 7 new). The failure (`MediatorClientTimeoutRaceTests.When_the_deadline_and_the_callers_cancellation_are_both_set_the_cancellation_wins`)
+  is a pre-existing flake: 12 full Mediator runs each on `5477971` and on the branch failed 2/12 and 3/12, in the same
+  three timing tests (that one, `PickupClientLiveAdv5Tests.A_fifty_round_drain_slower_than_the_interval_is_never_pre_empted…`,
+  `LivePushTests.A_live_push_that_ignores_its_deadline_keeps_its_grant_waiting…`); 0/30 in isolation. Follow-up, not this PR.
+- Pack: 9 `.nupkg` + 9 `.snupkg`. Client nuspec: Core, DI package, DI.Abstractions, Logging.Abstractions (all 1.5.1 / 10.0.14);
+  Mediator nuspec adds `DidComm.Mediator.Client`; README packed in the client package.
+
+### Negative controls (each reverted; `git status` clean after)
+- NC-1 unused `Microsoft.Extensions.Hosting.Abstractions` PackageReference on the client: the graph walk fails, the metadata pin passes (as designed).
+- NC-2 NC-1 + `typeof(IHostedService)` in the client: the metadata pin fails too.
+- NC-3 `DidComm.AspNetCore` ProjectReference on the client: the graph walk and the base-framework precondition fail.
+- NC-5 `DidComm.Mediator` ProjectReference on the client: restore fails, `MSB4006: There is a circular dependency in the target
+  dependency graph involving target "_GenerateRestoreProjectPathWalk"` (the self-test is the permanent stand-in).
+- DX: dropping one client entry (coverage) fails `EveryPublicMember_IsReferencedByASampleAssembly`; dropping one shared-type
+  entry (execution) fails `EveryExecutableMember_IsExecutedByASampleRun`; leaving one moved entry on the old prefix fails the coverage gate.
+- Interop fixtures: 150 files.
+- Pack validation: renaming `Message.Empty()` in Core fails pack with `CP0002` against the 1.5.0 baseline.
