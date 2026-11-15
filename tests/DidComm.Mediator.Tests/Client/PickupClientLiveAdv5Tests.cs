@@ -343,6 +343,7 @@ public sealed class PickupClientLiveAdv5Tests
         var (exchange, client) = Live(o => o.LivePollInterval = Interval);
         using var cts = new CancellationTokenSource();
         var liveOns = 0;
+        var drains = 0;
         var nextCycle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
         {
@@ -350,17 +351,17 @@ public sealed class PickupClientLiveAdv5Tests
             var n = r.Live ? Interlocked.Increment(ref liveOns) : 0;
             if (n > 5)
                 await cts.CancelAsync();
-            if (n == 2)
+            if (n == 2 && Volatile.Read(ref drains) == LiveDeliveryStream.MaxDrainRounds)
             {
-                // The next cycle has started: it is held here, on the stream's token, so the stop
-                // below finds the stream parked (#119: left to run on, it yields q51 first).
+                // The next cycle has started after the fifty rounds: it is held here, on the stream's
+                // token, so the stop below finds the stream parked (#119: left to run on, it yields
+                // q51 first). A live-on that comes earlier is a pre-empted drain: not held, braked.
                 nextCycle.TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, r.Ct);
             }
             exchange.Clock.Advance(Interval * 2);
             return Status(r, count: 60, live: r.Live);
         });
-        var drains = 0;
         exchange.On(MessagePickup.DeliveryRequestType, async r =>
         {
             await Task.Yield();
