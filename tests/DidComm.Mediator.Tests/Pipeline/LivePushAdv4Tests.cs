@@ -332,6 +332,9 @@ public sealed class LivePushAdv4Tests
         }
 
         Volatile.Read(ref maxPending).Should().Be(1, "one operation per grant until its work has ended: the abandoned send is never joined by another");
+        // #119: the healthy grant's last operation settles after its delivery (it records, looks for
+        // more and only then settles); idle means it has.
+        await world.Fixture.Dispatcher.WaitForIdleAsync(Wait); // a hang guard only
         world.Fixture.Dispatcher.Unsettled.Should().Be(1, "and the dispatcher still counts it");
         LivePushWorld.Deliveries(healthy).Should().HaveCount(Cycles);
         (await world.StatusAsync(a.Peer)).Should().Be(0, "every message of the stalled recipient was picked up and acknowledged");
