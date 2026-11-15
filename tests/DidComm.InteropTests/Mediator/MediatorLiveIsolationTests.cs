@@ -86,7 +86,9 @@ public sealed class MediatorLiveIsolationTests
         await mediator.EnrolAsync(bobA, a.Did);
         var alice = await mediator.NewSenderAsync();
         using var socketA = await mediator.ConnectAsync();
-        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socketA, bobA);
+        // The live-on wake-up is served first (#119): still running, it could take the forward while the
+        // forward's own wake-up is held, and that wake-up would settle as Push-Skipped-Cooldown.
+        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socketA, bobA, waitForLiveOnWakeUp: true);
         keys!.Pause(bobA.Did);
 
         var forA = await Qa.SendNoteAsync(mediator, alice, a, content: "for A");
@@ -96,8 +98,9 @@ public sealed class MediatorLiveIsolationTests
 
         mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed);
         keys.Released.Should().BeFalse("the deadline ended the push, not the resolution");
-        await socketA.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         keys.Release();
+        // Fetched while the live session is still open: the abandoned push itself gave the lease back
+        // (closing the session would end the session's leases anyway, and hide a push that did not).
         IReadOnlyList<DidComm.Mediator.Pickup.DeliveredMessage> fetched = Array.Empty<DidComm.Mediator.Pickup.DeliveredMessage>();
         await MediatorTestServer.WaitUntilAsync(() =>
         {
@@ -105,6 +108,8 @@ public sealed class MediatorLiveIsolationTests
             return fetched.Count > 0;
         }, "the abandoned push gave its lease back");
         (await MediatorRecipient.UnpackFromSenderAsync(a, fetched.Single().Payload, alice)).Message.Id.Should().Be(forA.Id);
+        mediator.PushOutcomes.Should().Equal(PushOutcomes.Failed);
+        await socketA.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
     }
 
     private static int StoredFor(MediatorTestServer mediator, string grantPeerDid)
