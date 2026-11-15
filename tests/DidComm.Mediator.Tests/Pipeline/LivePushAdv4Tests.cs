@@ -518,9 +518,14 @@ public sealed class LivePushAdv4Tests
             await world.ForwardAsync(a.Recipient, 2);
             await world.Fixture.Services.DisposeAsync().AsTask().WaitAsync(Wait); // a hang guard only
 
-            // Promptly: the dispatcher's DisposeAsync writes this line, before it returns, only when
-            // its workers did not stop within its grace — when one waits for the push it abandoned.
-            world.Fixture.Logs.Entries.Select(e => e.Formatted).Should().NotContain(line => line.StartsWith("Push workers did not stop within"), "disposing does not wait for a push that ignores its cancellation");
+            // #119: wait for the push's own record, not for DisposeAsync to return (it gives up
+            // waiting for the workers after a real-time grace).
+            (await world.Fixture.WaitForPushOutcomesAsync(1, Wait)).Should().Equal(PushOutcomes.SkippedShutdown);
+            // Promptly, without a clock: the worker let go of the grant while the send it abandoned
+            // still runs — it did not wait for that send.
+            await dispatcher.WaitForIdleAsync(Wait); // a hang guard only
+            dispatcher.Unsettled.Should().Be(1, "the abandoned send has not ended, yet the worker is done with it");
+            release.Task.IsCompleted.Should().BeFalse("the send is released only below");
             // L-020 (PR #109 review round 2, D-2/D-3): the second forward's wake-up waits behind the
             // push in flight (its grant is busy until that push settles), so it is counted when the
             // abandoned push ends, not at the shutdown.
