@@ -2057,9 +2057,18 @@ postponed by the step (fix round 3, ADV3-5; L-060, as `NegotiatedVersionCache` t
   duplicate filter recognises it.
 - **Failures.** A step that fails with `TimeoutException`, `TransportException`,
   `MediatorBusyException` (the pending bound), or an `OperationCanceledException` the caller did not
-  cause is retried after a back-off of 1 s, doubling up to 30 s. Five failed steps in a row (cycle,
-  drain round or flush; the count starts again when a drain completes) end the stream with the last
-  exception. Anything else ends it at once, as it ends a fetch: a `MediationProtocolException` (a
+  cause is retried after a back-off of 1, 2, 4, 8, 16, then 30 s; while a back-off lasts nothing is
+  sent, acknowledgements included. Once the run of failed steps (cycle, drain round or flush) is
+  older than `RequestTimeout` + `GiveUpMargin` (30 s; one minute by default) the next failure ends
+  the stream with its exception (PR #112 ADV5-2: it used to end at the fifth failure, after
+  1 + 2 + 4 + 8 = 15 s, before a busy refusal — whose cause ends within one `RequestTimeout` — or a
+  16 s mediator restart could clear; the 16 s and 30 s pauses were dead code). The run starts again
+  only when a drain completes (ADV5-3, a known limit deferred to #111). A clock stepped back below
+  the run's first failure starts the run again. A successful live-on clears a back-off left over
+  from the failure before it, so the cycle's drain rounds are not gated by it (ADV5-1: a clock
+  stepped back into that back-off ran a cycle early and left its drain gated, and the loop span
+  without awaiting; `WaitAsync` now also waits on the point the loop acts on — the back-off while
+  draining, the next cycle otherwise). Anything else ends it at once, as it ends a fetch: a `MediationProtocolException` (a
   problem report such as `e.m.live-mode-not-supported`, a malformed answer), every other
   `InvalidOperationException` (the send path's configuration refusals), a pack-stage error such as
   `SecretNotFoundException`, `ObjectDisposedException`, the caller's cancellation. (Before the fix
@@ -2305,6 +2314,17 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
     lookups end, every delivered message fails at once ("unpack capacity exhausted"), for every DID
     and tenant of the container. The fix for now is a resolver that honours its token;
     `UnpackTimeout` and `FetchAsync` document it.
+  - **Deferred from the ADV-5 pass (owner decision on #88, 2026-11-14), reproductions skipped
+    naming #111 in `PickupClientLiveAdv5Tests`:**
+    - **The run of failures resets only when a drain completes** (ADV5-3, Low). Cycles that deliver
+      and acknowledge but whose drain never completes (a lossy link and a long backlog) keep one run
+      of failures going, so their scattered failures end the stream once the run is older than
+      `RequestTimeout` + 30 s.
+    - **A mediator that does not lease** (ADV5-4, Low). Pickup 3.0 does not require a mediator to
+      set delivered messages aside; at one that does not, a message that never opens is at the head
+      of every answer, so every drain sends 50 `delivery-request`s and yields it 50 times, and the
+      messages behind it wait until the host discards it with `AckAsync`. This library's mediator
+      leases, so it is not affected; #98 checks which external mediators lease.
   - **Found by the final break-it pass on fix round 3 (ADV-4), deferred to #111 by owner decision
     (that pass's findings are documented, not patched); none loses a message; reproductions skipped
     naming #111 in `PickupClientLiveAdv4Tests` and `DeliveredUnpackAdv4Tests`:**

@@ -549,11 +549,18 @@ public sealed class PickupClient
     /// </para>
     /// <para>
     /// <strong>A cycle runs to its end before the next one.</strong> Once a cycle has turned live
-    /// delivery on, it sends its delivery requests until the mediator has nothing more for it (or
-    /// after 50 rounds), and only then is the next cycle scheduled, one
-    /// <see cref="MediatorClientOptions.LivePollInterval"/> after that end. So however slowly the
-    /// mediator answers — even more slowly than the interval — every cycle fetches what is queued,
-    /// and a cycle coming due never pre-empts a drain or the pushes waiting their turn.
+    /// delivery on, it sends its delivery requests until the mediator has nothing more for it, until
+    /// 50 rounds, or until one of its steps fails, and only then is the next cycle scheduled: one
+    /// <see cref="MediatorClientOptions.LivePollInterval"/> after that end, or after the back-off when
+    /// a step failed. So however slowly the mediator answers — even more slowly than the interval —
+    /// every cycle fetches what is queued, and a cycle coming due never pre-empts a drain or the
+    /// pushes waiting their turn. Two consequences: turning live delivery on again after a dropped
+    /// connection waits for the drain in progress to end (at most 50 rounds, each bounded by
+    /// <see cref="MediatorClientOptions.RequestTimeout"/> and the decrypt budget), and the stream
+    /// does its work — cycles, the 10-second acknowledgement, re-arming live mode — only inside your
+    /// <c>MoveNextAsync</c>, so while your loop body holds an item none of it happens (a slow loop
+    /// body delays the poll and can let the mediator's lease on taken messages run out; they then
+    /// come again and are recognised as repeats).
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing</strong> is yielded again each time the mediator delivers
@@ -583,13 +590,27 @@ public sealed class PickupClient
     /// The route is resolved at the first <c>MoveNextAsync</c>, and refused when it is not a
     /// WebSocket, before anything is sent. One stream per mediator and DID may be open at a time,
     /// and at most 16 per container. A step that got no answer (<see cref="TimeoutException"/>) or
-    /// failed in the transport (<see cref="TransportException"/>) is retried after a pause that
-    /// starts at one second and doubles up to 30; so is a request refused because too many of the
-    /// container's requests are already waiting (an <see cref="InvalidOperationException"/>; every
-    /// other one is thrown at once). Five failures in a row end the stream with the last
-    /// exception. Any other failure ends it at once with its exception: a problem report from the
+    /// failed in the transport (<see cref="TransportException"/>) is retried after a pause of 1, 2,
+    /// 4, 8, 16, then 30 seconds; so is a request refused because too many of the container's
+    /// requests are already waiting (an <see cref="InvalidOperationException"/>; every other one is
+    /// thrown at once). While a pause lasts nothing is sent, acknowledgements included. Once the
+    /// stream's steps have kept failing for longer than
+    /// <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds (one minute by default),
+    /// the next failure ends the stream with its exception, so a condition that clears within one
+    /// <c>RequestTimeout</c> (the busy refusal, a mediator restarting) never does. The run of failures
+    /// starts again only when a drain completes: failures separated by successful steps in cycles
+    /// that never complete a drain still count as one run (a known limit, deferred to
+    /// <see href="https://github.com/moisesja/didcomm-dotnet/issues/111">#111</see>). Any other failure ends it at once with its exception: a problem report from the
     /// mediator, a malformed answer, a key of <paramref name="from"/> this agent does not hold, the
     /// container's disposal.
+    /// </para>
+    /// <para>
+    /// <strong>A mediator that does not set delivered messages aside</strong> (Message Pickup 3.0 does
+    /// not require it; this library's mediator does) answers every delivery request with the head of
+    /// your queue until it is acknowledged. A message there that never opens is then delivered on
+    /// every round of a drain: each cycle sends 50 delivery requests and yields that message 50
+    /// times, and everything behind it waits until you discard it with <see cref="AckAsync"/> (a known
+    /// limit, deferred to <see href="https://github.com/moisesja/didcomm-dotnet/issues/111">#111</see>).
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
@@ -598,10 +619,10 @@ public sealed class PickupClient
     /// <param name="ct">Cancellation token (combined with one passed through <c>WithCancellation</c>); cancelling ends the enumeration.</param>
     /// <returns>The items, as they arrive.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent. While enumerating: a refusal of the send path (no key curve in common with the mediator, a mediator reached through routing, no transport router), at once; or five refusals in a row because too many of the container's requests were waiting.</exception>
+    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent. While enumerating: a refusal of the send path (no key curve in common with the mediator, a mediator reached through routing, no transport router), at once; or the stream's steps kept being refused because too many of the container's requests were waiting for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds.</exception>
     /// <exception cref="MediationProtocolException">While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>), a malformed answer, or a drain answered with a delivery in which no message has a usable id.</exception>
-    /// <exception cref="TimeoutException">While enumerating: five steps in a row got no answer.</exception>
-    /// <exception cref="TransportException">While enumerating: five steps in a row failed to send.</exception>
+    /// <exception cref="TimeoutException">While enumerating: the stream's steps kept getting no answer for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds (this is the last one).</exception>
+    /// <exception cref="TransportException">While enumerating: the stream's steps kept failing to send for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds (this is the last one).</exception>
     /// <exception cref="SecretNotFoundException">While enumerating: this agent holds no key for <paramref name="from"/> (at once, like any failure that no retry can fix).</exception>
     /// <exception cref="ObjectDisposedException">While enumerating: the container was disposed, also while the stream was opening a delivery (it then ends at once, and the resolvers opening it see their cancellation token cancelled).</exception>
     public IAsyncEnumerable<PickupItem> ReceiveLiveAsync(string mediatorDid, string from, Uri? serviceEndpointOverride = null, CancellationToken ct = default)

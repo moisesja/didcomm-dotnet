@@ -153,16 +153,18 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   ready, or after 10 seconds). One stream per mediator and DID may be open at a time, and at most 16
   per container. A step that gets no answer (`TimeoutException`), fails in the transport
   (`TransportException`) or is refused because too many requests are waiting is retried after a
-  pause that starts at 1 second and doubles up to 30; five failures in a row end the stream with the
-  last exception. Any other failure ends it at once: a problem report, a malformed answer, a key of
+  pause of 1, 2, 4, 8, 16, then 30 seconds (nothing is sent during a pause, acknowledgements
+  included); once the steps have kept failing for longer than `RequestTimeout` plus 30 seconds (one
+  minute by default), the next failure ends the stream with its exception. Any other failure ends it at once: a problem report, a malformed answer, a key of
   `from` this agent does not hold, the container's disposal (also while a delivery is being opened:
   a fetch or a stream then ends at once with `ObjectDisposedException`, and the resolvers opening
   the delivery see their token cancelled).
 - **Polling is the permanent design** (owner decision on #88, 2026-11-14). A message whose sender
   delayed it is never pushed when it falls due, and the mediator has no scheduler that would push it
-  later, now or in a future version (FR-PICK-08). The drain when a stream starts and the one every
-  `LivePollInterval` are how such a message reaches you, and how a stream recovers from a dropped
-  connection. Keep `LivePollInterval` at or below the longest delay you expect your senders to ask
+  later, now or in a future version (FR-PICK-08). The drain when a stream starts and the one each
+  `LivePollInterval` after the previous drain ended are how such a message reaches you, and how a
+  stream recovers from a dropped connection. The stream does this work only inside your
+  `MoveNextAsync`: while your loop body holds an item, nothing is polled or acknowledged. Keep `LivePollInterval` at or below the longest delay you expect your senders to ask
   for (this library's mediator caps a delay at 1 hour by default, `MediatorOptions.MaxForwardDelay`),
   or such a message waits up to one interval longer.
 - **Delivery is at-least-once.** A message can arrive twice: after a lost acknowledgement, a dropped
@@ -410,6 +412,26 @@ deferred to #111 are checked in skipped, their skip reason naming #111. Fix roun
     and the next one is due one interval after that end; regression tests cover latency below,
     at and above the interval, failed and timed-out steps, and an interval shorter than
     `RequestTimeout` (`PickupClientLiveSchedulingTests`).
+  - **Found by the scoped break-it pass on the R1-1 fix (ADV-5); owner decision on #88
+    (https://github.com/moisesja/didcomm-dotnet/issues/88#issuecomment-6887124928):**
+    - **Fixed before release — a clock step back could make a draining stream spin (ADV5-1, Low,
+      introduced by the R1-1 fix).** After a failed step, a host clock stepped back into the
+      back-off while a recovery drain ran left the drain gated by that back-off and the loop
+      returned from its wait at once. A successful live-on now clears the leftover back-off, and the
+      wait waits on the point the loop acts on (`PickupClientLiveAdv5Tests.ADV5_1_…`).
+    - **Fixed before release — the stream gave up after 15 seconds (ADV5-2, Medium).** It ended at
+      the fifth failure, after pauses of 1 + 2 + 4 + 8 s, before a busy refusal (whose cause ends
+      within one `RequestTimeout`) or a 16-second mediator restart could clear; the documented
+      "doubling to 30 s" was never reached. It now backs off 1, 2, 4, 8, 16, then 30 s and gives up
+      only once its steps have kept failing for longer than `RequestTimeout` plus 30 seconds
+      (`ADV5_2_…`, `PickupClientLiveCycleTests.Steps_that_keep_failing_…`,
+      `The_give_up_point_follows_RequestTimeout`).
+    - **Deferred to #111 (known limits; reproductions skipped naming #111):** the run of failures is
+      reset only when a drain completes, so failures separated by successful steps still end the
+      stream once the run is older than `RequestTimeout` + 30 s (ADV5-3, Low); and at a mediator that
+      does not set delivered messages aside (pickup 3.0 allows it; ours does), one message that never
+      opens makes every drain send 50 requests and yield it 50 times until the host discards it
+      (ADV5-4, Low).
   - **Found by the final break-it pass on fix round 3 (ADV-4), documented and deferred to #111 by
     owner decision** (none loses a message; reproductions skipped naming #111):
     - **A new cycle took a waiting push's turn back (ADV4-1, Low) — resolved in #96 by the fix for
