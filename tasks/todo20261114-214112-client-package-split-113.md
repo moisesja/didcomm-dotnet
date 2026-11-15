@@ -120,7 +120,7 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
 - [x] E3 Fix what they confirm; per-component defect tally (L-063).
 
 ### F. PR
-- [ ] F1 PR opened (`Closes #113`, `Part of #88`); CI checked once; hand back.
+- [x] F1 PR opened (`Closes #113`, `Part of #88`): #118; CI checked once; hand back.
 
 ## Results
 
