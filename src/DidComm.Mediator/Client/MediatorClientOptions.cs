@@ -1,0 +1,180 @@
+namespace DidComm.Mediator.Client;
+
+/// <summary>
+/// Settings of the recipient-side mediator clients, <see cref="MediationClient"/> and
+/// <see cref="PickupClient"/>: how long a request waits for the mediator's answer, how many
+/// requests may wait at once, which Coordinate Mediation version to speak, how many delivered
+/// messages to remember so a repeat is not returned twice, how often a live stream polls, and how
+/// long opening one delivery may take (FR-MED-09, FR-PICK-11).
+/// </summary>
+/// <remarks>
+/// The settings are copied and checked once, when the clients are built (by
+/// <c>AddMediatorClient()</c> or by a client's constructor). Changing this object afterwards
+/// changes nothing. The delegate passed to <c>AddMediatorClient()</c> may run more than once, on
+/// different instances, so it must only assign values.
+/// </remarks>
+public sealed class MediatorClientOptions
+{
+    /// <summary>
+    /// How long each step of a call may take: finding the mediator's endpoint in its DID document,
+    /// then each request the call sends, from the send until the mediator's answer (a call may send
+    /// more than one: a Discover Features query first, or one request per page). Every step gets the
+    /// whole of it, so a call can take longer than this in total. Default 30 seconds; greater than
+    /// zero and at most 10 minutes. When a step runs out the call fails with
+    /// <see cref="TimeoutException"/>. A request that ran out names its id, and the mediator may
+    /// still have acted on it, so retry: every request these clients send is safe to repeat. Running
+    /// out while finding the endpoint names no request: nothing was sent yet.
+    /// </summary>
+    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The largest number of requests that may wait for an answer at the same time, for both
+    /// clients of one container together. A request beyond it is refused with
+    /// <see cref="InvalidOperationException"/> before anything is sent. Default 64; 1 to 4096.
+    /// </summary>
+    public int MaxPendingRequests { get; set; } = 64;
+
+    /// <summary>
+    /// Which Coordinate Mediation version <see cref="MediationClient"/> speaks (FR-MED-10). Default
+    /// <see cref="Client.CoordinateMediationVersion.Negotiate"/>: ask the mediator with Discover
+    /// Features and prefer 3.0. Pin <see cref="Client.CoordinateMediationVersion.V3"/> or
+    /// <see cref="Client.CoordinateMediationVersion.V2"/> for a mediator that does not answer
+    /// Discover Features queries.
+    /// </summary>
+    public CoordinateMediationVersion CoordinateMediationVersion { get; set; } = CoordinateMediationVersion.Negotiate;
+
+    /// <summary>
+    /// How many delivered messages the clients remember, so a message the mediator delivers again
+    /// (delivery is at-least-once) is acknowledged but not returned a second time. Default 4096;
+    /// 0 turns this off; at most 1 000 000. A message is remembered by a fixed-size hash of the
+    /// mailbox it came from (the <c>from</c> of the fetch or live stream), its sender, the DID it was
+    /// decrypted for and its id (of its bytes when the sender is anonymous), so a message returned
+    /// from one mailbox is never a repeat in another, and the memory used stays bounded whatever the
+    /// wire values look like. The oldest are
+    /// forgotten first, and a forgotten message that comes back is returned again. 0 turns off the
+    /// memory from one call or stream to the next; a fetch still returns a message that comes twice
+    /// in one delivery only once, but a live stream then yields it twice (that once-per-delivery rule
+    /// is the fetch's own).
+    /// </summary>
+    public int DedupeCapacity { get; set; } = 4096;
+
+    /// <summary>
+    /// How often a live stream (<see cref="PickupClient.ReceiveLiveAsync"/>) turns live delivery on
+    /// again and collects what is queued, besides taking what the mediator pushes, measured from the
+    /// end of the previous collection (a collection always runs to its end first, however slowly the
+    /// mediator answers). Default 1 minute; 1 second to 24 hours. It is also how a stream notices a dropped connection, and the only way
+    /// it receives a message whose delivery its sender delayed (a mediator never pushes a delayed
+    /// message when it falls due), so keep it at or below the longest delay you expect your senders
+    /// to ask for (this library's mediator allows up to an hour by default). The mediator has no
+    /// scheduler for due messages, now or in a future version: this poll, and the one when a stream
+    /// starts, is the permanent design, not a stopgap (FR-PICK-08).
+    /// </summary>
+    public TimeSpan LivePollInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How long opening one delivery may take, all of its messages together and every re-wrap layer
+    /// included (looking up a sender's DID is usually the slow part): each
+    /// <see cref="PickupClient.FetchAsync"/>, and each delivery a live stream handles (a drain round
+    /// or a push). Default 20 seconds; greater than zero and at most 10 minutes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The messages of a delivery are opened four at a time, and each gets an equal share of the
+    /// time: this value divided by the number of rounds of four the delivery needs (the whole of it
+    /// for up to four messages, half for five to eight, a third for nine to twelve). A message that
+    /// is not open when its share is up — its sender's DID resolves slowly, or never — is reported
+    /// as a failed item with a <see cref="TimeoutException"/> (naming the request, never a message)
+    /// and is not acknowledged, and the next message takes its place; so slow messages cannot keep
+    /// the ones behind them from being opened. The rest of the delivery is returned and acknowledged
+    /// as usual. A live stream
+    /// opens a delivery before it yields any of its items, so the time you spend on an item never
+    /// counts against this.
+    /// </para>
+    /// <para>
+    /// <strong>Resolvers that block.</strong> Each message is opened on a thread-pool work item of its
+    /// own, so the fetch or stream gets its result at this limit even when a DID or secrets resolver
+    /// blocks its thread. Blocking host code cannot be bounded, though: the outcome is decided here,
+    /// but the blocked thread and its work stay the resolver's until it returns, and meanwhile it
+    /// holds one of the abandoned-unpack slots (below). Use resolvers that are asynchronous and
+    /// honour their cancellation token.
+    /// </para>
+    /// <para>
+    /// <strong>Keep it well below the mediator's lease.</strong> A mediator sets aside what it
+    /// delivered for a while (this library's mediator for <c>MessagePickupOptions.LeaseTimeout</c>,
+    /// 60 seconds by default) and delivers it again only after that. While a message the client gave
+    /// up on is still set aside, the next fetch passes over it and gets what is queued behind it, so
+    /// a loop that fetches until drained gets past slow messages, as many as its fetches pass over
+    /// within one lease (see the known limits below). The default, a third of this
+    /// library's default lease, leaves room for the fetch's request and acknowledgement. For a
+    /// third-party mediator, keep it below that mediator's lease. If the lease runs out first, the
+    /// mediator hands the messages still being opened to the next fetch as well (a message can then
+    /// reach you twice), though this library's mediator still accepts the acknowledgement of the
+    /// ones that were opened.
+    /// </para>
+    /// <para>
+    /// <strong>A message that keeps failing.</strong> Discard it with
+    /// <see cref="PickupClient.AckAsync"/>. A mediator that does not set fetched messages aside
+    /// delivers it first on every fetch, and this limit alone does not get you past it.
+    /// </para>
+    /// <para>
+    /// <strong>A DID resolver that ignores cancellation.</strong> A message whose opening ran out of
+    /// time keeps one of the container's 16 slots for abandoned unpacks until its sender's DID
+    /// lookup really ends. A resolver that ignores cancellation can hold all 16 (one slow sender is
+    /// enough), and until those lookups end every delivered message fails at once, for every DID
+    /// and tenant of the container. Use a resolver that honours its cancellation token.
+    /// </para>
+    /// <para>
+    /// <strong>Known limits with slow senders</strong>, to be hardened in
+    /// <see href="https://github.com/moisesja/didcomm-dotnet/issues/111">#111</see>. The client does
+    /// not remember slow messages from one fetch to the next: a fetch of slow messages takes this
+    /// whole limit, so within one lease a loop passes over about three fetches' worth of them, and
+    /// more slow messages than that in front of yours keep a loop that fetches until drained, or a
+    /// live stream's drain, from reaching what is behind them (discard what keeps failing with
+    /// <see cref="PickupClient.AckAsync"/>). A message's share is fixed from the delivery's size, so
+    /// messages that fail at once leave an honest message only its share, not the time they did not
+    /// use. The bound of 16 abandoned unpacks is checked when an unpack starts, not reserved, so
+    /// deliveries opened at the same moment can together leave more than 16 running. And the slots
+    /// are shared by the whole container, as above.
+    /// </para>
+    /// </remarks>
+    public TimeSpan UnpackTimeout { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>Check the settings. <c>AddMediatorClient()</c> and the clients' constructors call it.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">A setting is outside its range; the exception names the setting and the range.</exception>
+    public void Validate()
+    {
+        if (RequestTimeout <= TimeSpan.Zero || RequestTimeout > MaxTimeout)
+            throw new ArgumentOutOfRangeException(nameof(RequestTimeout), "The value must be greater than zero and at most 10 minutes.");
+        if (MaxPendingRequests is < 1 or > MaxPendingRequestsLimit)
+            throw new ArgumentOutOfRangeException(nameof(MaxPendingRequests), "The value must be from 1 to 4096.");
+        if (!Enum.IsDefined(CoordinateMediationVersion))
+            throw new ArgumentOutOfRangeException(nameof(CoordinateMediationVersion), "The value must be Negotiate, V3 or V2.");
+        if (DedupeCapacity is < 0 or > MaxDedupeCapacity)
+            throw new ArgumentOutOfRangeException(nameof(DedupeCapacity), "The value must be from 0 (off) to 1 000 000.");
+        if (LivePollInterval < TimeSpan.FromSeconds(1) || LivePollInterval > TimeSpan.FromHours(24))
+            throw new ArgumentOutOfRangeException(nameof(LivePollInterval), "The value must be from 1 second to 24 hours.");
+        if (UnpackTimeout <= TimeSpan.Zero || UnpackTimeout > MaxTimeout)
+            throw new ArgumentOutOfRangeException(nameof(UnpackTimeout), "The value must be greater than zero and at most 10 minutes.");
+    }
+
+    private const int MaxPendingRequestsLimit = 4096;
+    private const int MaxDedupeCapacity = 1_000_000;
+    private static readonly TimeSpan MaxTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>A checked copy: what the clients keep, so a later change to this instance changes nothing (L-060).</summary>
+    /// <exception cref="ArgumentOutOfRangeException">A setting is outside its range.</exception>
+    internal MediatorClientOptions ValidatedCopy()
+    {
+        var copy = new MediatorClientOptions
+        {
+            RequestTimeout = RequestTimeout,
+            MaxPendingRequests = MaxPendingRequests,
+            CoordinateMediationVersion = CoordinateMediationVersion,
+            DedupeCapacity = DedupeCapacity,
+            LivePollInterval = LivePollInterval,
+            UnpackTimeout = UnpackTimeout,
+        };
+        copy.Validate();
+        return copy;
+    }
+}

@@ -211,7 +211,7 @@ public sealed class ReturnRouteRulesTests
     [Fact]
     public void Rules_throw_only_for_null_input()
     {
-        var a = () => ReturnRouteEligibility.TryGetPeer(null!, out _, out _, out _);
+        var a = () => ReturnRouteEligibility.TryGetPeer((UnpackResult)null!, out _, out _, out _);
         a.Should().Throw<ArgumentNullException>();
         var b = () => ReturnRouteAddressing.Check(null!, "did:example:alice", "did:example:bob");
         b.Should().Throw<ArgumentNullException>();

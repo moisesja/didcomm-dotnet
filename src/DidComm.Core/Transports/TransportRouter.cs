@@ -37,16 +37,31 @@ public sealed class TransportRouter : ITransportRouter
         if (QueueTransport.IsQueueTransport(request.Endpoint))
             throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
 
+        var transport = Select(request.Endpoint)
+            ?? throw new TransportException(
+                $"No registered IDidCommTransport handles scheme '{request.Endpoint.Scheme}' (FR-TRN-01). " +
+                $"Register one via builder.UseHttpTransport()/UseWebSocketTransport()/UseTransport<T>().",
+                httpStatusCode: null,
+                scheme: request.Endpoint.Scheme);
+        return transport.SendAsync(request, ct);
+    }
+
+    /// <summary>
+    /// The transport <see cref="SendAsync"/> hands a request for <paramref name="endpoint"/> to: the
+    /// first registered one whose <see cref="IDidCommTransport.CanHandle"/> accepts it, or
+    /// <c>null</c> when none does. One selection for the send and for any question asked about it
+    /// beforehand (L-041). The queue URI is not special-cased here; <see cref="SendAsync"/> refuses it
+    /// before selecting.
+    /// </summary>
+    /// <param name="endpoint">The destination URI.</param>
+    internal IDidCommTransport? Select(Uri endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
         foreach (var transport in _transports)
         {
-            if (transport.CanHandle(request.Endpoint))
-                return transport.SendAsync(request, ct);
+            if (transport.CanHandle(endpoint))
+                return transport;
         }
-
-        throw new TransportException(
-            $"No registered IDidCommTransport handles scheme '{request.Endpoint.Scheme}' (FR-TRN-01). " +
-            $"Register one via builder.UseHttpTransport()/UseWebSocketTransport()/UseTransport<T>().",
-            httpStatusCode: null,
-            scheme: request.Endpoint.Scheme);
+        return null;
     }
 }

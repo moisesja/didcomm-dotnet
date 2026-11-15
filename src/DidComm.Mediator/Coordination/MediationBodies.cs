@@ -121,7 +121,13 @@ internal static class MediationBodies
     /// </summary>
     public static JsonElement ToElement(JsonObject? body) => WireJson.ToElement(body);
 
-    public static IReadOnlyList<string> ReadRoutingDids(JsonElement body, string message)
+    /// <summary>
+    /// Read <c>routing_did</c>: a single string (the 2.0 shape) or an array (3.0). With
+    /// <paramref name="maxEntries"/>, an array longer than that is malformed, refused from its
+    /// length alone before any entry is read or anything is allocated for it (L-055); what sits
+    /// beyond the bound is never looked at.
+    /// </summary>
+    public static IReadOnlyList<string> ReadRoutingDids(JsonElement body, string message, int maxEntries = int.MaxValue)
     {
         var value = RequireMember(body, RoutingDid, message);
         // The 2.0 shape is a single string; 3.0 is an array. Both are accepted on receive.
@@ -129,6 +135,8 @@ internal static class MediationBodies
             return new[] { ReadDid(value, RoutingDid, message) };
         if (value.ValueKind != JsonValueKind.Array)
             throw new MalformedMessageException($"{message} '{RoutingDid}' must be an array of DID strings.");
+        if (value.GetArrayLength() > maxEntries)
+            throw TooManyEntries(RoutingDid, maxEntries, message);
 
         var dids = new List<string>(value.GetArrayLength());
         foreach (var entry in value.EnumerateArray())
@@ -185,9 +193,15 @@ internal static class MediationBodies
         return updates;
     }
 
-    public static IReadOnlyList<RecipientUpdateResult> ReadUpdated(JsonElement body, string message)
+    /// <summary>
+    /// Read <c>updated</c>. With <paramref name="maxEntries"/>, a longer list is malformed, refused
+    /// from its length alone before any entry is read or allocated (L-055).
+    /// </summary>
+    public static IReadOnlyList<RecipientUpdateResult> ReadUpdated(JsonElement body, string message, int maxEntries = int.MaxValue)
     {
         var array = RequireArray(body, Updated, message);
+        if (array.GetArrayLength() > maxEntries)
+            throw TooManyEntries(Updated, maxEntries, message);
         var updated = new List<RecipientUpdateResult>(array.GetArrayLength());
         foreach (var entry in array.EnumerateArray())
         {
@@ -216,9 +230,16 @@ internal static class MediationBodies
         return new RecipientQueryPaging(limit, offset);
     }
 
-    public static (IReadOnlyList<string> Dids, RecipientPagination? Pagination) ReadRecipients(JsonElement body, string listName, string message)
+    /// <summary>
+    /// Read a page of registered DIDs (<paramref name="listName"/>: <c>dids</c> in 3.0, <c>keys</c>
+    /// in 2.0) and its optional <c>pagination</c>. With <paramref name="maxEntries"/>, a longer list
+    /// is malformed, refused from its length alone before any entry is read or allocated (L-055).
+    /// </summary>
+    public static (IReadOnlyList<string> Dids, RecipientPagination? Pagination) ReadRecipients(JsonElement body, string listName, string message, int maxEntries = int.MaxValue)
     {
         var array = RequireArray(body, listName, message);
+        if (array.GetArrayLength() > maxEntries)
+            throw TooManyEntries(listName, maxEntries, message);
         var dids = new List<string>(array.GetArrayLength());
         foreach (var entry in array.EnumerateArray())
         {
@@ -267,6 +288,9 @@ internal static class MediationBodies
 
     private static MalformedMessageException TooManyUpdates(int maxEntries, string message)
         => new($"{message} '{Updates}' has more than {maxEntries} entries.");
+
+    private static MalformedMessageException TooManyEntries(string list, int maxEntries, string message)
+        => new($"{message} '{list}' has more than {maxEntries} entries.");
 
     private static JsonElement RequireMember(JsonElement body, string name, string message)
     {

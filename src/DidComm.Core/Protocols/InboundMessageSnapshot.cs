@@ -23,6 +23,7 @@ internal sealed class InboundMessageSnapshot
         string id,
         string type,
         string? thid,
+        string? pthid,
         string? from,
         IReadOnlyList<string> to,
         bool encrypted,
@@ -35,12 +36,14 @@ internal sealed class InboundMessageSnapshot
         VerifiedKeyBinding? senderKeyBinding,
         VerifiedKeyBinding? signerKeyBinding,
         VerifiedKeyBinding? recipientKeyBinding,
-        RecipientAddressing recipientAddressing)
+        RecipientAddressing recipientAddressing,
+        bool verified)
     {
         PlaintextJson = plaintextJson;
         Id = id;
         Type = type;
         Thid = thid;
+        Pthid = pthid;
         From = from;
         To = to;
         Encrypted = encrypted;
@@ -54,6 +57,7 @@ internal sealed class InboundMessageSnapshot
         SignerKeyBinding = signerKeyBinding;
         RecipientKeyBinding = recipientKeyBinding;
         RecipientAddressing = recipientAddressing;
+        Verified = verified;
     }
 
     private int _utf8ByteCount = -1;
@@ -79,6 +83,10 @@ internal sealed class InboundMessageSnapshot
     internal string Id { get; }
     internal string Type { get; }
     internal string? Thid { get; }
+
+    /// <summary>The parent thread id (<c>pthid</c>): what a problem report about a request carries (FR-PICK-07).</summary>
+    internal string? Pthid { get; }
+
     internal string? From { get; }
     internal IReadOnlyList<string> To { get; }
     internal bool Encrypted { get; }
@@ -92,6 +100,14 @@ internal sealed class InboundMessageSnapshot
     internal VerifiedKeyBinding? SignerKeyBinding { get; }
     internal VerifiedKeyBinding? RecipientKeyBinding { get; }
     internal RecipientAddressing RecipientAddressing { get; }
+
+    /// <summary>
+    /// <c>true</c> only for a snapshot registered by unpack (<see cref="RegisterVerified"/>), whose
+    /// trust fields the envelope layer established; <c>false</c> for a <see cref="CreateFallback"/>
+    /// snapshot, whose fields are the caller's claims. A correlator that completes a pending request
+    /// on the strength of the trust fields must require it.
+    /// </summary>
+    internal bool Verified { get; }
 
     /// <summary>Associate verified unpack output with its mutable public message by object identity.</summary>
     /// <remarks><paramref name="recipientAddressing"/> is deliberately required, not defaulted: a
@@ -120,6 +136,7 @@ internal sealed class InboundMessageSnapshot
             message.Id,
             message.Type,
             message.Thid,
+            message.Pthid,
             message.From,
             CopyRecipients(message.To),
             encrypted,
@@ -132,7 +149,8 @@ internal sealed class InboundMessageSnapshot
             senderKeyBinding,
             signerKeyBinding,
             recipientKeyBinding,
-            recipientAddressing));
+            recipientAddressing,
+            verified: true));
     }
 
     /// <summary>Look up the verified snapshot associated with an unpacked message.</summary>
@@ -162,6 +180,7 @@ internal sealed class InboundMessageSnapshot
             cloned.Id,
             cloned.Type,
             cloned.Thid,
+            cloned.Pthid,
             cloned.From,
             CopyRecipients(cloned.To),
             received.Encrypted,
@@ -181,7 +200,8 @@ internal sealed class InboundMessageSnapshot
             senderKeyBinding: null,
             signerKeyBinding: null,
             recipientKeyBinding: null,
-            recipientAddressing: RecipientAddressing.NotEvaluated);
+            recipientAddressing: RecipientAddressing.NotEvaluated,
+            verified: false);
     }
 
     /// <summary>Create an independent mutable message instance from the immutable plaintext.</summary>

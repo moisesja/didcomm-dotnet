@@ -38,7 +38,7 @@ internal enum ReturnedMessageRefusal
 /// <remarks>
 /// <para>
 /// Both identities come from verified envelope key ids through
-/// <see cref="ReturnRouteEligibility.TryGetPeer"/>, never from the plaintext <c>from</c> / <c>to</c>.
+/// <see cref="ReturnRouteEligibility.TryGetPeer(UnpackResult, out string, out string, out ReturnRouteIneligibility)"/>, never from the plaintext <c>from</c> / <c>to</c>.
 /// Both sides of each compare are DID subjects (PRD §4.3, L-034): the expected values are reduced to
 /// their subjects here too, so a DID URL of the same subject matches. Both compares always run and
 /// are combined without short-circuiting, so the work done does not depend on which one fails.

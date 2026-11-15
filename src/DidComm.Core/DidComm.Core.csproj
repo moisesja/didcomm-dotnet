@@ -42,6 +42,8 @@
     <InternalsVisibleTo Include="DidComm.Mediator" />
     <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
     <InternalsVisibleTo Include="DidComm.TestSupport" />
+    <!-- IInboundReceivingTransport only (#96): the mediator client asks the transport whether pushes reach the inbound consumer. -->
+    <InternalsVisibleTo Include="DidComm.Transports.WebSocket" />
   </ItemGroup>
 
 </Project>

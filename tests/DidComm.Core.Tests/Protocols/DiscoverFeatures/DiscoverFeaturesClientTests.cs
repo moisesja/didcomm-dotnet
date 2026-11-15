@@ -536,6 +536,41 @@ public sealed class DiscoverFeaturesClientTests
     }
 
     [Fact]
+    public async Task OnInbound_reports_a_claim_exactly_when_it_completed_a_query()
+    {
+        // #96 R-3: the dispatcher lowers its no-handler line to Debug only for a claimed message, so
+        // the claim must mean "completed a pending query" — never a refusal, a stranger's message,
+        // a duplicate, or another message type.
+        var client = Client(out var sent);
+        var correlator = (IInboundCorrelator)client;
+        var queryTask = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(30));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
+
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose("unknown-thread", disclosures: Legit())))
+            .Should().BeFalse("no query is pending on that thread");
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id, authenticated: false, disclosures: Forged())))
+            .Should().BeFalse("an unauthenticated disclose is refused, not claimed");
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id, from: Mallory, senderKid: "did:peer:mallory#key-1", disclosures: Forged())))
+            .Should().BeFalse("a disclose from another DID is refused, not claimed");
+        var ping = new UnpackResult(
+            Message: new Message { Id = "p", Type = "https://didcomm.org/trust-ping/2.0/ping", Thid = query.Id, From = Bob, To = new[] { Alice } },
+            Stack: Array.Empty<DidComm.Jose.EnvelopeKind>(),
+            Encrypted: true, Authenticated: true, NonRepudiation: false, AnonymousSender: false,
+            ContentEncryption: null, KeyWrap: null, SignatureAlgorithm: null,
+            SignerKid: null, SenderKid: "did:peer:bob#key-1", RecipientKid: "did:peer:alice#key-1",
+            AllRecipientKids: Array.Empty<string>(), FromPrior: null);
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(ping))
+            .Should().BeFalse("only a disclose can complete a query");
+
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit())))
+            .Should().BeTrue("the genuine disclose completed the pending query");
+        correlator.OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit())))
+            .Should().BeFalse("the query is no longer pending");
+
+        (await queryTask).Should().ContainSingle(d => d.Id == "legit");
+    }
+
+    [Fact]
     public async Task Invalid_known_thread_logging_is_rate_limited()
     {
         var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);

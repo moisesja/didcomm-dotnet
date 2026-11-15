@@ -221,12 +221,13 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
     /// snapshot; disclosure parsing runs on the awaiting requester's continuation.
     /// </summary>
     /// <param name="received">The immutable plaintext/trust snapshot created during unpack.</param>
-    void IInboundCorrelator.OnInbound(InboundMessageSnapshot received)
+    /// <returns><c>true</c> exactly when <paramref name="received"/> completed a pending query.</returns>
+    bool IInboundCorrelator.OnInbound(InboundMessageSnapshot received)
     {
         if (!string.Equals(received.Type, DiscoverFeatures.DiscloseType, StringComparison.OrdinalIgnoreCase))
-            return;
+            return false;
         if (received.Thid is not { Length: > 0 } thid || !_pending.TryGetValue(thid, out var pending) || !pending.IsWaiting)
-            return; // unsolicited disclose — stays a terminal leaf (FR-PROTO-05)
+            return false; // unsolicited disclose — stays a terminal leaf (FR-PROTO-05)
 
         // Spoofing defense: never complete a waiter off an unauthenticated envelope or a sender
         // other than the DID we queried. The pending entry is left intact so a forgery cannot
@@ -235,7 +236,7 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         {
             LogRejected(pending, thid, received,
                 "envelope does not authenticate the sender (anoncrypt/plaintext)");
-            return;
+            return false;
         }
         // Defense in depth: `Authenticated` implies the sender is bound to an authenticating key id
         // (authcrypt skid or a verified JWS signer kid) — that binding is what makes `from`
@@ -246,7 +247,7 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         {
             LogRejected(pending, thid, received,
                 "envelope reports authenticated but carries no sender/signer key id");
-            return;
+            return false;
         }
         if ((!string.IsNullOrEmpty(received.SenderKid)
                 && !DidSubject.SameDidSubject(received.SenderKid, received.From))
@@ -255,7 +256,7 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         {
             LogRejected(pending, thid, received,
                 "plaintext sender does not match its authenticating key DID subject");
-            return;
+            return false;
         }
         // Compare DID subjects, not raw strings (PRD §4.3): `from` and the queried `to` are DIDs or
         // DID URLs without a fragment, so a subject-wise match avoids dropping a legitimate reply
@@ -265,7 +266,7 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         {
             LogRejected(pending, thid, received,
                 "sender is not the queried responder");
-            return;
+            return false;
         }
 
         // Bind the response to the local identity that originated this exact query. `to` is covered by
@@ -275,19 +276,21 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         {
             LogRejected(pending, thid, received,
                 "message is not addressed to the requester");
-            return;
+            return false;
         }
         if (received.Encrypted && !DidSubject.SameDidSubject(received.RecipientKid, pending.RequesterDid))
         {
             LogRejected(pending, thid, received,
                 "envelope was not decrypted by the requester");
-            return;
+            return false;
         }
 
         // One atomic terminal transition wins against duplicates and timeout/cancellation cleanup.
         // RunContinuationsAsynchronously prevents typed body parsing from running on this receive path.
-        if (pending.TryComplete(received))
-            RemovePending(thid, pending);
+        if (!pending.TryComplete(received))
+            return false;
+        RemovePending(thid, pending);
+        return true;
     }
 
     private void LogRejected(

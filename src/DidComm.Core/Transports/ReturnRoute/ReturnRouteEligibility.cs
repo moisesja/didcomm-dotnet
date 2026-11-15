@@ -1,5 +1,6 @@
 using DidComm.Consistency;
 using DidComm.Facade;
+using DidComm.Protocols;
 
 namespace DidComm.Transports.ReturnRoute;
 
@@ -56,28 +57,64 @@ internal static class ReturnRouteEligibility
     public static bool TryGetPeer(UnpackResult inbound, out string peerDid, out string localDid, out ReturnRouteIneligibility reason)
     {
         ArgumentNullException.ThrowIfNull(inbound);
+        return TryGetPeerCore(
+            inbound.Encrypted, inbound.Authenticated, inbound.SenderKid, inbound.SignerKid, inbound.RecipientKid, inbound.Message?.Type,
+            out peerDid, out localDid, out reason);
+    }
+
+    /// <summary>
+    /// The same rule as <see cref="TryGetPeer(UnpackResult, out string, out string, out ReturnRouteIneligibility)"/>,
+    /// over the immutable inbound snapshot the dispatcher hands its correlators (the mediator client
+    /// uses it to tell a mediator's answer from other traffic). Both overloads share one core over the
+    /// same fields, so they cannot drift (L-041).
+    /// </summary>
+    /// <param name="inbound">The snapshot of the inbound message.</param>
+    /// <param name="peerDid">The DID subject of the authenticated sender.</param>
+    /// <param name="localDid">The DID subject of the decrypting key.</param>
+    /// <param name="reason">Why the inbound is ineligible; <see cref="ReturnRouteIneligibility.None"/> on success.</param>
+    public static bool TryGetPeer(InboundMessageSnapshot inbound, out string peerDid, out string localDid, out ReturnRouteIneligibility reason)
+    {
+        ArgumentNullException.ThrowIfNull(inbound);
+        return TryGetPeerCore(
+            inbound.Encrypted, inbound.Authenticated, inbound.SenderKid, inbound.SignerKid, inbound.RecipientKid, inbound.Type,
+            out peerDid, out localDid, out reason);
+    }
+
+    // The one rule, over the fields both inputs carry. Each overload only reads its own fields into
+    // it, so the two cannot apply different rules (L-041).
+    private static bool TryGetPeerCore(
+        bool encrypted,
+        bool authenticated,
+        string? senderKid,
+        string? signerKid,
+        string? recipientKid,
+        string? messageType,
+        out string peerDid,
+        out string localDid,
+        out ReturnRouteIneligibility reason)
+    {
         peerDid = string.Empty;
         localDid = string.Empty;
 
-        if (!inbound.Encrypted || !inbound.Authenticated)
+        if (!encrypted || !authenticated)
         {
             reason = ReturnRouteIneligibility.NotEncryptedAndAuthenticated;
             return false;
         }
-        if (string.IsNullOrEmpty(inbound.SenderKid))
+        if (string.IsNullOrEmpty(senderKid))
         {
             reason = ReturnRouteIneligibility.NoSenderKid;
             return false;
         }
-        var sender = DidSubject.DidSubjectOf(inbound.SenderKid);
+        var sender = DidSubject.DidSubjectOf(senderKid);
         if (sender is null)
         {
             reason = ReturnRouteIneligibility.SenderKidNotDid;
             return false;
         }
-        if (!string.IsNullOrEmpty(inbound.SignerKid))
+        if (!string.IsNullOrEmpty(signerKid))
         {
-            var signer = DidSubject.DidSubjectOf(inbound.SignerKid);
+            var signer = DidSubject.DidSubjectOf(signerKid);
             if (signer is null)
             {
                 reason = ReturnRouteIneligibility.SignerKidNotDid;
@@ -89,13 +126,13 @@ internal static class ReturnRouteEligibility
                 return false;
             }
         }
-        var local = DidSubject.DidSubjectOf(inbound.RecipientKid);
+        var local = DidSubject.DidSubjectOf(recipientKid);
         if (local is null)
         {
             reason = ReturnRouteIneligibility.RecipientKidNotDid;
             return false;
         }
-        if (MediatorServiceProtocols.IsReplayExempt(inbound.Message?.Type))
+        if (MediatorServiceProtocols.IsReplayExempt(messageType))
         {
             reason = ReturnRouteIneligibility.Forward;
             return false;
