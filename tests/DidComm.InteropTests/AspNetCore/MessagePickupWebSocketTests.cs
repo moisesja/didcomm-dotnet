@@ -208,9 +208,9 @@ public sealed class MessagePickupWebSocketTests
         var results = new ConcurrentQueue<(PickupDeliveryResult Result, bool ClosedBefore)>();
         var pusher = Task.Run(async () =>
         {
-            var deadline = DateTime.UtcNow + PickupEndpointHost.Timeout;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
             var afterClose = 0;
-            while (afterClose < 3 && DateTime.UtcNow < deadline)
+            while (afterClose < 3 && System.Diagnostics.Stopwatch.GetElapsedTime(started) < PickupEndpointHost.Timeout)
             {
                 var closedBefore = session.Closed.IsCancellationRequested;
                 results.Enqueue((await mediator.Queue.DeliverAsync(recipient.Did, payload), closedBefore));
@@ -240,7 +240,7 @@ public sealed class MessagePickupWebSocketTests
         using var disposeSecond = second;
         reopened.MessageCount.Should().Be(ids.Length);
         var received = new List<string>();
-        var until = DateTime.UtcNow + PickupEndpointHost.Timeout;
+        var redelivering = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
         while (received.Count < ids.Length)
         {
             var request = MessagePickup.CreateDeliveryRequest(recipient.Did, mediator.Mediator, 10);
@@ -255,7 +255,7 @@ public sealed class MessagePickupWebSocketTests
 
             // A status while messages are still counted: the closed socket's leases are on their way out.
             answer.Status(request.Id).MessageCount.Should().Be(ids.Length - received.Count);
-            (DateTime.UtcNow < until).Should().BeTrue("every retained message is deliverable again without waiting for the lease timeout (FR-PICK-04/08)");
+            (System.Diagnostics.Stopwatch.GetElapsedTime(redelivering) < PickupEndpointHost.Timeout).Should().BeTrue("every retained message is deliverable again without waiting for the lease timeout (FR-PICK-04/08)");
             await Task.Delay(10);
         }
         received.Should().BeEquivalentTo(ids, "each arrival reaches the recipient exactly once");

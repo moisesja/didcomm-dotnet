@@ -602,8 +602,8 @@ public sealed partial class ReturnRouteSessionTests : IAsyncLifetime
             var downgrader = Task.Factory.StartNew(() =>
             {
                 ready.Set();
-                var deadline = DateTime.UtcNow + Timeout;
-                while (socket.Frames.Count < k && DateTime.UtcNow < deadline)
+                var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
+                while (socket.Frames.Count < k && System.Diagnostics.Stopwatch.GetElapsedTime(started) < Timeout)
                     Thread.SpinWait(1);
                 Thread.SpinWait(spin);
                 session.ApplyHeader(ReturnRouteHeader.None);

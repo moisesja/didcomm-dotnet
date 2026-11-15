@@ -440,8 +440,8 @@ public sealed class WebSocketTransportRoundTripTests
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
-        var deadline = DateTime.UtcNow + timeout;
-        while (!condition() && DateTime.UtcNow < deadline)
+        var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
+        while (!condition() && System.Diagnostics.Stopwatch.GetElapsedTime(started) < timeout)
             await Task.Delay(10);
     }
 

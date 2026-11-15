@@ -234,10 +234,10 @@ public sealed class MessagePickupFlowTests
 
     private static async Task WaitUntilAsync(Func<Task<bool>> condition)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
         while (!await condition())
         {
-            if (DateTime.UtcNow > deadline)
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) > TimeSpan.FromSeconds(10))
                 throw new TimeoutException("The condition did not become true.");
             await Task.Delay(20);
         }
