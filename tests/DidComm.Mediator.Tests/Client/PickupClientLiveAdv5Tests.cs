@@ -533,6 +533,15 @@ public sealed class PickupClientLiveAdv5Tests
         var day = TimeSpan.FromHours(24);
         var (exchange, client) = Live(o => o.LivePollInterval = day);
         using var cts = new CancellationTokenSource();
+        // A regression that sends live-on in a loop must fail, not spin the test host (#119).
+        var liveOns = 0;
+        exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
+        {
+            await Task.Yield();
+            if (r.Live && Interlocked.Increment(ref liveOns) > 5)
+                await cts.CancelAsync();
+            return Status(r, live: r.Live);
+        });
         exchange.On(MessagePickup.DeliveryRequestType, async r =>
         {
             await Task.Yield();
