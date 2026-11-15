@@ -11,8 +11,8 @@ using DidComm.Transports.ReturnRoute;
 namespace DidComm.Facade;
 
 // The recipient-side mediator client's two entry points into the facade (#96). Both are internal:
-// DidComm.Mediator reaches them through InternalsVisibleTo, and nothing here changes a released
-// member.
+// DidComm.Mediator.Client (the client's package since #113) reaches them through InternalsVisibleTo,
+// and nothing here changes a released member.
 public sealed partial class DidCommClient
 {
     /// <summary>

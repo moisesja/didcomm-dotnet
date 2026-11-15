@@ -6,12 +6,51 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — packaging: the recipient-side client is its own package, `DidComm.Mediator.Client` (#113, epic #88)
+
+**What to reference.** A wallet, or any agent that only uses a mediator, references
+**`DidComm.Mediator.Client`**. A mediator references **`DidComm.Mediator`**, which depends on
+`DidComm.Mediator.Client` and so brings the client along (one host can be both). Neither package
+has been published yet, so nothing released changes; this release is the first to ship either.
+
+- **What moved.** The recipient-side client of #96 (`MediationClient`, `PickupClient`,
+  `PickupBatch`, `PickupItem`, `RecipientQueryResult`, `MediatorClientOptions`,
+  `CoordinateMediationVersion`, `MediationProtocolException`, `MediationNotSupportedException`,
+  `AddMediatorClient()` and `DidCommServiceBuilder.ForMediation(grant)`), together with the message
+  helpers both roles use: the Coordinate Mediation and Message Pickup builders and parsers
+  (`CoordinateMediation`, `MessagePickup`) and their records (`MediationGrant`, `RecipientUpdate`,
+  `RecipientUpdateResult`, `RecipientUpdateAction`, `RecipientUpdateOutcome`, `RecipientQueryPaging`,
+  `RecipientPagination`, `PickupStatus`, `DeliveredMessage`), plus the internal body codecs and the
+  internal Coordinate Mediation 2.0 client codec. The mediator roles, the stores and their records
+  (`RecipientPage`, `RecipientStoreOutcome`, `QueuedMessage`, …), the policies, `AddMediator()`, the
+  pipeline and the hosted service stay in `DidComm.Mediator`.
+- **Nothing else changes.** Namespaces are unchanged (`DidComm.Mediator.Client`,
+  `DidComm.Mediator.Coordination`, `DidComm.Mediator.Pickup`), and so are every type, member and
+  signature, every behaviour, every service registration of `AddMediator()` and
+  `AddMediatorClient()`, and every log category. Code that uses these types needs only the package
+  reference.
+- **Dependencies.** `DidComm.Mediator.Client` depends on `DidComm.Core`,
+  `DidComm.Extensions.DependencyInjection`, `Microsoft.Extensions.DependencyInjection.Abstractions`
+  and `Microsoft.Extensions.Logging.Abstractions`: not on `DidComm.Mediator`, not on
+  `Microsoft.Extensions.Hosting.Abstractions`, not on ASP.NET Core. A test pins both the client
+  assembly's references and its dependency graph (`ClientPackageReferencesTests`).
+  `DidComm.Mediator` keeps its dependencies and adds `DidComm.Mediator.Client`.
+- **Lockstep.** `DidComm.Mediator.Client` calls internals of `DidComm.Core` (the same ones the client
+  used before), and `DidComm.Mediator` calls internals of `DidComm.Mediator.Client` (the shared
+  logging and DID helpers and the bounded parser overloads), through `InternalsVisibleTo`. Like the
+  other packages, publish them from one tag at one version (`RELEASING.md`). The new id needs no
+  Trusted Publishing set-up: the policy covers `DidComm.*` new packages (owner decision D1 on #88).
+- **DX gate.** `DidComm.Mediator.Client` joins the shipped-assembly list (nine assemblies). The
+  allow-list entries of the moved types now name the new assembly (111 coverage and 108 execution
+  entries, among them the 43 / 42 `TODO(#97)` entries of the client); the totals are unchanged
+  (433 / 366).
+
 ### Added — recipient-side mediator client: MediationClient, PickupClient, AddMediatorClient(), ForMediation (FR-MED-09, FR-PICK-11, FR-MED-10 and FR-ROUTE-06 on the recipient side, #96, epic #88)
 
 An agent can now use a mediator, not only be one: ask a mediator to mediate for it, publish a DID
 whose messages go through that mediator, register the DID, and then fetch what the mediator holds
-or receive it live. The client is in `DidComm.Mediator`, namespace `DidComm.Mediator.Client`, still
-without any ASP.NET Core reference. It speaks Coordinate Mediation 3.0 or 2.0 and Message Pickup 3.0,
+or receive it live. The client is in namespace `DidComm.Mediator.Client`, in its own package
+`DidComm.Mediator.Client` since #113 (entry above), without any ASP.NET Core reference. It speaks Coordinate Mediation 3.0 or 2.0 and Message Pickup 3.0,
 so it works against this library's mediator (#95) and others. Still to come in the epic: sample 11
 and the cookbook sections (#97), the interop and adversarial gate (#98), the Coordinate Mediation 2.0
 mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoint (#110).
@@ -269,7 +308,7 @@ deferred to #111 are checked in skipped, their skip reason naming #111. Fix roun
   `InternalsVisibleTo`): `WebSocketDidCommTransport` implements Core's internal
   `IInboundReceivingTransport`, which tells the mediator client whether pushes on a session socket
   reach the inbound consumer (`ReceiveInbound` on and STOMP off). No public member changes. Like the
-  other packages that call internals of `DidComm.Core` (`DidComm.Mediator` among them), it must ship
+  other packages that call internals of `DidComm.Core` (`DidComm.Mediator` and `DidComm.Mediator.Client` among them), it must ship
   at the same version as Core: see "The packages ship in lockstep" in `RELEASING.md`.
 - **`DidComm.Core` internals for the client**, with no public change: on `DidCommClient`,
   `ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select, with `SendAsync`'s
@@ -1049,7 +1088,9 @@ directions, with `ClockSkew = 0` negative controls that fail where `main` failed
 A mediator can now hold messages for the recipients enrolled with it and hand them over when they
 ask (didcomm.org [messagepickup 3.0](https://didcomm.org/messagepickup/3.0/), PRD §8c). It is the
 second piece of the mediator service, in the `DidComm.Mediator` package under the namespace
-`DidComm.Mediator.Pickup`, still without any ASP.NET Core reference. What puts forwarded messages
+`DidComm.Mediator.Pickup`, still without any ASP.NET Core reference (`MessagePickup`, `PickupStatus`
+and `DeliveredMessage`, which the recipient side uses too, are in `DidComm.Mediator.Client` since
+#113, same namespace). What puts forwarded messages
 into the queue — the delivery pipeline — is #95 (above); the recipient-side client is #96 (above); Pickup
 4.0 is #100 and reuses the internals built here.
 
@@ -1221,7 +1262,9 @@ told which mediator DID to publish as its endpoint, and registers the DIDs it wa
 accepted for (didcomm.org [coordinate-mediation 3.0](https://didcomm.org/coordinate-mediation/3.0/),
 PRD §8b). This is the first piece of the mediator service and ships in a **new package,
 `DidComm.Mediator`** (namespace `DidComm.Mediator.Coordination`), which references `DidComm.Core` and
-`DidComm.Extensions.DependencyInjection` and nothing from ASP.NET Core. Message pickup is the
+`DidComm.Extensions.DependencyInjection` and nothing from ASP.NET Core (`CoordinateMediation`,
+`MediationGrant` and the `RecipientUpdate` records, which the recipient side uses too, are in
+`DidComm.Mediator.Client` since #113, same namespace). Message pickup is the
 entry above (#94); the delivery pipeline (#95) and the recipient-side client (#96) are above too,
 and the 2.0 compatibility handler (#99) follows. No existing package changes behaviour.
 

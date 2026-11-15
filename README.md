@@ -149,7 +149,8 @@ package per transport and integration. The badge at the top of this file shows t
 | `DidComm.AspNetCore` | `MapDidCommEndpoint` / `MapDidCommWebSocket` / `MapDidCommOobEndpoint` receive endpoints |
 | `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | Sender-side transport bindings |
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
-| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline |
+| `DidComm.Mediator.Client` | The recipient side of a mediator, for a wallet or other edge agent: `MediationClient` (enrol, register DIDs), `PickupClient` (fetch, acknowledge, live delivery), `AddMediatorClient()`, and the Coordinate Mediation / Message Pickup message builders and parsers. No mediator roles, no hosting, no ASP.NET Core |
+| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline; brings `DidComm.Mediator.Client` with it |
 | `DidComm.Mediator.AspNetCore` | `MapDidCommMediator`: the mediator's HTTP, WebSocket and out-of-band invitation endpoints |
 
 ```bash
@@ -198,7 +199,8 @@ repo publishes.
 | `DidComm.Transports.Http` | HTTPS sender (FR-TRN-04..08): `IHttpClientFactory`-backed POST, manual 307 follow + 301/308 refusal, Polly retry / circuit-breaker / timeout |
 | `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events |
 | `DidComm.AspNetCore` | Minimal-API extensions: `MapDidCommEndpoint` (HTTP receive, FR-TRN-07), `MapDidCommWebSocket` (WS receive with frame reassembly, FR-TRN-09/10), `MapDidCommOobEndpoint` (short-form OOB retrieval); `MaxReceiveBytes` ⇒ 413 / 1009 (FR-API-06) |
-| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10); the complete mediator — `AddMediator()`, `MediatorOptions`, the forward → live / queue pipeline, start-up checks of the routing DIDs (FR-MED-07, FR-PICK-09/10) |
+| `DidComm.Mediator.Client` | Recipient role (PRD §8b/§8c): `MediationClient` (FR-MED-09, Coordinate Mediation 3.0 with 2.0 negotiated or pinned), `PickupClient` (FR-PICK-11, Message Pickup 3.0 fetch / acknowledge / live), `AddMediatorClient()`, `DidCommServiceBuilder.ForMediation(grant)`; the message builders, parsers and records both roles share (`CoordinateMediation`, `MessagePickup`, `MediationGrant`, `RecipientUpdate`, `PickupStatus`, `DeliveredMessage`). Depends on `DidComm.Core` and `DidComm.Extensions.DependencyInjection` only: no `DidComm.Mediator`, no hosting, no ASP.NET Core |
+| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10); the complete mediator — `AddMediator()`, `MediatorOptions`, the forward → live / queue pipeline, start-up checks of the routing DIDs (FR-MED-07, FR-PICK-09/10). References `DidComm.Mediator.Client` |
 | `DidComm.Mediator.AspNetCore` | `MapDidCommMediator(pattern)`: the mediator's HTTP endpoint, its WebSocket endpoint with same-socket replies, and its out-of-band invitation endpoint |
 | `DidComm.TestSupport` *(not shipped)* | `InMemorySecretsResolver` for tests and samples — deliberately kept out of `DidComm.Core` per DD-02 |
 
@@ -312,7 +314,7 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-01 coverage gate
 (`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
 packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
-eight shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
+nine shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
 intersects real execution hits with the public surface. Of the 1021 public members, **628 are
 proven to execute**; 27 have no executable code at all (enums, const holders, two static readonly
 fields) and are itemized in the test output; the other 366 are the Phase 7 mediator surface, on
@@ -371,11 +373,12 @@ didcomm-dotnet/
 │   ├── DidComm.Transports.Http/                   # Polly-backed HTTPS sender (FR-TRN-04..08)
 │   ├── DidComm.Transports.WebSocket/              # WebSocket sender with pool + reconnect (FR-TRN-09..11)
 │   ├── DidComm.AspNetCore/                        # MapDidCommEndpoint / MapDidCommWebSocket / MapDidCommOobEndpoint
+│   ├── DidComm.Mediator.Client/                   # recipient side: MediationClient, PickupClient, AddMediatorClient() + the message builders/parsers both roles share
 │   ├── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 + Message Pickup 3.0 (mediator role), store + policy contracts, AddMediator() + delivery pipeline
 │   └── DidComm.Mediator.AspNetCore/               # MapDidCommMediator: the mediator's HTTP, WebSocket and invitation endpoints
 ├── tests/
 │   ├── DidComm.Core.Tests/                        # unit tests
-│   ├── DidComm.Mediator.Tests/                    # mediator service unit tests (coordination, pickup, pipeline)
+│   ├── DidComm.Mediator.Tests/                    # mediator service unit tests (coordination, pickup, pipeline, recipient client)
 │   ├── DidComm.InteropTests/                      # Appendix C vectors + Appendix B resolution + facade round-trip + rotation + routing + transports + mediator endpoints + sample smoke tests
 │   └── DidComm.TestSupport/                       # InMemorySecretsResolver helper (non-test library)
 ├── samples/

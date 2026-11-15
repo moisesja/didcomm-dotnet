@@ -3,7 +3,7 @@ namespace DidComm.Diagnostics;
 /// <summary>
 /// How a value a stranger chose is written into a log line: a message id bounded in length, and an
 /// exception by its type names only (its message can quote wire values — a DID, a line break).
-/// Shared by Core, <c>DidComm.AspNetCore</c> and <c>DidComm.Mediator</c>, so every package bounds
+/// Shared by Core, <c>DidComm.AspNetCore</c>, <c>DidComm.Mediator</c> and <c>DidComm.Mediator.Client</c>, so every package bounds
 /// ids the same way.
 /// </summary>
 internal static class LogValues
