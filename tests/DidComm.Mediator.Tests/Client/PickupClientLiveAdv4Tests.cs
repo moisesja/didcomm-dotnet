@@ -56,10 +56,11 @@ public sealed class PickupClientLiveAdv4Tests
             var n = Interlocked.Increment(ref round);
             return Delivery(r, ($"d{n}", $"stall:d{n}"));
         });
-        // Each stall is signalled, so the test advances the clock only once that round's budget and
-        // share timers exist (timers of a previous round are disposed on the pool, so a timer count
-        // alone can be satisfied by stale ones under load); a move that yields without a stall (the
-        // push) is taken as it comes.
+        // Each stall is signalled, so the test tells a move that needs the clock from one that does
+        // not: once a round's stall has started, its budget and share timers exist and the clock
+        // passes them (the previous round's timers all fired, and fired timers are not counted,
+        // whenever the pool disposes them); a move that yields without a stall (the push) is taken
+        // as it comes.
         var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
         exchange.Unpacker = (text, ct) =>
         {

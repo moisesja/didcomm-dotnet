@@ -61,6 +61,22 @@ public sealed class ManualTimeProviderTests
         clock.ScheduledTimers.Should().Be(0);
     }
 
+    // DeliveredUnpackAdv3Tests.Share_budget_and_caller_ending_together… relies on this: its caller's
+    // timer, created first, fires before the budget's and the shares' timers due at the same instant.
+    [Fact]
+    public void Timers_due_at_the_same_instant_fire_in_the_order_they_were_created_even_when_one_was_set_again()
+    {
+        var clock = new ManualTimeProvider();
+        var fired = new List<string>();
+        using var first = clock.CreateTimer(_ => fired.Add("first"), null, Inner, Timeout.InfiniteTimeSpan);
+        using var second = clock.CreateTimer(_ => fired.Add("second"), null, Outer, Timeout.InfiniteTimeSpan);
+        using var third = clock.CreateTimer(_ => fired.Add("third"), null, Outer, Timeout.InfiniteTimeSpan);
+        first.Change(Outer, Timeout.InfiniteTimeSpan); // set again, to the same instant, after the others were created
+
+        clock.Advance(Outer).Should().Be(3);
+        fired.Should().Equal("first", "second", "third");
+    }
+
     [Fact]
     public void Advance_returns_how_many_timers_it_fired()
     {
