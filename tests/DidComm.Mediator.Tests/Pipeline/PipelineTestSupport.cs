@@ -238,6 +238,10 @@ internal sealed class TestMeterFactory : IMeterFactory
 internal sealed class MeasurementRecorder : IDisposable
 {
     private readonly MeterListener _listener = new();
+    private readonly object _gate = new();
+    // Completed (and replaced) after every measurement is enqueued; never runs a waiter on the
+    // recording thread, which is the product's.
+    private TaskCompletionSource _recorded = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public MeasurementRecorder(TestMeterFactory factory)
     {
@@ -252,6 +256,7 @@ internal sealed class MeasurementRecorder : IDisposable
             foreach (var tag in tags)
                 copy[tag.Key] = tag.Value;
             Measurements.Enqueue((instrument.Name, value, copy));
+            Recorded();
         });
         _listener.SetMeasurementEventCallback<int>((instrument, value, tags, _) =>
         {
@@ -259,6 +264,7 @@ internal sealed class MeasurementRecorder : IDisposable
             foreach (var tag in tags)
                 copy[tag.Key] = tag.Value;
             Measurements.Enqueue((instrument.Name, value, copy));
+            Recorded();
         });
         _listener.Start();
     }
@@ -276,7 +282,48 @@ internal sealed class MeasurementRecorder : IDisposable
     public IReadOnlyList<string?> TagValues(string instrument, string tag)
         => Measurements.Where(m => m.Instrument == instrument).Select(m => m.Tags.GetValueOrDefault(tag) as string).ToArray();
 
+    /// <summary>
+    /// Wait until <paramref name="condition"/> holds over what has been recorded: a rendezvous on the
+    /// records a test asserts, not on a state counter the product updates before it records (#119).
+    /// <paramref name="timeout"/> is a hang guard only (real time); on it, the message lists every
+    /// measurement recorded.
+    /// </summary>
+    public async Task WaitForAsync(Func<MeasurementRecorder, bool> condition, TimeSpan timeout, string because)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            Task recorded;
+            lock (_gate)
+                recorded = _recorded.Task; // taken before the check: a measurement after it completes this one
+            if (condition(this))
+                return;
+            try
+            {
+                await recorded.WaitAsync(cts.Token);
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                throw new TimeoutException($"Not within {timeout}: {because}. Recorded: [{string.Join(", ", Measurements.Select(Describe))}]");
+            }
+        }
+    }
+
     public void Dispose() => _listener.Dispose();
+
+    private void Recorded()
+    {
+        TaskCompletionSource signal;
+        lock (_gate)
+        {
+            signal = _recorded;
+            _recorded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        signal.TrySetResult();
+    }
+
+    private static string Describe((string Instrument, long Value, IReadOnlyDictionary<string, object?> Tags) m)
+        => $"{m.Instrument}{{{string.Join(",", m.Tags.Select(t => $"{t.Key}={t.Value}"))}}}={m.Value}";
 }
 
 /// <summary>An <see cref="IMediationStore"/> over the real in-memory store whose recipient lookup a test can replace (to make it throw or park).</summary>
