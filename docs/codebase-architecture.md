@@ -1771,8 +1771,10 @@ changes.
    `.`, `_`, `-` that parse as a problem code, else `null`). The body is read on the caller's
    continuation.
 8. **No answer:** a disposed channel → `ObjectDisposedException`; the caller's cancellation →
-   `OperationCanceledException` (it wins over a deadline that fired at the same time); the deadline
-   → `TimeoutException` naming our request id and the message name, never a DID.
+   `OperationCanceledException` (the caller's cancellation wins when it was requested before the
+   call ended without an answer, even if the deadline fired first; one requested after that changes
+   nothing); the deadline → `TimeoutException` naming our request id and the message name, never a
+   DID.
 9. **Finally:** abandon, remove exactly this entry (a `KeyValuePair` removal), release the counts.
    A late answer then finds no waiting request and is dropped. A late `delivery` is never
    acknowledged, so it comes back after its lease; a late grant or update was applied, and a retry

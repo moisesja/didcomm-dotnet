@@ -410,8 +410,8 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         catch (OperationCanceledException) when (IsDisposed)
         {
             // The disposal cancelled the budget (ADV3-7): the caller sees the disposal, as it would
-            // in any other step, and wins over a cancellation of its own at the same time
-            // (Unanswered's order).
+            // in any other step, also when it cancelled too (Unanswered's order: a disposal seen as
+            // the call ends comes first).
             throw Disposed();
         }
     }
@@ -648,8 +648,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         }
     }
 
-    // Why a request ended without an answer, from the caller's view: the channel went away, the
-    // caller cancelled (which wins over a deadline that fired at the same time), or the deadline.
+    // Why a request ended without an answer, from the caller's view, read once as it ends: the channel
+    // went away, the caller cancelled, or the deadline. The caller's cancellation wins when it was
+    // requested before the call ended without an answer, even if the deadline fired first; one
+    // requested after that changes nothing.
     private Exception Unanswered(PendingRequest pending, GuardedDeadline deadline, CancellationToken ct)
     {
         if (IsDisposed)
