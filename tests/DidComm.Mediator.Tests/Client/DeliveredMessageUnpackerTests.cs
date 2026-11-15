@@ -268,7 +268,7 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
 
         var running = unpacker.UnpackAsync(Utf8("x"), default);
         await fake.Started(1);
-        var advance = () => _time.Advance(Timeout);
+        Action advance = () => _time.Advance(Timeout);
 
         advance.Should().NotThrow();
         (await running).Error.Should().BeOfType<TimeoutException>();

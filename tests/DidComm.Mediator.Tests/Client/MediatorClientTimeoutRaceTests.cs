@@ -142,7 +142,7 @@ public sealed class MediatorClientTimeoutRaceTests : IAsyncLifetime
         };
         var (_, exchange) = Start();
 
-        var advance = () => _time.Advance(_channel.Options.RequestTimeout);
+        Action advance = () => _time.Advance(_channel.Options.RequestTimeout);
 
         advance.Should().NotThrow("the timer cancels inside a try");
         handed.IsCancellationRequested.Should().BeTrue();

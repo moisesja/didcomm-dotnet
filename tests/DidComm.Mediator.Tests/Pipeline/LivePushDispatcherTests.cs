@@ -234,7 +234,7 @@ public sealed class LivePushDispatcherTests
         fixture.Dispatcher.Wake((await world.StoreAsync(grant)).GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
 
-        fixture.Invoking(f => f.Time.Advance(PushTimeout)).Should().NotThrow("the deadline's callback cancels inside a try");
+        fixture.Invoking(f => { f.Time.Advance(PushTimeout); }).Should().NotThrow("the deadline's callback cancels inside a try");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
