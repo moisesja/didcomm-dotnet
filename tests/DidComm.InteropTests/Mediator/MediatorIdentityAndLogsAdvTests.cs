@@ -134,9 +134,9 @@ public sealed class MediatorIdentityAndLogsAdvTests
         (await mediator.PostAsync(captured)).Status.Should().Be(HttpStatusCode.Accepted, "Bob's own copy is now a replay");
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
-        var deadline = DateTime.UtcNow + MediatorTestServer.Timeout;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
         IReadOnlyList<DeliveredMessage> again;
-        while ((again = await mediator.FetchAsync(bob)).Count == 0 && DateTime.UtcNow < deadline)
+        while ((again = await mediator.FetchAsync(bob)).Count == 0 && System.Diagnostics.Stopwatch.GetElapsedTime(started) < MediatorTestServer.Timeout)
             await Task.Delay(20);
         again.Should().ContainSingle("closing the socket gives the lease back");
     }

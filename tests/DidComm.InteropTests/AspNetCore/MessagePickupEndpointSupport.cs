@@ -372,7 +372,7 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
     /// <summary><see cref="FetchUntilDeliveredAsync(WebSocket, TestPeer, int)"/> over any connection: <paramref name="ask"/> sends one request and returns its answer.</summary>
     public async Task<(Message Request, PickupAnswer Delivery)> FetchUntilDeliveredAsync(TestPeer peer, Func<Message, Task<PickupAnswer>> ask, int limit = 10)
     {
-        var deadline = DateTime.UtcNow + Timeout;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
         while (true)
         {
             var request = MessagePickup.CreateDeliveryRequest(peer.Did, Mediator, limit);
@@ -380,7 +380,7 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
             if (answer.Message.Type == MessagePickup.DeliveryType)
                 return (request, answer);
             answer.Message.Type.Should().Be(MessagePickup.StatusType);
-            (DateTime.UtcNow < deadline).Should().BeTrue("the leases of a closed socket are released without waiting for the lease timeout (FR-PICK-04)");
+            (System.Diagnostics.Stopwatch.GetElapsedTime(started) < Timeout).Should().BeTrue("the leases of a closed socket are released without waiting for the lease timeout (FR-PICK-04)");
             await Task.Delay(10);
         }
     }
