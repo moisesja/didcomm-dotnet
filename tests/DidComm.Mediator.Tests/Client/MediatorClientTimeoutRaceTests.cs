@@ -203,25 +203,63 @@ public sealed class MediatorClientTimeoutRaceTests : IAsyncLifetime
         (await exchange).Should().BeSameAs(answer);
     }
 
+    // The contract (#119): the caller's cancellation wins when it was requested before the call ended
+    // without an answer, even if the deadline fired first; one requested after that changes nothing.
+    // The next two tests pin each half.
+
     [Fact]
-    public async Task When_the_deadline_and_the_callers_cancellation_are_both_set_the_cancellation_wins()
+    public async Task When_the_deadline_fired_and_the_caller_cancelled_before_the_call_ended_the_cancellation_wins()
     {
         using var cts = new CancellationTokenSource();
-        // The rendezvous: the deadline firing cancels the caller's token too, synchronously, before
-        // the exchange can observe either — both are set when it decides.
+        using var inSend = new ManualResetEventSlim();
+        using var proceed = new ManualResetEventSlim();
+        // L-044: the send parks (on a pool thread) until the deadline has fired and the caller has
+        // cancelled, so the call cannot end before both are set. A deadline that fired first does not
+        // decide by itself.
+        _send.Respond = (_, _, _) =>
+        {
+            inSend.Set();
+            proceed.Wait(TimeSpan.FromSeconds(10)); // a hang guard: the test sets it below
+            return new TaskCompletionSource<SendResult>().Task; // never; ignores its token
+        };
+        var exchange = Task.Run(() => _channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, cts.Token));
+        inSend.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue("the send started");
+        _time.ScheduledTimers.Should().Be(1, "the deadline is armed before the send");
+
+        _time.Advance(_channel.Options.RequestTimeout);
+        await cts.CancelAsync();
+        exchange.IsCompleted.Should().BeFalse("the call has not ended: its send is parked");
+        proceed.Set();
+
+        (await FluentActions.Awaiting(() => exchange).Should().ThrowAsync<OperationCanceledException>()).Which.CancellationToken.Should().Be(cts.Token);
+    }
+
+    [Fact]
+    public async Task A_cancellation_requested_after_the_deadline_ended_the_call_leaves_it_a_timeout()
+    {
+        using var cts = new CancellationTokenSource();
+        Task<InboundMessageSnapshot>? exchange = null;
+        var endedFirst = false;
+        // The deadline's own firing cancels the caller's token, but only once the call has ended: the
+        // callback waits for that before it cancels (it runs on the Advance caller's thread; the call
+        // ends on the pool, or inline before the callback when no synchronization context is current).
         _send.Respond = (_, _, ct) =>
         {
-            ct.Register(() => cts.Cancel());
+            ct.Register(() =>
+            {
+                endedFirst = SpinWait.SpinUntil(() => Volatile.Read(ref exchange)?.IsCompleted == true, TimeSpan.FromSeconds(10)); // a hang guard
+                cts.Cancel();
+            });
             return new TaskCompletionSource<SendResult>().Task;
         };
-        var (_, exchange) = Start(cts.Token);
-        // L-044: the send (and its registration) must be in place before the deadline fires.
+        (_, exchange) = Start(cts.Token);
         await _send.FirstCall.WaitAsync(TimeSpan.FromSeconds(10));
 
         _time.Advance(_channel.Options.RequestTimeout);
 
+        endedFirst.Should().BeTrue("the call ended before the caller cancelled");
         cts.IsCancellationRequested.Should().BeTrue();
-        (await FluentActions.Awaiting(() => exchange).Should().ThrowAsync<OperationCanceledException>()).Which.CancellationToken.Should().Be(cts.Token);
+        await FluentActions.Awaiting(() => exchange).Should().ThrowAsync<TimeoutException>();
     }
 
     [Fact]

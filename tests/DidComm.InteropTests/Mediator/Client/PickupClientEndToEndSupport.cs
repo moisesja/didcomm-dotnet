@@ -59,7 +59,12 @@ internal sealed class PickupRequestObserver : IProtocolObserver
     /// <summary>Wait until at least <paramref name="count"/> pickup messages were observed.</summary>
     public Task WaitForAsync(int count) => MediatorTestServer.WaitUntilAsync(() => _seen.Count >= count, $"the mediator observed {count} pickup message(s)");
 
-    /// <summary>Wait until at least <paramref name="count"/> pickup messages from <paramref name="from"/> were observed (each one already answered).</summary>
+    /// <summary>
+    /// Wait until at least <paramref name="count"/> pickup messages from <paramref name="from"/> were
+    /// observed: the mediator's dispatcher has handled each one. The observer is handed each message
+    /// before the mediator sends its answer, so this says nothing about the client: a test that moves
+    /// the client's clock next must first wait for the client's own state (#119).
+    /// </summary>
     public Task WaitForAsync(string from, int count)
         => MediatorTestServer.WaitUntilAsync(() => _seen.Count(s => s.From == from) >= count, $"the mediator observed {count} pickup message(s) of the DID");
 }
