@@ -377,6 +377,8 @@ public sealed class LivePushDispatcherTests
         (await fixture.WaitForPushOutcomesAsync(2, Wait)).Should().HaveCount(2).And.OnlyContain(o => o == PushOutcomes.SkippedShutdown);
         dispatcher.Unsettled.Should().Be(0, "the cancelled push settled before its held wake-up was counted");
         fixture.Store.MessageCount.Should().Be(3, "the push in flight was cancelled; all stay queued");
+        // The cancelled send gave its lease back before its work ended; the held wake-up is counted after that.
+        (await PickupFromAsync(fixture.Store, grant.Peer, fixture.Options.Now())).Should().HaveCount(3, "every message can be picked up");
         LivePushWorld.Deliveries(session).Should().BeEmpty();
         dispatcher.Wake((await world.StoreAsync(grant, 9)).GrantPeerDid).Should().BeFalse();
         fixture.Pushes(PushOutcomes.SkippedShutdown).Should().Be(3);

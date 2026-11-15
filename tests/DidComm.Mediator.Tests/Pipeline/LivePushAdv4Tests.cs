@@ -520,7 +520,7 @@ public sealed class LivePushAdv4Tests
 
             // Promptly: the dispatcher's DisposeAsync writes this line, before it returns, only when
             // its workers did not stop within its grace — when one waits for the push it abandoned.
-            world.Fixture.Logs.Entries.Should().NotContain(e => e.Formatted.Contains("Push workers did not stop within"), "disposing does not wait for a push that ignores its cancellation");
+            world.Fixture.Logs.Entries.Select(e => e.Formatted).Should().NotContain(line => line.StartsWith("Push workers did not stop within"), "disposing does not wait for a push that ignores its cancellation");
             // L-020 (PR #109 review round 2, D-2/D-3): the second forward's wake-up waits behind the
             // push in flight (its grant is busy until that push settles), so it is counted when the
             // abandoned push ends, not at the shutdown.
