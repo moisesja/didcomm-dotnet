@@ -22,7 +22,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <c>Microsoft.NETCore.App</c> only: under ASP.NET Core, .NET 10 prunes the Extensions packages the
 /// framework already provides from the graph, and the walk below could no longer see a hosting
 /// dependency. A direct project reference from the client to <c>DidComm.Mediator</c> cannot be
-/// built at all (the restore reports a cycle, NU1108); the self-test of the walk stands in for it.
+/// built at all (the restore fails with MSB4006, a circular dependency); the self-test of the walk
+/// stands in for it.
 /// </remarks>
 public sealed class ClientPackageReferencesTests
 {
@@ -35,9 +36,10 @@ public sealed class ClientPackageReferencesTests
     [Fact]
     public void The_client_assembly_uses_only_core_the_di_package_and_the_extensions_abstractions()
     {
+        // Every reference outside the base shared framework counts, a System.* package included.
         var references = ClientAssembly.GetReferencedAssemblies()
             .Select(a => a.Name!)
-            .Where(n => !IsBaseClassLibrary(n))
+            .Where(n => !IsInTheBaseSharedFramework(n))
             .Order(StringComparer.Ordinal)
             .ToList();
 
@@ -113,6 +115,10 @@ public sealed class ClientPackageReferencesTests
             "the walk must reach the client's own dependencies, or it is not reading the graph");
         closure.Where(IsForbiddenForTheClient).Should().BeEmpty(
             "a wallet that references DidComm.Mediator.Client must not get the mediator service, hosting or ASP.NET Core");
+
+        // What the package declares (its nuspec dependencies), exactly: a new one is a new dependency for every wallet.
+        graph[ClientNode].Order(StringComparer.Ordinal).Should().Equal(
+            ["DidComm.Core", "DidComm.Extensions.DependencyInjection", "Microsoft.Extensions.DependencyInjection.Abstractions", "Microsoft.Extensions.Logging.Abstractions"]);
     }
 
     [Fact]
@@ -152,8 +158,9 @@ public sealed class ClientPackageReferencesTests
         IsForbiddenForTheClient("DidComm.Extensions.DependencyInjection").Should().BeFalse();
     }
 
-    private static bool IsBaseClassLibrary(string name) =>
-        name is "System" or "netstandard" or "mscorlib" || name.StartsWith("System.", StringComparison.Ordinal);
+    /// <summary>Whether the assembly ships in <c>Microsoft.NETCore.App</c>, the framework this host runs on (checked by name in its directory).</summary>
+    private static bool IsInTheBaseSharedFramework(string name) =>
+        File.Exists(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, name + ".dll"));
 
     private static bool IsForbiddenForTheClient(string name) =>
         name is MediatorNode or "DidComm.Mediator.AspNetCore" or "DidComm.AspNetCore"
