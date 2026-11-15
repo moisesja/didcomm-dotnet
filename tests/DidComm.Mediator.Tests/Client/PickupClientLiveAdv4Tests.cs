@@ -56,7 +56,17 @@ public sealed class PickupClientLiveAdv4Tests
             var n = Interlocked.Increment(ref round);
             return Delivery(r, ($"d{n}", $"stall:d{n}"));
         });
-        exchange.Unpacker = StallsUntilCancelled;
+        // Each stall is signalled, so the test advances the clock only once that round's budget and
+        // share timers exist (timers of a previous round are disposed on the pool, so a timer count
+        // alone can be satisfied by stale ones under load); a move that yields without a stall (the
+        // push) is taken as it comes.
+        var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        exchange.Unpacker = (text, ct) =>
+        {
+            if (text.StartsWith("stall:", StringComparison.Ordinal))
+                Volatile.Read(ref stalled[0]).TrySetResult();
+            return StallsUntilCancelled(text, ct);
+        };
         exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
         {
             // An honest message is pushed as live mode goes on.
@@ -67,18 +77,26 @@ public sealed class PickupClientLiveAdv4Tests
 
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
-        var move = stream.MoveNextAsync().AsTask();
+        Task<bool> NextMove()
+        {
+            Volatile.Write(ref stalled[0], new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+            return stream.MoveNextAsync().AsTask();
+        }
+        var move = NextMove();
         var items = new List<PickupItem>();
         try
         {
             // Six drain rounds: two minutes, twice this library's lease.
             for (var i = 0; i < 6 && !items.Any(x => x.Id == "p1"); i++)
             {
-                await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // a round's slow message is being opened
-                exchange.Clock.Advance(Budget);
+                if (await Task.WhenAny(move, Volatile.Read(ref stalled[0]).Task).WaitAsync(PickupTest.Timeout) != move)
+                {
+                    await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // the round's budget and share
+                    exchange.Clock.Advance(Budget);
+                }
                 (await PickupTest.Within(move)).Should().BeTrue();
                 items.Add(stream.Current);
-                move = stream.MoveNextAsync().AsTask();
+                move = NextMove();
             }
 
             items.Select(x => x.Id).Should().Contain("p1",
