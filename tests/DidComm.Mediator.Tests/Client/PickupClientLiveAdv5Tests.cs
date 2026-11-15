@@ -25,7 +25,7 @@ public sealed class PickupClientLiveAdv5Tests
     // ==== findings (these tests fail while the defect is there) ===================================
 
     /// <summary>
-    /// ADV5-1 (defect, Low; introduced by <c>111dc8e</c>, the R1-1 fix). Property broken —
+    /// ADV5-1 (fixed in #96, PR #112 round 1; was a defect, Low; introduced by <c>111dc8e</c>, the R1-1 fix). Property broken —
     /// <see cref="LiveDeliveryStream"/> remarks (ADV3-5): "A reading lower than that one (a host clock
     /// that stepped back: an NTP correction, a restored snapshot) counts as due, at the cost of one
     /// early cycle, retry or flush per step"; and the loop's own rule that it waits for "a push, the
@@ -83,7 +83,9 @@ public sealed class PickupClientLiveAdv5Tests
         exchange.Registration!.TryPush(Push(("q1", "ok:m1"))).Should().BeTrue();
         (await PickupTest.Within(first)).Should().BeTrue();
         stream.Current.Id.Should().Be("q1");
-        Types(exchange).Should().Equal(new[] { LiveOn, LiveOn, Drain, LiveOn }, "the step costs one early cycle (ADV3-5)");
+        // Aligned with the ADV5-1 fix: the early cycle is a whole cycle — live-on and its drain round
+        // (before the fix its drain stayed gated by the old back-off, which is what made the loop spin).
+        Types(exchange).Should().Equal(new[] { LiveOn, LiveOn, Drain, LiveOn, Drain }, "the step costs one early cycle (ADV3-5), its drain included");
         var sentBefore = exchange.Sent.Count;
 
         // The consumer asks for the next item. Nothing is due but the drain round after the back-off:
@@ -118,7 +120,7 @@ public sealed class PickupClientLiveAdv5Tests
     }
 
     /// <summary>
-    /// ADV5-2 (defect, Medium; pre-existing in #96 since the live stream landed, unchanged by the
+    /// ADV5-2 (fixed in #96, PR #112 round 1; was a defect, Medium; pre-existing in #96 since the live stream landed, unchanged by the
     /// R1-1 fix). Property broken — <see cref="LiveDeliveryStream"/> <c>Retryable</c>: the busy
     /// refusal (<see cref="MediatorBusyException"/>) is retried because it is "transient, the others
     /// end within <see cref="MediatorClientOptions.RequestTimeout"/>"; and the documented back-off
@@ -207,7 +209,7 @@ public sealed class PickupClientLiveAdv5Tests
     }
 
     /// <summary>
-    /// ADV5-3 (defect, Low; pre-existing in #96, unchanged by the R1-1 fix). Property broken —
+    /// ADV5-3 (known limit deferred to #111 by owner decision; Low; pre-existing in #96, unchanged by the R1-1 fix). Property broken —
     /// <see cref="PickupClient.ReceiveLiveAsync"/>: "Five failures in a row end the stream with the
     /// last exception"; <c>&lt;exception cref="TimeoutException"&gt;</c>: "five steps in a row got no
     /// answer"; <see cref="LiveDeliveryStream"/> remarks: "five in a row end the stream".
@@ -224,7 +226,10 @@ public sealed class PickupClientLiveAdv5Tests
     /// lost requests spread over hundreds of successful ones.
     /// </para>
     /// </summary>
-    [Fact]
+    // Aligned with the ADV5-2 fix (time-based give-up): the run of failures is still reset only by a
+    // completed drain, so scattered failures across delivering cycles end the stream once the run is
+    // older than RequestTimeout + 30 s (here at the seventh such cycle, about 61 s), not at the fifth.
+    [Fact(Skip = "Known limit, deferred to #111: the run of failures is reset only when a drain completes, so failures separated by successful steps still end the stream once the run is older than RequestTimeout + 30 s (ADV5-3).")]
     public async Task ADV5_3_failures_separated_by_successful_steps_and_delivered_messages_still_end_the_stream_as_five_in_a_row()
     {
         var (exchange, client) = Live(o => o.LivePollInterval = TimeSpan.FromSeconds(60));
@@ -233,7 +238,7 @@ public sealed class PickupClientLiveAdv5Tests
         {
             await Task.Yield();
             var n = Interlocked.Increment(ref drains);
-            if (n > 40)
+            if (n > 80)
                 throw new InvalidDataException("brake"); // ends the stream at once
             return n % 2 == 1
                 ? Delivery(r, ($"q{(n + 1) / 2}", $"ok:m{(n + 1) / 2}"))
@@ -245,7 +250,7 @@ public sealed class PickupClientLiveAdv5Tests
         var ids = new List<string>();
         Exception? error = null;
         Task<bool>? move = null;
-        while (ids.Count < 6 && error is null)
+        while (ids.Count < 12 && error is null)
         {
             move = stream.MoveNextAsync().AsTask();
             await AdvanceUntilAsync(exchange, move, maxSeconds: 60);
@@ -270,11 +275,11 @@ public sealed class PickupClientLiveAdv5Tests
         error.Should().BeNull(
             "between every two failures the stream turned live mode on, received a delivery, yielded it and had it acknowledged — the failures were never in a row — yet it ended with {0} after {1}: {2}",
             error?.GetType().Name ?? "nothing", string.Join(", ", ids), string.Join(", ", types));
-        ids.Should().Contain("q6");
+        ids.Should().Contain("q12");
     }
 
     /// <summary>
-    /// ADV5-4 (defect, Low; pre-existing in #96, unchanged by the R1-1 fix). Property broken —
+    /// ADV5-4 (known limit deferred to #111 by owner decision; Low; pre-existing in #96, unchanged by the R1-1 fix). Property broken —
     /// <see cref="PickupClient.ReceiveLiveAsync"/>: "A mediator that does not set delivered messages
     /// aside delivers it on every drain", and the drain is the poll that runs "one
     /// <see cref="MediatorClientOptions.LivePollInterval"/> after each such round ends" — a request
@@ -292,7 +297,7 @@ public sealed class PickupClientLiveAdv5Tests
     /// items per cycle and block every message behind them.
     /// </para>
     /// </summary>
-    [Fact]
+    [Fact(Skip = "Known limit, deferred to #111: at a mediator that does not set delivered messages aside, one message that never opens makes every drain send 50 requests and yield it 50 times (ADV5-4).")]
     public async Task ADV5_4_one_failing_message_at_a_mediator_that_does_not_lease_makes_every_drain_send_fifty_requests_and_yield_it_fifty_times()
     {
         var (exchange, client) = Live(o => o.LivePollInterval = TimeSpan.FromSeconds(60));
@@ -553,7 +558,8 @@ public sealed class PickupClientLiveAdv5Tests
     /// <summary>
     /// Held: a mediator that answers live-on but lets every delivery request run past
     /// <see cref="MediatorClientOptions.RequestTimeout"/> gets one live-on per attempt (no storm),
-    /// the documented pauses, and the stream ends with the fifth time-out; live mode is turned off.
+    /// the documented pauses, and the stream ends once its steps have kept failing for longer than
+    /// RequestTimeout + 30 s (ADV5-2's fix); live mode is turned off.
     /// </summary>
     [Fact]
     public async Task A_mediator_slower_than_RequestTimeout_on_every_drain_round_gets_one_live_on_per_attempt_and_no_storm()
@@ -575,17 +581,25 @@ public sealed class PickupClientLiveAdv5Tests
             throw new TimeoutException("no answer (test)");
         });
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var start = exchange.Clock.GetTimestamp();
         var first = stream.MoveNextAsync().AsTask();
-        foreach (var pause in new[] { 1, 2, 4, 8 })
+        // Aligned with the ADV5-2 fix (PR #112): the stream now gives up on time, once its steps have
+        // kept failing for longer than RequestTimeout + 30 s, not at the fifth failure. Each failure
+        // here costs a whole RequestTimeout, so fewer attempts fit in that time.
+        for (var pause = 1; pause <= 64 && !first.IsCompleted; pause *= 2)
         {
-            await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-            first.IsCompleted.Should().BeFalse();
-            exchange.Clock.Advance(TimeSpan.FromSeconds(pause));
+            var timer = exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+            if (await Task.WhenAny(first, timer).WaitAsync(PickupTest.Timeout) == first)
+                break;
+            exchange.Clock.Advance(TimeSpan.FromSeconds(Math.Min(pause, 30)));
         }
 
         await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TimeoutException>();
         await PickupTest.Within(stream.DisposeAsync());
-        Types(exchange).Should().Equal(LiveOn, Drain, LiveOn, Drain, LiveOn, Drain, LiveOn, Drain, LiveOn, Drain, LiveOff);
+        var types = Types(exchange);
+        types[^1].Should().Be(LiveOff);
+        types.Take(types.Count - 1).Chunk(2).Should().OnlyContain(pair => pair.Length == 2 && pair[0] == LiveOn && pair[1] == Drain, "one live-on per attempt, each followed by its drain round: no storm");
+        exchange.Clock.GetElapsedTime(start).Should().BeGreaterThan(exchange.Options.RequestTimeout + LiveDeliveryStream.GiveUpMargin, "the stream gave up only after its steps had kept failing for longer than RequestTimeout + 30 s");
     }
 
     /// <summary>

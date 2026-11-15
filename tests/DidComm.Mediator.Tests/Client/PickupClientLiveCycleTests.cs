@@ -287,12 +287,17 @@ public sealed class PickupClientLiveCycleTests
     }
 
     [Fact]
-    public async Task Five_failed_steps_in_a_row_end_the_stream_with_the_last_exception()
+    public async Task Steps_that_keep_failing_for_longer_than_RequestTimeout_plus_30_s_end_the_stream_with_the_last_exception()
     {
+        // ADV5-2 (PR #112): the stream used to give up at the fifth failure, after 1 + 2 + 4 + 8 s.
+        // It now backs off 1, 2, 4, 8, 16 and 30 s, and the first failure more than RequestTimeout
+        // (30 s) + 30 s after the run began — the seventh, at 61 s — ends it with its exception.
         var (exchange, client) = Live();
         var failures = new List<TimeoutException>();
         exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
         {
+            if (!r.Live)
+                return Task.FromResult(Status(r, live: false));
             var error = new TimeoutException($"attempt {failures.Count + 1}");
             failures.Add(error);
             return Task.FromException<InboundMessageSnapshot>(error);
@@ -300,17 +305,45 @@ public sealed class PickupClientLiveCycleTests
         await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
         var first = stream.MoveNextAsync().AsTask();
 
-        foreach (var pause in new[] { 1, 2, 4, 8 })
+        foreach (var pause in new[] { 1, 2, 4, 8, 16, 30 })
+        {
+            await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+            first.IsCompleted.Should().BeFalse("a run of failures shorter than RequestTimeout + 30 s is retried");
+            exchange.Clock.Advance(TimeSpan.FromSeconds(pause));
+        }
+
+        var thrown = (await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TimeoutException>()).Which;
+        thrown.Should().BeSameAs(failures[6], "the first failure more than RequestTimeout + 30 s into the run ends the stream with its exception");
+        Types(exchange).Should().Equal(new[] { LiveOn, LiveOn, LiveOn, LiveOn, LiveOn, LiveOn, LiveOn, LiveOff }, "live-off is still attempted at the end");
+        exchange.Registrations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_give_up_point_follows_RequestTimeout()
+    {
+        // With RequestTimeout 2 min the stream keeps retrying (30 s pauses) until a failure more than
+        // 2 min + 30 s into the run: 0, 1, 3, 7, 15, 31, 61, 91, 121, 151 s.
+        var (exchange, client) = Live(o => o.RequestTimeout = TimeSpan.FromMinutes(2));
+        var failures = 0;
+        exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
+        {
+            if (!r.Live)
+                return Task.FromResult(Status(r, live: false));
+            Interlocked.Increment(ref failures);
+            return Task.FromException<InboundMessageSnapshot>(new TransportException("down"));
+        });
+        await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
+        var first = stream.MoveNextAsync().AsTask();
+
+        foreach (var pause in new[] { 1, 2, 4, 8, 16, 30, 30, 30, 30 })
         {
             await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
             first.IsCompleted.Should().BeFalse();
             exchange.Clock.Advance(TimeSpan.FromSeconds(pause));
         }
 
-        var thrown = (await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TimeoutException>()).Which;
-        thrown.Should().BeSameAs(failures[4], "the fifth failure in a row ends the stream with its exception");
-        Types(exchange).Should().Equal(new[] { LiveOn, LiveOn, LiveOn, LiveOn, LiveOn, LiveOff }, "live-off is still attempted at the end");
-        exchange.Registrations.Should().BeEmpty();
+        await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TransportException>();
+        failures.Should().Be(10);
     }
 
     [Fact]

@@ -21,15 +21,20 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>Cycle.</strong> <c>live-delivery-change{true}</c> → <c>status</c>, then a drain
 /// (<c>delivery-request{10}</c> until a <c>status</c>, at most 50 rounds). Live mode is turned on
 /// before the drain, so a message that arrives between the two is pushed (it is after the
-/// mediator's arrival mark) or drained, never neither. The cycle runs at the start, every
-/// <see cref="MediatorClientOptions.LivePollInterval"/> on the monotonic clock (which also picks up
-/// delayed messages, never pushed when they fall due, and recovers a dropped connection), and after
-/// a failed step with back-off from 1 s doubling to 30 s. The mediator has no scheduler for due
-/// messages, now or later (owner decision D2 on #88, 2026-11-14), so this polling is the permanent
-/// design, not a stopgap. Only a failure a retry can fix is retried (<see cref="Retryable"/>); five
-/// in a row end the stream with the last exception, and any other failure (a
-/// <see cref="MediationProtocolException"/> such as live mode not supported, a pack-stage error such
-/// as <see cref="SecretNotFoundException"/>) ends it at once.
+/// mediator's arrival mark) or drained, never neither. The cycle runs at the start, one
+/// <see cref="MediatorClientOptions.LivePollInterval"/> after the previous cycle's drain ended, on
+/// the monotonic clock (which also picks up delayed messages, never pushed when they fall due, and
+/// recovers a dropped connection), and after a failed step once its back-off has passed (1 s,
+/// doubling to 30 s). A cycle that has started is never pre-empted: it runs until its drain ends or
+/// one of its steps fails (R1-1). The mediator has no scheduler for due messages, now or later
+/// (owner decision D2 on #88, 2026-11-14), so this polling is the permanent design, not a stopgap.
+/// Only a failure a retry can fix is retried (<see cref="Retryable"/>); once the stream's steps have
+/// kept failing for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus
+/// <see cref="GiveUpMargin"/> (60 s by default) the next failure ends it with its exception
+/// (ADV5-2), and any other failure (a <see cref="MediationProtocolException"/> such as live mode not
+/// supported, a pack-stage error such as <see cref="SecretNotFoundException"/>) ends it at once.
+/// While a back-off lasts nothing is sent, acknowledgements included. The run of failures ends only
+/// when a drain completes (ADV5-3, a known limit deferred to #111).
 /// </para>
 /// <para>
 /// <strong>Drain rounds and pushes take turns (ADV3-1).</strong> Once a cycle is draining, its next
@@ -107,8 +112,14 @@ internal sealed class LiveDeliveryStream
     /// <summary>The most taken messages waiting for an acknowledgement.</summary>
     internal const int MaxTaken = 100;
 
-    /// <summary>Consecutive failed steps that end the stream.</summary>
-    internal const int MaxFailures = 5;
+    /// <summary>
+    /// How much longer than <see cref="MediatorClientOptions.RequestTimeout"/> the stream's steps may
+    /// keep failing before it ends (ADV5-2): the give-up point is <c>RequestTimeout</c> plus this
+    /// (60 s by default), so a transient condition that lasts one <c>RequestTimeout</c> — the busy
+    /// refusal, whose cause ends within one; a mediator restarting — clears before the stream gives
+    /// up, and the back-off really reaches <see cref="MaxBackoff"/> on the way.
+    /// </summary>
+    internal static readonly TimeSpan GiveUpMargin = TimeSpan.FromSeconds(30);
 
     /// <summary>Taken messages are acknowledged once the oldest has waited this long.</summary>
     internal static readonly TimeSpan FlushAge = TimeSpan.FromSeconds(10);
@@ -139,6 +150,7 @@ internal sealed class LiveDeliveryStream
     private bool _pushTurn;
     private int _drainRounds;
     private int _failures;
+    private long? _failingSince;
     private bool _liveRequested;
     private bool _warnedNotLive;
 
@@ -289,15 +301,18 @@ internal sealed class LiveDeliveryStream
     // error, and the stream ends; an error it was closed with (the channel's disposal) is thrown.
     private async Task<bool> WaitAsync(CancellationToken ct)
     {
-        // One reading: due (the interval passed, or the clock stepped back below the cycle's
-        // reading), or the time left, which is then more than zero and at most the interval.
-        var elapsed = _time.GetElapsedTime(_nextCycle.Since);
-        if (elapsed < TimeSpan.Zero || elapsed >= _nextCycle.After)
+        // The point the loop acts on next: while a cycle drains, the back-off gate of its drain
+        // rounds; otherwise the next cycle (ADV5-1: waiting on the next cycle while draining span,
+        // since that point stays due for the whole drain). One reading: due (passed, or the clock
+        // stepped back below its reading), or the time left, then more than zero and at most it.
+        var point = _draining ? _notBefore : _nextCycle;
+        var elapsed = _time.GetElapsedTime(point.Since);
+        if (elapsed < TimeSpan.Zero || elapsed >= point.After)
             return true;
-        using var wake = OwnDeadline.Start(_time, _nextCycle.After - elapsed, ct);
-        // Read again once the timer exists: a clock that passed the cycle while the timer was being
+        using var wake = OwnDeadline.Start(_time, point.After - elapsed, ct);
+        // Read again once the timer exists: a clock that passed the point while the timer was being
         // set (a manual clock moved in between) is seen here, not waited out for a whole interval.
-        if (IsDue(_nextCycle))
+        if (IsDue(point))
             return true;
         try
         {
@@ -339,6 +354,10 @@ internal sealed class LiveDeliveryStream
         _draining = true;
         _pushTurn = false; // the cycle's first drain round goes before any waiting push
         _drainRounds = 0;
+        // Live mode is on again: a back-off left over from the step that failed before this cycle
+        // no longer gates its drain rounds (ADV5-1: a clock stepped back into that back-off ran a
+        // cycle early and then left its drain gated, and the loop spun without awaiting).
+        _notBefore = DueIn(TimeSpan.Zero);
     }
 
     private async Task DrainRoundAsync(CancellationToken ct)
@@ -387,17 +406,31 @@ internal sealed class LiveDeliveryStream
     {
         _draining = false;
         _failures = 0;
+        _failingSince = null;
         _nextCycle = DueIn(_exchange.Options.LivePollInterval);
     }
 
     // A step failed: back off (the next cycle re-arms live mode and drains again), or end the
-    // stream with this exception after MaxFailures in a row.
+    // stream with this exception once the steps have kept failing for longer than RequestTimeout
+    // plus GiveUpMargin (ADV5-2: a count of five gave up after 1+2+4+8 = 15 s, before a busy refusal,
+    // whose cause ends within one RequestTimeout, could clear). A clock stepped back below the run's
+    // first failure starts the run again, so a step back never ends a stream.
     private void Failed(string requestId, MediatorExchangeSpec spec, Exception error)
     {
         _failures++;
         _draining = false;
-        if (_failures >= MaxFailures)
-            ExceptionDispatchInfo.Capture(error).Throw();
+        if (_failingSince is not { } since)
+        {
+            _failingSince = Now;
+        }
+        else
+        {
+            var failingFor = _time.GetElapsedTime(since);
+            if (failingFor < TimeSpan.Zero)
+                _failingSince = Now;
+            else if (failingFor > _exchange.Options.RequestTimeout + GiveUpMargin)
+                ExceptionDispatchInfo.Capture(error).Throw();
+        }
         var backoff = Backoff(_failures);
         _notBefore = DueIn(backoff);
         _nextCycle = _notBefore;
