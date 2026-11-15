@@ -366,67 +366,67 @@
       "reason": "Return-route client side (#92): demonstrated by cookbook sections CC–FF / sample 11 (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateDeny(System.String,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateDeny(System.String,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateGrant(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateGrant(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateMediateRequest(System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateMediateRequest(System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipient(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Mediator.Coordination.RecipientPagination,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipient(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Mediator.Coordination.RecipientPagination,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientQuery(System.String,System.String,DidComm.Mediator.Coordination.RecipientQueryPaging,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientQuery(System.String,System.String,DidComm.Mediator.Coordination.RecipientQueryPaging,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientUpdate(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientUpdate(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientUpdateResponse(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdateResult>,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::CreateRecipientUpdateResponse(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdateResult>,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::ResponseThreadId(DidComm.Messages.Message)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::ResponseThreadId(DidComm.Messages.Message)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseDeny(DidComm.Messages.Message)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseDeny(DidComm.Messages.Message)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseGrant(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseGrant(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseMediateRequest(DidComm.Messages.Message)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseMediateRequest(DidComm.Messages.Message)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipient(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&,DidComm.Mediator.Coordination.RecipientPagination&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipient(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&,DidComm.Mediator.Coordination.RecipientPagination&)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientQuery(DidComm.Messages.Message,DidComm.Mediator.Coordination.RecipientQueryPaging&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientQuery(DidComm.Messages.Message,DidComm.Mediator.Coordination.RecipientQueryPaging&)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientUpdate(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientUpdate(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>&)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientUpdateResponse(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdateResult>&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.CoordinateMediation::TryParseRecipientUpdateResponse(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdateResult>&)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -606,19 +606,19 @@
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.MediationGrant",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant::.ctor(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.MediationGrant::.ctor(System.String,System.Collections.Generic.IReadOnlyList`1<System.String>)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant::prop:PeerDid",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.MediationGrant::prop:PeerDid",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.MediationGrant::prop:RoutingDids",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.MediationGrant::prop:RoutingDids",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -638,75 +638,75 @@
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientPagination",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::.ctor(System.Int32,System.Int32,System.Int32)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientPagination::.ctor(System.Int32,System.Int32,System.Int32)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::prop:Count",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientPagination::prop:Count",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::prop:Offset",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientPagination::prop:Offset",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientPagination::prop:Remaining",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientPagination::prop:Remaining",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientQueryPaging",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging::.ctor(System.Int32,System.Int32)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientQueryPaging::.ctor(System.Int32,System.Int32)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging::prop:Limit",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientQueryPaging::prop:Limit",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientQueryPaging::prop:Offset",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientQueryPaging::prop:Offset",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdate",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate::.ctor(System.String,DidComm.Mediator.Coordination.RecipientUpdateAction)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdate::.ctor(System.String,DidComm.Mediator.Coordination.RecipientUpdateAction)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate::prop:Action",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdate::prop:Action",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdate::prop:RecipientDid",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdate::prop:RecipientDid",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdateResult",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::.ctor(System.String,DidComm.Mediator.Coordination.RecipientUpdateAction,DidComm.Mediator.Coordination.RecipientUpdateOutcome)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdateResult::.ctor(System.String,DidComm.Mediator.Coordination.RecipientUpdateAction,DidComm.Mediator.Coordination.RecipientUpdateOutcome)",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Action",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Action",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:RecipientDid",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:RecipientDid",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Result",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Coordination.RecipientUpdateResult::prop:Result",
       "reason": "TODO(#97): Coordinate Mediation 3.0 mediator role (#93): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -726,19 +726,19 @@
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.DeliveredMessage",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage::.ctor(System.String,System.ReadOnlyMemory`1<System.Byte>)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.DeliveredMessage::.ctor(System.String,System.ReadOnlyMemory`1<System.Byte>)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage::prop:Id",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.DeliveredMessage::prop:Id",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.DeliveredMessage::prop:Payload",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.DeliveredMessage::prop:Payload",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -910,63 +910,63 @@
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateDelivery(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Pickup.DeliveredMessage>,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateDelivery(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Pickup.DeliveredMessage>,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateDeliveryRequest(System.String,System.String,System.Int32,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateDeliveryRequest(System.String,System.String,System.Int32,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateLiveDeliveryChange(System.String,System.String,System.Boolean,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateLiveDeliveryChange(System.String,System.String,System.Boolean,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateLiveModeNotSupported(System.String,System.String,System.String)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateLiveModeNotSupported(System.String,System.String,System.String)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateMessagesReceived(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateMessagesReceived(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateStatus(System.String,System.String,DidComm.Mediator.Pickup.PickupStatus,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateStatus(System.String,System.String,DidComm.Mediator.Pickup.PickupStatus,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::CreateStatusRequest(System.String,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::CreateStatusRequest(System.String,System.String,System.String,DidComm.Messages.IMessageIdGenerator)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::ResponseThreadId(DidComm.Messages.Message)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::ResponseThreadId(DidComm.Messages.Message)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseDelivery(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Pickup.DeliveredMessage>&,System.String&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::TryParseDelivery(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Pickup.DeliveredMessage>&,System.String&)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseDeliveryRequest(DidComm.Messages.Message,System.Int32&,System.String&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::TryParseDeliveryRequest(DidComm.Messages.Message,System.Int32&,System.String&)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseLiveDeliveryChange(DidComm.Messages.Message,System.Boolean&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::TryParseLiveDeliveryChange(DidComm.Messages.Message,System.Boolean&)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseMessagesReceived(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::TryParseMessagesReceived(DidComm.Messages.Message,System.Collections.Generic.IReadOnlyList`1<System.String>&)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseStatus(DidComm.Messages.Message,DidComm.Mediator.Pickup.PickupStatus&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::TryParseStatus(DidComm.Messages.Message,DidComm.Mediator.Pickup.PickupStatus&)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.MessagePickup::TryParseStatusRequest(DidComm.Messages.Message,System.String&)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.MessagePickup::TryParseStatusRequest(DidComm.Messages.Message,System.String&)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -1114,39 +1114,39 @@
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::.ctor(System.Int32,System.String,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Boolean>)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::.ctor(System.Int32,System.String,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Int64>,System.Nullable`1<System.Boolean>)",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:LiveDelivery",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:LiveDelivery",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:LongestWaitedSeconds",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:LongestWaitedSeconds",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:MessageCount",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:MessageCount",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:NewestReceivedTime",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:NewestReceivedTime",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:OldestReceivedTime",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:OldestReceivedTime",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:RecipientDid",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:RecipientDid",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Pickup.PickupStatus::prop:TotalBytes",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Pickup.PickupStatus::prop:TotalBytes",
       "reason": "TODO(#97): Message Pickup 3.0 mediator role (#94): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
@@ -1298,171 +1298,171 @@
       "reason": "TODO(#97): mediator pipeline (#95): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationClient",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::.ctor(DidComm.Facade.DidCommClient,DidComm.Mediator.Client.MediatorClientOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Client.MediationClient>)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationClient::.ctor(DidComm.Facade.DidCommClient,DidComm.Mediator.Client.MediatorClientOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Client.MediationClient>)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::QueryAllRecipientsAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationClient::QueryAllRecipientsAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::QueryRecipientsAsync(System.String,System.String,DidComm.Mediator.Coordination.RecipientQueryPaging,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationClient::QueryRecipientsAsync(System.String,System.String,DidComm.Mediator.Coordination.RecipientQueryPaging,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::RequestMediationAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationClient::RequestMediationAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationClient::UpdateRecipientsAsync(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationClient::UpdateRecipientsAsync(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<DidComm.Mediator.Coordination.RecipientUpdate>,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationNotSupportedException",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationNotSupportedException",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationNotSupportedException::prop:DisclosedProtocols",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationNotSupportedException::prop:DisclosedProtocols",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationProtocolException",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationProtocolException",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationProtocolException::prop:ProblemCode",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationProtocolException::prop:ProblemCode",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationProtocolException::prop:RequestId",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationProtocolException::prop:RequestId",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationServiceBuilderExtensions",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationServiceBuilderExtensions",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediationServiceBuilderExtensions::ForMediation(DidComm.Mediator.Coordination.MediationGrant)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediationServiceBuilderExtensions::ForMediation(DidComm.Mediator.Coordination.MediationGrant)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientBuilderExtensions",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientBuilderExtensions",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientBuilderExtensions::AddMediatorClient(DidComm.Extensions.DependencyInjection.DidCommBuilder,System.Action`1<DidComm.Mediator.Client.MediatorClientOptions>)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientBuilderExtensions::AddMediatorClient(DidComm.Extensions.DependencyInjection.DidCommBuilder,System.Action`1<DidComm.Mediator.Client.MediatorClientOptions>)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::.ctor()",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::.ctor()",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::Validate()",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::Validate()",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:CoordinateMediationVersion",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::prop:CoordinateMediationVersion",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:DedupeCapacity",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::prop:DedupeCapacity",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:LivePollInterval",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::prop:LivePollInterval",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:MaxPendingRequests",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::prop:MaxPendingRequests",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:RequestTimeout",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::prop:RequestTimeout",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.MediatorClientOptions::prop:UnpackTimeout",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.MediatorClientOptions::prop:UnpackTimeout",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupBatch",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch::prop:Drained",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupBatch::prop:Drained",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch::prop:Items",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupBatch::prop:Items",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupBatch::prop:Status",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupBatch::prop:Status",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::.ctor(DidComm.Facade.DidCommClient,DidComm.Mediator.Client.MediatorClientOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Client.PickupClient>)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient::.ctor(DidComm.Facade.DidCommClient,DidComm.Mediator.Client.MediatorClientOptions,Microsoft.Extensions.Logging.ILogger`1<DidComm.Mediator.Client.PickupClient>)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::AckAsync(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient::AckAsync(System.String,System.String,System.Collections.Generic.IReadOnlyList`1<System.String>,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::FetchAsync(System.String,System.String,System.Int32,System.String,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient::FetchAsync(System.String,System.String,System.Int32,System.String,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::GetStatusAsync(System.String,System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient::GetStatusAsync(System.String,System.String,System.String,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::ReceiveLiveAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient::ReceiveLiveAsync(System.String,System.String,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupClient::SetLiveDeliveryAsync(System.String,System.String,System.Boolean,System.Uri,System.Threading.CancellationToken)",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupClient::SetLiveDeliveryAsync(System.String,System.String,System.Boolean,System.Uri,System.Threading.CancellationToken)",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupItem",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem::prop:Error",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupItem::prop:Error",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem::prop:Id",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupItem::prop:Id",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.PickupItem::prop:Unpacked",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.PickupItem::prop:Unpacked",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.RecipientQueryResult",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.RecipientQueryResult",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.RecipientQueryResult::prop:Dids",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.RecipientQueryResult::prop:Dids",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     },
     {
-      "member": "DidComm.Mediator!DidComm.Mediator.Client.RecipientQueryResult::prop:Pagination",
+      "member": "DidComm.Mediator.Client!DidComm.Mediator.Client.RecipientQueryResult::prop:Pagination",
       "reason": "TODO(#97): recipient-side client (#96): demonstrated by sample 11 / cookbook sections CC–FF (#97); delete this entry when #97 lands."
     }
   ]
