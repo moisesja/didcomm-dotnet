@@ -21,6 +21,8 @@
   <ItemGroup>
     <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
     <ProjectReference Include="..\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <!-- The recipient-side client and the message builders, parsers and records both roles share (#113). -->
+    <ProjectReference Include="..\DidComm.Mediator.Client\DidComm.Mediator.Client.csproj" />
   </ItemGroup>
 
   <ItemGroup>

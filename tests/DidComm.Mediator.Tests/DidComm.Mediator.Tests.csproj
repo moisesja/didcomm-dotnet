@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
     <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator.Client\DidComm.Mediator.Client.csproj" />
     <ProjectReference Include="..\..\src\DidComm.Mediator\DidComm.Mediator.csproj" />
     <ProjectReference Include="..\..\samples\_shared\_shared.csproj" />
     <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />

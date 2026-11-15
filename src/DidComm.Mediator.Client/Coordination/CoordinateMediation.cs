@@ -18,7 +18,7 @@ namespace DidComm.Mediator.Coordination;
 /// Three exchanges, all request/response: <c>mediate-request</c> → <c>mediate-grant</c> or
 /// <c>mediate-deny</c>; <c>recipient-update</c> → <c>recipient-update-response</c>;
 /// <c>recipient-query</c> → <c>recipient</c>. The mediator role is served by
-/// <see cref="CoordinateMediationHandler"/>.
+/// <c>CoordinateMediationHandler</c>.
 /// </para>
 /// <para>
 /// <strong>Parsers.</strong> A <c>TryParse…</c> method returns <c>false</c> when the message is not
