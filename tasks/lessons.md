@@ -1199,3 +1199,38 @@ Format per entry:
   as a known limit instead of claiming the bound makes progress. Size shares from the time and the
   items left, never from a count fixed up front, and check every turn-taking flag against every
   event that can reset it. See [[L-058]], [[L-061]] and [[L-063]].
+
+## L-065 — A timing test waits for the event its assertion reads, never for a neighbour of it.
+
+- **Lesson:** A test stops depending on machine speed when nothing the machine can reorder sits
+  between what it waits for and what it asserts. Seven rules cover every flaky test #119 found:
+  1. **Wait on the record you assert.** If the assertion reads an outcome log, a metric or a log
+     line, wait for that entry, not for a counter or a store state the product updates just before
+     it (`Unsettled == 0` is decremented under the lock; the outcome is recorded after it).
+  2. **Take every baseline before the trigger.** `Sent.Count` read after `Advance` already includes
+     what the advance released.
+  3. **Before moving a manual clock, wait for the specific timer** — created after a mark, with the
+     due time the claim is about — and assert how many timers the move fired. "Some timer is
+     scheduled" and "the other side received the request" are neighbours of "the client is parked
+     on its next cycle". A test clock must never step back when two advances overlap.
+  4. **Cleanup that expects a cancellation needs the product held in a step that honours the
+     token.** Otherwise the product runs on and finishes first.
+  5. **Count what the design records, and force what the name claims.** Outcomes are per attempt,
+     not per message; and a TestHost WebSocket never back-pressures, so "a reader that stops
+     reading" has to be built with a gated socket, or it never happens.
+  6. **A verdict must not hang on callback order or inlining.** Cancellation callbacks run newest
+     first, and a continuation may run inline or on the pool: set every precondition before the
+     product decides, with the product parked.
+  7. **Real time is only a hang guard** on an event that is certain with a correct product, never
+     the property. Prove the fixed test both ways: a mutation of the code under test fails it
+     deterministically, and a correct but slow product (a delay inserted at the racy point) passes.
+- **Why:** In #119, nine tests from #95 and #96 failed intermittently on CI and under full-suite
+  load (3 of 4 pushes to `main` red). Every one was a test defect of one of these shapes, proven by
+  forcing the interleaving with gates and the manual clock; none was a product defect. The old
+  tests also let mutations through: T6's "returns promptly" passed with a 5 s shutdown stall inside
+  its 10 s wait, and no test caught an item yielded after cancellation.
+- **How to apply:** For each wait in a test, write the event the next assertion reads beside it
+  and check they are the same event. Diagnose a flaky test by forcing the bad interleaving (a gate,
+  a held step, a clock move at the wrong moment) before changing anything: retries and repeated
+  runs are not a reproduction. In QA briefs, ask for one mutation per fixed test and one
+  slow-but-correct run. See [[L-044]], [[L-060]] and [[L-045]].
