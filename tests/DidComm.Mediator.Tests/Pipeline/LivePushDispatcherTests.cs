@@ -369,12 +369,13 @@ public sealed class LivePushDispatcherTests
 
         dispatcher.Invoking(d => d.Dispose()).Should().NotThrow("the shutdown cancels inside a try");
         await dispatcher.WaitForIdleAsync(Wait);
-        await MessagePickupLive.UntilAsync(() => dispatcher.Unsettled == 0, "the cancelled push settled");
 
         // L-020 (PR #109 review round 2, D-2): the two wake-ups during the push coalesced into one held
         // wake-up; the push in flight and that wake-up each end once (Push-Skipped-Shutdown), not one
-        // outcome per message; every message stays queued.
-        fixture.PushOutcomeLog.Should().HaveCount(2).And.OnlyContain(o => o == PushOutcomes.SkippedShutdown);
+        // outcome per message; every message stays queued. #119: wait for the held wake-up's record,
+        // not for Unsettled == 0 — settling lowers that counter under its lock and records after it.
+        (await fixture.WaitForPushOutcomesAsync(2, Wait)).Should().HaveCount(2).And.OnlyContain(o => o == PushOutcomes.SkippedShutdown);
+        dispatcher.Unsettled.Should().Be(0, "the cancelled push settled before its held wake-up was counted");
         fixture.Store.MessageCount.Should().Be(3, "the push in flight was cancelled; all stay queued");
         LivePushWorld.Deliveries(session).Should().BeEmpty();
         dispatcher.Wake((await world.StoreAsync(grant, 9)).GrantPeerDid).Should().BeFalse();

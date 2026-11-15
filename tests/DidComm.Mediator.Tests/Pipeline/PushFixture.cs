@@ -52,6 +52,18 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <summary>Every push outcome recorded, in order.</summary>
     public IReadOnlyList<string?> PushOutcomeLog => Recorder.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
 
+    /// <summary>
+    /// Wait until at least <paramref name="count"/> push outcomes are recorded, and return every one
+    /// recorded by then, in order. Wait on this, not on <c>Dispatcher.Unsettled</c>, before asserting
+    /// an outcome that settling records: the dispatcher lowers that counter under its lock and
+    /// records the outcome after it (#119). <paramref name="timeout"/> is a hang guard only.
+    /// </summary>
+    public async Task<IReadOnlyList<string?>> WaitForPushOutcomesAsync(int count, TimeSpan timeout)
+    {
+        await Recorder.WaitForAsync(r => r.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag).Count >= count, timeout, $"{count} push outcome(s) recorded");
+        return PushOutcomeLog;
+    }
+
     /// <param name="configure">More mediator settings.</param>
     /// <param name="services">More registrations, made before <c>AddDidComm</c>.</param>
     /// <param name="didComm">More facade settings; the facade clock is already the manual clock.</param>
