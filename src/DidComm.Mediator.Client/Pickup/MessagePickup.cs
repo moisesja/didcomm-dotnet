@@ -18,7 +18,7 @@ namespace DidComm.Mediator.Pickup;
 /// <c>delivery</c> (or <c>status</c> when nothing is waiting); <c>messages-received</c> →
 /// <c>status</c>; <c>live-delivery-change</c> → <c>status</c>, or a problem report when the
 /// connection cannot do live delivery. Every request is sent with <c>return_route: all</c>. The
-/// mediator role is served by <c>MessagePickupHandler</c>.
+/// mediator role is served by <c>MessagePickupHandler</c> (in the <c>DidComm.Mediator</c> package).
 /// </para>
 /// <para>
 /// <strong>Parsers.</strong> A <c>TryParse…</c> method returns <c>false</c> when the message is not

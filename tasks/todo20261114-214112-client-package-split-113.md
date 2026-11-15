@@ -58,7 +58,7 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
   `DidComm.Mediator`, `DidComm.Mediator.AspNetCore`, `DidComm.AspNetCore`, `Microsoft.Extensions.Hosting*`, `Microsoft.AspNetCore.*`,
   with positive controls (the `DidComm.Mediator` closure does contain Hosting.Abstractions and the client) and a precondition that the
   host's frameworks are `Microsoft.NETCore.App` only; (d) a self-test of the walk over an in-memory deps document where the
-  client depends on `DidComm.Mediator` (the permanent stand-in for the issue's literal negative control, which cannot build: NU1108 cycle).
+  client depends on `DidComm.Mediator` (the permanent stand-in for the issue's literal negative control, which cannot build: MSB4006 circular dependency).
 - J-11. **DX allowlists: 111 coverage / 108 execution entries change prefix, not only the 43/42 tagged `#96`.** The issue text names the
   43/42 client entries; the #93/#94-tagged entries of the moved shared types (`CoordinateMediation`, `MessagePickup`, `MediationGrant`,
   the `RecipientUpdate` family, `PickupStatus`, `DeliveredMessage`) also carry the assembly in their id and must follow, or the gate
@@ -93,15 +93,15 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
 ### B. Gates and tests
 - [x] B1 DX gate: `ShippedAssemblies` + "nine"; `ExtensionMemberSurfaceTests` prefix and dll; allowlist rewrite by script (J-11), counts recorded.
 - [x] B2 Dependency pin test (J-10), red first to read the real reference list, then green.
-- [ ] B3 Full test run; counts against the baseline.
+- [x] B3 Full test run; counts against the baseline.
 - [x] B4 Pack: 9 `.nupkg` + 9 `.snupkg`; nuspec dependencies per package.
 
 ### C. Negative controls (run once, record, revert; re-diff csproj after, L-023)
 - [x] C1 NC-1 unused Hosting.Abstractions PackageReference on the client → deps walk red.
 - [x] C2 NC-2 NC-1 + a use of `IHostedService` → metadata pin red too.
 - [x] C3 NC-3 `DidComm.AspNetCore` ProjectReference on the client → walk/precondition red.
-- [x] C4 NC-5 `DidComm.Mediator` ProjectReference on the client → restore fails NU1108.
-- [ ] C5 API-equivalence diff fails when one moved public member is renamed.
+- [x] C4 NC-5 `DidComm.Mediator` ProjectReference on the client → restore fails (MSB4006 circular dependency).
+- [x] C5 API-equivalence diff fails when one moved public member is renamed.
 - [x] C6 DX gate fails when one allowlist entry is dropped.
 - [x] C7 Interop fixtures populated (149–150 files).
 - [x] C8 Pack validation still bites on a released package (CP0002 on a renamed released member).
@@ -115,9 +115,9 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
 - [x] D6 Source comments that name the package.
 
 ### E. Independent passes
-- [ ] E1 QA pass: API equivalence, restore graph + wallet-only consumer enrols and picks up against the #95 test server, counts, DX gate, pack/nuspecs.
-- [ ] E2 Adversarial review of the diff (public API, IVT width, type identity, DI, load/trim, dependency leak).
-- [ ] E3 Fix what they confirm; per-component defect tally (L-063).
+- [x] E1 QA pass: API equivalence, restore graph + wallet-only consumer enrols and picks up against the #95 test server, counts, DX gate, pack/nuspecs.
+- [x] E2 Adversarial review of the diff (public API, IVT width, type identity, DI, load/trim, dependency leak).
+- [x] E3 Fix what they confirm; per-component defect tally (L-063).
 
 ### F. PR
 - [ ] F1 PR opened (`Closes #113`, `Part of #88`); CI checked once; hand back.
@@ -149,3 +149,55 @@ Baseline at `5477971`: Core 2,548; Mediator 4,251 + 8 skipped; Interop 1,370 + 1
   entry (execution) fails `EveryExecutableMember_IsExecutedByASampleRun`; leaving one moved entry on the old prefix fails the coverage gate.
 - Interop fixtures: 150 files.
 - Pack validation: renaming `Message.Empty()` in Core fails pack with `CP0002` against the 1.5.0 baseline.
+
+### QA pass (independent, `orch-113-qa`; all 7 items PASS, no defect)
+- API: MetadataLoadContext dump of every visible type and member (attributes, defaults, modreqs, const/enum values, extension
+  skeletons), assembly ignored: 194 types / 1,989 members on both sides, diff empty. Negative control (C5): renaming
+  `CoordinateMediation.CreateRecipient` gives a one-line diff; reverted, the rebuilt dll is byte-identical.
+- DI: descriptor dumps (index, lifetime, key, service type, implementation / factory method) for 10 scenarios
+  (`AddMediator`, `AddMediatorClient`, `AddCoordinateMediation`, `AddMessagePickup`, combinations and orders): identical (421 lines).
+- Wallet-only consumer from the packed feed (fresh `NUGET_PACKAGES`, local feed only): `project.assets.json` 40 libraries, none
+  forbidden, framework `Microsoft.NETCore.App` only. Three processes (mediator host on Kestrel set up like `MediatorTestServer`, the
+  wallet, a sender): enrol, register, status, fetch and open the forwarded message over HTTP — PASS; WebSocket live receive — PASS.
+  The same program against the baseline feed (referencing `DidComm.Mediator`) gives identical output and logger categories.
+- Counts (two full runs): Core 2,548; Mediator 4,258 + 8 skipped; Interop 1,370 + 1 skipped.
+- DX: 9 assemblies, 1,021 members, 564 + 24 covered, 433 allow-listed, 628 executed, 27 reference-only, 366 execution-allow-listed —
+  equal to baseline; prefix-stripped surface ids equal. Negative control: removing the client from `ShippedAssemblies` fails 3 DX tests.
+- Pack: 9 + 9; only nuspec differences are the new package and `DidComm.Mediator` → `DidComm.Mediator.Client`.
+- Hygiene: 100% renames except the two one-line cref files; splits byte-identical; builder files' blobs unchanged.
+- Low: the test remark said NU1108 where restore reports MSB4006 (fixed, see below).
+
+### Adversarial pass (independent, `orch-113-adv`; no Critical/High/Medium)
+- Clean: public API (Cecil dump, identical), every IVT grant used and none wider (Core → Client 33 internals, Client → Mediator 9 + a const,
+  → Mediator.Tests 154, → InteropTests 34; no grant to Mediator.AspNetCore), no type in two assemblies, DI identical (389 descriptors),
+  no load-by-name / resources / EventIds / Meters in the moved code, client graph clean under several bypass attempts, allow-lists exact.
+- Findings and dispositions:
+  - **L1** (Low) the metadata pin ignored every `System.*` reference, so a `System.*` NuGet package (e.g. `System.Threading.RateLimiting`)
+    passed. **Fixed:** "base library" now means "ships in `Microsoft.NETCore.App`" (the file is in the running framework's directory),
+    and the client node's direct dependencies in `.deps.json` are pinned exactly (the nuspec set). Regression controls: an unused
+    `System.Threading.RateLimiting` reference fails the graph test; a used one fails the metadata pin too.
+  - **L2** (Low) no gate reads the packed nuspec (repro needs a pack-only `Condition="'$(_IsPacking)' == 'true'"` reference).
+    **Declined:** contrived (a deliberate pack-only condition, visible in the csproj review); every ordinary way to add a dependency is now
+    caught by the exact direct-dependency pin, and this PR's nuspec was checked by QA. A CI nuspec step would add workflow surface outside #113.
+  - **L3** (Low) the test remark named NU1108. **Fixed:** MSB4006 (plan text too).
+  - **L4** (Low) the two summaries that lost their cref no longer say where the handler is. **Fixed:** "(in the `DidComm.Mediator` package)".
+  - **L5** (Low) doc nits. **Fixed:** README and architecture doc list the client package's four dependencies (and say where
+    `Microsoft.Extensions.Options` comes from); the Core grant comment lists `ReturnRouteIneligibility` and `DeliveredUnpack`; `LogValues`
+    is described as shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use.
+  - Suspected, not a defect of this change: floor-only (`>=`) dependency versions between packages coupled through IVT — the existing
+    lockstep rule (RELEASING) covers it; the split adds one more edge. Reported to the epic as an owner-level option, not changed here.
+  - Historical count in the #93 CHANGELOG entry ("eight assemblies since #95"): that entry was kept current by #95 and edited by #113,
+    so it now says "nine since #113" too.
+- Incident (reported upward): the adversarial agent ran `git submodule deinit --all -f` in a throwaway worktree, which removed the shared
+  `submodule.tests/DidComm.InteropTests/fixtures` section from the common `.git/config`; it restored it with `git submodule init`. Verified
+  afterwards: `url` and `active = true` present, the main checkout's submodule still at `dd56125`. No files were touched.
+
+### Per-component defect tally (L-063)
+- Pin test: 2 (L1, L3), both first-pass, no post-fix defect. Docs/comments: 2 (L4, L5), first-pass. Move/csproj/IVT/DX: 0.
+
+### After the review-pass fixes (final pre-PR run)
+- Build `/warnaserror` green; pin tests 7/7; full run: Core 2,548; Mediator 4,258 + 8 skipped; Interop 1,369 + 1 failed + 1 skipped.
+  The failure, `MediatorLiveIsolationTests.A_live_push_whose_key_resolution_outlasts_the_push_timeout_is_abandoned_and_the_message_is_fetchable`,
+  is a timing test: 0/15 in isolation on both `5477971` and the branch. Six full Interop runs each: baseline 1/6 (a different timing test,
+  `PickupClientWebSocketEndToEndTests.A_delayed_message_is_picked_up_by_the_periodic_cycle_on_the_clients_clock`), branch 0/6.
+  Pre-existing timing flakes on `main`; recorded as a follow-up for the epic, not changed here.

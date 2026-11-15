@@ -41,9 +41,9 @@
     <InternalsVisibleTo Include="DidComm.Adapters.NetDid" />
     <InternalsVisibleTo Include="DidComm.Mediator" />
     <!-- The recipient-side client, split out of DidComm.Mediator (#113): the same code keeps the same access
-         (IInboundCorrelator, InboundMessageSnapshot, ReturnRouteEligibility, DidCommClient.UnpackDeliveredAsync /
-         ResolveDirectEndpointAsync / ReceivesPushesOn, DidSubject, IdentifierLimits, LogValues, UnreservedUriChars,
-         Base64Url). -->
+         (IInboundCorrelator, InboundMessageSnapshot, ReturnRouteEligibility / ReturnRouteIneligibility,
+         DidCommClient.UnpackDeliveredAsync / ResolveDirectEndpointAsync / ReceivesPushesOn with DeliveredUnpack,
+         DidSubject, IdentifierLimits, LogValues, UnreservedUriChars, Base64Url). -->
     <InternalsVisibleTo Include="DidComm.Mediator.Client" />
     <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
     <InternalsVisibleTo Include="DidComm.TestSupport" />

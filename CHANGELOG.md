@@ -1370,7 +1370,8 @@ Things to know before running a mediator on this:
   accepted before the revocation (for example one waiting on `delay_milli`) still reaches the sink.
 - `DidComm.Mediator` has no released version yet, so SDK package validation is off for it until the
   first release names a baseline. The FR-DX-01 sample-coverage gate now scans `DidComm.Mediator` too
-  (eight assemblies since #95 added `DidComm.Mediator.AspNetCore`); the
+  (eight assemblies since #95 added `DidComm.Mediator.AspNetCore`, nine since #113 added
+  `DidComm.Mediator.Client`); the
   new package's members are allow-listed with a `TODO(#97)` marker until sample 11 demonstrates them.
 
 ### Added — return-route client side (FR-RR-07, FR-RR-09, #92, epic #88)
