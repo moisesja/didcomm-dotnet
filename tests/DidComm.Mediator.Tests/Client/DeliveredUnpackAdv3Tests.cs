@@ -190,7 +190,7 @@ public sealed class DeliveredUnpackAdv3Tests
         var batch = unpacker.UnpackAllAsync(Payloads(4, "m-"), "request-1", caller.Token);
         await time.WaitForScheduledTimersAsync(6, RealTime);
 
-        FluentActions.Invoking(() => time.Advance(Budget)).Should().NotThrow("nothing a host callback throws escapes into the caller's Cancel() or onto a timer");
+        FluentActions.Invoking(() => { time.Advance(Budget); }).Should().NotThrow("nothing a host callback throws escapes into the caller's Cancel() or onto a timer");
 
         await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>();
         SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();

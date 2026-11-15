@@ -18,7 +18,9 @@ namespace DidComm.Mediator.Tests.Pipeline;
 /// <summary>
 /// A <see cref="TimeProvider"/> the test moves by hand. Timers (including the ones behind
 /// <c>PeriodicTimer</c> and <c>Task.WaitAsync(TimeSpan, TimeProvider)</c>) fire only from
-/// <see cref="Advance"/>, on the calling thread, after the clock has moved.
+/// <see cref="Advance"/>, on the calling thread, after the clock has moved. The clock never moves
+/// back: an <see cref="Advance"/> made while another one runs (from a timer callback, or a fake
+/// mediator's handler on another thread) is kept, not overwritten (#119, shape I).
 /// </summary>
 internal sealed class ManualTimeProvider : TimeProvider
 {
@@ -26,6 +28,7 @@ internal sealed class ManualTimeProvider : TimeProvider
     private readonly List<ManualTimer> _timers = new();
     private TaskCompletionSource _timerChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DateTimeOffset _now;
+    private long _created;
 
     public ManualTimeProvider(DateTimeOffset? start = null)
         => _now = start ?? new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero);
@@ -56,12 +59,29 @@ internal sealed class ManualTimeProvider : TimeProvider
 
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
-        var timer = new ManualTimer(this, callback, state);
+        long sequence;
+        lock (_gate)
+            sequence = ++_created;
+        var timer = new ManualTimer(this, callback, state, sequence);
         timer.Change(dueTime, period);
         return timer;
     }
 
-    /// <summary>Wait (bounded, in real time) until at least <paramref name="count"/> timers are scheduled.</summary>
+    /// <summary>
+    /// A mark for <see cref="WaitForTimerAsync"/>: every timer created after this call has a higher
+    /// creation number than the value returned.
+    /// </summary>
+    public long Mark()
+    {
+        lock (_gate)
+            return _created;
+    }
+
+    /// <summary>
+    /// Wait (bounded, in real time) until at least <paramref name="count"/> timers are scheduled.
+    /// Any timer counts, whoever created it and whenever; to wait for one particular timer, use
+    /// <see cref="WaitForTimerAsync"/>.
+    /// </summary>
     public async Task WaitForScheduledTimersAsync(int count, TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource(timeout);
@@ -78,8 +98,45 @@ internal sealed class ManualTimeProvider : TimeProvider
         }
     }
 
-    /// <summary>Move the clock forward and fire every timer that came due, in due order.</summary>
-    public void Advance(TimeSpan by)
+    /// <summary>
+    /// Wait (bounded, in real time) until a timer created after <paramref name="createdAfter"/> (a
+    /// <see cref="Mark"/>) is scheduled with exactly <paramref name="dueTime"/> (the relative due time
+    /// it was last set to). A rendezvous on one particular timer — the one a step under test sets —
+    /// that neither an older timer nor a timer of another length can satisfy. Times out with the
+    /// timers that are scheduled, so a step that set the wrong one says so.
+    /// </summary>
+    public async Task WaitForTimerAsync(TimeSpan dueTime, long createdAfter, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            Task changed;
+            string scheduled;
+            lock (_gate)
+            {
+                if (_timers.Any(t => t.Sequence > createdAfter && t.DueAt is not null && t.DueTime == dueTime))
+                    return;
+                changed = _timerChanged.Task;
+                scheduled = string.Join(", ", _timers.Where(t => t.DueAt is not null).Select(t => $"#{t.Sequence} {t.DueTime}"));
+            }
+            try
+            {
+                await changed.WaitAsync(cts.Token);
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                throw new TimeoutException($"No timer of {dueTime} created after #{createdAfter} was scheduled within {timeout}; scheduled: [{scheduled}].");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Move the clock forward by <paramref name="by"/> and fire every timer that came due, in due
+    /// order; returns how many fired. The clock ends at the later of the target and wherever an
+    /// <see cref="Advance"/> made meanwhile (by a fired timer's callback, or on another thread) has
+    /// moved it: never back.
+    /// </summary>
+    public int Advance(TimeSpan by)
     {
         if (by < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(by));
@@ -87,6 +144,7 @@ internal sealed class ManualTimeProvider : TimeProvider
         lock (_gate)
             target = _now + by;
 
+        var fired = 0;
         while (true)
         {
             ManualTimer? next;
@@ -95,22 +153,26 @@ internal sealed class ManualTimeProvider : TimeProvider
                 next = _timers.Where(t => t.DueAt is { } due && due <= target).OrderBy(t => t.DueAt).FirstOrDefault();
                 if (next is null)
                 {
-                    _now = target;
-                    return;
+                    if (target > _now)
+                        _now = target;
+                    return fired;
                 }
                 _now = next.DueAt!.Value > _now ? next.DueAt.Value : _now;
                 next.DueAt = next.Period is { } period ? next.DueAt + period : null;
             }
             next.Fire();
+            fired++;
         }
     }
 
-    private void Changed(ManualTimer timer, DateTimeOffset? dueAt, TimeSpan? period, bool remove)
+    private void Changed(ManualTimer timer, TimeSpan? dueTime, TimeSpan? period, bool remove)
     {
         TaskCompletionSource signal;
         lock (_gate)
         {
-            timer.DueAt = dueAt;
+            // The due instant is computed under the lock, from the clock as it is now.
+            timer.DueAt = dueTime is { } relative ? _now + relative : null;
+            timer.DueTime = dueTime;
             timer.Period = period;
             if (remove)
                 _timers.Remove(timer);
@@ -122,18 +184,25 @@ internal sealed class ManualTimeProvider : TimeProvider
         signal.TrySetResult();
     }
 
-    private sealed class ManualTimer(ManualTimeProvider owner, TimerCallback callback, object? state) : ITimer
+    private sealed class ManualTimer(ManualTimeProvider owner, TimerCallback callback, object? state, long sequence) : ITimer
     {
+        /// <summary>The creation number (see <see cref="Mark"/>).</summary>
+        public long Sequence { get; } = sequence;
+
         public DateTimeOffset? DueAt { get; set; }
+
+        /// <summary>The relative due time the timer was last set to (<c>null</c>: not scheduled).</summary>
+        public TimeSpan? DueTime { get; set; }
+
         public TimeSpan? Period { get; set; }
 
         public void Fire() => callback(state);
 
         public bool Change(TimeSpan dueTime, TimeSpan period)
         {
-            DateTimeOffset? dueAt = dueTime == Timeout.InfiniteTimeSpan ? null : owner.GetUtcNow() + dueTime;
+            TimeSpan? relative = dueTime == Timeout.InfiniteTimeSpan ? null : dueTime;
             TimeSpan? every = period == Timeout.InfiniteTimeSpan || period == TimeSpan.Zero ? null : period;
-            owner.Changed(this, dueAt, every, remove: false);
+            owner.Changed(this, relative, every, remove: false);
             return true;
         }
 
