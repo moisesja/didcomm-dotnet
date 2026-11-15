@@ -175,23 +175,30 @@ public sealed class MediatorMatrixQaTests
         await mediator.PushesIdleAsync();
         var perGrant = DidsPerGrant * Senders * PerPair;
         // L-020 (PR #109 review R1-2): every forward is stored first (Queued) and the live grant's
-        // messages are pushed by the push workers, one at a time per grant with at most 16 waiting or
-        // in flight: under this burst a push job beyond that share is refused and its message stays
-        // queued for the live recipient to fetch (L-044: assert the invariant, not the race).
+        // messages are pushed by the push workers. A push outcome is one per ATTEMPT, not per message
+        // (#119): a session whose push slots are all taken (16 frames queued while its writer lags)
+        // refuses the push (Push-Failed); the operation ends, the message stays queued and is tried
+        // again at the grant's next wake-up, or fetched. So how many outcomes there are depends on the
+        // scheduler; what does not is that each Pushed-Live is one frame on the live socket and that the
+        // frames and the fetched messages are every message of the grant, exactly once (L-044: assert
+        // the invariant, not the race).
         mediator.Outcome(ForwardOutcomes.Queued).Should().Be(Grants * perGrant);
-        mediator.PushOutcomes.Should().HaveCount(perGrant, "one push outcome per message of the live grant, none for the others");
         mediator.PushOutcomes.Should().OnlyContain(o => o == PushOutcomes.PushedLive || o == PushOutcomes.SkippedSaturated || o == PushOutcomes.Failed);
         var pushedLive = (int)mediator.PushOutcome(PushOutcomes.PushedLive);
         pushedLive.Should().BeGreaterThan(0);
 
-        // Grant 0: the live pushes, one per message pushed; whatever was not pushed is fetched on the same socket.
+        // Grant 0: the live pushes, one frame per Pushed-Live; whatever was not pushed is fetched on the same socket.
         var live = new List<DeliveredMessage>();
-        while (live.Count < pushedLive)
+        for (var frames = 0; live.Count < pushedLive; frames++)
+        {
+            frames.Should().BeLessThan(pushedLive, "each live push is one frame with one message");
             live.AddRange((await mediator.ReceiveOverSocketAsync(liveSocket, peers[0])).Delivery(thid: null));
+        }
         live.Should().HaveCount(pushedLive);
         (await MediatorDeliveryModesQaTests.AckOverSocketAsync(mediator, liveSocket, peers[0], live.Select(m => m.Id).ToArray())).MessageCount.Should().Be(perGrant - pushedLive);
-        while (live.Count < perGrant)
+        for (var round = 0; live.Count < perGrant; round++)
         {
+            round.Should().BeLessThan(perGrant, "each delivery-request hands out at least one queued message");
             var request = MessagePickup.CreateDeliveryRequest(peers[0].Did, mediator.Did, 10);
             var batch = (await mediator.AskOverSocketAsync(liveSocket, peers[0], request)).Delivery(request.Id);
             live.AddRange(batch);
@@ -201,8 +208,9 @@ public sealed class MediatorMatrixQaTests
 
         // Grant 1: delivery-request over its socket, acknowledging as it goes.
         var polled = new List<DeliveredMessage>();
-        while (true)
+        for (var round = 0; ; round++)
         {
+            round.Should().BeLessThanOrEqualTo(perGrant, "each delivery-request hands out at least one queued message until the status");
             var request = MessagePickup.CreateDeliveryRequest(peers[1].Did, mediator.Did, 10);
             var answer = await mediator.AskOverSocketAsync(pollSocket, peers[1], request);
             if (answer.Message.Type == MessagePickup.StatusType)

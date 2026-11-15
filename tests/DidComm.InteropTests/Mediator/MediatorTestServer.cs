@@ -439,7 +439,12 @@ internal sealed class MediatorTestServer : IAsyncDisposable
 
     public MessagePickupQueue Queue => App.Services.GetRequiredService<MessagePickupQueue>();
 
-    public InMemoryMessageStore Store => (InMemoryMessageStore)App.Services.GetRequiredService<IMessageStore>();
+    /// <summary>The product's in-memory store (behind a <see cref="LeaseGatedStore"/> when the test registered one).</summary>
+    public InMemoryMessageStore Store => App.Services.GetRequiredService<IMessageStore>() switch
+    {
+        LeaseGatedStore gated => gated.Inner,
+        var store => (InMemoryMessageStore)store,
+    };
 
     public IMediationStore Mediation => App.Services.GetRequiredService<IMediationStore>();
 
