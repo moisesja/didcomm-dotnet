@@ -68,34 +68,75 @@ public sealed class MediatorDeliveryModesQaTests
         f.ShouldNotLeak(delivered.Id);
     }
 
-    [Fact]
-    public async Task A_live_session_aborted_around_the_push_never_loses_the_message()
+    /// <summary>Where the abort of a live connection lands relative to a live push.</summary>
+    public enum AbortPoint
     {
-        // Whichever side wins (the push is written before the server notices the abort, or the
-        // session is gone first), the message ends with one outcome and can be fetched on a new
-        // connection: a live lease ends with its session (L-044: assert the invariant, not the race).
-        // L-020 (PR #109 review R1-2): the forward is always stored (Queued) and at most one push job
-        // follows (none when the session was already gone), so the race is now on the push counter.
-        await using var mediator = await MediatorTestServer.StartAsync();
+        /// <summary>The push reached the peer: the message is leased to the session, and that lease ends with it.</summary>
+        AfterThePushArrived,
+
+        /// <summary>The push operation has started for the message (parked in its lease): the session is gone when it sends.</summary>
+        WhileThePushTakesTheMessage,
+
+        /// <summary>The connection is gone before the forward arrives: nothing is pushed.</summary>
+        BeforeTheForwardArrives,
+    }
+
+    [Theory]
+    [InlineData(AbortPoint.AfterThePushArrived)]
+    [InlineData(AbortPoint.WhileThePushTakesTheMessage)]
+    [InlineData(AbortPoint.BeforeTheForwardArrives)]
+    public async Task A_live_session_aborted_around_the_push_never_loses_the_message(AbortPoint abort)
+    {
+        // Each order the abort can land in, forced (#119; L-044: drive the interleaving instead of
+        // hoping for it): the forward is always stored (Queued), it ends with at most one push outcome,
+        // and it can be fetched on a new connection — a live lease ends with its session.
+        LeaseGatedStore? store = null;
+        await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = s => LeaseGatedStore.Register(s, x => store = x));
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
         var alice = await mediator.NewSenderAsync();
         var socket = await mediator.ConnectAsync();
-        // The live-on wake-up is served first (#119): still running, it could take the forward while the
+        // The live-on wake-up is served first: still running, it could take the forward while the
         // forward's own wake-up is held, and that wake-up would then add a second outcome.
         await GoLiveAsync(mediator, socket, bob, waitForLiveOnWakeUp: true);
 
         var note = alice.Note(bob.Did);
         var (packed, _) = await alice.ForwardAsync(mediator.Did, bob.Did, await alice.AuthcryptAsync(note, bob.Did));
-        var post = mediator.PostAsync(packed);
-        socket.Abort();
-        socket.Dispose();
-        (await post).Status.Should().Be(HttpStatusCode.Accepted);
+        ParkedCall? take = null;
+        if (abort == AbortPoint.BeforeTheForwardArrives)
+            await AbortAsync(mediator, socket, bob);
+        else if (abort == AbortPoint.WhileThePushTakesTheMessage)
+            take = store!.ParkLiveLease();
+        (await mediator.PostAsync(packed)).Status.Should().Be(HttpStatusCode.Accepted);
         await mediator.FlushAsync();
+        if (abort == AbortPoint.AfterThePushArrived)
+        {
+            (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle();
+            await AbortAsync(mediator, socket, bob);
+        }
+        else if (take is not null)
+        {
+            await take.Arrived.WaitAsync(MediatorTestServer.Timeout);
+            await AbortAsync(mediator, socket, bob);
+            take.Release();
+        }
         await mediator.PushesIdleAsync();
 
         mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued);
-        mediator.PushOutcomes.Should().HaveCountLessThanOrEqualTo(1, "one outcome for the push job, when the session was still there to get one");
+        switch (abort)
+        {
+            case AbortPoint.AfterThePushArrived:
+                mediator.PushOutcomes.Should().Equal(PushOutcomes.PushedLive);
+                break;
+            case AbortPoint.WhileThePushTakesTheMessage:
+                // The session may still take the frame between leaving the registry and closing (the
+                // frame is then discarded and the lease ends with the session), or refuse it.
+                mediator.PushOutcomes.Should().ContainSingle().Which.Should().BeOneOf(PushOutcomes.PushedLive, PushOutcomes.Failed);
+                break;
+            default:
+                mediator.PushOutcomes.Should().BeEmpty("with no live session nothing is woken");
+                break;
+        }
         IReadOnlyList<DeliveredMessage> fetched = Array.Empty<DeliveredMessage>();
         (await ReturnRouteTestHost.WaitUntilAsync(() =>
         {
@@ -106,6 +147,13 @@ public sealed class MediatorDeliveryModesQaTests
         (await MediatorRecipient.UnpackFromSenderAsync(bob, delivered.Payload, alice)).Message.Id.Should().Be(note.Id);
         (await mediator.AcknowledgeAsync(bob, delivered.Id)).MessageCount.Should().Be(0);
         mediator.LeakingLogLines(delivered.Id).Should().BeEmpty();
+
+        static async Task AbortAsync(MediatorTestServer mediator, WebSocket socket, TestPeer bob)
+        {
+            socket.Abort();
+            socket.Dispose();
+            await WaitForNoLiveSessionAsync(mediator, bob.Did);
+        }
     }
 
     [Fact]
