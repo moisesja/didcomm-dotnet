@@ -50,11 +50,18 @@ public sealed class PickupClientLiveSchedulingTests
         (await Next(stream)).Id.Should().Be("q1", "the queued message is fetched and yielded although every answer takes {0}", latency);
         Types(exchange).Should().StartWith(new[] { LiveOn, Drain }, "a started cycle sends its delivery request before anything else");
 
-        // Run on: the drain ends with a status, then the next cycle comes due one interval later.
+        // Run on: the drain ends with a status, and the stream waits for the next cycle, one interval
+        // after that end (#119: the rendezvous is that timer, and the baseline is read before the
+        // clock moves, since the stream runs the cycle on its own once it does).
+        var mark = exchange.Clock.Mark();
         var next = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-        exchange.Clock.Advance(Interval);
-        await exchange.WaitForSentAsync(Types(exchange).Count + 2);
+        await exchange.Clock.WaitForTimerAsync(Interval, mark, PickupTest.Timeout);
+        var before = exchange.Sent.Count;
+        mark = exchange.Clock.Mark();
+        exchange.Clock.Advance(Interval).Should().Be(1, "one interval after the drain ended, the stream's wait fires");
+        await exchange.WaitForSentAsync(before + 2);
+        Types(exchange).Skip(before).Take(2).Should().Equal(new[] { LiveOn, Drain }, "the cycle that came due sends its delivery request");
+        await exchange.Clock.WaitForTimerAsync(Interval, mark, PickupTest.Timeout); // its drain ended: the stream waits again
         await StopAsync(stream, next, cts);
 
         NoCycleWithoutItsDrain(Types(exchange));
@@ -79,13 +86,21 @@ public sealed class PickupClientLiveSchedulingTests
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
 
         (await Next(stream)).Id.Should().Be("q1");
+        var mark = exchange.Clock.Mark();
         var next = stream.MoveNextAsync().AsTask();
-        for (var i = 0; i < 20 && exchange.Sent.Count < 20; i++)
+        // Eight more cycles, one per interval: twenty requests in all. Each time the stream waits for
+        // its next cycle (that timer is the rendezvous), the baseline is read before the clock moves.
+        for (var i = 0; i < 8; i++)
         {
-            await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-            exchange.Clock.Advance(Interval);
-            await exchange.WaitForSentAsync(Math.Min(20, exchange.Sent.Count + 1));
+            await exchange.Clock.WaitForTimerAsync(Interval, mark, PickupTest.Timeout);
+            var before = exchange.Sent.Count;
+            mark = exchange.Clock.Mark();
+            exchange.Clock.Advance(Interval).Should().Be(1);
+            await exchange.WaitForSentAsync(before + 2);
+            Types(exchange).Skip(before).Take(2).Should().Equal(LiveOn, Drain);
         }
+        await exchange.Clock.WaitForTimerAsync(Interval, mark, PickupTest.Timeout);
+        exchange.Sent.Count.Should().Be(20);
         await StopAsync(stream, next, cts);
 
         var types = Types(exchange);
@@ -114,16 +129,20 @@ public sealed class PickupClientLiveSchedulingTests
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
         (await Next(stream)).Id.Should().Be("q1");
 
-        // The drain's second round answers status at t = 11 s; the next cycle is due at 21 s.
+        // The drain's second round answers status at t = 11 s; the next cycle is due at 21 s: the
+        // stream waits on a timer of exactly one interval (measured from the end, not from the start
+        // at 0 s, which would leave nothing to wait for).
+        var mark = exchange.Clock.Mark();
         var next = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-        var before = Types(exchange).Count(t => t == LiveOn);
-        before.Should().Be(1, "the drain ended at 11 s and the next cycle is not due before 21 s (measured from the end, not from the start at 0 s)");
-        exchange.Clock.Advance(interval - TimeSpan.FromTicks(1));
-        Types(exchange).Count(t => t == LiveOn).Should().Be(before, "one tick before an interval has passed since the drain ended");
-        exchange.Clock.Advance(TimeSpan.FromTicks(1));
-        await exchange.WaitForSentAsync(exchange.Sent.Count + 1);
-        Types(exchange).Count(t => t == LiveOn).Should().Be(before + 1);
+        await exchange.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout);
+        Types(exchange).Count(t => t == LiveOn).Should().Be(1, "the drain ended at 11 s and the next cycle is not due before 21 s");
+        exchange.Clock.Advance(interval - TimeSpan.FromTicks(1)).Should().Be(0, "one tick before an interval has passed since the drain ended, nothing fires");
+        var before = exchange.Sent.Count;
+        mark = exchange.Clock.Mark();
+        exchange.Clock.Advance(TimeSpan.FromTicks(1)).Should().Be(1, "an interval after the drain ended, the stream's wait fires");
+        await exchange.WaitForSentAsync(before + 2);
+        Types(exchange).Skip(before).Take(2).Should().Equal(LiveOn, Drain);
+        await exchange.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout);
         await StopAsync(stream, next, cts);
     }
 
