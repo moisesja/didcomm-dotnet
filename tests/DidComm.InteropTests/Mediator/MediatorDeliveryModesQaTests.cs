@@ -112,6 +112,10 @@ public sealed class MediatorDeliveryModesQaTests
         if (abort == AbortPoint.AfterThePushArrived)
         {
             (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle();
+            // The frame can arrive before the push operation looked at the session again and recorded
+            // Pushed-Live; aborted first, the session would be closed by then and the push counted as not
+            // taken (#119). Wait for the operation to end before the abort.
+            await mediator.PushesIdleAsync();
             await AbortAsync(mediator, socket, bob);
         }
         else if (take is not null)
@@ -170,6 +174,9 @@ public sealed class MediatorDeliveryModesQaTests
 
         var first = await Qa.SendNoteAsync(mediator, alice, bob, content: "first");
         var onNewer = (await mediator.ReceiveOverSocketAsync(newer, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
+        // The frame can arrive before the push operation looked at the session again and recorded
+        // Pushed-Live; the newer session must still be open then (#119).
+        await mediator.PushesIdleAsync();
         (await MediatorRecipient.UnpackFromSenderAsync(bob, onNewer.Payload, alice)).Message.Id.Should().Be(first.Id);
         // The older socket's next frame is the answer to its own request: nothing was pushed to it.
         (await AckOverSocketAsync(mediator, older, bob, onNewer.Id)).MessageCount.Should().Be(0);
