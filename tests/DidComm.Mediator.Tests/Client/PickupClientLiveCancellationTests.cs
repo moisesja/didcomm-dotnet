@@ -18,7 +18,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// </summary>
 public sealed class PickupClientLiveCancellationTests
 {
-    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(1);
+    // Seven seconds: no back-off step (1, 2, 4, 8, 16, 30 s), no RequestTimeout and no budget has
+    // this length, so a timer of exactly one interval is the stream's wait for its next cycle (#119 F3).
+    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(7);
 
     [Theory]
     [InlineData("waiting for the next cycle")]

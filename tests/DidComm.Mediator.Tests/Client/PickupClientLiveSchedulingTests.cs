@@ -20,17 +20,24 @@ namespace DidComm.Mediator.Tests.Client;
 /// </summary>
 public sealed class PickupClientLiveSchedulingTests
 {
-    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(1);
+    // Seven seconds: no back-off step (1, 2, 4, 8, 16, 30 s), no RequestTimeout and no budget has
+    // this length, so a timer of exactly one interval is the stream's wait for its next cycle and
+    // nothing else (#119 F3: at 1 s the first back-off met the same rendezvous).
+    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(7);
 
     [Theory]
-    [InlineData(500)]   // faster than the interval
-    [InlineData(1000)]  // exactly the interval
-    [InlineData(2000)]  // slower than the interval (the review's reproduction)
-    [InlineData(5000)]  // much slower, still well inside RequestTimeout (30 s): LivePollInterval < RequestTimeout
+    [InlineData(3500)]   // faster than the interval
+    [InlineData(7000)]   // exactly the interval
+    [InlineData(14000)]  // slower than the interval (the review's reproduction: twice the interval)
+    [InlineData(35000)]  // much slower, still well inside RequestTimeout (2 min here): LivePollInterval < RequestTimeout
     public async Task Whatever_the_mediators_latency_a_started_cycle_drains_and_the_queued_message_is_yielded(int latencyMs)
     {
         var latency = TimeSpan.FromMilliseconds(latencyMs);
-        var (exchange, client) = Live(o => o.LivePollInterval = Interval);
+        var (exchange, client) = Live(o =>
+        {
+            o.LivePollInterval = Interval;
+            o.RequestTimeout = TimeSpan.FromMinutes(2);
+        });
         using var cts = new CancellationTokenSource();
         exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
         {
@@ -70,14 +77,15 @@ public sealed class PickupClientLiveSchedulingTests
     [Fact]
     public async Task The_reviews_reproduction_twenty_slow_answers_yield_the_queued_message_instead_of_twenty_live_on_requests()
     {
-        // LivePollInterval 1 s, default RequestTimeout 30 s; every live-on answer succeeds with
-        // message_count 1 after 2 s. Before the fix: 20 live-on, 0 delivery requests, 0 items.
+        // The review's numbers scaled to this class's interval: LivePollInterval 7 s, default
+        // RequestTimeout 30 s; every live-on answer succeeds with message_count 1 after two intervals.
+        // Before the fix: 20 live-on, 0 delivery requests, 0 items.
         var (exchange, client) = Live(o => o.LivePollInterval = Interval);
         using var cts = new CancellationTokenSource();
         exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
         {
             await Brake(cts);
-            exchange.Clock.Advance(TimeSpan.FromSeconds(2));
+            exchange.Clock.Advance(Interval * 2);
             return Status(r, count: 1, live: r.Live);
         });
         var drains = 0;
@@ -157,7 +165,7 @@ public sealed class PickupClientLiveSchedulingTests
         exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
         {
             await Brake(cts);
-            exchange.Clock.Advance(TimeSpan.FromSeconds(2));
+            exchange.Clock.Advance(Interval * 2);
             if (failing == "live-on" && r.Live && Interlocked.Increment(ref liveOns) == 1)
                 throw new TimeoutException("no answer (test)");
             return Status(r, count: 1, live: r.Live);
@@ -165,7 +173,7 @@ public sealed class PickupClientLiveSchedulingTests
         var drains = 0;
         exchange.On(MessagePickup.DeliveryRequestType, r =>
         {
-            exchange.Clock.Advance(TimeSpan.FromSeconds(2));
+            exchange.Clock.Advance(Interval * 2);
             var n = Interlocked.Increment(ref drains);
             if (failing == "drain" && n == 1)
                 return Task.FromException<InboundMessageSnapshot>(new TimeoutException("no answer (test)"));
