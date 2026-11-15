@@ -16,7 +16,7 @@ gated behind a reviewer-approved environment — see step 2 below.
 
 ## What gets published
 
-A `v*` tag publishes all eight packages plus their `.snupkg` symbol packages
+A `v*` tag publishes all nine packages plus their `.snupkg` symbol packages
 (SourceLink + deterministic build are already configured in
 [`Directory.Build.props`](Directory.Build.props)):
 
@@ -28,23 +28,25 @@ A `v*` tag publishes all eight packages plus their `.snupkg` symbol packages
 | `DidComm.Transports.Http` | HTTPS sender transport binding |
 | `DidComm.Transports.WebSocket` | WebSocket sender transport binding |
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
-| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline |
+| `DidComm.Mediator.Client` | The recipient side of a mediator (`MediationClient`, `PickupClient`, `AddMediatorClient()`) and the Coordinate Mediation / Message Pickup message builders and parsers both roles share; what a wallet references |
+| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline; depends on `DidComm.Mediator.Client` |
 | `DidComm.Mediator.AspNetCore` | `MapDidCommMediator`: the mediator's HTTP, WebSocket and out-of-band invitation endpoints |
 
 Tests and samples set `IsPackable=false`, so they are never published.
 
 **The packages ship in lockstep.** Every package takes its version from the one tag, and some call
 internals of others through `InternalsVisibleTo` — `DidComm.Mediator.AspNetCore` calls internals of
-`DidComm.AspNetCore` (the mediator's WebSocket endpoint) and of `DidComm.Mediator`, as several
+`DidComm.AspNetCore` (the mediator's WebSocket endpoint) and of `DidComm.Mediator`, `DidComm.Mediator`
+calls internals of `DidComm.Mediator.Client` (the message helpers both roles share), and several
 packages do of `DidComm.Core`. A package's dependency on another names only a minimum version, so
 an internal call is safe only between packages of the same version: always publish all of them
 together from one tag, never one package alone.
 
-**New package ids.** `DidComm.Mediator` and `DidComm.Mediator.AspNetCore` have never been
-published. Each sets `EnablePackageValidation` to `false` in its `.csproj`, because SDK Package
+**New package ids.** `DidComm.Mediator`, `DidComm.Mediator.Client` and `DidComm.Mediator.AspNetCore`
+have never been published. Each sets `EnablePackageValidation` to `false` in its `.csproj`, because SDK Package
 Validation has no released version of it to compare against. After the first release that
 publishes them, once `PackageValidationBaselineVersion` in `Directory.Build.props` names that
-release, delete that line from both `.csproj` files so the repo-wide default (`true`) applies to
+release, delete that line from all three `.csproj` files so the repo-wide default (`true`) applies to
 them too. Before that first release, check that the Trusted Publishing policy below lets a new
 package id be pushed: a scope limited to new versions of existing packages does not.
 
@@ -134,7 +136,7 @@ No secret is needed.
 
 ## Post-release verification
 
-- The eight packages appear at `https://www.nuget.org/packages/DidComm.Core` etc.
+- The nine packages appear at `https://www.nuget.org/packages/DidComm.Core` etc.
   (prerelease versions are hidden unless "Include prerelease" is checked).
 - A scratch project can restore them:
   ```bash

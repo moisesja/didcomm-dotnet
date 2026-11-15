@@ -16,14 +16,14 @@ namespace DidComm.InteropTests.DxCoverage;
 public sealed class ExtensionMemberSurfaceTests
 {
     private const string ExtensionsType = "DidComm.Mediator.Client.MediationServiceBuilderExtensions";
-    private const string ForMediationId = "DidComm.Mediator!" + ExtensionsType + "::ForMediation(DidComm.Mediator.Coordination.MediationGrant)";
+    private const string ForMediationId = "DidComm.Mediator.Client!" + ExtensionsType + "::ForMediation(DidComm.Mediator.Coordination.MediationGrant)";
 
     [Fact]
     public void The_extension_block_surfaces_as_the_static_class_and_its_implementation_method_only()
     {
         var surface = CoverageComputation.Instance.Surface.Select(m => m.Id).ToList();
 
-        surface.Should().Contain("DidComm.Mediator!" + ExtensionsType);
+        surface.Should().Contain("DidComm.Mediator.Client!" + ExtensionsType);
         surface.Should().Contain(ForMediationId, "the implementation method is what DidCommServiceBuilder.ForMediation(grant) call sites reference");
         surface.Should().NotContain(id => id.Contains("<G>$", StringComparison.Ordinal) || id.Contains("<M>$", StringComparison.Ordinal) || id.Contains("<Extension>$", StringComparison.Ordinal),
             "the compiler's grouping and marker types are not demonstrable surface");
@@ -32,7 +32,7 @@ public sealed class ExtensionMemberSurfaceTests
     [Fact]
     public void The_compiler_grouping_type_exists_and_the_implementation_method_is_not_compiler_generated()
     {
-        using var module = ModuleDefinition.ReadModule(Path.Combine(AppContext.BaseDirectory, "DidComm.Mediator.dll"));
+        using var module = ModuleDefinition.ReadModule(Path.Combine(AppContext.BaseDirectory, "DidComm.Mediator.Client.dll"));
         var extensions = module.GetType(ExtensionsType);
         extensions.Should().NotBeNull();
 

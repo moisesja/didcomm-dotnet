@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The folders keep the namespaces the types had in DidComm.Mediator (DidComm.Mediator.Client,
+         .Coordination, .Pickup, .Internal): only the assembly changed (#113). -->
+    <RootNamespace>DidComm.Mediator</RootNamespace>
+    <AssemblyName>DidComm.Mediator.Client</AssemblyName>
+    <PackageId>DidComm.Mediator.Client</PackageId>
+    <Version>$(DidCommVersion)</Version>
+    <Description>Recipient-side mediator client for didcomm-dotnet (PRD §8b/§8c, epic #88). MediationClient enrols with a mediator over Coordinate Mediation 3.0 (2.0 when the mediator only speaks that, found through Discover Features or pinned) and registers the DIDs it publishes; PickupClient checks, fetches, acknowledges and receives live (Message Pickup 3.0) the messages the mediator holds; AddMediatorClient() registers both on DidCommBuilder, and DidCommServiceBuilder.ForMediation(grant) builds the service entry of a DID reached through the mediator. Also the message builders, parsers and records both roles share (CoordinateMediation, MessagePickup, MediationGrant, RecipientUpdate, PickupStatus, DeliveredMessage). No mediator roles, no hosting and no ASP.NET Core: a wallet references this package; a mediator references DidComm.Mediator, which brings it along.</Description>
+    <!-- No released baseline exists on NuGet yet, so there is nothing for SDK Package Validation to
+         compare against. Remove this line (the repo-wide default is true) once the first version of
+         this package has shipped and PackageValidationBaselineVersion names it. -->
+    <EnablePackageValidation>false</EnablePackageValidation>
+  </PropertyGroup>
+
+  <!-- A wallet carries only what is listed here (and what Core and the DI package bring): never
+       DidComm.Mediator, Microsoft.Extensions.Hosting.Abstractions or ASP.NET Core. Pinned by
+       tests/DidComm.Mediator.Tests/Client/ClientPackageReferencesTests.cs. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The mediator roles use the shared internals that moved here with the client: MediatorLog,
+         BareDid, PickupBodies.MaxIdLength and the bounded parser overloads
+         CoordinateMediation.TryParseRecipientUpdate(message, maxUpdates, …) and
+         MessagePickup.TryParseMessagesReceived(message, maxIds, …). -->
+    <InternalsVisibleTo Include="DidComm.Mediator" />
+    <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
+    <InternalsVisibleTo Include="DidComm.InteropTests" />
+  </ItemGroup>
+
+</Project>

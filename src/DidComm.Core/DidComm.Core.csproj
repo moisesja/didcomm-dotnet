@@ -40,6 +40,11 @@
     <InternalsVisibleTo Include="DidComm.Extensions.DependencyInjection" />
     <InternalsVisibleTo Include="DidComm.Adapters.NetDid" />
     <InternalsVisibleTo Include="DidComm.Mediator" />
+    <!-- The recipient-side client, split out of DidComm.Mediator (#113): the same code keeps the same access
+         (IInboundCorrelator, InboundMessageSnapshot, ReturnRouteEligibility / ReturnRouteIneligibility,
+         DidCommClient.UnpackDeliveredAsync / ResolveDirectEndpointAsync / ReceivesPushesOn with DeliveredUnpack,
+         DidSubject, IdentifierLimits, LogValues, UnreservedUriChars, Base64Url). -->
+    <InternalsVisibleTo Include="DidComm.Mediator.Client" />
     <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
     <InternalsVisibleTo Include="DidComm.TestSupport" />
     <!-- IInboundReceivingTransport only (#96): the mediator client asks the transport whether pushes reach the inbound consumer. -->

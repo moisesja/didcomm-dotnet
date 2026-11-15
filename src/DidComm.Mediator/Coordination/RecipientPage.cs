@@ -1,13 +1,5 @@
 namespace DidComm.Mediator.Coordination;
 
-/// <summary>
-/// A mediation relationship: the mediator agreed to accept forwards for the DIDs that
-/// <paramref name="PeerDid"/> registers (FR-MED-05). One grant exists per peer DID.
-/// </summary>
-/// <param name="PeerDid">The recipient that enrolled: the DID subject of the authcrypt sender key of its <c>mediate-request</c>. The key of the grant.</param>
-/// <param name="RoutingDids">The mediator DIDs the grant told the recipient to publish (<c>routing_did</c>). A repeated <c>mediate-request</c> is answered with exactly these.</param>
-public sealed record MediationGrant(string PeerDid, IReadOnlyList<string> RoutingDids);
-
 /// <summary>One page of the DIDs registered under a grant, as <see cref="IMediationStore.ListRecipientsAsync"/> returns it.</summary>
 /// <param name="Dids">The DIDs in this page, in registration order.</param>
 /// <param name="Total">The number of DIDs registered under the grant in all, at the moment the page was read.</param>

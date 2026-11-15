@@ -6,7 +6,7 @@ namespace DidComm.Protocols.Routing;
 /// The "first and every 1000th" rule for a log line any stranger can cause once per message: the
 /// first occurrence and every <see cref="Every"/>-th are written at the line's own level, the rest at
 /// <see cref="LogLevel.Debug"/>, with the same text. Core's copy of the mediator's rule
-/// (<c>MediatorLog.RateLimited</c> in <c>DidComm.Mediator</c>, which Core cannot reference). Thread-safe.
+/// (<c>MediatorLog.RateLimited</c> in <c>DidComm.Mediator.Client</c>, which Core cannot reference). Thread-safe.
 /// </summary>
 internal static class RateLimitedLog
 {
