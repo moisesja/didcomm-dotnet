@@ -35,6 +35,12 @@ an identity or crashed, and the recipient client's live stream showed no defect.
   mutation of the code under test, and several mutations that the old tests let through now fail
   (a shutdown that waits for an abandoned push, a next cycle due one tick early, a missing lease
   release masked by the session close).
+- **Relay order, stated as built.** The forward handler relays in publication order: forwards on
+  one WebSocket connection are relayed in the order they arrived (new test), while forwards of
+  separate HTTP requests are published as each response completes, so two sent one after the other
+  may be relayed in either order. The HTTP test that asserted FIFO across two requests now asserts
+  that each is relayed exactly once (`…_over_HTTP_each_reach_the_sink_exactly_once`); this was
+  never a guarantee of the #90 design, and the architecture doc now says so.
 - **New tests.** `PickupClientLiveCancellationTests` (a cancellation that lands while any step of a
   live cycle ignores the token ends the move with `OperationCanceledException` and yields nothing
   after it — no test caught that before); the other half of the channel's cancellation contract;

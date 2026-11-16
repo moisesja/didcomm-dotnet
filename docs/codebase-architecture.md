@@ -217,7 +217,10 @@ Inbound forward:
    `ProtocolDispatcher.DispatchAsync(…, Task acknowledged, …)` overload — so neither the processing
    nor the sink runs before the sender holds the 202 (only a forward addressed to the mediator
    itself is opened before it, inline; see below). The WebSocket endpoint and a direct
-   dispatcher caller pass `Task.CompletedTask` and publish immediately. A cancelled or faulted
+   dispatcher caller pass `Task.CompletedTask` and publish immediately. The pump relays in
+   publication order, so forwards received on one WebSocket connection are relayed in the order
+   they arrived, while forwards of separate HTTP requests are published as each response completes
+   and two sent one after the other may be relayed in either order (#119). A cancelled or faulted
    acknowledgement releases the reservation and drops the forward with a warning (id only). The
    clock was read once, at step 3: the same instant fixes the `delay_milli` schedule
    (`ForwardProcessor.ResolveDelay`, under the processor's `MaxDelay` cap → `NotBefore`) carried in
