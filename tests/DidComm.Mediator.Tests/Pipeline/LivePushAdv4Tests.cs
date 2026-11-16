@@ -500,7 +500,9 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task Disposing_the_container_while_a_live_push_ignores_its_cancellation_returns_promptly_and_loses_nothing()
     {
-        var world = await LivePushWorld.StartAsync();
+        // #119 (PR #121 review): the dispatcher waits for its workers without a bound, so disposing
+        // can return within the hang guard below only if it does not wait for the abandoned send.
+        var world = await LivePushWorld.StartAsync(services: s => PushFixture.UseShutdownGrace(s, Timeout.InfiniteTimeSpan));
         try
         {
             var a = await world.GrantAsync("a");
@@ -515,17 +517,17 @@ public sealed class LivePushAdv4Tests
             var store = world.Fixture.Store;
             var outcomes = world.Fixture.Recorder;
             var dispatcher = world.Fixture.Dispatcher;
+            dispatcher.ShutdownGrace.Should().Be(Timeout.InfiniteTimeSpan, "the container's (and the sink's) dispatcher is the one built here");
 
             await world.ForwardAsync(a.Recipient, 1);
             await entered.Task.WaitAsync(Wait);
             await world.ForwardAsync(a.Recipient, 2);
-            await world.Fixture.Services.DisposeAsync().AsTask().WaitAsync(Wait); // a hang guard only
+            // Promptly: with no grace to give up after, this returns only once the workers stopped,
+            // and they stop without waiting for the send that ignores its cancellation.
+            await world.Fixture.Services.DisposeAsync().AsTask().WaitAsync(Wait); // the bound is a hang guard only
 
-            // #119: wait for the push's own record, not for DisposeAsync to return (it gives up
-            // waiting for the workers after a real-time grace).
             (await world.Fixture.WaitForPushOutcomesAsync(1, Wait)).Should().Equal(PushOutcomes.SkippedShutdown);
-            // Promptly, without a clock: the worker let go of the grant while the send it abandoned
-            // still runs — it did not wait for that send.
+            // And the worker let go of the grant while the send it abandoned still runs.
             await dispatcher.WaitForIdleAsync(Wait); // a hang guard only
             dispatcher.Unsettled.Should().Be(1, "the abandoned send has not ended, yet the worker is done with it");
             release.Task.IsCompleted.Should().BeFalse("the send is released only below");

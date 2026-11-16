@@ -147,6 +147,21 @@ internal sealed class PushFixture : IAsyncDisposable
         return new StoredMessage(result.GrantPeerDid, recipientDid, result.MessageId);
     }
 
+    /// <summary>
+    /// Register the container's push dispatcher with <paramref name="shutdownGrace"/> instead of the
+    /// 5-second default (pass as <c>services</c>: made before <c>AddDidComm</c>, and
+    /// <c>AddMediator()</c> adds its own only when none is registered). The sink, the fixture and
+    /// the container's disposal all use this one instance.
+    /// </summary>
+    public static void UseShutdownGrace(IServiceCollection services, TimeSpan shutdownGrace)
+        => services.AddSingleton(sp => new PushDispatcher(
+            sp.GetRequiredService<IOptions<MediatorOptions>>(),
+            sp.GetRequiredService<MessagePickupQueue>(),
+            sp.GetRequiredService<MediatorMetrics>(),
+            sp.GetService<ILogger<PushDispatcher>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            shutdownGrace));
+
     /// <summary>A second dispatcher over this container's stores; the caller disposes it.</summary>
     public PushDispatcher NewDispatcher()
         => new(

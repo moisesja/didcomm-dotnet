@@ -349,6 +349,34 @@ public sealed class LivePushDispatcherTests
     // ---- shutdown --------------------------------------------------------------------------------------
 
     [Fact]
+    public async Task The_shutdown_grace_is_five_seconds_unless_a_test_sets_another_and_a_non_positive_one_is_refused()
+    {
+        await using var fixture = PushFixture.Create();
+        fixture.Dispatcher.ShutdownGrace.Should().Be(TimeSpan.FromSeconds(5), "AddMediator() keeps the default");
+        foreach (var refused in new[] { TimeSpan.Zero, TimeSpan.FromTicks(-1), TimeSpan.FromSeconds(-5) })
+        {
+            FluentActions.Invoking(() => NewDispatcher(fixture, refused)).Should().Throw<ArgumentOutOfRangeException>()
+                .Which.ParamName.Should().Be("shutdownGrace");
+        }
+        foreach (var accepted in new[] { TimeSpan.FromTicks(1), Timeout.InfiniteTimeSpan })
+        {
+            await using var dispatcher = NewDispatcher(fixture, accepted);
+            dispatcher.ShutdownGrace.Should().Be(accepted);
+        }
+        await using (var defaulted = NewDispatcher(fixture, null))
+            defaulted.ShutdownGrace.Should().Be(TimeSpan.FromSeconds(5));
+
+        static PushDispatcher NewDispatcher(PushFixture fixture, TimeSpan? grace)
+            => new(
+                fixture.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MediatorOptions>>(),
+                fixture.Queue,
+                fixture.Services.GetRequiredService<MediatorMetrics>(),
+                logger: null,
+                fixture.Time,
+                grace);
+    }
+
+    [Fact]
     public async Task Disposing_while_a_push_holds_a_throwing_cancellation_callback_neither_throws_nor_loses_a_message()
     {
         var gate = new PushGate();
