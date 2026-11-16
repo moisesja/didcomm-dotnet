@@ -55,6 +55,10 @@ step failed, so neither the didcomm-python leg nor the didcomm-jvm leg ran for t
   - **The fix.** The test now cancels synchronously, as `MediatorClientChannel.Dispose` does. The
     failure no longer reproduces under the same starvation. A mutation that makes the unpacker
     ignore the shutdown still fails the test.
+  - **The hang guard is no longer ignored** (PR review). The host code counts a 10 s gate that
+    times out, and the test asserts that none had when the shutdown was decided. Under the forced
+    starvation, the old `CancelAsync()` version now fails with "found 2" from that check, which
+    names the cause, instead of "no exception was thrown".
   - **The sweep.** I checked the other 40 `CancelAsync()` calls in the tests:
     - 39 have no real-time wait in host code that could decide the outcome;
     - the one suspected sibling, `MediatorClientTimeoutRaceTests…the_cancellation_wins`, passes

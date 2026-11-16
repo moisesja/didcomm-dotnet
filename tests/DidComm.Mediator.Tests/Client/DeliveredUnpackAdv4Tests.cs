@@ -214,10 +214,14 @@ public sealed class DeliveredUnpackAdv4Tests
             using var shutdown = new CancellationTokenSource();
             using var gate = new ManualResetEventSlim(false);
             using var entered = new SemaphoreSlim(0);
+            var guardFired = 0;
             var unpacker = new DeliveredMessageUnpacker((_, _) =>
             {
                 entered.Release();
-                gate.Wait(RealTime); // blocks its thread and ignores its token
+                // Blocks its thread and ignores its token. RealTime is only a hang guard: the test
+                // lets it go (gate.Set below); a guard that fires is counted, never ignored.
+                if (!gate.Wait(RealTime))
+                    Interlocked.Increment(ref guardFired);
                 throw new InvalidOperationException(marker);
             }, Budget, time, shutdown.Token);
 
@@ -229,6 +233,7 @@ public sealed class DeliveredUnpackAdv4Tests
             // a busy pool the host code's 10 s gate could time out first and complete the delivery
             // normally (#120: a windows CI run, reproduced by starving the pool).
             shutdown.Cancel();
+            Volatile.Read(ref guardFired).Should().Be(0, "the shutdown was decided while both unpacks were still blocked, not after their 10 s hang guard let them go");
             await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>();
             unpacker.Abandoned.Should().Be(2);
 

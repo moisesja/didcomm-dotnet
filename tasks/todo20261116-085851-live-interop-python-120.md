@@ -132,3 +132,26 @@ https://github.com/moisesja/didcomm-dotnet/actions/runs/43882021940
 **Windows leg of `ci.yml`.** The new majors ran on `windows-2025-vs2026` in both PR CI runs. The checkout and its post-job credential cleanup worked, and so did the submodule and the artifact upload. Upstream, checkout v7.0.1 includes the fix for v7.0.0's Windows credential-path cleanup bug (actions/checkout#2528).
 
 **Live interop on the code head `75a3ce2`.** Run 43888459643 is green. Its per-cell `summary.md`, below the header, is byte-identical to 43882021940's. A first dispatch on `2658f31` (43883317735) stayed "queued" with no jobs for over 30 minutes, during a GitHub incident; `gh run cancel` answered that it was already completed. It never ran, so it is not evidence either way.
+
+### PR review round 1 (comment 6919371539, on `2658f31`)
+
+The reviewer found no defect in the workflow or harness diff. They held approval only on the red windows CI run, and asked for:
+- a diagnosis;
+- the comparison with the base;
+- a green windows run;
+- a deterministic fix that does not disable the assertion and does not rely on a passing retry.
+
+The test-only fix stays in #122; we chose that over a separate issue. It is small, deterministic and in a CI-reliability PR, and splitting it out would leave a known flake on `main`.
+
+**Addressed the reviewer's point that `gate.Wait(RealTime)`'s return value was ignored:**
+- The host code now counts a gate that timed out.
+- The test asserts, right after the synchronous `Cancel()`, that none had: the shutdown was decided while both unpacks were still blocked.
+
+**Proof:**
+- **Forced starvation** (`Diag120ForcingTests` with the same check):
+  - the old `CancelAsync()` version now fails at the new check, "found 2": both hang guards had fired. That proves the ordering the CI log could not show;
+  - the fixed version passes in 13 ms;
+  - both pass on an idle pool.
+- **Mutation:** with `OnBudgetEnded` set to `shutDown = false`, the strengthened test still fails (47 ms, at the `OperationCanceledException` assertion).
+- **Mediator.Tests:** 4,272 passed, 8 skipped; build with `/warnaserror` clean.
+
