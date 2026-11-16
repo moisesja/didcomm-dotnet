@@ -260,8 +260,12 @@ public sealed class MediatorEndpointRelayTests
     }
 
     [Fact]
-    public async Task Two_forwards_in_quick_succession_reach_the_sink_in_order()
+    public async Task Two_forwards_in_quick_succession_over_HTTP_each_reach_the_sink_exactly_once()
     {
+        // No order between two HTTP requests (#119): each forward goes to the pump only when its own
+        // 202 has been committed (Response.OnCompleted), and the client holds the 202 before the server
+        // runs that callback, so the second request's forward can be published first. The order of one
+        // connection's forwards is the WebSocket test below.
         await using var host = await StartMediatorAsync();
         var first = NewProposal();
         var second = NewProposal();
@@ -276,8 +280,45 @@ public sealed class MediatorEndpointRelayTests
         host.Sink.Results.Should().HaveCount(2);
         results.Select(r => r.NextHop).Should().Equal(Bob, Bob);
         var bob = BobClient();
-        (await bob.UnpackAsync(Encoding.UTF8.GetString(results[0].OnwardPacked))).Message.Id.Should().Be(first.Id, "FIFO: the first forward is relayed first");
-        (await bob.UnpackAsync(Encoding.UTF8.GetString(results[1].OnwardPacked))).Message.Id.Should().Be(second.Id);
+        var ids = new List<string>();
+        foreach (var result in results)
+            ids.Add((await bob.UnpackAsync(Encoding.UTF8.GetString(result.OnwardPacked))).Message.Id);
+        ids.Should().BeEquivalentTo(new[] { first.Id, second.Id }, "each forward is relayed once");
+    }
+
+    [Fact]
+    public async Task Forwards_sent_on_one_WebSocket_reach_the_sink_in_the_order_they_were_sent()
+    {
+        // A WebSocket offers no wire acknowledgement, so the handler publishes each forward to its pump
+        // as the connection's receive loop dispatches it, one after the other; the one pump hands them
+        // to the sink in that order, one at a time. The first is held inside the sink until the other
+        // two are queued behind it (#119: forced, not left to the scheduler).
+        await using var host = await StartMediatorAsync();
+        var proposals = new[] { NewProposal(), NewProposal(), NewProposal() };
+        var packed = new List<string>();
+        foreach (var proposal in proposals)
+            packed.Add((await PackForBobViaMediatorAsync(proposal)).Message);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Sink.FirstGate = gate;
+
+        var wsClient = host.Server.CreateWebSocketClient();
+        using var socket = await wsClient.ConnectAsync(BuildWebSocketUri(host.Server, "/ws"), default);
+        foreach (var envelope in packed)
+            await socket.SendAsync(Encoding.UTF8.GetBytes(envelope), WebSocketMessageType.Binary, endOfMessage: true, default);
+        await host.Sink.WaitForEnteredAsync(1, Timeout);
+        await host.WaitUntilAsync(() => host.Handler.Outstanding == proposals.Length, "the other two forwards are queued behind the one in the sink");
+        host.Sink.Results.Should().BeEmpty("the first is still in the sink, and nothing overtakes it");
+
+        gate.SetResult();
+        var results = await host.Sink.WaitForCountAsync(proposals.Length, Timeout);
+        await host.Handler.FlushAsync(Timeout);
+        host.Sink.Results.Should().HaveCount(proposals.Length);
+        var bob = BobClient();
+        var ids = new List<string>();
+        foreach (var result in results)
+            ids.Add((await bob.UnpackAsync(Encoding.UTF8.GetString(result.OnwardPacked))).Message.Id);
+        ids.Should().Equal(proposals.Select(p => p.Id), "FIFO on one connection: relayed in the order sent");
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
     }
 
     [Fact]
@@ -509,6 +550,9 @@ public sealed class MediatorEndpointRelayTests
         /// <summary>When set, <see cref="AcceptAsync"/> blocks on it before recording the result.</summary>
         public TaskCompletionSource? Gate { get; set; }
 
+        /// <summary>When set, only the first <see cref="AcceptAsync"/> call blocks on it.</summary>
+        public TaskCompletionSource? FirstGate { get; set; }
+
         /// <summary>Sink invocations, counted before the gate.</summary>
         public int Entered => Volatile.Read(ref _entered);
 
@@ -516,9 +560,11 @@ public sealed class MediatorEndpointRelayTests
 
         public async Task AcceptAsync(ForwardProcessingResult result, ProtocolContext context, CancellationToken ct)
         {
-            Interlocked.Increment(ref _entered);
+            var entered = Interlocked.Increment(ref _entered);
             if (Gate is { } gate)
                 await gate.Task.WaitAsync(ct);
+            if (entered == 1 && FirstGate is { } first)
+                await first.Task.WaitAsync(ct);
             _results.Enqueue(result);
         }
 
