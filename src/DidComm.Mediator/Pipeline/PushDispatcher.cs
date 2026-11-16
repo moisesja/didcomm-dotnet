@@ -113,7 +113,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     /// <summary>Operations allowed between start and settlement, per worker.</summary>
     internal const int UnsettledPerWorker = 2;
 
-    private static readonly TimeSpan ShutdownGrace = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultShutdownGrace = TimeSpan.FromSeconds(5);
 
     private readonly PickupCoordinator _pickup;
     private readonly MediatorMetrics _metrics;
@@ -123,6 +123,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     private readonly TimeSpan _cooldown;
     private readonly int _perRun;
     private readonly int _maxUnsettled;
+    private readonly TimeSpan _shutdownGrace;
     private readonly object _gate = new();
     // Under _gate: one entry per grant that is woken, busy or cooling down; the woken grants waiting
     // for a worker, in the order they are to be served.
@@ -153,11 +154,31 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
         MediatorMetrics metrics,
         ILogger<PushDispatcher>? logger,
         TimeProvider timeProvider)
+        : this(options, queue, metrics, logger, timeProvider, shutdownGrace: null) { }
+
+    /// <summary>Test seam: a dispatcher with an explicit shutdown grace.</summary>
+    /// <param name="options">The mediator settings; copied here.</param>
+    /// <param name="queue">The pickup queue: its store view, live sessions and leases are the ones a push uses.</param>
+    /// <param name="metrics">The push counter.</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="timeProvider">The clock behind the deadlines and the cooldown (its monotonic timestamps).</param>
+    /// <param name="shutdownGrace">How long <see cref="DisposeAsync"/> waits for the workers; <c>null</c> for 5 seconds, <see cref="Timeout.InfiniteTimeSpan"/> for no bound.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="shutdownGrace"/> is zero or negative (and not <see cref="Timeout.InfiniteTimeSpan"/>).</exception>
+    internal PushDispatcher(
+        IOptions<MediatorOptions> options,
+        MessagePickupQueue queue,
+        MediatorMetrics metrics,
+        ILogger<PushDispatcher>? logger,
+        TimeProvider timeProvider,
+        TimeSpan? shutdownGrace)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(queue);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(timeProvider);
+        _shutdownGrace = shutdownGrace ?? DefaultShutdownGrace;
+        if (_shutdownGrace <= TimeSpan.Zero && _shutdownGrace != Timeout.InfiniteTimeSpan)
+            throw new ArgumentOutOfRangeException(nameof(shutdownGrace));
 
         // Read once, after validation: a host that changes the options object later changes nothing here.
         var settings = options.Value;
@@ -191,6 +212,9 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
 
     /// <summary>Operations allowed between start and settlement.</summary>
     internal int MaxUnsettled => _maxUnsettled;
+
+    /// <summary>How long <see cref="DisposeAsync"/> waits for the workers.</summary>
+    internal TimeSpan ShutdownGrace => _shutdownGrace;
 
     /// <summary>Pushes one operation makes before it yields its worker.</summary>
     internal int PerRun => _perRun;
@@ -585,17 +609,17 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     /// <summary>Stop admission, cancel the running pushes and drop the waiting wake-ups; does not wait.</summary>
     public void Dispose() => Stop();
 
-    /// <summary>Stop as <see cref="Dispose"/> does, then wait up to five seconds for the workers to finish.</summary>
+    /// <summary>Stop as <see cref="Dispose"/> does, then wait up to five seconds (the default grace) for the workers to finish.</summary>
     public async ValueTask DisposeAsync()
     {
         Stop();
         try
         {
-            await Task.WhenAll(_workers).WaitAsync(ShutdownGrace).ConfigureAwait(false);
+            await Task.WhenAll(_workers).WaitAsync(_shutdownGrace).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            MediatorLog.Write(_logger, LogLevel.Warning, "Push workers did not stop within {Grace}; their messages stay queued for pickup.", ShutdownGrace);
+            MediatorLog.Write(_logger, LogLevel.Warning, "Push workers did not stop within {Grace}; their messages stay queued for pickup.", _shutdownGrace);
         }
         catch
         {
