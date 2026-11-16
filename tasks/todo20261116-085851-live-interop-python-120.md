@@ -112,4 +112,21 @@ https://github.com/moisesja/didcomm-dotnet/actions/runs/43882021940
 - **Its only hold was the docs and CHANGELOG** (done in the docs commit).
 - **One note for the owner.** A `release: published` live run uses the workflow at the released tag. A tag cut before this merge (for example 1.6.0, if it were cut from an older commit) would still ask for 3.9 and fail. Cut releases after this merges.
 
+**CI finding on the PR (windows), diagnosed and fixed: a test defect, not a product defect.**
+
+- **The failure.** Run 43885384456 on `2658f31` (ubuntu green, windows red) failed one test: `DeliveredUnpackAdv4Tests.Host_code_that_throws_on_its_thread_after_the_shutdown_is_observed_and_gives_its_slot_back` (Mediator.Tests, #96 unpacker). The message was "Expected a <System.OperationCanceledException> to be thrown, but no exception was thrown", after 10 s.
+- **Not caused by this PR.** The image (`windows-2025-vs2026`), SDK 10.0.404 and runtime 10.0.15 are the same as main's green windows run 43880029542, and no code changed. It is this test's first failure in the CI history searched (all CI runs since 11-13).
+- **Mechanism.** The test ends the shutdown with `await shutdown.CancelAsync()`, which runs the token's callbacks (`GuardedDeadline` → `OnBudgetEnded`) on a thread-pool work item. The host code under test blocks two pool threads with `gate.Wait(RealTime)` (10 s) and then throws. If the pool reaches the CancelAsync item more than 10 s late, the gates time out first, both unpacks fail normally, `Complete` closes the delivery with outcomes, and `OnBudgetEnded` later finds it closed. The batch never throws. Production cancels synchronously (`MediatorClientChannel.Dispose` → `GuardedDeadline.CancelQuietly(_shutdown)` → `Cancel()`), so the test's stimulus differed from the product's (L-065 rule 7: real time decided the outcome).
+- **Forced** (scratch branch `diag/120-win-flake`, local, unpushed; `Diag120ForcingTests`). Before the cancel, 400 pool work items blocking for 15 s are queued:
+  - `CancelAsync` + starved pool: **FAIL**, with the exact CI message.
+  - `Cancel()` + starved pool: pass (13 ms).
+  - Both pass on an idle pool.
+- **Fix** (test only). `shutdown.Cancel()` in place of `await shutdown.CancelAsync()`, with a comment.
+  - Mutation: `OnBudgetEnded` with `shutDown = false` (the unpacker ignores the shutdown). The fixed test fails deterministically (47 ms).
+  - Slow but correct: it passes under the forced starvation.
+  - Mediator.Tests: 4,272 passed, 8 skipped (unchanged).
+- **Sweep** (L-039): all 41 `CancelAsync()` calls in `tests/` were classified by one read-only agent: 4 are before start, 35 are hang guards only, and 2 were suspected of the same shape.
+  - The second suspect is `MediatorClientTimeoutRaceTests.When_the_deadline_fired_and_the_caller_cancelled…:230`. Under the same forced starvation it **passes** (24 ms): at that moment the caller's token has no callbacks for CancelAsync to defer. Left unchanged.
+  - `DeliveredUnpackFix3Tests:119` is a hang guard only (its host code waits on a TCS or on its token, on a manual clock). Left unchanged.
+
 **Windows leg of `ci.yml`.** These majors are proven only by the PR's own CI run; that result is recorded in the PR thread. Upstream, checkout v7.0.1 includes the fix for v7.0.0's Windows credential-path cleanup bug (actions/checkout#2528).

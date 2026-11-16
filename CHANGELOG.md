@@ -45,6 +45,20 @@ step failed, so neither the didcomm-python leg nor the didcomm-jvm leg ran for t
 - **3.12 is a stopgap.** It lasts while the runner image has a 3.12 build (3.12 reaches end of
   life in 2028-10). The lasting fix is a python counterpart stack off pydantic v1. The workflow
   comment and `tools/interop-live/README.md` say so.
+- **One test fixed, no behaviour change.** The PR's windows CI failed
+  `DeliveredUnpackAdv4Tests.Host_code_that_throws_on_its_thread_after_the_shutdown_is_observed_and_gives_its_slot_back`
+  ("expected `OperationCanceledException`, but no exception was thrown", after 10 s).
+  - **Why it failed.** The test ended the channel's shutdown with `CancelAsync()`, which runs the
+    cancellation's callbacks on a thread-pool work item. When the pool is busy for longer than the
+    test's 10 s real-time gate, the blocked host code times out first and the delivery completes
+    normally. Starving the pool forces this every time.
+  - **The fix.** The test now cancels synchronously, as `MediatorClientChannel.Dispose` does. The
+    failure no longer reproduces under the same starvation. A mutation that makes the unpacker
+    ignore the shutdown still fails the test.
+  - **The sweep.** I checked the other 40 `CancelAsync()` calls in the tests:
+    - 39 have no real-time wait in host code that could decide the outcome;
+    - the one suspected sibling, `MediatorClientTimeoutRaceTests…the_cancellation_wins`, passes
+      under the same forced starvation, so it stays unchanged.
 
 ### Fixed — tests: the mediator timing tests no longer depend on how fast the machine runs (#119, #114, epic #88)
 

@@ -224,7 +224,11 @@ public sealed class DeliveredUnpackAdv4Tests
             var batch = unpacker.UnpackAllAsync(Payloads(2, "m-"), "request-1", default);
             for (var i = 0; i < 2; i++)
                 (await entered.WaitAsync(RealTime)).Should().BeTrue();
-            await shutdown.CancelAsync();
+            // Cancelled synchronously, as the channel's Dispose cancels its shutdown: the delivery
+            // ends inside this call. CancelAsync would run the callbacks on a pool work item, and on
+            // a busy pool the host code's 10 s gate could time out first and complete the delivery
+            // normally (#120: a windows CI run, reproduced by starving the pool).
+            shutdown.Cancel();
             await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>();
             unpacker.Abandoned.Should().Be(2);
 
