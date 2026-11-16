@@ -49,7 +49,7 @@ Verified with `gh api` (tag ref exists; `runs.using` in `action.yml` at that tag
 - [x] First full harness run on 26.04 (the failing runs stopped before Setup Java): both legs ran; jvm leg 60 executed / 3 n/a; `fetch-deps.sh` SHA-256 checks pass under 26.04's coreutils.
 - [x] Live run from the branch: `gh workflow run interop-live.yml --ref fix/live-interop-python-120`; record run URL, image, CPython patch, per-cell summary; compare against the 2026-11-07 baseline (every FAIL is a finding; N-A must match).
 - [x] Log of the live run shows no "Node.js 20 is deprecated" annotation.
-- [ ] Ordinary CI green on the PR head (ubuntu + windows), no Node 20 annotation.
+- [x] Ordinary CI green on the PR head (ubuntu + windows), no Node 20 annotation. The first run on `2658f31` (43885384456) was red on windows: a test defect, diagnosed and fixed (see Review). The run on `75a3ce2` (43888426496) was green on both: Core 2,548, Mediator 4,272 + 8 skipped, Interop 1,380 + 1 skipped. Its only annotation was the `ubuntu-latest` notice.
 
 ### 4. Adversarial pass (one short review of the workflow diff)
 - [x] Supply chain: each `uses:` ref is an existing tag of the right repo (re-verify with `gh api`), and the same tag style as before.
@@ -60,7 +60,7 @@ Verified with `gh api` (tag ref exists; `runs.using` in `action.yml` at that tag
 
 ### 5. Docs, PR
 - [x] CHANGELOG entry under `[Unreleased]`.
-- [ ] Commit(s) `ci(interop): … (#120)`; push; PR against `main` (`Closes #120`, `Part of #88`), summary, live-run URL + per-cell summary, N-A comparison, sweep list.
+- [x] Commits `2f886e8` (ci), `2658f31` (docs), `75a3ce2` (test fix) and this plan update; PR #122 against `main` (`Closes #120`, `Part of #88`).
 
 ## Sweep list (step 4 of #120) — fixed vs listed
 
@@ -129,4 +129,6 @@ https://github.com/moisesja/didcomm-dotnet/actions/runs/43882021940
   - The second suspect is `MediatorClientTimeoutRaceTests.When_the_deadline_fired_and_the_caller_cancelled…:230`. Under the same forced starvation it **passes** (24 ms): at that moment the caller's token has no callbacks for CancelAsync to defer. Left unchanged.
   - `DeliveredUnpackFix3Tests:119` is a hang guard only (its host code waits on a TCS or on its token, on a manual clock). Left unchanged.
 
-**Windows leg of `ci.yml`.** These majors are proven only by the PR's own CI run; that result is recorded in the PR thread. Upstream, checkout v7.0.1 includes the fix for v7.0.0's Windows credential-path cleanup bug (actions/checkout#2528).
+**Windows leg of `ci.yml`.** The new majors ran on `windows-2025-vs2026` in both PR CI runs. The checkout and its post-job credential cleanup worked, and so did the submodule and the artifact upload. Upstream, checkout v7.0.1 includes the fix for v7.0.0's Windows credential-path cleanup bug (actions/checkout#2528).
+
+**Live interop on the code head `75a3ce2`.** Run 43888459643 is green. Its per-cell `summary.md`, below the header, is byte-identical to 43882021940's. A first dispatch on `2658f31` (43883317735) stayed "queued" with no jobs for over 30 minutes, during a GitHub incident; `gh run cancel` answered that it was already completed. It never ran, so it is not evidence either way.
