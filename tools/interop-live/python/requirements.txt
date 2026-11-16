@@ -1,7 +1,9 @@
 # Pinned counterpart stack for the python leg of the live interop harness (FR-IX-04/05).
 # didcomm is sicpa-dlab/didcomm-python (the reference implementation the PRD names in S13.2);
 # everything below it is its transitive closure, frozen so the nightly run is reproducible.
-# Validated on CPython 3.9 (macOS arm64 + ubuntu-latest x86_64).
+# Imports only on CPython 3.9-3.12 (pydantic 1.9.2 breaks at import on 3.13+). Validated on
+# CPython 3.12: macOS arm64 locally, and Ubuntu 26.04 x86_64 in the nightly (3.12.16, run
+# 43882021940). Every pin installs from a wheel except varint, which builds from its sdist.
 didcomm==0.3.2
 Authlib==1.6.12
 attrs==22.2.0

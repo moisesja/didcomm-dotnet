@@ -355,7 +355,7 @@ ones plus this cell.
 
 | Stack | Pin |
 |---|---|
-| didcomm-python | `didcomm==0.3.2` + full transitive freeze in `python/requirements.txt`; CPython 3.9 on CI. The stack imports only on CPython 3.9–3.12: its pydantic 1.9.2 (pydantic v1) breaks `import didcomm` on 3.13 (`TypeError: multiple bases have instance lay-out conflict`) and 3.14 (`ConfigError: unable to infer type for attribute "accept"`), and Authlib 1.6.12 needs 3.9+. The leg checks the interpreter first and exits 2 outside that range. |
+| didcomm-python | `didcomm==0.3.2` + full transitive freeze in `python/requirements.txt`; CPython 3.12 on CI. The stack imports only on CPython 3.9–3.12: its pydantic 1.9.2 (pydantic v1) breaks `import didcomm` on 3.13 (`TypeError: multiple bases have instance lay-out conflict`) and 3.14 (`ConfigError: unable to infer type for attribute "accept"`), and Authlib 1.6.12 needs 3.9+. The leg checks the interpreter first and exits 2 outside that range. CI runs the newest interpreter in that range; it is a stopgap that lasts while the runner image has a 3.12 build (3.12 reaches end of life in 2028-10). The lasting fix is a counterpart stack that is off pydantic v1. |
 | didcomm-jvm | `org.didcommx:didcomm:0.3.2`, `tink:1.6.1`, `protobuf-java:3.14.0`, `gson:2.8.6`, `varint:1.0.0`, `kotlin-stdlib:1.9.24` — each SHA-256-pinned in `jvm/fetch-deps.sh`; Temurin 17 on CI (validated on 25 locally) |
 | didcomm-dotnet | whatever the checkout builds (`tools/InteropCli`, Release) |
 
@@ -379,6 +379,15 @@ an executed / passed / failed / declared-n-a tally, so a reader can tell coverag
 `interop-live.yml` runs on `schedule` (nightly 03:17 UTC), `workflow_dispatch`, and
 `release: published`; it uploads `summary.md` + per-leg tables as the `live-interop-summary`
 artifact and fails on any FAIL cell. The python-leg results above were executed locally on
-macOS arm64 / CPython 3.12.7; the nightly additionally proves the same matrix on
-ubuntu-latest with CPython 3.9 and Temurin 17 — the pinned stacks are platform-independent
-pure wheels/jars, so no divergence is expected, but that run is the remaining unproven claim.
+macOS arm64 / CPython 3.12.7. The nightly proves the same matrix on `ubuntu-latest` (Ubuntu
+26.04 since 2026-11-08) with CPython 3.12 and Temurin 17. The workflow hands the leg the exact
+interpreter `setup-python` installed (`PYTHON`), and the leg logs the CPython version it ran on.
+First green run there: 43882021940 (2026-11-16, CPython 3.12.16, Temurin 17.0.21): python leg
+63 executed · 63 passed · 0 n/a, jvm leg 60 executed · 60 passed · 3 n/a, the same cells as the
+last 3.9 run (2026-11-07) plus the #95 mediator cell in each leg.
+
+The nightly stopped on 2026-11-08, when `ubuntu-latest` moved to Ubuntu 26.04: that image has
+no CPython 3.9 build, so `setup-python` failed before any test ran (#120). A move of the
+floating runner image can drop an interpreter again, and the nightly then fails in its setup
+steps. The fix is an interpreter the image still builds inside the 3.9–3.12 window or, once
+none is left, a counterpart stack off pydantic v1; never a skipped leg.

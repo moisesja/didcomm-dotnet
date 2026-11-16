@@ -19,14 +19,14 @@ Stops (hand back, don't patch): a FAIL cell that traces to our code (a regressio
 ## Checklist
 
 ### 1. Interpreter fix
-- [ ] `interop-live.yml`: `python-version: '3.9'` → `'3.12'`, comment says why 3.12 (newest in the 3.9–3.12 window the harness accepts; upstream support to 2028-10) and that 3.13+ cannot work (pydantic v1).
-- [ ] `interop-live.yml`: give the setup step an `id` and pass its `python-path` output to the harness step as `PYTHON` (step-level `env:`), so the leg seeds its venv from exactly the interpreter the workflow installed, not whatever `python3` is first on `PATH` (Ubuntu 26.04 ships a newer system Python; the guard would stop it with exit 2, but the binding should be explicit). Architect: keep. Nothing else in the harness calls `python3` (the jvm leg has no Python; the peer and pip run from `$VENV/bin`).
-- [ ] `run-python-leg.sh`: print the venv interpreter's version next to the existing `didcomm-python:` stderr line, so the leg's log names the CPython patch it ran on (evidence only; the guard is unchanged). QA trap (architect): `${PYTHON:-python3}` treats an empty value as unset, so a mistyped step id would silently fall back to `python3`. Check the step's `env:` block in the log shows `/opt/hostedtoolcache/Python/3.12.*/x64/bin/python`.
-- [ ] YAML comment + README: 3.12 is a stopgap. The same failure returns when `ubuntu-latest` moves to an image with no 3.12 build (3.12 is end-of-life 2028-10); the lasting fix is a counterpart stack off pydantic v1 (not in #120's scope).
-- [ ] Harness guard (`run-python-leg.sh`, 3.9–3.12) unchanged.
-- [ ] (after the green live run, citing its id — architect) `tools/interop-live/python/requirements.txt` header: "Validated on CPython 3.12 (macOS arm64 + Ubuntu 26.04 x86_64 in CI); imports on 3.9–3.12".
-- [ ] `tools/interop-live/README.md`: Pinned versions row ("CPython 3.12 on CI") and CI cadence note (ubuntu-latest = 26.04, CPython 3.12, Temurin 17; the "remaining unproven claim" sentence updated with the run that proves it).
-- [ ] No pin moves unless the live run forces one (stop and report first).
+- [x] `interop-live.yml`: `python-version: '3.9'` → `'3.12'`, comment says why 3.12 (newest in the 3.9–3.12 window the harness accepts; upstream support to 2028-10) and that 3.13+ cannot work (pydantic v1).
+- [x] `interop-live.yml`: give the setup step an `id` and pass its `python-path` output to the harness step as `PYTHON` (step-level `env:`), so the leg seeds its venv from exactly the interpreter the workflow installed, not whatever `python3` is first on `PATH` (Ubuntu 26.04 ships a newer system Python; the guard would stop it with exit 2, but the binding should be explicit). Architect: keep. Nothing else in the harness calls `python3` (the jvm leg has no Python; the peer and pip run from `$VENV/bin`).
+- [x] `run-python-leg.sh`: print the venv interpreter's version next to the existing `didcomm-python:` stderr line, so the leg's log names the CPython patch it ran on (evidence only; the guard is unchanged). QA trap (architect): `${PYTHON:-python3}` treats an empty value as unset, so a mistyped step id would silently fall back to `python3`. Check the step's `env:` block in the log shows `/opt/hostedtoolcache/Python/3.12.*/x64/bin/python`.
+- [x] YAML comment + README: 3.12 is a stopgap. The same failure returns when `ubuntu-latest` moves to an image with no 3.12 build (3.12 is end-of-life 2028-10); the lasting fix is a counterpart stack off pydantic v1 (not in #120's scope).
+- [x] Harness guard (`run-python-leg.sh`, 3.9–3.12) unchanged.
+- [x] (after the green live run, citing its id — architect) `tools/interop-live/python/requirements.txt` header: "Validated on CPython 3.12 (macOS arm64 + Ubuntu 26.04 x86_64 in CI); imports on 3.9–3.12".
+- [x] `tools/interop-live/README.md`: Pinned versions row ("CPython 3.12 on CI") and CI cadence note (ubuntu-latest = 26.04, CPython 3.12, Temurin 17; the "remaining unproven claim" sentence updated with the run that proves it).
+- [x] No pin moves unless the live run forces one (stop and report first).
 
 ### 2. Node 20 sweep (same shape: a pinned version the runners are dropping)
 Verified with `gh api` (tag ref exists; `runs.using` in `action.yml` at that tag):
@@ -39,27 +39,27 @@ Verified with `gh api` (tag ref exists; `runs.using` in `action.yml` at that tag
 | `actions/setup-java` | v4 | node20 | **v6** (v6.3.0) | node24 | v4 itself warns "deprecated … migrate to v5"; v6 changes Zulu/Maven paths, renames `jdkFile`→`jdk-file` (unused), and added a javac problem matcher that v6.3.0 made opt-in (so no `InteropPeer.java` annotations expected). We use Temurin, no cache. |
 | `actions/upload-artifact` | v4 | node20 | **v7** (v7.0.2) | node24 | v5 still node20; v6 node24; v7 adds opt-in `archive: false` (default unchanged: zipped). |
 
-- [ ] `interop-live.yml`: all five bumped.
-- [ ] `ci.yml`: `checkout`, `setup-dotnet`, `upload-artifact` bumped (the PR's own CI run proves them on ubuntu and windows).
-- [ ] `release.yml`: **no change** (only a real release proves it). Recommendation listed below.
+- [x] `interop-live.yml`: all five bumped.
+- [x] `ci.yml`: `checkout`, `setup-dotnet`, `upload-artifact` bumped (the PR's own CI run proves them on ubuntu and windows).
+- [x] `release.yml`: **no change** (only a real release proves it). Recommendation listed below.
 
 ### 3. QA
-- [ ] Negative control: `PYTHON=python3.14 bash tools/interop-live/run-python-leg.sh` exits 2 before installing anything; `PYTHON=/nonexistent` exits 2 ("not runnable").
-- [ ] `actionlint`-style check of the YAML (parse + `gh workflow view` after push).
-- [ ] First full harness run on 26.04 (the failing runs stopped before Setup Java): both legs ran; jvm leg 60 executed / 3 n/a; `fetch-deps.sh` SHA-256 checks pass under 26.04's coreutils.
-- [ ] Live run from the branch: `gh workflow run interop-live.yml --ref fix/live-interop-python-120`; record run URL, image, CPython patch, per-cell summary; compare against the 2026-11-07 baseline (every FAIL is a finding; N-A must match).
-- [ ] Log of the live run shows no "Node.js 20 is deprecated" annotation.
+- [x] Negative control: `PYTHON=python3.14 bash tools/interop-live/run-python-leg.sh` exits 2 before installing anything; `PYTHON=/nonexistent` exits 2 ("not runnable").
+- [x] YAML check: both workflows parse (Ruby `YAML.load_file`; steps, ids, `uses:` and env listed as intended); `setup-python@v7` declares the `python-path` output. No `actionlint` installed locally; the dispatched run is the end-to-end check.
+- [x] First full harness run on 26.04 (the failing runs stopped before Setup Java): both legs ran; jvm leg 60 executed / 3 n/a; `fetch-deps.sh` SHA-256 checks pass under 26.04's coreutils.
+- [x] Live run from the branch: `gh workflow run interop-live.yml --ref fix/live-interop-python-120`; record run URL, image, CPython patch, per-cell summary; compare against the 2026-11-07 baseline (every FAIL is a finding; N-A must match).
+- [x] Log of the live run shows no "Node.js 20 is deprecated" annotation.
 - [ ] Ordinary CI green on the PR head (ubuntu + windows), no Node 20 annotation.
 
 ### 4. Adversarial pass (one short review of the workflow diff)
-- [ ] Supply chain: each `uses:` ref is an existing tag of the right repo (re-verify with `gh api`), and the same tag style as before.
-- [ ] `permissions`: unchanged (`contents: read`), nothing new requested.
-- [ ] `release.yml`'s publish path: byte-unchanged.
-- [ ] The `PYTHON` env binding cannot be steered by untrusted input (it is an action output, not event data).
-- [ ] The artifact upload path stays `${{ runner.temp }}/interop-summary/` (checkout v6+ writes its credentials file under `$RUNNER_TEMP`).
+- [x] Supply chain: each `uses:` ref is an existing tag of the right repo (re-verify with `gh api`), and the same tag style as before.
+- [x] `permissions`: unchanged (`contents: read`), nothing new requested.
+- [x] `release.yml`'s publish path: byte-unchanged.
+- [x] The `PYTHON` env binding cannot be steered by untrusted input (it is an action output, not event data).
+- [x] The artifact upload path stays `${{ runner.temp }}/interop-summary/` (checkout v6+ writes its credentials file under `$RUNNER_TEMP`).
 
 ### 5. Docs, PR
-- [ ] CHANGELOG entry under `[Unreleased]`.
+- [x] CHANGELOG entry under `[Unreleased]`.
 - [ ] Commit(s) `ci(interop): … (#120)`; push; PR against `main` (`Closes #120`, `Part of #88`), summary, live-run URL + per-cell summary, N-A comparison, sweep list.
 
 ## Sweep list (step 4 of #120) — fixed vs listed
@@ -80,4 +80,36 @@ Listed for the owner, not changed:
 
 ## Review
 
-(filled in at the end)
+**Result.** Live interop run **43882021940** from `2f886e8` on this branch is green:
+https://github.com/moisesja/didcomm-dotnet/actions/runs/43882021940
+
+- **Image and tools.** Ubuntu 26.04 (`ubuntu26/20261111.196`), CPython **3.12.16** (from the tool cache), Temurin **17.0.21**, SDK 10.0.404.
+- **Interpreter binding.** The harness step's env shows `PYTHON: /opt/hostedtoolcache/Python/3.12.16/x64/bin/python`, and the leg logs `python: CPython 3.12.16 from /opt/hostedtoolcache/Python/3.12.16/x64`, so the venv came from the interpreter the workflow installed, not a `python3` fallback.
+- **python leg:** 63 executed · 63 passed · 0 failed · 0 n/a.
+- **jvm leg:** 60 executed · 60 passed · 0 failed · 3 n/a.
+- **Annotations.** Only the `ubuntu-latest` migration notice. No "Node.js 20 is deprecated" warning, and no javac problem-matcher annotations.
+
+**Compared with the last green run** (42363748989, 2026-11-07, `d8a100c`, Ubuntu 24.04, CPython 3.9.25), I diffed `summary.md` below its header:
+- Every cell has the same result.
+- The N-A cells are the same three on the JVM side: outbound and inbound `signed ES256K` and vector `signed-es256k`.
+- The only additions are one row per leg, "authcrypt via a running dotnet mediator (pickup)", PASS. #95 added them after 11-07.
+- So there is no FAIL cell and no regression since 2026-11-07, which covers #95, #96, #113 and #119.
+
+**Negative control.** The interpreter guard is unchanged and still bites. Each case exits **2** before creating a venv (the work dir stays empty):
+- `PYTHON=python3.14`;
+- `PYTHON=/nonexistent/python` ("not runnable");
+- an empty `PYTHON`, which falls back to `python3`, 3.14 on this Mac. This is the architect's trap: a mistyped step id would fall back the same way. The run log's env line above shows that did not happen.
+
+**First failure date.** The issue says 2026-11-10, but the first failing nightly is 2026-11-08 (42471799819), then 11-09 (42611473329), all with the same "3.9 … not found for Ubuntu 26.04" error.
+
+**Adversarial pass** (one reviewer, read-only): no security or correctness blockers.
+- **Supply chain.** Every ref is in `actions/*`, in the existing floating-major style, and is the newest release of its major: checkout v7.0.1 `3d3c42e`, setup-dotnet v6.1.0 `0f4a354`, setup-python v7.1.0 `6d4fd22`, setup-java v6.3.0 `d1374f8`, upload-artifact v7.0.2 `cf430e0`. Each declares node24.
+- **Permissions.** `permissions` is unchanged.
+- **Credentials file.** In the run, checkout's credentials file sits at `_temp/git-credentials-<uuid>.config`, a sibling of the uploaded `_temp/interop-summary/`, so the upload cannot pick it up.
+- **Injection.** `PYTHON` comes from an action output, not from event data.
+- **`release.yml`.** Byte-unchanged.
+- **The new echo line** cannot abort the leg under `set -euo pipefail`.
+- **Its only hold was the docs and CHANGELOG** (done in the docs commit).
+- **One note for the owner.** A `release: published` live run uses the workflow at the released tag. A tag cut before this merge (for example 1.6.0, if it were cut from an older commit) would still ask for 3.9 and fail. Cut releases after this merges.
+
+**Windows leg of `ci.yml`.** These majors are proven only by the PR's own CI run; that result is recorded in the PR thread. Upstream, checkout v7.0.1 includes the fix for v7.0.0's Windows credential-path cleanup bug (actions/checkout#2528).
