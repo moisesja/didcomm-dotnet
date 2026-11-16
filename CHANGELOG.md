@@ -45,6 +45,11 @@ an identity or crashed, and the recipient client's live stream showed no defect.
   when two advances overlap, report how many timers an advance fired, and can wait for a specific
   timer; `MeasurementRecorder.WaitForAsync`; `MediatorPushGates` (a gated server WebSocket and a
   lease-parking store); an opt-in `GoLiveAsync(…, waitForLiveOnWakeUp: true)`.
+- **One internal test seam, no behaviour change.** `PushDispatcher` (internal) gained an internal
+  constructor taking its shutdown grace (`null` = the unchanged 5 s default, as `ForwardHandler` and
+  `ObserverDelivery` already do), so the disposal test can run with no grace and prove that disposing
+  the container does not wait for a live push that ignores its cancellation. `AddMediator()` and
+  every public surface are unchanged.
 - **Docs.** The channel's cancellation-versus-deadline rule is stated once, identically, in code and
   in `docs/codebase-architecture.md`: the caller's cancellation wins when it was requested before the
   call ended without an answer, even if the deadline fired first; one requested after that changes
