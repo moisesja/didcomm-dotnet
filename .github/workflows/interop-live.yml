@@ -23,27 +23,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: true # didcomm-dotnet-fixtures (PRD §13.3)
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
 
+      # CPython 3.12: the newest interpreter the pinned didcomm==0.3.2 stack imports on (its
+      # pydantic v1 breaks at import on 3.13+; run-python-leg.sh exits 2 outside 3.9-3.12).
+      # 3.9 was dropped: ubuntu-latest is Ubuntu 26.04, which has no 3.9 build (#120). 3.12 is
+      # itself a stopgap: it lasts while the runner image has a 3.12 build (upstream end of
+      # life 2028-10); the lasting fix is a counterpart stack off pydantic v1.
       - name: Setup Python (python leg counterpart)
-        uses: actions/setup-python@v5
+        id: setup-python
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.9' # the interpreter the pinned didcomm==0.3.2 stack is validated on
+          python-version: '3.12'
 
       - name: Setup Java (jvm leg counterpart)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17' # didcomm-jvm 0.3.2 targets 8; validated on 17 (CI) and 25 (local)
 
       - name: Run live interop harness
+        env:
+          # Seed the python leg's venv from exactly the interpreter installed above, not from
+          # whichever python3 is first on PATH (the image ships a newer system Python).
+          PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: |
           export INTEROP_SUMMARY_DIR="$RUNNER_TEMP/interop-summary"
           set +e
@@ -54,7 +64,7 @@ jobs:
 
       - name: Upload summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-interop-summary
           path: ${{ runner.temp }}/interop-summary/

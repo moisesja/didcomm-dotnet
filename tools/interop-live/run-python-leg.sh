@@ -71,6 +71,7 @@ if [ ! -x "$VENV/bin/python" ]; then
         -r "$SCRIPT_DIR/python/requirements.txt"
 fi
 PEER=("$VENV/bin/python" "$SCRIPT_DIR/python/interop_peer.py")
+echo "python: $("$VENV/bin/python" -c 'import platform, sys; print(platform.python_implementation(), platform.python_version(), "from", sys.base_prefix)')" >&2
 echo "didcomm-python: $("$VENV/bin/pip" show didcomm | grep -i ^version)" >&2
 
 # ── didcomm-dotnet CLI ────────────────────────────────────────────────────────────────────
