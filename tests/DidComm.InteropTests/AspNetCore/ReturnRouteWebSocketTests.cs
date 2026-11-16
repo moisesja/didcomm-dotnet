@@ -431,13 +431,13 @@ public sealed class ReturnRouteWebSocketTests
         using var socket = await host.ConnectAsync();
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.ActiveWebSocketConnections == 1, Timeout)).Should().BeTrue();
 
-        var started = DateTime.UtcNow;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119): a sleep or NTP step moves the wall clock only
         await socket.SendAsync(new byte[4096], WebSocketMessageType.Binary, endOfMessage: true, default);
 
         // The peer neither reads the 1009 close frame nor answers it.
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 1, WebSocketReturnRouteSessionGrace + Timeout))
             .Should().BeTrue("the final close handshake is bounded by the close grace and then aborted");
-        (DateTime.UtcNow - started).Should().BeLessThan(WebSocketReturnRouteSessionGrace + TimeSpan.FromSeconds(3));
+        System.Diagnostics.Stopwatch.GetElapsedTime(started).Should().BeLessThan(WebSocketReturnRouteSessionGrace + TimeSpan.FromSeconds(3));
         host.Registry.Count.Should().Be(0);
         host.LeakingLogLines().Should().BeEmpty();
     }
@@ -929,8 +929,8 @@ public sealed class ReturnRouteWebSocketTests
             var session = context.Session!;
             pusher = Task.Run(async () =>
             {
-                var deadline = DateTime.UtcNow + Timeout;
-                for (var seq = 0; DateTime.UtcNow < deadline; seq++)
+                var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
+                for (var seq = 0; System.Diagnostics.Stopwatch.GetElapsedTime(started) < Timeout; seq++)
                 {
                     var closedBefore = session.Closed.IsCancellationRequested;
                     var ok = await session.TrySendAsync(PushTo(host, host.Alice.Did, "bg-" + seq, message.Id), CancellationToken.None);

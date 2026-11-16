@@ -234,7 +234,7 @@ public sealed class LivePushDispatcherTests
         fixture.Dispatcher.Wake((await world.StoreAsync(grant)).GrantPeerDid).Should().BeTrue();
         await gate.WaitForArrivalsAsync(1, Wait);
 
-        fixture.Invoking(f => f.Time.Advance(PushTimeout)).Should().NotThrow("the deadline's callback cancels inside a try");
+        fixture.Invoking(f => { f.Time.Advance(PushTimeout); }).Should().NotThrow("the deadline's callback cancels inside a try");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
@@ -349,6 +349,34 @@ public sealed class LivePushDispatcherTests
     // ---- shutdown --------------------------------------------------------------------------------------
 
     [Fact]
+    public async Task The_shutdown_grace_is_five_seconds_unless_a_test_sets_another_and_a_non_positive_one_is_refused()
+    {
+        await using var fixture = PushFixture.Create();
+        fixture.Dispatcher.ShutdownGrace.Should().Be(TimeSpan.FromSeconds(5), "AddMediator() keeps the default");
+        foreach (var refused in new[] { TimeSpan.Zero, TimeSpan.FromTicks(-1), TimeSpan.FromSeconds(-5) })
+        {
+            FluentActions.Invoking(() => NewDispatcher(fixture, refused)).Should().Throw<ArgumentOutOfRangeException>()
+                .Which.ParamName.Should().Be("shutdownGrace");
+        }
+        foreach (var accepted in new[] { TimeSpan.FromTicks(1), Timeout.InfiniteTimeSpan })
+        {
+            await using var dispatcher = NewDispatcher(fixture, accepted);
+            dispatcher.ShutdownGrace.Should().Be(accepted);
+        }
+        await using (var defaulted = NewDispatcher(fixture, null))
+            defaulted.ShutdownGrace.Should().Be(TimeSpan.FromSeconds(5));
+
+        static PushDispatcher NewDispatcher(PushFixture fixture, TimeSpan? grace)
+            => new(
+                fixture.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MediatorOptions>>(),
+                fixture.Queue,
+                fixture.Services.GetRequiredService<MediatorMetrics>(),
+                logger: null,
+                fixture.Time,
+                grace);
+    }
+
+    [Fact]
     public async Task Disposing_while_a_push_holds_a_throwing_cancellation_callback_neither_throws_nor_loses_a_message()
     {
         var gate = new PushGate();
@@ -369,13 +397,16 @@ public sealed class LivePushDispatcherTests
 
         dispatcher.Invoking(d => d.Dispose()).Should().NotThrow("the shutdown cancels inside a try");
         await dispatcher.WaitForIdleAsync(Wait);
-        await MessagePickupLive.UntilAsync(() => dispatcher.Unsettled == 0, "the cancelled push settled");
 
         // L-020 (PR #109 review round 2, D-2): the two wake-ups during the push coalesced into one held
         // wake-up; the push in flight and that wake-up each end once (Push-Skipped-Shutdown), not one
-        // outcome per message; every message stays queued.
-        fixture.PushOutcomeLog.Should().HaveCount(2).And.OnlyContain(o => o == PushOutcomes.SkippedShutdown);
+        // outcome per message; every message stays queued. #119: wait for the held wake-up's record,
+        // not for Unsettled == 0 — settling lowers that counter under its lock and records after it.
+        (await fixture.WaitForPushOutcomesAsync(2, Wait)).Should().HaveCount(2).And.OnlyContain(o => o == PushOutcomes.SkippedShutdown);
+        dispatcher.Unsettled.Should().Be(0, "the cancelled push settled before its held wake-up was counted");
         fixture.Store.MessageCount.Should().Be(3, "the push in flight was cancelled; all stay queued");
+        // The cancelled send gave its lease back before its work ended; the held wake-up is counted after that.
+        (await PickupFromAsync(fixture.Store, grant.Peer, fixture.Options.Now())).Should().HaveCount(3, "every message can be picked up");
         LivePushWorld.Deliveries(session).Should().BeEmpty();
         dispatcher.Wake((await world.StoreAsync(grant, 9)).GrantPeerDid).Should().BeFalse();
         fixture.Pushes(PushOutcomes.SkippedShutdown).Should().Be(3);

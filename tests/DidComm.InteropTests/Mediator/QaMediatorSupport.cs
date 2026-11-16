@@ -139,6 +139,8 @@ internal static class Qa
 /// <summary>
 /// A <see cref="TimeProvider"/> the test moves by hand (a copy of the one in <c>DidComm.Mediator.Tests</c>,
 /// which this project cannot see). Timers fire only from <see cref="Advance"/>, on the calling thread.
+/// The clock never goes back, even when an <see cref="Advance"/> made from a timer callback or from
+/// another thread finishes before the one that started first (#119).
 /// </summary>
 internal sealed class QaManualTimeProvider : TimeProvider
 {
@@ -146,6 +148,7 @@ internal sealed class QaManualTimeProvider : TimeProvider
     private readonly List<ManualTimer> _timers = new();
     private TaskCompletionSource _timerChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DateTimeOffset _now;
+    private int _timersFired;
 
     public QaManualTimeProvider(DateTimeOffset? start = null)
         => _now = start ?? new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero);
@@ -173,6 +176,39 @@ internal sealed class QaManualTimeProvider : TimeProvider
         }
     }
 
+    /// <summary>How many timer firings <see cref="Advance"/> has made so far (a periodic timer counts once per firing).</summary>
+    public int TimersFired
+    {
+        get
+        {
+            lock (_gate)
+                return _timersFired;
+        }
+    }
+
+    /// <summary>
+    /// Whether exactly one timer is scheduled and it is due exactly <paramref name="dueIn"/> from now:
+    /// for a test that must know which timer its next <see cref="Advance"/> fires (for example a live
+    /// stream parked on its next cycle, with no request deadline pending).
+    /// </summary>
+    /// <param name="dueIn">How long from now the only scheduled timer must be due.</param>
+    public bool HasOnlyTimerDueIn(TimeSpan dueIn)
+    {
+        lock (_gate)
+        {
+            ManualTimer? only = null;
+            foreach (var timer in _timers)
+            {
+                if (timer.DueAt is null)
+                    continue;
+                if (only is not null)
+                    return false;
+                only = timer;
+            }
+            return only is not null && only.DueAt == _now + dueIn;
+        }
+    }
+
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
         var timer = new ManualTimer(this, callback, state);
@@ -196,6 +232,13 @@ internal sealed class QaManualTimeProvider : TimeProvider
         }
     }
 
+    /// <summary>
+    /// Move the clock <paramref name="by"/> forward from its reading now and fire every timer that came
+    /// due, in due order. The clock ends at the later of that target and its reading then: an
+    /// <see cref="Advance"/> made meanwhile (from a timer callback, or from another thread) that went
+    /// further is never stepped back.
+    /// </summary>
+    /// <param name="by">How far to move the clock; not negative.</param>
     public void Advance(TimeSpan by)
     {
         if (by < TimeSpan.Zero)
@@ -212,11 +255,12 @@ internal sealed class QaManualTimeProvider : TimeProvider
                 next = _timers.Where(t => t.DueAt is { } due && due <= target).OrderBy(t => t.DueAt).FirstOrDefault();
                 if (next is null)
                 {
-                    _now = target;
+                    _now = target > _now ? target : _now;
                     return;
                 }
                 _now = next.DueAt!.Value > _now ? next.DueAt.Value : _now;
                 next.DueAt = next.Period is { } period ? next.DueAt + period : null;
+                _timersFired++;
             }
             next.Fire();
         }

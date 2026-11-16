@@ -31,7 +31,13 @@ public sealed class MediatorLivePushAdv4Tests
         // L-020 (ADV-4 D1): this test asserted the defect — sixteen pushed, four refused by the
         // 16-job share (Push-Skipped-Saturated) and left for pickup. The share is now the queue's
         // per-grant quota, so all twenty are pushed, in order, and nothing is left to fetch.
-        var (mediator, keys) = await StartAsync(honourCancellation: true);
+        // #119: the session itself has room for the whole burst. With the default 16 push slots, a
+        // writer that lags 16 frames behind the back-to-back pushes (CPU load) makes the session refuse
+        // the 17th (Push-Failed; the documented design then leaves the rest queued until the grant's
+        // next wake-up or a pickup), which is the session's slot bound — the subject of
+        // MediatorDeliveryModesQaTests' stopped-reader test — not this test's.
+        const int Burst = 20;
+        var (mediator, keys) = await StartAsync(honourCancellation: true, mediatorOptions: m => m.Sessions.MaxPendingPushes = Burst);
         await using var _ = mediator;
         var bob = await mediator.NewPeerAsync();
         var a = await mediator.NewRecipientAsync();
@@ -42,22 +48,22 @@ public sealed class MediatorLivePushAdv4Tests
         keys.Pause(bob.Did);
 
         var notes = new List<Message>();
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < Burst; i++)
             notes.Add(await Qa.SendNoteAsync(mediator, alice, a, content: "burst " + i));
         await MediatorTestServer.WaitUntilAsync(() => keys.Arrivals >= 1, "the first push is packing");
         mediator.PushOutcome(PushOutcomes.SkippedSaturated).Should().Be(0, "the grant's share of the backlog is its queue quota");
         keys.Release();
 
         // All twenty, in arrival order, over the live connection.
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < Burst; i++)
         {
             var pushed = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
             (await MediatorRecipient.UnpackFromSenderAsync(a, pushed.Payload, alice)).Message.Id.Should().Be(notes[i].Id);
         }
         await mediator.PushesIdleAsync();
-        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(20);
-        mediator.PushOutcomes.Should().HaveCount(20, "one outcome per handed-over message");
-        mediator.Outcomes.Should().HaveCount(20).And.OnlyContain(o => o == ForwardOutcomes.Queued);
+        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(Burst);
+        mediator.PushOutcomes.Should().HaveCount(Burst, "one outcome per handed-over message: with room for the burst no push is refused");
+        mediator.Outcomes.Should().HaveCount(Burst).And.OnlyContain(o => o == ForwardOutcomes.Queued);
 
         // Nothing is left for pickup: every message is leased to the live session until acknowledged.
         (await mediator.FetchAsync(bob)).Should().BeEmpty();
@@ -73,7 +79,10 @@ public sealed class MediatorLivePushAdv4Tests
     public async Task Every_message_that_arrives_while_live_delivery_is_on_reaches_the_live_connection()
     {
         // Pickup 3.0, recipient mode 2: fetch the queue, turn live mode on, then rely on live delivery.
-        var (mediator, keys) = await StartAsync(honourCancellation: true);
+        // #119: the session has room for the whole burst (see the burst test above): a session whose
+        // push slots are full refuses a push, and that bound is MediatorDeliveryModesQaTests' subject.
+        const int Burst = 20;
+        var (mediator, keys) = await StartAsync(honourCancellation: true, mediatorOptions: m => m.Sessions.MaxPendingPushes = Burst);
         await using var _ = mediator;
         var bob = await mediator.NewPeerAsync();
         var a = await mediator.NewRecipientAsync();
@@ -84,13 +93,13 @@ public sealed class MediatorLivePushAdv4Tests
         keys.Pause(bob.Did);
 
         var notes = new List<Message>();
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < Burst; i++)
             notes.Add(await Qa.SendNoteAsync(mediator, alice, a, content: "burst " + i));
         await MediatorTestServer.WaitUntilAsync(() => keys.Arrivals >= 1, "the first push is packing");
         keys.Release();
 
         var received = new List<string>();
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < Burst; i++)
         {
             var pushed = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery(thid: null).Should().ContainSingle().Subject;
             received.Add((await MediatorRecipient.UnpackFromSenderAsync(a, pushed.Payload, alice)).Message.Id);
@@ -336,7 +345,9 @@ public sealed class MediatorLivePushAdv4Tests
         await mediator.EnrolAsync(bob, a.Did);
         var alice = await mediator.NewSenderAsync();
         using var socket = await mediator.ConnectAsync();
-        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob);
+        // The live-on wake-up is served first (#119): still running, it could take the note while the
+        // note's own wake-up is held, and that wake-up would settle as Push-Skipped-Cooldown.
+        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, bob, waitForLiveOnWakeUp: true);
         keys.Pause(bob.Did);
 
         var note = await Qa.SendNoteAsync(mediator, alice, a, content: "abandoned");
@@ -376,7 +387,10 @@ public sealed class MediatorLivePushAdv4Tests
         var recipient = await mediator.NewRecipientAsync();
         await mediator.EnrolAsync(peer, recipient.Did);
         var socket = await mediator.ConnectAsync();
-        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, peer);
+        // The live-on wake-up is served before the grant is used (#119): a later note taken by a
+        // still-running live-on operation would leave the note's own wake-up held, and at a deadline
+        // that wake-up settles as one more Push-Skipped-Cooldown.
+        await MediatorDeliveryModesQaTests.GoLiveAsync(mediator, socket, peer, waitForLiveOnWakeUp: true);
         return (new LiveGrant(peer, recipient), socket);
     }
 

@@ -332,6 +332,9 @@ public sealed class LivePushAdv4Tests
         }
 
         Volatile.Read(ref maxPending).Should().Be(1, "one operation per grant until its work has ended: the abandoned send is never joined by another");
+        // #119: the healthy grant's last operation settles after its delivery (it records, looks for
+        // more and only then settles); idle means it has.
+        await world.Fixture.Dispatcher.WaitForIdleAsync(Wait); // a hang guard only
         world.Fixture.Dispatcher.Unsettled.Should().Be(1, "and the dispatcher still counts it");
         LivePushWorld.Deliveries(healthy).Should().HaveCount(Cycles);
         (await world.StatusAsync(a.Peer)).Should().Be(0, "every message of the stalled recipient was picked up and acknowledged");
@@ -497,7 +500,9 @@ public sealed class LivePushAdv4Tests
     [Fact]
     public async Task Disposing_the_container_while_a_live_push_ignores_its_cancellation_returns_promptly_and_loses_nothing()
     {
-        var world = await LivePushWorld.StartAsync();
+        // #119 (PR #121 review): the dispatcher waits for its workers without a bound, so disposing
+        // can return within the hang guard below only if it does not wait for the abandoned send.
+        var world = await LivePushWorld.StartAsync(services: s => PushFixture.UseShutdownGrace(s, Timeout.InfiniteTimeSpan));
         try
         {
             var a = await world.GrantAsync("a");
@@ -512,12 +517,20 @@ public sealed class LivePushAdv4Tests
             var store = world.Fixture.Store;
             var outcomes = world.Fixture.Recorder;
             var dispatcher = world.Fixture.Dispatcher;
+            dispatcher.ShutdownGrace.Should().Be(Timeout.InfiniteTimeSpan, "the container's (and the sink's) dispatcher is the one built here");
 
             await world.ForwardAsync(a.Recipient, 1);
             await entered.Task.WaitAsync(Wait);
             await world.ForwardAsync(a.Recipient, 2);
-            await world.Fixture.Services.DisposeAsync().AsTask().WaitAsync(Wait);
+            // Promptly: with no grace to give up after, this returns only once the workers stopped,
+            // and they stop without waiting for the send that ignores its cancellation.
+            await world.Fixture.Services.DisposeAsync().AsTask().WaitAsync(Wait); // the bound is a hang guard only
 
+            (await world.Fixture.WaitForPushOutcomesAsync(1, Wait)).Should().Equal(PushOutcomes.SkippedShutdown);
+            // And the worker let go of the grant while the send it abandoned still runs.
+            await dispatcher.WaitForIdleAsync(Wait); // a hang guard only
+            dispatcher.Unsettled.Should().Be(1, "the abandoned send has not ended, yet the worker is done with it");
+            release.Task.IsCompleted.Should().BeFalse("the send is released only below");
             // L-020 (PR #109 review round 2, D-2/D-3): the second forward's wake-up waits behind the
             // push in flight (its grant is busy until that push settles), so it is counted when the
             // abandoned push ends, not at the shutdown.
@@ -525,16 +538,15 @@ public sealed class LivePushAdv4Tests
                 .Should().Equal(PushOutcomes.SkippedShutdown);
             store.MessageCount.Should().Be(2, "nothing is lost by the shutdown");
             release.SetResult(ReturnRouteSendResult.NotSent);
-            await MessagePickupLive.UntilAsync(() => Task.FromResult(dispatcher.Unsettled == 0), "the abandoned push settled");
-            outcomes.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag)
+
+            // #119: wait for the held wake-up's own record, not for Unsettled == 0 — settling lowers
+            // that counter under its lock and records the outcome after it.
+            (await world.Fixture.WaitForPushOutcomesAsync(2, Wait))
                 .Should().Equal(PushOutcomes.SkippedShutdown, PushOutcomes.SkippedShutdown);
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            await MessagePickupLive.UntilAsync(async () =>
-            {
-                // Each poll leases what it finds, so what it found is remembered across polls.
-                seen.UnionWith(await world.PickupFromAsync(store, a.Peer));
-                return seen.Count == 2;
-            }, "the abandoned send gave its lease back after the container was gone");
+            dispatcher.Unsettled.Should().Be(0, "the abandoned push settled before its held wake-up was counted");
+            // The abandoned send gave its lease back before its work ended, so before that record:
+            // one pickup, after the container is gone, gets both messages.
+            (await world.PickupFromAsync(store, a.Peer)).Should().HaveCount(2, "the abandoned send gave its lease back after the container was gone");
         }
         finally
         {

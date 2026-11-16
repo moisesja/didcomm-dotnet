@@ -217,7 +217,10 @@ Inbound forward:
    `ProtocolDispatcher.DispatchAsync(…, Task acknowledged, …)` overload — so neither the processing
    nor the sink runs before the sender holds the 202 (only a forward addressed to the mediator
    itself is opened before it, inline; see below). The WebSocket endpoint and a direct
-   dispatcher caller pass `Task.CompletedTask` and publish immediately. A cancelled or faulted
+   dispatcher caller pass `Task.CompletedTask` and publish immediately. The pump relays in
+   publication order, so forwards received on one WebSocket connection are relayed in the order
+   they arrived, while forwards of separate HTTP requests are published as each response completes
+   and two sent one after the other may be relayed in either order (#119). A cancelled or faulted
    acknowledgement releases the reservation and drops the forward with a warning (id only). The
    clock was read once, at step 3: the same instant fixes the `delay_milli` schedule
    (`ForwardProcessor.ResolveDelay`, under the processor's `MaxDelay` cap → `NotBefore`) carried in
@@ -1771,8 +1774,10 @@ changes.
    `.`, `_`, `-` that parse as a problem code, else `null`). The body is read on the caller's
    continuation.
 8. **No answer:** a disposed channel → `ObjectDisposedException`; the caller's cancellation →
-   `OperationCanceledException` (it wins over a deadline that fired at the same time); the deadline
-   → `TimeoutException` naming our request id and the message name, never a DID.
+   `OperationCanceledException` (the caller's cancellation wins when it was requested before the
+   call ended without an answer, even if the deadline fired first; one requested after that changes
+   nothing); the deadline → `TimeoutException` naming our request id and the message name, never a
+   DID.
 9. **Finally:** abandon, remove exactly this entry (a `KeyValuePair` removal), release the counts.
    A late answer then finds no waiting request and is dropped. A late `delivery` is never
    acknowledged, so it comes back after its lease; a late grant or update was applied, and a retry

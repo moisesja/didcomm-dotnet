@@ -290,13 +290,21 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
         return (result.MessageType, Encoding.UTF8.GetString(ms.ToArray()));
     }
 
-    /// <summary>Poll <paramref name="condition"/> until it holds or <paramref name="timeout"/> passes.</summary>
-    public static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    /// <summary>
+    /// Poll <paramref name="condition"/> until it holds or <paramref name="timeout"/> passes, measured on
+    /// the monotonic clock (#119). The wall clock is never read: it jumps ahead across a machine sleep
+    /// (or an NTP step) while the product's timers do not, which ended every wait in progress at once.
+    /// </summary>
+    public static Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+        => WaitUntilAsync(condition, timeout, TimeProvider.System);
+
+    /// <summary><see cref="WaitUntilAsync(Func{bool}, TimeSpan)"/> on <paramref name="time"/>'s timestamps (the helper's own tests).</summary>
+    internal static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout, TimeProvider time)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        var started = time.GetTimestamp();
         while (!condition())
         {
-            if (DateTime.UtcNow >= deadline)
+            if (time.GetElapsedTime(started) >= timeout)
                 return false;
             await Task.Delay(10);
         }

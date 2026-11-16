@@ -401,9 +401,12 @@ public sealed class LivePushTests
         Volatile.Read(ref calls).Should().Be(1, "the grant is not served again while its push is unsettled");
         live.Fixture.Dispatcher.Wake(first.GrantPeerDid).Should().BeFalse("and it is paused");
         never.TrySetResult(ReturnRouteSendResult.NotSent);
-        await MessagePickupLive.UntilAsync(() => live.Fixture.Dispatcher.Unsettled == 0, "the abandoned send ended");
-        Volatile.Read(ref calls).Should().Be(1, "the wake-up held during the operation fell in the cooldown");
-        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown, PushOutcomes.SkippedCooldown);
+        // #119: wait for the held wake-up's own record, not for Unsettled == 0 — settling lowers that
+        // counter under its lock and records the outcome after it.
+        (await live.Fixture.WaitForPushOutcomesAsync(3, Wait))
+            .Should().Equal(new[] { PushOutcomes.Failed, PushOutcomes.SkippedCooldown, PushOutcomes.SkippedCooldown }, "the wake-up held during the operation fell in the cooldown");
+        live.Fixture.Dispatcher.Unsettled.Should().Be(0, "the abandoned send ended before its held wake-up was counted");
+        Volatile.Read(ref calls).Should().Be(1, "the held wake-up was not served during the cooldown");
         (await live.PickupAsync()).Should().Equal(first.MessageId);
     }
 

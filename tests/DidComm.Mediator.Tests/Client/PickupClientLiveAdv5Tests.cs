@@ -340,22 +340,36 @@ public sealed class PickupClientLiveAdv5Tests
     [Fact]
     public async Task A_fifty_round_drain_slower_than_the_interval_is_never_pre_empted_and_the_next_cycle_is_due_one_interval_after_its_last_answer()
     {
-        var (exchange, client) = Live(o => o.LivePollInterval = Interval);
+        // Seven seconds, not this class's one: no back-off step (1, 2, 4, 8, 16, 30 s), no
+        // RequestTimeout and no budget has this length, so the timer the rendezvous waits for is the
+        // wait for the next cycle and nothing else (#119 F3).
+        var interval = TimeSpan.FromSeconds(7);
+        var (exchange, client) = Live(o => o.LivePollInterval = interval);
         using var cts = new CancellationTokenSource();
         var liveOns = 0;
+        var drains = 0;
+        var nextCycle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
         {
             await Task.Yield();
-            if (r.Live && Interlocked.Increment(ref liveOns) > 5)
+            var n = r.Live ? Interlocked.Increment(ref liveOns) : 0;
+            if (n > 5)
                 await cts.CancelAsync();
-            exchange.Clock.Advance(Interval * 2);
+            if (n == 2 && Volatile.Read(ref drains) == LiveDeliveryStream.MaxDrainRounds)
+            {
+                // The next cycle has started after the fifty rounds: it is held here, on the stream's
+                // token, so the stop below finds the stream parked (#119: left to run on, it yields
+                // q51 first). A live-on that comes earlier is a pre-empted drain: not held, braked.
+                nextCycle.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, r.Ct);
+            }
+            exchange.Clock.Advance(interval * 2);
             return Status(r, count: 60, live: r.Live);
         });
-        var drains = 0;
         exchange.On(MessagePickup.DeliveryRequestType, async r =>
         {
             await Task.Yield();
-            exchange.Clock.Advance(Interval * 2);
+            exchange.Clock.Advance(interval * 2);
             var n = Interlocked.Increment(ref drains);
             return Delivery(r, ($"q{n}", $"ok:m{n}"));
         });
@@ -363,18 +377,18 @@ public sealed class PickupClientLiveAdv5Tests
 
         for (var i = 1; i <= LiveDeliveryStream.MaxDrainRounds; i++)
             (await Next(stream)).Id.Should().Be($"q{i}");
+        var mark = exchange.Clock.Mark();
         var next = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await exchange.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout); // the wait for the next cycle, one interval after the fiftieth answer
 
         var types = Types(exchange);
         types.Count(t => t == LiveOn).Should().Be(1, "a started cycle is never pre-empted: {0}", string.Join(", ", types));
         types.Count(t => t == Drain).Should().Be(LiveDeliveryStream.MaxDrainRounds);
         exchange.AcknowledgedIds.Should().OnlyHaveUniqueItems().And.HaveCount(LiveDeliveryStream.MaxDrainRounds);
-        exchange.Clock.Advance(Interval - TimeSpan.FromTicks(1));
-        Types(exchange).Count(t => t == LiveOn).Should().Be(1, "one tick before an interval has passed since the fiftieth answer");
-        exchange.Clock.Advance(TimeSpan.FromTicks(1));
-        await exchange.WaitForSentAsync(types.Count + 1);
-        Types(exchange)[types.Count].Should().Be(LiveOn);
+        exchange.Clock.Advance(interval - TimeSpan.FromTicks(1)).Should().Be(0, "one tick before an interval has passed since the fiftieth answer, nothing fires");
+        exchange.Clock.Advance(TimeSpan.FromTicks(1)).Should().Be(1, "an interval after the fiftieth answer, the stream's wait fires");
+        await PickupTest.Within(nextCycle.Task);
+        Types(exchange).Skip(types.Count).Should().Equal(LiveOn);
         await StopAsync(stream, next, cts);
     }
 
@@ -523,6 +537,15 @@ public sealed class PickupClientLiveAdv5Tests
         var day = TimeSpan.FromHours(24);
         var (exchange, client) = Live(o => o.LivePollInterval = day);
         using var cts = new CancellationTokenSource();
+        // A regression that sends live-on in a loop must fail, not spin the test host (#119).
+        var liveOns = 0;
+        exchange.On(MessagePickup.LiveDeliveryChangeType, async r =>
+        {
+            await Task.Yield();
+            if (r.Live && Interlocked.Increment(ref liveOns) > 5)
+                await cts.CancelAsync();
+            return Status(r, live: r.Live);
+        });
         exchange.On(MessagePickup.DeliveryRequestType, async r =>
         {
             await Task.Yield();
@@ -545,10 +568,10 @@ public sealed class PickupClientLiveAdv5Tests
             await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
         }
         Types(exchange).Count(t => t == LiveOn).Should().Be(1);
-        exchange.Clock.Advance(day - exchange.Clock.GetElapsedTime(drainEnded) - TimeSpan.FromTicks(1));
-        Types(exchange).Count(t => t == LiveOn).Should().Be(1, "one tick before 24 h have passed since the drain ended");
+        exchange.Clock.Advance(day - exchange.Clock.GetElapsedTime(drainEnded) - TimeSpan.FromTicks(1)).Should().Be(0, "one tick before 24 h have passed since the drain ended, nothing fires");
+        Types(exchange).Count(t => t == LiveOn).Should().Be(1);
         var sent = exchange.Sent.Count;
-        exchange.Clock.Advance(TimeSpan.FromTicks(1));
+        exchange.Clock.Advance(TimeSpan.FromTicks(1)).Should().Be(1, "24 h after the drain ended, the stream's wait fires");
         await exchange.WaitForSentAsync(sent + 2);
         Types(exchange).Skip(sent).Take(2).Should().Equal(LiveOn, Drain);
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);

@@ -54,10 +54,10 @@ public sealed class MessagePickupCleanupBoundTests
 
     private static async Task UntilAsync(Func<bool> condition, string what)
     {
-        var deadline = DateTime.UtcNow + Deadline;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
         while (!condition())
         {
-            if (DateTime.UtcNow > deadline)
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) > Deadline)
                 throw new TimeoutException("Timed out waiting until " + what + ".");
             await Task.Delay(5);
         }
@@ -122,9 +122,9 @@ public sealed class MessagePickupCleanupBoundTests
             pushed.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
             ids.Add(pushed.MessageId!);
 
-            var before = DateTime.UtcNow;
+            var before = System.Diagnostics.Stopwatch.GetTimestamp(); // monotonic (#119)
             socket.Close();
-            (DateTime.UtcNow - before).Should().BeLessThan(TimeSpan.FromSeconds(2), "closing never waits for the store");
+            System.Diagnostics.Stopwatch.GetElapsedTime(before).Should().BeLessThan(TimeSpan.FromSeconds(2), "closing never waits for the store");
             fixture.Sessions.Unregister(socket);
 
             tracker.PendingReleases.Should().BeLessThanOrEqualTo(PickupSessionTracker.MaxPendingReleases);

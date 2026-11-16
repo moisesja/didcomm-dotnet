@@ -111,6 +111,9 @@ public sealed class PickupClientLiveRobustnessQa2Tests
         var m1 = await PickupE2E.SendAsync(mediator, alice, recipient, "m1");
         (await PickupE2E.Within(first)).Should().BeTrue();
         PickupE2E.ShouldBeAlicesNote(stream.Current, alice, recipient, m1);
+        // The item can arrive before m1's push operation looked at the session again and recorded
+        // Pushed-Live; the session must still be there then (#119). Wait for it before the eviction.
+        await mediator.PushesIdleAsync();
 
         // Another socket of Bob's takes the only session slot: the client's socket is evicted and closed.
         using var raw = await mediator.ConnectAsync();
@@ -308,7 +311,15 @@ public sealed class PickupClientLiveRobustnessQa2Tests
         var yielded = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         var early = new ConcurrentQueue<string>();
         var store = new Qa2Store(new InMemoryMessageStore(new MessagePickupOptions()));
-        await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = s => s.AddSingleton<IMessageStore>(new WatchingStore(store, yielded, early)));
+        await using var mediator = await MediatorTestServer.StartAsync(o =>
+        {
+            o.ConfigureServices = s => s.AddSingleton<IMessageStore>(new WatchingStore(store, yielded, early));
+            // #119: the session has room for every push of the burst, and as many answers to the
+            // stream's own requests. With the default 16 push slots, a mediator writer that lags 17
+            // frames behind (CPU load) refuses the tail of the burst (Push-Failed, left for pickup):
+            // the session's slot bound, which MediatorDeliveryModesQaTests covers, not the client's buffer.
+            o.Mediator = m => m.Sessions.MaxPendingPushes = 2 * Pushed;
+        });
         await using var harness = await MediatorClientHarness.CreateAsync(mediator, o => o.UseWebSocket = true);
         var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
         var alice = await harness.NewAliceAsync();

@@ -255,15 +255,19 @@ public sealed class MediatorTimeBoundsQaTests
 
         // At t0 + limit: "oldest" is at the limit, "old" one tick before it. One loop round.
         mediator.Clock.Advance(limit - TimeSpan.FromMinutes(30));
+        // #119: a round counts what it removed after the store's purge returns, so wait for that
+        // record rather than for the store's count, then read both.
         time.Advance(TimeSpan.FromMinutes(1));
-        await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 2, "the loop's round removed the record at the limit");
+        await MediatorTestServer.WaitUntilAsync(() => mediator.Measurements.Sum(DidComm.Mediator.Pipeline.MediatorMetrics.QueuePurgedInstrument) > 0, "the loop's round counted what it removed");
         mediator.Measurements.Sum(DidComm.Mediator.Pipeline.MediatorMetrics.QueuePurgedInstrument).Should().Be(1, "one tick before the limit is kept");
+        mediator.Store.MessageCount.Should().Be(2, "the loop's round removed the record at the limit");
 
         // One tick later, the next round removes "old" only.
         mediator.Clock.Advance(TimeSpan.FromTicks(1));
         time.Advance(TimeSpan.FromMinutes(1));
-        await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 1, "the next round removed the record now at the limit");
+        await MediatorTestServer.WaitUntilAsync(() => mediator.Measurements.Sum(DidComm.Mediator.Pipeline.MediatorMetrics.QueuePurgedInstrument) > 1, "the next round counted what it removed");
         mediator.Measurements.Sum(DidComm.Mediator.Pipeline.MediatorMetrics.QueuePurgedInstrument).Should().Be(2);
+        mediator.Store.MessageCount.Should().Be(1, "the next round removed the record now at the limit");
         var left = (await mediator.FetchAsync(bob)).Should().ContainSingle().Subject;
         (await MediatorRecipient.UnpackFromSenderAsync(bob, left.Payload, alice)).Message.Body!["content"]!.GetValue<string>().Should().Be("young");
         mediator.Logs.Entries.Should().Contain(e => e.StartsWith("Mediator purge:", StringComparison.Ordinal));

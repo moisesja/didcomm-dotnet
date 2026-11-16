@@ -6,6 +6,63 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — tests: the mediator timing tests no longer depend on how fast the machine runs (#119, #114, epic #88)
+
+Since #95 and #96 merged, CI on `main` failed on 3 of 4 pushes, each time on a different timing test
+of the mediator pipeline or the recipient client's live stream. **No product behaviour changes**:
+every one of the nine reported tests (and every swept one) was a test defect, each proven by forcing
+the bad interleaving with gates and the test clock, not by rerunning. None lost a message, crossed
+an identity or crashed, and the recipient client's live stream showed no defect.
+
+- **What the tests got wrong** (lesson L-065):
+  - they waited for a counter the product lowers just before it records the outcome they then read
+    (`Unsettled == 0` before `Push-Skipped-Shutdown` / `Push-Skipped-Cooldown`; a purge's store count
+    before its metric) — #114 was this;
+  - they counted one push outcome per message, while the design records one per attempt (a session
+    whose push slots are full answers "not sent", the message waits for the next wake-up or pickup);
+  - they took a baseline after the clock move that released the product, moved the client's clock
+    while it was still finishing the previous answer, or stopped a stream that had already run on;
+  - a verdict depended on the order of cancellation callbacks and on where a continuation ran;
+  - "a reader that stops reading" was never forced: a TestHost WebSocket never back-pressures;
+  - a shared hang-guard helper set its deadline from the wall clock, so a machine sleep ended every
+    wait in progress.
+- **What they do now.** Each waits for the event its assertion reads: the recorded outcome or metric,
+  the stream's own cycle timer (created after a mark, with the due time the claim is about), the
+  client parked with no request pending; it asserts how many timers a clock move fired; it holds the
+  product in a step that honours the token before it cancels; it forces back-pressure with a gated
+  server socket and parks a lease where the order matters. Real time is used only as a hang guard,
+  measured on the monotonic clock. Every rewritten test was shown to fail under at least one
+  mutation of the code under test, and several mutations that the old tests let through now fail
+  (a shutdown that waits for an abandoned push, a next cycle due one tick early, a missing lease
+  release masked by the session close).
+- **Relay order, stated as built.** The forward handler relays in publication order: forwards on
+  one WebSocket connection are relayed in the order they arrived (new test), while forwards of
+  separate HTTP requests are published as each response completes, so two sent one after the other
+  may be relayed in either order. The HTTP test that asserted FIFO across two requests now asserts
+  that each is relayed exactly once (`…_over_HTTP_each_reach_the_sink_exactly_once`); this was
+  never a guarantee of the #90 design, and the architecture doc now says so.
+- **New tests.** `PickupClientLiveCancellationTests` (a cancellation that lands while any step of a
+  live cycle ignores the token ends the move with `OperationCanceledException` and yields nothing
+  after it — no test caught that before); the other half of the channel's cancellation contract;
+  tests of the test clocks and of the hang-guard helper. Test counts: Core 2,548; Mediator 4,271 + 8
+  skipped; Interop 1,379 + 1 skipped (only additions; the 9 skipped tests and their reasons are
+  unchanged).
+- **Test helpers** (`tests/` only): `ManualTimeProvider` and `QaManualTimeProvider` never step back
+  when two advances overlap, report how many timers an advance fired, and can wait for a specific
+  timer; `MeasurementRecorder.WaitForAsync`; `MediatorPushGates` (a gated server WebSocket and a
+  lease-parking store); an opt-in `GoLiveAsync(…, waitForLiveOnWakeUp: true)`.
+- **One internal test seam, no behaviour change.** `PushDispatcher` (internal) gained an internal
+  constructor taking its shutdown grace (`null` = the unchanged 5 s default, as `ForwardHandler` and
+  `ObserverDelivery` already do), so the disposal test can run with no grace and prove that disposing
+  the container does not wait for a live push that ignores its cancellation. `AddMediator()` and
+  every public surface are unchanged.
+- **Docs.** The channel's cancellation-versus-deadline rule is stated once, identically, in code and
+  in `docs/codebase-architecture.md`: the caller's cancellation wins when it was requested before the
+  call ended without an answer, even if the deadline fired first; one requested after that changes
+  nothing (the old wording, "wins over a deadline that fired at the same time", overclaimed).
+  PRD FR-PICK-09's test list now states the precondition of its "every message is pushed" checks: a
+  session with push room for the burst.
+
 ### Changed — packaging: the recipient-side client is its own package, `DidComm.Mediator.Client` (#113, epic #88)
 
 **What to reference.** A wallet, or any agent that only uses a mediator, references

@@ -52,6 +52,18 @@ internal sealed class PushFixture : IAsyncDisposable
     /// <summary>Every push outcome recorded, in order.</summary>
     public IReadOnlyList<string?> PushOutcomeLog => Recorder.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag);
 
+    /// <summary>
+    /// Wait until at least <paramref name="count"/> push outcomes are recorded, and return every one
+    /// recorded by then, in order. Wait on this, not on <c>Dispatcher.Unsettled</c>, before asserting
+    /// an outcome that settling records: the dispatcher lowers that counter under its lock and
+    /// records the outcome after it (#119). <paramref name="timeout"/> is a hang guard only.
+    /// </summary>
+    public async Task<IReadOnlyList<string?>> WaitForPushOutcomesAsync(int count, TimeSpan timeout)
+    {
+        await Recorder.WaitForAsync(r => r.TagValues(MediatorMetrics.PushOutcomesInstrument, MediatorMetrics.PushOutcomeTag).Count >= count, timeout, $"{count} push outcome(s) recorded");
+        return PushOutcomeLog;
+    }
+
     /// <param name="configure">More mediator settings.</param>
     /// <param name="services">More registrations, made before <c>AddDidComm</c>.</param>
     /// <param name="didComm">More facade settings; the facade clock is already the manual clock.</param>
@@ -134,6 +146,21 @@ internal sealed class PushFixture : IAsyncDisposable
             throw new InvalidOperationException($"Not queued ({result.Outcome}).");
         return new StoredMessage(result.GrantPeerDid, recipientDid, result.MessageId);
     }
+
+    /// <summary>
+    /// Register the container's push dispatcher with <paramref name="shutdownGrace"/> instead of the
+    /// 5-second default (pass as <c>services</c>: made before <c>AddDidComm</c>, and
+    /// <c>AddMediator()</c> adds its own only when none is registered). The sink, the fixture and
+    /// the container's disposal all use this one instance.
+    /// </summary>
+    public static void UseShutdownGrace(IServiceCollection services, TimeSpan shutdownGrace)
+        => services.AddSingleton(sp => new PushDispatcher(
+            sp.GetRequiredService<IOptions<MediatorOptions>>(),
+            sp.GetRequiredService<MessagePickupQueue>(),
+            sp.GetRequiredService<MediatorMetrics>(),
+            sp.GetService<ILogger<PushDispatcher>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            shutdownGrace));
 
     /// <summary>A second dispatcher over this container's stores; the caller disposes it.</summary>
     public PushDispatcher NewDispatcher()

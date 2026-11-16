@@ -4,6 +4,7 @@ using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
 using DidComm.Mediator.Tests.Coordination;
+using DidComm.Mediator.Tests.Pickup;
 using DidComm.Protocols.OutOfBand;
 using DidComm.Protocols.Routing;
 using DidComm.Resolution;
@@ -281,7 +282,12 @@ public sealed class MediatorHostedServiceTests
         await store.WaitForPurgesAsync(1, Wait);
 
         store.Inner.MessageCount.Should().Be(0);
+        // #119: the store's signal comes before the round counts and logs what it removed (the round
+        // runs on the loop's own thread when its tick was already due when it first awaited it):
+        // wait for each record before asserting it.
+        await fixture.Recorder.WaitForAsync(r => r.Sum(MediatorMetrics.QueuePurgedInstrument) > 0, Wait, "the round counted what it removed");
         fixture.Recorder.Sum(MediatorMetrics.QueuePurgedInstrument).Should().Be(1);
+        await MessagePickupLive.UntilAsync(() => fixture.ServiceLines.Any(e => e.Everything.Contains("expired or aged-out", StringComparison.Ordinal)), "the round logged what it removed");
         fixture.ServiceLines.Should().ContainSingle(e => e.Everything.Contains("1 expired or aged-out", StringComparison.Ordinal));
 
         fixture.Time.Advance(TimeSpan.FromMinutes(1));

@@ -99,7 +99,18 @@ public sealed class PickupClientWebSocketEndToEndTests
         first.IsCompleted.Should().BeFalse("a delayed message is not pushed when it falls due");
         mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(0);
 
+        // The observer records at the mediator, so it cannot tell whether the client has finished its
+        // first cycle (#119). Moving the client's clock earlier would fire the drain's request deadline,
+        // or let the drain's end read the moved clock and arm the next cycle a whole interval after it.
+        // So wait for the client itself: no request waiting and one timer, the stream's wait for its
+        // next cycle.
+        await MediatorTestServer.WaitUntilAsync(() => harness.Channel.PendingCount == 0 && time.ScheduledTimers == 1, "the stream finished its first cycle and waits for the next");
+        time.HasOnlyTimerDueIn(TimeSpan.FromMinutes(1)).Should().BeTrue("the next cycle is due one LivePollInterval after the first one's drain, on the client's clock");
+        var fired = time.TimersFired;
+
         time.Advance(TimeSpan.FromMinutes(1));
+
+        time.TimersFired.Should().Be(fired + 1, "the advance fired the cycle timer and nothing else");
 
         (await PickupE2E.Within(first)).Should().BeTrue();
         PickupE2E.ShouldBeAlicesNote(stream.Current, alice, recipient, note);
