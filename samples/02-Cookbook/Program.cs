@@ -66,6 +66,10 @@ public static class Program
         await Section_Z_CustomTransport.RunAsync(ctx);
         await Section_AA_NetDidAndDidWebRejection.RunAsync(ctx);
         await Section_BB_ProfilesAndI18n.RunAsync(ctx);
+        await Section_CC_EnrollWithAMediator.RunAsync(ctx);
+        await Section_DD_PickUpQueuedMessages.RunAsync(ctx);
+        await Section_EE_LiveDeliveryOverWebSocket.RunAsync(ctx);
+        await Section_FF_MinimalMediator.RunAsync(ctx);
     }
 
     private static string Truncate(string did)

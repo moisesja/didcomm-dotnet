@@ -5,7 +5,7 @@
     <RootNamespace>DidComm.Samples.Cookbook</RootNamespace>
     <AssemblyName>DidComm.Samples.Cookbook</AssemblyName>
     <IsPackable>false</IsPackable>
-    <Description>didcomm-dotnet Cookbook — runnable, narrated demonstrations of the §14.2 API tasks (FR-DX-04). The Phase 6 close-out completes the set: one section per task letter, A through BB.</Description>
+    <Description>didcomm-dotnet Cookbook — runnable, narrated demonstrations of the §14.2 API tasks (FR-DX-04). One section per task letter, A through BB, plus the Phase 7 mediator tasks CC through FF.</Description>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,6 +24,9 @@
     <ProjectReference Include="..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
     <ProjectReference Include="..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
     <ProjectReference Include="..\..\src\DidComm.AspNetCore\DidComm.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator.Client\DidComm.Mediator.Client.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator\DidComm.Mediator.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator.AspNetCore\DidComm.Mediator.AspNetCore.csproj" />
     <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
     <ProjectReference Include="..\_shared\_shared.csproj" />
   </ItemGroup>

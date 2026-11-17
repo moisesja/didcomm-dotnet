@@ -8,7 +8,7 @@ namespace DidComm.InteropTests.Samples;
 /// <summary>
 /// FR-DX-02/04 build+run gate for the <c>02-Cookbook</c> sample. Invokes
 /// <see cref="Program.RunAsync"/> directly (no process spawn), capturing console output, and
-/// asserts every §14.2 task letter (A–BB) produced its section banner — the cookbook is the
+/// asserts every §14.2 task letter (A–FF) produced its section banner — the cookbook is the
 /// backbone of API coverage, so a section silently dropping out must fail CI.
 /// </summary>
 public sealed class CookbookSmokeTests
@@ -51,6 +51,10 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("Section Z — Custom transport (IDidCommTransport + TransportRouter)");
         transcript.Should().Contain("Section AA — net-did integration & the did:web refusal");
         transcript.Should().Contain("Section BB — Profiles & i18n");
+        transcript.Should().Contain("Section CC — Enroll with a mediator");
+        transcript.Should().Contain("Section DD — Pick up queued messages");
+        transcript.Should().Contain("Section EE — Live delivery over WebSocket");
+        transcript.Should().Contain("Section FF — Run a minimal mediator in 20 lines");
 
         // Distinctive per-section outcomes, so a section that banners but silently degrades
         // still fails the gate.
