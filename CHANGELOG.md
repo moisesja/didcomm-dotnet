@@ -30,7 +30,8 @@ adapter, which never used them; no API change).
 - **How it is enforced.** `Directory.Build.targets` reads the grants at pack time and writes the exact
   versions, then reads the packed `.nuspec` and fails pack (and deletes the package) if a dependency
   on a granting package is missing or not exact, so CI's pack step and the release workflow both
-  enforce it; `-p:DidCommSkipFriendPin=true` is the negative control and must fail. A new test,
+  enforce it, also for a version with SemVer build metadata (CI packs one such version);
+  `-p:DidCommSkipFriendPin=true` is the negative control and must fail. A new test,
   `ShippedAssembliesListTests`, pins the eight coupled pairs and checks that the packable
   `src/*/*.csproj` projects equal the DX gate's assembly list (owner decision D2), each with a
   negative control. RELEASING.md describes the rule; its trusted-publishing setup row now names the
@@ -44,7 +45,8 @@ adapter, which never used them; no API change).
     `RevokeAndPurgeAsync`, `IMessageStore.PurgeRecipientAsync`, the session registry's `Find`).
   - The wallet is its own class library that references only `DidComm.Mediator.Client` and the
     transports: the boundary a wallet developer copies, pinned by the smoke test in both the compiled
-    references and the restore graph. Bob fetches the invitation through the outbound-endpoint guard,
+    references and the restore graph. Bob fetches the invitation through the outbound-endpoint guard
+    (never through a proxy, which would see only the proxy's address checked),
     enrolls, publishes a DID built with `ForMediation(grant)`, picks up over HTTP, then receives live
     over WebSocket; Carol gets a `mediate-deny` (a `null` result, not an exception).
   - The mediator's port is chosen before it starts (`samples/_shared/LoopbackPort`), because its DID

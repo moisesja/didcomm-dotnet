@@ -187,7 +187,7 @@ Architect report: agent a243884fcccbecc68. My calls, each with its reason:
 ### 6. Verify and ship
 - [x] `dotnet build DidComm.sln -c Release /warnaserror` · `dotnet test DidComm.sln -c Release
       --no-build` · `dotnet pack DidComm.sln -c Release --no-build` (under `caffeinate -dimsu`).
-- [ ] PR against `main` ("Closes #97", "Part of #88"); CI green on the head (ubuntu + windows).
+- [x] PR against `main` ("Closes #97", "Part of #88"); CI green on the head (ubuntu + windows): PR #123, head `2a4382f`, run 44111807996 (ubuntu + windows build/test, pack).
 
 ## Review
 
@@ -254,3 +254,39 @@ Architect report: agent a243884fcccbecc68. My calls, each with its reason:
 ### Owner decision during the run
 - 2026-11-17: the seven library-constructed constructors are permanent reference-gate entries
   (option a).
+
+### Review round 1 (PR #123, review 5945111006, reviewer notes `tasks/todo20261117-pr123-review.md`)
+
+Three P2 findings, all in this PR's own code; fixed in one round, each with a regression test or CI
+step that fails on the submitted head:
+- **Proxy bypass in the wallet's invitation fetch** (`Wallet/RecipientWallet.cs`): the guarded
+  `SocketsHttpHandler` kept the default `UseProxy`, so with a configured proxy the guard vetted the
+  proxy's address and the proxy received `CONNECT` for the forbidden host. Fix: `UseProxy = false`,
+  with the reason in a comment and the README. Regression: `MediatedAgentWalletProxyTests` (a
+  stand-in proxy on loopback through `HttpClient.DefaultProxy`, in a non-parallel collection): the
+  fetch of `https://10.0.0.1/…` is refused by the guard and the proxy accepts no connection.
+  Mutation (`UseProxy` removed): fails at once.
+- **Pack check vs build metadata** (`Directory.Build.targets`): the verifier looked for
+  `$(PackageId).$(PackageVersion).nupkg`, but NuGet names the file by the normalized version (no
+  build metadata). Fix: take the package pack reports writing (`@(_OutputPackItems)`, `.nupkg`, not
+  `.symbols.nupkg`). Proven: `-p:DidCommVersion=1.5.1+review` packs (deps `[1.5.1]`) with the new
+  targets and fails with the old ones; the ordinary version, `SymbolPackageFormat=symbols.nupkg`
+  and the skip-pin negative control (also with metadata) behave as before. Regression: a CI step
+  packs `DidComm.Mediator.AspNetCore` at `1.0.0+ci.<run>` after the ordinary pack.
+- **Live iterator disposed mid-read** (cookbook EE `NextLiveAsync`, sample 11
+  `ReceiveNextAsync` + `LiveConnection.DisposeAsync`): on the hang-guard path the stream was disposed
+  while `MoveNextAsync` was still running. Fix: one helper, `samples/_shared/GuardedStreamReader<T>`,
+  used by both: on a timeout it cancels the read and waits for it to end before reporting the
+  timeout; disposing with a read running does the same before disposing the stream; with no read
+  running, disposing is a normal end (no cancellation, so the live stream still acknowledges and
+  turns live delivery off). Regression: `GuardedStreamReaderTests` on the manual clock, with a stream
+  whose clean-up is held by a gate (3 tests). Mutation (no wait for the running read): the two
+  timing tests fail.
+
+Recorded, not changed here (**owner decision**, brought to the coordinator): the shipped HTTP and
+WebSocket transports build their SSRF-pinned `SocketsHttpHandler` with the default `UseProxy` too.
+Probe at this head through `ITransportRouter` with a loopback stand-in proxy: with the default policy
+the guard refuses the proxy's own address (so a proxy on a private address breaks every send); with
+the proxy's address allowed (as a public proxy would be), the transport sent `CONNECT 10.0.0.1:443`
+to it. The facade's pre-send check still stops literal private IPs; DNS names and direct router
+callers are exposed. Pre-existing in released packages.

@@ -29,7 +29,8 @@ at an exact version (`[x.y.z]`) in its packed `.nuspec`; every other dependency 
 before any `, PublicKey=…`), `_DidCommPinFriendDependencies` (after NuGet's
 `_GetProjectReferenceVersions`) rewrites `ProjectVersion` to `[%(ProjectVersion)]` for each
 referenced project that grants this assembly, and `_DidCommVerifyFriendDependencies` (after
-`GenerateNuspec`) reads the `.nuspec` inside the written `$(PackageId).$(PackageVersion).nupkg` and
+`GenerateNuspec`) reads the `.nuspec` inside the package pack reports writing (named by NuGet's
+normalized version, so a version with build metadata works; never a `.symbols.nupkg`) and
 fails pack, deleting the package, if a dependency on a granting package is missing or not exact.
 `-p:DidCommSkipFriendPin=true` skips only the rewrite: it is the negative control, and pack must
 fail with it. The edges today: `DidComm.AspNetCore`, `DidComm.Extensions.DependencyInjection`,
@@ -90,8 +91,11 @@ that every grantee references its granter directly (pack pins direct references 
   is empty and the reference allowlist holds only const holders and constructors of
   library-produced results)
   and `Samples` (one smoke test per sample; `MediatedAgentSmokeTests` also pins the wallet library's
-  boundary, in its compiled references and in its restore graph, and `InboxRelaySinkTests` pins
-  sample 04's relay bound and failure records). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
+  boundary, in its compiled references and in its restore graph; `MediatedAgentWalletProxyTests`
+  pins that the wallet's invitation fetch never reaches a configured proxy; `GuardedStreamReaderTests`
+  pins, on a manual clock, that a timed-out or disposed read is cancelled and has ended before the
+  timeout surfaces or the stream is disposed; `InboxRelaySinkTests` pins sample 04's relay bound and
+  failure records). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
   same-socket / STOMP scoping of the mediator WebSocket endpoint against the public
   `MapDidCommWebSocket`.
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
@@ -133,8 +137,9 @@ that every grantee references its granter directly (pack pins direct references 
 - `samples/01-Quickstart` through `samples/11-MediatedAgent` (sample 11 is two projects: the
   mediator host, and `Wallet/`, a class library that references only `DidComm.Mediator.Client` and
   the transports), with `samples/_shared` (`Narrator`, `PeerIdentityFactory`, `LoopbackPort`, which
-  picks a free loopback port for a mediator whose DID must name its address before it listens) as
-  the common helper project.
+  picks a free loopback port for a mediator whose DID must name its address before it listens, and
+  `GuardedStreamReader`, which reads a live stream item by item behind a hang guard and never
+  disposes it mid-read) as the common helper project.
 
 ## Inbound flow
 
