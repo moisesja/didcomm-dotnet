@@ -301,8 +301,11 @@ public static class Program
                             CancellationToken.None);
                         narrator.Note("UNEXPECTED: the transport connected to a loopback address under the default policy.");
                     }
-                    catch (HttpRequestException ex) when (ex.InnerException is TransportException refusal)
+                    catch (Exception ex) when (ex is TransportException || ex.InnerException is TransportException)
                     {
+                        // The HTTP client reports a refused connection as HttpRequestException,
+                        // with the guard's TransportException inside.
+                        var refusal = ex as TransportException ?? (TransportException)ex.InnerException!;
                         narrator.Step("The transport's own connection check refused it too:");
                         narrator.Note(refusal.Message);
                     }
