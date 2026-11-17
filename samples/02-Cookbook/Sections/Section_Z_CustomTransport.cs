@@ -6,6 +6,7 @@ using DidComm.Messages;
 using DidComm.Resolution;
 using DidComm.Secrets;
 using DidComm.Transports;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DidComm.Samples.Cookbook.Sections;
@@ -27,7 +28,8 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// <c>IDidCommTransport</c> (scheme <c>loopback</c>) that sections S and T ride.
 /// </para>
 /// <para>
-/// Maps to PRD §14.2 task <strong>Z</strong> (FR-TRN-01 — transport extension point).
+/// Maps to PRD §14.2 task <strong>Z</strong> (FR-TRN-01 — transport extension point; FR-RR-07 — the
+/// return-route fields of a transport request).
 /// </para>
 /// </remarks>
 public static class Section_Z_CustomTransport
@@ -73,6 +75,13 @@ public static class Section_Z_CustomTransport
         // endpoint is the exact URI the router matched your scheme against.
         ctx.Narrator.Value("Delivered endpoint", transport.Delivered[0].Endpoint);
         ctx.Narrator.Value("Delivered media type", transport.Delivered[0].MediaType);
+        // For an authcrypt send straight to one DID (no mediator in between), the request also
+        // names both ends — a transport that keeps connections open matches them on these. The
+        // return-route fields stay empty unless the sender asked for an answer on this connection.
+        ctx.Narrator.Value("Delivered LocalDid is Alice", transport.Delivered[0].LocalDid == ctx.Alice.Did);
+        ctx.Narrator.Value("Delivered PeerDid is Bob", transport.Delivered[0].PeerDid == ctx.Bob.Did);
+        ctx.Narrator.Value("Delivered ReturnRoute", transport.Delivered[0].ReturnRoute);
+        ctx.Narrator.Value("Delivered MaxResponseBytes", transport.Delivered[0].MaxResponseBytes);
 
         // The bytes the transport carried are a normal packed envelope — Bob unpacks them
         // with the shared client as if they had arrived over HTTP.
@@ -95,6 +104,23 @@ public static class Section_Z_CustomTransport
             ctx.Narrator.Note($"Refused as designed: {ex.Message}");
         }
 
+        // A sender that asks for the answer on the same connection (return_route) needs a transport
+        // that can carry one back. This one can't, so it refuses instead of dropping the answer.
+        ctx.Narrator.Step("A send that asks for a return route is refused by a one-way transport.");
+        try
+        {
+            await sectionClient.SendAsync(message, new SendOptions(
+                Recipients: new[] { ctx.Bob.Did },
+                From: ctx.Alice.Did,
+                ServiceEndpointOverride: new Uri("memq://bob-inbox")) { ReturnRoute = ReturnRouteMode.All });
+            ctx.Narrator.Note("UNEXPECTED: the return-route send was not refused.");
+        }
+        catch (TransportException ex)
+        {
+            ctx.Narrator.Note($"Refused as designed: {ex.Message}");
+        }
+        ctx.Narrator.Value("Queue depth (unchanged)", transport.Delivered.Count);
+
         ctx.Narrator.Note("LoopbackTransport in this very cookbook is the DI-registered flavor of the same extension point — sections S and T ride it.");
     }
 
@@ -104,8 +130,8 @@ public static class Section_Z_CustomTransport
     /// a message bus — anything that can carry an opaque payload (FR-TRN-01). This one is
     /// delivery-only: it reports acceptance and never hands back a reply (FR-TRN-03). A transport
     /// that implements the return-route extension may return more (the HTTP transport hands back
-    /// the response body when the send asked for one, PRD §8a); this one ignores those request
-    /// fields.
+    /// the response body when the send asked for one, PRD §8a); this one refuses a send that asks
+    /// for a return route, because the answer would have nowhere to go (FR-RR-07).
     /// </summary>
     private sealed class MemoryQueueTransport : IDidCommTransport
     {
@@ -119,6 +145,17 @@ public static class Section_Z_CustomTransport
 
         public Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
         {
+            // ReturnRoute is what the packed message asked for: All or Thread wants answers on this
+            // connection. MaxResponseBytes is then how much of an answer a transport may read. A
+            // one-way transport must refuse rather than accept and silently lose the answer.
+            if (request.ReturnRoute is ReturnRouteMode.All or ReturnRouteMode.Thread)
+            {
+                throw new TransportException(
+                    $"memq:// is one-way and cannot carry back the answer this send asked for (return_route, up to {request.MaxResponseBytes} bytes): nothing was sent.",
+                    httpStatusCode: null,
+                    scheme: Scheme);
+            }
+
             Delivered.Add(request);
             return Task.FromResult(new TransportResult(Accepted: true, HttpStatusCode: null));
         }
