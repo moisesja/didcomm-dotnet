@@ -1,5 +1,4 @@
 using System.Diagnostics.Metrics;
-using System.Threading.RateLimiting;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Mediator;
@@ -178,13 +177,12 @@ internal sealed class MediatorHost : IAsyncDisposable
             .AddMediator(ConfigureMediator));
 
         // Anyone who can reach the endpoints can post forwards and ask for mediation: put a rate
-        // limit in front. On the WebSocket endpoint it counts connections, not messages.
+        // limit in front. On the WebSocket endpoint it counts connections, not messages. This one
+        // window is shared by every caller; a public mediator would also limit per client.
         services.AddRateLimiter(o => o.AddFixedWindowLimiter(RateLimitPolicy, w =>
         {
             w.PermitLimit = 100;
             w.Window = TimeSpan.FromSeconds(1);
-            w.QueueLimit = 0;
-            w.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
         }));
 
         var app = builder.Build();
