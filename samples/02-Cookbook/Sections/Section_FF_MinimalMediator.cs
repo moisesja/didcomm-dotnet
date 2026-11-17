@@ -28,14 +28,16 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NetCrypto;
 using NetDid.Core;
+using NetDid.Core.Parsing;
 
 namespace DidComm.Samples.Cookbook.Sections;
 
 /// <summary>
 /// Section FF: a complete mediator — Coordinate Mediation, the routing mediator, Message Pickup,
 /// live delivery — is <c>AddMediator()</c> plus <c>MapDidCommMediator(...)</c>. Then the same roles
-/// composed by hand, with a container and without one, and the replay protection every mediator
-/// runs, with the clock rule it implies. The mediator references the <c>DidComm.Mediator</c> and
+/// composed by hand: with a container, behind the library's endpoint, which runs replay protection
+/// for you; and without one, where your own receive path must run that check before it dispatches.
+/// Last, the replay protection itself and the clock rule it implies. The mediator references the <c>DidComm.Mediator</c> and
 /// <c>DidComm.Mediator.AspNetCore</c> packages; a wallet references <c>DidComm.Mediator.Client</c>
 /// and a transport.
 /// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-PICK-01..10, FR-ROUTE-09..11, FR-RR-08).
@@ -51,8 +53,9 @@ public static class Section_FF_MinimalMediator
     {
         ctx.Narrator.Section("FF", "Run a minimal mediator in 20 lines");
 
-        // The wallets that try the mediators below: Bob (on the allow-list) and Carol (not), plus
-        // Alice, who sends Bob a message. Each holds only its own keys.
+        // The agents that try the mediators below. One wallet holds both Bob's keys (he is on the
+        // allow-list) and Carol's (she is not), to keep the section short; Alice, who sends Bob a
+        // message, has an agent of her own that holds only her keys.
         var carol = await MintAsync(ctx, service: null);
         var walletSecrets = new InMemorySecretsResolver(ctx.Bob.Privates.Concat(carol.Privates));
         await using var wallet = BuildHttpAgent(walletSecrets, b => b.AddMediatorClient());
@@ -83,11 +86,12 @@ public static class Section_FF_MinimalMediator
             var builder = WebApplication.CreateBuilder();
             builder.Logging.ClearProviders(); // keep this cookbook's console to the narration
             builder.WebHost.UseUrls(url);
-            builder.Services.AddRateLimiter(o => o.AddFixedWindowLimiter("mediator", w =>
-            {
-                w.PermitLimit = 100;
-                w.Window = TimeSpan.FromSeconds(1);
-            }));
+            // One window per client address. On the WebSocket endpoint a permit is a connection,
+            // not a message: limit what a connection may do with the mediator's session bounds.
+            builder.Services.AddRateLimiter(o => o.AddPolicy("mediator", http =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    _ => new FixedWindowRateLimiterOptions { PermitLimit = 100, Window = TimeSpan.FromSeconds(1) })));
             builder.Services.AddSingleton<IMediationPolicy>(new AllowListMediationPolicy(ctx.Bob.Did));
             builder.Services.AddDidComm(b => b
                 .UseNetDidResolver()
@@ -124,7 +128,8 @@ public static class Section_FF_MinimalMediator
             narrator.Value("[bob] granted (on the allow-list)", bobGrant is not null);
             var carolGrant = await mediation.RequestMediationAsync(mediatorDid, carol.Did);
             narrator.Value("[carol] granted", carolGrant is not null);
-            narrator.Note("[carol] mediate-deny: not on the allow-list");
+            if (carolGrant is null)
+                narrator.Note("[carol] mediate-deny: not on the allow-list");
 
             narrator.Note("Put rate limiting in front: anyone can post forwards, and a flood from freshly made DIDs fills the replay protection budget, which then refuses in-scope messages for everyone for a few minutes.");
             narrator.Note("Enrolment is open by default (anyone who can authcrypt a mediate-request gets a grant, and grants never expire): register an allow-list or rate-limiting IMediationPolicy before AddMediator().");
@@ -207,7 +212,9 @@ public static class Section_FF_MinimalMediator
                 // Discover Features tells wallets which roles you serve (AddMediator() adds it itself).
                 .AddBuiltInProtocols());
             var mediator = builder.Build();
-            mediator.MapDidCommEndpoint("/didcomm"); // the registry-aware endpoint dispatches to the roles
+            // The registry-aware endpoint dispatches to the roles, after the replay check. A public
+            // host also puts a rate limiter in front of it, as FF.1 does: anyone can post to it.
+            mediator.MapDidCommEndpoint("/didcomm");
             try
             {
                 await mediator.StartAsync();
@@ -269,7 +276,7 @@ public static class Section_FF_MinimalMediator
     private static async Task RunWithoutContainerAsync(CookbookContext ctx)
     {
         var narrator = ctx.Narrator;
-        narrator.Step("FF.2 (b) The same roles without a container: build the stores, the queue and the handlers, and dispatch in-process.");
+        narrator.Step("FF.2 (b) The same roles without a container: build the stores, the queue and the handlers; your own receive path runs the replay check, then dispatches.");
 
         // The mediator's identity. Nothing crosses a network here, so its DID needs no address.
         var mediatorSecrets = new InMemorySecretsResolver();
@@ -307,27 +314,74 @@ public static class Section_FF_MinimalMediator
         registry.Register(pickupHandler);
         await using var dispatcher = new ProtocolDispatcher(registry, new InMemoryThreadStateStore());
 
-        // Bob asks; the mediator unpacks, dispatches and packs the reply back to him. A transport
-        // would carry both envelopes; here they stay in memory.
-        async Task<Message> AskAsync(Message request)
+        // Replay protection (FR-RR-08). The library's endpoints run it for you, before dispatch:
+        // MapDidCommMediator, and MapDidCommEndpoint with a handler registry (FF.1, FF.2 (a)). The
+        // dispatcher does not. A receive path of your own must run it after unpack and before
+        // dispatch, or anyone who captures one of Bob's envelopes can play it again.
+        var replayGuard = new InMemoryReplayGuard(new ReplayProtectionOptions()); // the defaults (FF.3)
+        var dispatched = 0;
+
+        // The mediator's receive path: unpack, admit, dispatch. A refused message never reaches a
+        // handler and is answered with nothing.
+        async Task<(ReplayAdmission? Admission, Message? Reply)> ReceiveAsync(string packed)
         {
-            var packed = (await ctx.Client.PackEncryptedAsync(request,
+            var unpacked = await mediatorClient.UnpackAsync(packed);
+            ReplayAdmission? admission = null;
+            if (InReplayScope(unpacked))
+            {
+                // Keyed on the DID of the key that authenticated the envelope, never on the
+                // plaintext from. No such DID, or no message id: refuse.
+                var sender = SenderDidSubject(unpacked.SenderKid);
+                if (sender is null || string.IsNullOrEmpty(unpacked.Message.Id))
+                    return (null, null);
+                var now = didCommOptions.Clock?.Invoke() ?? DateTimeOffset.UtcNow;
+                admission = replayGuard.TryAdmit(sender, unpacked.Message.Id, unpacked.Message.CreatedTime, now);
+                if (admission != ReplayAdmission.Admitted)
+                    return (admission, null);
+            }
+
+            dispatched++;
+            var outcome = await dispatcher.DispatchAsync(unpacked, mediatorClient, didCommOptions);
+            return (admission, outcome.Reply);
+        }
+
+        // Bob packs a request for the mediator. SendAsync stamps created_time for you; packing by
+        // hand, stamp it yourself, or the mediator's replay check refuses the request (FR-RR-09).
+        async Task<string> PackFromBobAsync(Message request)
+        {
+            request.CreatedTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            return (await ctx.Client.PackEncryptedAsync(request,
                 new PackEncryptedOptions(Recipients: new[] { mediator.Did }, From: ctx.Bob.Did))).Message;
-            var outcome = await dispatcher.DispatchAsync(await mediatorClient.UnpackAsync(packed), mediatorClient, didCommOptions);
-            var reply = outcome.Reply ?? throw new InvalidOperationException($"No reply ({outcome.Result}).");
+        }
+
+        // Bob asks; the mediator receives and packs the reply back to him. A transport would carry
+        // both envelopes; here they stay in memory.
+        async Task<Message> AskAsync(string packedRequest)
+        {
+            var (admission, reply) = await ReceiveAsync(packedRequest);
+            if (reply is null)
+                throw new InvalidOperationException($"No reply (replay check: {admission?.ToString() ?? "refused"}).");
             var replyPacked = (await mediatorClient.PackEncryptedAsync(reply,
                 new PackEncryptedOptions(Recipients: new[] { ctx.Bob.Did }, From: mediator.Did))).Message;
             return (await ctx.Client.UnpackAsync(replyPacked)).Message;
         }
 
-        var grantMessage = await AskAsync(CoordinateMediation.CreateMediateRequest(ctx.Bob.Did, mediator.Did));
+        var grantMessage = await AskAsync(await PackFromBobAsync(CoordinateMediation.CreateMediateRequest(ctx.Bob.Did, mediator.Did)));
         var granted = CoordinateMediation.TryParseGrant(grantMessage, out var routingDids);
         narrator.Value("[bob] mediate-request answered with a grant", granted);
         narrator.Value("[bob] grant names the mediator", granted && routingDids![0] == mediator.Did);
 
-        var statusMessage = await AskAsync(MessagePickup.CreateStatusRequest(ctx.Bob.Did, mediator.Did));
+        var statusRequest = await PackFromBobAsync(MessagePickup.CreateStatusRequest(ctx.Bob.Did, mediator.Did));
+        var statusMessage = await AskAsync(statusRequest);
         narrator.Value("[bob] status-request answered: messages waiting",
             MessagePickup.TryParseStatus(statusMessage, out var status) ? status.MessageCount : -1);
+
+        // Someone who captured that envelope plays it again: same sender, same message id.
+        var dispatchedBefore = dispatched;
+        var (replayed, _) = await ReceiveAsync(statusRequest);
+        narrator.Value("[mediator] the same status-request again", replayed?.ToString() ?? "refused");
+        narrator.Value("[mediator] the replay reached a handler", dispatched > dispatchedBefore);
+        narrator.Note("The library's endpoints run this replay check for you; a receive path of your own must run it, after unpack and before dispatch.");
     }
 
     // ── FF.3 Replay protection and clocks ────────────────────────────────────────────────────────
@@ -400,7 +454,7 @@ public static class Section_FF_MinimalMediator
                     o.AllowedSchemes = new[] { "http", "https" };
                     o.MaxRetryAttempts = 0;
                 })
-                // The SSRF guard refuses loopback by default: open exactly 127.0.0.1 and nothing else.
+                // The SSRF guard refuses loopback by default: open 127.0.0.1 (on every port), nothing else.
                 .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"));
             more?.Invoke(b);
         });
@@ -423,10 +477,33 @@ public static class Section_FF_MinimalMediator
 
     private static async Task<T> AwaitOrFailAsync<T>(Task<T> task, string what)
     {
-        if (await Task.WhenAny(task, Task.Delay(HangGuard)) != task)
-            throw new TimeoutException($"Timed out waiting for {what}.");
-        return await task;
+        try
+        {
+            return await task.WaitAsync(HangGuard);
+        }
+        catch (TimeoutException ex) when (!task.IsCompleted)
+        {
+            throw new TimeoutException($"Timed out waiting for {what}.", ex);
+        }
     }
+
+    // The library's replay scope (FR-RR-08), from public APIs: an authcrypted message (it names a
+    // sender key; a verified signature alone does not count) that asks for a return route or is a
+    // mediator-service request. A forward is exempt: each copy is relayed again.
+    private static bool InReplayScope(UnpackResult unpacked)
+    {
+        var type = unpacked.Message.Type;
+        var authcrypted = unpacked.Authenticated && !string.IsNullOrEmpty(unpacked.SenderKid);
+        return authcrypted
+            && !MediatorServiceProtocols.IsReplayExempt(type)
+            && (ReturnRouteHeader.Read(unpacked.Message).Mode != ReturnRouteMode.None
+                || MediatorServiceProtocols.IsMediatorServiceType(type));
+    }
+
+    // The DID subject of the sender's key id (did:…#key-1 → did:…), parsed as the library parses
+    // it; null when the key id is not a DID URL.
+    private static string? SenderDidSubject(string? kid)
+        => string.IsNullOrEmpty(kid) ? null : DidParser.ParseDidUrl(kid)?.Did.Value;
 
     private static string Trunc(string value) => value.Length <= 56 ? value : value[..55] + "…";
 
@@ -441,6 +518,11 @@ public static class Section_FF_MinimalMediator
     /// Grants mediation only to the DIDs on the operator's list, which is fixed at start-up (nothing
     /// from the network is ever added to it). Everything else is the default policy's.
     /// </summary>
+    /// <remarks>
+    /// The list gates only the first grant: a peer that already holds one gets it back without the
+    /// policy being asked. So taking a peer off a list like this must also end its grant
+    /// (<c>MessagePickupQueue.RevokeAndPurgeAsync(peer)</c>).
+    /// </remarks>
     private sealed class AllowListMediationPolicy(params string[] allowed) : IMediationPolicy
     {
         private readonly string[] _allowed = allowed.Select(DidSubject).ToArray();

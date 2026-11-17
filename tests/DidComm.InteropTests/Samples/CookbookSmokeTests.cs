@@ -91,7 +91,9 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("memq:// is one-way and cannot carry back the answer this send asked for"); // Z: return route refused
         transcript.Should().Contain("[mediator] TrySendAsync(notice, 256 bytes) = TooLarge"); // EE: bounded session send
         transcript.Should().Contain("[mediator] TrySendAsync(notice, 64 KiB) = Sent");      // EE
+        transcript.Should().Contain("[bob] Frame 1 authcrypted by the mediator = True");    // EE: frame consumer
         transcript.Should().Contain("[bob] Frame 2 authcrypted by the mediator = True");    // EE: frame consumer
+        transcript.Should().NotContain("skipped a frame");                                  // EE: every frame came from the peer
         transcript.Should().Contain("Session closed (its Closed token fired) = True");      // EE: Closed token
         transcript.Should().Contain("[bob] live = Hello again");                            // EE: live pickup
         transcript.Should().Contain("[bob] Messages left after discarding the last one = 0"); // EE: AckAsync(last)
@@ -100,6 +102,8 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("AddMediator() with a host IForwardSink = refused");    // FF: refusal shown
         transcript.Should().Contain("[sink] MessagePickupQueue.DeliverAsync = Queued");      // FF.2: à la carte
         transcript.Should().Contain("[bob] mediate-request answered with a grant = True");  // FF.2: no container
+        transcript.Should().Contain("[mediator] the same status-request again = Duplicate"); // FF.2 (b): own receive path runs replay admission
+        transcript.Should().Contain("[mediator] the replay reached a handler = False");     // FF.2 (b): refused before dispatch
         transcript.Should().Contain("msg-1, again = Duplicate");                            // FF.3: replay guard
         transcript.Should().Contain("SaturationCount / ClockBehindRefusalCount = 1 / 1");   // FF.3
     }

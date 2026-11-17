@@ -66,7 +66,8 @@ public static class Section_CC_EnrollWithAMediator
             .UseSecretsResolver(walletSecrets)
             // Plain http only because everything here is on 127.0.0.1; production stays https.
             .UseHttpTransport(o => o.AllowedSchemes = ["http", "https"])
-            // The outbound-address guard blocks loopback by default. Open exactly this one host.
+            // The outbound-address guard blocks loopback by default. Open this one host (on every
+            // port), nothing else.
             .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"))
             .AddMediatorClient());
         await using var wallet = services.BuildServiceProvider();

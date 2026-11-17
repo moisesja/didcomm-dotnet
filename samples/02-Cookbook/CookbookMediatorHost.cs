@@ -1,3 +1,4 @@
+using System.Threading.RateLimiting;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Mediator;
 using DidComm.Mediator.AspNetCore;
@@ -89,13 +90,13 @@ public sealed class CookbookMediatorHost : IAsyncDisposable
             .UseSecretsResolver(secrets)
             .AddMediator(m => m.CoordinateMediation.RoutingDids.Add(identity.Did)));
 
-        // Anyone who can reach a mediator can post to it, so it sits behind a rate limiter. The
-        // permits here are generous; size yours to your traffic.
-        builder.Services.AddRateLimiter(o => o.AddFixedWindowLimiter("mediator", w =>
-        {
-            w.PermitLimit = 1000;
-            w.Window = TimeSpan.FromSeconds(1);
-        }));
+        // Anyone who can reach a mediator can post to it, so it sits behind a rate limiter with one
+        // window per client address. On the WebSocket endpoint a permit is a connection, not a
+        // message. The permits here are generous; size yours to your traffic.
+        builder.Services.AddRateLimiter(o => o.AddPolicy("mediator", http =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 1000, Window = TimeSpan.FromSeconds(1) })));
 
         var app = builder.Build();
         try

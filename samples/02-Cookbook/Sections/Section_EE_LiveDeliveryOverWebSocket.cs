@@ -23,6 +23,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NetCrypto;
 using NetDid.Core;
+using NetDid.Core.Parsing;
 
 namespace DidComm.Samples.Cookbook.Sections;
 
@@ -83,6 +84,8 @@ public static class Section_EE_LiveDeliveryOverWebSocket
                 .AddProtocol<NoticeHandler>());
             var built = builder.Build();
             built.UseWebSockets(); // before mapping, or the WebSocket endpoint answers 400
+            // A public mediator also puts a per-client rate limiter in front (section FF): anyone
+            // who can reach it can post to it.
             built.MapDidCommMediator("/didcomm");
             try
             {
@@ -130,7 +133,7 @@ public static class Section_EE_LiveDeliveryOverWebSocket
         await using var bobBase = bobServices.BuildServiceProvider();
 
         // The SSRF guard refuses private and loopback addresses by default. This demo talks to
-        // 127.0.0.1, so it opens exactly that host and nothing else; production keeps the default.
+        // 127.0.0.1, so it opens this host (on every port), nothing else; production keeps the default.
         var bobOptions = new DidCommOptions();
         bobOptions.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1");
 
@@ -187,21 +190,28 @@ public static class Section_EE_LiveDeliveryOverWebSocket
             narrator.Value("[mediator] TrySendAsync(notice, 64 KiB)", report.Bounded);
 
             // Bob's consumer got the two notices the session sent (the oversized one never left).
-            for (var i = 1; i <= 2; i++)
+            // The frame's DIDs only say which connection it came in on. Only the authcrypt envelope
+            // proves who sent it, so unpack each frame and skip it unless its sender is the
+            // connection's peer (the same DID, compared without any #fragment).
+            for (var i = 1; i <= 2;)
             {
                 var frame = await AwaitOrFailAsync(received.Reader.ReadAsync().AsTask(), $"pushed notice {i}");
+                var opened = await bobClient.UnpackAsync(Encoding.UTF8.GetString(frame.Payload));
+                var fromPeer = opened.Authenticated
+                    && DidSubjectOf(opened.SenderKid) is { } sender
+                    && string.Equals(sender, DidSubjectOf(frame.PeerDid), StringComparison.Ordinal);
+                if (!fromPeer)
+                {
+                    narrator.Note("[bob] skipped a frame that the connection's peer did not authcrypt");
+                    continue;
+                }
+
                 narrator.Value($"[bob] Frame {i} came in on", frame.Endpoint);
                 narrator.Value($"[bob] Frame {i} LocalDid is Bob / PeerDid is the mediator", $"{frame.LocalDid == ctx.Bob.Did} / {frame.PeerDid == mediatorDid}");
                 narrator.Value($"[bob] Frame {i} payload bytes", frame.Payload.Length);
-
-                // The frame's DIDs only say which connection it came in on. Only the authcrypt envelope
-                // proves who sent it, so unpack and check the sender before trusting the content.
-                var opened = await bobClient.UnpackAsync(Encoding.UTF8.GetString(frame.Payload));
-                var fromPeer = opened.Authenticated
-                    && opened.SenderKid is { } kid
-                    && kid.StartsWith(frame.PeerDid + "#", StringComparison.Ordinal);
                 narrator.Value($"[bob] Frame {i} authcrypted by the mediator", fromPeer);
                 narrator.Value($"[bob] Frame {i} text", opened.Message.Body?["text"]?.GetValue<string>());
+                i++;
             }
 
             // While the connection is open, the mediator can find Bob's session by his DID.
@@ -324,12 +334,17 @@ public static class Section_EE_LiveDeliveryOverWebSocket
     private static async Task<PickupItem> NextLiveAsync(IAsyncEnumerator<PickupItem> live, CancellationTokenSource stop, string what)
     {
         var move = live.MoveNextAsync().AsTask();
-        if (await Task.WhenAny(move, Task.Delay(HangGuard)) != move)
+        bool moved;
+        try
+        {
+            moved = await move.WaitAsync(HangGuard);
+        }
+        catch (TimeoutException ex) when (!move.IsCompleted)
         {
             await stop.CancelAsync(); // end the pending move before the stream is disposed
-            throw new TimeoutException($"Timed out waiting for {what}.");
+            throw new TimeoutException($"Timed out waiting for {what}.", ex);
         }
-        if (!await move)
+        if (!moved)
             throw new InvalidOperationException($"The live stream ended before {what}.");
         var item = live.Current;
         if (item.Error is not null)
@@ -339,17 +354,32 @@ public static class Section_EE_LiveDeliveryOverWebSocket
 
     private static async Task<T> AwaitOrFailAsync<T>(Task<T> task, string what)
     {
-        if (await Task.WhenAny(task, Task.Delay(HangGuard)) != task)
-            throw new TimeoutException($"Timed out waiting for {what}.");
-        return await task;
+        try
+        {
+            return await task.WaitAsync(HangGuard);
+        }
+        catch (TimeoutException ex) when (!task.IsCompleted)
+        {
+            throw new TimeoutException($"Timed out waiting for {what}.", ex);
+        }
     }
 
     private static async Task AwaitOrFailAsync(Task task, string what)
     {
-        if (await Task.WhenAny(task, Task.Delay(HangGuard)) != task)
-            throw new TimeoutException($"Timed out waiting for {what}.");
-        await task;
+        try
+        {
+            await task.WaitAsync(HangGuard);
+        }
+        catch (TimeoutException ex) when (!task.IsCompleted)
+        {
+            throw new TimeoutException($"Timed out waiting for {what}.", ex);
+        }
     }
+
+    // The DID subject of a DID or DID URL (did:…#key-1 → did:…), parsed as the library parses it;
+    // null when the value is not a DID.
+    private static string? DidSubjectOf(string? value)
+        => string.IsNullOrEmpty(value) ? null : DidParser.ParseDidUrl(value)?.Did.Value;
 
     private static Task<PeerIdentity> MintAsync(CookbookContext ctx, DidCommServiceSpec? service)
         => PeerIdentityFactory.CreateAsync(
@@ -414,7 +444,8 @@ public static class Section_EE_LiveDeliveryOverWebSocket
 
         private readonly TaskCompletionSource<NoticeReport> _report = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private CancellationTokenRegistration _closedRegistration;
+        // Written on the mediator's request thread, disposed from the section's: swapped atomically.
+        private IDisposable? _closedRegistration;
 
         public string ProtocolUri => ProtocolUriValue;
 
@@ -422,7 +453,7 @@ public static class Section_EE_LiveDeliveryOverWebSocket
 
         public Task SessionClosed => _closed.Task;
 
-        public void StopWatching() => _closedRegistration.Dispose();
+        public void StopWatching() => Interlocked.Exchange(ref _closedRegistration, null)?.Dispose();
 
         public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
         {
@@ -451,7 +482,8 @@ public static class Section_EE_LiveDeliveryOverWebSocket
             // The callback must be short and must not throw; dispose the registration when done.
             // This demo has one subscriber; a real handler keeps its per-session state keyed by the
             // session and drops it when that session's Closed token fires.
-            _closedRegistration = session.Closed.Register(static state => ((TaskCompletionSource)state!).TrySetResult(), _closed);
+            var registration = session.Closed.Register(static state => ((TaskCompletionSource)state!).TrySetResult(), _closed);
+            Interlocked.Exchange(ref _closedRegistration, registration)?.Dispose();
 
             _report.TrySetResult(new NoticeReport(
                 HeaderIsAll: header == new ReturnRouteHeader(ReturnRouteMode.All, null),

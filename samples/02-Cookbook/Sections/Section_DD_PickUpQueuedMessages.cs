@@ -60,7 +60,7 @@ public static class Section_DD_PickUpQueuedMessages
             .UseNetDidResolver()
             .UseSecretsResolver(walletSecrets)
             .UseHttpTransport(o => o.AllowedSchemes = ["http", "https"]) // loopback demo; production stays https
-            .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")) // open exactly this host
+            .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")) // this host (on every port), nothing else
             .AddMediatorClient());
         await using var wallet = services.BuildServiceProvider();
         var mediation = wallet.GetRequiredService<MediationClient>();

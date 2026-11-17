@@ -131,7 +131,10 @@ public static class Section_Z_CustomTransport
     /// delivery-only: it reports acceptance and never hands back a reply (FR-TRN-03). A transport
     /// that implements the return-route extension may return more (the HTTP transport hands back
     /// the response body when the send asked for one, PRD §8a); this one refuses a send that asks
-    /// for a return route, because the answer would have nowhere to go (FR-RR-07).
+    /// for a return route, because the answer would have nowhere to go (FR-RR-07). A transport that
+    /// opens network connections must also enforce the outbound-address (SSRF) guard itself, when it
+    /// connects (<c>OutboundEndpointGuard.ConnectAsync</c>), as the built-in HTTP and WebSocket
+    /// transports do; this one opens none.
     /// </summary>
     private sealed class MemoryQueueTransport : IDidCommTransport
     {
