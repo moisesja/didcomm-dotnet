@@ -44,6 +44,7 @@
     <ProjectReference Include="..\..\samples\08-Extensibility\08-Extensibility.csproj" />
     <ProjectReference Include="..\..\samples\09-NetDidIntegration\09-NetDidIntegration.csproj" />
     <ProjectReference Include="..\..\samples\10-ProfilesAndI18n\10-ProfilesAndI18n.csproj" />
+    <ProjectReference Include="..\..\samples\11-MediatedAgent\11-MediatedAgent.csproj" />
     <ProjectReference Include="..\DidComm.TestSupport\DidComm.TestSupport.csproj" />
   </ItemGroup>
 
