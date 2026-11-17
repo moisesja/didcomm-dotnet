@@ -32,8 +32,9 @@
        -p:DidCommSkipFriendPin=true skips only this rewrite. It exists as the negative control of
        step 3: packing into an empty output directory with it must fail.
     3. _DidCommVerifyFriendDependencies runs after GenerateNuspec, reads the .nuspec inside the
-       .nupkg that was just written ($(PackageId).$(PackageVersion).nupkg, never a .symbols.nupkg
-       written beside it when SymbolPackageFormat=symbols.nupkg), and fails the pack (deleting that .nupkg and .snupkg) when a
+       .nupkg that was just written (the one pack reports, named by NuGet's normalized version, so a
+       version with build metadata works; never a .symbols.nupkg written beside it when
+       SymbolPackageFormat=symbols.nupkg), and fails the pack (deleting that .nupkg and .snupkg) when a
        dependency on a granting project is missing or is not an exact version. It runs on every
        pack, so CI's pack step and the release workflow enforce it.
   -->
@@ -91,13 +92,20 @@
       <_DidCommIsExact>starts-with(@version,'[') and substring(@version,string-length(@version))=']' and not(contains(@version,','))</_DidCommIsExact>
     </PropertyGroup>
     <ItemGroup>
-      <!-- By exact name: with SymbolPackageFormat=symbols.nupkg a .symbols.nupkg is written beside it. -->
-      <_DidCommPackedPackage Include="@(_OutputPackItems)" Condition="'%(Filename)%(Extension)' == '$(PackageId).$(PackageVersion).nupkg'" />
+      <!-- The package pack just wrote, as pack reports it (@(_OutputPackItems)). Not rebuilt from
+           $(PackageVersion): NuGet names the file by the normalized version, which drops build
+           metadata ("1.6.0+abc" is written as ….1.6.0.nupkg). With SymbolPackageFormat=symbols.nupkg
+           a .symbols.nupkg is written beside it; that one is skipped. -->
+      <_DidCommWrittenNupkg Include="@(_OutputPackItems)" Condition="'%(Extension)' == '.nupkg'" />
+      <_DidCommWrittenNupkg>
+        <IsSymbols>$([System.String]::Copy('%(Filename)').EndsWith('.symbols'))</IsSymbols>
+      </_DidCommWrittenNupkg>
+      <_DidCommPackedPackage Include="@(_DidCommWrittenNupkg)" Condition="'%(IsSymbols)' != 'True'" />
       <_DidCommBuiltPackage Include="@(_OutputPackItems)" Condition="'%(Extension)' == '.nupkg' OR '%(Extension)' == '.snupkg'" />
     </ItemGroup>
 
     <Error Condition="'@(_DidCommPackedPackage->Count())' != '1' OR !Exists('@(_DidCommPackedPackage)')"
-           Text="$(PackageId): expected exactly one written $(PackageId).$(PackageVersion).nupkg to check its InternalsVisibleTo dependencies, found '@(_DidCommPackedPackage)' among '@(_OutputPackItems)'." />
+           Text="$(PackageId): expected exactly one written package (not .symbols.nupkg) to check its InternalsVisibleTo dependencies, found '@(_DidCommPackedPackage)' among '@(_OutputPackItems)'." />
 
     <RemoveDir Directories="$(_DidCommPackedNuspecDir)" />
     <Unzip SourceFiles="@(_DidCommPackedPackage)" DestinationFolder="$(_DidCommPackedNuspecDir)" Include="*.nuspec" />

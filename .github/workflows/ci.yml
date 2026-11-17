@@ -45,6 +45,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: dotnet pack DidComm.sln --configuration Release --no-build
 
+      # The pack-time check that internals-coupled packages pin each other exactly
+      # (Directory.Build.targets) must also pass for a version with SemVer build metadata: NuGet
+      # names the package by the normalized version, which drops the metadata. Packs one package
+      # with two such dependencies; the Mediator ids run no package validation, so the version is
+      # arbitrary. The step above is the ordinary-version control (PR #123 review).
+      - name: Pack with a build-metadata version (exact-dependency check)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet pack src/DidComm.Mediator.AspNetCore/DidComm.Mediator.AspNetCore.csproj --configuration Release --no-build -p:DidCommVersion=1.0.0+ci.${{ github.run_number }} --output ${{ runner.temp }}/pack-build-metadata
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
