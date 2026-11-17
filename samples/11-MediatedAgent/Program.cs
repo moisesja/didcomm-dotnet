@@ -77,7 +77,7 @@ public static class Program
         // mediator's DID, not an address. A sender expands it into the mediator's own address and
         // wraps one forward for the mediator's keys (FR-ROUTE-04).
         var route = await alice.ResolveServiceAsync(bobPublic).ConfigureAwait(false);
-        narrator.Value("Bob's service uri (the mediator's DID)", Text.Trunc(route.Uri, 48));
+        narrator.Value("Bob's service uri (the mediator's DID)", Display.Trunc(route.Uri, 48));
         narrator.Value("It is the mediator's DID", string.Equals(route.Uri, mediator.Did, StringComparison.Ordinal));
         await SendAndWaitUntilStoredAsync(narrator, mediator, alice, bobPublic, "Hello Bob", show: true).ConfigureAwait(false);
 
@@ -146,7 +146,7 @@ public static class Program
         narrator.Step($"[mediator] listening on {mediator.HttpEndpoint}");
         // The DID was minted with DidCommServiceBuilder.ForEndpoint(its own URL): a known port is
         // needed because the DID names the address and is checked before the server listens.
-        narrator.Step($"[mediator] routing DID = {Text.Trunc(mediator.Did, 48)}");
+        narrator.Step($"[mediator] routing DID = {Display.Trunc(mediator.Did, 48)}");
         var identity = mediator.App.Services.GetRequiredService<IMediatorIdentity>();
         narrator.Value("[mediator] routing DIDs", mediator.Identity.RoutingDids.Count);
         narrator.Value("[mediator] primary routing DID is the one minted", string.Equals(identity.RoutingDids[0], mediator.Did, StringComparison.Ordinal));
@@ -199,6 +199,7 @@ public static class Program
         try
         {
             var sessionClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            CancellationTokenRegistration closedRegistration = default;
             var live = bob.ConnectLive(mediator.WebSocketEndpoint);
             try
             {
@@ -220,8 +221,12 @@ public static class Program
                 // WebSocket session (sessions are keyed by the DID that authenticated them).
                 var sessions = mediator.Sessions.Find(bob.Did);
                 narrator.Step($"[mediator] sessions for Bob: {sessions.Count}");
+                if (sessions.Count == 0)
+                    throw new InvalidOperationException("Bob has no live session.");
                 narrator.Value("[mediator] session transport", sessions[0].Transport);
-                sessions[0].Closed.Register(() => sessionClosed.TrySetResult());
+                // The session's own end-of-session signal. A callback registered on it runs at once
+                // if the session has already ended.
+                closedRegistration = sessions[0].Closed.Register(() => sessionClosed.TrySetResult());
             }
             finally
             {
@@ -229,8 +234,8 @@ public static class Program
             }
 
             await AwaitOrFailAsync(sessionClosed.Task, "Bob's session to close").ConfigureAwait(false);
+            await closedRegistration.DisposeAsync().ConfigureAwait(false);
             narrator.Step("[mediator] Bob's session closed (its Closed token fired)");
-            narrator.Value("[mediator] sessions open now", mediator.Sessions.Count);
             narrator.Note($"Session notifications seen so far: {Volatile.Read(ref opened)} opened, {Volatile.Read(ref closed)} closed (best effort: they may still be on their way).");
         }
         finally
@@ -301,6 +306,7 @@ public static class Program
         narrator.Value("[operator] replay guard: refused while full / refused for a clock behind", $"{guard.SaturationCount} / {guard.ClockBehindRefusalCount}");
         var sessions = mediator.Sessions;
         narrator.Value("[operator] sessions: opened / ended / evicted / refused", $"{sessions.Registered} / {sessions.Unregistered} / {sessions.Evicted} / {sessions.Refused}");
+        narrator.Value("[operator] sessions open now", sessions.Count);
         narrator.Value("[operator] session notifications dropped", sessions.DroppedNotifications);
         narrator.Step("[mediator] shutting down (the container disposes the session registry it built)");
     }

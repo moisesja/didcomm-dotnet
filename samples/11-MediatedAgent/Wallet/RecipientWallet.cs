@@ -113,7 +113,7 @@ public sealed class RecipientWallet : IAsyncDisposable
         try
         {
             var identity = await MintAsync(provider, secrets, service: null).ConfigureAwait(false);
-            narrator.Step($"[{name}] wallet created; its own DID = {Text.Trunc(identity, 48)}");
+            narrator.Step($"[{name}] wallet created; its own DID = {Display.Trunc(identity, 48)}");
             return new RecipientWallet(name, narrator, secrets, provider, identity);
         }
         catch
@@ -146,7 +146,7 @@ public sealed class RecipientWallet : IAsyncDisposable
             throw new InvalidOperationException("The invitation does not offer mediation.");
         _mediatorDid = invitation.From;
 
-        _narrator.Step($"[{_name}] invitation from {Text.Trunc(_mediatorDid, 48)}");
+        _narrator.Step($"[{_name}] invitation from {Display.Trunc(_mediatorDid, 48)}");
         _narrator.Value($"[{_name}] invitation id (_oobid)", oobId);
         _narrator.Value($"[{_name}] goal code", invitation.GoalCode);
     }
@@ -197,7 +197,7 @@ public sealed class RecipientWallet : IAsyncDisposable
         var results = await _mediation.UpdateRecipientsAsync(MediatorDid, Did, new[] { update }, ct: ct).ConfigureAwait(false);
         var result = results[0];
         _narrator.Step($"[{_name}] registered {label}: {result.Result}");
-        _narrator.Value($"[{_name}] {label}", Text.Trunc(did, 48));
+        _narrator.Value($"[{_name}] {label}", Display.Trunc(did, 48));
         _narrator.Value($"[{_name}] answer is for that DID ({result.Action})", string.Equals(result.RecipientDid, update.RecipientDid, StringComparison.Ordinal) && result.Action == update.Action);
         if (result.Result is not (RecipientUpdateOutcome.Success or RecipientUpdateOutcome.NoChange))
             throw new InvalidOperationException($"The mediator did not register the DID: {result.Result}.");
@@ -247,19 +247,22 @@ public sealed class RecipientWallet : IAsyncDisposable
             batch = await _pickup.FetchAsync(MediatorDid, Did, limit: 10, ct: ct).ConfigureAwait(false);
             foreach (var item in batch.Items)
             {
-                if (item.Unpacked is { } unpacked)
+                if (item.Error is { } error)
                 {
-                    var text = unpacked.Message.Body?["content"]?.GetValue<string>() ?? "<no content>";
-                    texts.Add(text);
-                    _narrator.Step($"[{_name}] fetched: {text}");
-                    _narrator.Value($"[{_name}] sender authenticated", unpacked.Authenticated);
-                    _narrator.Value($"[{_name}] mediator's id for it", Text.Trunc(item.Id, 16));
+                    // A message that did not open stays queued; discard it with AckAsync once you
+                    // give up on it. Log the error's type, not its text: the text can quote DIDs
+                    // and key ids.
+                    _narrator.Note($"[{_name}] a message did not open ({error.GetType().Name}); it stays queued.");
+                    continue;
                 }
-                else
-                {
-                    // Log the error's type, not its text: the text can quote DIDs and key ids.
-                    _narrator.Note($"[{_name}] a message did not open ({item.Error?.GetType().Name}); it stays queued until acknowledged with AckAsync.");
-                }
+
+                var unpacked = item.Unpacked!;
+                var text = unpacked.Message.Body?["content"]?.GetValue<string>() ?? "<no content>";
+                texts.Add(text);
+                _narrator.Step($"[{_name}] fetched: {text}");
+                // Check who sent it before trusting it: a queued message may be anonymous.
+                _narrator.Value($"[{_name}] sender authenticated", unpacked.Authenticated);
+                _narrator.Value($"[{_name}] mediator's id for it", Display.Trunc(item.Id, 16));
             }
         }
         while (!batch.Drained);

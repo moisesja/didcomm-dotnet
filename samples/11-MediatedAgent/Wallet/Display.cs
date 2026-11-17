@@ -1,7 +1,7 @@
 namespace DidComm.Samples.MediatedAgent.Wallet;
 
 /// <summary>Display helpers: the sample never prints a whole DID, key or packed message.</summary>
-public static class Text
+public static class Display
 {
     /// <summary>The first <paramref name="max"/> characters of <paramref name="value"/>, with an ellipsis when cut.</summary>
     /// <param name="value">The value to show.</param>
