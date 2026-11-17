@@ -145,7 +145,8 @@ public sealed class PublicApiCoverageTests
     /// <c>Type::Method</c>), and the demonstrating sample assemblies from the row's
     /// "Demonstrated in" column (01 → Quickstart, 02 → Cookbook, 03 → EnvelopesAndMessages,
     /// 04 → MediatorAgent, 05 → WebSocketChat, 06 → OutOfBand, 07 → ProblemsAndProtocols,
-    /// 08 → Extensibility, 09 → NetDidIntegration, 10 → ProfilesAndI18n).
+    /// 08 → Extensibility, 09 → NetDidIntegration, 10 → ProfilesAndI18n, 11 → MediatedAgent plus
+    /// its MediatedAgent.Wallet library).
     /// </summary>
     public static TheoryData<string, string[], string[]> CoverageMatrixRows()
     {
@@ -153,6 +154,8 @@ public sealed class PublicApiCoverageTests
         var cookbook = "DidComm.Samples.Cookbook";
         var envelopes = "DidComm.Samples.EnvelopesAndMessages";
         var mediator = "DidComm.Samples.MediatorAgent";
+        var mediated = "DidComm.Samples.MediatedAgent";
+        var mediatedWallet = "DidComm.Samples.MediatedAgent.Wallet";
         var wsChat = "DidComm.Samples.WebSocketChat";
         var oob = "DidComm.Samples.OutOfBand";
         var problems = "DidComm.Samples.ProblemsAndProtocols";
@@ -256,15 +259,15 @@ public sealed class PublicApiCoverageTests
                 [mediator, wsChat, extensibility]
             },
             {
-                // §14.4 names sample 04 alone; the Forward flag itself is demonstrated by the
-                // cookbook (04 rides SendAsync's automatic wrapping), so the cookbook joins the row.
+                // §14.4 names samples 04 and 11; the Forward flag itself is demonstrated by the
+                // cookbook (04 and 11 ride SendAsync's automatic wrapping), so the cookbook joins the row.
                 "Routing",
                 [
                     "DidComm.Facade.PackEncryptedOptions::get_Forward",
                     "DidComm.Protocols.Routing.ForwardProcessor",
                     "DidComm.Protocols.Routing.ForwardMessage::TryParse",
                 ],
-                [mediator, cookbook]
+                [mediator, mediated, cookbook]
             },
             {
                 "Protocols",
@@ -288,6 +291,25 @@ public sealed class PublicApiCoverageTests
                     "DidComm.Messages.MessageBuilder::WithAcceptLang",
                 ],
                 [profiles]
+            },
+            {
+                // Sample 11 is two assemblies: the mediator host and the wallet class library that
+                // references only DidComm.Mediator.Client (the boundary a wallet developer copies).
+                // Sample 04 carries the return-route send (SendOptions.ReturnRoute → Returned).
+                "Mediation",
+                [
+                    "DidComm.Mediator.MediatorBuilderExtensions::AddMediator",
+                    "DidComm.Mediator.AspNetCore.MediatorEndpointRouteBuilderExtensions::MapDidCommMediator",
+                    "DidComm.Mediator.Coordination.IMediationStore",
+                    "DidComm.Mediator.Pickup.IMessageStore",
+                    "DidComm.Mediator.Coordination.IMediationPolicy",
+                    "DidComm.Mediator.Client.MediationClient",
+                    "DidComm.Mediator.Client.PickupClient",
+                    "DidComm.Resolution.DidCommServiceBuilder",
+                    "DidComm.Transports.SendOptions::get_ReturnRoute",
+                    "DidComm.Transports.SendResult::get_Returned",
+                ],
+                [mediator, mediated, mediatedWallet]
             },
             {
                 "Exceptions",

@@ -72,5 +72,35 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("Keystore round-trip NonRepudiation = True");           // Y: opaque signing worked
         transcript.Should().Contain("No registered IDidCommTransport handles scheme 'https'"); // Z: router dispatch
         transcript.Should().Contain("refused (web)");                                       // AA: did:web rejection
+
+        // Phase 7 mediator sections: outcomes, not just banners.
+        transcript.Should().Contain("[bob] granted: routing DIDs = 1");                     // CC: enrolled
+        transcript.Should().Contain("[bob] Add public DID = Success");                      // CC: DID registered
+        transcript.Should().Contain("[bob] the same add again = NoChange");                 // CC: retry is safe
+        transcript.Should().Contain("[alice] add Bob's DID = ClientError");                 // CC: first registrant wins
+        transcript.Should().Contain("Refused = MediationNotSupportedException");            // CC: wrong peer
+        transcript.Should().Contain("IsQueueTransport(Uri) = True");                        // CC: queue URI
+        transcript.Should().Contain("mediate-deny → TryParseDeny = True (and TryParseGrant: False)"); // CC: wire table
+        transcript.Should().Contain("[mediator] a DID nobody registered = NotRegistered");   // DD: DeliverAsync refuses
+        transcript.Should().Contain("[bob] status = 2 message(s)");                         // DD: status
+        transcript.Should().Contain("[bob] opened = \"Hello Bob, from your mailbox.\" (authenticated sender: True)"); // DD: fetch
+        transcript.Should().Contain("[bob] could not open = ");                             // DD: failure reported
+        transcript.Should().Contain("[bob] discarded the unopenable one; status = 0 message(s)"); // DD: AckAsync discards
+        transcript.Should().Contain("EnqueueAsync m1 again = DuplicateId");                 // DD.3: store contract
+        transcript.Should().Contain("Store bounded at 2 per grant: EnqueueAsync ×3 = Enqueued, Enqueued, GrantMessageLimitReached"); // DD.3
+        transcript.Should().Contain("memq:// is one-way and cannot carry back the answer this send asked for"); // Z: return route refused
+        transcript.Should().Contain("[mediator] TrySendAsync(notice, 256 bytes) = TooLarge"); // EE: bounded session send
+        transcript.Should().Contain("[mediator] TrySendAsync(notice, 64 KiB) = Sent");      // EE
+        transcript.Should().Contain("[bob] Frame 2 authcrypted by the mediator = True");    // EE: frame consumer
+        transcript.Should().Contain("Session closed (its Closed token fired) = True");      // EE: Closed token
+        transcript.Should().Contain("[bob] live = Hello again");                            // EE: live pickup
+        transcript.Should().Contain("[bob] Messages left after discarding the last one = 0"); // EE: AckAsync(last)
+        transcript.Should().Contain("[bob] granted (on the allow-list) = True");            // FF: allow-list grants
+        transcript.Should().Contain("[carol] granted = False");                             // FF: allow-list denies
+        transcript.Should().Contain("AddMediator() with a host IForwardSink = refused");    // FF: refusal shown
+        transcript.Should().Contain("[sink] MessagePickupQueue.DeliverAsync = Queued");      // FF.2: à la carte
+        transcript.Should().Contain("[bob] mediate-request answered with a grant = True");  // FF.2: no container
+        transcript.Should().Contain("msg-1, again = Duplicate");                            // FF.3: replay guard
+        transcript.Should().Contain("SaturationCount / ClockBehindRefusalCount = 1 / 1");   // FF.3
     }
 }

@@ -146,8 +146,9 @@ public interface IMessageStore
 
     /// <summary>
     /// Remove every record stored under <paramref name="grantPeerDid"/> for
-    /// <paramref name="recipientDid"/>: what a host calls after removing that DID from the grant,
-    /// and what the pickup role calls when it finds the DID no longer registered to the peer.
+    /// <paramref name="recipientDid"/>: what a host calls after removing that DID from the grant.
+    /// The library never calls it: the pickup role, when it finds records of a DID no longer
+    /// registered to the peer, removes just those records by id with <see cref="AcknowledgeAsync"/>.
     /// </summary>
     /// <param name="grantPeerDid">The grant.</param>
     /// <param name="recipientDid">The recipient DID whose records go.</param>
