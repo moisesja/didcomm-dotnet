@@ -96,6 +96,15 @@ public sealed class ShippedAssembliesListTests
         packable.FriendAssemblies.Should().Equal("DidComm.Example.Tests", "DidComm.Other");
         packable.ReferencedProjectFiles.Should().Equal(
             Path.GetFullPath(Path.Combine(Path.GetTempPath(), "src", "DidComm.Core", "DidComm.Core.csproj")));
+
+        // A strong-named grant names the friend before the first comma; the pack-time pin reads it the
+        // same way, so it is an edge like any other.
+        var strongNamed = ShippedProjects.Parse(path, XDocument.Parse(
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>"
+            + "<InternalsVisibleTo Include=\"DidComm.Strong, PublicKey=0024000004800000940000000602000000240000\" />"
+            + "<InternalsVisibleTo Include=\"DidComm.Spaced ,PublicKey=00\" />"
+            + "</ItemGroup></Project>"));
+        strongNamed.FriendAssemblies.Should().Equal("DidComm.Strong", "DidComm.Spaced");
     }
 
     [Fact]

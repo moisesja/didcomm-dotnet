@@ -15,7 +15,7 @@ internal static class ShippedProjects
     /// <param name="FullPath">The absolute path of the <c>.csproj</c>.</param>
     /// <param name="AssemblyName">The <c>&lt;AssemblyName&gt;</c>, or else the file name without its extension (the SDK default).</param>
     /// <param name="IsPackable">False only when the project sets <c>&lt;IsPackable&gt;false&lt;/IsPackable&gt;</c>.</param>
-    /// <param name="FriendAssemblies">The assemblies named by its <c>&lt;InternalsVisibleTo Include="…" /&gt;</c> items.</param>
+    /// <param name="FriendAssemblies">The assemblies named by its <c>&lt;InternalsVisibleTo Include="…" /&gt;</c> items: the name before the first comma, so a strong-named grant (<c>"DidComm.X, PublicKey=…"</c>) counts as <c>DidComm.X</c>, as Directory.Build.targets reads it.</param>
     /// <param name="ReferencedProjectFiles">The absolute paths of the projects it references directly.</param>
     internal sealed record SrcProject(
         string FullPath,
@@ -61,7 +61,7 @@ internal static class ShippedProjects
             fullPath,
             string.IsNullOrEmpty(assemblyName) ? Path.GetFileNameWithoutExtension(fullPath) : assemblyName,
             !string.Equals(Property("IsPackable"), "false", StringComparison.OrdinalIgnoreCase),
-            Includes("InternalsVisibleTo").ToList(),
+            Includes("InternalsVisibleTo").Select(FriendAssemblyName).Where(v => v.Length > 0).ToList(),
             Includes("ProjectReference")
                 .Select(include => Path.GetFullPath(Path.Combine(directory, include.Replace('\\', Path.DirectorySeparatorChar))))
                 .ToList());
@@ -123,6 +123,13 @@ internal static class ShippedProjects
                 + "(say so in the CHANGELOG).");
 
     private static string Edge(string grantee, string granter) => $"{grantee} -> {granter}";
+
+    // "DidComm.X, PublicKey=…" → "DidComm.X": the text before the first comma, trimmed.
+    private static string FriendAssemblyName(string include)
+    {
+        var comma = include.IndexOf(',', StringComparison.Ordinal);
+        return (comma < 0 ? include : include[..comma]).Trim();
+    }
 
     private static List<string> Differences(
         IEnumerable<string> actual, IEnumerable<string> expected, Func<string, string> onlyActual, Func<string, string> onlyExpected)

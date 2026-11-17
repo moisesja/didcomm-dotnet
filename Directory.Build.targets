@@ -23,20 +23,27 @@
     <InternalsVisibleTo> items are the only source of truth: add a grant and the pin follows; there
     is no list to keep in sync. RELEASING.md describes the lockstep release this relies on.
 
-    1. _DidCommGetFriendGrants runs in a referenced project and returns its grants.
+    1. _DidCommGetFriendGrants runs in a referenced project and returns its grants. A grant may name
+       a strong-named friend ("DidComm.X, PublicKey=…"); only the assembly name before the first
+       comma is compared (FriendAssembly).
     2. _DidCommPinFriendDependencies runs after NuGet's _GetProjectReferenceVersions (which fills
        @(_ProjectReferencesWithVersions) for GenerateNuspec) and rewrites ProjectVersion to
        "[version]" for each referenced project that grants this assembly.
        -p:DidCommSkipFriendPin=true skips only this rewrite. It exists as the negative control of
        step 3: packing into an empty output directory with it must fail.
     3. _DidCommVerifyFriendDependencies runs after GenerateNuspec, reads the .nuspec inside the
-       .nupkg that was just written, and fails the pack (deleting that .nupkg and .snupkg) when a
+       .nupkg that was just written ($(PackageId).$(PackageVersion).nupkg, never a .symbols.nupkg
+       written beside it when SymbolPackageFormat=symbols.nupkg), and fails the pack (deleting that .nupkg and .snupkg) when a
        dependency on a granting project is missing or is not an exact version. It runs on every
        pack, so CI's pack step and the release workflow enforce it.
   -->
   <Target Name="_DidCommGetFriendGrants" Returns="@(_DidCommFriendGrant)">
     <ItemGroup>
       <_DidCommFriendGrant Include="@(InternalsVisibleTo)" GranterProject="$(MSBuildProjectFullPath)" GranterPackageId="$(PackageId)" />
+      <!-- The assembly name: the text before the first comma ("DidComm.X, PublicKey=…" → "DidComm.X"). -->
+      <_DidCommFriendGrant>
+        <FriendAssembly>$([System.Text.RegularExpressions.Regex]::Replace('%(Identity)', '\s*,.*$', ''))</FriendAssembly>
+      </_DidCommFriendGrant>
     </ItemGroup>
   </Target>
 
@@ -52,7 +59,7 @@
     <ItemGroup>
       <!-- One item per referenced project that grants this assembly; identity = that project's path. -->
       <_DidCommFriendReference Include="@(_DidCommGrantFromReference->'%(GranterProject)')"
-                               Condition="'%(_DidCommGrantFromReference.Identity)' == '$(AssemblyName)'" />
+                               Condition="'%(_DidCommGrantFromReference.FriendAssembly)' == '$(AssemblyName)'" />
     </ItemGroup>
   </Target>
 
@@ -84,12 +91,13 @@
       <_DidCommIsExact>starts-with(@version,'[') and substring(@version,string-length(@version))=']' and not(contains(@version,','))</_DidCommIsExact>
     </PropertyGroup>
     <ItemGroup>
-      <_DidCommPackedPackage Include="@(_OutputPackItems)" Condition="'%(Extension)' == '.nupkg'" />
+      <!-- By exact name: with SymbolPackageFormat=symbols.nupkg a .symbols.nupkg is written beside it. -->
+      <_DidCommPackedPackage Include="@(_OutputPackItems)" Condition="'%(Filename)%(Extension)' == '$(PackageId).$(PackageVersion).nupkg'" />
       <_DidCommBuiltPackage Include="@(_OutputPackItems)" Condition="'%(Extension)' == '.nupkg' OR '%(Extension)' == '.snupkg'" />
     </ItemGroup>
 
     <Error Condition="'@(_DidCommPackedPackage->Count())' != '1' OR !Exists('@(_DidCommPackedPackage)')"
-           Text="$(PackageId): expected exactly one written .nupkg to check its InternalsVisibleTo dependencies, found '@(_DidCommPackedPackage)'." />
+           Text="$(PackageId): expected exactly one written $(PackageId).$(PackageVersion).nupkg to check its InternalsVisibleTo dependencies, found '@(_DidCommPackedPackage)' among '@(_OutputPackItems)'." />
 
     <RemoveDir Directories="$(_DidCommPackedNuspecDir)" />
     <Unzip SourceFiles="@(_DidCommPackedPackage)" DestinationFolder="$(_DidCommPackedNuspecDir)" Include="*.nuspec" />
