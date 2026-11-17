@@ -18,6 +18,11 @@ namespace DidComm.Samples.MediatedAgent;
 /// and always walks the whole list: how long the check takes does not tell a caller how far down
 /// the list its DID matched. The list is bounded (<see cref="MaxEntries"/>).
 /// </para>
+/// <para>
+/// The list gates only the first grant: a peer that already holds one gets it back without the
+/// policy being asked. So taking a peer off the list must also end its grant
+/// (<c>MessagePickupQueue.RevokeAndPurgeAsync(peer)</c>), or it keeps its mediation.
+/// </para>
 /// </remarks>
 internal sealed class AllowListMediationPolicy : IMediationPolicy
 {

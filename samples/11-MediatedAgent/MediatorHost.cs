@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using System.Threading.RateLimiting;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Mediator;
@@ -103,9 +104,10 @@ internal sealed class MediatorHost : IAsyncDisposable
         o.Pickup.MaxMessageAge = TimeSpan.FromDays(7);
 
         // Replay protection. The clocks of the mediator and its peers must agree within ClockSkew
-        // (a minute by default), or their requests are refused.
+        // (a minute, the default, set here to show where it lives), or their requests are refused.
+        // The id budgets stay at their defaults: keep MaxEntries far above MaxEntriesPerPeer
+        // (32 768 and 1 024), or a few busy peers fill the whole budget and everyone is refused.
         o.Replay.ClockSkew = TimeSpan.FromMinutes(1);
-        o.Replay.MaxEntries = 8192;
 
         // Live connections: how many one peer may hold and how many in all, how many pushes one may
         // have pending, and how many open/close notifications wait for a slow subscriber.
@@ -177,13 +179,12 @@ internal sealed class MediatorHost : IAsyncDisposable
             .AddMediator(ConfigureMediator));
 
         // Anyone who can reach the endpoints can post forwards and ask for mediation: put a rate
-        // limit in front. On the WebSocket endpoint it counts connections, not messages. This one
-        // window is shared by every caller; a public mediator would also limit per client.
-        services.AddRateLimiter(o => o.AddFixedWindowLimiter(RateLimitPolicy, w =>
-        {
-            w.PermitLimit = 100;
-            w.Window = TimeSpan.FromSeconds(1);
-        }));
+        // limit in front, one window per client address. On the WebSocket endpoint a permit is a
+        // connection, not a message. The permits are generous; size yours to your traffic.
+        services.AddRateLimiter(o => o.AddPolicy(RateLimitPolicy, http =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 100, Window = TimeSpan.FromSeconds(1) })));
 
         var app = builder.Build();
         try

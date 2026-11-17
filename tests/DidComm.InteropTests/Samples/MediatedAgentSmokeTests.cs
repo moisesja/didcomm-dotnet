@@ -1,6 +1,8 @@
 using System.IO;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using AwesomeAssertions;
+using DidComm.InteropTests.DxCoverage;
 using DidComm.Samples.MediatedAgent.Wallet;
 using Xunit;
 using MediatedAgentProgram = DidComm.Samples.MediatedAgent.Program;
@@ -114,5 +116,42 @@ public sealed class MediatedAgentSmokeTests
         references.Should().NotContain("DidComm.Mediator");
         references.Should().NotContain("DidComm.Mediator.AspNetCore");
         references.Should().NotContain(name => name.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Wallet_restore_graph_holds_no_mediator_side_package_and_no_AspNetCore_framework()
+    {
+        // The compiled references above miss a project or package the wallet references but never
+        // calls (the compiler drops it). The restore graph lists everything it would ship with.
+        var assetsPath = Path.Combine(
+            ShippedProjects.FindRepoRoot(), "samples", "11-MediatedAgent", "Wallet", "obj", "project.assets.json");
+        File.Exists(assetsPath).Should().BeTrue("the wallet project is restored before the tests are built");
+        using var assets = JsonDocument.Parse(File.ReadAllText(assetsPath));
+        var root = assets.RootElement;
+
+        // Every package and project in the graph, direct or transitive ("Name/Version").
+        var libraries = root.GetProperty("libraries").EnumerateObject().Select(p => p.Name).ToList();
+        libraries.Should().Contain(name => name.StartsWith("DidComm.Mediator.Client/", StringComparison.OrdinalIgnoreCase),
+            "positive control: the wallet does depend on the client package");
+        libraries.Should().NotContain(name => name.StartsWith("DidComm.Mediator/", StringComparison.OrdinalIgnoreCase));
+        libraries.Should().NotContain(name => name.StartsWith("DidComm.Mediator.AspNetCore/", StringComparison.OrdinalIgnoreCase));
+
+        // Shared frameworks: the project's own, and those any project or package in the graph brings.
+        var frameworks = new List<string>();
+        foreach (var framework in root.GetProperty("project").GetProperty("frameworks").EnumerateObject())
+        {
+            if (framework.Value.TryGetProperty("frameworkReferences", out var own))
+                frameworks.AddRange(own.EnumerateObject().Select(f => f.Name));
+        }
+        foreach (var target in root.GetProperty("targets").EnumerateObject())
+        {
+            foreach (var library in target.Value.EnumerateObject())
+            {
+                if (library.Value.TryGetProperty("frameworkReferences", out var brought) && brought.ValueKind == JsonValueKind.Array)
+                    frameworks.AddRange(brought.EnumerateArray().Select(f => f.GetString() ?? string.Empty));
+            }
+        }
+        frameworks.Should().Contain("Microsoft.NETCore.App", "positive control: the framework section was read");
+        frameworks.Should().NotContain(name => name.StartsWith("Microsoft.AspNetCore.App", StringComparison.OrdinalIgnoreCase));
     }
 }

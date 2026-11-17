@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Mediator.Client;
@@ -5,9 +6,11 @@ using DidComm.Mediator.Coordination;
 using DidComm.Resolution;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
+using DidComm.Transports;
 using DidComm.Transports.Http;
 using DidComm.Transports.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NetCrypto;
 using NetDid.Core;
 
@@ -28,6 +31,9 @@ namespace DidComm.Samples.MediatedAgent.Wallet;
 /// </remarks>
 public sealed class RecipientWallet : IAsyncDisposable
 {
+    /// <summary>The largest invitation the wallet reads; an invitation is a few kilobytes.</summary>
+    private const int MaxInvitationBytes = 64 * 1024;
+
     private readonly string _name;
     private readonly Narrator _narrator;
     private readonly InMemorySecretsResolver _secrets;
@@ -106,8 +112,8 @@ public sealed class RecipientWallet : IAsyncDisposable
             // Plain http only because this demo runs on loopback; production stays on https (the
             // transport's default).
             .UseHttpTransport(o => o.AllowedSchemes = new[] { "http", "https" })
-            // The outbound guard refuses loopback and private addresses by default; open exactly
-            // the one host this demo uses, and nothing else.
+            // The outbound guard refuses loopback and private addresses by default; open the one
+            // host this demo uses (on every port), nothing else.
             .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")));
         var provider = services.BuildServiceProvider();
         try
@@ -134,10 +140,29 @@ public sealed class RecipientWallet : IAsyncDisposable
         if (!OutOfBandApi.TryGetShortFormId(invitationUrl, out var oobId))
             throw new InvalidOperationException("Not a short-form invitation URL.");
 
-        // The short URL is fetched with a plain GET; the body is the invitation itself. Plain http
-        // only because this demo runs on loopback: production invitation URLs are https.
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        using var response = await http.GetAsync(new Uri(invitationUrl), ct).ConfigureAwait(false);
+        // The short URL is fetched with a plain GET; the body is the invitation itself. The URL came
+        // from outside (a QR code, a web page), so the fetch gets the protection a send gets. In
+        // production an invitation URL is https; plain http is accepted here only for a loopback
+        // address, because this demo runs on 127.0.0.1.
+        var url = new Uri(invitationUrl);
+        if (url.Scheme != Uri.UriSchemeHttps && !(url.Scheme == Uri.UriSchemeHttp && url.IsLoopback))
+            throw new InvalidOperationException("The invitation URL must be https.");
+
+        // The wallet's own outbound guard checks every address the client connects to (the same
+        // policy its transports use), redirects are not followed, and the body is capped.
+        var guard = new OutboundEndpointGuard(_services.GetRequiredService<IOptions<DidCommOptions>>().Value.OutboundEndpointPolicy);
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectCallback = async (context, token) =>
+                new NetworkStream(await guard.ConnectAsync(context.DnsEndPoint, token).ConfigureAwait(false), ownsSocket: true),
+        };
+        using var http = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+            MaxResponseContentBufferSize = MaxInvitationBytes,
+        };
+        using var response = await http.GetAsync(url, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var invitation = OutOfBandApi.FromPlaintext(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
 

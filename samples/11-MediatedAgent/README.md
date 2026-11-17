@@ -16,7 +16,7 @@ and no routing code. **Carol**, who is not on the operator's allow-list, is refu
    collaborators are registered before `AddDidComm(b => b.AddMediator(...))` (every mediator
    registration is a `TryAdd`, so yours win): the identity (`MediatorIdentity`), the mediation
    store, an allow-list `IMediationPolicy`, the replay guard and a wrapped session registry. The
-   endpoints go behind a rate limiter:
+   endpoints go behind a rate limiter with one window per client address:
    `app.MapDidCommMediator("/didcomm").RequireRateLimiting("mediator")`, after
    `app.UseWebSockets()`. The invitation URL (`…/didcomm/oob?_oobid=mediator`) is printed.
 2. **Enrolling (Coordinate Mediation).** Bob's wallet fetches the invitation, takes the
@@ -88,13 +88,19 @@ starts.
 
 ## Things to copy with care
 
-- **Loopback and plain `http`/`ws`** are for the demo only. Every party opens exactly
-  `127.0.0.1` in the outbound guard (`OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")`) and
-  never turns it off; production uses `https`/`wss`.
+- **Loopback and plain `http`/`ws`** are for the demo only. Every party opens `127.0.0.1` (on
+  every port) in the outbound guard (`OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")`) and
+  never turns it off; production uses `https`/`wss`. The wallet fetches the invitation URL through
+  the same guard (`OutboundEndpointGuard.ConnectAsync`), follows no redirect, caps the body at
+  64 KiB, and takes plain `http` only for a loopback address.
 - **Enrolment is open by default** and grants never expire: a public mediator needs a policy
-  like the allow-list here, or one that rate-limits enrolment, plus the rate limiter in front.
+  like the allow-list here, or one that rate-limits enrolment, plus the rate limiter in front
+  (one window per client address; on the WebSocket endpoint a permit is a connection, not a
+  message).
 - **The allow-list** compares DID subjects (a DID URL's path, query or fragment is ignored),
-  ordinally, in one pass over the whole list, and holds at most 1024 peers.
+  ordinally, in one pass over the whole list, and holds at most 1024 peers. It gates only the
+  first grant: taking a peer off the list must also end its grant
+  (`MessagePickupQueue.RevokeAndPurgeAsync(peer)`).
 - **The first peer to register a DID gets it**: the protocol asks for no proof that a peer
   controls the DID it registers, so a wallet registers its DID before handing it out.
 - **A recipient offline longer than the mailbox age limit** (`MediatorOptions.Pickup.MaxMessageAge`)

@@ -43,7 +43,7 @@ internal sealed class AliceAgent : IAsyncDisposable
             .UseHttpTransport(o => o.AllowedSchemes = new[] { "http", "https" })
             // The address Alice posts to comes from Bob's DID (and the mediator's): data a stranger
             // chose. The outbound guard refuses loopback and private addresses unless allowed;
-            // open exactly this one host.
+            // open this one host (on every port), nothing else.
             .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")));
         var provider = services.BuildServiceProvider();
         try
