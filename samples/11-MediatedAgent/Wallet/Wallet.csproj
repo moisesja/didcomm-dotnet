@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>DidComm.Samples.MediatedAgent.Wallet</RootNamespace>
+    <AssemblyName>DidComm.Samples.MediatedAgent.Wallet</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>The wallet half of didcomm-dotnet sample 11: a recipient with no endpoint of its own that enrolls with a mediator (MediationClient), publishes a DID reached through it (DidCommServiceBuilder.ForMediation) and picks its messages up over HTTP and live over a WebSocket (PickupClient). It references the client package and the transports only: no mediator package, no ASP.NET Core.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <!-- What a wallet installs: DidComm.Mediator.Client plus a transport (HTTP, and the WebSocket one
+       for live delivery). Never DidComm.Mediator or ASP.NET Core; the sample's smoke test checks
+       this assembly's references. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\DidComm.Mediator.Client\DidComm.Mediator.Client.csproj" />
+    <ProjectReference Include="..\..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
+    <ProjectReference Include="..\..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
+    <ProjectReference Include="..\..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\..\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>
