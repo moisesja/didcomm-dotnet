@@ -22,6 +22,26 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0**, namespace `DidComm.Mediator.Coordination` — public: `IMediationStore` / `InMemoryMediationStore`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). Internal, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule). The builders, parsers and wire records the roles speak, and the recipient-side client, come from `DidComm.Mediator.Client` (row above); the roles use its internals `MediatorLog`, `BareDid`, `PickupBodies.MaxIdLength` and the bounded parser overloads through `InternalsVisibleTo`. References `DidComm.Mediator.Client`, `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. A mediator references this package and gets the client with it. |
 | `DidComm.Mediator.AspNetCore` | The mediator's endpoints: `MediatorEndpointRouteBuilderExtensions` (`MapDidCommMediator`, `InvitationOobId`); internal `CompositeEndpointConventionBuilder` and `MediatorInvitationStore`. References `DidComm.Mediator` and `DidComm.AspNetCore`, and calls internals of both, so they ship in lockstep. |
 
+**Lockstep is enforced at pack time (#97).** A package that calls another's internals depends on it
+at an exact version (`[x.y.z]`) in its packed `.nuspec`; every other dependency stays a minimum.
+`Directory.Build.targets` derives the pairs from the `InternalsVisibleTo` grants themselves:
+`_DidCommGetFriendGrants` returns a referenced project's grants (compared by the assembly name
+before any `, PublicKey=…`), `_DidCommPinFriendDependencies` (after NuGet's
+`_GetProjectReferenceVersions`) rewrites `ProjectVersion` to `[%(ProjectVersion)]` for each
+referenced project that grants this assembly, and `_DidCommVerifyFriendDependencies` (after
+`GenerateNuspec`) reads the `.nuspec` inside the written `$(PackageId).$(PackageVersion).nupkg` and
+fails pack, deleting the package, if a dependency on a granting package is missing or not exact.
+`-p:DidCommSkipFriendPin=true` skips only the rewrite: it is the negative control, and pack must
+fail with it. The edges today: `DidComm.AspNetCore`, `DidComm.Extensions.DependencyInjection`,
+`DidComm.Transports.WebSocket`, `DidComm.Mediator.Client` and `DidComm.Mediator` → `DidComm.Core`;
+`DidComm.Mediator` → `DidComm.Mediator.Client`; `DidComm.Mediator.AspNetCore` →
+`DidComm.AspNetCore` and `DidComm.Mediator`. `DidComm.Core` no longer grants `DidComm.Adapters.NetDid`
+(the adapter never used Core's internals), so the adapter and `DidComm.Transports.Http` keep minimum
+dependencies. `tests/DidComm.InteropTests/DxCoverage/ShippedAssembliesListTests` pins this edge list
+(a new grant is new consumer impact, so it fails until the list is updated deliberately), checks
+that every grantee references its granter directly (pack pins direct references only) and that no
+`[assembly: InternalsVisibleTo]` attribute hides a grant from both.
+
 ## Tests and tools
 
 - `tests/DidComm.Core.Tests`: unit tests, organised by the same folder names as `DidComm.Core`
@@ -63,8 +83,15 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
   host's own endpoint `MediatorClientHostEndpointAdv1Tests`; the decrypt budget against the
   mediator's lease `PickupClientBudgetLeaseTests`),
   `DxCoverage` (public-API coverage of the nine shipped assemblies, and quickstart drift checks;
-  `ExtensionMemberSurfaceTests` pins how a C# 14 extension member surfaces to the scanner)
-  and `Samples` (one smoke test per sample). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
+  `ExtensionMemberSurfaceTests` pins how a C# 14 extension member surfaces to the scanner;
+  `ShippedAssembliesListTests` with its parser `ShippedProjects` checks that the packable
+  `src/*/*.csproj` projects equal `CoverageComputation.ShippedAssemblies` and pins the
+  internals-coupled package pairs, each with a negative control; since #97 the execution allowlist
+  is empty and the reference allowlist holds only const holders and constructors of
+  library-produced results)
+  and `Samples` (one smoke test per sample; `MediatedAgentSmokeTests` also pins the wallet library's
+  boundary, in its compiled references and in its restore graph, and `InboxRelaySinkTests` pins
+  sample 04's relay bound and failure records). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
   same-socket / STOMP scoping of the mediator WebSocket endpoint against the public
   `MapDidCommWebSocket`.
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
@@ -103,8 +130,11 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 - `tools/InteropCli`: command-line peer used by the live interop runs. Its `mediator-pickup` verb
   runs a forward built by the counterpart library through an in-process didcomm-dotnet mediator.
 - `tools/interop-live`: cross-implementation legs (`python/`, `jvm/`) driven by `run-all.sh`.
-- `samples/01-Quickstart` through `samples/10-ProfilesAndI18n`, with `samples/_shared` (`Narrator`,
-  `PeerIdentityFactory`) as the common helper project.
+- `samples/01-Quickstart` through `samples/11-MediatedAgent` (sample 11 is two projects: the
+  mediator host, and `Wallet/`, a class library that references only `DidComm.Mediator.Client` and
+  the transports), with `samples/_shared` (`Narrator`, `PeerIdentityFactory`, `LoopbackPort`, which
+  picks a free loopback port for a mediator whose DID must name its address before it listens) as
+  the common helper project.
 
 ## Inbound flow
 
@@ -336,8 +366,10 @@ pending acknowledgements within its timeout before fencing the pump.
 
 `ForwardProcessor.ProcessAsync(string)` stays as a convenience: it unpacks with the mediator's
 client and follows the same path, so a plaintext or signed-only forward is refused with
-`ConsistencyException`. `samples/04-MediatorAgent` still drives the processor from the `onReceive`
-callback, handing it the endpoint's `UnpackResult`; the handler-based version of the sample is #97.
+`ConsistencyException`. `samples/04-MediatorAgent` (since #97) runs `AddRoutingMediator()` behind the
+registry-aware `MapDidCommEndpoint` with a host `IForwardSink` (`InboxRelaySink`) that relays to the
+recipient's inbox with `SendPackedAsync`, and composes the same relay without a container; see
+"Demonstrated by" below.
 
 Rule for sinks (lesson L-017): an `IForwardSink` must not take `ProtocolHandlerRegistry` or
 `ProtocolDispatcher` in its constructor — the registry factory builds `ForwardHandler`, which
@@ -354,6 +386,24 @@ container cannot see inside a factory and would otherwise deadlock). The same ru
 host-registered `IReturnRouteSessionRegistry` or `IInboundReplayGuard` that a handler depends on.
 #92 wraps `AddDidComm`'s `DidCommClient` factory the same way and gives `UseWebSocketTransport`'s
 factory a copy of the check (see "Return-route client side").
+
+### Demonstrated by (#97)
+
+- `samples/04-MediatorAgent`: `AddRoutingMediator(new ForwardProcessorOptions(...) { MaxDelay = … })`
+  behind the registry-aware `MapDidCommEndpoint("/didcomm")`; `InMemoryForwardRecipientRegistry`
+  (`Register`, `Unregister`, `Count`, `IsRegisteredAsync` through `IForwardRecipientRegistry`); the
+  host sink `InboxRelaySink : IForwardSink`, registered before `AddRoutingMediator()`, which awaits
+  `context.Acknowledged`, re-checks `IsExpired`, and relays with `SendPackedAsync` to an inbox from
+  a bounded operator-filled directory (16 entries), each relay bounded by its own timeout (5 s) and
+  recorded once whatever the outcome; `NullForwardSink` for a registered recipient with no inbox; a
+  forward for an unregistered DID dropped with 202 and seen as `Dropped-Unknown` on
+  `didcomm.forward.outcomes`; and section 8, the same relay without a container (the public
+  `ForwardHandler` and five-argument `ForwardProcessor` constructors, `StaticRecipientRoutingKeyProvider`,
+  both `ProtocolDispatcher.DispatchAsync` overloads with an acknowledgement held back, `Dispose` then
+  `DisposeAsync`). Known limit, stated in the sample: the sink runs on the handler's single pump, so
+  a slow inbox delays the forwards behind it by up to the relay timeout each (L-064); a production
+  relay hands each forward to a bounded per-recipient queue.
+- `samples/11-MediatedAgent` and cookbook FF: the same routing core under `AddMediator()`.
 
 ## Return-route receive side (Phase 7, #91)
 
@@ -600,6 +650,28 @@ budget and deny in-scope traffic for up to `Window + 2 × ClockSkew` (put rate l
 of a mediator: `MapDidCommMediator(...).RequireRateLimiting(...)`, #95); the first delivery of a captured
 authcrypted `all` message owns the session socket (confidentiality holds); a handler that throws
 after pushing gets the uniform `400` and its push is discarded.
+
+### Demonstrated by (#97)
+
+- Cookbook EE (`Section_EE_LiveDeliveryOverWebSocket`): a sample `IProtocolHandler` on a mediator host
+  that answers a `return_route: all` request through `context.Session` (every `IReturnRouteSession`
+  member; `TrySendAsync` unbounded, and bounded → `TooLarge` then `Sent`), compares
+  `context.ReturnRoute` with `ReturnRouteHeader.None` / `Read` / `TryRead`, and waits on the session's
+  `Closed` token; the host registers its own `InMemoryReturnRouteSessionRegistry` with
+  `ReturnRouteSessionOptions`.
+- `samples/11-MediatedAgent`: `ObservedSessionRegistry`, a host decorator over the in-memory registry
+  (every `IReturnRouteSessionRegistry` member, `SessionRegistration`, the best-effort
+  `SessionOpened` / `SessionClosed` events), the operator's `Find`, and the mediator's replay guard
+  built from `ReplayProtectionOptions` with its counters read. Note for hosts: a wrapped registry or
+  guard is no longer the in-memory type the mediator looks for, so the mediator's
+  dropped-notifications metric and purge-tick warning for it go quiet; the sample reads
+  `DroppedNotifications` itself.
+- Cookbook FF.3: `ReplayProtectionOptions` (every property, `Validate`) and a standalone
+  `InMemoryReplayGuard` admitting an id once, then `Duplicate`, `FutureDated`, `TooOld`,
+  `MissingCreatedTime`, `MessageIdTooLong` and `Saturated`; FF.2(b) runs the admission step itself
+  (`TryAdmit` before `DispatchAsync`, the library's scope rule rebuilt from `MediatorServiceProtocols`
+  and `ReturnRouteHeader`), because a receive path of the host's own must do what the library's
+  endpoints do (see `ProtocolDispatcher`).
 
 ## Return-route client side (Phase 7, #92)
 
@@ -848,6 +920,20 @@ Known limitations:
   reply; over WebSocket the mediator's replies and pushes are judged by the client's own
   `ClockSkew`. `DidCommOptions.ExpiresClockSkew` (default 0) governs FR-API-05 expiry only.
 
+### Demonstrated by (#97)
+
+- `samples/04-MediatorAgent` section 5: Alice's Discover Features query with
+  `SendOptions.ReturnRoute = All`, answered in the HTTP 200 body and read from `SendResult.Returned`
+  (authenticated, threaded to the question, `FeatureDisclosure.Roles` = `mediator`).
+- Cookbook EE.2: Bob's hand-built `WebSocketDidCommTransport` (four-argument constructor) with a sample
+  `IInboundFrameConsumer` that reads each `InboundFrame` and keeps only frames whose authcrypt sender
+  is the frame's peer (DID subjects, ordinal); EE.3 and sample 11 use the three set-up calls
+  (`UseWebSocketTransport(o => o.ReceiveInbound = true)`, `UseInboundDispatch()`,
+  `AddMediatorClient()`).
+- Cookbook CC: `QueueTransport` (`IsQueueTransport`, both overloads) and `SendAsync` refusing the
+  queue URI; cookbook Z: a custom transport reading `TransportRequest.LocalDid` / `PeerDid` /
+  `ReturnRoute` / `MaxResponseBytes` and refusing a return-route send it cannot carry.
+
 ## Coordinate Mediation 3.0, mediator role (Phase 7, #93)
 
 The enrolment protocol of the mediator service (PRD §8b, FR-MED-01..06 and -08;
@@ -942,6 +1028,20 @@ Documented limits:
   and the 2.0 type constants and codecs of `CoordinateMediation20`). The recipient role is
   `MediationClient` (#96, "Recipient-side client" below), and the start-up check of routing DIDs
   against their DID documents (FR-MED-07) is `AddMediator()`'s (#95, below).
+
+### Demonstrated by (#97)
+
+- `samples/11-MediatedAgent`: `AddMediator()` with an `InMemoryMediationStore` instance, a
+  `MediatorIdentity`, and `AllowListMediationPolicy` (wraps `DefaultMediationPolicy`; compares DID
+  subjects ordinally in one pass with no early exit; bounded at 1024 peers; gates only the first
+  grant, so removing a peer from the list must also end its grant with `RevokeAndPurgeAsync`); Carol's
+  `mediate-deny` comes back as `null`; the operator console calls every `IMediationStore` member
+  (`GrantAsync` pre-provisions Carol, `RevokeAsync` ends it).
+- Cookbook CC: enrolment with `MediationClient`, "the first peer to register a DID gets it" shown
+  with a `ClientError`, the wrong peer (`MediationNotSupportedException`), and every
+  `CoordinateMediation` builder and parser round-tripped. FF.1: an allow-list host;
+  FF.2: `AddCoordinateMediation()` before `AddRoutingMediator()`, and the handler built without a
+  container (`CoordinateMediationHandler`, every `CoordinateMediationOptions` property).
 
 ## Message Pickup 3.0, mediator role (Phase 7, #94)
 
@@ -1191,6 +1291,22 @@ Documented limits:
 - **No session, no delivery.** Over the library endpoints a request without `return_route: all`
   gets nothing; over a WebSocket the endpoint needs `AllowSameSocketReplies` (the mediator's own
   WebSocket endpoint, `MapDidCommMediator`, has it on).
+
+### Demonstrated by (#97)
+
+- Cookbook DD: `PickupClient` status → fetch → `AckAsync` of a message that will not open;
+  `MessagePickupQueue.DeliverAsync` with `PickupDeliveryOptions` (`Queued`, `NotRegistered`); every
+  `MessagePickup` builder and parser; and DD.3, the `IMessageStore` contract walked call by call on a
+  standalone `InMemoryMessageStore` (lease, release, pass over, release leases, acknowledge, the three
+  purges, a bounded store refusing with `GrantMessageLimitReached`) for authors of persistent stores.
+  `IMessageStore.PurgeRecipientAsync` is for the host only: the pickup role removes an unregistered
+  DID's records by id with `AcknowledgeAsync` as it meets them.
+- `samples/11-MediatedAgent` section 7: `MessagePickupQueue.RemoveAsync`, `PurgeExpiredAsync`,
+  `RevokeAndPurgeAsync` (`GrantRevocation`), `MaxAdmissiblePayloadBytes`, and
+  `IMessageStore.PurgeRecipientAsync` after the host removes one of Bob's DIDs.
+- Cookbook FF.2: `AddMessagePickup()` à la carte with a host sink calling `DeliverAsync`
+  (`AllowLive: false`, as the library's own sink, so the forward pump never waits on a session), and
+  `MessagePickupQueue` / `MessagePickupHandler` built without a container.
 
 ## Mediator service: pipeline, `AddMediator()`, `MapDidCommMediator` (Phase 7, #95)
 
@@ -1651,6 +1767,23 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   decided by the store's arrival sequence, and the cooldown is measured on the monotonic clock, so a
   step of the wall clock changes neither.
 - **Outside a generic host** there are no start-up checks, no invitation and no purge (above).
+
+### Demonstrated by (#97)
+
+- `samples/11-MediatedAgent/MediatorHost.cs`: `AddMediator(ConfigureMediator)` setting every
+  `MediatorOptions` property, `MediatorOptions.Validate()` and `ReturnRouteSessionOptions.Validate()`
+  each shown refusing an invalid copy, a
+  per-client rate limiter (`AddRateLimiter` + a policy partitioned by remote address;
+  `RequireRateLimiting` covers the HTTP, WebSocket and invitation routes, and the WebSocket endpoint
+  counts connections, not messages), `UseWebSockets()`, `MapDidCommMediator("/didcomm")`, and the
+  invitation URL (`OutOfBand.ToShortUrl(..., InvitationOobId)`). The mediator's DID is minted for a
+  port picked before start (`LoopbackPort`), because `MediatorHostedService` checks the routing
+  DIDs in `StartingAsync`, before the server binds. `StoredForwardsWatcher` waits for a forward to
+  be stored by listening to `didcomm.forward.outcomes` (outcome `Queued`), because the 202 goes out
+  before the sink stores it.
+- Cookbook FF.1: the same host in about twenty lines with an allow-list policy, and `AddMediator()`
+  refusing a host `IForwardSink` ("use `AddRoutingMediator()`"). `CookbookMediatorHost` is the
+  ready-made host sections CC and DD start and dispose.
 
 ## Recipient-side client: `MediationClient`, `PickupClient` (Phase 7, #96)
 
@@ -2412,10 +2545,27 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
   messages instead of `delivery` (DD-13), is not taken as a push; the stream still gets those
   messages by polling. A mediator without Discover Features needs a pinned version.
 
+### Demonstrated by (#97)
+
+- `samples/11-MediatedAgent/Wallet` (`RecipientWallet`, `LiveConnection`): a class library that
+  references only `DidComm.Mediator.Client`, the transports and the DI package. It fetches the
+  invitation through the outbound guard (a `SocketsHttpHandler` whose `ConnectCallback` is
+  `OutboundEndpointGuard.ConnectAsync`, no redirects, a 64 KiB cap), enrolls with a hand-built
+  `MediationClient` (every method, `MediatorClientOptions` with `Validate()` and all six options),
+  publishes a DID built with `ForMediation(grant)`, fetches over HTTP with `PickupClient`, then goes
+  live over WebSocket with the three set-up calls: `SetLiveDeliveryAsync`, `ReceiveLiveAsync`, and
+  `AckAsync(item.Id)` for the last item.
+- Cookbook CC (enrolment, the wrong peer, the wire table), DD (fetch and the wire table) and EE.3
+  (live pickup) carry the plain-language rules: at-least-once delivery with repeats filtered per
+  mailbox, acknowledgement on the next item, `AckAsync` for a message that keeps failing, polling in
+  live mode as the permanent design (a delayed message that becomes due is not pushed), clocks within
+  a minute by default.
+
 ## Phase 7: still to build
 
-Open under epic #88: sample 11 with cookbook sections CC–FF (#97), which also retires the
-`TODO(#97)` entries of the DX allowlists; the live interop and adversarial gate (#98); Coordinate
-Mediation 2.0 compatibility for the mediator role (#99; the recipient-side client already speaks
-2.0, #96); Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; and
-the push to a host-registered recipient endpoint, deferred from #95 (#110).
+Open under epic #88: the live interop and adversarial gate (#98); Coordinate Mediation 2.0
+compatibility for the mediator role (#99; the recipient-side client already speaks 2.0, #96);
+Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; the push to a
+host-registered recipient endpoint, deferred from #95 (#110); and the recipient client's slow-sender
+hardening (#111). Sample 11, cookbook CC–FF and the sample 04 refresh landed with #97, which
+retired every Phase 7 entry of the DX allowlists.

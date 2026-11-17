@@ -53,7 +53,11 @@ exact, then reads the packed `.nuspec` and **fails the pack** if one is missing 
 pack step and the release workflow both enforce it. (`-p:DidCommSkipFriendPin=true` skips the rewrite;
 packing into an empty output directory with it must fail, which shows the check works.)
 `ShippedAssembliesListTests` pins the list of coupled pairs, so a new grant between shipped projects
-is a deliberate change; say what it does to consumers in the CHANGELOG.
+is a deliberate change; say what it does to consumers in the CHANGELOG. The detection works only among packages
+packed with this rule (1.6.0 and later): a published 1.5.x package declares a minimum on what is now
+an internals edge, so an app mixing it with a later package restores without a warning. NU1608 is a
+warning, so an app that wants a mix to fail the build sets `<WarningsAsErrors>NU1608</WarningsAsErrors>`
+(or keeps every `DidComm.*` package on one version through central package management).
 
 **New package ids.** `DidComm.Mediator`, `DidComm.Mediator.Client` and `DidComm.Mediator.AspNetCore`
 have never been published. Each sets `EnablePackageValidation` to `false` in its `.csproj`, because SDK Package

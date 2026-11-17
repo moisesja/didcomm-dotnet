@@ -127,12 +127,12 @@ Architect report: agent a243884fcccbecc68. My calls, each with its reason:
 ### 0. Setup and scaffold (orchestrator)
 - [x] Worktree + submodule (`dd56125`), branch verified.
 - [x] Architect design pass; calls recorded above.
-- [ ] Scaffold commit: `samples/_shared/LoopbackPort.cs`; cookbook csproj references to the three
+- [x] Scaffold commit: `samples/_shared/LoopbackPort.cs`; cookbook csproj references to the three
       mediator packages; `Section_CC…FF` stubs (banner only) + `Program.cs` calls; CC–FF banners in
       `CookbookSmokeTests`; this plan.
 
 ### 1. Implementation (one engineer per lane, disjoint files)
-- [ ] **A — sample 11** (`samples/11-MediatedAgent/**`, `MediatedAgentSmokeTests.cs`, `DidComm.sln`,
+- [x] **A — sample 11** (`samples/11-MediatedAgent/**`, `MediatedAgentSmokeTests.cs`, `DidComm.sln`,
       InteropTests csproj reference). Sections: (1) mediator start, DID via `DidCommServiceBuilder`,
       `AddMediator` + `MapDidCommMediator` + `RequireRateLimiting`, invitation URL, options
       `Validate`; (2) Bob discovers the mediator from `/oob`, enrolls, registers his public DID,
@@ -143,51 +143,114 @@ Architect report: agent a243884fcccbecc68. My calls, each with its reason:
       `PurgeExpiredAsync` / `RevokeAndPurgeAsync`, `PurgeRecipientAsync`) and teardown with the
       session's `Closed` token; (7) `mediate-deny` via an allow-list policy. Smoke test pins each
       section's markers and the wallet project's reference boundary.
-- [ ] **B — sample 04** (`samples/04-MediatorAgent/**`, `MediatorAgentSmokeTests.cs`).
-- [ ] **C1 — cookbook CC + DD** (+ `Section_Z` `TransportRequest` properties) and the
+- [x] **B — sample 04** (`samples/04-MediatorAgent/**`, `MediatorAgentSmokeTests.cs`).
+- [x] **C1 — cookbook CC + DD** (+ `Section_Z` `TransportRequest` properties) and the
       `CookbookMediatorHost` helper if CC/DD want one.
-- [ ] **C2 — cookbook EE + FF.**
-- [ ] **D — packaging**: D1 target + nuspec check, unused-grant verification, D2 tests,
+- [x] **C2 — cookbook EE + FF.**
+- [x] **D — packaging**: D1 target + nuspec check, unused-grant verification, D2 tests,
       `RELEASING.md` row, `CONTRIBUTING.md:7` link.
-- [ ] Each engineer runs both DX gates in its worktree and hands back the list of allowlist
+- [x] Each engineer runs both DX gates in its worktree and hands back the list of allowlist
       entries its work covers (no JSON edits), plus its transcript markers and README text.
 
 ### 2. Integration (orchestrator)
-- [ ] Merge D, B, C1, C2, A. Delete every allowlist entry waiting on #97 (421 coverage, 366
+- [x] Merge D, B, C1, C2, A. Delete every allowlist entry waiting on #97 (421 coverage, 366
       execution). Run both gates; close residual gaps in the owning sample (never with entries,
       except the owner-approved library-constructed constructors of item 8).
-- [ ] Cookbook smoke markers and README merged.
-- [ ] `IMessageStore.PurgeRecipientAsync` remark fixed.
+- [x] Cookbook smoke markers and README merged.
+- [x] `IMessageStore.PurgeRecipientAsync` remark fixed.
 
 ### 3. QA (sub-agents)
-- [ ] `dotnet run` for 04, 11 and the cookbook exits 0 with no network (loopback only, OS-assigned
+- [x] `dotnet run` for 04, 11 and the cookbook exits 0 with no network (loopback only, OS-assigned
       ports, no fixed sleeps).
-- [ ] Smoke tests 04, 11, cookbook green; repeated runs and a run under parallel load (L-065).
-- [ ] DX gate green with no Mediator entries; negative control: delete one sample call → the gate
+- [x] Smoke tests 04, 11, cookbook green; repeated runs and a run under parallel load (L-065).
+- [x] DX gate green with no Mediator entries; negative control: delete one sample call → the gate
       names the member.
-- [ ] D2 negative controls; nuspec check negative control (`-p:DidCommSkipFriendPin=true`);
+- [x] D2 negative controls; nuspec check negative control (`-p:DidCommSkipFriendPin=true`);
       packed nuspecs show `[1.6.0]` on exactly the friend edges; package validation negative
       control (a public type made internal in a scratch copy → `CP0001`).
-- [ ] D1 graph check: a consumer project mixing versions gets NU1608 / NU1107 at restore.
+- [x] D1 graph check: a consumer project mixing versions gets NU1608 / NU1107 at restore.
 
 ### 4. Adversarial (~30 min)
-- [ ] Copy-risk review of the samples: unauthenticated return route, SSRF guard narrowness,
+- [x] Copy-risk review of the samples: unauthenticated return route, SSRF guard narrowness,
       logging of DIDs / keys / wire text, unbounded stores or directories, the deny policy's
       correctness (single pass, no early exit, DID subjects), D1 ranges (broken graphs).
       Each finding: severity, fixed or declined with a reason.
 
 ### 5. Docs
-- [ ] PRD §14.2 CC–FF snippets, §14.3 rows 02/04/11, §14.4 Mediation row (and the test's matrix
+- [x] PRD §14.2 CC–FF snippets, §14.3 rows 02/04/11, §14.4 Mediation row (and the test's matrix
       row), §12 Phase 7 status.
-- [ ] `docs/codebase-architecture.md`: extend the #90–#96 sections with "Demonstrated by", the
+- [x] `docs/codebase-architecture.md`: extend the #90–#96 sections with "Demonstrated by", the
       packaging rule, "Phase 7: still to build".
-- [ ] README: §12 wording, DX paragraph and numbers, sample 11 row, mediator package rows checked.
-- [ ] CHANGELOG `[Unreleased]`: consumer impact of D1 first, then the Samples entry.
+- [x] README: §12 wording, DX paragraph and numbers, sample 11 row, mediator package rows checked.
+- [x] CHANGELOG `[Unreleased]`: consumer impact of D1 first, then the Samples entry.
 
 ### 6. Verify and ship
-- [ ] `dotnet build DidComm.sln -c Release /warnaserror` · `dotnet test DidComm.sln -c Release
+- [x] `dotnet build DidComm.sln -c Release /warnaserror` · `dotnet test DidComm.sln -c Release
       --no-build` · `dotnet pack DidComm.sln -c Release --no-build` (under `caffeinate -dimsu`).
 - [ ] PR against `main` ("Closes #97", "Part of #88"); CI green on the head (ubuntu + windows).
 
 ## Review
-(filled in as the work lands)
+
+### What landed (branch `feat/mediated-agent-sample-97`)
+- Lanes merged: D packaging (`52873f1`), B sample 04 (`09253f2`), C1 cookbook CC/DD/Z (`095c64e`),
+  C2 cookbook EE/FF (`13963c6`), A sample 11 (`d6d8c41`); integration `88c063f`; fix batch
+  `4107477`..`7a1a76e`; docs commit on top.
+- DX gate: 421 + 366 `#97` entries deleted; 7 owner-approved library-constructed constructors added
+  (reference gate only — they execute, the library builds them); execution allowlist empty;
+  994/1021 executed, 27 not measurable; §14.4 Mediation row added to the matrix test.
+- D1: 8 exact edges, derived from the grants; Core → Adapters.NetDid grant proven unused (82/20/4/50/4/2/4/2
+  CS errors for the used ones; none for the adapter, identical IL) and removed; pack fails on a
+  non-exact friend dependency. Published packages whose Core dependency changes: AspNetCore,
+  Extensions.DependencyInjection, Transports.WebSocket.
+- D2: `ShippedAssembliesListTests` (7 tests) with negative controls.
+
+### QA (two passes) — all permutations PASS
+- QA1 (samples): 10 sequential + 36 concurrent runs exit 0; lsof + a macOS sandbox denying
+  non-loopback traffic show loopback only; every wait is on the event the next line reads; smoke
+  tests green 10×, under 14 CPU burners, and beside Mediator.Tests; 7 mutations each fail their
+  smoke test, 6 slow-but-correct variants pass; the LoopbackPort retry path forced and proven.
+  Findings: L1 wallet boundary test missed unused references → fixed (restore-graph check, proven
+  to bite); L2 sample 04 §8 line true by construction → removed; L3 FF.1 Carol note unconditional →
+  fixed; nit `Task.WhenAny` hang guards → `WaitAsync`.
+- QA2 (gates): every negative control bites — DX static (3 members) and execution (wallet assembly
+  instrumented), each of the 7 entries, redundant/stale hygiene, the matrix row, D2 (fake project,
+  new grant, attribute grant), the pack check (skip-pin fails 6 packages, no nupkg left),
+  package validation (`CP0001` on a type made internal), the release workflow runs the same targets,
+  no network needed. Consumer graph: NU1608 / NU1107 as designed. Findings: M1 CHANGELOG pending →
+  written; M2 detection only among packages packed with the rule → CHANGELOG + RELEASING say so;
+  L1 `symbols.nupkg` format broke the check → package selected by exact name; L3 strong-name grant
+  text → compared before the comma (pin + test); L2 (failed solution pack leaves other packages
+  unchecked: release uses a fresh dir and stops) and L4 (negative-control tests start from the live
+  repo, noisy on real drift) declined as harmless; L5 (`PackageValidationBaselineVersion` still
+  1.5.0 though 1.5.1 is published) pre-existing → for the owner.
+
+### Adversarial (one pass) — no High
+- ADV-1 Medium, sample 04 relay had no per-relay bound on the single forward pump → 5 s bound per
+  relay, failures recorded, known limit stated (L-064). Library side noted for a follow-up: the HTTP
+  transport's circuit breaker is transport-wide.
+- ADV-2 Medium, FF.2(b) dispatched without FR-RR-08 admission → the sample now runs `TryAdmit` with
+  the library's scope rule rebuilt from public APIs and shows a replay refused; handler docs point at
+  the rule. Classified sample-only (FR-RR-08 binds receive endpoints; `ProtocolDispatcher` documents
+  that a receive path of your own must admit). Follow-up idea: make the scope helper public.
+- ADV-3 Medium, sample 04 passed a DID-derived URL as `ServiceEndpointOverride` → the mediator DID
+  carries its own service; override dropped; Section Z says a network transport must run the guard.
+- ADV-4 Medium, the wallet's invitation fetch bypassed the guard → `SocketsHttpHandler` with the
+  guard's `ConnectAsync`, no redirects, 64 KiB cap, scheme check.
+- ADV-5..10 Low and the Info items: per-client limiters in the copyable hosts, comments elsewhere;
+  relay failure records for every failure; the sample's raw-id log line dropped; comments on the
+  narrated guard messages; EE frames checked by DID subject; "the allow-list gates only the first
+  grant"; replay budget back to defaults in sample 11; "this host (on every port)"; host directory
+  filled by the operator only; `NoticeHandler` registration swap made safe. Declined: printing the
+  sanitized `DisclosedProtocols`/`ProblemCode` in CC (it is the member being demonstrated); reusing
+  a secrets resolver across LoopbackPort attempts (harmless); sample `Main` printing the exception
+  (every sample does).
+
+### Library observations (recorded, not patched)
+- `HttpDidCommTransport` connect failures reach `ITransportRouter.SendAsync` callers as
+  `HttpRequestException`, not the documented `TransportException`; reproduced by the skipped
+  `HttpTransportConnectFailureContractTests` (fails when un-skipped). Facade callers are unaffected.
+- The HTTP transport's Polly circuit breaker is shared by all hosts.
+
+### Owner decision during the run
+- 2026-11-17: the seven library-constructed constructors are permanent reference-gate entries
+  (option a).

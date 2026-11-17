@@ -134,7 +134,7 @@ Shipped highlights:
 
 The unit and interop suites build and run under `/warnaserror` on Linux and Windows on every PR
 ([`ci.yml`](.github/workflows/ci.yml)). See [CHANGELOG.md](CHANGELOG.md) for the per-release log,
-the [PRD](docs/didcomm-dotnet_PRD.md) for normative requirements (the six-phase plan is §12), and
+the [PRD](docs/didcomm-dotnet_PRD.md) for normative requirements (the phased plan, Phases 0–7, is §12), and
 the [roadmap](#roadmap) below for status at a glance.
 
 ## Install
@@ -301,27 +301,28 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 | Sample | What it shows |
 |---|---|
 | [`samples/01-Quickstart`](samples/01-Quickstart/) | The quickstart above: two identities, authcrypt round-trip, unpack metadata |
-| [`samples/02-Cookbook`](samples/02-Cookbook/) | One narrated section per API task (all 28 PRD §14.2 letters) — run `dotnet run --project samples/02-Cookbook` |
+| [`samples/02-Cookbook`](samples/02-Cookbook/) | One narrated section per API task (all 32 PRD §14.2 letters, A–FF) — run `dotnet run --project samples/02-Cookbook` |
 | [`samples/03-EnvelopesAndMessages`](samples/03-EnvelopesAndMessages/) | Every envelope composition and content-encryption alg, multi-recipient, attachments, threading + ACKs, DID rotation |
-| [`samples/04-MediatorAgent`](samples/04-MediatorAgent/) | ASP.NET Core mediator + Routing 2.0 relay; Alice→Mediator→Bob over HTTP with DID-published routingKeys |
+| [`samples/04-MediatorAgent`](samples/04-MediatorAgent/) | Routing relay only: `AddRoutingMediator()` + a host `IForwardSink` relaying to Bob's own inbox; Alice→Mediator→Bob over HTTP with DID-published routingKeys |
 | [`samples/05-WebSocketChat`](samples/05-WebSocketChat/) | Two agents over WebSocket: trust-ping, discover-features, chat, reconnect after drop |
 | [`samples/06-OutOfBand`](samples/06-OutOfBand/) | OOB invitation → URL/QR → decode → `pthid`-correlated response |
 | [`samples/07-ProblemsAndProtocols`](samples/07-ProblemsAndProtocols/) | Problem-report taxonomy, escalation, cascade guard, empty-ACK, custom `lets_do_lunch` handler |
 | [`samples/08-Extensibility`](samples/08-Extensibility/) | Custom (mock-KMS) secrets resolver, the net-did `IKeyStore` bridge, custom transport |
 | [`samples/09-NetDidIntegration`](samples/09-NetDidIntegration/) | did:key / did:peer minting, Ed25519→X25519 derivation, the deliberate `did:web` rejection |
 | [`samples/10-ProfilesAndI18n`](samples/10-ProfilesAndI18n/) | `accept` profile negotiation and `lang`/`accept-lang` (the spec's chess example) |
+| [`samples/11-MediatedAgent`](samples/11-MediatedAgent/) | The full mediator service (`AddMediator()` + `MapDidCommMediator`) and a wallet that enrolls from its invitation, picks up over HTTP and live over WebSocket; a policy-driven `mediate-deny` |
 
 Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-01 coverage gate
 (`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
 packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
-nine shipped assemblies and re-runs all ten samples plus the 28 cookbook sections in-process, then
-intersects real execution hits with the public surface. Of the 1021 public members, **628 are
-proven to execute**; 27 have no executable code at all (enums, const holders, two static readonly
-fields) and are itemized in the test output; the other 366 are the Phase 7 mediator surface, on
-the execution gate's allowlist with a `TODO(#97)` marker until sample 11 and cookbook sections
-CC–FF demonstrate them. A cheaper metadata-reference gate runs alongside it as a first check and
-carries 12 justified entries for members no sample references directly, plus 421 `TODO(#97)`
-entries for the same Phase 7 surface.
+nine shipped assemblies and re-runs all eleven samples plus the 32 cookbook sections in-process,
+then intersects real execution hits with the public surface. Of the 1021 public members, **994 are
+proven to execute**; the other 27 have no executable code at all (enums, const holders, two static
+readonly fields) and are itemized in the test output. The execution gate has no allowlist entries.
+A cheaper metadata-reference gate runs alongside it as a first check and carries 19 justified
+entries for members no sample can reference honestly (const holders, and constructors of results
+only the library produces). A companion test fails if a packable `src/` project is missing from the
+gate's assembly list.
 
 ## Specifications
 
@@ -347,6 +348,7 @@ didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PR
 | **4** | Routing & mediation (Forward protocol, mediator-as-DID-endpoint, rewrapping) | ✅ Complete |
 | **5** | Transports (HTTPS + ASP.NET Core receive, WebSocket) | ✅ Complete |
 | **6** | Protocols, cross-message concerns, live interop, samples, release | ✅ Complete |
+| **7** | Mediator service: return route, Coordinate Mediation, Message Pickup, `AddMediator()`, the recipient client, sample 11 | 🚧 In progress — the external-mediator interop gate, CM 2.0 (mediator role) and Pickup 4.0 remain ([#88](https://github.com/moisesja/didcomm-dotnet/issues/88)) |
 
 Phase 6, in detail:
 
