@@ -6,6 +6,64 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — CI: the nightly Live interop job runs again (#120, epic #88)
+
+The scheduled `Live interop` workflow failed every night from 2026-11-08 to 2026-11-16, before
+any test ran. **No library code changes.** `ubuntu-latest` moved to Ubuntu 26.04, which has no
+CPython 3.9 build (3.9 is end-of-life), and the workflow asked `setup-python` for 3.9. The setup
+step failed, so neither the didcomm-python leg nor the didcomm-jvm leg ran for that week.
+
+- **The python leg runs on CPython 3.12.** It is the newest interpreter the pinned didcomm-python
+  0.3.2 stack imports on: its pydantic v1 breaks at import on 3.13+. The harness's 3.9–3.12
+  interpreter check is unchanged and still exits 2 outside that window (checked on 3.14, on a
+  missing interpreter and on an empty `PYTHON`). No counterpart pin moved: every pin installs
+  from a cp312 wheel, except `varint`, which builds from source as before.
+- **The leg uses the interpreter the workflow installed.** The harness step gets `PYTHON` from
+  `setup-python`'s `python-path` output instead of taking whichever `python3` comes first on
+  `PATH` (Ubuntu 26.04's own is 3.14). `run-python-leg.sh` now logs the CPython version and base
+  prefix its venv was made from.
+- **Proof.** Live interop run 43882021940 from the PR branch, on Ubuntu 26.04 with CPython 3.12.16
+  and Temurin 17.0.21:
+  - python leg: 63 executed, 63 passed, 0 n/a;
+  - jvm leg: 60 executed, 60 passed, 3 n/a.
+
+  These are the same cells as the last green run (2026-11-07, CPython 3.9 on Ubuntu 24.04), with
+  the same three ES256K N-A cells on the JVM side, plus the #95 "via a running dotnet mediator"
+  cell in each leg, which passes.
+- **Actions moved off Node 20** in `interop-live.yml` and `ci.yml`. GitHub now forces Node-20
+  actions onto Node 24 with a deprecation warning, the same shape of drift that dropped 3.9. Each
+  new tag exists and declares `runs.using: node24`:
+  - `actions/checkout` v4 → v7;
+  - `actions/setup-dotnet` v4 → v6;
+  - `actions/setup-python` v5 → v7;
+  - `actions/setup-java` v4 → v6;
+  - `actions/upload-artifact` v4 → v7.
+
+  `release.yml` is unchanged: only a real release can prove it. Its bump is listed for the owner
+  in the plan (`tasks/todo20261116-085851-live-interop-python-120.md`), together with the floating
+  runner images, which stay as they are.
+- **3.12 is a stopgap.** It lasts while the runner image has a 3.12 build (3.12 reaches end of
+  life in 2028-10). The lasting fix is a python counterpart stack off pydantic v1. The workflow
+  comment and `tools/interop-live/README.md` say so.
+- **One test fixed, no behaviour change.** The PR's windows CI failed
+  `DeliveredUnpackAdv4Tests.Host_code_that_throws_on_its_thread_after_the_shutdown_is_observed_and_gives_its_slot_back`
+  ("expected `OperationCanceledException`, but no exception was thrown", after 10 s).
+  - **Why it failed.** The test ended the channel's shutdown with `CancelAsync()`, which runs the
+    cancellation's callbacks on a thread-pool work item. When the pool is busy for longer than the
+    test's 10 s real-time gate, the blocked host code times out first and the delivery completes
+    normally. Starving the pool forces this every time.
+  - **The fix.** The test now cancels synchronously, as `MediatorClientChannel.Dispose` does. The
+    failure no longer reproduces under the same starvation. A mutation that makes the unpacker
+    ignore the shutdown still fails the test.
+  - **The hang guard is no longer ignored** (PR review). The host code counts a 10 s gate that
+    times out, and the test asserts that none had when the shutdown was decided. Under the forced
+    starvation, the old `CancelAsync()` version now fails with "found 2" from that check, which
+    names the cause, instead of "no exception was thrown".
+  - **The sweep.** I checked the other 40 `CancelAsync()` calls in the tests:
+    - 39 have no real-time wait in host code that could decide the outcome;
+    - the one suspected sibling, `MediatorClientTimeoutRaceTests…the_cancellation_wins`, passes
+      under the same forced starvation, so it stays unchanged.
+
 ### Fixed — tests: the mediator timing tests no longer depend on how fast the machine runs (#119, #114, epic #88)
 
 Since #95 and #96 merged, CI on `main` failed on 3 of 4 pushes, each time on a different timing test
