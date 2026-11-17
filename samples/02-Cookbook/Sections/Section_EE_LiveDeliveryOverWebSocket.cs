@@ -300,25 +300,25 @@ public static class Section_EE_LiveDeliveryOverWebSocket
 
         // The stream turns live delivery on, takes what is already queued, then yields each message
         // the mediator pushes. A message may arrive either way; the stream does not care which.
-        using var stop = new CancellationTokenSource();
-        var live = pickup.ReceiveLiveAsync(mediatorDid, ctx.Bob.Did, ct: stop.Token).GetAsyncEnumerator();
+        // (An await foreach over ReceiveLiveAsync is the usual way to read it. This section reads one
+        // item at a time because it sends between items, and it adds a hang guard so a broken run
+        // fails instead of waiting forever; GuardedStreamReader keeps that guard from disposing the
+        // stream while a read is still running.)
         PickupItem last;
-        try
+        await using (var live = new GuardedStreamReader<PickupItem>(
+            token => pickup.ReceiveLiveAsync(mediatorDid, ctx.Bob.Did, ct: token), HangGuard))
         {
-            var first = await NextLiveAsync(live, stop, "Bob's first live item");
+            var first = await NextLiveAsync(live, "Bob's first live item");
             narrator.Value("[bob] live", first.Unpacked?.Message.Body?["content"]?.GetValue<string>());
 
             await SendToBobAsync("Hello again");
             // Asking for the next item acknowledges the previous one.
-            last = await NextLiveAsync(live, stop, "Bob's second live item");
+            last = await NextLiveAsync(live, "Bob's second live item");
             narrator.Value("[bob] live", last.Unpacked?.Message.Body?["content"]?.GetValue<string>());
-        }
-        finally
-        {
-            // Ending the enumeration (here, like a break) acknowledges what was taken and turns live
+
+            // Ending the enumeration here (like a break) acknowledges what was taken and turns live
             // delivery off. The last item is NOT acknowledged: the stream cannot tell whether you
             // handled it, so the mediator would deliver it again later.
-            await live.DisposeAsync();
         }
 
         // To discard the last item, acknowledge it yourself.
@@ -331,22 +331,9 @@ public static class Section_EE_LiveDeliveryOverWebSocket
         narrator.Note("So keep LivePollInterval at or below the longest delay your senders ask for (this library's mediator caps a delay at 1 hour by default).");
     }
 
-    private static async Task<PickupItem> NextLiveAsync(IAsyncEnumerator<PickupItem> live, CancellationTokenSource stop, string what)
+    private static async Task<PickupItem> NextLiveAsync(GuardedStreamReader<PickupItem> live, string what)
     {
-        var move = live.MoveNextAsync().AsTask();
-        bool moved;
-        try
-        {
-            moved = await move.WaitAsync(HangGuard);
-        }
-        catch (TimeoutException ex) when (!move.IsCompleted)
-        {
-            await stop.CancelAsync(); // end the pending move before the stream is disposed
-            throw new TimeoutException($"Timed out waiting for {what}.", ex);
-        }
-        if (!moved)
-            throw new InvalidOperationException($"The live stream ended before {what}.");
-        var item = live.Current;
+        var item = await live.NextAsync(what);
         if (item.Error is not null)
             throw new InvalidOperationException($"{what} did not unpack: {item.Error.GetType().Name}.");
         return item;

@@ -17,8 +17,10 @@ public sealed class LiveConnection : IAsyncDisposable
     private readonly string _mediatorDid;
     private readonly string _did;
     private readonly Uri _endpoint;
-    private readonly CancellationTokenSource _stop = new();
-    private IAsyncEnumerator<PickupItem>? _stream;
+    private GuardedStreamReader<PickupItem>? _stream;
+
+    /// <summary>How long one live read may take before the sample fails instead of hanging.</summary>
+    public static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(30);
 
     internal LiveConnection(string name, Narrator narrator, ServiceProvider services, string mediatorDid, string did, Uri endpoint)
     {
@@ -51,12 +53,16 @@ public sealed class LiveConnection : IAsyncDisposable
     /// what is already queued, then waits for what the mediator pushes. Asking for the next message
     /// acknowledges the previous one.
     /// </summary>
-    public async Task<PickupItem> ReceiveNextAsync()
+    /// <param name="what">What is being waited for, for the error message.</param>
+    /// <exception cref="TimeoutException">Nothing arrived within <see cref="HangGuard"/>; the read has been cancelled and has ended.</exception>
+    public Task<PickupItem> ReceiveNextAsync(string what = "the next live message")
     {
-        _stream ??= _pickup.ReceiveLiveAsync(_mediatorDid, _did, _endpoint, _stop.Token).GetAsyncEnumerator(_stop.Token);
-        if (!await _stream.MoveNextAsync().ConfigureAwait(false))
-            throw new InvalidOperationException("The live stream ended.");
-        return _stream.Current;
+        // An await foreach over ReceiveLiveAsync is the usual way to read the stream; the sample reads
+        // one item at a time with a hang guard, and GuardedStreamReader never disposes the stream while
+        // a read is still running.
+        _stream ??= new GuardedStreamReader<PickupItem>(
+            token => _pickup.ReceiveLiveAsync(_mediatorDid, _did, _endpoint, token), HangGuard);
+        return _stream.NextAsync(what);
     }
 
     /// <summary>
@@ -80,19 +86,11 @@ public sealed class LiveConnection : IAsyncDisposable
     /// <summary>Close the connection.</summary>
     public async ValueTask DisposeAsync()
     {
-        await _stop.CancelAsync().ConfigureAwait(false);
         if (_stream is { } stream)
         {
-            try
-            {
-                await stream.DisposeAsync().ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Stopped on purpose.
-            }
+            _stream = null;
+            await stream.DisposeAsync().ConfigureAwait(false); // waits for a read still running, first
         }
         await _services.DisposeAsync().ConfigureAwait(false);
-        _stop.Dispose();
     }
 }

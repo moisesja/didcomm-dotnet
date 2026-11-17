@@ -208,9 +208,9 @@ public static class Program
                 // Start the stream (it turns live delivery on and takes what is queued), then Alice
                 // sends. Bob gets the message by push, or by the stream's own collection if it was
                 // stored first: either way it arrives, and that is what the sample checks.
-                var next = live.ReceiveNextAsync();
+                var next = live.ReceiveNextAsync("Bob's live delivery"); // carries its own hang guard
                 await SendAndWaitUntilStoredAsync(narrator, mediator, alice, bobPublic, "Hello again, Bob", show: false).ConfigureAwait(false);
-                var item = await AwaitOrFailAsync(next, "Bob's live delivery").ConfigureAwait(false);
+                var item = await next.ConfigureAwait(false);
                 var text = item.Unpacked?.Message.Body?["content"]?.GetValue<string>();
                 if (text != "Hello again, Bob")
                     throw new InvalidOperationException("Bob's live stream returned something else.");
