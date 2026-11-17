@@ -5,7 +5,7 @@
     <RootNamespace>DidComm.Samples.MediatorAgent</RootNamespace>
     <AssemblyName>DidComm.Samples.MediatorAgent</AssemblyName>
     <IsPackable>false</IsPackable>
-    <Description>didcomm-dotnet mediated routing over HTTP — an ASP.NET Core mediator (MapDidCommEndpoint receive + ForwardProcessor Routing 2.0 relay) plus a console flow routing Alice → Mediator → Bob with did:peer identities carrying routingKeys, including the outbound-endpoint SSRF guard and its explicit loopback opt-in (PRD §14.3 sample 04, tasks O/P/Q).</Description>
+    <Description>didcomm-dotnet mediated routing over HTTP — an ASP.NET Core mediator running the library's routing role (AddRoutingMediator behind the registry-aware MapDidCommEndpoint) with a host-written IForwardSink that relays each forward to the recipient's own inbox via SendPackedAsync, plus a console flow routing Alice → Mediator → Bob with did:peer identities carrying routingKeys: the outbound-endpoint SSRF guard and its explicit loopback opt-in, Discover Features answered on the same request, a registered recipient without an inbox, a forward for an unregistered DID, and the same relay composed without a DI container (PRD §14.3 sample 04).</Description>
   </PropertyGroup>
 
   <ItemGroup>
