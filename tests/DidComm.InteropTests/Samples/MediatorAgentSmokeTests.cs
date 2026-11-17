@@ -43,7 +43,12 @@ public sealed class MediatorAgentSmokeTests
         transcript.Should().Contain("The transport's own connection check refused it too:");
         transcript.Should().Contain("Refusing to connect to '127.0.0.1:");
 
-        // Discover Features with return_route all: the disclose came back on the same request.
+        // Discover Features with return_route all: the disclose came back on the same request. The
+        // mediator's address came from its own DID (resolved and guarded), not from an override.
+        var inbox = Regex.Match(transcript, @"Mediator inbox = (http://127\.0\.0\.1:\d+/didcomm)");
+        inbox.Success.Should().BeTrue("the mediator prints its inbox");
+        transcript.Should().Contain($"The mediator's own endpoint (from its DID) = {inbox.Groups[1].Value}");
+        transcript.Should().Contain($"Endpoint used (the mediator's, from its DID) = {inbox.Groups[1].Value}");
         transcript.Should().Contain("return_route = All");
         transcript.Should().Contain("Answer arrived as HTTP = 200");
         transcript.Should().Contain("Answer type = https://didcomm.org/discover-features/2.0/disclose");
@@ -76,7 +81,6 @@ public sealed class MediatorAgentSmokeTests
         transcript.Should().Contain("== Section 8 — The same relay without a DI container ==");
         transcript.Should().Contain("[mediator] verified forward — next=did:peer:2.");
         transcript.Should().Contain("[bob] Content = Relayed by the hand-built mediator.");
-        transcript.Should().Contain("[mediator] relayed before the acknowledgement = False");
         transcript.Should().Contain("[mediator] our transport acknowledged before the sink ran = True");
         transcript.Should().Contain("[bob] Content = Held until the acknowledgement.");
         transcript.Should().Contain("Hand-built handler stopped");

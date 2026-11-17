@@ -14,7 +14,8 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
 ## What it demonstrates
 
 - **The routing role (FR-ROUTE-09/10/11)** — `AddRoutingMediator(new ForwardProcessorOptions(RewrapMode.PassThrough) { MaxDelay = … })`
-  behind the registry-aware `MapDidCommEndpoint("/didcomm")`. A forward is checked inline
+  behind the registry-aware `MapDidCommEndpoint("/didcomm")`, with a rate limiter in front (one
+  window per client address: anyone who can reach a mediator can post forwards to it). A forward is checked inline
   (encrypted to a key the mediator holds, not expired, `next` registered), the sender gets its
   `202`, and only then is the forward processed and handed to the `IForwardSink`.
   `ForwardProcessorOptions.Validate()` refuses a bad setting (a negative `MaxDelay`) up front.
@@ -27,10 +28,20 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   replaces the default `NullForwardSink`). For each forward it reads `ProtocolContext.Acknowledged`
   (already complete: the 202 went out first), re-checks expiry with
   `ForwardProcessingResult.IsExpired`, reads `NotBefore`, looks the recipient up in a bounded host
-  directory (DID → inbox URL, at most 16 entries) and relays the still-encrypted onward bytes with
+  directory (DID → inbox URL, at most 16 entries, filled only by the operator — never from a
+  peer's message or a DID document) and relays the still-encrypted onward bytes with
   `DidCommClient.SendPackedAsync` — which applies the mediator's SSRF policy to the inbox URL and
-  never reads a response body. **The library's built-in push to a recipient's endpoint is deferred
-  to #110**; until then a relay like this one is the host's own code.
+  never reads a response body. A failed relay, of any kind, is recorded as `Failed` and handed
+  back to the forward handler, which logs its message id and exception type.
+  **The library's built-in push to a recipient's endpoint is deferred to #110**; until then a
+  relay like this one is the host's own code.
+- **A time limit on every relay** — a sink runs on the forward handler's background pump, so it
+  must never wait on an endpoint a peer controls without a bound: each relay gets at most
+  `InboxRelaySink.RelayTimeout` (5 seconds) and is recorded as `Failed` when it runs out. Known
+  limit: this sample relays one forward at a time, so a slow inbox still delays every forward
+  queued behind it by up to that bound each. A production relay hands each forward to a bounded
+  queue per recipient, served by its own workers, so a slow recipient only delays its own
+  messages.
 - **A registered recipient with no inbox** — Carol is registered but the host knows no inbox for
   her, so the relay hands her forward to the library's `NullForwardSink`, which drops it and logs
   the message id.
@@ -40,6 +51,10 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   (`Dropped-Unknown`) through a `MeterListener` — what an operator would export with OpenTelemetry.
 - **Discover Features, answered on the same request (FR-RR-07)** — Alice asks the mediator Bob
   named which routing protocol it serves, sending with `SendOptions { ReturnRoute = ReturnRouteMode.All }`.
+  The mediator's own DID names its inbox, so `SendAsync` finds that address the normal way and the
+  outbound guard checks it. An address read from someone else's DID document is never passed as
+  `SendOptions.ServiceEndpointOverride`: an override is trusted as the caller's own choice and
+  skips the guard.
   The `disclose` comes back as the HTTP `200` body in `SendResult.Returned`, and
   `FeatureDisclosure.Roles` reads `mediator` for `routing/2.0`. A reply rides back only to an
   authenticated (authcrypt) sender that asked for it, and only between directly connected agents.
@@ -54,8 +69,10 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   document, i.e. from a counterparty. `DidCommOptions.OutboundEndpointPolicy` blocks
   private/loopback/metadata destinations by default: the sample shows `SendAsync` refusing this
   loopback demo, and the HTTP transport's own connect-time check refusing it too when bytes are
-  handed straight to `ITransportRouter`. Every party then opens exactly one host,
-  `OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")` — never by disabling the guard.
+  handed straight to `ITransportRouter`. Every party then opens one host (on every port),
+  `OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")` — never by disabling the guard. The
+  refusal messages printed here name the endpoint and its address: a production log records the
+  exception type only.
 - **The same relay without a DI container** — `StaticRecipientRoutingKeyProvider`, the public
   `ForwardProcessor` and `ForwardHandler` constructors, a hand-built `ProtocolHandlerRegistry` and
   `ProtocolDispatcher`. A forward packed by hand (`ForwardMessage.Create`, `ForwardMessage.TryParse`,
@@ -117,8 +134,10 @@ Ports and DIDs change every run; the structure is stable:
 == Section 5 — Alice asks the mediator what it does — Discover Features, answered on the same request ==
     Bob's service endpoint (from his DID) = http://127.0.0.1:<port>/didcomm
     Bob's routingKeys to wrap for = 1
+    The mediator's own endpoint (from its DID) = http://127.0.0.1:<port>/didcomm
     return_route = All
     return_route_thread = <none: only the thread mode names one>
+    Endpoint used (the mediator's, from its DID) = http://127.0.0.1:<port>/didcomm
     Answer arrived as HTTP = 200
     Answer type = https://didcomm.org/discover-features/2.0/disclose
     Answer authenticated = True
@@ -164,7 +183,6 @@ Ports and DIDs change every run; the structure is stable:
     …
     [bob] Content = Relayed by the hand-built mediator.
     [mediator] dispatch result before the acknowledgement = NoReply
-    [mediator] relayed before the acknowledgement = False
     [mediator] relay outcome = Relayed
     [mediator] our transport acknowledged before the sink ran = True
     …

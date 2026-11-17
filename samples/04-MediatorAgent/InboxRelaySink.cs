@@ -1,5 +1,4 @@
 using System.Threading.Channels;
-using DidComm.Exceptions;
 using DidComm.Facade;
 using DidComm.Protocols;
 using DidComm.Protocols.Routing;
@@ -19,7 +18,11 @@ public enum RelayOutcome
     /// <summary>The forward's own <c>expires_time</c> passed while it waited: not relayed.</summary>
     Expired,
 
-    /// <summary>The inbox could not be reached; the exception goes back to the handler, which logs it.</summary>
+    /// <summary>
+    /// The relay did not finish: the inbox could not be reached, answered with an error, or took
+    /// longer than <see cref="InboxRelaySink.RelayTimeout"/>. The exception goes back to the
+    /// handler, which logs the message id and the exception type.
+    /// </summary>
     Failed,
 }
 
@@ -65,7 +68,9 @@ public sealed record RelayRecord(
 /// <para>
 /// The directory is bounded (<see cref="MaxInboxes"/> entries) and keyed by DID subject — the DID
 /// without any <c>#fragment</c>, <c>?query</c> or <c>/path</c> — because a forward's <c>next</c> may
-/// name one of the recipient's keys rather than the bare DID (PRD §4.3).
+/// name one of the recipient's keys rather than the bare DID (PRD §4.3). Only the host's operator
+/// fills it (<see cref="TryAddInbox"/>), never from a peer's message or a DID document: otherwise a
+/// stranger could point the relay at an address of its choosing.
 /// </para>
 /// <para>
 /// Dependency rule: a sink is built inside the protocol handler registry, so it must never take
@@ -73,6 +78,15 @@ public sealed record RelayRecord(
 /// in its constructor (<c>AddRoutingMediator()</c> refuses such a sink at registration). The
 /// <see cref="DidCommClient"/> is safe to take: the library's own <see cref="ForwardProcessor"/>
 /// takes it too. A sink is a singleton and must be thread-safe.
+/// </para>
+/// <para>
+/// A sink runs on the forward handler's background pump, one forward at a time, so it must never
+/// wait on an endpoint a peer controls without a time limit: one inbox that never answers would
+/// stop every relay behind it. Each relay here gets at most <see cref="RelayTimeout"/>. That bound
+/// does not remove the problem, it only caps it: because this sample relays one forward at a time,
+/// a slow inbox still delays each forward queued behind it by up to the bound (a known limit). A
+/// production relay hands each forward to a bounded queue per recipient, served by its own
+/// workers, so a slow recipient only delays its own messages.
 /// </para>
 /// </remarks>
 public sealed class InboxRelaySink : IForwardSink
@@ -83,9 +97,14 @@ public sealed class InboxRelaySink : IForwardSink
     /// <summary>The most outcome records kept for the host to read; older ones are dropped first.</summary>
     public const int MaxRecords = 32;
 
+    /// <summary>
+    /// The longest one relay may take, from the first connection attempt to the inbox's answer.
+    /// After that the relay is given up and recorded as <see cref="RelayOutcome.Failed"/>.
+    /// </summary>
+    public static readonly TimeSpan RelayTimeout = TimeSpan.FromSeconds(5);
+
     private readonly DidCommClient _relay;
     private readonly NullForwardSink _noInbox;
-    private readonly ILogger<InboxRelaySink>? _logger;
     private readonly object _gate = new();
     private readonly Dictionary<string, Uri> _inboxes = new(StringComparer.Ordinal);
     private readonly Channel<RelayRecord> _records = Channel.CreateBounded<RelayRecord>(
@@ -93,12 +112,11 @@ public sealed class InboxRelaySink : IForwardSink
 
     /// <summary>Create the relay.</summary>
     /// <param name="relay">The mediator's facade: it sends the onward bytes under the mediator's own outbound-endpoint (SSRF) policy.</param>
-    /// <param name="loggerFactory">Optional; the relay and its fallback <see cref="NullForwardSink"/> log message ids only, never a DID.</param>
+    /// <param name="loggerFactory">Optional; for the fallback <see cref="NullForwardSink"/>, which logs message ids only, never a DID. The relay itself logs nothing: a relay that fails goes back to the forward handler, which logs it.</param>
     public InboxRelaySink(DidCommClient relay, ILoggerFactory? loggerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(relay);
         _relay = relay;
-        _logger = loggerFactory?.CreateLogger<InboxRelaySink>();
         _noInbox = new NullForwardSink(loggerFactory?.CreateLogger<NullForwardSink>());
     }
 
@@ -177,12 +195,16 @@ public sealed class InboxRelaySink : IForwardSink
             return;
         }
 
+        // The inbox is an endpoint a peer controls: give the relay a time limit of its own (see
+        // the class remarks), linked to the shutdown token the handler passes in.
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(RelayTimeout);
         try
         {
             // The onward bytes are already packed for the recipient: send them as they are. The
             // facade applies the mediator's outbound-endpoint (SSRF) policy to the inbox URL and
             // never reads a response body on this path.
-            var sent = await _relay.SendPackedAsync(result.OnwardPacked, inbox, ForwardConstants.PayloadMediaType, ct)
+            var sent = await _relay.SendPackedAsync(result.OnwardPacked, inbox, ForwardConstants.PayloadMediaType, bounded.Token)
                 .ConfigureAwait(false);
             Write(Base(RelayOutcome.Relayed) with
             {
@@ -192,11 +214,24 @@ public sealed class InboxRelaySink : IForwardSink
                 ResponseBytes = sent.ResponsePayload?.Length ?? 0,
             });
         }
-        catch (TransportException ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Let the handler see the failure too: it logs the message id and the exception type.
+            // The host is shutting down: not a failed relay. The handler counts the forward as
+            // dropped at shutdown.
+            throw;
+        }
+        catch (OperationCanceledException ex) when (bounded.IsCancellationRequested)
+        {
+            // Our own time limit fired: the inbox was too slow. Record it, and hand the handler a
+            // TimeoutException so it is logged as a failure, not as a shutdown.
+            Write(Base(RelayOutcome.Failed) with { Error = nameof(TimeoutException) });
+            throw new TimeoutException($"The relay did not finish within {RelayTimeout.TotalSeconds} seconds.", ex);
+        }
+        catch (Exception ex)
+        {
+            // Any other failure (the inbox refused, the guard refused its address, a fault): record
+            // it, then let the handler see it too; it logs the message id and the exception type.
             Write(Base(RelayOutcome.Failed) with { Error = ex.GetType().Name });
-            _logger?.LogWarning("Relay of forward {MessageId} failed ({ExceptionType}).", context.Received.Message.Id, ex.GetType().Name);
             throw;
         }
 

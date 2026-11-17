@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using System.Threading.RateLimiting;
 using DidComm.AspNetCore;
 using DidComm.Exceptions;
 using DidComm.Extensions.DependencyInjection;
@@ -20,6 +21,7 @@ using DidComm.Transports.Http;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -39,6 +41,8 @@ namespace DidComm.Samples.MediatorAgent;
 /// local demo needs, a Discover Features answer returned on the same request, a registered
 /// recipient without an inbox, a forward for an unregistered DID, and the same relay composed
 /// without a DI container.
+/// The mediator's own DID names its inbox too, so Alice reaches it the normal way: resolved from a
+/// DID and checked by the outbound guard, never through an address override.
 /// <see cref="Main"/> is the CLI; <see cref="RunAsync"/> is the testable seam invoked by the
 /// InteropTests smoke test (FR-DX-02: dynamic ports, loopback only, no fixed timing).
 /// </summary>
@@ -46,6 +50,9 @@ public static class Program
 {
     /// <summary>The hang guard on every wait: a broken run fails loudly instead of hanging.</summary>
     private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(30);
+
+    /// <summary>The rate-limiter policy in front of the mediator's endpoint.</summary>
+    private const string RelayRateLimitPolicy = "relay";
 
     /// <summary>CLI entry point — writes to <see cref="Console.Out"/> and exits 0 on success.</summary>
     public static async Task<int> Main()
@@ -115,7 +122,9 @@ public static class Program
             .UseNetDidResolver()
             .UseSecretsResolver(mediatorSecrets)
             // The relay sends onward over HTTP. Loopback plaintext http is a demo-only choice —
-            // production endpoints are https (the transport's default AllowedSchemes).
+            // production endpoints are https (the transport's default AllowedSchemes). The relay
+            // also bounds each send itself (InboxRelaySink.RelayTimeout), because it runs on the
+            // forward handler's one background pump.
             .UseHttpTransport(o =>
             {
                 o.AllowedSchemes = new[] { "http", "https" };
@@ -125,7 +134,7 @@ public static class Program
             {
                 // The SSRF guard (section 4) also applies to the relay: a recipient's inbox URL is
                 // data someone else chose. This process deliberately talks to loopback, so it opens
-                // exactly that host and nothing else.
+                // this host (on every port), nothing else.
                 o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1");
                 // Some in-the-wild DID documents still write serviceEndpoint as a bare string
                 // instead of the spec's object form. Accepting that is a receive-side tolerance
@@ -138,11 +147,19 @@ public static class Program
             // The routing role: the forward handler, its recipient registry and the sink above.
             .AddRoutingMediator(routingOptions));
 
+        // Anyone who can reach the mediator can post forwards to it: put a rate limit in front,
+        // one window per client address. The permits are generous; size yours to your traffic.
+        mediatorBuilder.Services.AddRateLimiter(o => o.AddPolicy(RelayRateLimitPolicy, http =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 100, Window = TimeSpan.FromSeconds(1) })));
+
         var mediatorApp = mediatorBuilder.Build();
+        mediatorApp.UseRateLimiter();
         // The registry-aware endpoint: it unpacks each envelope and dispatches it to the
         // registered protocol handlers. A forward goes to the routing role's handler, which checks
         // it, lets the endpoint answer 202 and only then hands it to the sink (FR-ROUTE-11).
-        mediatorApp.MapDidCommEndpoint("/didcomm");
+        mediatorApp.MapDidCommEndpoint("/didcomm").RequireRateLimiting(RelayRateLimitPolicy);
 
         // The routing role counts every forward it drops on the didcomm.forward.outcomes counter
         // (meter "didcomm-dotnet", tag didcomm.forward.outcome). An operator would export it with
@@ -190,7 +207,10 @@ public static class Program
             var keyGen = mediatorApp.Services.GetRequiredService<IKeyGenerator>();
             var crypto = mediatorApp.Services.GetRequiredService<ICryptoProvider>();
 
-            var mediator = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto);
+            // The mediator's DID names its own inbox (the app is already listening, so the address
+            // is known). Anyone who wants to talk to the mediator itself resolves it from this DID.
+            var mediator = await PeerIdentityFactory.CreateAsync(manager, keyGen, crypto,
+                new DidCommServiceSpec(mediatorInbox.ToString(), Accept: new[] { "didcomm/v2" }));
             foreach (var key in mediator.Privates) mediatorSecrets.Add(key);
             narrator.Step($"Minted mediator = {Trunc(mediator.Did, 64)}");
 
@@ -259,6 +279,8 @@ public static class Program
                 // The relay's own directory: Bob has an inbox; Carol does not (she would collect
                 // her messages some other way). The library's built-in push to a recipient's
                 // endpoint is a planned feature (#110); until then this directory is the host's.
+                // Only the operator fills it — never from a peer's message or a DID document,
+                // or a stranger could point the relay at an address of its choosing.
                 narrator.Value("[mediator] Bob's inbox added to the relay's directory", relay.TryAddInbox(bob.Did, bobInbox));
                 narrator.Value("[mediator] inboxes in the directory", $"{relay.InboxCount} of {InboxRelaySink.MaxInboxes}");
 
@@ -286,6 +308,8 @@ public static class Program
                     catch (TransportException ex)
                     {
                         narrator.Step("Default policy refused, as designed:");
+                        // The message names the endpoint and its address: fine for this demo's
+                        // narration, but a production log records the exception type only.
                         narrator.Note(ex.Message);
                     }
 
@@ -307,6 +331,8 @@ public static class Program
                         // with the guard's TransportException inside.
                         var refusal = ex as TransportException ?? (TransportException)ex.InnerException!;
                         narrator.Step("The transport's own connection check refused it too:");
+                        // As above: the message names the host and port, so a production log
+                        // records the exception type only.
                         narrator.Note(refusal.Message);
                     }
                 }
@@ -331,6 +357,16 @@ public static class Program
                     var mediatorDid = InboxRelaySink.DidSubjectOf(serviceInfo.RoutingKeys[0])
                         ?? throw new InvalidOperationException("Bob's routing key is not a DID URL.");
 
+                    // The mediator's own DID names its inbox, so Alice sends to it like to anyone
+                    // else: SendAsync resolves the address from that DID and the outbound guard
+                    // checks it. Never pass an address read from someone else's DID document as
+                    // SendOptions.ServiceEndpointOverride: an override is trusted as your own
+                    // choice and skips the guard.
+                    var mediatorService = (await routedAlice.Provider
+                        .GetRequiredService<IServiceEndpointResolver>()
+                        .ResolveAsync(mediatorDid)).Single();
+                    narrator.Value("The mediator's own endpoint (from its DID)", mediatorService.Uri);
+
                     // Ask the mediator Bob named which routing protocol it serves, and in which
                     // role. With ReturnRoute = All the answer comes back as the HTTP response to
                     // this very request (FR-RR-07), so Alice needs no inbox of her own. The
@@ -342,10 +378,7 @@ public static class Program
                         FeatureType = DiscoverFeatures.FeatureTypeProtocol,
                         Match = "https://didcomm.org/routing/*",
                     });
-                    var askOptions = new SendOptions(
-                        Recipients: new[] { mediatorDid },
-                        From: alice.Did,
-                        ServiceEndpointOverride: new Uri(serviceInfo.Uri))
+                    var askOptions = new SendOptions(Recipients: new[] { mediatorDid }, From: alice.Did)
                     {
                         ReturnRoute = ReturnRouteMode.All,
                     };
@@ -353,6 +386,7 @@ public static class Program
                     narrator.Value("return_route_thread", askOptions.ReturnRouteThread ?? "<none: only the thread mode names one>");
 
                     var asked = await routedAlice.Client.SendAsync(query, askOptions);
+                    narrator.Value("Endpoint used (the mediator's, from its DID)", asked.EndpointUsed);
                     narrator.Value("Answer arrived as HTTP", asked.Transport.HttpStatusCode);
                     // Returned has passed the identity rule: authcrypted by the DID Alice asked,
                     // to Alice. Correlate it with the question on its thid.
@@ -513,7 +547,6 @@ public static class Program
         var heldOutcome = await dispatcher.DispatchAsync(
             second, facade, didCommOptions, acknowledged.Task, session: null, CancellationToken.None);
         narrator.Value("[mediator] dispatch result before the acknowledgement", heldOutcome.Result);
-        narrator.Value("[mediator] relayed before the acknowledgement", sink.Records.Count > 0);
         acknowledged.SetResult(); // our transport has now acknowledged the message on the wire
         NarrateRecord(narrator, await NextRecordAsync(sink, "the relay after the acknowledgement"), "our transport acknowledged");
         var secondDelivery = await AwaitOrFailAsync(bobDeliveries.ReadAsync().AsTask(), "the second hand-built delivery to Bob");
@@ -587,8 +620,8 @@ public static class Program
                 });
             if (allowLoopback)
             {
-                // The narrow opt-in: this exact host, nothing else. The rest of the policy
-                // (private ranges, link-local, metadata IPs) keeps blocking.
+                // The narrow opt-in: this host (on every port), nothing else. The rest of the
+                // policy (private ranges, link-local, metadata IPs) keeps blocking.
                 b.Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"));
             }
         });
@@ -620,19 +653,27 @@ public static class Program
     /// <summary>Await a signal with a hard upper bound — a hang fails loudly instead of forever (FR-DX-02).</summary>
     private static async Task<T> AwaitOrFailAsync<T>(Task<T> task, string what)
     {
-        var winner = await Task.WhenAny(task, Task.Delay(HangGuard));
-        if (winner != task)
-            throw new TimeoutException($"Timed out waiting for {what}.");
-        return await task;
+        try
+        {
+            return await task.WaitAsync(HangGuard);
+        }
+        catch (TimeoutException ex) when (!task.IsCompleted)
+        {
+            throw new TimeoutException($"Timed out waiting for {what}.", ex);
+        }
     }
 
     /// <inheritdoc cref="AwaitOrFailAsync{T}(Task{T}, string)"/>
     private static async Task AwaitOrFailAsync(Task task, string what)
     {
-        var winner = await Task.WhenAny(task, Task.Delay(HangGuard));
-        if (winner != task)
-            throw new TimeoutException($"Timed out waiting for {what}.");
-        await task;
+        try
+        {
+            await task.WaitAsync(HangGuard);
+        }
+        catch (TimeoutException ex) when (!task.IsCompleted)
+        {
+            throw new TimeoutException($"Timed out waiting for {what}.", ex);
+        }
     }
 
     private static string Trunc(string? value, int max)
