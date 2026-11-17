@@ -149,10 +149,14 @@ public sealed class RecipientWallet : IAsyncDisposable
             throw new InvalidOperationException("The invitation URL must be https.");
 
         // The wallet's own outbound guard checks every address the client connects to (the same
-        // policy its transports use), redirects are not followed, and the body is capped.
+        // policy its transports use), redirects are not followed, and the body is capped. No proxy:
+        // through a proxy the client connects to the proxy, so the guard would check the proxy's
+        // address and the proxy would then reach whatever host the URL names. A wallet behind a
+        // proxy must vet the invitation's host itself before handing the request to the proxy.
         var guard = new OutboundEndpointGuard(_services.GetRequiredService<IOptions<DidCommOptions>>().Value.OutboundEndpointPolicy);
         var handler = new SocketsHttpHandler
         {
+            UseProxy = false,
             AllowAutoRedirect = false,
             ConnectCallback = async (context, token) =>
                 new NetworkStream(await guard.ConnectAsync(context.DnsEndPoint, token).ConfigureAwait(false), ownsSocket: true),

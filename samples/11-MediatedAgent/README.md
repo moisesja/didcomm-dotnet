@@ -91,8 +91,13 @@ starts.
 - **Loopback and plain `http`/`ws`** are for the demo only. Every party opens `127.0.0.1` (on
   every port) in the outbound guard (`OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")`) and
   never turns it off; production uses `https`/`wss`. The wallet fetches the invitation URL through
-  the same guard (`OutboundEndpointGuard.ConnectAsync`), follows no redirect, caps the body at
-  64 KiB, and takes plain `http` only for a loopback address.
+  the same guard (`OutboundEndpointGuard.ConnectAsync`), never through a proxy (through one the
+  guard would check the proxy's address, not the invitation's host), follows no redirect, caps the
+  body at 64 KiB, and takes plain `http` only for a loopback address.
+- **Reading the live stream with a hang guard.** `await foreach` over `ReceiveLiveAsync` is the
+  usual way to read it. The sample reads one item at a time with a hang guard
+  (`samples/_shared/GuardedStreamReader`), which cancels a read that takes too long and waits for it
+  to end before the stream is disposed: an async stream must not be disposed mid-read.
 - **Enrolment is open by default** and grants never expire: a public mediator needs a policy
   like the allow-list here, or one that rate-limits enrolment, plus the rate limiter in front
   (one window per client address; on the WebSocket endpoint a permit is a connection, not a
