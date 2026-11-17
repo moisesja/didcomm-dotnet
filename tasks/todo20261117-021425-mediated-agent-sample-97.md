@@ -51,6 +51,14 @@ before every commit). Child engineers work in their own worktrees branched from 
   nuspec reading optional if cheap.
 - **6918389034 / 6938333269** (after #119/#120): L-065 test rules + corollary (a test's trigger
   reaches the product the way production's does); long local runs under `caffeinate -dimsu`.
+- **Owner decision (2026-11-17), amending #97's acceptance "no allowlist entries for Mediator
+  types" for constructors of library-produced results only:** option (a). The seven
+  library-constructed constructors (`GrantRevocation`, `PickupDeliveryResult`, `QueueStatus`,
+  `RecipientPage`, `SessionRegistration`, `ReturnRouteSessionEventArgs`, `InboundFrame`) become
+  permanent DX allowlist entries, each with a one-line "library-constructed result" reason like the
+  existing `SendResult` / `UnpackResult` / `ForwardProcessingResult` / `DispatchOutcome` /
+  `WebSocketLifecycleEventArgs` entries. Engineers look for an honest sample home first, so the
+  list may shrink. Goes in the PR body and in "Planning update after #97".
 - Coordinator stops: never patch `PickupClient`'s live stream; never build direct push (#110);
   a sample-exposed library defect is a stop unless small/local/no public API; the DX gate passing
   only via a public API change or Mediator allowlist entries is a stop; L-063 churn guard.
@@ -108,12 +116,9 @@ Architect report: agent a243884fcccbecc68. My calls, each with its reason:
 8. **Seven library-constructed constructors** (`GrantRevocation`, `PickupDeliveryResult`,
    `QueueStatus`, `RecipientPage`, `SessionRegistration`, `ReturnRouteSessionEventArgs`,
    `InboundFrame`) have no honest sample home short of a full custom store / registry / receiving
-   transport. That is the "Mediator allowlist entries" stop → asked the coordinator for an owner
-   decision mid-run (recommendation: permanent "library-constructed" entries, the repo's existing
-   precedent for `SendResult`, `UnpackResult`, `ForwardProcessingResult`, `DispatchOutcome`,
-   `WebSocketLifecycleEventArgs`). Engineers first look for an honest home (e.g. `InboundFrame`
-   from a custom receiving transport). Work continues meanwhile; whatever is pending lands in its
-   own commit so it is easy to reverse.
+   transport. Asked the owner; **decided 2026-11-17: option (a)**, permanent "library-constructed
+   result" entries (see the binding inputs). Engineers first look for an honest home (e.g.
+   `InboundFrame` from a custom receiving transport).
 9. **Doc drift found by the architect:** `IMessageStore.PurgeRecipientAsync`'s remarks say the
    pickup role calls it; nothing in `src` does. Text-only fix in the remark and the architecture doc.
 
@@ -150,7 +155,7 @@ Architect report: agent a243884fcccbecc68. My calls, each with its reason:
 ### 2. Integration (orchestrator)
 - [ ] Merge D, B, C1, C2, A. Delete every allowlist entry waiting on #97 (421 coverage, 366
       execution). Run both gates; close residual gaps in the owning sample (never with entries,
-      except as the owner decides for item 8).
+      except the owner-approved library-constructed constructors of item 8).
 - [ ] Cookbook smoke markers and README merged.
 - [ ] `IMessageStore.PurgeRecipientAsync` remark fixed.
 
