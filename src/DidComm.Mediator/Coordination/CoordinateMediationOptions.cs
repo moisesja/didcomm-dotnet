@@ -68,7 +68,9 @@ public sealed class CoordinateMediationOptions
     /// as malformed from its length alone: no entry is decoded, checked or allocated, and the store
     /// and the policy are not called. What it bounds is the per-entry work (DID parsing, policy
     /// calls, store operations, the size of the reply); the message itself was already parsed once
-    /// on receipt, within <c>DidCommOptions.MaxReceiveBytes</c>. Default 1024.
+    /// on receipt, within <c>DidCommOptions.MaxReceiveBytes</c>. The answer repeats every entry with
+    /// its <c>result</c>, so it is slightly larger than the request (about 1% for long DIDs): a
+    /// sender close to its own receive limit splits its list. Default 1024.
     /// </summary>
     public int MaxUpdatesPerMessage { get; set; } = 1024;
 

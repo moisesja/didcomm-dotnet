@@ -131,9 +131,10 @@ public static class CoordinateMediationBuilderExtensions
         if (registered && !enabled)
         {
             throw new InvalidOperationException(
-                "CoordinateMediationOptions.EnableV2 is false in the settings in effect, but an AddCoordinateMediation() or AddMediator() " +
-                "call registered the Coordinate Mediation 2.0 role: the setting is read when that call runs. To serve 3.0 only, set " +
-                "EnableV2 = false in the delegate of every AddCoordinateMediation() and AddMediator() call.");
+                "CoordinateMediationOptions.EnableV2 is false in the settings in effect, but the Coordinate Mediation 2.0 role is registered " +
+                "(by an AddCoordinateMediation() or AddMediator() call, which reads the setting when it runs, or by " +
+                "AddProtocol<CoordinateMediation20Handler>()). To serve 3.0 only, set EnableV2 = false in the delegate of every " +
+                "AddCoordinateMediation() and AddMediator() call, and do not register the 2.0 handler yourself.");
         }
         if (!registered && enabled)
         {

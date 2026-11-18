@@ -66,7 +66,13 @@ released behaviour changes. No package, dependency or `InternalsVisibleTo` grant
 `CoordinateMediation20InteropVectorTests` (request shapes taken from the Identus and Blocktrust source),
 and `MediatorCoordinateMediation20Tests` (the real client against `AddMediator()` over the TestServer,
 replay admission of 2.0 requests included); the 2.0 codec and fixture tests now cover the mediator
-direction, and the DI tests cover `EnableV2` and the disclosure of both versions.
+direction, and `CoordinateMediation20DiTests` covers `EnableV2` and the disclosure of both versions.
+QA added `CoordinateMediation20Qa1Tests`, `MediatorCoordinateMediation20Qa1Tests` (replay edges over
+HTTP and WebSocket, the page walker, caps, DID-URL spellings, log scans) and
+`MediatorClientCoordinateMediation20Qa2Tests` (the client against a host serving only the real 2.0
+role, over HTTP and WebSocket); the adversarial pass added `CoordinateMediation20Adv99Tests`
+(cross-version spellings, hostile numbers and stores, error-text echo, timing ratios). Every new test
+was shown to fail under a mutation of the code it guards.
 
 ### Changed — Transports: direct connections by default, and an explicit `TrustedProxy` setting (security hardening, tracked privately; epic #88)
 

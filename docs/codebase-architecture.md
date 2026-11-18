@@ -69,7 +69,9 @@ that every grantee references its granter directly (pack pins direct references 
   `MediatorUnknownNextTests`, `MediatorLiveIsolationTests` (a live recipient whose key resolution
   stalls holds up no other recipient's storage or pickup) and `MediatorCoordinateMediation20Tests`
   (#99: the real client pinned to 2.0 and negotiating against `AddMediator()`, one tenant across
-  versions, replay admission of 2.0 requests, `EnableV2 = false`); the QA permutations are the `*QaTests.cs`
+  versions, replay admission of 2.0 requests, `EnableV2 = false`; with its QA suites
+  `MediatorCoordinateMediation20Qa1Tests` and `Client/MediatorClientCoordinateMediation20Qa2Tests`);
+  the QA permutations are the `*QaTests.cs`
   files with `QaMediatorSupport`, and the adversarial passes the `*AdvTests.cs` files
   (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
   `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`, `MediatorLivePushAdv4Tests`); the
@@ -110,8 +112,9 @@ that every grantee references its granter directly (pack pins direct references 
   `MapDidCommWebSocket`.
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
   builders, store, handler, DI, adversarial, and for 2.0 (#99) `CoordinateMediation20HandlerTests`,
-  `CoordinateMediationCrossVersionTests` and `CoordinateMediation20InteropVectorTests` (request
-  shapes from the Identus and Blocktrust source); `Pickup`: wire format, store (its arrival sequence:
+  `CoordinateMediationCrossVersionTests`, `CoordinateMediation20InteropVectorTests` (request
+  shapes from the Identus and Blocktrust source), `CoordinateMediation20DiTests`,
+  `CoordinateMediation20Qa1Tests` and `CoordinateMediation20Adv99Tests`); `Pickup`: wire format, store (its arrival sequence:
   `MessagePickupStoreSequenceTests`, `MessagePickupStoreSequenceAdv6Tests`), sizing, handler
   decision table, identities, faults, logs, live delivery, DI, random ids, the mailbox age limit,
   revoke-and-purge; `Pipeline`: `MediatorOptions`, `AddMediator()` DI and conflicts,
