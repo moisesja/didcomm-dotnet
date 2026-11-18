@@ -26,7 +26,18 @@ namespace DidComm.InteropTests.Transports.Proxy;
 /// </remarks>
 public sealed class HttpTransportTrustedProxyTests
 {
-    private static Func<StandInConnection, Task> Accept202 => c => c.StatusAsync("202 Accepted", "Connection: close");
+    private static Func<StandInConnection, Task> Accept202 => c => AnswerAsync(c, "202 Accepted");
+
+    /// <summary>
+    /// Answer a request and close. A POST's one-byte body is read first: closing with unread data
+    /// resets the connection, and a reset can reach the client before it has read the answer.
+    /// </summary>
+    private static async Task AnswerAsync(StandInConnection c, string status, params string[] headers)
+    {
+        if (c.RequestLine.StartsWith("POST ", StringComparison.Ordinal))
+            await c.Stream.ReadExactlyAsync(new byte[1], c.Stopping);
+        await c.StatusAsync(status, [.. headers, "Connection: close"]);
+    }
 
     // ----- the proxy carries the send -----------------------------------------------------------
 
@@ -139,8 +150,8 @@ public sealed class HttpTransportTrustedProxyTests
         // The first request gets the redirect; anything after it would be answered 202, so a
         // followed hop that reached the proxy would show as a second recorded request.
         await using var standIn = new StandInProxy(c => c.RequestLine.Contains("/r ", StringComparison.Ordinal)
-            ? c.StatusAsync("307 Temporary Redirect", $"Location: {location}", "Connection: close")
-            : c.StatusAsync("202 Accepted", "Connection: close"));
+            ? AnswerAsync(c, "307 Temporary Redirect", $"Location: {location}")
+            : AnswerAsync(c, "202 Accepted"));
         var attempts = new AttemptCounter();
         await using var sp = Build(
             o =>
@@ -234,6 +245,8 @@ public sealed class HttpTransportTrustedProxyTests
     [InlineData("LOCALHOST.", "https")]
     [InlineData("127.0.0.1", "http")]
     [InlineData("127.0.0.1", "https")]
+    [InlineData("127.0.0.1.", "http")]
+    [InlineData("127.0.0.1.", "https")]
     public async Task The_proxy_is_dialled_under_the_blocking_policy_however_its_loopback_host_is_spelled(string proxyHost, string scheme)
     {
         await using var standIn = new StandInProxy(Accept202);
@@ -346,9 +359,18 @@ public sealed class HttpTransportTrustedProxyTests
     private const string SecretHost = "secret-proxy-host.internal";
     private const string Password = "pw-s3cr3t";
 
-    public static TheoryData<string> InvalidProxies => new()
+    /// <summary>Each case, and the part of the message that names the rule it breaks.</summary>
+    public static TheoryData<string, string> InvalidProxies => new()
     {
-        "no Address", "relative", "ftp scheme", "user info", "socks without a port", "path", "query", "fragment",
+        { "no Address", "has no Address" },
+        { "relative", "must have an absolute Address" },
+        { "ftp scheme", "must use one of the schemes" },
+        { "user info", "must not carry a user name or password" },
+        { "socks without a host", "must name a host" },
+        { "socks without a port", "must name a port" },
+        { "path", "no path, query or fragment" },
+        { "query", "no path, query or fragment" },
+        { "fragment", "no path, query or fragment" },
     };
 
     private static WebProxy InvalidProxy(string rule) => rule switch
@@ -357,6 +379,7 @@ public sealed class HttpTransportTrustedProxyTests
         "relative" => new WebProxy { Address = new Uri("/proxy", UriKind.Relative) },
         "ftp scheme" => new WebProxy(new Uri($"ftp://{SecretHost}:21")),
         "user info" => new WebProxy(new Uri($"http://u:{Password}@{SecretHost}:1")),
+        "socks without a host" => new WebProxy(new Uri("socks5:///")),
         "socks without a port" => new WebProxy(new Uri($"socks5://{SecretHost}")),
         "path" => new WebProxy(new Uri($"http://{SecretHost}:1/x")),
         "query" => new WebProxy(new Uri($"http://{SecretHost}:1/?q=1")),
@@ -366,7 +389,7 @@ public sealed class HttpTransportTrustedProxyTests
 
     [Theory]
     [MemberData(nameof(InvalidProxies))]
-    public async Task An_invalid_TrustedProxy_fails_the_transport_resolution_without_echoing_the_address(string rule)
+    public async Task An_invalid_TrustedProxy_fails_the_transport_resolution_without_echoing_the_address(string rule, string names)
     {
         var proxy = InvalidProxy(rule);
         await using var sp = Build(o => o.TrustedProxy = proxy);
@@ -374,7 +397,7 @@ public sealed class HttpTransportTrustedProxyTests
         var resolve = () => sp.GetRequiredService<IDidCommTransport>();
 
         var error = resolve.Should().Throw<InvalidOperationException>(rule).Which;
-        error.Message.Should().StartWith("HttpTransportOptions.TrustedProxy", rule);
+        error.Message.Should().StartWith("HttpTransportOptions.TrustedProxy", rule).And.Contain(names, "the rule that fired is named");
         Describe(error).Should().NotContain(Password, rule).And.NotContain(SecretHost, rule);
     }
 
@@ -386,6 +409,30 @@ public sealed class HttpTransportTrustedProxyTests
             await using var sp = Build(o => o.TrustedProxy = new WebProxy(new Uri($"{scheme}://127.0.0.1:1080")));
             sp.GetRequiredService<IDidCommTransport>().Should().NotBeNull(scheme);
         }
+    }
+
+    // ----- credentials ----------------------------------------------------------------------------
+
+    [Fact]
+    public async Task The_proxy_credentials_survive_the_copy_and_answer_the_proxy_challenge()
+    {
+        // The first connection is challenged; the client can retry only with credentials to offer,
+        // so a second recorded request and an accepted send mean the copy kept them.
+        var connections = 0;
+        await using var standIn = new StandInProxy(c => Interlocked.Increment(ref connections) == 1
+            ? AnswerAsync(c, "407 Proxy Authentication Required", "Proxy-Authenticate: Basic realm=\"qa\"")
+            : AnswerAsync(c, "202 Accepted"));
+        await using var sp = Build(o => o.TrustedProxy = new WebProxy(standIn.Address())
+        {
+            Credentials = new NetworkCredential("qa-user", "qa-password"),
+        });
+        var transport = sp.GetRequiredService<IDidCommTransport>();
+
+        var result = await SendAsync(transport, $"http://{PublicHost}/inbox");
+        await standIn.WaitForRequestsAsync(2, HangGuard);
+
+        result.Accepted.Should().BeTrue("the challenge was answered with the configured credentials");
+        standIn.Requests.Should().Equal($"POST http://{PublicHost}/inbox HTTP/1.1", $"POST http://{PublicHost}/inbox HTTP/1.1");
     }
 
     // ----- the hint is for direct connections only ----------------------------------------------
