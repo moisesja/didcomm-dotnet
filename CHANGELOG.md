@@ -6,6 +6,68 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll (FR-MED-10, #99, epic #88)
+
+**Behaviour change for mediator hosts.** `AddCoordinateMediation()`, and so `AddMediator()`, now also
+answer Coordinate Mediation 2.0 (`https://didcomm.org/coordinate-mediation/2.0`) and Discover
+Features discloses it next to 3.0, both with `roles: ["mediator"]`. 2.0 is the version the wallets of
+the Identus and Blocktrust ecosystems speak. To keep a mediator 3.0-only, set
+`CoordinateMediationOptions.EnableV2 = false` (with `AddMediator()`:
+`o.CoordinateMediation.EnableV2 = false`). Neither mediator package has been published yet, so no
+released behaviour changes. No package, dependency or `InternalsVisibleTo` grant is added.
+
+- **`CoordinateMediation20Handler` (new, `DidComm.Mediator.Coordination`).** Answers
+  `mediate-request` with `mediate-grant` or `mediate-deny`, `keylist-update` with
+  `keylist-update-response`, and `keylist-query` with `keylist`. It runs the same rules as the 3.0
+  handler over the same store, policy and identity, so **a peer is one tenant in both versions**: a
+  DID registered through 2.0 is listed and removed through 3.0, and the other way round, and no other
+  peer can touch it through either version. Same security posture as 3.0: only an authcrypt sender is
+  a peer (plaintext, anoncrypt and signed-only requests are not answered); a `recipient_did` that is a
+  DID URL gets `client_error` and is never normalized; every DID field is capped at 2048 characters
+  before it is read (FR-API-09); an `updates` list over `MaxUpdatesPerMessage` is refused from its
+  length; answers carry `thid` = the request's `thid`, else its `id`; log lines and exception texts
+  carry message ids and type names only. Its public constructor takes the same collaborators as
+  `CoordinateMediationHandler`, so a host that builds its handlers by hand (cookbook FF.2 (b)) serves
+  both versions from one store.
+- **A 2.0 grant carries one routing DID: the first.** 2.0's `routing_did` is a single string, so a
+  2.0 grant names the grant's first routing DID; a 3.0 grant still lists them all (owner decision of
+  2026-11-12). A peer that already holds a grant gets it again unchanged, first DID included.
+  Forwards addressed to any of the mediator's routing DIDs are relayed whichever one a grant named.
+- **Routing-DID order now matters, and is documented** on `CoordinateMediationOptions.RoutingDids`,
+  `IMediatorIdentity`, `MediatorIdentity` and `AddMediator()`: the first DID is the primary one (3.0
+  grants list it first, a 2.0 grant carries only it, the out-of-band invitation is issued from it). To
+  move to a new DID, list the new one first and keep the old one, with its keys.
+- **`CoordinateMediationOptions.EnableV2`** (default `true`) is read when `AddCoordinateMediation()`
+  / `AddMediator()` runs, because it decides what is registered. A value that arrives another way and
+  disagrees with what was registered (`services.Configure<CoordinateMediationOptions>`, configuration
+  binding, or two calls that disagree) fails with `InvalidOperationException` when the Coordinate
+  Mediation handlers are first built (at start-up in a generic host with `AddMediator()`), naming the
+  property and never a DID. With 2.0 off, a 2.0 request finds no handler and is not answered.
+- **Recipient side: unchanged.** `MediationClient` already speaks 2.0 (#96): it asks the mediator
+  first and prefers 3.0, or uses the version pinned with
+  `MediatorClientOptions.CoordinateMediationVersion` (the issue's "preferred version"). Against the
+  new handler, a pinned 2.0 client enrolls, registers and lists, and a negotiating client picks 3.0.
+- **The internal 2.0 message codec** (`CoordinateMediation20`, in `DidComm.Mediator.Client`) now works
+  in both directions: the request parsers and the four answer builders were added for the mediator.
+  It stays internal; 2.0 adds no public message API.
+
+**Interop notes (from reading the Identus and Blocktrust source; to be confirmed in the #98 live runs).**
+- **Identus wallets** (the TypeScript edge-agent SDK) send `keylist-update` without `return_route` and
+  ignore the answer. The update is applied; over HTTP the answer has no channel back and is dropped.
+- **Blocktrust's wallet** sends no `created_time`. Coordinate Mediation is a mediator-service protocol,
+  so the mediator's replay protection (FR-RR-08) refuses such a request by default, silently (HTTP
+  202). A host that must serve that wallet sets `MediatorOptions.Replay.RequireCreatedTime = false`.
+  The cost: a request without a timestamp is then kept in the replay memory only for the replay
+  window, so a captured copy can be replayed after the window ends.
+- Both real 2.0 mediators answer with a single-string `routing_did`, never send `pagination` and
+  ignore `paginate`; our handler writes the string, honours `paginate` and always sends `pagination`.
+
+**Tests.** New: `CoordinateMediation20HandlerTests`, `CoordinateMediationCrossVersionTests`,
+`CoordinateMediation20InteropVectorTests` (request shapes taken from the Identus and Blocktrust source),
+and `MediatorCoordinateMediation20Tests` (the real client against `AddMediator()` over the TestServer,
+replay admission of 2.0 requests included); the 2.0 codec and fixture tests now cover the mediator
+direction, and the DI tests cover `EnableV2` and the disclosure of both versions.
+
 ### Changed — Transports: direct connections by default, and an explicit `TrustedProxy` setting (security hardening, tracked privately; epic #88)
 
 **Behaviour change for deployments behind a proxy.** The HTTP and WebSocket transports no longer use
