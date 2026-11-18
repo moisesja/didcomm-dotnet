@@ -407,7 +407,8 @@ public sealed class MediatorClientEnrolmentQa1Tests
     [Fact]
     public async Task A_pinned_version_the_mediator_does_not_speak_fails_as_no_answer_and_grants_nothing()
     {
-        await using var mediator = await MediatorTestServer.StartAsync();
+        // Our mediator speaks 2.0 too unless told not to (EnableV2, on by default): here it is 3.0 only.
+        await using var mediator = await MediatorTestServer.StartAsync(o => o.Mediator = m => m.CoordinateMediation.EnableV2 = false);
         await using var fake = await FakeCoordinateMediation20Mediator.StartAsync(mediator);
         await using var v3Harness = await MediatorClientHarness.CreateAsync(mediator, o => o.Client = c => c.CoordinateMediationVersion = CoordinateMediationVersion.V3);
         await using var v2Harness = await MediatorClientHarness.CreateAsync(mediator, o => o.Client = c => c.CoordinateMediationVersion = CoordinateMediationVersion.V2);
