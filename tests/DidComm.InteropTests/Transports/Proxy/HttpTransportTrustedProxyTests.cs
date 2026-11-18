@@ -188,7 +188,9 @@ public sealed class HttpTransportTrustedProxyTests
         for (var i = 0; i < 6; i++)
         {
             var thrown = await SendExpectingFailureAsync(transport, "http://10.0.0.1/x");
-            thrown.Should().BeOfType<TransportException>("refusal {0}: {1}", i + 1, Describe(thrown));
+            // Only "refused by the guard" here (the refusal's own type is pinned elsewhere), so a
+            // refusal the breaker counts fails this test at the good send below, where it shows.
+            Chain(thrown).OfType<TransportException>().Should().NotBeEmpty("refusal {0}: {1}", i + 1, Describe(thrown));
         }
 
         var result = await SendAsync(transport, $"http://{PublicHost}/inbox");
