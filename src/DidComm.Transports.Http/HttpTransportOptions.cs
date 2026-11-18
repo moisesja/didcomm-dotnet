@@ -93,7 +93,8 @@ public sealed class HttpTransportOptions
     /// <see cref="System.Net.WebProxy.UseDefaultCredentials"/>); an address carrying a user name or
     /// password is refused. A destination on <see cref="System.Net.WebProxy.BypassList"/> (or a
     /// local one with <see cref="System.Net.WebProxy.BypassProxyOnLocal"/>) is connected to directly,
-    /// with the full connect-time check, as when no proxy is set.
+    /// with the full connect-time check, as when no proxy is set, even when it names the proxy's own
+    /// host and port: only a connection that uses the proxy as a proxy is exempt.
     /// </para>
     /// <para>
     /// The value is checked when the transport is created and copied once per container, so later

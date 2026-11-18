@@ -63,12 +63,13 @@ public static class HttpDidCommBuilderExtensions
                     // SSRF defense: resolve + vet the target IP and pin the TCP connection to it.
                     // This runs for the initial host and for every manually followed 307 hop, so a
                     // redirect to an internal host (or a DNS-rebind) cannot reach a private address.
-                    // The named proxy is the host's choice and is dialled unfiltered; any other
-                    // endpoint (a destination the proxy bypasses) gets the full guard.
+                    // The named proxy is the host's choice and is dialled unfiltered, when the handler
+                    // uses it as a proxy; any other connection (a destination the proxy bypasses, even
+                    // one naming the proxy's own host and port) gets the full guard.
                     ConnectCallback = async (context, ct) =>
                     {
                         Socket socket;
-                        if (route is not null && route.IsProxyEndpoint(context.DnsEndPoint))
+                        if (route is not null && route.IsProxyConnection(context))
                         {
                             socket = await TrustedProxyRoute.ConnectToProxyAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
                         }

@@ -42,7 +42,9 @@ reach your internal network through it.
   query or fragment (`InvalidOperationException` when the transport is created, never quoting the
   address). It is read and copied once (HTTP: once per container; WebSocket: in its constructor),
   so later changes to the same `WebProxy` instance have no effect. A destination on its
-  `BypassList` is connected to directly, with the full connect-time check. One named proxy per
+  `BypassList` (or a local one with `BypassProxyOnLocal`) is connected to directly, with the full
+  connect-time check, even when it names the proxy's own host and port: only a connection that
+  uses the proxy as a proxy is exempt from the private-address filter. One named proxy per
   transport: PAC/WPAD, a proxy per destination and proxy failover are not supported.
 - **Custom connection paths.** A replaced `"didcomm"` primary handler (HTTP) or a
   `WebSocketTransportOptions.Connect` delegate still decides how and where it connects, and without

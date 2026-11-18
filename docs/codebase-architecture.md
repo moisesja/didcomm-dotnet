@@ -233,10 +233,14 @@ directly, and a proxy carries their connections only when the host names one.
   fragment; `InvalidOperationException` naming the option, never the address) and copies it. The
   HTTP transport reads it once per container (`TrustedProxySnapshot`, shared by every handler
   build and by the transport); the WebSocket transport once, in its constructor. The handler then
-  has `UseProxy = true` and `Proxy` = the copy. In the callback, an endpoint that matches the
-  proxy's host and port (`IsProxyEndpoint`: one trailing dot ignored, IP addresses compared as
-  addresses) is dialled without the private-address filter; any other endpoint (a bypassed
-  destination) gets the full guard, so a mismatch fails closed.
+  has `UseProxy = true` and `Proxy` = the copy. In the callback, a connection is dialled without
+  the private-address filter only when it uses the proxy as a proxy (`IsProxyConnection`): the
+  endpoint matches the proxy's host and port (`IsProxyEndpoint`: one trailing dot ignored, IP
+  addresses compared as addresses), and the request that opens it is the handler's own `CONNECT`
+  tunnel or a request the copy does not bypass (`WebProxy.IsBypassed`, the question the handler
+  asked when it chose the route). Any other connection gets the full guard: a bypassed
+  destination, even one naming the proxy's own host and port (PR #124 review), and any spelling
+  mismatch, so it fails closed.
 - **The destination check through a proxy.** Past the proxy no connect-time check sees the
   destination, so each transport checks it itself with `OutboundEndpointGuard.Validate`, before
   handing the send to whatever connects it: the HTTP transport on every hop of its 307 loop

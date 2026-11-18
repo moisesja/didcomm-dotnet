@@ -237,9 +237,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             AllowAutoRedirect = route is null,
             ConnectCallback = async (context, ct) =>
             {
-                if (route is not null && route.IsProxyEndpoint(context.DnsEndPoint))
+                if (route is not null && route.IsProxyConnection(context))
                 {
-                    // The named proxy is the host's choice: dialled unfiltered, on any network.
+                    // The named proxy is the host's choice: dialled unfiltered, on any network, when the
+                    // handler uses it as a proxy. A destination the proxy bypasses gets the full guard,
+                    // even when it names the proxy's own host and port.
                     var proxySocket = await TrustedProxyRoute.ConnectToProxyAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
                     return new NetworkStream(proxySocket, ownsSocket: true);
                 }

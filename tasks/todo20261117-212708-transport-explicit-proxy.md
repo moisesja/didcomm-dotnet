@@ -181,10 +181,34 @@ guard, L-065).
 | ADV-P4 | Low | Ambiguous numeric names (`127.0.0.08`) are names to .NET and reach the proxy as written | **Declined**: inside the documented limit (names are the proxy's to filter) |
 | ADV-P5 | Info | .NET's own exception text names the proxy's host and port (never credentials) | Accepted |
 | ADV-P6 | Info | `BypassList` entries are unanchored regexes | Accepted: bypassed destinations get the full guard; .NET semantics |
-| ADV-P7 | Info | A bypassed destination naming the proxy itself is dialled unfiltered | Accepted: reaches only the trusted proxy (pinned by a probe) |
+| ADV-P7 | Info → P2 (review) | A bypassed destination naming the proxy itself is dialled unfiltered | First accepted ("reaches only the trusted proxy"), which contradicted the documented promise that bypassed destinations get the full connect-time check. **Fixed in review round 1** (below) |
 | ADV-P8 | Info | A proxy's 403 on CONNECT spends the WebSocket reconnect budget | Accepted: same as a peer's failure |
 | ADV-P9 | Info | Synchronous lookups in the destination check ignore cancellation | Accepted: same as the facade's check; now once per hop / per send |
 
 ## Review
 
-(filled in at each review round)
+### Round 1 (PR #124, head `fae64a8`, changes requested: one P2)
+
+Reviewer notes: `tasks/todo20261118-pr124-review.md` (main checkout). Comment:
+https://github.com/moisesja/didcomm-dotnet/pull/124#issuecomment-6983407685.
+
+- **P2: a bypassed destination must not inherit the proxy's private-network exemption.** The
+  connect callbacks exempted any connection whose host:port matched the named proxy. With a
+  bypass (`BypassList` or `BypassProxyOnLocal`) the handler connects to such a destination
+  directly, so the exemption applied to a direct connection. My acceptance of ADV-P7 was wrong:
+  it contradicted the options' own promise.
+  - **Fix (both transports):** `TrustedProxyRoute.IsProxyConnection(context)` replaces the
+    endpoint-only test in both callbacks. A connection is exempt only when its endpoint is the
+    proxy's and the opening request is the handler's own `CONNECT` tunnel (not an extended
+    CONNECT) or a request the proxy copy does not bypass (`WebProxy.IsBypassed`, the handler's own
+    routing question, on the same instance). Every other connection gets the full guard. No public
+    API or semantics change: this makes the documented behaviour true.
+  - **Tests:** the probe that pinned the old outcome is now
+    `Http_a_bypassed_destination_naming_the_proxy_is_refused_at_connect_time`, with
+    `Ws_a_bypassed_destination_naming_the_proxy_is_refused_at_connect_time`, each for
+    `BypassList` and `BypassProxyOnLocal`, `ResolveDnsNames = false`, no `AllowedHosts`: a
+    connect-time refusal and zero connections. All four fail on `fae64a8` (HTTP: the send was
+    accepted; WebSocket: no refusal). Controls with the same bypass config prove legitimate proxy
+    traffic still works (an absolute-form POST, an https and a ws `CONNECT`, with the proxy named
+    `localhost` and itself bypassed); they fail when the `CONNECT` special case is removed.
+  - Docs: both options' remarks, the architecture section, the CHANGELOG bypass sentence.

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
 
 namespace DidComm.Transports.WebSocket;
@@ -81,8 +82,29 @@ internal sealed class TrustedProxyRoute
     }
 
     /// <summary>
-    /// Whether the handler is connecting to the named proxy. A host spelled differently is not the
-    /// proxy, so a mismatch falls back to the full guard (fails closed).
+    /// Whether the handler is opening this connection to the named proxy <em>as a proxy</em>: the
+    /// endpoint is the proxy's (<see cref="IsProxyEndpoint"/>), and the handler is using it as one,
+    /// for its own tunnel request (<c>CONNECT</c>) or for a request the proxy does not bypass
+    /// (forwarded, or relayed over SOCKS). A destination the proxy bypasses is a direct connection,
+    /// even when it names the proxy's own host and port, and gets the full connect-time check.
+    /// </summary>
+    /// <param name="context">The handler's connect context.</param>
+    public bool IsProxyConnection(SocketsHttpConnectionContext context)
+    {
+        if (!IsProxyEndpoint(context.DnsEndPoint))
+            return false;
+        var request = context.InitialRequestMessage;
+        // The handler's own tunnel request to the proxy. An extended CONNECT (it carries a :protocol)
+        // is a request to the destination, never the handler's tunnel.
+        if (request.Method == HttpMethod.Connect && request.Headers.Protocol is null)
+            return true;
+        // The same question the handler asked when it chose the route, on the same proxy instance.
+        return request.RequestUri is { IsAbsoluteUri: true } destination && !Proxy.IsBypassed(destination);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="endpoint"/> is the named proxy's host and port. A host spelled
+    /// differently is not the proxy, so a mismatch falls back to the full guard (fails closed).
     /// </summary>
     /// <param name="endpoint">The endpoint the handler wants a socket to.</param>
     public bool IsProxyEndpoint(DnsEndPoint endpoint)
@@ -96,7 +118,7 @@ internal sealed class TrustedProxyRoute
     }
 
     /// <summary>Open the TCP connection to the named proxy, whatever network it is on.</summary>
-    /// <param name="endpoint">The proxy's endpoint, as <see cref="IsProxyEndpoint"/> accepted it.</param>
+    /// <param name="endpoint">The proxy's endpoint, as <see cref="IsProxyConnection"/> accepted it.</param>
     /// <param name="ct">Cancels the connect.</param>
     public static ValueTask<Socket> ConnectToProxyAsync(DnsEndPoint endpoint, CancellationToken ct) =>
         ProxyDialer.ConnectAsync(endpoint, ct);

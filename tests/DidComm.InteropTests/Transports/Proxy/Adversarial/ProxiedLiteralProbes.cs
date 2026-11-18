@@ -87,27 +87,91 @@ public sealed class ProxiedLiteralProbes(ITestOutputHelper output)
     }
 
     // ---- a bypassed destination that names the proxy itself ---------------------------------
+    // PR #124 review (P2): the proxy's exemption from the private-address filter belongs to a
+    // connection that uses it as a proxy. A destination the proxy bypasses is a direct connection
+    // and gets the full connect-time check, even when it names the proxy's own host and port.
+    // ResolveDnsNames is off, so the name-only pre-check lets 'localhost' through to the connect.
 
-    [Fact]
-    public async Task Pinned_a_bypassed_destination_naming_the_proxy_is_dialled_unfiltered()
+    public static TheoryData<string> BypassKinds => new() { "BypassList", "BypassProxyOnLocal" };
+
+    private static WebProxy LocalhostProxy(StandInProxy proxy, string bypass) => bypass == "BypassList"
+        ? new WebProxy(proxy.Address(host: "localhost"), BypassOnLocal: false, BypassList: new[] { "localhost" })
+        : new WebProxy(proxy.Address(host: "localhost"), BypassOnLocal: true);
+
+    [Theory]
+    [MemberData(nameof(BypassKinds))]
+    public async Task Http_a_bypassed_destination_naming_the_proxy_is_refused_at_connect_time(string bypass)
     {
-        // ResolveDnsNames off (documented for proxy-only DNS), proxy named by a loopback host name,
-        // the same name on the bypass list. The destination 'is' the proxy's endpoint, so the
-        // connect callback dials it without the private-address filter, and the proxy receives an
-        // origin-form request directly (not a proxied absolute-form one).
         await using var proxy = new StandInProxy(Accept202);
         await using var sp = Http.Build(o =>
         {
-            o.TrustedProxy = new WebProxy(proxy.Address(host: "localhost"), BypassOnLocal: false, BypassList: new[] { "localhost" });
+            o.TrustedProxy = LocalhostProxy(proxy, bypass);
             o.OutboundEndpointPolicy = new OutboundEndpointPolicy { ResolveDnsNames = false };
         });
         var transport = sp.GetRequiredService<IDidCommTransport>();
 
-        var result = await Http.SendAsync(transport, $"http://localhost:{proxy.Port}/squid-internal-mgr/menu");
-        await proxy.WaitForRequestsAsync(1, Http.HangGuard);
-        output.WriteLine("proxy saw: " + string.Join("; ", proxy.Requests));
+        var thrown = await Http.SendExpectingFailureAsync(transport, $"http://localhost:{proxy.Port}/squid-internal-mgr/menu");
+        output.WriteLine(Http.Describe(thrown));
 
-        result.Accepted.Should().BeTrue();
-        proxy.Requests.Should().Equal("POST /squid-internal-mgr/menu HTTP/1.1");
+        Http.Chain(thrown).OfType<TransportException>().Should().NotBeEmpty("the connect-time guard refuses the bypassed destination ({0})", Http.Describe(thrown));
+        Http.Describe(thrown).Should().Contain("private or reserved");
+        proxy.Accepted.Should().Be(0, "a bypassed destination is a direct connection, and the guard refuses loopback (it recorded: [{0}])", string.Join("; ", proxy.Requests));
+    }
+
+    [Theory]
+    [MemberData(nameof(BypassKinds))]
+    public async Task Http_with_the_same_bypass_other_destinations_still_go_through_the_proxy(string bypass)
+    {
+        // The control: the proxy is named 'localhost' and is itself on its bypass list, and the
+        // handler's own tunnel request names the proxy, so the CONNECT must still be recognised.
+        await using var proxy = new StandInProxy(c => c.RequestLine.StartsWith("CONNECT ", StringComparison.Ordinal)
+            ? c.StatusAsync("403 Forbidden", "Connection: close")
+            : Accept202(c));
+        await using var sp = Http.Build(o =>
+        {
+            o.TrustedProxy = LocalhostProxy(proxy, bypass);
+            o.OutboundEndpointPolicy = new OutboundEndpointPolicy { ResolveDnsNames = false };
+        });
+        var transport = sp.GetRequiredService<IDidCommTransport>();
+
+        var forwarded = await Http.SendAsync(transport, $"http://{Http.PublicHost}/inbox");
+        var tunnel = await Http.SendExpectingFailureAsync(transport, $"https://{Http.PublicHost}/inbox");
+
+        forwarded.Accepted.Should().BeTrue();
+        tunnel.Should().BeOfType<HttpRequestException>(Http.Describe(tunnel))
+            .Which.HttpRequestError.Should().Be(HttpRequestError.ProxyTunnelError, "the proxy itself refused the tunnel");
+        proxy.Requests.Should().Equal($"POST http://{Http.PublicHost}/inbox HTTP/1.1", $"CONNECT {Http.PublicHost}:443 HTTP/1.1");
+    }
+
+    [Theory]
+    [MemberData(nameof(BypassKinds))]
+    public async Task Ws_a_bypassed_destination_naming_the_proxy_is_refused_at_connect_time(string bypass)
+    {
+        await using var proxy = new StandInProxy(c => c.StatusAsync("502 Bad Gateway"));
+        var sockets = new StrongBox<int>();
+        var options = Ws.DefaultPathOptions(new OutboundEndpointPolicy { ResolveDnsNames = false }, 3, sockets);
+        options.TrustedProxy = LocalhostProxy(proxy, bypass);
+        await using var transport = Ws.Transport(options);
+
+        var thrown = await Ws.SendFailsAsync(transport, Ws.Request(new Uri($"ws://localhost:{proxy.Port}/internal-admin")));
+        output.WriteLine(Ws.Describe(thrown));
+
+        Ws.Describe(thrown).Should().Contain("private or reserved");
+        proxy.Accepted.Should().Be(0, "a bypassed destination is a direct connection, and the guard refuses loopback (it recorded: [{0}])", string.Join("; ", proxy.Requests));
+        sockets.Value.Should().Be(1, "the connect-time refusal is fatal: no reconnect is spent");
+    }
+
+    [Theory]
+    [MemberData(nameof(BypassKinds))]
+    public async Task Ws_with_the_same_bypass_other_destinations_still_go_through_the_proxy(string bypass)
+    {
+        await using var proxy = new StandInProxy(c => c.StatusAsync("502 Bad Gateway"));
+        var options = Ws.DefaultPathOptions(new OutboundEndpointPolicy { ResolveDnsNames = false }, 0, new StrongBox<int>());
+        options.TrustedProxy = LocalhostProxy(proxy, bypass);
+        await using var transport = Ws.Transport(options);
+
+        _ = await Ws.SendFailsAsync(transport, Ws.Request(new Uri($"ws://{Http.PublicHost}/x")));
+
+        proxy.Requests.Should().Equal($"CONNECT {Http.PublicHost}:80 HTTP/1.1");
     }
 }
