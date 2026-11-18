@@ -112,16 +112,10 @@ internal sealed class TrustedProxyRoute
             $"{error.Message.TrimEnd('.', ' ')}. This transport connects directly: it does not use HTTP_PROXY, HTTPS_PROXY, ALL_PROXY " +
             $"or the system proxy. To send through a proxy, set {OptionName}.");
 
-    // The handler hands an IPv6 proxy host over with brackets on the tunnel path and without them on
-    // the forwarding path, and keeps a trailing dot; compare the bare forms.
-    private static string Normalize(string host)
-    {
-        if (host.Length > 2 && host[0] == '[' && host[^1] == ']')
-            host = host[1..^1];
-        if (host.Length > 1 && host[^1] == '.')
-            host = host[..^1];
-        return host;
-    }
+    // One trailing dot (the DNS root) names the same host. An IPv6 proxy host arrives with brackets on
+    // the tunnel path and without them on the forwarding path; IPAddress.TryParse reads both.
+    private static string Normalize(string host) =>
+        host.Length > 1 && host[^1] == '.' ? host[..^1] : host;
 
     private static InvalidOperationException Invalid(string rule) => new($"{OptionName} {rule}");
 }

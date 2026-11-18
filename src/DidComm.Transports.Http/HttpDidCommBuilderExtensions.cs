@@ -37,6 +37,7 @@ public static class HttpDidCommBuilderExtensions
         if (configure is not null)
             builder.Services.Configure(configure);
         builder.Services.AddOptions<HttpTransportOptions>();
+        builder.Services.TryAddSingleton(sp => new TrustedProxySnapshot(sp.GetRequiredService<IOptions<HttpTransportOptions>>()));
 
         builder.Services
             .AddHttpClient(HttpDidCommTransport.HttpClientName)
@@ -50,8 +51,8 @@ public static class HttpDidCommBuilderExtensions
                     ?? sp.GetService<IOptions<DidCommOptions>>()?.Value.OutboundEndpointPolicy
                     ?? new OutboundEndpointPolicy();
                 var guard = new OutboundEndpointGuard(policy);
-                // Read and copied on every handler build, as the policy is (HttpTransportOptions.TrustedProxy).
-                var route = TrustedProxyRoute.From(options.TrustedProxy);
+                // Read and copied once per container, then reused by every handler build (TrustedProxySnapshot).
+                var route = sp.GetRequiredService<TrustedProxySnapshot>().Route;
                 var sockets = new SocketsHttpHandler
                 {
                     // The transport follows 307 manually so it can enforce the FR-TRN-06 rule

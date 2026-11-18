@@ -355,6 +355,44 @@ public sealed class HttpTransportTrustedProxyTests
         other.Accepted.Should().Be(0, "the handler holds a copy taken when it was built");
     }
 
+    [Fact]
+    public async Task A_rebuilt_handler_keeps_the_proxy_read_at_first_use()
+    {
+        // The factory rebuilds the named client's handler when its lifetime ends (1 s here, the
+        // minimum). The proxy is read once per container, like the WebSocket transport's, so a change
+        // to the configured instance must not reach the rebuilt handler either.
+        await using var original = new StandInProxy(Accept202);
+        await using var other = new StandInProxy(Accept202);
+        var configured = new WebProxy(original.Address());
+        var builds = 0;
+        await using var sp = Build(
+            o => o.TrustedProxy = configured,
+            s => s.AddHttpClient(HttpDidCommTransport.HttpClientName)
+                .SetHandlerLifetime(TimeSpan.FromSeconds(1))
+                .ConfigurePrimaryHttpMessageHandler((_, _) => Interlocked.Increment(ref builds)));
+        var transport = sp.GetRequiredService<IDidCommTransport>();
+
+        (await SendAsync(transport, $"http://{PublicHost}/one")).Accepted.Should().BeTrue();
+        configured.Address = other.Address();
+
+        // Wait for the event the claim is about: a second handler was built. The lifetime is the
+        // factory's own real-time timer, so poll for the build, bounded by the hang guard only.
+        var factory = sp.GetRequiredService<IHttpClientFactory>();
+        using (var guard = new CancellationTokenSource(HangGuard))
+        {
+            while (Volatile.Read(ref builds) < 2)
+            {
+                factory.CreateClient(HttpDidCommTransport.HttpClientName).Dispose();
+                await Task.Delay(50, guard.Token);
+            }
+        }
+
+        // The stand-in records a request line before it answers, so an accepted send means it is recorded.
+        (await SendAsync(transport, $"http://{PublicHost}/two")).Accepted.Should().BeTrue();
+        other.Accepted.Should().Be(0, "the rebuilt handler uses the proxy read the first time, not the changed instance");
+        original.Requests.Should().Equal($"POST http://{PublicHost}/one HTTP/1.1", $"POST http://{PublicHost}/two HTTP/1.1");
+    }
+
     // ----- validation ---------------------------------------------------------------------------
 
     // A distinctive host and password: neither may appear in the error message.

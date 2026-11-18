@@ -95,11 +95,11 @@ public sealed class HttpTransportOptions
     /// with the full connect-time check.
     /// </para>
     /// <para>
-    /// The value is checked and copied when the transport is created and each time the
-    /// <c>"didcomm"</c> client's handler is built, so later changes to the same
-    /// <see cref="System.Net.WebProxy"/> instance do not reach a handler already built. An invalid
-    /// value throws <see cref="InvalidOperationException"/>. It has no effect when the host replaces
-    /// the <c>"didcomm"</c> client's primary handler: that handler decides how to connect.
+    /// The value is checked when the transport is created and copied once, the first time the
+    /// transport connects, so later changes to the same <see cref="System.Net.WebProxy"/> instance
+    /// have no effect. An invalid value throws <see cref="InvalidOperationException"/>. It has no
+    /// effect when the host replaces the <c>"didcomm"</c> client's primary handler: that handler
+    /// decides how to connect.
     /// </para>
     /// </remarks>
     /// <example>
