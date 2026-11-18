@@ -55,9 +55,10 @@ public static class PeerIdentityFactory
 
     /// <summary>
     /// Mint a new identity exactly like <see cref="CreateAsync"/>, but embed a service entry the
-    /// caller built itself instead of one described by a <see cref="DidCommServiceSpec"/>. For
-    /// tests that need a DID whose service the library's <see cref="DidCommServiceBuilder"/> would
-    /// refuse to build (an unsupported scheme, for instance); samples use <see cref="CreateAsync"/>.
+    /// caller built itself instead of one described by a <see cref="DidCommServiceSpec"/>: a
+    /// service built with <see cref="DidCommServiceBuilder"/> directly (for a wallet enrolled with a
+    /// mediator, <c>DidCommServiceBuilder.ForMediation(grant).Build()</c>), or, in tests, one the
+    /// builder would refuse to build (an unsupported scheme, for instance).
     /// </summary>
     /// <param name="manager">net-did's DID manager.</param>
     /// <param name="keyGenerator">A key generator (NetCrypto).</param>

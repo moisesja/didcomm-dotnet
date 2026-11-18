@@ -4,7 +4,7 @@ Thank you for your interest in contributing. This document covers how to get set
 
 ## Before you start
 
-didcomm-dotnet is a **spec-driven** project. The [Product Requirements Document](didcomm-dotnet_PRD.md) is normative — it defines every `MUST`, `SHOULD`, and `MAY` requirement, and traces each one back to the [DIDComm Messaging v2.1](https://identity.foundation/didcomm-messaging/spec/v2.1) section it derives from. Please skim the PRD's Table of Contents before opening a non-trivial PR. In particular:
+didcomm-dotnet is a **spec-driven** project. The [Product Requirements Document](docs/didcomm-dotnet_PRD.md) is normative — it defines every `MUST`, `SHOULD`, and `MAY` requirement, and traces each one back to the [DIDComm Messaging v2.1](https://identity.foundation/didcomm-messaging/spec/v2.1) section it derives from. Please skim the PRD's Table of Contents before opening a non-trivial PR. In particular:
 
 - **§2 — Scope** tells you what is in and out of scope for v1.0
 - **§12 — Phased Implementation Plan** tells you which phase the project is in and what exit criteria gate the next phase
@@ -139,7 +139,7 @@ Do not file security vulnerabilities as public issues. See [SECURITY.md](SECURIT
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By participating, you agree to uphold its terms.
+This project follows the [Contributor Covenant](https://www.contributor-covenant.org/). By participating, you agree to uphold its terms.
 
 ## License
 

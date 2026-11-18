@@ -8,7 +8,7 @@ which builds, tests, packs, and pushes every package. Publishing to NuGet is
 gated behind a reviewer-approved environment — see step 2 below.
 
 > **Status:** Published releases to date — `0.1.0-preview.1`, `1.0.0`, `1.1.0`, `1.2.0`,
-> `1.3.0`, `1.4.0`, `1.4.1`, `1.5.0`. The one-time setup below is done (the `nuget-release` reviewer
+> `1.3.0`, `1.4.0`, `1.4.1`, `1.5.0`, `1.5.1`. The one-time setup below is done (the `nuget-release` reviewer
 > gate was added 2026-10-29, before 1.5.0, and Trusted Publishing replaced the stored API key on
 > 2026-11-02, before 1.5.1); cutting a release starts at [Cutting a release](#cutting-a-release).
 
@@ -37,18 +37,36 @@ Tests and samples set `IsPackable=false`, so they are never published.
 **The packages ship in lockstep.** Every package takes its version from the one tag, and some call
 internals of others through `InternalsVisibleTo` — `DidComm.Mediator.AspNetCore` calls internals of
 `DidComm.AspNetCore` (the mediator's WebSocket endpoint) and of `DidComm.Mediator`, `DidComm.Mediator`
-calls internals of `DidComm.Mediator.Client` (the message helpers both roles share), and several
-packages do of `DidComm.Core`. A package's dependency on another names only a minimum version, so
-an internal call is safe only between packages of the same version: always publish all of them
-together from one tag, never one package alone.
+calls internals of `DidComm.Mediator.Client` (the message helpers both roles share), and
+`DidComm.AspNetCore`, `DidComm.Extensions.DependencyInjection`, `DidComm.Transports.WebSocket`,
+`DidComm.Mediator.Client` and `DidComm.Mediator` call internals of `DidComm.Core`. An internal call is
+safe only between packages built from the same commit: always publish all of them together from one
+tag, never one package alone.
+
+**Internals-coupled packages depend on each other at an exact version.** Where a package calls
+another's internals, its packed dependency on that package is exact (`[1.6.0]`), not a minimum
+(`>= 1.6.0`), so an app that mixes versions gets a restore warning (NU1608) or error (NU1107) instead
+of a `MissingMethodException` at run time. Every other dependency between `DidComm.*` packages stays a
+minimum. The `<InternalsVisibleTo>` items in the `.csproj` files are the only list: at pack time
+[`Directory.Build.targets`](Directory.Build.targets) makes the dependency on each granting project
+exact, then reads the packed `.nuspec` and **fails the pack** if one is missing or not exact, so CI's
+pack step and the release workflow both enforce it. (`-p:DidCommSkipFriendPin=true` skips the rewrite;
+packing into an empty output directory with it must fail, which shows the check works.)
+`ShippedAssembliesListTests` pins the list of coupled pairs, so a new grant between shipped projects
+is a deliberate change; say what it does to consumers in the CHANGELOG. The detection works only among packages
+packed with this rule (1.6.0 and later): a published 1.5.x package declares a minimum on what is now
+an internals edge, so an app mixing it with a later package restores without a warning. NU1608 is a
+warning, so an app that wants a mix to fail the build sets `<WarningsAsErrors>NU1608</WarningsAsErrors>`
+(or keeps every `DidComm.*` package on one version through central package management).
 
 **New package ids.** `DidComm.Mediator`, `DidComm.Mediator.Client` and `DidComm.Mediator.AspNetCore`
 have never been published. Each sets `EnablePackageValidation` to `false` in its `.csproj`, because SDK Package
 Validation has no released version of it to compare against. After the first release that
 publishes them, once `PackageValidationBaselineVersion` in `Directory.Build.props` names that
 release, delete that line from all three `.csproj` files so the repo-wide default (`true`) applies to
-them too. Before that first release, check that the Trusted Publishing policy below lets a new
-package id be pushed: a scope limited to new versions of existing packages does not.
+them too. Pushing a new package id needs a Trusted Publishing scope that allows new packages; the
+policy below uses one ("Push new packages and package versions"). A scope limited to new versions of
+existing packages would refuse the three new ids.
 
 ---
 
@@ -71,7 +89,7 @@ On nuget.org, click your username → **Trusted Publishing** and add a policy (c
 | Repository | `didcomm-dotnet` |
 | Workflow File | `release.yml` (file name only, no path) |
 | Environment | `nuget-release` |
-| Scope, if offered | new versions of existing packages, glob `DidComm.*` |
+| Scope, if offered | **Push new packages and package versions**, glob `DidComm.*` |
 
 Keep the environment set: it means a token is honored only from the environment that requires
 approval. A policy covers every package its owner has unless a scope narrows it.

@@ -5,10 +5,135 @@
 
     This lives in Directory.Build.targets (imported AFTER each project body) rather than
     Directory.Build.props so $(IsPackable) is already resolved: test and sample projects set
-    IsPackable=false and are skipped, while the six src libraries (IsPackable unset → true)
-    include the root README. $(MSBuildThisFileDirectory) is the repo root, where README.md lives.
+    IsPackable=false and are skipped, while every src library (IsPackable unset → true)
+    includes the root README. $(MSBuildThisFileDirectory) is the repo root, where README.md lives.
   -->
   <ItemGroup Condition="'$(IsPackable)' != 'false' AND Exists('$(MSBuildThisFileDirectory)README.md')">
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
+
+  <!--
+    Exact versions between packages coupled through InternalsVisibleTo.
+
+    When package X calls internals of package Y (Y's project lists X in an <InternalsVisibleTo>
+    item), that call works only between builds of the same commit. NuGet writes a project
+    reference as a minimum version (">= 1.6.0"), so an app could restore X 1.6.0 with Y 1.7.0 and
+    fail at run time with MissingMethodException. These targets make X's packed dependency on Y
+    exact ("[1.6.0]"), so a mixed-version app gets a restore warning (NU1608) instead. The
+    <InternalsVisibleTo> items are the only source of truth: add a grant and the pin follows; there
+    is no list to keep in sync. RELEASING.md describes the lockstep release this relies on.
+
+    1. _DidCommGetFriendGrants runs in a referenced project and returns its grants. A grant may name
+       a strong-named friend ("DidComm.X, PublicKey=…"); only the assembly name before the first
+       comma is compared (FriendAssembly).
+    2. _DidCommPinFriendDependencies runs after NuGet's _GetProjectReferenceVersions (which fills
+       @(_ProjectReferencesWithVersions) for GenerateNuspec) and rewrites ProjectVersion to
+       "[version]" for each referenced project that grants this assembly.
+       -p:DidCommSkipFriendPin=true skips only this rewrite. It exists as the negative control of
+       step 3: packing into an empty output directory with it must fail.
+    3. _DidCommVerifyFriendDependencies runs after GenerateNuspec, reads the .nuspec inside the
+       .nupkg that was just written (the one pack reports, named by NuGet's normalized version, so a
+       version with build metadata works; never a .symbols.nupkg written beside it when
+       SymbolPackageFormat=symbols.nupkg), and fails the pack (deleting that .nupkg and .snupkg) when a
+       dependency on a granting project is missing or is not an exact version. It runs on every
+       pack, so CI's pack step and the release workflow enforce it.
+  -->
+  <Target Name="_DidCommGetFriendGrants" Returns="@(_DidCommFriendGrant)">
+    <ItemGroup>
+      <_DidCommFriendGrant Include="@(InternalsVisibleTo)" GranterProject="$(MSBuildProjectFullPath)" GranterPackageId="$(PackageId)" />
+      <!-- The assembly name: the text before the first comma ("DidComm.X, PublicKey=…" → "DidComm.X"). -->
+      <_DidCommFriendGrant>
+        <FriendAssembly>$([System.Text.RegularExpressions.Regex]::Replace('%(Identity)', '\s*,.*$', ''))</FriendAssembly>
+      </_DidCommFriendGrant>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="_DidCommResolveFriendReferences"
+          DependsOnTargets="_GetProjectReferenceVersions"
+          Condition="'$(IsPackable)' == 'true' AND '$(NuspecFile)' == ''">
+    <MSBuild Projects="@(_ProjectReferencesWithVersions)"
+             Targets="_DidCommGetFriendGrants"
+             SkipNonexistentTargets="true"
+             Properties="BuildProjectReferences=false;">
+      <Output TaskParameter="TargetOutputs" ItemName="_DidCommGrantFromReference" />
+    </MSBuild>
+    <ItemGroup>
+      <!-- One item per referenced project that grants this assembly; identity = that project's path. -->
+      <_DidCommFriendReference Include="@(_DidCommGrantFromReference->'%(GranterProject)')"
+                               Condition="'%(_DidCommGrantFromReference.FriendAssembly)' == '$(AssemblyName)'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="_DidCommPinFriendDependencies"
+          AfterTargets="_GetProjectReferenceVersions"
+          DependsOnTargets="_DidCommResolveFriendReferences"
+          Condition="'$(IsPackable)' == 'true' AND '$(NuspecFile)' == '' AND '$(DidCommSkipFriendPin)' != 'true'">
+    <ItemGroup>
+      <_DidCommUnpinnedReference Include="@(_ProjectReferencesWithVersions)" Exclude="@(_DidCommFriendReference)" />
+      <_DidCommPinnedReference Include="@(_ProjectReferencesWithVersions)" Exclude="@(_DidCommUnpinnedReference)" />
+      <_DidCommPinnedReference>
+        <ProjectVersion>[%(ProjectVersion)]</ProjectVersion>
+      </_DidCommPinnedReference>
+      <_ProjectReferencesWithVersions Remove="@(_DidCommPinnedReference)" />
+      <_ProjectReferencesWithVersions Include="@(_DidCommPinnedReference)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="_DidCommVerifyFriendDependencies"
+          AfterTargets="GenerateNuspec"
+          DependsOnTargets="_DidCommResolveFriendReferences"
+          Condition="'$(IsPackable)' == 'true' AND '$(PackageReferenceCompatibleProjectStyle)' == 'true' AND '$(NuspecFile)' == ''">
+    <PropertyGroup>
+      <_DidCommPackedNuspecDir>$(BaseIntermediateOutputPath)$(Configuration)/didcomm-packed-nuspec/</_DidCommPackedNuspecDir>
+      <!-- XPath 1.0 over the nuspec (any schema namespace): the dependencies on granting packages. -->
+      <_DidCommFriendIdTest>@(_DidCommFriendReference->'@id=&quot;%(GranterPackageId)&quot;', ' or ')</_DidCommFriendIdTest>
+      <_DidCommDependencyPath>/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='dependencies']//*[local-name()='dependency']</_DidCommDependencyPath>
+      <!-- Exact in NuGet range syntax: "[v]", one version between square brackets, no comma. -->
+      <_DidCommIsExact>starts-with(@version,'[') and substring(@version,string-length(@version))=']' and not(contains(@version,','))</_DidCommIsExact>
+    </PropertyGroup>
+    <ItemGroup>
+      <!-- The package pack just wrote, as pack reports it (@(_OutputPackItems)). Not rebuilt from
+           $(PackageVersion): NuGet names the file by the normalized version, which drops build
+           metadata ("1.6.0+abc" is written as ….1.6.0.nupkg). With SymbolPackageFormat=symbols.nupkg
+           a .symbols.nupkg is written beside it; that one is skipped. -->
+      <_DidCommWrittenNupkg Include="@(_OutputPackItems)" Condition="'%(Extension)' == '.nupkg'" />
+      <_DidCommWrittenNupkg>
+        <IsSymbols>$([System.String]::Copy('%(Filename)').EndsWith('.symbols'))</IsSymbols>
+      </_DidCommWrittenNupkg>
+      <_DidCommPackedPackage Include="@(_DidCommWrittenNupkg)" Condition="'%(IsSymbols)' != 'True'" />
+      <_DidCommBuiltPackage Include="@(_OutputPackItems)" Condition="'%(Extension)' == '.nupkg' OR '%(Extension)' == '.snupkg'" />
+    </ItemGroup>
+
+    <Error Condition="'@(_DidCommPackedPackage->Count())' != '1' OR !Exists('@(_DidCommPackedPackage)')"
+           Text="$(PackageId): expected exactly one written package (not .symbols.nupkg) to check its InternalsVisibleTo dependencies, found '@(_DidCommPackedPackage)' among '@(_OutputPackItems)'." />
+
+    <RemoveDir Directories="$(_DidCommPackedNuspecDir)" />
+    <Unzip SourceFiles="@(_DidCommPackedPackage)" DestinationFolder="$(_DidCommPackedNuspecDir)" Include="*.nuspec" />
+    <ItemGroup>
+      <_DidCommPackedNuspec Include="$(_DidCommPackedNuspecDir)*.nuspec" />
+    </ItemGroup>
+    <Error Condition="'@(_DidCommPackedNuspec->Count())' != '1'"
+           Text="$(PackageId): no .nuspec found inside @(_DidCommPackedPackage)." />
+
+    <XmlPeek Condition="'@(_DidCommFriendReference)' != ''"
+             XmlInputPath="@(_DidCommPackedNuspec)"
+             Query="$(_DidCommDependencyPath)[$(_DidCommFriendIdTest)]/@id">
+      <Output TaskParameter="Result" ItemName="_DidCommFriendDependencyFound" />
+    </XmlPeek>
+    <XmlPeek Condition="'@(_DidCommFriendReference)' != ''"
+             XmlInputPath="@(_DidCommPackedNuspec)"
+             Query="$(_DidCommDependencyPath)[($(_DidCommFriendIdTest)) and not($(_DidCommIsExact))]/@id">
+      <Output TaskParameter="Result" ItemName="_DidCommLooseFriendDependency" />
+    </XmlPeek>
+    <ItemGroup>
+      <_DidCommMissingFriendDependency Include="@(_DidCommFriendReference->'%(GranterPackageId)')" Exclude="@(_DidCommFriendDependencyFound)" />
+    </ItemGroup>
+
+    <Delete Condition="'@(_DidCommLooseFriendDependency)' != '' OR '@(_DidCommMissingFriendDependency)' != ''"
+            Files="@(_DidCommBuiltPackage)" />
+    <Error Condition="'@(_DidCommMissingFriendDependency)' != ''"
+           Text="$(PackageId) calls internals of these packages (InternalsVisibleTo), but its packed .nuspec has no dependency on them: @(_DidCommMissingFriendDependency, ', '). It must depend on each at an exact version (&quot;[x.y.z]&quot;); a ProjectReference that NuGet packs as a dependency gets one. The .nupkg and .snupkg were deleted." />
+    <Error Condition="'@(_DidCommLooseFriendDependency)' != ''"
+           Text="$(PackageId) calls internals of these packages (InternalsVisibleTo), but its packed .nuspec depends on them at a minimum version instead of an exact one (&quot;[x.y.z]&quot;): @(_DidCommLooseFriendDependency->Distinct(), ', '). An internal call is safe only between packages of the same version. _DidCommPinFriendDependencies in Directory.Build.targets writes the exact versions; -p:DidCommSkipFriendPin=true skips it. The .nupkg and .snupkg were deleted." />
+  </Target>
 </Project>

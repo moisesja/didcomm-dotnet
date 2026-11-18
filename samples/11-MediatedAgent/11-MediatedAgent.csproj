@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DidComm.Samples.MediatedAgent</RootNamespace>
+    <AssemblyName>DidComm.Samples.MediatedAgent</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>didcomm-dotnet complete mediator, end to end (PRD §14.3 sample 11): an ASP.NET Core mediator built with AddMediator() + MapDidCommMediator(), a wallet that enrolls through its out-of-band invitation, registers a DID that routes through it and picks its messages up over HTTP and live over a WebSocket, a sender that reaches the wallet through the mediator, an allow-list mediation policy that refuses a stranger, and the operator's console.</Description>
+    <!-- The wallet is its own project below this folder, with its own references: keep its files
+         out of this one. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Wallet/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- The mediator side: DidComm.Mediator (the roles and AddMediator()) and
+       DidComm.Mediator.AspNetCore (MapDidCommMediator). The sender (Alice) uses the HTTP transport. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DidComm.Core\DidComm.Core.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator\DidComm.Mediator.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator.AspNetCore\DidComm.Mediator.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
+    <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\_shared\_shared.csproj" />
+    <ProjectReference Include="Wallet\Wallet.csproj" />
+  </ItemGroup>
+
+</Project>

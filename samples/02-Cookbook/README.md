@@ -2,7 +2,7 @@
 
 A runnable, narrated tour of the DIDComm v2.1 library. Each section is a small program that demonstrates one capability end-to-end: it bootstraps two test identities, performs the operation, and prints what happened. Read the source alongside the output and you should be able to copy the patterns into your own application.
 
-The cookbook is complete: one section per API task letter in the project PRD's §14.2 master list, A through BB.
+The cookbook is complete: one section per API task letter in the project PRD's §14.2 master list, A through FF. Sections CC–FF cover the mediator service: a wallet enrolling with a mediator, picking up its mail over HTTP and live over WebSocket, and running a mediator yourself.
 
 ## Sections
 
@@ -33,9 +33,13 @@ The cookbook is complete: one section per API task letter in the project PRD's �
 | **W** — Empty message | The header-only envelope: `Message.Empty()` carrying just an `ack` — a receipt with no body. |
 | **X** — Custom protocol handler | The protocol extension point: implement `IProtocolHandler`, register it with `AddProtocol<T>()`, and watch the dispatcher route an inbound message to it and return its reply. |
 | **Y** — Custom secrets resolver & keystore bridge | Both ways to own the key-custody seam: a hand-written `ISecretsResolver` (a tiny "mock KMS" showing the two-method contract), and `NetDidKeyStoreSecretsResolver` bridging a NetCrypto `IKeyStore` — which signs and encrypts without a private byte ever leaving the store. |
-| **Z** — Custom transport | The transport extension point: implement `IDidCommTransport` for a made-up `memq://` scheme, let `TransportRouter` pick it by endpoint scheme in a full `SendAsync`, and see the router refuse a scheme nobody handles. |
+| **Z** — Custom transport | The transport extension point: implement `IDidCommTransport` for a made-up `memq://` scheme, let `TransportRouter` pick it by endpoint scheme in a full `SendAsync`, read what the request carries (`LocalDid`, `PeerDid`, `ReturnRoute`, `MaxResponseBytes`), refuse a return-route send a one-way transport cannot answer, and see the router refuse a scheme nobody handles. |
 | **AA** — net-did integration + `did:web` rejection | Implicitly, every section is using net-did to resolve DIDs. This section makes that explicit, and shows the deliberate exception: `did:web` is refused at every entry point because its trust model leaves it vulnerable to silent key substitution. Use `did:webvh` if you need a web-resolvable DID. |
 | **BB** — Profiles & i18n | Negotiating which DIDComm dialect to speak from a peer's `accept` list, and speaking it in the right language: `lang`/`accept-lang` headers with the preference persisted per thread — and proven not to leak across threads. |
+| **CC** — Enroll with a mediator | A wallet with no public address enrolls with a real mediator over HTTP: `MediationClient.RequestMediationAsync` (a `mediate-deny` is a `null` grant), a public DID whose service is `DidCommServiceBuilder.ForMediation(grant)`, `UpdateRecipientsAsync` (retrying is safe; the first peer to register a DID gets it), `QueryRecipientsAsync`. Then the wrong peer (a plain agent → `MediationNotSupportedException`), the `didcomm:transport/queue` URI that `SendAsync` refuses, and every Coordinate Mediation message built and parsed. A wallet installs `DidComm.Mediator.Client` plus `DidComm.Transports.Http` (or `.WebSocket` for live delivery). |
+| **DD** — Pick up queued messages | The mailbox over HTTP with `PickupClient`: status → fetch (each message opened and acknowledged) → discard one that will not open with `AckAsync`. Delivery is at-least-once with repeats filtered per mailbox; a message older than the age limit (30 days by default) is dropped without notice. The mediator side drops messages straight into a queue with `MessagePickupQueue.DeliverAsync`; every Message Pickup message is built and parsed; and DD.3 walks the `IMessageStore` contract call by call for anyone writing a persistent store. |
+| **EE** — Live delivery over WebSocket | Messages that come back over a connection the client opened. On the mediator: a protocol handler answers a `return_route: all` request by pushing notices through `context.Session` (`TrySendAsync`, whose size-bounded form answers `TooLarge` without sending anything) and watches the session's `Closed` token. On the client, by hand: a `WebSocketDidCommTransport` with an `IInboundFrameConsumer` of its own, which skips any frame whose authcrypt sender is not the connection's peer (compared as DID subjects). The usual way: `UseWebSocketTransport(o => o.ReceiveInbound = true)` + `UseInboundDispatch()` + `AddMediatorClient()`, then `PickupClient.ReceiveLiveAsync`. A live item is acknowledged when you ask for the next one, and `AckAsync(item.Id)` discards the last one. Polling in live mode is permanent: a delayed message that becomes due is not pushed, and the next poll (one `LivePollInterval` after the previous drain) picks it up. Delivery is at-least-once, and the session's `Closed` token, not the registry's best-effort events, marks a session's end. |
+| **FF** — Run a minimal mediator in 20 lines | A complete mediator is `AddMediator()` + `MapDidCommMediator("/didcomm").RequireRateLimiting(...)`, with an allow-list `IMediationPolicy` because enrolment is open by default. `AddMediator()` refuses a host `IForwardSink`: use `AddRoutingMediator()` for that. Then the roles composed yourself: à la carte in a container (`AddCoordinateMediation()` before `AddRoutingMediator()`, `AddMessagePickup()`, and a sink that calls `MessagePickupQueue.DeliverAsync`; live push stays `AddMediator()`'s), and with no container at all (the queue, the two handlers and a dispatcher, driven in-process). The library's endpoints run replay admission before dispatch; a receive path of your own must run it itself (`IInboundReplayGuard.TryAdmit`, keyed on the authcrypt sender's DID subject), and the section shows a captured `status-request` played again being refused as `Duplicate` before any handler runs. Last, the replay guard: each message id is admitted once, and two hosts' clocks must agree within a minute by default (`ReplayProtectionOptions.ClockSkew`). The mediator references `DidComm.Mediator` + `DidComm.Mediator.AspNetCore`; a wallet references `DidComm.Mediator.Client` and a transport. |
 
 Cookbook letters come from the project's PRD §14.2, which is the master list of the API tasks the library must demonstrate. The PRD/FR cross-references live in each section's XML doc and the project CHANGELOG.
 
@@ -63,6 +67,8 @@ Identifiers change every run because fresh `did:peer:2` identities are minted ea
 == Section A — Dependency-injection setup ==
 ...
 == Section BB — Profiles & i18n ==
+...
+== Section FF — Run a minimal mediator in 20 lines ==
 ```
 
 Each section follows the same frame — steps (`•`), key = value report lines, and closing `note:` lines. Section K in full, as a representative example:
@@ -96,6 +102,7 @@ The smoke test asserts every banner (and one distinctive outcome per tricky sect
 - [`Program.cs`](Program.cs) — entry point. The `RunAsync(TextWriter)` overload is the testable seam used by the smoke test. Sections are registered in §14.2 letter order.
 - [`CookbookContext.cs`](CookbookContext.cs) — one-time bootstrap: DI graph plus the three test identities.
 - [`LoopbackTransport.cs`](LoopbackTransport.cs) — the in-process `IDidCommTransport` that lets protocol sections (S, T) run request/response flows without a network.
+- [`CookbookMediatorHost.cs`](CookbookMediatorHost.cs) — a complete mediator (`AddMediator()` + `MapDidCommMediator("/didcomm")`, rate-limited per client address) on a free 127.0.0.1 port, started and disposed by sections CC and DD. Its DID names its own address, so the port is picked first (`LoopbackPort`); production addresses are fixed and https.
 - [`Sections/`](Sections/) — one `Section_<Letter>_<Name>.cs` file per §14.2 task letter, each a static class with a `RunAsync(CookbookContext)`.
 
-Shared helpers (`Narrator`, `PeerIdentityFactory`) live in [`../_shared/`](../_shared/) so future sample apps can reuse them.
+Shared helpers (`Narrator`, `PeerIdentityFactory`, `LoopbackPort`) live in [`../_shared/`](../_shared/) so future sample apps can reuse them.

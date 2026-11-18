@@ -69,6 +69,13 @@ namespace DidComm.Mediator.Pickup;
 /// Messages of the protocol that a mediator does not act on (<c>status</c>, <c>delivery</c>, or a
 /// name it does not know) are ignored.
 /// </para>
+/// <para>
+/// <strong>Replay.</strong> The handler does not check for replayed requests itself: front it with
+/// an endpoint that runs replay admission (the library's <c>MapDidCommMediator</c> and the
+/// registry-aware <c>MapDidCommEndpoint</c> do), or call
+/// <see cref="DidComm.Transports.ReturnRoute.IInboundReplayGuard.TryAdmit"/> yourself before dispatch
+/// (see <see cref="ProtocolDispatcher"/>).
+/// </para>
 /// </remarks>
 public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRoles
 {

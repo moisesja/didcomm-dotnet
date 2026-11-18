@@ -6,6 +6,96 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Samples: sample 11 `MediatedAgent`, sample 04 as a routing relay, cookbook CC–FF; exact versions between internals-coupled packages (#97, epic #88)
+
+**Consumer impact — upgrade every `DidComm.*` package together, patch releases included.**
+Packages that call each other's internals through `InternalsVisibleTo` now depend on each other at an
+exact version (`[1.6.0]`) instead of a minimum (`>= 1.6.0`). This changes three packages that are
+already on nuget.org: **`DidComm.Transports.WebSocket`, `DidComm.AspNetCore` and
+`DidComm.Extensions.DependencyInjection` now depend on `DidComm.Core` at exactly their own version.**
+(The owner's decision named `DidComm.Transports.WebSocket`; the grants show the other two call Core's
+internals as well.) The new packages are pinned the same way: `DidComm.Mediator.Client` → Core,
+`DidComm.Mediator` → Core and `DidComm.Mediator.Client`, `DidComm.Mediator.AspNetCore` →
+`DidComm.AspNetCore` and `DidComm.Mediator`. `DidComm.Transports.Http` and `DidComm.Adapters.NetDid`
+keep minimum dependencies: neither calls Core's internals (`DidComm.Core` no longer grants them to the
+adapter, which never used them; no API change).
+- **What a mixed install sees now.** An app that references, for example, `DidComm.Mediator` 1.6.0
+  and `DidComm.Core` 1.6.1 directly gets **NU1608** at restore ("requires DidComm.Core (= 1.6.0) but
+  version 1.6.1 was resolved") instead of a `MissingMethodException` at run time. Two of our packages
+  at different versions that pin Core differently fail restore with **NU1107**. NU1608 is a warning:
+  set `<WarningsAsErrors>NU1608</WarningsAsErrors>`, or keep every `DidComm.*` package on one version
+  with central package management, to make a mix fail the build.
+- **Not detected:** mixing with a package published before this change (1.5.x and earlier), whose
+  dependency is still a minimum, restores silently.
+- **How it is enforced.** `Directory.Build.targets` reads the grants at pack time and writes the exact
+  versions, then reads the packed `.nuspec` and fails pack (and deletes the package) if a dependency
+  on a granting package is missing or not exact, so CI's pack step and the release workflow both
+  enforce it, also for a version with SemVer build metadata (CI packs one such version);
+  `-p:DidCommSkipFriendPin=true` is the negative control and must fail. A new test,
+  `ShippedAssembliesListTests`, pins the eight coupled pairs and checks that the packable
+  `src/*/*.csproj` projects equal the DX gate's assembly list (owner decision D2), each with a
+  negative control. RELEASING.md describes the rule; its trusted-publishing setup row now names the
+  scope in use ("Push new packages and package versions", glob `DidComm.*`).
+
+**Samples.**
+- **`samples/11-MediatedAgent` (new).** The full mediator service and a wallet, narrated end to end:
+  - The mediator: `AddMediator()` + `MapDidCommMediator("/didcomm").RequireRateLimiting(...)` with a
+    per-client limiter, an allow-list `IMediationPolicy`, an out-of-band invitation, and an operator
+    console (`IMediationStore`, `MessagePickupQueue.RemoveAsync` / `PurgeExpiredAsync` /
+    `RevokeAndPurgeAsync`, `IMessageStore.PurgeRecipientAsync`, the session registry's `Find`).
+  - The wallet is its own class library that references only `DidComm.Mediator.Client` and the
+    transports: the boundary a wallet developer copies, pinned by the smoke test in both the compiled
+    references and the restore graph. Bob fetches the invitation through the outbound-endpoint guard
+    (never through a proxy, which would see only the proxy's address checked),
+    enrolls, publishes a DID built with `ForMediation(grant)`, picks up over HTTP, then receives live
+    over WebSocket; Carol gets a `mediate-deny` (a `null` result, not an exception).
+  - The mediator's port is chosen before it starts (`samples/_shared/LoopbackPort`), because its DID
+    names its own address and `AddMediator()` checks that DID before the server listens. Production
+    knows its address up front.
+- **`samples/04-MediatorAgent` is now a routing relay only.** The library's routing role
+  (`AddRoutingMediator()` behind the registry-aware `MapDidCommEndpoint`) with a host `IForwardSink`
+  that waits for the transport acknowledgement and relays to Bob's own inbox with `SendPackedAsync`,
+  each relay bounded by its own timeout. The library's built-in push to a recipient endpoint is
+  deferred to #110. It also shows Discover Features answered on the same request
+  (`SendOptions.ReturnRoute` → `SendResult.Returned`), a registered recipient with no inbox
+  (`NullForwardSink`), a forward for an unregistered DID dropped with 202, the transport's
+  connect-time SSRF check, and the same relay composed without a DI container.
+- **Cookbook sections CC–FF** (32 sections now, A–FF): CC enroll with a mediator (and the wrong peer,
+  the queue URI, every Coordinate Mediation message on the wire); DD pick up queued messages (and
+  `MessagePickupQueue.DeliverAsync`, every Message Pickup message, and the `IMessageStore` contract
+  walked call by call for authors of persistent stores); EE live delivery over WebSocket (a handler
+  pushing through the return-route session, a hand-built transport with its own
+  `IInboundFrameConsumer`, and live pickup); FF a minimal mediator in about twenty lines, the roles
+  composed by hand with and without a container (including the replay-admission step a receive path
+  of your own must run), and the replay guard. They say in plain words: delivery is at-least-once,
+  with repeats filtered per mailbox; a live item is acknowledged when you ask for the next one, and
+  `AckAsync(item.Id)` discards the last; a message that keeps failing is discarded with `AckAsync`;
+  polling continues in live mode (a delayed message that becomes due is not pushed); a recipient
+  offline longer than the age limit (30 days by default) loses those messages without notice; two
+  hosts' clocks must agree within a minute by default; enrolment is open by default, and the first
+  peer to register a DID gets it. Section Z's custom transport now reads the request's return-route
+  fields and refuses a send it cannot carry.
+- **The DX gate retires every Phase 7 allowlist entry** (421 reference and 366 execution entries):
+  all three mediator packages are referenced and executed by samples; the execution allowlist is
+  empty; 994 of 1021 public members are proven to execute (the other 27 have no executable code).
+  Seven constructors of results only the library produces (`GrantRevocation`,
+  `PickupDeliveryResult`, `QueueStatus`, `RecipientPage`, `SessionRegistration`,
+  `ReturnRouteSessionEventArgs`, `InboundFrame`) are permanent reference-gate entries, like the
+  existing `SendResult` / `UnpackResult` ones (owner decision, 2026-11-17). The §14.4 matrix test
+  gains the Mediation row.
+
+**Docs.** PRD §14.2 snippets CC–FF, §14.3 rows 02/04/11, §14.4, §3.1 (the exact-version note) and the
+Phase 7 status; `docs/codebase-architecture.md` gains a "Demonstrated by" part in each Phase 7
+section and the pack-time rule; README (the samples table, the DX paragraph, the Phase 7 roadmap row);
+CONTRIBUTING's PRD link is fixed. `IMessageStore.PurgeRecipientAsync`'s remarks no longer say the
+pickup role calls it (it never did; the role removes such records with `AcknowledgeAsync`), and the
+two mediator handlers' docs say a receive path of your own must run replay admission before dispatch.
+
+**Recorded, not changed:** `HttpDidCommTransport` lets connection failures (including its connect-time
+SSRF refusal) reach a caller of `ITransportRouter.SendAsync` as `HttpRequestException` rather than the
+documented `TransportException` (callers of `DidCommClient` are unaffected: the facade's guard runs
+first). A skipped test, `HttpTransportConnectFailureContractTests`, reproduces it for a follow-up.
+
 ### Fixed — CI: the nightly Live interop job runs again (#120, epic #88)
 
 The scheduled `Live interop` workflow failed every night from 2026-11-08 to 2026-11-16, before
