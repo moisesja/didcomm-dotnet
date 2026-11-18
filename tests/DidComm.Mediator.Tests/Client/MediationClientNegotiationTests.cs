@@ -63,6 +63,21 @@ public sealed class MediationClientNegotiationTests
         exchange.Versions.Count.Should().Be(0, "a pinned version is not negotiated, so nothing is remembered");
     }
 
+    [Theory]
+    [InlineData(CoordinateMediationVersion.V3, CoordinateMediationVersion.V2, CoordinateMediation.MediateRequestType)]
+    [InlineData(CoordinateMediationVersion.V2, CoordinateMediationVersion.V3, CoordinateMediation20.MediateRequestType)]
+    public async Task A_pinned_version_wins_over_a_version_remembered_for_the_mediator(CoordinateMediationVersion pinned, CoordinateMediationVersion remembered, string expectedType)
+    {
+        // QA-2 (#99): the pin is read before the cache, whatever the cache holds for this mediator.
+        var exchange = new FakeMediatorExchange(MediationClientTests.Pinned(pinned));
+        exchange.Versions.Set(Mediator, remembered);
+
+        (await exchange.Client().RequestMediationAsync(Mediator, Me)).Should().NotBeNull();
+
+        exchange.Queries.Should().BeEmpty();
+        exchange.Sent.Should().ContainSingle().Which.Message.Type.Should().Be(expectedType);
+    }
+
     // ---- choosing -------------------------------------------------------------------------
 
     [Fact]
