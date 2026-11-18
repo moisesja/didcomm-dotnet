@@ -4,6 +4,7 @@ using DidComm.Facade;
 using DidComm.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace DidComm.Transports.Http;
@@ -25,8 +26,8 @@ public static class HttpDidCommBuilderExtensions
     /// <see cref="HttpTransportOptions.OutboundEndpointPolicy"/> at TCP connect time so every
     /// connection — including each followed redirect — is pinned to a vetted, non-private IP.
     /// Connections are direct: no proxy from the environment is used. Only a proxy the host names in
-    /// <see cref="HttpTransportOptions.TrustedProxy"/> carries them; each request is then checked
-    /// before it is handed to that proxy.
+    /// <see cref="HttpTransportOptions.TrustedProxy"/> carries them; the transport then checks each
+    /// destination (and each followed 307) before the request is sent.
     /// </summary>
     /// <param name="builder">The DidComm DI builder.</param>
     /// <param name="configure">Optional <see cref="HttpTransportOptions"/> configuration callback.</param>
@@ -46,11 +47,7 @@ public static class HttpDidCommBuilderExtensions
                 // Single source of truth (#27): use this transport's explicit policy if set, else inherit
                 // the core DidCommOptions.OutboundEndpointPolicy (the same instance the facade's pre-send
                 // check uses), else a fresh default. So configuring the policy in one place governs both.
-                var options = sp.GetRequiredService<IOptions<HttpTransportOptions>>().Value;
-                var policy = options.OutboundEndpointPolicy
-                    ?? sp.GetService<IOptions<DidCommOptions>>()?.Value.OutboundEndpointPolicy
-                    ?? new OutboundEndpointPolicy();
-                var guard = new OutboundEndpointGuard(policy);
+                var guard = new OutboundEndpointGuard(ResolvePolicy(sp));
                 // Read and copied once per container, then reused by every handler build (TrustedProxySnapshot).
                 var route = sp.GetRequiredService<TrustedProxySnapshot>().Route;
                 var sockets = new SocketsHttpHandler
@@ -91,14 +88,34 @@ public static class HttpDidCommBuilderExtensions
                     },
                 };
                 // Through a proxy the callback sees only the proxy, so the checks that need no socket
-                // run on each request (each attempt, each followed 307) before the proxy is asked.
-                return route is null ? sockets : new ProxiedDestinationCheck(guard) { InnerHandler = sockets };
+                // run in the transport itself, before each hop is sent (HttpDidCommTransport.SendAsync).
+                // The handler stays a SocketsHttpHandler, so a host's UseSocketsHttpHandler or
+                // ConfigurePrimaryHttpMessageHandler tweak adjusts this one instead of replacing it.
+                return sockets;
             });
 
-        builder.Services.AddSingleton<IDidCommTransport, HttpDidCommTransport>();
+        // An explicit factory: the transport gets the same snapshot and the same inherited policy as
+        // the handler, for its own destination check when a TrustedProxy is set.
+        builder.Services.AddSingleton<IDidCommTransport>(sp => new HttpDidCommTransport(
+            sp.GetRequiredService<IHttpClientFactory>(),
+            sp.GetRequiredService<IOptions<HttpTransportOptions>>(),
+            sp.GetService<ILogger<HttpDidCommTransport>>(),
+            sp.GetRequiredService<TrustedProxySnapshot>().Route,
+            ResolvePolicy(sp)));
         // The router is normally registered by AddDidComm, but in case a host calls this
         // extension without going through AddDidComm we register it idempotently.
         builder.Services.TryAddSingleton<ITransportRouter, TransportRouter>();
         return builder;
     }
+
+    /// <summary>
+    /// Single source of truth (#27): this transport's explicit policy if set, else the core
+    /// <c>DidCommOptions.OutboundEndpointPolicy</c> (the same instance the facade's pre-send check
+    /// uses), else a fresh default.
+    /// </summary>
+    /// <param name="sp">The provider.</param>
+    private static OutboundEndpointPolicy ResolvePolicy(IServiceProvider sp) =>
+        sp.GetRequiredService<IOptions<HttpTransportOptions>>().Value.OutboundEndpointPolicy
+        ?? sp.GetService<IOptions<DidCommOptions>>()?.Value.OutboundEndpointPolicy
+        ?? new OutboundEndpointPolicy();
 }

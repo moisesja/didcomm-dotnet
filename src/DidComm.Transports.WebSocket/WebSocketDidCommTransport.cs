@@ -73,6 +73,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     // via SocketsHttpHandler.ConnectCallback, or hands it to the named TrustedProxy (see constructor).
     // Always built, so DefaultConnect never connects without it; a custom Connect delegate never uses it.
     private readonly HttpMessageInvoker _pinnedInvoker;
+    // WebSocketTransportOptions.TrustedProxy is set (read once). The pre-send check then runs on every
+    // send, whatever connects it: past a proxy, no connect-time check sees the destination.
+    private readonly bool _proxied;
     private readonly ConcurrentDictionary<string, System.Net.WebSockets.WebSocket> _pool = new(StringComparer.Ordinal);
     // One connect gate per pool key so establishing a connection to one endpoint doesn't block
     // connects to a different endpoint.
@@ -220,6 +223,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // never connect without it, even when Connect is changed after construction.
         // Read and copied once (WebSocketTransportOptions.TrustedProxy).
         var route = TrustedProxyRoute.From(_options.TrustedProxy);
+        _proxied = route is not null;
         var sockets = new SocketsHttpHandler
         {
             // FR-TRN-13: never the process proxy (HttpClient.DefaultProxy: HTTP_PROXY, HTTPS_PROXY,
@@ -402,8 +406,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // clear error. The authoritative defense is the connect-time IP pinning in _pinnedInvoker
         // (see constructor), which additionally covers DNS rebinding and ResolveDnsNames = false. A
         // custom Connect delegate (e.g. tests against an in-process TestServer) owns its own vetting,
-        // so both layers are skipped there.
-        if (_options.Connect is null)
+        // so both layers are skipped there, unless a TrustedProxy is set (FR-TRN-13): then this check
+        // is the destination's only one and runs on every send.
+        if (_options.Connect is null || _proxied)
             _guard.Validate(request.Endpoint);
 
         var key = PoolKey(request.Endpoint);

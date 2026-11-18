@@ -73,15 +73,16 @@ public sealed class HttpTransportOptions
     /// your internal network.
     /// </para>
     /// <para>
-    /// <b>What the library still checks</b> before each request and each followed 307 redirect: the
-    /// scheme (<see cref="AllowedSchemes"/>), an IP-literal destination (refused when the
-    /// <see cref="OutboundEndpointPolicy"/> blocks it), and, while
+    /// <b>What the library still checks</b>, in the transport, before each send and each followed
+    /// 307 redirect: the scheme (<see cref="AllowedSchemes"/>), an IP-literal destination (refused
+    /// when the <see cref="OutboundEndpointPolicy"/> blocks it), and, while
     /// <see cref="Transports.OutboundEndpointPolicy.ResolveDnsNames"/> is on, a local lookup of the
-    /// destination's name. That lookup is best effort, because the proxy looks the name up again. A
-    /// refusal is a <see cref="Exceptions.TransportException"/>, thrown before the proxy is
-    /// contacted and never retried. Where only the proxy can resolve names, set
-    /// <c>ResolveDnsNames = false</c> (on <c>DidCommOptions.OutboundEndpointPolicy</c>, which
-    /// <c>DidCommClient</c> checks too); then only IP literals are checked here.
+    /// destination's name. That lookup is best effort, because the proxy looks the name up again; a
+    /// name that does not resolve locally is refused. A refusal is a
+    /// <see cref="Exceptions.TransportException"/>, thrown before the proxy is contacted and never
+    /// retried. Where only the proxy can resolve names, set <c>ResolveDnsNames = false</c> (on
+    /// <c>DidCommOptions.OutboundEndpointPolicy</c>, which <c>DidCommClient</c> checks too); then only
+    /// IP literals are checked here.
     /// </para>
     /// <para>
     /// <b>The proxy itself</b> is your explicit choice, so its own address is never refused, even
@@ -92,14 +93,14 @@ public sealed class HttpTransportOptions
     /// <see cref="System.Net.WebProxy.UseDefaultCredentials"/>); an address carrying a user name or
     /// password is refused. A destination on <see cref="System.Net.WebProxy.BypassList"/> (or a
     /// local one with <see cref="System.Net.WebProxy.BypassProxyOnLocal"/>) is connected to directly,
-    /// with the full connect-time check.
+    /// with the full connect-time check, as when no proxy is set.
     /// </para>
     /// <para>
-    /// The value is checked when the transport is created and copied once, the first time the
-    /// transport connects, so later changes to the same <see cref="System.Net.WebProxy"/> instance
-    /// have no effect. An invalid value throws <see cref="InvalidOperationException"/>. It has no
-    /// effect when the host replaces the <c>"didcomm"</c> client's primary handler: that handler
-    /// decides how to connect.
+    /// The value is checked when the transport is created and copied once per container, so later
+    /// changes to the same <see cref="System.Net.WebProxy"/> instance have no effect. An invalid
+    /// value throws <see cref="InvalidOperationException"/>. When the host replaces the
+    /// <c>"didcomm"</c> client's primary handler, that handler decides how and where to connect
+    /// (the proxy is not applied), and the destination checks above still run.
     /// </para>
     /// </remarks>
     /// <example>

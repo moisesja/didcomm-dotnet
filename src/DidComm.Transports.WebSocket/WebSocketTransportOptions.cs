@@ -38,7 +38,8 @@ public sealed class WebSocketTransportOptions
     /// <see cref="System.Net.WebSockets.ClientWebSocket"/> through the transport's guarded handler
     /// (directly, or through <see cref="TrustedProxy"/>); tests substitute a TestServer-handshake
     /// variant. A delegate set here owns how and where it connects: the outbound-endpoint checks and
-    /// <see cref="TrustedProxy"/> do not apply to it.
+    /// <see cref="TrustedProxy"/> do not apply to it, except that with <see cref="TrustedProxy"/> set
+    /// the destination is still checked before each send.
     /// </summary>
     public Func<System.Net.WebSockets.WebSocket, Uri, CancellationToken, Task>? Connect { get; set; }
 
@@ -106,9 +107,10 @@ public sealed class WebSocketTransportOptions
     /// alike): the scheme (<see cref="AllowedSchemes"/>), an IP-literal destination (refused when
     /// the <see cref="OutboundEndpointPolicy"/> blocks it), and, while
     /// <see cref="Transports.OutboundEndpointPolicy.ResolveDnsNames"/> is on, a local lookup of the
-    /// destination's name. That lookup is best effort, because the proxy looks the name up again. A
-    /// refusal is a <see cref="Exceptions.TransportException"/>, thrown before the proxy is
-    /// contacted and never retried. Through a proxy the opening handshake follows no redirects. Where
+    /// destination's name. That lookup is best effort, because the proxy looks the name up again; a
+    /// name that does not resolve locally is refused. A refusal is a
+    /// <see cref="Exceptions.TransportException"/>, thrown before the proxy is contacted and never
+    /// retried. Through a proxy the opening handshake follows no redirects. Where
     /// only the proxy can resolve names, set <c>ResolveDnsNames = false</c> (on
     /// <c>DidCommOptions.OutboundEndpointPolicy</c>, which <c>DidCommClient</c> checks too); then
     /// only IP literals are checked here.
@@ -122,13 +124,14 @@ public sealed class WebSocketTransportOptions
     /// <see cref="System.Net.WebProxy.UseDefaultCredentials"/>); an address carrying a user name or
     /// password is refused. A destination on <see cref="System.Net.WebProxy.BypassList"/> (or a
     /// local one with <see cref="System.Net.WebProxy.BypassProxyOnLocal"/>) is connected to directly,
-    /// with the full connect-time check.
+    /// with the full connect-time check, as when no proxy is set.
     /// </para>
     /// <para>
     /// The value is checked and copied once, when the transport is created, so later changes to the
     /// same <see cref="System.Net.WebProxy"/> instance do not reach it. An invalid value throws
-    /// <see cref="InvalidOperationException"/>. It has no effect when a custom <see cref="Connect"/>
-    /// delegate is set: that delegate decides how to connect.
+    /// <see cref="InvalidOperationException"/>. When a custom <see cref="Connect"/> delegate is set,
+    /// that delegate decides how and where to connect (the proxy is not applied), and the
+    /// destination checks above still run before each send.
     /// </para>
     /// </remarks>
     /// <example>
