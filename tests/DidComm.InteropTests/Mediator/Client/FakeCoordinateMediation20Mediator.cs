@@ -26,6 +26,12 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// the <see cref="MediatorTestServer"/>'s network and clock, so a <see cref="MediatorClientHarness"/>
 /// built over that server reaches it at the address its DID document names.
 /// </summary>
+/// <remarks>
+/// This library's mediator speaks 2.0 too (#99, <c>CoordinateMediationOptions.EnableV2</c>), and
+/// <c>MediatorCoordinateMediation20Tests</c> covers the client against it. This host stays as the
+/// stand-in for third-party 2.0 mediators: it discloses 2.0 only and can answer the ways they do
+/// that ours never does (no <c>thid</c>, <c>paginate</c> ignored), which the client must still take.
+/// </remarks>
 internal sealed class FakeCoordinateMediation20Mediator : IAsyncDisposable
 {
     public const string Host = "m2.test";

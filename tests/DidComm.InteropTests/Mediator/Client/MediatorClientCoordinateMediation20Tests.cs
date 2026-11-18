@@ -2,11 +2,8 @@ using AwesomeAssertions;
 using DidComm.Exceptions;
 using DidComm.Mediator.Client;
 using DidComm.Mediator.Coordination;
-using DidComm.Protocols;
+using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Resolution;
-using DidComm.Samples.Shared;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace DidComm.InteropTests.Mediator.Client;
@@ -17,8 +14,8 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// registry-aware endpoint with a test handler answering in the 2.0 page's shapes), the client
 /// negotiates 2.0 and enrols, updates and lists in 2.0 messages, whether the answers carry a
 /// <c>thid</c> or not (over HTTP the response is the answer). A host disclosing neither version is
-/// <see cref="MediationNotSupportedException"/>; a mediator disclosing 3.0 and 2.0 is spoken to in
-/// 3.0. A 2.0 host that ignores <c>paginate</c> (its whole list at offset 0, with or without a
+/// <see cref="MediationNotSupportedException"/>; a mediator disclosing 3.0 and 2.0 (this library's
+/// own, as <c>AddMediator()</c> registers it) is spoken to in 3.0. A 2.0 host that ignores <c>paginate</c> (its whole list at offset 0, with or without a
 /// <c>pagination</c>) is listed in one page larger than asked for, and one holding more than 1000
 /// keys fails the walk rather than truncating it.
 /// </summary>
@@ -72,24 +69,23 @@ public sealed class MediatorClientCoordinateMediation20Tests
     [Fact]
     public async Task A_mediator_disclosing_3_0_and_2_0_is_spoken_to_in_3_0()
     {
-        var identity = await MediatorCast.MintAsync(new DidCommServiceSpec("http://mediator.test/", Accept: new[] { "didcomm/v2" }));
-        var twoOh = new FakeCoordinateMediation20Handler(identity.Did, omitThid: false);
-        await using var mediator = await MediatorTestServer.StartAsync(o =>
-        {
-            o.Identity = identity;
-            o.ConfigureServices = s =>
-            {
-                s.AddSingleton(twoOh);
-                s.TryAddEnumerable(ServiceDescriptor.Singleton<IProtocolHandler, FakeCoordinateMediation20Handler>(sp => sp.GetRequiredService<FakeCoordinateMediation20Handler>()));
-            };
-        });
+        // This library's mediator as AddMediator() registers it: it answers and discloses both versions.
+        var seen = new Qa1Recorder();
+        await using var mediator = await MediatorTestServer.StartAsync(o => o.PostConfigureServices = seen.Register);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var bob = await harness.NewPeerAsync();
+        var asker = await mediator.NewPeerAsync();
+        var disclosed = await mediator.AskAsync(asker, DiscoverFeatures.CreateQuery(asker.Did, mediator.Did,
+            new FeatureQuery { FeatureType = DiscoverFeatures.FeatureTypeProtocol, Match = "https://didcomm.org/coordinate-mediation/*" }));
+        DiscoverFeatures.ReadDisclosures(disclosed.Message).Select(d => d.Id)
+            .Should().BeEquivalentTo(new[] { CoordinateMediation.ProtocolUri, CoordinateMediation20.ProtocolUri }, "the mediator discloses both");
 
         var (grant, published) = await MediatorClientEnrolmentTests.EnrolAsync(harness, mediator.Did, bob);
 
         grant.RoutingDids.Should().Equal(mediator.Did);
-        twoOh.Handled.Should().BeEmpty("3.0 is preferred when both are disclosed");
+        seen.From(bob.Did).Should().NotContain(r => r.Type.StartsWith(CoordinateMediation20.ProtocolUri + "/", StringComparison.Ordinal),
+            "3.0 is preferred when both are disclosed");
+        seen.From(bob.Did).Should().Contain(r => r.Type == CoordinateMediation.MediateRequestType);
         (await mediator.Mediation.FindGrantByRecipientDidAsync(published.Did, default))!.PeerDid.Should().Be(bob.Did);
         harness.Channel.Versions.TryGet(mediator.Did, out var version).Should().BeTrue();
         version.Should().Be(CoordinateMediationVersion.V3);
