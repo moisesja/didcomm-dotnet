@@ -62,14 +62,19 @@ public sealed class CoordinateMediationDiTests
             registry.TryResolve(type, out var resolved).Should().BeTrue(type);
             resolved.Should().BeSameAs(sp.GetRequiredService<CoordinateMediationHandler>(), "the registry entry and the typed singleton are one instance");
         }
-        registry.TryResolve("https://didcomm.org/coordinate-mediation/2.0/keylist-update", out _).Should().BeFalse("2.0 is a separate handler (#99)");
+        // 2.0 is on by default (#99): a separate handler, its own singleton, over the same collaborators.
+        registry.TryResolve(CoordinateMediation20.KeylistUpdateType, out var twoZero).Should().BeTrue("2.0 is registered by default (#99)");
+        twoZero.Should().BeSameAs(sp.GetRequiredService<CoordinateMediation20Handler>()).And.NotBeSameAs(sp.GetRequiredService<CoordinateMediationHandler>());
+        sp.GetServices<IProtocolHandler>().Where(h => h is CoordinateMediationHandler or CoordinateMediation20Handler).Should().HaveCount(2);
 
         sp.GetRequiredService<CoordinateMediationHandler>().Roles.Should().Equal("mediator");
+        sp.GetRequiredService<CoordinateMediation20Handler>().Roles.Should().Equal("mediator");
         sp.GetRequiredService<IMediationStore>().Should().BeOfType<InMemoryMediationStore>();
         sp.GetRequiredService<IMediationPolicy>().Should().BeOfType<DefaultMediationPolicy>();
         sp.GetRequiredService<IMediatorIdentity>().RoutingDids.Should().BeEmpty();
         sp.GetRequiredService<IForwardRecipientRegistry>().Should().BeOfType<MediationForwardRecipientRegistry>();
         sp.GetRequiredService<IOptions<CoordinateMediationOptions>>().Value.MaxPageSize.Should().Be(100);
+        sp.GetRequiredService<IOptions<CoordinateMediationOptions>>().Value.EnableV2.Should().BeTrue();
     }
 
     [Fact]
@@ -78,6 +83,7 @@ public sealed class CoordinateMediationDiTests
         using var sp = Build(_ => { });
 
         sp.GetService<CoordinateMediationHandler>().Should().BeNull();
+        sp.GetService<CoordinateMediation20Handler>().Should().BeNull();
         sp.GetService<IMediationStore>().Should().BeNull();
         sp.GetService<IMediationPolicy>().Should().BeNull();
         sp.GetService<IMediatorIdentity>().Should().BeNull();
@@ -360,7 +366,7 @@ public sealed class CoordinateMediationDiTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Discover_features_discloses_coordinate_mediation_3_0_with_roles_mediator_only_for_a_mediator(bool mediatorRole)
+    public async Task Discover_features_discloses_coordinate_mediation_3_0_and_2_0_with_roles_mediator_only_for_a_mediator(bool mediatorRole)
     {
         var secrets = new InMemorySecretsResolver();
         await using var sp = Build(b =>
@@ -385,13 +391,17 @@ public sealed class CoordinateMediationDiTests
 
         if (mediatorRole)
         {
-            var disclosed = disclosures.Should().ContainSingle().Which;
-            disclosed.Id.Should().Be("https://didcomm.org/coordinate-mediation/3.0");
-            disclosed.Roles.Should().Equal("mediator");
-            var entry = entries.Should().ContainSingle().Which;
-            entry.GetProperty("feature-type").GetString().Should().Be("protocol");
-            entry.GetProperty("id").GetString().Should().Be("https://didcomm.org/coordinate-mediation/3.0");
-            entry.GetProperty("roles").EnumerateArray().Select(r => r.GetString()).Should().Equal("mediator");
+            // Both versions by default (#99). Disclosure order is not specified: compare as sets.
+            var expected = new[] { "https://didcomm.org/coordinate-mediation/3.0", "https://didcomm.org/coordinate-mediation/2.0" };
+            disclosures.Select(d => d.Id).Should().BeEquivalentTo(expected);
+            disclosures.Should().OnlyContain(d => d.Roles != null && d.Roles.SequenceEqual(new[] { "mediator" }));
+            entries.Should().HaveCount(2);
+            entries.Select(e => e.GetProperty("id").GetString()).Should().BeEquivalentTo(expected);
+            foreach (var entry in entries)
+            {
+                entry.GetProperty("feature-type").GetString().Should().Be("protocol");
+                entry.GetProperty("roles").EnumerateArray().Select(r => r.GetString()).Should().Equal("mediator");
+            }
         }
         else
         {
