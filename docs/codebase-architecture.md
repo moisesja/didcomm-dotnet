@@ -16,8 +16,8 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
 | `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options) and `DidCommReceiveOptions.ForMediatorEndpoint()`. |
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator` — which also registers the shared `ForwardMetrics` and a cycle-guarded `ForwardHandler` factory — `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
-| `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions`, `HttpResiliencePipelineFactory`, `UseHttpTransport()`. |
-| `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
+| `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions` (including `TrustedProxy`), `HttpResiliencePipelineFactory`, `UseHttpTransport()`; internal `TrustedProxyRoute` (the checked copy of the named proxy and the test that recognises its socket) and `TrustedProxySnapshot` (one reading per container). |
+| `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound` and `TrustedProxy`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
 | `DidComm.Mediator.Client` | The recipient side of the mediator service and the message helpers both roles share (Phase 7; split out of `DidComm.Mediator` by #113 before either was published, namespaces unchanged). A wallet references this package only. **The recipient-side client** (#96), namespace `DidComm.Mediator.Client` — public: `MediationClient`, `PickupClient`, `MediatorClientOptions`, `CoordinateMediationVersion`, `PickupBatch`, `PickupItem`, `RecipientQueryResult`, `MediationProtocolException`, `MediationNotSupportedException`, `AddMediatorClient()` (`MediatorClientBuilderExtensions`) and `DidCommServiceBuilder.ForMediation(grant)` (`MediationServiceBuilderExtensions`, a C# 14 static extension member); internal, namespace `DidComm.Mediator.Client.Internal`: `MediatorClientChannel` (the correlator: pending map, matcher, routes, live-stream registry) behind `IMediatorExchange`, with `PendingRequest`, `MediatorAnswerTypes`, `MediatorExchangeSpec`, `MediatorRoute`, `GuardedDeadline`, `OwnDeadline`, `MediatorBusyException`, `MediatorProblemCode`, `SingleLoggerFactory`; `FeatureNegotiation`, `NegotiatedVersionCache` and `CoordinateMediationWire` (Coordinate Mediation); `DeliveryReader`, `LiveRegistration`, `LiveDeliveryStream` and `PickupLog` (pickup); `DeliveredMessageUnpacker`, `DeliveredOutcome` and `DuplicateFilter`. **Shared by both roles** — namespace `DidComm.Mediator.Coordination`, public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `MediationGrant`, `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums; internal: `MediationBodies` (body codecs), `BareDid`, and the 2.0 client codec `CoordinateMediation20`. Namespace `DidComm.Mediator.Pickup`, public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`; internal: `PickupBodies` (body and attachment codecs, with `ReadAttachmentsEach` / `DeliveredAttachment` for the client). Namespace `DidComm.Mediator.Internal`, internal: `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). Its package depends on `DidComm.Core`, `DidComm.Extensions.DependencyInjection`, `Microsoft.Extensions.DependencyInjection.Abstractions` and `Microsoft.Extensions.Logging.Abstractions` only (`Microsoft.Extensions.Options`, which `AddMediatorClient()` uses, arrives through Core and the DI package) — never `DidComm.Mediator`, `Microsoft.Extensions.Hosting.Abstractions` or ASP.NET Core (pinned by `ClientPackageReferencesTests`). Calls Core internals (`IInboundCorrelator`, `InboundMessageSnapshot`, `DidCommClient.UnpackDeliveredAsync`, …) through `InternalsVisibleTo`, and grants its own to `DidComm.Mediator` and the two test projects, so it ships in lockstep with both. |
 | `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0**, namespace `DidComm.Mediator.Coordination` — public: `IMediationStore` / `InMemoryMediationStore`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). Internal, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule). The builders, parsers and wire records the roles speak, and the recipient-side client, come from `DidComm.Mediator.Client` (row above); the roles use its internals `MediatorLog`, `BareDid`, `PickupBodies.MaxIdLength` and the bounded parser overloads through `InternalsVisibleTo`. References `DidComm.Mediator.Client`, `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. A mediator references this package and gets the client with it. |
 | `DidComm.Mediator.AspNetCore` | The mediator's endpoints: `MediatorEndpointRouteBuilderExtensions` (`MapDidCommMediator`, `InvitationOobId`); internal `CompositeEndpointConventionBuilder` and `MediatorInvitationStore`. References `DidComm.Mediator` and `DidComm.AspNetCore`, and calls internals of both, so they ship in lockstep. |
@@ -73,6 +73,13 @@ that every grantee references its granter directly (pack pins direct references 
   `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`, `MediatorLivePushAdv4Tests`); the
   timing measurements run in the `QaSerialTiming` collection, alone and after the parallel tests;
   `Transports/HttpTransportAcceptedLogTests` pins the HTTP transport's guarded 2xx line),
+  `Transports/Proxy` (FR-TRN-13, both transports against `StandInProxy`, a loopback stand-in forward
+  proxy that records request lines: `HttpTransportProcessProxyTests` and
+  `WebSocketDirectByDefaultTests` set a process proxy through `ProcessProxyScope`, from
+  `HttpClient.DefaultProxy` or each proxy variable, in the non-parallel `DefaultProxyCollection`,
+  and fail on the code before the fix; `HttpTransportTrustedProxyTests` and
+  `WebSocketTrustedProxyTests` cover the named proxy; `TrustedProxyRouteDriftTests` keeps the two
+  copies of `TrustedProxyRoute` identical; `Adversarial/` holds the red team's probes),
   `Mediator/Client` (the recipient-side client against that mediator, through
   `MediatorClientHarness`: enrolment `MediatorClientEnrolmentTests`, pickup over HTTP and WebSocket
   `PickupClientHttpEndToEndTests` and `PickupClientWebSocketEndToEndTests`, re-wrapped deliveries
@@ -92,7 +99,8 @@ that every grantee references its granter directly (pack pins direct references 
   library-produced results)
   and `Samples` (one smoke test per sample; `MediatedAgentSmokeTests` also pins the wallet library's
   boundary, in its compiled references and in its restore graph; `MediatedAgentWalletProxyTests`
-  pins that the wallet's invitation fetch never reaches a configured proxy; `GuardedStreamReaderTests`
+  pins that the wallet's invitation fetch never reaches a configured proxy (and owns the
+  non-parallel `DefaultProxyCollection` the transport proxy tests share); `GuardedStreamReaderTests`
   pins, on a manual clock, that a timed-out or disposed read is cancelled and has ended before the
   timeout surfaces or the stream is disposed; `InboxRelaySinkTests` pins sample 04's relay bound and
   failure records). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
@@ -198,11 +206,57 @@ below).
 7. `ITransportRouter.SendAsync` picks the `IDidCommTransport` whose `Scheme` matches the endpoint
    (`HttpDidCommTransport` or `WebSocketDidCommTransport`), which delivers one packed envelope —
    over WebSocket on the endpoint's pooled socket or on a return-route session socket — and returns
-   a `TransportResult`.
+   a `TransportResult`. Both connect directly (FR-TRN-13): their `SocketsHttpHandler` has
+   `UseProxy = false`, so no proxy from the environment is used, and its `ConnectCallback` runs
+   `OutboundEndpointGuard.ConnectAsync` on every connection, pinning it to a vetted address. See
+   "Outbound connections and the trusted proxy" below.
 8. The facade surfaces it as `SendResult`; for a return-route send over HTTP it first turns the
    response body into `SendResult.Returned`, or a `TransportException` when the body was over the
    cap, late or unreadable. See "Return-route client side" below. `DidCommClient.SendPackedAsync`
    delivers bytes already packed: no steps 3–4 or 6, the guard always, no response read.
+
+## Outbound connections and the trusted proxy (FR-TRN-13)
+
+The outbound-endpoint guard can only judge the socket it opens. So both transports connect
+directly, and a proxy carries their connections only when the host names one.
+
+- **Direct (the default).** The HTTP transport's named-client handler (built in `UseHttpTransport`)
+  and the WebSocket transport's `_pinnedInvoker` handler are `SocketsHttpHandler`s with
+  `UseProxy = false`: `HttpClient.DefaultProxy` (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, the
+  system proxy) is never read. Their `ConnectCallback` runs `OutboundEndpointGuard.ConnectAsync`
+  on every connection (each 307 hop, each WebSocket connect, reconnect and session socket). A
+  `SocketException` from that connect is re-thrown with the same error code and one sentence saying
+  the transport connects directly and naming the `TrustedProxy` option. The WebSocket invoker is
+  always built, so `DefaultConnect` never connects without it.
+- **`TrustedProxy` (a `WebProxy`).** `TrustedProxyRoute.From` checks it (absolute address, scheme
+  `http`/`https`/`socks4`/`socks4a`/`socks5`, a host and a port, no user info, no path, query or
+  fragment; `InvalidOperationException` naming the option, never the address) and copies it. The
+  HTTP transport reads it once per container (`TrustedProxySnapshot`, shared by every handler
+  build and by the transport); the WebSocket transport once, in its constructor. The handler then
+  has `UseProxy = true` and `Proxy` = the copy. In the callback, an endpoint that matches the
+  proxy's host and port (`IsProxyEndpoint`: one trailing dot ignored, IP addresses compared as
+  addresses) is dialled without the private-address filter; any other endpoint (a bypassed
+  destination) gets the full guard, so a mismatch fails closed.
+- **The destination check through a proxy.** Past the proxy no connect-time check sees the
+  destination, so each transport checks it itself with `OutboundEndpointGuard.Validate`, before
+  handing the send to whatever connects it: the HTTP transport on every hop of its 307 loop
+  (`_destinationCheck`, before the resilience pipeline, so a refusal is neither retried nor counted
+  by the breaker), the WebSocket transport in `SendAsync` on every send (also under a custom
+  `Connect`). `Validate` classifies the host as sent (`Uri.IdnHost`, after IDNA mapping) and
+  matches `AllowedHosts` against either spelling. With `ResolveDnsNames` it also looks the name up
+  locally, best effort: the proxy looks it up again. Through a proxy the WebSocket handshake follows
+  no redirects (`AllowAutoRedirect = false`); direct, redirects are followed and each hop is pinned.
+- **What the host owns.** The proxy must refuse internal destinations (egress filtering). Where only
+  the proxy resolves names, `ResolveDnsNames = false` leaves names to it.
+- **Custom paths.** A replaced HTTP primary handler or a WebSocket `Connect` delegate decides how
+  and where it connects; without `TrustedProxy` nothing about them changed, and with it the
+  destination check above still runs first.
+- **Known limits.** One named proxy per transport: no PAC/WPAD, no proxy per destination, no
+  failover (a `BypassList` can send some destinations direct, guarded). The destination check's
+  name lookup is synchronous, like the facade's. An HTTP connect-time refusal on a direct
+  connection (including a bypassed destination) still reaches the resilience pipeline as
+  `HttpRequestException`, so it is retried and counted by the shared breaker, as before (a
+  follow-up candidate on #88).
 
 ## Mediator routing core (Phase 7, #90)
 
@@ -1823,6 +1877,10 @@ changes.
    pattern), so a repeated call registers one correlator.
 5. `TryAddSingleton` of `MediationClient` and `PickupClient`, through internal constructors over
    the channel.
+
+The clients build no connection of their own: they send through `DidCommClient` and the host's
+`UseHttpTransport` / `UseWebSocketTransport` registrations. A wallet that reaches its mediator only
+through a proxy names it there (`TrustedProxy`, FR-TRN-13).
 
 | Setting (`MediatorClientOptions`) | Default | Allowed |
 | --- | --- | --- |

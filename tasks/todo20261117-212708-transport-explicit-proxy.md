@@ -56,18 +56,21 @@ connection to the proxy, not to the destination. After this change:
    mismatch fails closed. Internal `TrustedProxyRoute`, duplicated in each package. Reason: a
    linked source file has no precedent and would clash under the shared test project's IVT; the
    repo already duplicates small helpers between the transports (`AsWaitBudget`).
-4. **HTTP socket-independent checks: a `DelegatingHandler` that wraps the primary handler only when
-   a proxy is set** (`ProxiedDestinationCheck`, calls `OutboundEndpointGuard.Validate` on each
-   request). It runs on every attempt and every 307 hop, is built in the same factory call as the
-   proxy and the policy (consistent across handler rotation), and goes away with a host's own
-   primary handler (custom path unchanged). A `TransportException` is neither retried nor counted by
-   the circuit breaker. Reason: a check inside `HttpDidCommTransport` would need the inherited core
-   policy, which only a new constructor could pass, and it would also run on custom handler paths.
-5. **WebSocket socket-independent checks: the existing pre-send `Validate`** (once per send, before
-   the reconnect pipeline; covers pooled sockets, session sockets and reconnects). With a proxy set
-   the handshake handler does not follow redirects (`AllowAutoRedirect = false`), so no unchecked
-   hop goes through the proxy. The direct path keeps today's redirect behaviour (each hop is pinned
-   by the callback).
+4. **HTTP socket-independent checks (as built after ADV-P1): in the transport's own 307 loop.**
+   `HttpDidCommTransport` holds `_destinationCheck` (an `OutboundEndpointGuard` on the resolved
+   policy) when a proxy is set and runs `Validate` on every hop before the resilience pipeline, so
+   a refusal is neither retried nor counted by the breaker. The DI registration is a factory that
+   passes the container's `TrustedProxySnapshot` and the inherited policy; the public constructor
+   uses the transport's own policy or the default. The primary handler is always the guarded
+   `SocketsHttpHandler`. First design (a `DelegatingHandler` wrapping the primary when proxied) was
+   dropped: a host's `UseSocketsHttpHandler` tweak replaced the wrapper with an unguarded handler
+   that used the process proxy (ADV-P1).
+5. **WebSocket socket-independent checks (as built): the pre-send `Validate`, on every send when a
+   proxy is set** (`_proxied`), also under a custom `Connect`. Covers pooled sockets, session
+   sockets and reconnects (same endpoint). With a proxy the handshake handler follows no redirects
+   (`AllowAutoRedirect = false`); direct, it keeps today's behaviour (each hop pinned). A separate
+   per-handshake check was built and removed: once the pre-send check runs on every proxied send it
+   adds nothing but a second lookup.
 6. **Name lookups:** the proxied pre-check honours `ResolveDnsNames` as the facade's check already
    does. Documented: best effort (the proxy does its own lookup); where only the proxy can resolve
    names, set `ResolveDnsNames = false` and only IP literals are checked locally.
@@ -81,19 +84,27 @@ connection to the proxy, not to the destination. After this change:
    `cws.ConnectAsync(endpoint, ct)` (no guard, default proxy) was reachable when `Connect` was set at
    construction and cleared later. The guarded invoker is now always built and the fallback removed.
    The custom `Connect` path never calls `DefaultConnect`, so it is unchanged.
-9. **Custom paths:** `TrustedProxy` is ignored (still validated) under a custom WebSocket `Connect`
-   and under a host-supplied HTTP primary handler. Documented.
+9. **Custom paths:** a host-supplied HTTP primary handler or WebSocket `Connect` delegate decides
+   how and where it connects. Without `TrustedProxy` nothing changed. With it, the destination
+   check still runs first (both transports, same semantics). `TrustedProxy` is still validated.
 10. **Recorded limit, not a stop:** one named proxy per transport. PAC/WPAD and system proxy
     discovery are excluded by the owner's "explicit only"; per-destination proxy choice and proxy
     failover are not served (a `BypassList` can send some destinations direct, guarded). Raised in
     the hand-back for the owner's information.
+11. **HTTP reads `TrustedProxy` once per container** (`TrustedProxySnapshot`), like the WebSocket
+    transport, instead of at every handler rotation (QA finding).
+12. **`OutboundEndpointGuard.Validate` classifies the wire host** (`Uri.IdnHost`); `AllowedHosts`
+    matches either spelling (ADV-P2). Reachability in published versions checked against the 1.5.1
+    package: no exposure beyond the advisory (direct paths are caught by the connect-time pin;
+    elsewhere names already pass when `ResolveDnsNames` is off). The advisory's wording was made
+    precise.
 
 ## Sweep: outbound HTTP clients, handlers and WebSockets in `src/`
 
 | Site | Verdict |
 |---|---|
 | `Transports.Http/HttpDidCommBuilderExtensions.cs` — the `"didcomm"` primary `SocketsHttpHandler` | **Fix** (1–4, 7) |
-| `Transports.Http/HttpDidCommTransport.cs` — `CreateClient("didcomm")` | Covered by the row above; validates `TrustedProxy` in its constructor. A host-built factory is the custom path. |
+| `Transports.Http/HttpDidCommTransport.cs` — `CreateClient("didcomm")` | **Fix**: the per-hop destination check through a proxy (4); validates `TrustedProxy` in its constructor. |
 | `Transports.WebSocket/WebSocketDidCommTransport.cs` — `_pinnedInvoker` `SocketsHttpHandler` | **Fix** (1–3, 5, 7, 8) |
 | `Transports.WebSocket/WebSocketDidCommTransport.cs` — `new ClientWebSocket()` (pooled and session sockets) | Fine: connects through the invoker, whose proxy settings apply. A `WebSocketFactory` socket with its own `Options.Proxy` is refused by .NET when an invoker is used (unchanged). |
 | `Transports.WebSocket/WebSocketDidCommTransport.cs` — `DefaultConnect` fallback without the invoker | **Fix** (8) |
@@ -112,18 +123,18 @@ No library package outside the two transports makes outbound connections, so the
 - [x] Private advisory drafted (draft only; never published, no CVE requested)
 - [x] Architect pass; design reconciled above
 - [x] Lesson L-066 (first-principles owner decisions)
-- [ ] Implement: `TrustedProxy` on both options types with XML docs
-- [ ] Implement: `TrustedProxyRoute` (HTTP and WebSocket copies)
-- [ ] Implement: HTTP handler factory (`UseProxy`, proxy route, callback, `ProxiedDestinationCheck`, hint)
-- [ ] Implement: HTTP transport constructor validates `TrustedProxy`
-- [ ] Implement: WebSocket invoker (always built, `UseProxy`, route, `AllowAutoRedirect`, hint), `DefaultConnect` fallback removed
-- [ ] Core XML docs: `OutboundEndpointPolicy.ResolveDnsNames`, `OutboundEndpointGuard` summary
-- [ ] QA: permutations below; each new test fails on `origin/main` or with the fix mutated out
-- [ ] Adversarial pass (~30 min), findings recorded below with severity and disposition
-- [ ] Cookbook section GG (both setters executed; offline-safe stand-in proxy)
-- [ ] Docs: CHANGELOG (behaviour change first), PRD (new FR-TRN-13, §14.2 GG, §14.3, §14.4), architecture doc, root README (the packages' readme)
-- [ ] Package validation: additive change passes; negative control fails
-- [ ] Gate: `dotnet build DidComm.sln -c Release /warnaserror`, `dotnet test … --no-build`, `dotnet pack … --no-build`
+- [x] Implement: `TrustedProxy` on both options types with XML docs
+- [x] Implement: `TrustedProxyRoute` (HTTP and WebSocket copies)
+- [x] Implement: HTTP handler factory (`UseProxy`, proxy route, callback, hint) and the per-hop check in the transport
+- [x] Implement: HTTP transport constructor validates `TrustedProxy`
+- [x] Implement: WebSocket invoker (always built, `UseProxy`, route, `AllowAutoRedirect`, hint), `DefaultConnect` fallback removed, pre-send check on every proxied send
+- [x] Core XML docs: `OutboundEndpointPolicy.ResolveDnsNames`, `OutboundEndpointGuard` summary
+- [x] QA: permutations below; each new test fails on `origin/main` or with the fix mutated out
+- [x] Adversarial pass (~30 min), findings recorded below with severity and disposition
+- [x] Cookbook section GG (both setters executed; offline-safe stand-in proxy); DX gate negative control (GG without the WebSocket setter) fails
+- [x] Docs: CHANGELOG (behaviour change first), PRD (new FR-TRN-13, §14.2 GG, §14.3, §14.4), architecture doc, root README (the packages' readme)
+- [x] Package validation: additive change passes; negative control (`MaxRedirectHops` made internal) fails with CP0002
+- [x] Gate: `dotnet build DidComm.sln -c Release /warnaserror` (0 warnings), `dotnet test … --no-build` (Core 2548, Mediator 4272 + 8 skipped, Interop 1701 + 3 skipped; 0 failed), `dotnet pack … --no-build` (9 packages)
 - [ ] PR opened, CI green
 
 ## QA permutations
@@ -147,9 +158,32 @@ guard, L-065).
   when proxied.
 - Custom paths unchanged: WebSocket `Connect` delegate, HTTP host primary handler.
 
-## Adversarial pass
+## QA (two agents, merged)
 
-(filled in after QA)
+- HTTP (`qa/proxy-http`, 53 cases) and WebSocket plus the drift guard (`qa/proxy-ws`): every new
+  test fails on `origin/main` (the default-mode and closed-fallback tests, run against main's
+  `src/`) or under at least one of ~30 scripted mutations; a slow-but-correct run (250 ms delays at
+  the racy points) passes (L-065). No product defects.
+- Findings acted on: HTTP re-read `TrustedProxy` at each handler rotation (now once per container,
+  with a rotation test that fails otherwise); the bracket strip in `Normalize` was dead code
+  (removed).
+- Accepted: the destination check's name lookup is synchronous, like the facade's (an async form
+  would change Core's public API); a proxy that hangs up without answering a CONNECT gets it again
+  from the runtime (up to 16 times per attempt), outside the transport's retry budget.
+
+## Adversarial pass (one pass, ~30 min; probes merged under `Transports/Proxy/Adversarial/`)
+
+| Id | Severity | Finding | Disposition |
+|---|---|---|---|
+| ADV-P1 | Medium | With a proxy set, a host's `UseSocketsHttpHandler` tweak replaced the wrapped primary with an unguarded handler that used the process proxy | **Fixed**: the check moved into the transport's 307 loop; the primary is always the guarded handler (design 4) |
+| ADV-P2 | Medium | Hosts that IDNA maps to an IP (`127。0。0。1`, full-width digits) passed the literal check and reached the proxy as literals | **Fixed** in Core: `Validate` classifies `IdnHost` (design 12) |
+| ADV-P3 | Low | An HTTP connect-time refusal (direct, or a bypassed destination) is retried and counted by the shared breaker | **Declined**: unchanged from main on the direct path; #88 follow-up candidates (a)/(b). Probe skipped with that reason; docs say it |
+| ADV-P4 | Low | Ambiguous numeric names (`127.0.0.08`) are names to .NET and reach the proxy as written | **Declined**: inside the documented limit (names are the proxy's to filter) |
+| ADV-P5 | Info | .NET's own exception text names the proxy's host and port (never credentials) | Accepted |
+| ADV-P6 | Info | `BypassList` entries are unanchored regexes | Accepted: bypassed destinations get the full guard; .NET semantics |
+| ADV-P7 | Info | A bypassed destination naming the proxy itself is dialled unfiltered | Accepted: reaches only the trusted proxy (pinned by a probe) |
+| ADV-P8 | Info | A proxy's 403 on CONNECT spends the WebSocket reconnect budget | Accepted: same as a peer's failure |
+| ADV-P9 | Info | Synchronous lookups in the destination check ignore cancellation | Accepted: same as the facade's check; now once per hop / per send |
 
 ## Review
 

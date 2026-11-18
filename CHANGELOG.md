@@ -6,6 +6,83 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — Transports: direct connections by default, and an explicit `TrustedProxy` setting (security hardening, tracked privately; epic #88)
+
+**Behaviour change for deployments behind a proxy.** The HTTP and WebSocket transports no longer use
+a proxy from the environment: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `HttpClient.DefaultProxy` and
+the operating system's proxy settings are ignored, and every connection is direct. If your host can
+reach other agents only through a proxy, sends now fail (connection refused, host not found, or a
+timeout) until you name the proxy on both transports:
+
+```csharp
+services.AddDidComm(b => b
+    .UseHttpTransport(o => o.TrustedProxy = new WebProxy("http://egress.internal:3128"))
+    .UseWebSocketTransport(o => o.TrustedProxy = new WebProxy("http://egress.internal:3128")));
+```
+
+**Your proxy must then refuse internal destinations.** Past the proxy, the library can no longer see
+where a connection ends up: the proxy opens it and looks the name up itself. A DID document's service
+endpoint is written by whoever controls that DID, so a proxy without egress filtering lets a peer
+reach your internal network through it.
+
+- **What the library still checks with a proxy set.** Each transport checks every destination itself
+  before handing the send on (each send, and each followed 307 over HTTP): the scheme, an IP-literal
+  destination, and, while `OutboundEndpointPolicy.ResolveDnsNames` is on, a local lookup of the name
+  (best effort: the proxy looks it up again). A refusal is a `TransportException`, thrown before the
+  proxy is contacted and never retried. Where only the proxy can resolve names, set
+  `ResolveDnsNames = false` on `DidCommOptions.OutboundEndpointPolicy`: then only IP literals are
+  checked locally, and names are your proxy's to filter. Through a proxy the WebSocket handshake
+  follows no redirects.
+- **The proxy itself** is your explicit choice: its own address is never refused, even on a private
+  or loopback network. Don't add it to `AllowedHosts`, which would also allow it as a destination.
+- **The setting** is a `System.Net.WebProxy`, with the same name and meaning on
+  `HttpTransportOptions` and `WebSocketTransportOptions`. Schemes `http`, `https`, `socks4`,
+  `socks4a`, `socks5`. Credentials go in `WebProxy.Credentials` (or `UseDefaultCredentials`); an
+  address carrying a user name or password is refused, as is one without a port or with a path,
+  query or fragment (`InvalidOperationException` when the transport is created, never quoting the
+  address). It is read and copied once (HTTP: once per container; WebSocket: in its constructor),
+  so later changes to the same `WebProxy` instance have no effect. A destination on its
+  `BypassList` is connected to directly, with the full connect-time check. One named proxy per
+  transport: PAC/WPAD, a proxy per destination and proxy failover are not supported.
+- **Custom connection paths.** A replaced `"didcomm"` primary handler (HTTP) or a
+  `WebSocketTransportOptions.Connect` delegate still decides how and where it connects, and without
+  `TrustedProxy` nothing about it changed. With `TrustedProxy` set, the destination check above
+  still runs before it. A host tweak of the HTTP handler (`UseSocketsHttpHandler`,
+  `ConfigurePrimaryHttpMessageHandler((handler, sp) => ...)`) adjusts the library's guarded handler,
+  as before.
+- **A clearer error.** When a direct connection fails because it is refused or the host is not
+  found, the message now says the transport connects directly, ignores the proxy variables and the
+  system proxy, and names the `TrustedProxy` option. The exception types and socket error codes
+  are unchanged. A timeout cannot carry the hint.
+- **The WebSocket transport's default connect always goes through its guarded handler**, also when
+  `Connect` was set when the transport was created and cleared later.
+- **`OutboundEndpointGuard.Validate` classifies the host as it is sent** (`Uri.IdnHost`, after IDNA
+  mapping), so a host written with look-alike characters that map to an IP address
+  (`127。0。0。1`) is classified as that address. This also applies to `DidCommClient`'s pre-send
+  check. **Behaviour note:** an `OutboundEndpointPolicy.AllowedHosts` entry now matches the host as
+  written (`Uri.DnsSafeHost`) or as sent (`Uri.IdnHost`); before, only the written form matched. An
+  ASCII host is spelled the same both ways, so only internationalised names see a difference.
+
+**API.** Additive only: `HttpTransportOptions.TrustedProxy` and `WebSocketTransportOptions.TrustedProxy`.
+Package validation passes against 1.5.0, and its negative control (a removed member) fails.
+
+**Tests.** `tests/DidComm.InteropTests/Transports/Proxy/`: a loopback stand-in forward proxy and a
+scope that sets the process proxy from `HttpClient.DefaultProxy` or each proxy variable (in the
+non-parallel `DefaultProxyCollection`). The default-mode tests fail on the code before this change;
+every other test fails under at least one mutation of the fix. They cover http, https (CONNECT), ws
+and wss, 307 hops, refusals that are neither retried nor counted by the circuit breaker, proxy
+spellings, bypass lists, SOCKS, credentials, validation, the copy, custom paths, reconnects and
+session sockets, and the adversarial pass's probes (look-alike literals, handler tweaks).
+
+**Docs.** PRD FR-TRN-13 (new), §14.2 task GG, §14.3 and §14.4; `docs/codebase-architecture.md`
+("Outbound connections and the trusted proxy"); the transport rows of the README. Cookbook section
+**GG** sends through a stand-in egress proxy and shows each outcome.
+
+**Recorded, not changed:** on a direct connection (including a destination a proxy's `BypassList`
+sends direct), the HTTP transport's connect-time refusal still reaches the resilience pipeline as
+`HttpRequestException`, so it is retried and counted by the shared circuit breaker, as before (the
+#88 follow-up candidates on the exception type and the shared breaker).
+
 ### Added — Samples: sample 11 `MediatedAgent`, sample 04 as a routing relay, cookbook CC–FF; exact versions between internals-coupled packages (#97, epic #88)
 
 **Consumer impact — upgrade every `DidComm.*` package together, patch releases included.**

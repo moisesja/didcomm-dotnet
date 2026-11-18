@@ -476,6 +476,7 @@ public sealed class DidComm {
 | FR-TRN-01 | MUST | Define `IDidCommTransport` (scheme, send, can-handle) and a router selecting transport by `serviceEndpoint.uri` scheme. | Router dispatches http(s)/ws(s). |
 | FR-TRN-02 | MUST | Transports carry the IANA media type of the content (e.g. via `Content-Type`). | Correct media type set per envelope. |
 | FR-TRN-03 | MUST | Transports are delivery-only — no message effects/results return on the same channel — **unless the return-route extension (§8a) is in effect for a peer authenticated by an authcrypt layer (FR-RR-03)**, in which case replies flow back exactly as FR-RR-04/05 state. A sender MUST NOT assume a synchronous business response otherwise. | No synchronous business response assumed without `return_route`; with `return_route: all` from an authcrypt sender (FR-RR-03) the §8a behavior applies; from a signed-only or `anoncrypt(sign)` sender it does not. |
+| FR-TRN-13 | MUST | **Outbound connections are direct and checked; a proxy only when the host names one.** A DID document's `serviceEndpoint` is written by whoever controls that DID, so the HTTP and WebSocket senders the library builds check each connection against `OutboundEndpointPolicy` when they open it (the first, each followed 307, every WebSocket connect and reconnect) and connect straight to the destination. They never use a proxy from the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `HttpClient.DefaultProxy`, the system proxy): through a proxy, the check would see the proxy's address, not the destination's. A host MAY name a proxy it trusts (`TrustedProxy`, a `WebProxy`, on `HttpTransportOptions` and `WebSocketTransportOptions`, same semantics on both). The connection to that proxy is not checked against the policy (the host's explicit choice, on any network). The transport then checks every destination itself before handing the send on (each send and each followed 307): the scheme, an IP-literal destination (read as sent on the wire, after IDNA mapping), and, with `ResolveDnsNames`, a best-effort local lookup; a refusal is never retried. Past the proxy the library cannot see where a connection ends up, so **the host's proxy owns egress filtering and MUST refuse internal destinations**; where only the proxy can resolve names, the host sets `ResolveDnsNames = false` and names are the proxy's to filter. A host-supplied connection path (a WebSocket `Connect` delegate, a replaced HTTP primary handler) decides how and where it connects; with `TrustedProxy` set, the destination check still runs before it. | With no `TrustedProxy`, a stand-in proxy set through `HttpClient.DefaultProxy` or any of the three variables receives no connection over http, https, ws or wss, and the guard refuses a private target itself; with one, traffic reaches the named proxy even on loopback under the default policy, and a private or metadata destination (literal, look-alike or after a 307) is refused before the proxy is asked, in one attempt. |
 
 ### 9.2 HTTPS (§HTTPS)
 
@@ -1168,6 +1169,15 @@ app.MapDidCommMediator("/didcomm").RequireRateLimiting("mediator");   // HTTP, W
 // Two hosts' clocks must agree within ReplayProtectionOptions.ClockSkew (1 minute by default).
 ```
 
+**GG. Send through a proxy you trust (FR-TRN-13)**
+```csharp
+// Direct by default: HTTP_PROXY / HTTPS_PROXY / ALL_PROXY and the system proxy are never used.
+builder.Services.AddDidComm(b => b
+    .UseHttpTransport(o => o.TrustedProxy = new WebProxy("http://egress.internal:3128"))
+    .UseWebSocketTransport(o => o.TrustedProxy = new WebProxy("http://egress.internal:3128")));
+// Past the proxy the library cannot see where a connection ends up: the proxy must refuse internal destinations.
+```
+
 ### 14.3 Sample applications (required deliverables)
 
 All live under `samples/`, build on .NET 10, and are referenced by the FR-DX-01 coverage test. The numbering is a suggested build order. "Covers" lists the §14.2 task letters and the FR groups each exercises.
@@ -1175,7 +1185,7 @@ All live under `samples/`, build on .NET 10, and are referenced by the FR-DX-01 
 | # | Project | What it demonstrates | Covers |
 |---|---|---|---|
 | 01 | `samples/01-Quickstart` | The ≤ 25-line README quickstart: two `did:peer` identities (net-did) + in-memory secrets, authcrypt round-trip, print metadata. | A, B, F, K · FR-DX-05, FR-API |
-| 02 | `samples/02-Cookbook` | One runnable, narrated section per §14.2 task (A–FF; CC–FF added in Phase 7). The backbone of API-coverage. | **A–FF (all)** · FR-DX-01/04 |
+| 02 | `samples/02-Cookbook` | One runnable, narrated section per §14.2 task (A–GG; CC–FF added in Phase 7, GG with the trusted-proxy setting). The backbone of API-coverage. | **A–GG (all)** · FR-DX-01/04, FR-TRN-13 |
 | 03 | `samples/03-EnvelopesAndMessages` | Every envelope composition (plaintext/signed/anoncrypt/authcrypt/sign-then-encrypt/protect-sender), each content-encryption alg, multi-recipient, attachments, threading + ACKs, DID rotation — printing each packed form and the unpacked metadata. | C–N · FR-ENV, FR-ENC, FR-SIG, FR-ROT, FR-THR |
 | 04 | `samples/04-MediatorAgent` | ASP.NET Core **routing relay only**: `AddRoutingMediator()` behind the registry-aware receive endpoint, and a host `IForwardSink` that waits for the transport acknowledgement and relays to a recipient inbox the host knows with `DidCommClient.SendPackedAsync` (the library's built-in push to a recipient endpoint is deferred to #110) — Alice→Mediator→Bob over HTTP using `did:peer` routingKeys; also Discover Features answered on the same request (`SendOptions.ReturnRoute` → `SendResult.Returned`), a registered recipient with no inbox (`NullForwardSink`), a forward for an unregistered DID dropped with 202, and the same relay composed without a DI container. Enrollment and pickup are in 11. | O, P, Q · FR-ROUTE-01..08, FR-ROUTE-11, FR-TRN-04..08, FR-RR-04 |
 | 05 | `samples/05-WebSocketChat` | Two agents over WebSocket: trust-ping liveness, discover-features handshake, bidirectional chat, reconnect after drop. | R, S · FR-TRN-09..11, FR-PROTO-04/05 |
@@ -1203,7 +1213,7 @@ This matrix is the traceability artifact behind FR-DX-01/09. Each public API gro
 | DI | `AddDidComm`, `DidCommBuilder.UseNetDidResolver/UseSecretsResolver/UseTransport/AddProtocol/Configure` | 02, 08 |
 | Resolution | `IDidKeyService`, `NetDidKeyService`, `UseNetDidResolver`, `UnsupportedDidMethodException` | 09 |
 | Secrets | `ISecretsResolver`, `Secret`, `NetDidKeyStoreSecretsResolver` | 08 |
-| Transports | `IDidCommTransport`, `UseHttpTransport`, `MapDidCommEndpoint`, `UseWebSocketTransport`, `MapDidCommWebSocket` | 04, 05, 08 |
+| Transports | `IDidCommTransport`, `UseHttpTransport`, `MapDidCommEndpoint`, `UseWebSocketTransport`, `MapDidCommWebSocket`, `HttpTransportOptions.TrustedProxy` / `WebSocketTransportOptions.TrustedProxy` | 02, 04, 05, 08 |
 | Routing | forward wrapping, `PackEncryptedParams.Forward`, mediator role | 04, 11 |
 | Protocols | `IProtocolHandler`, `ProtocolContext`, `TrustPing`, `DiscoverFeatures`, `ProblemReport`, `OutOfBand`, `Empty` | 05, 06, 07 |
 | Profiles/i18n | `accept` selection, `WithLang/WithAcceptLang` | 10 |
