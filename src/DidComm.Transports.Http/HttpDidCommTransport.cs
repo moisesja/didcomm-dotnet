@@ -48,6 +48,7 @@ public sealed class HttpDidCommTransport : IDidCommTransport
     /// <param name="httpClientFactory">Factory for the named <c>"didcomm"</c> HTTP client.</param>
     /// <param name="options">Bound <see cref="HttpTransportOptions"/>.</param>
     /// <param name="logger">Optional logger; pass <see cref="NullLogger{T}.Instance"/> outside DI.</param>
+    /// <exception cref="InvalidOperationException"><see cref="HttpTransportOptions.TrustedProxy"/> is set but invalid.</exception>
     public HttpDidCommTransport(
         IHttpClientFactory httpClientFactory,
         IOptions<HttpTransportOptions> options,
@@ -57,6 +58,8 @@ public sealed class HttpDidCommTransport : IDidCommTransport
         ArgumentNullException.ThrowIfNull(options);
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        // Fail at the first resolution, not at the first send: an invalid TrustedProxy throws here.
+        _ = TrustedProxyRoute.From(_options.TrustedProxy);
         _logger = logger ?? NullLogger<HttpDidCommTransport>.Instance;
         _pipeline = HttpResiliencePipelineFactory.Create(_options);
     }

@@ -21,6 +21,8 @@ public static class WebSocketDidCommBuilderExtensions
     /// <summary>
     /// Register the WebSocket transport as a DI singleton (so the connection pool persists
     /// across sends) alongside an idempotent <see cref="ITransportRouter"/> registration.
+    /// Connections are direct: no proxy from the environment is used. Only a proxy the host names in
+    /// <see cref="WebSocketTransportOptions.TrustedProxy"/> carries them.
     /// </summary>
     /// <remarks>
     /// <para>

@@ -69,10 +69,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly ILogger<WebSocketDidCommTransport> _logger;
     private readonly ResiliencePipeline _reconnectPipeline;
     private readonly OutboundEndpointGuard _guard;
-    // Non-null on the default connect path: pins every ClientWebSocket connection to a guard-vetted
-    // IP via SocketsHttpHandler.ConnectCallback (see constructor). Null when a custom Connect
-    // delegate owns its own vetting.
-    private readonly HttpMessageInvoker? _pinnedInvoker;
+    // The default connect path's handler: pins every ClientWebSocket connection to a guard-vetted IP
+    // via SocketsHttpHandler.ConnectCallback, or hands it to the named TrustedProxy (see constructor).
+    // Always built, so DefaultConnect never connects without it; a custom Connect delegate never uses it.
+    private readonly HttpMessageInvoker _pinnedInvoker;
     private readonly ConcurrentDictionary<string, System.Net.WebSockets.WebSocket> _pool = new(StringComparer.Ordinal);
     // One connect gate per pool key so establishing a connection to one endpoint doesn't block
     // connects to a different endpoint.
@@ -216,29 +216,52 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // time regardless of OutboundEndpointPolicy.ResolveDnsNames, so this also defeats a DNS rebind
         // between the pre-send Validate() and the handshake. TLS still uses the original host for SNI
         // and certificate validation; only the TCP target IP is constrained. A custom Connect delegate
-        // owns its own vetting, so the invoker is built only for the default path.
-        _pinnedInvoker = _options.Connect is null
-            ? new HttpMessageInvoker(new SocketsHttpHandler
+        // owns its own vetting and never uses this invoker; it is built anyway, so the default path can
+        // never connect without it, even when Connect is changed after construction.
+        // Read and copied once (WebSocketTransportOptions.TrustedProxy).
+        var route = TrustedProxyRoute.From(_options.TrustedProxy);
+        var sockets = new SocketsHttpHandler
+        {
+            // FR-TRN-13: never the process proxy (HttpClient.DefaultProxy: HTTP_PROXY, HTTPS_PROXY,
+            // ALL_PROXY, the system proxy). Through a proxy the callback below would vet the proxy's
+            // socket, not the destination's. Only a proxy the host names is used.
+            UseProxy = route is not null,
+            Proxy = route?.Proxy,
+            // Direct, a handshake redirect is followed and the callback pins each hop. Through a proxy
+            // the callback sees only the proxy, and the destination check covers the first request
+            // only, so no redirect is followed.
+            AllowAutoRedirect = route is null,
+            ConnectCallback = async (context, ct) =>
             {
-                ConnectCallback = async (context, ct) =>
+                if (route is not null && route.IsProxyEndpoint(context.DnsEndPoint))
                 {
-                    try
-                    {
-                        var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
-                        Stream stream = new NetworkStream(socket, ownsSocket: true);
-                        return stream;
-                    }
-                    catch (TransportException ex)
-                    {
-                        // The guard's refusal is deterministic — every retry re-resolves to the
-                        // same blocked addresses — but ClientWebSocket wraps anything thrown here
-                        // in a retriable WebSocketException. Mark the refusal at its throw site so
-                        // ConnectPinnedAsync can reclassify it as fatal (issue #72).
-                        throw new GuardRefusalException(ex);
-                    }
-                },
-            })
-            : null;
+                    // The named proxy is the host's choice: dialled unfiltered, on any network.
+                    var proxySocket = await TrustedProxyRoute.ConnectToProxyAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                    return new NetworkStream(proxySocket, ownsSocket: true);
+                }
+                try
+                {
+                    var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                    Stream stream = new NetworkStream(socket, ownsSocket: true);
+                    return stream;
+                }
+                catch (TransportException ex)
+                {
+                    // The guard's refusal is deterministic — every retry re-resolves to the
+                    // same blocked addresses — but ClientWebSocket wraps anything thrown here
+                    // in a retriable WebSocketException. Mark the refusal at its throw site so
+                    // ConnectPinnedAsync can reclassify it as fatal (issue #72).
+                    throw new GuardRefusalException(ex, ResolvedOnlyToBlockedAddresses);
+                }
+                catch (SocketException ex) when (route is null)
+                {
+                    throw TrustedProxyRoute.WithDirectHint(ex);
+                }
+            },
+        };
+        // Through a proxy, the checks that need no socket also run on every handshake (first
+        // connects, reconnects and session sockets), whatever path reached the default connect.
+        _pinnedInvoker = new HttpMessageInvoker(route is null ? sockets : new ProxiedHandshakeCheck(_guard) { InnerHandler = sockets });
     }
 
     /// <summary>
@@ -1073,11 +1096,8 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         if (socket is ClientWebSocket cws)
         {
             // Drive the handshake through the SSRF-pinning invoker so the underlying TCP connection
-            // can only reach a guard-vetted IP. _pinnedInvoker is non-null whenever this default path
-            // is in use (no custom Connect delegate overriding it).
-            return _pinnedInvoker is not null
-                ? ConnectPinnedAsync(cws, endpoint, ct)
-                : cws.ConnectAsync(endpoint, ct);
+            // can only reach a guard-vetted IP (or the named TrustedProxy). There is no path around it.
+            return ConnectPinnedAsync(cws, endpoint, ct);
         }
         throw new InvalidOperationException(
             "Default Connect supports ClientWebSocket only. Provide WebSocketTransportOptions.Connect for custom socket types (used by tests against TestServer).");
@@ -1099,16 +1119,14 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     {
         try
         {
-            await socket.ConnectAsync(endpoint, _pinnedInvoker!, ct).ConfigureAwait(false);
+            await socket.ConnectAsync(endpoint, _pinnedInvoker, ct).ConfigureAwait(false);
         }
         catch (WebSocketException ex)
         {
             for (var inner = ex.InnerException; inner is not null; inner = inner.InnerException)
             {
                 if (inner is GuardRefusalException refusal)
-                    throw new FatalSendException(
-                        refusal.Cause,
-                        "every address the endpoint resolves to is private or reserved (SSRF defense)");
+                    throw new FatalSendException(refusal.Cause, refusal.Reason);
             }
             throw;
         }
@@ -1383,7 +1401,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
             DisposeIdleGates(_connectLocks);
             DisposeIdleGates(_sendLocks);
-            _pinnedInvoker?.Dispose();
+            _pinnedInvoker.Dispose();
         }
         finally
         {
@@ -1713,10 +1731,62 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     {
         /// <summary>Wrap the guard's refusal.</summary>
         /// <param name="cause">The guard's classified refusal.</param>
-        public GuardRefusalException(TransportException cause) : base(cause.Message, cause)
-            => Cause = cause;
+        /// <param name="reason">One clause naming why no reconnect can help.</param>
+        public GuardRefusalException(TransportException cause, string reason) : base(cause.Message, cause)
+        {
+            Cause = cause;
+            Reason = reason;
+        }
 
         /// <summary>The guard's classified refusal, preserved for the caller.</summary>
         public TransportException Cause { get; }
+
+        /// <summary>One clause naming why no reconnect can help.</summary>
+        public string Reason { get; }
+    }
+
+    /// <summary>The connect-time refusal's reason clause.</summary>
+    private const string ResolvedOnlyToBlockedAddresses =
+        "every address the endpoint resolves to is private or reserved (SSRF defense)";
+
+    /// <summary>
+    /// With <see cref="WebSocketTransportOptions.TrustedProxy"/> set, the connect callback sees only
+    /// the proxy's socket, so the checks that need no socket run on every handshake request instead,
+    /// before it is handed to the proxy. The refusal is marked like the connect-time one, so it
+    /// fails the send at once instead of spending the reconnect budget.
+    /// </summary>
+    private sealed class ProxiedHandshakeCheck : DelegatingHandler
+    {
+        private readonly OutboundEndpointGuard _guard;
+
+        /// <summary>Check every handshake against <paramref name="guard"/>'s policy.</summary>
+        /// <param name="guard">The transport's guard.</param>
+        public ProxiedHandshakeCheck(OutboundEndpointGuard guard) => _guard = guard;
+
+        /// <inheritdoc />
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Check(request);
+            return base.SendAsync(request, cancellationToken);
+        }
+
+        /// <inheritdoc />
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Check(request);
+            return base.Send(request, cancellationToken);
+        }
+
+        private void Check(HttpRequestMessage request)
+        {
+            try
+            {
+                _guard.Validate(request.RequestUri!);
+            }
+            catch (TransportException ex)
+            {
+                throw new GuardRefusalException(ex, "the endpoint was refused before the proxy was asked (SSRF defense)");
+            }
+        }
     }
 }

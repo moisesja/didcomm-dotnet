@@ -49,6 +49,63 @@ public sealed class HttpTransportOptions
     /// loopback / link-local / metadata destinations), so configuring the policy in one place applies
     /// to the pre-send check and the transport connect-time pin alike (#27). Set a non-null value only
     /// to give this transport a policy distinct from the core one.
+    /// <para>
+    /// The connect-time pin applies to direct connections. With <see cref="TrustedProxy"/> set, the
+    /// connection goes to the proxy instead; see there for what is still checked.
+    /// </para>
     /// </remarks>
     public OutboundEndpointPolicy? OutboundEndpointPolicy { get; set; }
+
+    /// <summary>
+    /// A proxy you trust to carry this transport's connections. <c>null</c> (the default) means
+    /// every connection is <b>direct</b>: the transport never uses a proxy from the environment
+    /// (<c>HTTP_PROXY</c>, <c>HTTPS_PROXY</c>, <c>ALL_PROXY</c>, <see cref="HttpClient.DefaultProxy"/>
+    /// or the operating system's proxy settings). Set it when this host can reach other agents only
+    /// through a proxy.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What the host takes on.</b> Once a connection goes through a proxy, the library can no
+    /// longer see where it ends up: the proxy opens the connection to the destination and does its
+    /// own name lookup. Your proxy must therefore refuse private, loopback, link-local and
+    /// cloud-metadata destinations (egress filtering). A DID document's service endpoint is written
+    /// by whoever controls that DID, so without that filtering a peer could have your proxy reach
+    /// your internal network.
+    /// </para>
+    /// <para>
+    /// <b>What the library still checks</b> before each request and each followed 307 redirect: the
+    /// scheme (<see cref="AllowedSchemes"/>), an IP-literal destination (refused when the
+    /// <see cref="OutboundEndpointPolicy"/> blocks it), and, while
+    /// <see cref="Transports.OutboundEndpointPolicy.ResolveDnsNames"/> is on, a local lookup of the
+    /// destination's name. That lookup is best effort, because the proxy looks the name up again. A
+    /// refusal is a <see cref="Exceptions.TransportException"/>, thrown before the proxy is
+    /// contacted and never retried. Where only the proxy can resolve names, set
+    /// <c>ResolveDnsNames = false</c> (on <c>DidCommOptions.OutboundEndpointPolicy</c>, which
+    /// <c>DidCommClient</c> checks too); then only IP literals are checked here.
+    /// </para>
+    /// <para>
+    /// <b>The proxy itself</b> is your explicit choice, so its own address is never refused, even
+    /// on a private or loopback network; don't add it to
+    /// <see cref="Transports.OutboundEndpointPolicy.AllowedHosts"/> (that would also allow it as a
+    /// destination). Supported schemes: <c>http</c>, <c>https</c>, <c>socks4</c>, <c>socks4a</c>,
+    /// <c>socks5</c>. Put credentials in <see cref="System.Net.WebProxy.Credentials"/> (or set
+    /// <see cref="System.Net.WebProxy.UseDefaultCredentials"/>); an address carrying a user name or
+    /// password is refused. A destination on <see cref="System.Net.WebProxy.BypassList"/> (or a
+    /// local one with <see cref="System.Net.WebProxy.BypassProxyOnLocal"/>) is connected to directly,
+    /// with the full connect-time check.
+    /// </para>
+    /// <para>
+    /// The value is checked and copied when the transport is created and each time the
+    /// <c>"didcomm"</c> client's handler is built, so later changes to the same
+    /// <see cref="System.Net.WebProxy"/> instance do not reach a handler already built. An invalid
+    /// value throws <see cref="InvalidOperationException"/>. It has no effect when the host replaces
+    /// the <c>"didcomm"</c> client's primary handler: that handler decides how to connect.
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// builder.UseHttpTransport(o => o.TrustedProxy = new WebProxy("http://egress.internal:3128"));
+    /// </code>
+    /// </example>
+    public System.Net.WebProxy? TrustedProxy { get; set; }
 }
