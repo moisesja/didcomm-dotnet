@@ -69,10 +69,13 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly ILogger<WebSocketDidCommTransport> _logger;
     private readonly ResiliencePipeline _reconnectPipeline;
     private readonly OutboundEndpointGuard _guard;
-    // Non-null on the default connect path: pins every ClientWebSocket connection to a guard-vetted
-    // IP via SocketsHttpHandler.ConnectCallback (see constructor). Null when a custom Connect
-    // delegate owns its own vetting.
-    private readonly HttpMessageInvoker? _pinnedInvoker;
+    // The default connect path's handler: pins every ClientWebSocket connection to a guard-vetted IP
+    // via SocketsHttpHandler.ConnectCallback, or hands it to the named TrustedProxy (see constructor).
+    // Always built, so DefaultConnect never connects without it; a custom Connect delegate never uses it.
+    private readonly HttpMessageInvoker _pinnedInvoker;
+    // WebSocketTransportOptions.TrustedProxy is set (read once). The pre-send check then runs on every
+    // send, whatever connects it: past a proxy, no connect-time check sees the destination.
+    private readonly bool _proxied;
     private readonly ConcurrentDictionary<string, System.Net.WebSockets.WebSocket> _pool = new(StringComparer.Ordinal);
     // One connect gate per pool key so establishing a connection to one endpoint doesn't block
     // connects to a different endpoint.
@@ -216,29 +219,54 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // time regardless of OutboundEndpointPolicy.ResolveDnsNames, so this also defeats a DNS rebind
         // between the pre-send Validate() and the handshake. TLS still uses the original host for SNI
         // and certificate validation; only the TCP target IP is constrained. A custom Connect delegate
-        // owns its own vetting, so the invoker is built only for the default path.
-        _pinnedInvoker = _options.Connect is null
-            ? new HttpMessageInvoker(new SocketsHttpHandler
+        // owns its own vetting and never uses this invoker; it is built anyway, so the default path can
+        // never connect without it, even when Connect is changed after construction.
+        // Read and copied once (WebSocketTransportOptions.TrustedProxy).
+        var route = TrustedProxyRoute.From(_options.TrustedProxy);
+        _proxied = route is not null;
+        var sockets = new SocketsHttpHandler
+        {
+            // FR-TRN-13: never the process proxy (HttpClient.DefaultProxy: HTTP_PROXY, HTTPS_PROXY,
+            // ALL_PROXY, the system proxy). Through a proxy the callback below would vet the proxy's
+            // socket, not the destination's. Only a proxy the host names is used.
+            UseProxy = route is not null,
+            Proxy = route?.Proxy,
+            // Direct, a handshake redirect is followed and the callback pins each hop. Through a proxy
+            // the callback sees only the proxy, and the destination check covers the first request
+            // only, so no redirect is followed.
+            AllowAutoRedirect = route is null,
+            ConnectCallback = async (context, ct) =>
             {
-                ConnectCallback = async (context, ct) =>
+                if (route is not null && route.IsProxyConnection(context))
                 {
-                    try
-                    {
-                        var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
-                        Stream stream = new NetworkStream(socket, ownsSocket: true);
-                        return stream;
-                    }
-                    catch (TransportException ex)
-                    {
-                        // The guard's refusal is deterministic — every retry re-resolves to the
-                        // same blocked addresses — but ClientWebSocket wraps anything thrown here
-                        // in a retriable WebSocketException. Mark the refusal at its throw site so
-                        // ConnectPinnedAsync can reclassify it as fatal (issue #72).
-                        throw new GuardRefusalException(ex);
-                    }
-                },
-            })
-            : null;
+                    // The named proxy is the host's choice: dialled unfiltered, on any network, when the
+                    // handler uses it as a proxy. A destination the proxy bypasses gets the full guard,
+                    // even when it names the proxy's own host and port.
+                    var proxySocket = await TrustedProxyRoute.ConnectToProxyAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                    return new NetworkStream(proxySocket, ownsSocket: true);
+                }
+                try
+                {
+                    var socket = await _guard.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                    Stream stream = new NetworkStream(socket, ownsSocket: true);
+                    return stream;
+                }
+                catch (TransportException ex)
+                {
+                    // The guard's refusal is deterministic — every retry re-resolves to the
+                    // same blocked addresses — but ClientWebSocket wraps anything thrown here
+                    // in a retriable WebSocketException. Mark the refusal at its throw site so
+                    // ConnectPinnedAsync can reclassify it as fatal (issue #72).
+                    throw new GuardRefusalException(ex);
+                }
+                catch (SocketException ex) when (route is null)
+                {
+                    throw TrustedProxyRoute.WithDirectHint(ex);
+                }
+            },
+        };
+        // Through a proxy, the destination's checks run before every send instead (SendAsync, _proxied).
+        _pinnedInvoker = new HttpMessageInvoker(sockets);
     }
 
     /// <summary>
@@ -379,8 +407,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // clear error. The authoritative defense is the connect-time IP pinning in _pinnedInvoker
         // (see constructor), which additionally covers DNS rebinding and ResolveDnsNames = false. A
         // custom Connect delegate (e.g. tests against an in-process TestServer) owns its own vetting,
-        // so both layers are skipped there.
-        if (_options.Connect is null)
+        // so both layers are skipped there, unless a TrustedProxy is set (FR-TRN-13): then this check
+        // is the destination's only one and runs on every send.
+        if (_options.Connect is null || _proxied)
             _guard.Validate(request.Endpoint);
 
         var key = PoolKey(request.Endpoint);
@@ -1073,11 +1102,8 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         if (socket is ClientWebSocket cws)
         {
             // Drive the handshake through the SSRF-pinning invoker so the underlying TCP connection
-            // can only reach a guard-vetted IP. _pinnedInvoker is non-null whenever this default path
-            // is in use (no custom Connect delegate overriding it).
-            return _pinnedInvoker is not null
-                ? ConnectPinnedAsync(cws, endpoint, ct)
-                : cws.ConnectAsync(endpoint, ct);
+            // can only reach a guard-vetted IP (or the named TrustedProxy). There is no path around it.
+            return ConnectPinnedAsync(cws, endpoint, ct);
         }
         throw new InvalidOperationException(
             "Default Connect supports ClientWebSocket only. Provide WebSocketTransportOptions.Connect for custom socket types (used by tests against TestServer).");
@@ -1099,7 +1125,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     {
         try
         {
-            await socket.ConnectAsync(endpoint, _pinnedInvoker!, ct).ConfigureAwait(false);
+            await socket.ConnectAsync(endpoint, _pinnedInvoker, ct).ConfigureAwait(false);
         }
         catch (WebSocketException ex)
         {
@@ -1383,7 +1409,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
             DisposeIdleGates(_connectLocks);
             DisposeIdleGates(_sendLocks);
-            _pinnedInvoker?.Dispose();
+            _pinnedInvoker.Dispose();
         }
         finally
         {

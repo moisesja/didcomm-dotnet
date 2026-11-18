@@ -16,6 +16,10 @@ namespace DidComm.Transports;
 /// (used by the HTTP transport's <c>SocketsHttpHandler.ConnectCallback</c>), which additionally
 /// defeats 307-redirect-to-internal and DNS-rebinding.</item>
 /// </list>
+/// The connect-time check sees only the socket it opens, so the transports connect directly. When a
+/// host names a proxy it trusts (the transports' <c>TrustedProxy</c>), the socket is the proxy's and
+/// only <see cref="Validate"/> still applies to the destination; past the proxy, egress filtering is
+/// the proxy's job.
 /// </summary>
 public sealed class OutboundEndpointGuard
 {
@@ -37,7 +41,9 @@ public sealed class OutboundEndpointGuard
     /// address. No-op when <see cref="OutboundEndpointPolicy.BlockPrivateNetworks"/> is <c>false</c>
     /// or the host is allowlisted. IP-literal hosts are classified directly; DNS names are resolved
     /// when <see cref="OutboundEndpointPolicy.ResolveDnsNames"/> is enabled and rejected if
-    /// <em>any</em> resolved address is private/reserved.
+    /// <em>any</em> resolved address is private/reserved. The host is classified as it is sent on
+    /// the wire (<see cref="Uri.IdnHost"/>, after IDNA mapping), so a host written with look-alike
+    /// characters that maps to an IP literal (<c>127。0。0。1</c>) is classified as that literal.
     /// </summary>
     /// <param name="endpoint">The fully resolved outbound endpoint URI.</param>
     public void Validate(Uri endpoint)
@@ -46,9 +52,16 @@ public sealed class OutboundEndpointGuard
         if (!_policy.BlockPrivateNetworks)
             return;
 
-        var host = NormalizeHost(endpoint.DnsSafeHost);
-        if (string.IsNullOrEmpty(host) || _policy.AllowedHosts.Contains(host))
+        // The wire form: what the HTTP stack writes in the request line or the CONNECT authority, and
+        // what a proxy acts on. DnsSafeHost keeps the written Unicode form, which can hide a literal.
+        var host = NormalizeHost(endpoint.IdnHost);
+        if (string.IsNullOrEmpty(host) || _policy.AllowedHosts.Contains(host)
+            || _policy.AllowedHosts.Contains(NormalizeHost(endpoint.DnsSafeHost)))
+        {
+            // An entry matches either spelling of the same host (an ASCII host is spelled the same
+            // both ways; a Unicode entry keeps matching its written form).
             return;
+        }
 
         IPAddress[] candidates;
         if (IPAddress.TryParse(host, out var literal))

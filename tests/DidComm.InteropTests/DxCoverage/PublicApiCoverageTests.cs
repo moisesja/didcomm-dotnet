@@ -255,8 +255,10 @@ public sealed class PublicApiCoverageTests
                     "DidComm.AspNetCore.DidCommEndpointRouteBuilderExtensions::MapDidCommEndpoint",
                     "DidComm.Transports.WebSocket.WebSocketDidCommBuilderExtensions::UseWebSocketTransport",
                     "DidComm.AspNetCore.DidCommEndpointRouteBuilderExtensions::MapDidCommWebSocket",
+                    "DidComm.Transports.Http.HttpTransportOptions::set_TrustedProxy",
+                    "DidComm.Transports.WebSocket.WebSocketTransportOptions::set_TrustedProxy",
                 ],
-                [mediator, wsChat, extensibility]
+                [mediator, wsChat, extensibility, cookbook]
             },
             {
                 // §14.4 names samples 04 and 11; the Forward flag itself is demonstrated by the

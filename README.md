@@ -196,8 +196,8 @@ repo publishes.
 | `DidComm.Core` | Message model; JWE/JWS envelopes; pack/unpack/send facade; `IDidKeyService` / `IDidKeyBindingService` + `NetDidKeyService` resolver adapter; `ISecretsResolver` contract; `from_prior` rotation; Routing Protocol 2.0 (forward wrapping + mediator processing + service-endpoint resolution); the built-in protocols and the dispatcher/observer seam; transport abstractions (`IDidCommTransport`, `ITransportRouter`); typed exception hierarchy |
 | `DidComm.Extensions.DependencyInjection` | `IServiceCollection.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver<T>().UseHttpTransport().UseWebSocketTransport().AddBuiltInProtocols().Configure(...))`; FR-SEC-02 fail-fast on missing registrations |
 | `DidComm.Adapters.NetDid` | Optional bridge from `NetDid.Core.IKeyStore` → `ISecretsResolver` (FR-SEC-04, SHOULD); documented scope (sign-side surface only — see class XML doc) |
-| `DidComm.Transports.Http` | HTTPS sender (FR-TRN-04..08): `IHttpClientFactory`-backed POST, manual 307 follow + 301/308 refusal, Polly retry / circuit-breaker / timeout |
-| `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events |
+| `DidComm.Transports.Http` | HTTPS sender (FR-TRN-04..08): `IHttpClientFactory`-backed POST, manual 307 follow + 301/308 refusal, Polly retry / circuit-breaker / timeout; direct connections only, unless you name a proxy in `TrustedProxy` (FR-TRN-13) |
+| `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events; direct connections only, unless you name a proxy in `TrustedProxy` (FR-TRN-13) |
 | `DidComm.AspNetCore` | Minimal-API extensions: `MapDidCommEndpoint` (HTTP receive, FR-TRN-07), `MapDidCommWebSocket` (WS receive with frame reassembly, FR-TRN-09/10), `MapDidCommOobEndpoint` (short-form OOB retrieval); `MaxReceiveBytes` ⇒ 413 / 1009 (FR-API-06) |
 | `DidComm.Mediator.Client` | Recipient role (PRD §8b/§8c): `MediationClient` (FR-MED-09, Coordinate Mediation 3.0 with 2.0 negotiated or pinned), `PickupClient` (FR-PICK-11, Message Pickup 3.0 fetch / acknowledge / live), `AddMediatorClient()`, `DidCommServiceBuilder.ForMediation(grant)`; the message builders, parsers and records both roles share (`CoordinateMediation`, `MessagePickup`, `MediationGrant`, `RecipientUpdate`, `PickupStatus`, `DeliveredMessage`). Depends on `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and the Microsoft.Extensions DI and logging abstractions only: no `DidComm.Mediator`, no hosting, no ASP.NET Core |
 | `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10); the complete mediator — `AddMediator()`, `MediatorOptions`, the forward → live / queue pipeline, start-up checks of the routing DIDs (FR-MED-07, FR-PICK-09/10). References `DidComm.Mediator.Client` |
@@ -301,7 +301,7 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 | Sample | What it shows |
 |---|---|
 | [`samples/01-Quickstart`](samples/01-Quickstart/) | The quickstart above: two identities, authcrypt round-trip, unpack metadata |
-| [`samples/02-Cookbook`](samples/02-Cookbook/) | One narrated section per API task (all 32 PRD §14.2 letters, A–FF) — run `dotnet run --project samples/02-Cookbook` |
+| [`samples/02-Cookbook`](samples/02-Cookbook/) | One narrated section per API task (all 33 PRD §14.2 letters, A–GG) — run `dotnet run --project samples/02-Cookbook` |
 | [`samples/03-EnvelopesAndMessages`](samples/03-EnvelopesAndMessages/) | Every envelope composition and content-encryption alg, multi-recipient, attachments, threading + ACKs, DID rotation |
 | [`samples/04-MediatorAgent`](samples/04-MediatorAgent/) | Routing relay only: `AddRoutingMediator()` + a host `IForwardSink` relaying to Bob's own inbox; Alice→Mediator→Bob over HTTP with DID-published routingKeys |
 | [`samples/05-WebSocketChat`](samples/05-WebSocketChat/) | Two agents over WebSocket: trust-ping, discover-features, chat, reconnect after drop |
@@ -315,7 +315,7 @@ app.MapDidCommWebSocket("/ws/didcomm",  async (unpacked, ct) => { /* host dispat
 Every sample builds and runs in CI via an in-process smoke test, and the FR-DX-01 coverage gate
 (`tests/DidComm.InteropTests/DxCoverage/`) fails the build if a public member of the shipped
 packages is not demonstrated. The gate measures **execution, not mention**: it instruments the
-nine shipped assemblies and re-runs all eleven samples plus the 32 cookbook sections in-process,
+nine shipped assemblies and re-runs all eleven samples plus the 33 cookbook sections in-process,
 then intersects real execution hits with the public surface. Of the 1021 public members, **994 are
 proven to execute**; the other 27 have no executable code at all (enums, const holders, two static
 readonly fields) and are itemized in the test output. The execution gate has no allowlist entries.

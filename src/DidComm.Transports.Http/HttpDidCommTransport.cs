@@ -43,20 +43,52 @@ public sealed class HttpDidCommTransport : IDidCommTransport
     private readonly HttpTransportOptions _options;
     private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
     private readonly ILogger<HttpDidCommTransport> _logger;
+    // Non-null only with a TrustedProxy: the connect-time pin then sees the proxy's socket, so the
+    // checks that need no socket run here, on every hop, before the request is sent.
+    private readonly OutboundEndpointGuard? _destinationCheck;
 
     /// <summary>Initialize the transport with a factory and bound options.</summary>
     /// <param name="httpClientFactory">Factory for the named <c>"didcomm"</c> HTTP client.</param>
     /// <param name="options">Bound <see cref="HttpTransportOptions"/>.</param>
     /// <param name="logger">Optional logger; pass <see cref="NullLogger{T}.Instance"/> outside DI.</param>
+    /// <remarks>
+    /// With <see cref="HttpTransportOptions.TrustedProxy"/> set, the destination check uses
+    /// <see cref="HttpTransportOptions.OutboundEndpointPolicy"/>, or the default policy when it is
+    /// unset (built this way, the transport does not see <c>DidCommOptions</c>; the
+    /// <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/> registration inherits it).
+    /// </remarks>
+    /// <exception cref="InvalidOperationException"><see cref="HttpTransportOptions.TrustedProxy"/> is set but invalid.</exception>
     public HttpDidCommTransport(
         IHttpClientFactory httpClientFactory,
         IOptions<HttpTransportOptions> options,
         ILogger<HttpDidCommTransport>? logger = null)
+        : this(
+            httpClientFactory,
+            options,
+            logger,
+            TrustedProxyRoute.From(options?.Value.TrustedProxy),
+            options?.Value.OutboundEndpointPolicy ?? new OutboundEndpointPolicy())
+    {
+    }
+
+    /// <summary>The DI registration's constructor: the container's proxy snapshot and inherited policy.</summary>
+    /// <param name="httpClientFactory">Factory for the named <c>"didcomm"</c> HTTP client.</param>
+    /// <param name="options">Bound <see cref="HttpTransportOptions"/>.</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="route">The checked <see cref="HttpTransportOptions.TrustedProxy"/>, or <c>null</c> for direct connections.</param>
+    /// <param name="policy">The resolved outbound-endpoint policy.</param>
+    internal HttpDidCommTransport(
+        IHttpClientFactory httpClientFactory,
+        IOptions<HttpTransportOptions> options,
+        ILogger<HttpDidCommTransport>? logger,
+        TrustedProxyRoute? route,
+        OutboundEndpointPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(httpClientFactory);
         ArgumentNullException.ThrowIfNull(options);
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        _destinationCheck = route is null ? null : new OutboundEndpointGuard(policy);
         _logger = logger ?? NullLogger<HttpDidCommTransport>.Instance;
         _pipeline = HttpResiliencePipelineFactory.Create(_options);
     }
@@ -95,6 +127,10 @@ public sealed class HttpDidCommTransport : IDidCommTransport
 
         for (var hop = 0; hop <= _options.MaxRedirectHops; hop++)
         {
+            // FR-TRN-13: through a TrustedProxy, vet this hop's destination before anything is sent.
+            // Deterministic, so it is thrown before the pipeline: never retried, never counted.
+            _destinationCheck?.Validate(currentUri);
+
             // Build a fresh HttpRequestMessage on every Polly attempt — the BCL HttpClient
             // refuses to re-send the same instance, so the retry loop would otherwise fail
             // on the second attempt with "request has already been sent".

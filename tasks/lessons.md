@@ -1234,3 +1234,18 @@ Format per entry:
   a held step, a clock move at the wrong moment) before changing anything: retries and repeated
   runs are not a reproduction. In QA briefs, ask for one mutation per fixed test and one
   slow-but-correct run. See [[L-044]], [[L-060]] and [[L-045]].
+
+## L-066 — Put a decision to the owner from first principles, in everyday words, before the options.
+
+- **Lesson:** When an agent asks the owner to decide something, it first explains the mechanism in
+  plain language: what the thing is, how it breaks, who is affected and who isn't. Only then does it
+  give numbered options, each with its cost, and its recommendation. It never leads with jargon,
+  class names or finding ids; those go in parentheses after the plain sentence, if at all.
+- **Why:** On 2026-11-17 the owner corrected the coordinator on exactly this, when the transport
+  proxy question found in PR #123's review was put to them for a decision. A decision needs the
+  mechanism first, so the person deciding can judge the options without reverse-engineering the
+  problem from the vocabulary of the code.
+- **How to apply:** Before sending any "owner decision" item, check that its first paragraph would
+  make sense to someone who has not read the code: one sentence on what the feature does, one on how
+  it fails, one on who is hit. Then "1. … (cost: …)", "2. … (cost: …)", and "Recommendation: …".
+  Applies to hand-backs, #88 planning updates and PR comments alike. See [[L-063]].
