@@ -111,8 +111,8 @@ public sealed class WebSocketDirectByDefaultTests
 
             var thrown = await SendFailsAsync(transport, Request(destination));
 
-            listener.Accepted.Should().Be(0, "a loopback destination is refused before it is dialled");
-            sockets.Value.Should().Be(1, "the connect-time refusal is fatal");
+            listener.Accepted.Should().Be(0, "a loopback destination is refused before it is dialled. Chain: {0}", Describe(thrown));
+            sockets.Value.Should().Be(1, "the connect-time refusal is fatal. Chain: {0}", Describe(thrown));
             Chain(thrown).OfType<TransportException>().Should().Contain(
                 e => e.Message.Contains($"Refusing to connect to 'localhost:{listener.Port}'", StringComparison.Ordinal),
                 "Chain: {0}", Describe(thrown));
