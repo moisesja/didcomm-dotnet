@@ -103,7 +103,7 @@ public sealed class HttpTransportTrustedProxyTests
 
         thrown.Should().BeOfType<TransportException>("the refusal surfaces as the guard's own exception ({0})", Describe(thrown))
             .Which.Message.Should().Contain("private or reserved");
-        attempts.Count.Should().Be(1, "a refusal is not retried, though MaxRetryAttempts = 3");
+        attempts.Count.Should().Be(0, "the transport refuses before handing the request to its client, so nothing is sent or retried, though MaxRetryAttempts = 3");
         standIn.Accepted.Should().Be(0, "the proxy is never asked to reach {0} (it recorded: [{1}])", host, string.Join("; ", standIn.Requests));
     }
 
@@ -168,7 +168,7 @@ public sealed class HttpTransportTrustedProxyTests
         await standIn.WaitForRequestsAsync(1, HangGuard);
         standIn.Requests.Should().Equal($"POST http://{PublicHost}/r HTTP/1.1");
         standIn.Accepted.Should().Be(1);
-        attempts.Count.Should().Be(2, "the first hop and the refused redirect hop, neither retried");
+        attempts.Count.Should().Be(1, "only the first hop is sent; the redirect hop is refused in the transport, before its client sees it");
     }
 
     // ----- the shared circuit breaker -----------------------------------------------------------
@@ -495,7 +495,7 @@ public sealed class HttpTransportTrustedProxyTests
     // ----- a host's own primary handler ---------------------------------------------------------
 
     [Fact]
-    public async Task A_host_supplied_primary_handler_decides_how_to_connect()
+    public async Task A_host_supplied_primary_handler_decides_how_to_connect_and_the_destination_check_still_runs()
     {
         await using var standIn = new StandInProxy(Accept202);
         var seen = new List<Uri>();
@@ -505,11 +505,37 @@ public sealed class HttpTransportTrustedProxyTests
                 .ConfigurePrimaryHttpMessageHandler(() => new RecordingHandler(seen)));
         var transport = sp.GetRequiredService<IDidCommTransport>();
 
-        var result = await SendAsync(transport, "http://10.0.0.1/x");
+        var refused = await SendExpectingFailureAsync(transport, "http://10.0.0.1/x");
+        var result = await SendAsync(transport, $"http://{PublicHost}/x");
 
+        refused.Should().BeOfType<TransportException>("with a TrustedProxy the transport checks each destination itself ({0})", Describe(refused));
         result.Accepted.Should().BeTrue("the host's handler answered");
-        seen.Should().Equal(new Uri("http://10.0.0.1/x"));
-        standIn.Accepted.Should().Be(0, "TrustedProxy has no effect once the host replaces the primary handler");
+        seen.Should().Equal(new[] { new Uri($"http://{PublicHost}/x") }, "the refused destination never reached the host's handler");
+        standIn.Accepted.Should().Be(0, "the proxy is not applied once the host replaces the primary handler");
+    }
+
+    [Fact]
+    public async Task A_host_UseSocketsHttpHandler_tweak_keeps_the_guarded_handler_and_the_named_proxy()
+    {
+        // ADV-P1: a tweak of the primary handler must adjust ours, not swap in an unguarded one.
+        await using var standIn = new StandInProxy(Accept202);
+        var tweaked = 0;
+        await using var sp = Build(
+            o => o.TrustedProxy = new WebProxy(standIn.Address()),
+            services => services.AddHttpClient(HttpDidCommTransport.HttpClientName)
+                .UseSocketsHttpHandler((h, _) =>
+                {
+                    h.PooledConnectionLifetime = TimeSpan.FromMinutes(1);
+                    Interlocked.Increment(ref tweaked);
+                }));
+        var transport = sp.GetRequiredService<IDidCommTransport>();
+
+        var refused = await SendExpectingFailureAsync(transport, "http://10.0.0.1/x");
+        (await SendAsync(transport, $"http://{PublicHost}/inbox")).Accepted.Should().BeTrue();
+
+        refused.Should().BeOfType<TransportException>(Describe(refused));
+        Volatile.Read(ref tweaked).Should().BeGreaterThan(0, "the host's tweak ran on the handler");
+        standIn.Requests.Should().Equal($"POST http://{PublicHost}/inbox HTTP/1.1");
     }
 
     private sealed class RecordingHandler(List<Uri> seen) : HttpMessageHandler

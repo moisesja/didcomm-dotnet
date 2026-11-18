@@ -255,7 +255,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                     // same blocked addresses — but ClientWebSocket wraps anything thrown here
                     // in a retriable WebSocketException. Mark the refusal at its throw site so
                     // ConnectPinnedAsync can reclassify it as fatal (issue #72).
-                    throw new GuardRefusalException(ex, ResolvedOnlyToBlockedAddresses);
+                    throw new GuardRefusalException(ex);
                 }
                 catch (SocketException ex) when (route is null)
                 {
@@ -263,9 +263,8 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 }
             },
         };
-        // Through a proxy, the checks that need no socket also run on every handshake (first
-        // connects, reconnects and session sockets), whatever path reached the default connect.
-        _pinnedInvoker = new HttpMessageInvoker(route is null ? sockets : new ProxiedHandshakeCheck(_guard) { InnerHandler = sockets });
+        // Through a proxy, the destination's checks run before every send instead (SendAsync, _proxied).
+        _pinnedInvoker = new HttpMessageInvoker(sockets);
     }
 
     /// <summary>
@@ -1131,7 +1130,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             for (var inner = ex.InnerException; inner is not null; inner = inner.InnerException)
             {
                 if (inner is GuardRefusalException refusal)
-                    throw new FatalSendException(refusal.Cause, refusal.Reason);
+                    throw new FatalSendException(
+                        refusal.Cause,
+                        "every address the endpoint resolves to is private or reserved (SSRF defense)");
             }
             throw;
         }
@@ -1736,62 +1737,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     {
         /// <summary>Wrap the guard's refusal.</summary>
         /// <param name="cause">The guard's classified refusal.</param>
-        /// <param name="reason">One clause naming why no reconnect can help.</param>
-        public GuardRefusalException(TransportException cause, string reason) : base(cause.Message, cause)
-        {
-            Cause = cause;
-            Reason = reason;
-        }
+        public GuardRefusalException(TransportException cause) : base(cause.Message, cause)
+            => Cause = cause;
 
         /// <summary>The guard's classified refusal, preserved for the caller.</summary>
         public TransportException Cause { get; }
-
-        /// <summary>One clause naming why no reconnect can help.</summary>
-        public string Reason { get; }
-    }
-
-    /// <summary>The connect-time refusal's reason clause.</summary>
-    private const string ResolvedOnlyToBlockedAddresses =
-        "every address the endpoint resolves to is private or reserved (SSRF defense)";
-
-    /// <summary>
-    /// With <see cref="WebSocketTransportOptions.TrustedProxy"/> set, the connect callback sees only
-    /// the proxy's socket, so the checks that need no socket run on every handshake request instead,
-    /// before it is handed to the proxy. The refusal is marked like the connect-time one, so it
-    /// fails the send at once instead of spending the reconnect budget.
-    /// </summary>
-    private sealed class ProxiedHandshakeCheck : DelegatingHandler
-    {
-        private readonly OutboundEndpointGuard _guard;
-
-        /// <summary>Check every handshake against <paramref name="guard"/>'s policy.</summary>
-        /// <param name="guard">The transport's guard.</param>
-        public ProxiedHandshakeCheck(OutboundEndpointGuard guard) => _guard = guard;
-
-        /// <inheritdoc />
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            Check(request);
-            return base.SendAsync(request, cancellationToken);
-        }
-
-        /// <inheritdoc />
-        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            Check(request);
-            return base.Send(request, cancellationToken);
-        }
-
-        private void Check(HttpRequestMessage request)
-        {
-            try
-            {
-                _guard.Validate(request.RequestUri!);
-            }
-            catch (TransportException ex)
-            {
-                throw new GuardRefusalException(ex, "the endpoint was refused before the proxy was asked (SSRF defense)");
-            }
-        }
     }
 }

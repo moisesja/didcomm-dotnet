@@ -192,17 +192,19 @@ public sealed class WebSocketTrustedProxyTests
 
     [Theory]
     [MemberData(nameof(Forbidden))]
-    public async Task The_handshake_check_alone_refuses_a_forbidden_destination_before_the_proxy_is_asked(string destination)
+    public async Task With_a_proxy_a_custom_Connect_never_skips_the_destination_check(string destination)
     {
-        // Isolate the handshake check from the pre-send check: the pre-send check runs only when no
-        // custom Connect is set as the send starts. Here one is, so it is skipped; the delegate
-        // clears itself and fails its attempt with a transient error, so the reconnect runs the
-        // default connect, where only the handshake check stands between the request and the proxy.
+        // Without a proxy, a custom Connect set as a send starts skips the pre-send check (the
+        // delegate owns its vetting). A delegate that clears itself and fails would then hand the
+        // reconnect to the default connect, which goes to the proxy. With a proxy set, the check
+        // runs on every send, so nothing is connected at all.
         await using var proxy = Refusing();
         var sockets = new StrongBox<int>();
+        var called = 0;
         var options = Through(proxy.Address(), 3, sockets);
         options.Connect = (_, _, _) =>
         {
+            Interlocked.Increment(ref called);
             options.Connect = null;
             throw new WebSocketException("first attempt: hand the reconnect to the default connect");
         };
@@ -210,12 +212,10 @@ public sealed class WebSocketTrustedProxyTests
 
         var thrown = await SendFailsAsync(transport, Request(new Uri(destination)));
 
+        thrown.Should().BeOfType<TransportException>().Which.Message.Should().Contain("private or reserved");
+        Volatile.Read(ref called).Should().Be(0, "the destination is refused before anything connects it");
+        sockets.Value.Should().Be(0);
         proxy.Accepted.Should().Be(0, "the request was refused before it was handed to the proxy");
-        sockets.Value.Should().Be(2, "the refusal on the reconnect is fatal: the other two attempts are not spent");
-        thrown.Should().BeOfType<TransportException>().Which.Message.Should()
-            .Contain("failed on attempt 2: the endpoint was refused before the proxy was asked (SSRF defense)")
-            .And.Contain("permanently fatal");
-        thrown.InnerException.Should().BeOfType<TransportException>().Which.Message.Should().Contain("private or reserved");
     }
 
     [Fact]
@@ -412,25 +412,29 @@ public sealed class WebSocketTrustedProxyTests
     // ---- A custom Connect owns its connection ----
 
     [Fact]
-    public async Task A_custom_Connect_is_used_unchanged_when_TrustedProxy_is_set()
+    public async Task A_custom_Connect_decides_how_to_connect_and_the_destination_check_still_runs()
     {
         await using var proxy = Refusing();
         var socket = new ScriptedSessionWebSocket();
-        Uri? connectedTo = null;
+        var connectedTo = new List<Uri>();
         var options = Through(proxy.Address(), 0, new StrongBox<int>());
         options.WebSocketFactory = () => socket;
         options.Connect = (_, endpoint, _) =>
         {
-            connectedTo = endpoint;
+            lock (connectedTo)
+                connectedTo.Add(endpoint);
             return Task.CompletedTask;
         };
         await using var transport = Transport(options);
 
-        var result = await transport.SendAsync(Request(new Uri("ws://10.0.0.1/x")), default).WaitAsync(HangGuard);
+        var refused = await SendFailsAsync(transport, Request(new Uri("ws://10.0.0.1/x")));
+        var result = await transport.SendAsync(Request(new Uri("ws://203.0.113.10/x")), default).WaitAsync(HangGuard);
 
-        result.Accepted.Should().BeTrue("a custom Connect owns its vetting: no pre-send refusal");
-        connectedTo.Should().Be(new Uri("ws://10.0.0.1/x"));
+        refused.Should().BeOfType<TransportException>("with a TrustedProxy the destination is checked before every send")
+            .Which.Message.Should().Contain("private or reserved");
+        result.Accepted.Should().BeTrue("the custom Connect owns how it connects");
+        connectedTo.Should().Equal(new[] { new Uri("ws://203.0.113.10/x") }, "the refused destination never reached the delegate");
         socket.Sent.Should().ContainSingle().Which.Should().Equal(Payload);
-        proxy.Accepted.Should().Be(0, "TrustedProxy does not apply to a custom Connect");
+        proxy.Accepted.Should().Be(0, "the proxy does not apply to a custom Connect");
     }
 }
