@@ -116,9 +116,9 @@ Commits: Identus mediator `hyperledger/identus-mediator@5664f1d` (M), its codecs
 
 ## G. Gate and PR
 
-- [ ] G1 Build / test / pack green locally (pack negative control).
-- [ ] G2 PR: "Closes #99", "Part of #88"; summary; interop evidence (I-1..I-15 and handling); QA/adversarial results; the owner decisions and their answers.
-- [ ] G3 CI green (chained `gh pr checks --watch`; diagnose every failure, never rerun to green).
+- [x] G1 Build / test / pack green locally (pack negative control).
+- [x] G2 PR: "Closes #99", "Part of #88"; summary; interop evidence (I-1..I-15 and handling); QA/adversarial results; the owner decisions and their answers.
+- [x] G3 CI green (chained `gh pr checks --watch`; diagnose every failure, never rerun to green).
 
 ## Review
 
@@ -142,6 +142,10 @@ Commits: Identus mediator `hyperledger/identus-mediator@5664f1d` (M), its codecs
 | — | Info (Core, not #99) | `Message.Validate` quotes wire `type`/`id`/`thid`/`from`/`to` in `MalformedMessageException` text, uncapped. | Pre-existing (#94 follow-up 1); not changed here. |
 
 What held: 14 cross-version type spellings (incl. look-alike letters and NUL), DID variants (case, Unicode, zero-width, encodings), `from` ≠ authcrypt sender (refused by Core), duplicate JSON members (refused by Core), `from_prior` (never read), forged `disclose` / version downgrade (the `disclose` must be authcrypted by the mediator to us on our query's thread; 2.0 loses only the routing-DID list, not security), hostile `paginate` numbers (≤ 1.1 ms, never a wider page), poison beyond the update bound, a hostile host store (14 cases, never throws through dispatch), and replay scope (2 340 spellings that route to the 2.0 handler are all in FR-RR-08 scope).
+
+### Gate
+- Local, at `a32cd71`: build `/warnaserror` 0 warnings; tests Core 2548, Mediator 4579 (+8 skipped), Interop 1759 (+3 skipped), all green; pack green. Pack negative control: a binary break in `DidComm.Core` (`MediaTypes.Matches` gained a parameter) fails pack with CP0002 against the 1.5.0 baseline; reverted. `ShippedAssembliesListTests` unchanged (no new grant or package).
+- PR #125 opened at `a32cd71`; CI run 44364639796 green on ubuntu and windows.
 
 ### Interop (from the real implementations' source; to be confirmed live in #98)
 See the table I-1..I-15 above. The mediator role needs nothing beyond the spec shapes. The client-side divergences (I-10 version discovery, I-11 Blocktrust's identity switch, I-2 Blocktrust's missing `result`) are owner decisions O-1 and O-2.
