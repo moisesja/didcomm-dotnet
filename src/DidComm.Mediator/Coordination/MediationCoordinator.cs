@@ -22,8 +22,9 @@ internal enum MediateOutcome
 /// <summary>
 /// The mediator role of Coordinate Mediation without the wire format: who the peer is, what a
 /// mediate request, a recipient update and a recipient query do to the store, and what comes back.
-/// <see cref="CoordinateMediationHandler"/> (3.0) puts message names and bodies around it; a 2.0
-/// handler can do the same over the same store (FR-MED-10).
+/// <see cref="CoordinateMediationHandler"/> (3.0) and <see cref="CoordinateMediation20Handler"/>
+/// (2.0) put message names and bodies around it, each over the same store, policy and identity
+/// (FR-MED-10).
 /// </summary>
 /// <remarks>
 /// Nothing here throws for a store, policy or identity fault: the fault is logged by exception type
@@ -35,6 +36,12 @@ internal enum MediateOutcome
 /// cancelled is replaced, so no driver's error text rides out on a hang-up. Log lines carry the
 /// message id (shortened when over <see cref="MaxLoggedIdLength"/> characters) and type or enum
 /// names only.
+/// <para>
+/// Each handler builds its own instance: they share no state but the collaborators, and each logs
+/// under its own handler's category, so an operator can tell which version a peer speaks. The two
+/// rate-limited counters bound log volume only, so two instances at most double it (the first line
+/// and every 1000th, per version).
+/// </para>
 /// </remarks>
 internal sealed class MediationCoordinator
 {

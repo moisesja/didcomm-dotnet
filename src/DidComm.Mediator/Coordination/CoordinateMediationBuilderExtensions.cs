@@ -7,17 +7,29 @@ using Microsoft.Extensions.Options;
 
 namespace DidComm.Mediator.Coordination;
 
-/// <summary>Registers the Coordinate Mediation 3.0 mediator role on a <see cref="DidCommBuilder"/>.</summary>
+/// <summary>Registers the Coordinate Mediation mediator role (3.0, and 2.0 unless switched off) on a <see cref="DidCommBuilder"/>.</summary>
 public static class CoordinateMediationBuilderExtensions
 {
     /// <summary>
-    /// Make this agent a Coordinate Mediation 3.0 mediator (FR-MED-01): registers
-    /// <see cref="CoordinateMediationHandler"/>, and — unless the host registered its own first —
+    /// Make this agent a Coordinate Mediation mediator (FR-MED-01, FR-MED-10): registers
+    /// <see cref="CoordinateMediationHandler"/> (3.0) and, unless
+    /// <see cref="CoordinateMediationOptions.EnableV2"/> is <c>false</c>,
+    /// <see cref="CoordinateMediation20Handler"/> (2.0, for the wallets of the Identus and Blocktrust
+    /// ecosystems); and — unless the host registered its own first —
     /// <see cref="InMemoryMediationStore"/> as <see cref="IMediationStore"/>,
     /// <see cref="DefaultMediationPolicy"/> as <see cref="IMediationPolicy"/> and an
     /// <see cref="IMediatorIdentity"/> over <see cref="CoordinateMediationOptions.RoutingDids"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <strong>Both versions, one set of grants.</strong> The two handlers share the store, the
+    /// policy and the identity, so a peer that enrolled through either version is one tenant, and
+    /// Discover Features discloses both protocols with <c>roles: ["mediator"]</c>. A 2.0 grant
+    /// carries the first routing DID only, so list the primary one first
+    /// (<see cref="CoordinateMediationOptions.RoutingDids"/>). A host that brings its own 2.0 handler
+    /// sets <see cref="CoordinateMediationOptions.EnableV2"/> to <c>false</c>, or two handlers claim
+    /// the same protocol and the last registered wins.
+    /// </para>
     /// <para>
     /// <strong>Forwards.</strong> The store also becomes the forward recipient directory
     /// (<see cref="IForwardRecipientRegistry"/>), so <c>AddRoutingMediator()</c> relays a forward
@@ -41,7 +53,7 @@ public static class CoordinateMediationBuilderExtensions
     /// <param name="builder">The DIDComm builder.</param>
     /// <param name="configure">Optional settings.</param>
     /// <exception cref="ArgumentException">The settings fail <see cref="CoordinateMediationOptions.Validate"/>.</exception>
-    /// <exception cref="InvalidOperationException">Another <see cref="IForwardRecipientRegistry"/> is already registered and <see cref="CoordinateMediationOptions.UseAsForwardRecipientRegistry"/> is <c>true</c>.</exception>
+    /// <exception cref="InvalidOperationException">Another <see cref="IForwardRecipientRegistry"/> is already registered and <see cref="CoordinateMediationOptions.UseAsForwardRecipientRegistry"/> is <c>true</c>. (Thrown later, when the handlers are first built: a directory registered after this call replaced the store, or <see cref="CoordinateMediationOptions.EnableV2"/> in the settings in effect disagrees with what the calls registered.)</exception>
     public static DidCommBuilder AddCoordinateMediation(this DidCommBuilder builder, Action<CoordinateMediationOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -72,6 +84,7 @@ public static class CoordinateMediationBuilderExtensions
         services.TryAddSingleton(sp =>
         {
             VerifyForwardRecipientRegistry(services);
+            VerifyVersion2Registration(services, sp);
             return new CoordinateMediationHandler(
                 sp.GetRequiredService<IMediationStore>(),
                 sp.GetRequiredService<IMediationPolicy>(),
@@ -79,8 +92,56 @@ public static class CoordinateMediationBuilderExtensions
                 sp.GetRequiredService<IOptions<CoordinateMediationOptions>>(),
                 sp.GetService<ILogger<CoordinateMediationHandler>>());
         });
+        builder.AddProtocol<CoordinateMediationHandler>();
 
-        return builder.AddProtocol<CoordinateMediationHandler>();
+        // Coordinate Mediation 2.0 (FR-MED-10): the same collaborators, so one registry serves both
+        // versions. Decided from this call's settings, because it decides what is registered; the
+        // settings in effect are compared with it when the handlers are built.
+        if (probe.EnableV2)
+        {
+            services.TryAddSingleton(sp =>
+            {
+                VerifyForwardRecipientRegistry(services);
+                VerifyVersion2Registration(services, sp);
+                return new CoordinateMediation20Handler(
+                    sp.GetRequiredService<IMediationStore>(),
+                    sp.GetRequiredService<IMediationPolicy>(),
+                    sp.GetRequiredService<IMediatorIdentity>(),
+                    sp.GetRequiredService<IOptions<CoordinateMediationOptions>>(),
+                    sp.GetService<ILogger<CoordinateMediation20Handler>>());
+            });
+            builder.AddProtocol<CoordinateMediation20Handler>();
+        }
+
+        return builder;
+    }
+
+    // EnableV2 is read when AddCoordinateMediation() runs, so a value that arrives another way
+    // (Configure<CoordinateMediationOptions>, configuration binding, two calls that disagree) cannot
+    // change what was registered. Rather than serve, or silently not serve, a protocol the settings
+    // say otherwise about, building either handler fails. Looks at registrations and the options
+    // only; no handler is resolved.
+    private static void VerifyVersion2Registration(IServiceCollection services, IServiceProvider sp)
+    {
+        var registered = false;
+        foreach (var descriptor in services)
+            registered |= descriptor.ServiceType == typeof(CoordinateMediation20Handler) && !descriptor.IsKeyedService;
+
+        var enabled = sp.GetRequiredService<IOptions<CoordinateMediationOptions>>().Value.EnableV2;
+        if (registered && !enabled)
+        {
+            throw new InvalidOperationException(
+                "CoordinateMediationOptions.EnableV2 is false in the settings in effect, but an AddCoordinateMediation() or AddMediator() " +
+                "call registered the Coordinate Mediation 2.0 role: the setting is read when that call runs. To serve 3.0 only, set " +
+                "EnableV2 = false in the delegate of every AddCoordinateMediation() and AddMediator() call.");
+        }
+        if (!registered && enabled)
+        {
+            throw new InvalidOperationException(
+                "CoordinateMediationOptions.EnableV2 is true in the settings in effect, but no AddCoordinateMediation() or AddMediator() " +
+                "call registered the Coordinate Mediation 2.0 role: the setting is read when that call runs, and a call set it to false. " +
+                "Set EnableV2 the same way in the delegate of every AddCoordinateMediation() and AddMediator() call.");
+        }
     }
 
     // Looks at registrations only; nothing is resolved, so it cannot close a dependency cycle.

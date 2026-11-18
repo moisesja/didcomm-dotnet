@@ -8,12 +8,14 @@ using DidComm.Protocols;
 namespace DidComm.Mediator.Coordination;
 
 /// <summary>
-/// Coordinate Mediation 2.0 (<c>https://didcomm.org/coordinate-mediation/2.0</c>, FR-MED-10), the
-/// recipient's direction only: the message type URIs, builders for the three requests a recipient
-/// sends (<c>mediate-request</c>, <c>keylist-update</c>, <c>keylist-query</c>) and strict parsers for
-/// the four answers it reads (<c>mediate-grant</c>, <c>mediate-deny</c>, <c>keylist-update-response</c>,
-/// <c>keylist</c>). <see cref="Client.MediationClient"/> speaks 2.0 through it when a mediator
-/// discloses no 3.0.
+/// Coordinate Mediation 2.0 (<c>https://didcomm.org/coordinate-mediation/2.0</c>, FR-MED-10) in
+/// both directions: the message type URIs; builders for the three requests a recipient sends
+/// (<c>mediate-request</c>, <c>keylist-update</c>, <c>keylist-query</c>) and strict parsers for
+/// them; builders for the four answers a mediator sends (<c>mediate-grant</c>, <c>mediate-deny</c>,
+/// <c>keylist-update-response</c>, <c>keylist</c>) and strict parsers for them.
+/// <see cref="Client.MediationClient"/> speaks 2.0 through it when a mediator discloses no 3.0 or
+/// the host pins 2.0; <c>CoordinateMediation20Handler</c> (in the <c>DidComm.Mediator</c> package)
+/// answers 2.0 recipients through it.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -22,7 +24,9 @@ namespace DidComm.Mediator.Coordination;
 /// this class writes through <see cref="MediationBodies"/>' writers and reads through its readers.
 /// 2.0 differs in the message names (<c>keylist-*</c> for <c>recipient-*</c>), in the list a
 /// query returns (<c>keys</c> for <c>dids</c>) and in <c>routing_did</c>, a single string where
-/// 3.0 has an array. The grant parser accepts both shapes, as 3.0's does.
+/// 3.0 has an array. The grant parser accepts both shapes, as 3.0's does; the grant builder writes
+/// the 2.0 shape only, a string, because both 2.0 mediators in the field and their wallets read it
+/// as one.
 /// </para>
 /// <para>
 /// <strong>Parsers</strong> follow <see cref="CoordinateMediation"/>'s rules: <c>false</c> for
@@ -30,18 +34,19 @@ namespace DidComm.Mediator.Coordination;
 /// value, for a body of the wrong shape; DID members bounded (FR-API-09) before they are looked at;
 /// unknown members ignored; types matched ignoring case and <c>-</c>/<c>_</c>, any 2.x minor. Each
 /// list parser takes a bound that is applied from the list's length before any entry is read
-/// (L-055).
+/// (L-055). <c>mediate-request</c> and <c>mediate-deny</c> define no body members, so their parsers
+/// only answer the type question.
 /// </para>
 /// <para>
-/// <strong>For the 2.0 mediator role (#99).</strong> Reusable as they are: the type constants,
-/// <see cref="MediationBodies"/>' readers and writers, and the grant/deny parsers (to test what the
-/// handler answers). To add: <c>CreateGrant(from, to, string routingDid, thid)</c> (a string
-/// <c>routing_did</c>), <c>CreateDeny</c>, <c>CreateKeylistUpdateResponse</c>
-/// (<see cref="MediationBodies.WriteUpdated"/>), <c>CreateKeylist</c>
-/// (<see cref="MediationBodies.WriteRecipients"/> with <c>keys</c>), and the request parsers
-/// (<c>TryParseMediateRequest</c>, <c>TryParseKeylistUpdate</c> with the
-/// <see cref="MediationBodies.RequireUpdatesWithin"/> bound, <c>TryParseKeylistQuery</c>), plus a
-/// decision whether the class becomes public.
+/// <strong>Builders</strong> check their arguments as <see cref="CoordinateMediation"/>'s do (a DID
+/// longer than 2048 characters is an <see cref="ArgumentException"/>, never quoted) and always
+/// write the canonical type string: a 2.0 mediator in the field matches types by exact string.
+/// Answers take the <c>thid</c> to answer on (<see cref="CoordinateMediation.ResponseThreadId"/>,
+/// the same rule in both versions).
+/// </para>
+/// <para>
+/// The class is internal: <see cref="Client.MediationClient"/> and the 2.0 mediator role are its
+/// only users, so 2.0 adds no public message API of its own.
 /// </para>
 /// </remarks>
 internal static class CoordinateMediation20
@@ -73,9 +78,12 @@ internal static class CoordinateMediation20
     /// <summary>The name of the list a <c>keylist</c> carries.</summary>
     internal const string KeysList = "keys";
 
+    internal static readonly MessageTypeUri MediateRequestUri = MessageTypeUri.Parse(MediateRequestType);
     internal static readonly MessageTypeUri MediateGrantUri = MessageTypeUri.Parse(MediateGrantType);
     internal static readonly MessageTypeUri MediateDenyUri = MessageTypeUri.Parse(MediateDenyType);
+    internal static readonly MessageTypeUri KeylistUpdateUri = MessageTypeUri.Parse(KeylistUpdateType);
     internal static readonly MessageTypeUri KeylistUpdateResponseUri = MessageTypeUri.Parse(KeylistUpdateResponseType);
+    internal static readonly MessageTypeUri KeylistQueryUri = MessageTypeUri.Parse(KeylistQueryType);
     internal static readonly MessageTypeUri KeylistUri = MessageTypeUri.Parse(KeylistType);
 
     // ---- builders (the recipient's requests) ----------------------------------------------
@@ -101,8 +109,7 @@ internal static class CoordinateMediation20
         {
             ArgumentNullException.ThrowIfNull(update, nameof(updates));
             RequireDid(update.RecipientDid, nameof(updates));
-            if (!Enum.IsDefined(update.Action))
-                throw new ArgumentOutOfRangeException(nameof(updates), "The value is not one the protocol defines.");
+            RequireDefined(update.Action, nameof(updates));
         }
 
         return Start(KeylistUpdateType, from, mediator, idGenerator)
@@ -123,6 +130,118 @@ internal static class CoordinateMediation20
         return Start(KeylistQueryType, from, mediator, idGenerator)
             .WithBody(MediationBodies.WritePaginate(paginate))
             .Build();
+    }
+
+    // ---- builders (the mediator's answers) ------------------------------------------------
+
+    /// <summary>
+    /// Build a 2.0 <c>mediate-grant</c> carrying <c>routing_did</c> as a single string, the 2.0
+    /// shape.
+    /// </summary>
+    /// <param name="from">The mediator's DID.</param>
+    /// <param name="to">The recipient's DID.</param>
+    /// <param name="routingDid">The mediator DID forwards should be sent to.</param>
+    /// <param name="thid">The thread to answer on (<see cref="CoordinateMediation.ResponseThreadId"/>).</param>
+    /// <param name="idGenerator">Optional id generator; the default is a UUID v4.</param>
+    internal static Message CreateGrant(string from, string to, string routingDid, string thid, IMessageIdGenerator? idGenerator = null)
+    {
+        RequireDid(routingDid, nameof(routingDid));
+        return Start(MediateGrantType, from, to, idGenerator, thid)
+            .WithBody(MediationBodies.WriteRoutingDid(routingDid))
+            .Build();
+    }
+
+    /// <summary>Build a 2.0 <c>mediate-deny</c> (<c>body: {}</c>).</summary>
+    /// <param name="from">The mediator's DID.</param>
+    /// <param name="to">The recipient's DID.</param>
+    /// <param name="thid">The thread to answer on (<see cref="CoordinateMediation.ResponseThreadId"/>).</param>
+    /// <param name="idGenerator">Optional id generator; the default is a UUID v4.</param>
+    internal static Message CreateDeny(string from, string to, string thid, IMessageIdGenerator? idGenerator = null)
+        => Start(MediateDenyType, from, to, idGenerator, thid)
+            .WithBody(new JsonObject())
+            .Build();
+
+    /// <summary>Build a <c>keylist-update-response</c>.</summary>
+    /// <param name="from">The mediator's DID.</param>
+    /// <param name="to">The recipient's DID.</param>
+    /// <param name="updated">One result per update, in the order the request listed them.</param>
+    /// <param name="thid">The thread to answer on (<see cref="CoordinateMediation.ResponseThreadId"/>).</param>
+    /// <param name="idGenerator">Optional id generator; the default is a UUID v4.</param>
+    internal static Message CreateKeylistUpdateResponse(string from, string to, IReadOnlyList<RecipientUpdateResult> updated, string thid, IMessageIdGenerator? idGenerator = null)
+    {
+        ArgumentNullException.ThrowIfNull(updated);
+        foreach (var entry in updated)
+        {
+            ArgumentNullException.ThrowIfNull(entry, nameof(updated));
+            RequireDid(entry.RecipientDid, nameof(updated));
+            RequireDefined(entry.Action, nameof(updated));
+            RequireDefined(entry.Result, nameof(updated));
+        }
+
+        return Start(KeylistUpdateResponseType, from, to, idGenerator, thid)
+            .WithBody(MediationBodies.WriteUpdated(updated))
+            .Build();
+    }
+
+    /// <summary>Build a <c>keylist</c> message: one page of registered DIDs, listed as <c>keys</c>.</summary>
+    /// <param name="from">The mediator's DID.</param>
+    /// <param name="to">The recipient's DID.</param>
+    /// <param name="keys">The registered DIDs in this page.</param>
+    /// <param name="pagination">Where this page sits in the whole list, or <c>null</c> to omit <c>pagination</c>.</param>
+    /// <param name="thid">The thread to answer on (<see cref="CoordinateMediation.ResponseThreadId"/>).</param>
+    /// <param name="idGenerator">Optional id generator; the default is a UUID v4.</param>
+    internal static Message CreateKeylist(string from, string to, IReadOnlyList<string> keys, RecipientPagination? pagination, string thid, IMessageIdGenerator? idGenerator = null)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        foreach (var did in keys)
+            RequireDid(did, nameof(keys));
+
+        return Start(KeylistType, from, to, idGenerator, thid)
+            .WithBody(MediationBodies.WriteRecipients(KeysList, keys, pagination))
+            .Build();
+    }
+
+    // ---- parsers (the recipient's requests) -----------------------------------------------
+
+    /// <summary>
+    /// Whether <paramref name="message"/> is a 2.0 <c>mediate-request</c>. The message defines no
+    /// body members, so there is nothing to refuse: an absent <c>body</c> (as in the protocol page's
+    /// example) and a <c>body</c> with members this version does not know are both accepted.
+    /// </summary>
+    /// <param name="message">The message to inspect.</param>
+    internal static bool TryParseMediateRequest(Message message) => WireJson.IsType(message, MediateRequestUri);
+
+    /// <summary>
+    /// Read a <c>keylist-update</c>, with a bound on the number of entries as the mediator applies it
+    /// (FR-MED-08). A longer list is malformed, and it is refused from its length alone: before the
+    /// body is re-read and before any entry is decoded or allocated, so what sits beyond the bound is
+    /// never looked at (L-055).
+    /// </summary>
+    /// <param name="message">The message to inspect.</param>
+    /// <param name="maxUpdates">The longest <c>updates</c> list accepted.</param>
+    /// <param name="updates">The entries in wire order. Each <c>recipient_did</c> is a non-empty string of at most 2048 characters; whether it is a DID has not been checked.</param>
+    /// <exception cref="MalformedMessageException">It is a <c>keylist-update</c> whose <c>updates</c> is missing, not an array or over <paramref name="maxUpdates"/>, or an entry lacks a member, has an <c>action</c> other than <c>add</c>/<c>remove</c>, or a <c>recipient_did</c> that is not a string, is empty or is over the bound.</exception>
+    internal static bool TryParseKeylistUpdate(Message message, int maxUpdates, [NotNullWhen(true)] out IReadOnlyList<RecipientUpdate>? updates)
+    {
+        updates = null;
+        if (!WireJson.IsType(message, KeylistUpdateUri))
+            return false;
+        MediationBodies.RequireUpdatesWithin(message.Body, maxUpdates, "keylist-update");
+        updates = MediationBodies.ReadUpdates(MediationBodies.ToElement(message.Body), "keylist-update", maxUpdates);
+        return true;
+    }
+
+    /// <summary>Read a <c>keylist-query</c>. An absent <c>body</c> or an absent <c>paginate</c> gives a <c>null</c> <paramref name="paginate"/>.</summary>
+    /// <param name="message">The message to inspect.</param>
+    /// <param name="paginate">The requested page, or <c>null</c> when the query names none. Values beyond the 32-bit range are clamped.</param>
+    /// <exception cref="MalformedMessageException">It is a <c>keylist-query</c> whose <c>paginate</c> is not an object, lacks <c>limit</c> or <c>offset</c>, has a non-integer value, or a negative <c>offset</c>.</exception>
+    internal static bool TryParseKeylistQuery(Message message, out RecipientQueryPaging? paginate)
+    {
+        paginate = null;
+        if (!WireJson.IsType(message, KeylistQueryUri))
+            return false;
+        paginate = MediationBodies.ReadPaginate(MediationBodies.ToElement(message.Body), "keylist-query");
+        return true;
     }
 
     // ---- parsers (the mediator's answers) -------------------------------------------------
@@ -194,11 +313,24 @@ internal static class CoordinateMediation20
             .WithTo(to);
     }
 
+    // An answer: the same, plus the REQUIRED thread id (FR-MED-04).
+    private static MessageBuilder Start(string type, string from, string to, IMessageIdGenerator? idGenerator, string thid)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(thid);
+        return Start(type, from, to, idGenerator).WithThid(thid);
+    }
+
     private static void RequireDid(string? value, string parameter)
     {
         if (string.IsNullOrEmpty(value))
             throw new ArgumentException("A DID is required.", parameter);
         if (!MediationBodies.IsWithinDidLimit(value))
             throw new ArgumentException("A DID exceeds the maximum length of 2048 characters (FR-API-09).", parameter);
+    }
+
+    private static void RequireDefined<TEnum>(TEnum value, string parameter) where TEnum : struct, Enum
+    {
+        if (!Enum.IsDefined(value))
+            throw new ArgumentOutOfRangeException(parameter, "The value is not one the protocol defines.");
     }
 }
