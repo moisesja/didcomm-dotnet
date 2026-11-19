@@ -44,6 +44,35 @@ Security issues in any of the following areas are in scope:
 - **Replay & freshness** — `expires_time` not enforced, `id`-uniqueness not enforced, threading guards bypassable
 - **DoS via cryptographic input** — pathological JOSE structures that exhaust CPU or memory beyond `max_receive_bytes` (PRD `FR-API-06` / `FR-TRN-07`)
 
+## Mediator threat model
+
+A mediator built with `AddMediator()` and `MapDidCommMediator` (the `DidComm.Mediator*` packages)
+accepts messages from anyone on the internet and keeps them for recipients that enrolled with it.
+This is what the library protects, and what it leaves to the host:
+
+- **Who a peer is.** A peer is the sender of an authcrypt envelope, identified by the key that
+  encrypted it. Enrolment, registration and pickup requests are acted on only when they are
+  authcrypted and fresh: each needs a recent `created_time` and is refused if it is repeated within
+  the replay window. A plaintext `from` is never trusted.
+- **Ownership is first come, first served.** Nobody has to prove they own a DID before registering
+  it. Under the default open enrolment any new DID can get a grant and register any DID that no
+  other grant holds, and an `add` tells an enrolled peer whether another grant holds a DID. Hosts
+  that serve known wallets only should use an allow-list `IMediationPolicy`.
+- **What a stranger can reach without enrolling:** the forward endpoint (always `202`, whether or
+  not the recipient is registered), the WebSocket endpoint and the out-of-band invitation.
+- **What the library bounds:** message size (`MaxReceiveBytes`), queued messages and bytes per
+  recipient and per store, grants and registrations, sessions, forwards waiting for their `202` (a
+  `202` that is not taken within its deadline is withdrawn and the forward is not relayed), and an
+  HTTP delivery that is not read within the pickup lease.
+- **What the host must bound:** connections, request rates and slow clients, at the edge (a reverse
+  proxy, or Kestrel's limits) as for any internet-facing ASP.NET Core service; and durable storage.
+  The in-memory stores are for samples, tests and small hosts.
+- **Known limits** are documented, with their reasons, in `docs/codebase-architecture.md` (the
+  mediator service, pickup and return-route limits): among them at-least-once delivery, and what a
+  stranger with many self-made DIDs can occupy under open enrolment.
+
+Report a weakness in any of this privately, as described above.
+
 ## Out of scope
 
 - Vulnerabilities in upstream dependencies — please report these to the respective project (`NSec.Cryptography`, `Portable.BouncyCastle`, `NetDid`, etc.)

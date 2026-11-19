@@ -6,6 +6,46 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Live interop: a mediator leg against the Hyperledger Identus mediator 1.2.1, and an adversarial review of the mediator service (#98, epic #88)
+
+The nightly live-interop job (`.github/workflows/interop-live.yml`, through
+`tools/interop-live/run-all.sh`) has a third leg, `tools/interop-live/run-mediator-leg.sh`. It
+starts the Identus mediator 1.2.1 and its MongoDB in Docker, both pinned by image digest, and checks
+this library's mediator pieces against a mediator someone else wrote. No library code changed for
+the leg itself; the fixes it and the review led to have their own entries below.
+
+- **Our wallet through Identus, over HTTP.** A wallet that references only `DidComm.Mediator.Client`
+  and the transports asks Identus which Coordinate Mediation version it speaks, picks 2.0 with no
+  pin, enrols, registers two DIDs and lists them. didcomm-python then sends a forward through
+  Identus, and the wallet fetches it, checks it and sees the queue at 0. A burst of 12 is fetched
+  the same way.
+- **Our sender through Identus** to a didcomm-python recipient that enrolled with hand-written
+  Coordinate Mediation 2.0 messages.
+- **Proxies.** The same flow through a real forward proxy (squid) set as `TrustedProxy` on both
+  transports, with Identus reachable only through it; and with `HTTP_PROXY`, `HTTPS_PROXY` and
+  `ALL_PROXY` set, which the transports ignore.
+- **The other direction.** didcomm-python enrols with this library's mediator (new
+  `InteropCli mediator-serve`) using hand-written Coordinate Mediation 2.0, including the shapes the
+  Identus wallet SDK sends, and picks a message up with Message Pickup 3.0.
+- **Each cell can fail.** Every cell has a sabotaged twin that must fail for the expected reason;
+  the workflow's `negative_controls` input runs them. A test (`MediatorWalletBoundaryTests`) pins
+  the wallet's package boundary on every PR.
+- **Recorded, not gated:** what Identus does that the specs leave open. It reads only text WebSocket
+  frames (this library sends binary ones, so WebSocket against Identus is recorded, not gated); it
+  sends no `status` after `messages-received` and answers such requests with an empty `202` after
+  3 s; it does not lease fetched messages and ignores `limit`; it stamps no `created_time`; it
+  refuses an envelope it has already seen. The README lists them all, with the I-1..I-15 interop
+  table from #99 re-checked against the pinned image.
+- **Not in the gate:** Blocktrust (incompatible with this spec-strict client, see #99) and the
+  Affinidi mediator (it enrols through its own authentication protocol, not Coordinate Mediation).
+- **Adversarial review.** Six passes over the mediator service (authorization and identifiers,
+  information leaks, resource exhaustion, sessions and acknowledgement, crypto integrity and replay,
+  transports and the proxied path). The fixes are the entries below; the regression tests are under
+  `tests/*/Adv98/`. The documented limits are now stated precisely (`docs/codebase-architecture.md`),
+  and `SECURITY.md` has a mediator threat model.
+- **Third-party file:** `tools/interop-live/mediator/identus/initdb.js` is Identus's MongoDB set-up
+  script, vendored unchanged (Apache-2.0; `NOTICE`).
+
 ### Fixed — A mediator client that does not read its HTTP responses can no longer hold the forward queue or pile up copies of a delivery (#98, epic #88)
 
 Two ways a stranger could tie up a mediator by sending requests and never reading the answers,
