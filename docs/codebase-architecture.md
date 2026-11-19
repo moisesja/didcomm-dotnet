@@ -2044,9 +2044,9 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    (FR-RR-04), so a 202, an identity-refused body or a body that answers nothing leaves nothing to
    wait for. A `TransportException` (status 200: over the cap, stalled or unreadable, FR-RR-07)
    propagates as it is. The one exception is `ExchangeAllowingNoAnswerAsync`, used only by
-   `PickupClient.AckAsync` for `messages-received` (whose `status` is a SHOULD): there the waiting
-   request is abandoned through the same compare-and-swap (`TryAbandon`) and the call returns `null`.
-   An answer that won the race still holds.
+   `PickupClient.AckAsync` and `FetchAsync`'s own acknowledgement for `messages-received` (whose
+   `status` is a SHOULD): there the waiting request is abandoned through the same compare-and-swap
+   (`TryAbandon`) and the call returns `null`. An answer that won the race still holds.
 6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
    has already completed the request in step 5). It is awaited; then the continuation yields
    (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
@@ -2249,9 +2249,13 @@ asked about (as a DID subject). One present without a filter is refused too, as 
    remembered yet, so everything comes back.
 9. **Commit:** the new keys go into the duplicate filter, scoped to `from`.
 10. **Acknowledge** the new messages and the repeats in one `messages-received` (at most 100 ids) on
-    the client's own deadline (`OwnDeadline`, `RequestTimeout`), not the caller's token. A failure is
-    logged by exception type name, and the batch is still returned; those messages come back and
-    are repeats then.
+    the client's own deadline (`OwnDeadline`, `RequestTimeout`), not the caller's token, through
+    `ExchangeAllowingNoAnswerAsync`. The status that may answer it is not read, so over HTTP a
+    response with no answer (the Identus mediator's empty 202; Message Pickup 3.0 makes that status a
+    SHOULD) is a sent acknowledgement, not a failure, and nothing is asked afterwards. A failure (a
+    problem report, no response within `RequestTimeout`, on a WebSocket no status within it, a
+    transport error) is logged by exception type name (rate-limited Warning), and the batch is still
+    returned; those messages come back and are repeats then.
 11. Return `PickupBatch(Items, Drained: false, Status: null)`: the messages that unpacked
     (acknowledged) and the failures (left queued), in delivery order.
 
@@ -2302,10 +2306,11 @@ The budget rule: a `messages-received` and the `status-request` that may follow 
 a `GuardedDeadline` of what is left (over HTTP, the rest; on a WebSocket, the other half); with
 nothing left it is not sent. When it gets no answer (that deadline, or over HTTP an empty response)
 the call fails with a `TimeoutException` naming the request ids, never a DID; it never waits a second
-full `RequestTimeout`. Neither `FetchAsync`'s acknowledgement nor the live
-stream's takes this path: they still send through `ExchangeAsync` and treat a missing status as a
-failed acknowledgement (the fetch logs it and returns its batch; the live stream keeps the ids and
-sends them again after its back-off).
+full `RequestTimeout`. `FetchAsync`'s acknowledgement (step 10 above) shares only the HTTP half of
+this: it asks for no status, and on a WebSocket it still waits its `RequestTimeout` and logs a
+missing status as a failed acknowledgement. The live stream does not take this path: it sends
+through `ExchangeAsync`, treats a missing status as a failed acknowledgement, keeps the ids and sends
+them again after its back-off.
 
 `SetLiveDeliveryAsync` needs a WebSocket route, sends `live-delivery-change` and returns the
 `status`; a problem report is a `MediationProtocolException` with `ProblemCode`, for example

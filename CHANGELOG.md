@@ -26,7 +26,7 @@ released behaviour changes. No public API changes.
   `thread` or a malformed value; all four fail on the code before this fix. Two
   `MessagePickupFlowTests` pin the problem report, and that a flag already on survives a pause.
 
-### Fixed — `PickupClient.AckAsync` works with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
+### Fixed — `PickupClient.AckAsync` and `FetchAsync` work with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
 
 Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated
 `status`, not that it must. The Identus mediator v1.2.1 removes the messages and sends nothing back
@@ -51,10 +51,18 @@ changes: same signature, same `Task<PickupStatus>`.
   harmless).
 - **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
   confirms an acknowledgement, and give the time rule.
-- **Not changed.** `FetchAsync`'s own acknowledgement and the live stream's still expect the
-  status. Against a mediator that sends none they treat the acknowledgement as failed: the fetch logs
-  it and returns its batch as before, and the live stream keeps the ids and sends them again after
-  its back-off. That is left for a separate decision.
+- **`FetchAsync` no longer logs a false warning over HTTP.** A fetch acknowledges what it returns
+  by itself and never reads the status that may follow. Against Identus every fetch logged the
+  Warning "Acknowledgement … failed (TimeoutException); the mediator delivers them again", although
+  the acknowledgement had been applied. Over HTTP an empty answer now counts as sent: nothing is
+  logged and nothing more is asked. A problem report, no response within `RequestTimeout`, or a
+  transport error is still logged as before, and the batch is returned either way. The `FetchAsync`
+  remarks say so.
+- **Not changed.** On a WebSocket a fetch's acknowledgement still waits up to `RequestTimeout` for
+  the status, and logs the acknowledgement as failed when none comes: there, silence looks the same
+  as a slow answer. The live stream's acknowledgement still expects the status too: against a
+  mediator that sends none it keeps the ids and sends them again after its back-off. That is left for
+  a separate decision.
 - **Tests.** `PickupClientAckWithoutStatusTests` in the interop tests runs the client against this
   library's mediator with its answer to `messages-received` dropped (the Identus shape: a real HTTP
   202 with an empty body), with one or both of two chunks unanswered, with the `status-request`
@@ -62,7 +70,10 @@ changes: same signature, same `Task<PickupStatus>`.
   the code before this fix with "got no answer in the HTTP response"; the two that pass there are the
   unchanged mediator and the problem report, whose behaviour stays the same. The unit tests of the
   same name pin the time rule on the test clock: half of `RequestTimeout` on a WebSocket, the rest of
-  it over HTTP, the call ending at exactly one `RequestTimeout`.
+  it over HTTP, the call ending at exactly one `RequestTimeout`. `PickupClientFetchAckWithoutStatusTests`
+  does the same for a fetch: an empty 202 logs no failure and the next status shows the
+  acknowledgement applied (this one fails on the code before this fix); a problem report, no answer
+  within `RequestTimeout`, and a WebSocket with no status are still logged.
 
 ### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll; the client's version question works with the Identus mediator (FR-MED-10, #99, epic #88)
 
