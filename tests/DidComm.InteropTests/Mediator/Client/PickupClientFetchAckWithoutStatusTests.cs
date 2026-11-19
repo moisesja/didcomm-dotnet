@@ -34,14 +34,14 @@ public sealed class PickupClientFetchAckWithoutStatusTests
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, (request, reply) => Is(request, MessagePickup.MessagesReceivedType) ? null : reply);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, recipient, alice, note) = await QueueNoteAsync(mediator, harness);
-        var before = observer.KindsFrom(bob.Did).Count;
+        var (bob, recipient, alice, note, before) = await QueueNoteAsync(mediator, harness, observer);
 
         var batch = await PickupE2E.Within(harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 10));
 
         PickupE2E.ShouldBeAlicesNote(batch.Items.Should().ContainSingle().Subject, alice, recipient, note);
         AckFailures(harness).Should().BeEmpty("an empty 202 is the mediator sending no status, which Message Pickup 3.0 allows");
-        Sent(observer, bob, before).Should().Equal(new[] { DeliveryRequest, MessagesReceived }, "a fetch does not ask for the status it does not read");
+        // No status-request: a fetch does not ask for the status it does not read.
+        await ShouldHaveSentAsync(mediator, observer, bob, before, DeliveryRequest, MessagesReceived);
         mediator.Store.MessageCount.Should().Be(0, "the mediator applied the acknowledgement");
         (await PickupE2E.Within(harness.Pickup.GetStatusAsync(mediator.Did, bob.Did))).MessageCount.Should().Be(0, "the next status shows the acknowledgement applied");
     }
@@ -54,8 +54,7 @@ public sealed class PickupClientFetchAckWithoutStatusTests
             ? ProblemReports.Create(request.To![0], request.From!, "e.p.req.refused-for-test", request.Id)
             : reply);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, recipient, alice, note) = await QueueNoteAsync(mediator, harness);
-        var before = observer.KindsFrom(bob.Did).Count;
+        var (bob, recipient, alice, note, before) = await QueueNoteAsync(mediator, harness, observer);
 
         var batch = await PickupE2E.Within(harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 10));
 
@@ -63,7 +62,7 @@ public sealed class PickupClientFetchAckWithoutStatusTests
         var failure = AckFailures(harness).Should().ContainSingle().Subject;
         failure.Level.Should().Be(LogLevel.Warning);
         failure.Text.Should().Contain(nameof(MediationProtocolException));
-        Sent(observer, bob, before).Should().Equal(DeliveryRequest, MessagesReceived);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, DeliveryRequest, MessagesReceived);
     }
 
     [Fact]
@@ -82,7 +81,7 @@ public sealed class PickupClientFetchAckWithoutStatusTests
                 o.Time = time;
                 o.Client = c => c.RequestTimeout = RequestTimeout;
             });
-            var (bob, recipient, alice, note) = await QueueNoteAsync(mediator, harness);
+            var (bob, recipient, alice, note, _) = await QueueNoteAsync(mediator, harness, observer);
 
             var fetch = harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 10);
             // The mediator holds the acknowledgement's answer, so its deadline is already running
@@ -115,8 +114,7 @@ public sealed class PickupClientFetchAckWithoutStatusTests
             o.Time = time;
             o.Client = c => c.RequestTimeout = RequestTimeout;
         });
-        var (bob, recipient, alice, note) = await QueueNoteAsync(mediator, harness);
-        var before = observer.KindsFrom(bob.Did).Count;
+        var (bob, recipient, alice, note, before) = await QueueNoteAsync(mediator, harness, observer);
 
         var fetch = harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 10, serviceEndpointOverride: harness.WebSocketEndpoint);
         // The mediator handled the acknowledgement, so its deadline is already running on the
@@ -140,14 +138,17 @@ public sealed class PickupClientFetchAckWithoutStatusTests
             o.PostConfigureServices = services => services.AddSingleton<IProtocolHandler>(
                 sp => new ReshapedPickupHandler(sp.GetRequiredService<MessagePickupHandler>(), answer)));
 
-    // Bob enrols and Alice's note is queued for his recipient DID.
-    private static async Task<(TestPeer Bob, TestPeer Recipient, MediatorSender Alice, Message Note)> QueueNoteAsync(MediatorTestServer mediator, MediatorClientHarness harness)
+    // Bob enrols and Alice's note is queued for his recipient DID. `Before` is the baseline of the
+    // pickup messages the mediator received from Bob, read once its observer queue is drained: none.
+    private static async Task<(TestPeer Bob, TestPeer Recipient, MediatorSender Alice, Message Note, int Before)> QueueNoteAsync(MediatorTestServer mediator, MediatorClientHarness harness, PickupRequestObserver observer)
     {
         var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
         var alice = await harness.NewAliceAsync();
         var note = await PickupE2E.SendAsync(mediator, alice, recipient);
         mediator.Store.MessageCount.Should().Be(1);
-        return (bob, recipient, alice, note);
+        var before = await observer.KindsFromAsync(mediator, bob.Did, 0);
+        before.Should().BeEmpty("enrolment is not Message Pickup");
+        return (bob, recipient, alice, note, before.Count);
     }
 
     // The client's "acknowledgement failed" lines (PickupLog.AckFailed), at any level.
@@ -157,9 +158,11 @@ public sealed class PickupClientFetchAckWithoutStatusTests
             .Select(r => (r.Level, r.Text))
             .ToArray();
 
-    // What the mediator received from Bob after the first `before` requests.
-    private static IReadOnlyList<string> Sent(PickupRequestObserver observer, TestPeer bob, int before)
-        => observer.KindsFrom(bob.Did).Skip(before).ToArray();
+    // What the mediator received from Bob after the first `before` requests is exactly `expected`.
+    // The observer records asynchronously (a finished call's last request can still be on its
+    // way), so the records asserted on are waited for and the observer queue drained first.
+    private static async Task ShouldHaveSentAsync(MediatorTestServer mediator, PickupRequestObserver observer, TestPeer bob, int before, params string[] expected)
+        => (await observer.KindsFromAsync(mediator, bob.Did, before + expected.Length)).Skip(before).Should().Equal(expected);
 
     private static bool Is(Message message, string type) => string.Equals(message.Type, type, StringComparison.Ordinal);
 }
