@@ -41,7 +41,8 @@
 #   INTEROP_CLI          prebuilt InteropCli binary (default: build Release from source)
 #   MEDIATOR_LEG_OWNER   adds the label org.didcomm-dotnet.owner=<value> to every Docker object
 # Development only (each refused when CI=true):
-#   MEDIATOR_LEG_WORK    scratch dir (default: mktemp -d; kept for debugging; a venv in it is reused)
+#   MEDIATOR_LEG_WORK    scratch dir (default: mktemp -d; kept for debugging; a venv in it is reused,
+#                        and each run writes only into a new WORK/runs/<run id>)
 #   MEDIATOR_LEG_IMAGES_ENV  images file to use instead of mediator/images.env
 #   MEDIATOR_LEG_ONLY    comma-separated cell ids to run (e.g. M-3,R-1)
 #   MEDIATOR_LEG_DEBUG_FIRST_PORT            first host port tried for Identus (port-clash test)
@@ -90,15 +91,22 @@ fi
 # output is redirected to its log, and its messages belong on the leg's stderr.
 exec 8>&1 9>&2
 
+# WORK holds what a later run may reuse (the venv) and one directory per run, RUN: every file a
+# run writes or waits for (identities, keys, the mediator's FIFO and ready file, cell records,
+# logs, the summary) lives in RUN, which must not exist yet, so nothing an earlier run left in
+# the same WORK can be taken for this run's own.
+RUN_ID="${GITHUB_RUN_ID:-local}-$$-$RANDOM"
 WORK="${MEDIATOR_LEG_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/didcomm-interop-mediator.XXXXXX")}"
-mkdir -p "$WORK/logs" "$WORK/cells" "$WORK/obs"
-echo "work dir: $WORK" >&2
-SUMMARY="$WORK/mediator-leg.md"
-OBS_JSON="$WORK/mediator-observations.json"
-CELLS_TSV="$WORK/cells.tsv"
+RUN="$WORK/runs/$RUN_ID"
+mkdir -p "$WORK/runs" || { say "cannot create $WORK/runs"; exit 2; }
+mkdir "$RUN" 2>/dev/null || { say "the run directory $RUN already exists or cannot be made; refusing to reuse it"; exit 2; }
+mkdir -p "$RUN/logs" "$RUN/cells" "$RUN/obs"
+echo "work dir: $WORK (this run: $RUN)" >&2
+SUMMARY="$RUN/mediator-leg.md"
+OBS_JSON="$RUN/mediator-observations.json"
+CELLS_TSV="$RUN/cells.tsv"
 : > "$CELLS_TSV"
 
-RUN_ID="${GITHUB_RUN_ID:-local}-$$-$RANDOM"
 LEG_LABEL="org.didcomm-dotnet.interop-leg=mediator-$RUN_ID"
 PREFIX="dcmed-$RUN_ID"
 NET="$PREFIX-net"
@@ -163,7 +171,7 @@ with_deadline() {
 # On failure WAIT_WHAT says what was not reached.
 wait_for() {
     local secs="$1" what="$2"; shift 2
-    local flag="$WORK/.deadline.$$.$RANDOM$RANDOM" rc
+    local flag="$RUN/.deadline.$$.$RANDOM$RANDOM" rc
     ( sleep "$secs" & s=$!
       trap 'kill "$s" 2>/dev/null; exit 0' TERM
       wait "$s"
@@ -192,8 +200,11 @@ HEADER=""
 copy_summary() {
     if [ -n "${INTEROP_SUMMARY_DIR:-}" ]; then
         mkdir -p "$INTEROP_SUMMARY_DIR"
+        # Both files always come from this run (an earlier run's JSON must not stand next to this
+        # run's summary): a run that recorded nothing says so.
+        [ -f "$OBS_JSON" ] || printf '{"mode": "%s", "cells": [], "observations": [], "note": "this run recorded no observations"}\n' "$MODE" >"$OBS_JSON"
         [ -f "$SUMMARY" ] && cp "$SUMMARY" "$INTEROP_SUMMARY_DIR/mediator-leg.md"
-        [ -f "$OBS_JSON" ] && cp "$OBS_JSON" "$INTEROP_SUMMARY_DIR/mediator-observations.json"
+        cp "$OBS_JSON" "$INTEROP_SUMMARY_DIR/mediator-observations.json"
     fi
     return 0
 }
@@ -213,7 +224,7 @@ env_unsuitable() { # exit 2: nothing ran
 # leaves the work dir.
 redact() {
     local args=() value
-    for value in $(cat "$WORK/identus-keys.env" "$WORK/identus-px-keys.env" "$WORK/mongo-root.env" 2>/dev/null |
+    for value in $(cat "$RUN/identus-keys.env" "$RUN/identus-px-keys.env" "$RUN/mongo-root.env" 2>/dev/null |
                    grep -E '^(KEY_[A-Z]+_D|MONGO_INITDB_ROOT_PASSWORD)=' | cut -d= -f2); do
         args+=(-e "s/$value/<redacted>/g")
     done
@@ -246,11 +257,11 @@ stop_serve() {
     return 0
 }
 # render_summary: the cells table, observations and totals → mediator-leg.md (+ JSON); the
-# totals line(s) in $WORK/totals.txt.
+# totals line(s) in $RUN/totals.txt.
 render_summary() {
-    "$VPY" -I "$MED/render_summary.py" render --mode "$MODE" --cells "$CELLS_TSV" --obs-dir "$WORK/obs" \
-        --wallet-obs "$WORK/cells/observations/wallet-observations.json" --md "$SUMMARY" --json "$OBS_JSON" \
-        --header "$HEADER" >"$WORK/totals.txt" 2>>"$WORK/logs/render.log"
+    "$VPY" -I "$MED/render_summary.py" render --mode "$MODE" --cells "$CELLS_TSV" --obs-dir "$RUN/obs" \
+        --wallet-obs "$RUN/cells/observations/wallet-observations.json" --md "$SUMMARY" --json "$OBS_JSON" \
+        --header "$HEADER" >"$RUN/totals.txt" 2>>"$RUN/logs/render.log"
 }
 cleanup() {
     local rc=$?
@@ -259,7 +270,7 @@ cleanup() {
     trap '' INT TERM
     exec 1>&8 2>&9
     [ -n "$WATCHDOG_PID" ] && stop_guard "$WATCHDOG_PID"
-    [ -s "$WORK/logs/watchdog.log" ] && cat "$WORK/logs/watchdog.log" >&2
+    [ -s "$RUN/logs/watchdog.log" ] && cat "$RUN/logs/watchdog.log" >&2
     stop_serve
     # Whatever still runs under the leg (a command a signal or the watchdog cut short, and its
     # hang guard) stops now, so nothing outlives the leg.
@@ -268,9 +279,9 @@ cleanup() {
         local id name
         for id in $(docker ps -aq --filter "label=$LEG_LABEL" 2>/dev/null); do
             name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')"
-            docker logs "$id" >"$WORK/logs/${name:-$id}.log" 2>&1
+            docker logs "$id" >"$RUN/logs/${name:-$id}.log" 2>&1
             case "$name" in *-squid)
-                docker exec "$id" cat /var/log/squid/harness-access.log >"$WORK/logs/$name.access.log" 2>/dev/null ;;
+                docker exec "$id" cat /var/log/squid/harness-access.log >"$RUN/logs/$name.access.log" 2>/dev/null ;;
             esac
         done
         local ids; ids="$(docker ps -aq --filter "label=$LEG_LABEL" 2>/dev/null)"
@@ -294,13 +305,14 @@ cleanup() {
     fi
     if [ "$LEG_FAILED" = 1 ] && [ -n "${INTEROP_SUMMARY_DIR:-}" ]; then
         # The uploaded logs go out with this run's private values redacted.
-        local file
-        mkdir -p "$INTEROP_SUMMARY_DIR/mediator-logs"
-        for file in "$WORK"/logs/*.log "$WORK"/serve-*/stderr.log; do
+        # One directory per run, so logs of an earlier failed run in the same summary dir stay apart.
+        local file logs="$INTEROP_SUMMARY_DIR/mediator-logs/$RUN_ID"
+        mkdir -p "$logs"
+        for file in "$RUN"/logs/*.log "$RUN"/serve-*/stderr.log; do
             [ -f "$file" ] || continue
-            redact <"$file" >"$INTEROP_SUMMARY_DIR/mediator-logs/$(basename "$(dirname "$file")")-$(basename "$file")"
+            redact <"$file" >"$logs/$(basename "$(dirname "$file")")-$(basename "$file")"
         done
-        rmdir "$INTEROP_SUMMARY_DIR/mediator-logs" 2>/dev/null # nothing to upload (e.g. Docker absent)
+        rmdir "$logs" "$INTEROP_SUMMARY_DIR/mediator-logs" 2>/dev/null # nothing to upload (e.g. Docker absent)
     fi
     copy_summary
     exit "$rc"
@@ -314,11 +326,11 @@ command -v docker >/dev/null 2>&1 || env_unsuitable "no docker CLI on PATH"
 command -v curl >/dev/null 2>&1 || env_unsuitable "no curl on PATH"
 command -v dotnet >/dev/null 2>&1 || env_unsuitable "no dotnet on PATH"
 command -v git >/dev/null 2>&1 || env_unsuitable "no git on PATH"
-DOCKER_SERVER="$(with_deadline 30 docker info --format '{{.ServerVersion}}' 2>"$WORK/logs/docker-info.err")"
+DOCKER_SERVER="$(with_deadline 30 docker info --format '{{.ServerVersion}}' 2>"$RUN/logs/docker-info.err")"
 case $? in
     0) ;;
     143) env_unsuitable "the Docker daemon did not answer within 30 s" ;;
-    *) env_unsuitable "the Docker daemon is unreachable ($(tail -1 "$WORK/logs/docker-info.err" 2>/dev/null))" ;;
+    *) env_unsuitable "the Docker daemon is unreachable ($(tail -1 "$RUN/logs/docker-info.err" 2>/dev/null))" ;;
 esac
 [ -n "$DOCKER_SERVER" ] || env_unsuitable "the Docker daemon gave no version"
 DOCKER_OK=1
@@ -357,7 +369,7 @@ leg_watchdog() {
     ( sleep "$2" & s=$!
       trap 'kill "$s" 2>/dev/null; exit 0' TERM
       wait "$s"
-      echo "mediator leg: the $2 s watchdog fired; stopping the leg" >"$WORK/logs/watchdog.log"
+      echo "mediator leg: the $2 s watchdog fired; stopping the leg" >"$RUN/logs/watchdog.log"
       kill -TERM "$1" 2>/dev/null
       command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$1" ) </dev/null >/dev/null 2>&1 8>&- 9>&- &
     WATCHDOG_PID=$!
@@ -397,8 +409,8 @@ print("" if d is None else json.dumps(d) if isinstance(d, (dict, list)) else str
 if [ -z "${INTEROP_CLI:-}" ]; then
     # 8>&- 9>&-: the build servers dotnet leaves running must not inherit the leg's output (fds 8, 9),
     # or whoever reads the leg's output would wait for them.
-    dotnet build "$REPO_ROOT/tools/InteropCli/InteropCli.csproj" -c Release --nologo -v quiet >"$WORK/logs/build-interopcli.log" 2>&1 8>&- 9>&- ||
-        setup_fail "build InteropCli" "$(grep -m1 -E 'error' "$WORK/logs/build-interopcli.log")"
+    dotnet build "$REPO_ROOT/tools/InteropCli/InteropCli.csproj" -c Release --nologo -v quiet >"$RUN/logs/build-interopcli.log" 2>&1 8>&- 9>&- ||
+        setup_fail "build InteropCli" "$(grep -m1 -E 'error' "$RUN/logs/build-interopcli.log")"
     INTEROP_CLI="$REPO_ROOT/tools/InteropCli/bin/Release/net10.0/InteropCli"
 fi
 WALLET_PROJECT="$MED/MediatorWallet/MediatorWallet.csproj"
@@ -406,8 +418,8 @@ WALLET_BIN_DIR="$MED/MediatorWallet/bin/Release/net10.0"
 WALLET_BIN="$WALLET_BIN_DIR/MediatorWallet"
 if plan_needs_wallet; then
     # Built here, not in run-all.sh, so a wallet build break fails this leg only.
-    dotnet build "$WALLET_PROJECT" -c Release --nologo -v quiet >"$WORK/logs/build-wallet.log" 2>&1 8>&- 9>&- ||
-        setup_fail "build MediatorWallet" "$(grep -m1 -E 'error|MSB' "$WORK/logs/build-wallet.log")"
+    dotnet build "$WALLET_PROJECT" -c Release --nologo -v quiet >"$RUN/logs/build-wallet.log" 2>&1 8>&- 9>&- ||
+        setup_fail "build MediatorWallet" "$(grep -m1 -E 'error|MSB' "$RUN/logs/build-wallet.log")"
 fi
 
 [ "$(git hash-object "$MED/identus/initdb.js")" = "$INITDB_BLOB" ] ||
@@ -436,11 +448,11 @@ done
 pull_verified() {
     local ref="$1" digest="${1##*@}" attempt
     for attempt in 1 2 3; do
-        if with_deadline 600 docker pull --quiet "$ref" >>"$WORK/logs/pull.log" 2>&1; then
+        if with_deadline 600 docker pull --quiet "$ref" >>"$RUN/logs/pull.log" 2>&1; then
             if docker image inspect --format '{{json .RepoDigests}}' "$ref" 2>/dev/null | grep -F "@$digest\"" >/dev/null; then
                 return 0
             fi
-            echo "RepoDigests of $ref do not list $digest" >>"$WORK/logs/pull.log"
+            echo "RepoDigests of $ref do not list $digest" >>"$RUN/logs/pull.log"
             return 1
         fi
         say "pull attempt $attempt of $ref failed"
@@ -448,36 +460,36 @@ pull_verified() {
     return 1
 }
 for ref in "$IDENTUS_IMAGE" "$MONGO_IMAGE" "$SQUID_IMAGE"; do
-    pull_verified "$ref" || setup_fail pull "pull failed: $ref ($(tail -1 "$WORK/logs/pull.log" 2>/dev/null))"
+    pull_verified "$ref" || setup_fail pull "pull failed: $ref ($(tail -1 "$RUN/logs/pull.log" 2>/dev/null))"
 done
 say "images pulled and digest-verified ($((SECONDS - STEP_T0)) s so far)"
 
 random_hex() { "$VPY" -I -c 'import secrets; print(secrets.token_hex(16))'; }
 
 # Identities the cells share: the python sender, a dotnet sender, the dotnet mediator.
-"${IPEER[@]}" mint --out "$WORK/python-base.json" >/dev/null 2>>"$WORK/logs/mint.log" || setup_fail mint "python mint failed"
-"$INTEROP_CLI" mint --out "$WORK/dotnet-base.json" >/dev/null 2>>"$WORK/logs/mint.log" || setup_fail mint "InteropCli mint failed"
+"${IPEER[@]}" mint --out "$RUN/python-base.json" >/dev/null 2>>"$RUN/logs/mint.log" || setup_fail mint "python mint failed"
+"$INTEROP_CLI" mint --out "$RUN/dotnet-base.json" >/dev/null 2>>"$RUN/logs/mint.log" || setup_fail mint "InteropCli mint failed"
 # The dotnet mediator's DID names an https endpoint: FR-MED-07 checks only the scheme at start-up;
 # nothing dials it (mediator-serve listens on 127.0.0.1 and reports the real URL in ready.json).
-"$INTEROP_CLI" mint --out "$WORK/dotnet-medsvc.json" --endpoint https://mediator.invalid/didcomm >/dev/null 2>>"$WORK/logs/mint.log" ||
+"$INTEROP_CLI" mint --out "$RUN/dotnet-medsvc.json" --endpoint https://mediator.invalid/didcomm >/dev/null 2>>"$RUN/logs/mint.log" ||
     setup_fail mint "InteropCli mint (mediator) failed"
 
 # ── containers ────────────────────────────────────────────────────────────────────────────
-docker network create "${DOCKER_LABELS[@]}" "$NET" >/dev/null 2>"$WORK/logs/network.err" ||
-    setup_fail network "$(tail -1 "$WORK/logs/network.err")"
+docker network create "${DOCKER_LABELS[@]}" "$NET" >/dev/null 2>"$RUN/logs/network.err" ||
+    setup_fail network "$(tail -1 "$RUN/logs/network.err")"
 
 # Mongo root credentials are per run; the application user (admin/admin in database mediator)
 # is the one the vendored initdb.js creates. Mongo has no host port: only Identus reaches it.
 umask 077
-printf 'MONGO_INITDB_ROOT_USERNAME=admin\nMONGO_INITDB_ROOT_PASSWORD=%s\nMONGO_INITDB_DATABASE=mediator\n' "$(random_hex)" >"$WORK/mongo-root.env"
+printf 'MONGO_INITDB_ROOT_USERNAME=admin\nMONGO_INITDB_ROOT_PASSWORD=%s\nMONGO_INITDB_DATABASE=mediator\n' "$(random_hex)" >"$RUN/mongo-root.env"
 umask 022
 MONGO_EVAL='const n = db.getCollectionNames(); print(["user.account", "messages", "messages.outbound"].every(c => n.includes(c)) ? "ready" : "missing")'
 start_mongo() { # $1=role (alias on the network)
     docker run -d --name "$PREFIX-$1" "${DOCKER_LABELS[@]}" --network "$NET" --network-alias "$1" \
-        --tmpfs /data/db --tmpfs /data/configdb --env-file "$WORK/mongo-root.env" \
+        --tmpfs /data/db --tmpfs /data/configdb --env-file "$RUN/mongo-root.env" \
         -v "$MED/identus/initdb.js:/docker-entrypoint-initdb.d/initdb.js:ro" \
-        "$MONGO_IMAGE" --auth >/dev/null 2>"$WORK/logs/$1.run.err" ||
-        setup_fail "$1" "docker run failed: $(tail -1 "$WORK/logs/$1.run.err")"
+        "$MONGO_IMAGE" --auth >/dev/null 2>"$RUN/logs/$1.run.err" ||
+        setup_fail "$1" "docker run failed: $(tail -1 "$RUN/logs/$1.run.err")"
 }
 container_state() { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null; }
 mongo_ready() { # $1=container
@@ -490,8 +502,8 @@ start_mongo mongo
 start_mongo mongo-px
 
 # Identus instances: per-run keys (never the compose demo keys), kept out of `ps` in an env file.
-"${PEER[@]}" okp-keys --out "$WORK/identus-keys.env" 2>>"$WORK/logs/mint.log" || setup_fail keys "okp-keys failed"
-"${PEER[@]}" okp-keys --out "$WORK/identus-px-keys.env" 2>>"$WORK/logs/mint.log" || setup_fail keys "okp-keys failed"
+"${PEER[@]}" okp-keys --out "$RUN/identus-keys.env" 2>>"$RUN/logs/mint.log" || setup_fail keys "okp-keys failed"
+"${PEER[@]}" okp-keys --out "$RUN/identus-px-keys.env" 2>>"$RUN/logs/mint.log" || setup_fail keys "okp-keys failed"
 IDENTUS_MONGO_PASSWORD="${MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD:-admin}"
 identus_env() { # $1=keys file $2=mongo alias $3=SERVICE_ENDPOINTS
     IDENTUS_ARGS=(--env-file "$1" -e "SERVICE_ENDPOINTS=$3" -e MONGODB_USER=admin
@@ -515,27 +527,27 @@ while :; do
     else
         IDENTUS_PORT="$("${PEER[@]}" free-port)" || setup_fail identus "free-port failed"
     fi
-    identus_env "$WORK/identus-keys.env" mongo "http://127.0.0.1:$IDENTUS_PORT;ws://127.0.0.1:$IDENTUS_PORT/ws"
+    identus_env "$RUN/identus-keys.env" mongo "http://127.0.0.1:$IDENTUS_PORT;ws://127.0.0.1:$IDENTUS_PORT/ws"
     if docker run -d --name "$IDENTUS" "${DOCKER_LABELS[@]}" --network "$NET" \
-        -p "127.0.0.1:$IDENTUS_PORT:8080" "${IDENTUS_ARGS[@]}" "$IDENTUS_IMAGE" >/dev/null 2>"$WORK/logs/identus.run.err"; then
+        -p "127.0.0.1:$IDENTUS_PORT:8080" "${IDENTUS_ARGS[@]}" "$IDENTUS_IMAGE" >/dev/null 2>"$RUN/logs/identus.run.err"; then
         break
     fi
     docker rm -f -v "$IDENTUS" >/dev/null 2>&1
-    if grep -Eqi 'port is already allocated|address already in use|ports are not available' "$WORK/logs/identus.run.err" && [ "$attempt" -lt 5 ]; then
+    if grep -Eqi 'port is already allocated|address already in use|ports are not available' "$RUN/logs/identus.run.err" && [ "$attempt" -lt 5 ]; then
         say "host port $IDENTUS_PORT is taken; retrying with another (attempt $attempt of 5)"
         PORT_RETRIES=$((PORT_RETRIES + 1))
         attempt=$((attempt + 1))
         continue
     fi
-    setup_fail identus "docker run failed (attempt $attempt): $(tail -1 "$WORK/logs/identus.run.err")"
+    setup_fail identus "docker run failed (attempt $attempt): $(tail -1 "$RUN/logs/identus.run.err")"
 done
 IDENTUS_URL="http://127.0.0.1:$IDENTUS_PORT"
 
 IDENTUS_PX="$PREFIX-identus-px"
-identus_env "$WORK/identus-px-keys.env" mongo-px "http://identus-px:8080;ws://identus-px:8080/ws"
+identus_env "$RUN/identus-px-keys.env" mongo-px "http://identus-px:8080;ws://identus-px:8080/ws"
 docker run -d --name "$IDENTUS_PX" "${DOCKER_LABELS[@]}" --network "$NET" --network-alias identus-px \
-    "${IDENTUS_ARGS[@]}" "$IDENTUS_IMAGE" >/dev/null 2>"$WORK/logs/identus-px.run.err" ||
-    setup_fail identus-px "docker run failed: $(tail -1 "$WORK/logs/identus-px.run.err")"
+    "${IDENTUS_ARGS[@]}" "$IDENTUS_IMAGE" >/dev/null 2>"$RUN/logs/identus-px.run.err" ||
+    setup_fail identus-px "docker run failed: $(tail -1 "$RUN/logs/identus-px.run.err")"
 
 direct_get() { # $1=path on the directly reachable Identus → body on stdout
     curl -s --noproxy '*' --max-time 10 "$IDENTUS_URL$1"
@@ -563,24 +575,24 @@ wait_for 180 "Identus (proxy-only) /health 200" identus_px_healthy ||
 IDENTUS_VERSION="$(direct_get /version)"
 [ "$IDENTUS_VERSION" = 1.2.1 ] || setup_fail identus "/version is '$IDENTUS_VERSION', expected 1.2.1"
 [ "$(px_get /version)" = 1.2.1 ] || setup_fail identus-px "/version is not 1.2.1"
-direct_get /did >"$WORK/identus.did"
-px_get /did >"$WORK/identus-px.did"
-"${PEER[@]}" did-check --did "@$WORK/identus.did" --keys "$WORK/identus-keys.env" \
-    --expect-http "$IDENTUS_URL" --expect-ws "ws://127.0.0.1:$IDENTUS_PORT/ws" --out "$WORK/identus.did-check.json" \
-    >/dev/null 2>"$WORK/logs/did-check.err" || setup_fail identus "/did: $(tail -1 "$WORK/logs/did-check.err")"
-"${PEER[@]}" did-check --did "@$WORK/identus-px.did" --keys "$WORK/identus-px-keys.env" \
+direct_get /did >"$RUN/identus.did"
+px_get /did >"$RUN/identus-px.did"
+"${PEER[@]}" did-check --did "@$RUN/identus.did" --keys "$RUN/identus-keys.env" \
+    --expect-http "$IDENTUS_URL" --expect-ws "ws://127.0.0.1:$IDENTUS_PORT/ws" --out "$RUN/identus.did-check.json" \
+    >/dev/null 2>"$RUN/logs/did-check.err" || setup_fail identus "/did: $(tail -1 "$RUN/logs/did-check.err")"
+"${PEER[@]}" did-check --did "@$RUN/identus-px.did" --keys "$RUN/identus-px-keys.env" \
     --expect-http http://identus-px:8080 --expect-ws ws://identus-px:8080/ws \
-    >/dev/null 2>"$WORK/logs/did-check-px.err" || setup_fail identus-px "/did: $(tail -1 "$WORK/logs/did-check-px.err")"
-IDENTUS_DID="$(cat "$WORK/identus.did")"
-PX_DID="$(cat "$WORK/identus-px.did")"
+    >/dev/null 2>"$RUN/logs/did-check-px.err" || setup_fail identus-px "/did: $(tail -1 "$RUN/logs/did-check-px.err")"
+IDENTUS_DID="$(cat "$RUN/identus.did")"
+PX_DID="$(cat "$RUN/identus-px.did")"
 
 SQUID="$PREFIX-squid"
 # The image declares /var/log/squid and /var/spool/squid as volumes: tmpfs mounts (owned by its
 # proxy user, uid 13) keep a run from leaving anonymous, unlabelled volumes behind.
 docker run -d --name "$SQUID" "${DOCKER_LABELS[@]}" --network "$NET" -p 127.0.0.1::3128 \
     --tmpfs /var/log/squid:uid=13,gid=13,mode=0755 --tmpfs /var/spool/squid:uid=13,gid=13,mode=0755 \
-    -v "$MED/squid/squid.conf:/etc/squid/squid.conf:ro" "$SQUID_IMAGE" >/dev/null 2>"$WORK/logs/squid.run.err" ||
-    setup_fail squid "docker run failed: $(tail -1 "$WORK/logs/squid.run.err")"
+    -v "$MED/squid/squid.conf:/etc/squid/squid.conf:ro" "$SQUID_IMAGE" >/dev/null 2>"$RUN/logs/squid.run.err" ||
+    setup_fail squid "docker run failed: $(tail -1 "$RUN/logs/squid.run.err")"
 SQUID_PORT="$(docker port "$SQUID" 3128/tcp 2>/dev/null | head -1 | sed 's/.*://')"
 [ -n "$SQUID_PORT" ] || setup_fail squid "no host port for 3128"
 SQUID_URL="http://127.0.0.1:$SQUID_PORT"
@@ -619,19 +631,22 @@ identus_logged_above() { [ "$(identus_logged "$1" "$2")" -gt "$3" ]; }
 
 # ── the dotnet mediator (mediator-serve), for R-1 and R-2 ─────────────────────────────────
 SERVE_HTTP="" SERVE_WS="" SERVE_DID="" SERVE_DIR=""
+# The ready file counts only when this very process wrote it: its pid must be SERVE_PID (the
+# directory is new for each run as well, so no earlier run's file can be there).
 serve_ready() {
     kill -0 "$SERVE_PID" 2>/dev/null || return 3
-    [ -s "$SERVE_DIR/ready.json" ] && [ -n "$(json_get "$SERVE_DIR/ready.json" http)" ] &&
-        [ -n "$(json_get "$SERVE_DIR/ready.json" ws)" ] && [ -n "$(json_get "$SERVE_DIR/ready.json" did)" ]
+    [ -s "$SERVE_DIR/ready.json" ] && [ "$(json_get "$SERVE_DIR/ready.json" pid)" = "$SERVE_PID" ] &&
+        [ -n "$(json_get "$SERVE_DIR/ready.json" http)" ] && [ -n "$(json_get "$SERVE_DIR/ready.json" ws)" ] &&
+        [ -n "$(json_get "$SERVE_DIR/ready.json" did)" ]
 }
 start_serve() { # $1=tag, rest: extra mediator-serve options
     local tag="$1"; shift
-    SERVE_DIR="$WORK/serve-$tag"
-    mkdir -p "$SERVE_DIR"
+    SERVE_DIR="$RUN/serve-$tag"
+    mkdir "$SERVE_DIR" || return 1 # new: a server's FIFO, ready file and logs are never reused
     mkfifo "$SERVE_DIR/stdin" || return 1
     # stdin is a FIFO held open on fd 7: the mediator stops when the leg closes it or dies. Its own
     # lifetime limit is the leg watchdog's, so it never stops before the leg would.
-    "$INTEROP_CLI" mediator-serve --mediator "$WORK/dotnet-medsvc.json" --ready-file "$SERVE_DIR/ready.json" \
+    "$INTEROP_CLI" mediator-serve --mediator "$RUN/dotnet-medsvc.json" --ready-file "$SERVE_DIR/ready.json" \
         --max-lifetime "$LEG_WATCHDOG_S" "$@" <"$SERVE_DIR/stdin" >"$SERVE_DIR/stdout.log" 2>"$SERVE_DIR/stderr.log" 8>&- 9>&- &
     SERVE_PID=$!
     exec 7>"$SERVE_DIR/stdin"
@@ -650,7 +665,7 @@ fi
 say "set-up done in $((SECONDS - STEP_T0)) s"
 
 if [ "$MODE" = up ]; then
-    cat >"$WORK/up.env" <<EOF
+    cat >"$RUN/up.env" <<EOF
 IDENTUS_URL=$IDENTUS_URL
 IDENTUS_DID=$IDENTUS_DID
 PX_DID=$PX_DID
@@ -658,8 +673,9 @@ SQUID_URL=$SQUID_URL
 SERVE_HTTP=$SERVE_HTTP
 SERVE_DID=$SERVE_DID
 WORK=$WORK
+RUN=$RUN
 EOF
-    cat "$WORK/up.env"
+    cat "$RUN/up.env"
     { summary_header; echo "**--up (development): set up and torn down; no cells run**"; } >"$SUMMARY"
     SUMMARY_WRITTEN=1
     say "up: press Enter (or close stdin) to tear everything down"
@@ -746,8 +762,8 @@ enrol_wallet() {
 # python_forward <to DID> <via DID> <tag>: a fresh authcrypted message from python-base, wrapped
 # for the mediator → $C/<tag>.msg.json, .fwd.json, .inner.json
 python_forward() {
-    ipeer gen-message --to "$1" --from "$WORK/python-base.json" --out "$C/$3.msg.json" &&
-    peer forward --identity "$WORK/python-base.json" --to "$1" --via "$2" --message "$C/$3.msg.json" \
+    ipeer gen-message --to "$1" --from "$RUN/python-base.json" --out "$C/$3.msg.json" &&
+    peer forward --identity "$RUN/python-base.json" --to "$1" --via "$2" --message "$C/$3.msg.json" \
         --out "$C/$3.fwd.json" --inner-out "$C/$3.inner.json" --meta-out "$C/$3.fwd.meta.json"
 }
 
@@ -780,7 +796,7 @@ cell_M1() { # dotnet recipient via Identus over HTTP (E-30, E-51)
     step "Identus /version, /did, /invitation"
     [ "$(direct_get /version)" = 1.2.1 ] || { cfail "/version is not 1.2.1"; return 1; }
     direct_get /did >"$C/did.txt"
-    peer did-check --did "@$C/did.txt" --keys "$WORK/identus-keys.env" --expect-http "$IDENTUS_URL" \
+    peer did-check --did "@$C/did.txt" --keys "$RUN/identus-keys.env" --expect-http "$IDENTUS_URL" \
         --expect-ws "ws://127.0.0.1:$IDENTUS_PORT/ws" || { cfail "/did failed did-check"; return 1; }
     direct_get /invitation >"$C/invitation.json"
     step "wallet enrols (no version pinned: Discover Features → Coordinate Mediation 2.0)"
@@ -805,7 +821,7 @@ cell_M1() { # dotnet recipient via Identus over HTTP (E-30, E-51)
         { cfail "fetch: $(wallet_error fetch)"; return 1; }
     local expected="$C/m.msg.json"
     if [ "$sab" = wrong-message ]; then
-        ipeer gen-message --to "$routed" --from "$WORK/python-base.json" --out "$C/other.msg.json" ||
+        ipeer gen-message --to "$routed" --from "$RUN/python-base.json" --out "$C/other.msg.json" ||
             { cfail "gen-message failed"; return 1; }
         expected="$C/other.msg.json"
     fi
@@ -854,9 +870,9 @@ cell_M3() { # dotnet sender via Identus to a python recipient (CM 2.0 + Pickup 3
     peer cm2-enrol --identity "$C/py-w2.json" --mediator "$IDENTUS_DID" --url "$IDENTUS_URL" \
         --register "$C/p2.json" --out "$C/enrol.json" || { cfail "cm2-enrol at Identus failed"; return 1; }
     step "InteropCli packs for P2 (its service uri is the Identus DID: one forward for Identus, FR-ROUTE-04)"
-    ipeer gen-message --to "$C/p2.json" --from "$WORK/dotnet-base.json" --out "$C/m.msg.json" ||
+    ipeer gen-message --to "$C/p2.json" --from "$RUN/dotnet-base.json" --out "$C/m.msg.json" ||
         { cfail "gen-message failed"; return 1; }
-    "$INTEROP_CLI" pack --identity "$WORK/dotnet-base.json" --to "$C/p2.json" --mode authcrypt \
+    "$INTEROP_CLI" pack --identity "$RUN/dotnet-base.json" --to "$C/p2.json" --mode authcrypt \
         --message "$C/m.msg.json" --out "$C/m.fwd.json" ${forward[@]+"${forward[@]}"} || { cfail "InteropCli pack failed"; return 1; }
     peer post --url "$IDENTUS_URL" --in "$C/m.fwd.json" --expect-status 202 --meta-out "$C/m.post.json" ||
         { cfail "forward not accepted: HTTP $(json_get "$C/m.post.json" status)"; return 1; }
@@ -1047,7 +1063,7 @@ cell_R1() { # python recipient via the dotnet mediator (reverse)
         --variant no-return-route-on-update --require-created-time --out "$C/enrol-noroute.json" ||
         { cfail "keylist-update without return_route"; return 1; }
     step "python forwards via the dotnet mediator, then picks up (Pickup 3.0 by hand)"
-    python_forward "$C/p.json" "$WORK/dotnet-medsvc.json" m || { cfail "python forward failed"; return 1; }
+    python_forward "$C/p.json" "$RUN/dotnet-medsvc.json" m || { cfail "python forward failed"; return 1; }
     peer post --url "$url" --in "$C/m.fwd.json" --expect-status 202 --meta-out "$C/m.post.json" ||
         { cfail "forward not accepted: HTTP $(json_get "$C/m.post.json" status)"; return 1; }
     peer pickup3 --identity "$C/py-r1.json" --mediator "$med" --url "$url" --recipient "$C/p.json" \
@@ -1065,7 +1081,7 @@ cell_R2() { # attribution control: the same wallet against the dotnet mediator (
     enrol_wallet w "$C/invitation.json" "$SERVE_DID" --expect-version "$version" --endpoint-override "$SERVE_HTTP" \
         --allow-hosts 127.0.0.1 || { cfail "enrol with the dotnet mediator: $(wallet_error w)"; return 1; }
     local routed; routed="$(json_get "$C/w.state.json" routedDid)"
-    python_forward "$routed" "$WORK/dotnet-medsvc.json" m || { cfail "python forward failed"; return 1; }
+    python_forward "$routed" "$RUN/dotnet-medsvc.json" m || { cfail "python forward failed"; return 1; }
     peer post --url "$SERVE_HTTP" --in "$C/m.fwd.json" --expect-status 202 --meta-out "$C/m.post.json" ||
         { cfail "forward not accepted"; return 1; }
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --explicit-ack --out-dir "$C/fetch" \
@@ -1130,7 +1146,7 @@ nc_expect() {
 run_cell() { # $1=id $2=sabotage
     local id="$1" sab="$2" fn rc t0=$SECONDS
     fn="cell_$(echo "$id" | tr -d '-')"
-    C="$WORK/cells/$id${sab:+-nc-$sab}"
+    C="$RUN/cells/$id${sab:+-nc-$sab}"
     mkdir -p "$C"
     CELL_DETAIL=""
     "$fn" "$sab" >"$C/cell.log" 2>&1
@@ -1170,11 +1186,11 @@ done
 
 # ── observations (data, never gating; gate mode only) ─────────────────────────────────────
 obs() { # obs <id> <title> <method> <e,…> <i,…> <value file>
-    "$VPY" -I "$MED/render_summary.py" obs --out "$WORK/obs/$1.json" --id "$1" --title "$2" --method "$3" \
-        --e "$4" --i "$5" --value-file "$6" 2>>"$WORK/logs/obs.log"
+    "$VPY" -I "$MED/render_summary.py" obs --out "$RUN/obs/$1.json" --id "$1" --title "$2" --method "$3" \
+        --e "$4" --i "$5" --value-file "$6" 2>>"$RUN/logs/obs.log"
 }
 run_observations() {
-    C="$WORK/cells/observations"
+    C="$RUN/cells/observations"
     mkdir -p "$C"
     {
         step "O-21 provenance"
@@ -1228,19 +1244,19 @@ for label, path in (("Identus delivery (M-3, python sees it)", sys.argv[1]), ("d
         items.append({"source": label, "encodings": [i.get("encoding") for i in pick.get("items", [])]})
     except (OSError, ValueError):
         items.append({"source": label, "encodings": None})
-json.dump(items, open(sys.argv[4], "w"), indent=2)' "$WORK/cells/M-3/pick.json" "$WORK/cells/R-1/pick.json" "$C/pick.json" "$C/o10.json"
+json.dump(items, open(sys.argv[4], "w"), indent=2)' "$RUN/cells/M-3/pick.json" "$RUN/cells/R-1/pick.json" "$C/pick.json" "$C/o10.json"
         obs O-10 "delivery attachment encoding (alphabet, padding, strict decoders) as python sees it" "pickup3 meta" "E-22" "" "$C/o10.json"
 
         step "O-7 one page of one recipient (the shipped client, in M-1's enrol)"
-        if [ -f "$WORK/cells/M-1/w.json" ]; then
-            json_get "$WORK/cells/M-1/w.json" observed.query_limit_1 >"$C/o7.json"
+        if [ -f "$RUN/cells/M-1/w.json" ]; then
+            json_get "$RUN/cells/M-1/w.json" observed.query_limit_1 >"$C/o7.json"
         else
             echo '"not measured: M-1 did not run"' >"$C/o7.json"
         fi
         obs O-7 "QueryRecipientsAsync(Limit 1, Offset 0) with two DIDs registered: DIDs returned, pagination" "shipped MediationClient (M-1 enrol)" "E-35" "I-3" "$C/o7.json"
 
         step "O-16 a second account adds a DID the M-1 wallet registered"
-        local taken; taken="$(json_get "$WORK/cells/M-1/w.state.json" routedDid)"
+        local taken; taken="$(json_get "$RUN/cells/M-1/w.state.json" routedDid)"
         if [ -n "$taken" ]; then
             ipeer mint --out "$C/py-second.json" >/dev/null &&
             peer cm2-enrol --identity "$C/py-second.json" --mediator "$IDENTUS_DID" --url "$IDENTUS_URL" --register "$taken" \
@@ -1372,13 +1388,13 @@ fi
 if render_summary; then
     SUMMARY_WRITTEN=1
 else
-    say "render_summary failed (see $WORK/logs/render.log)"
+    say "render_summary failed (see $RUN/logs/render.log)"
     LEG_FAILED=1
 fi
 echo
-cat "$WORK/totals.txt" 2>/dev/null
+cat "$RUN/totals.txt" 2>/dev/null
 if [ "$LEG_FAILED" = 1 ]; then
-    say "FAILED (work dir kept at $WORK)"
+    say "FAILED (run dir kept at $RUN)"
     exit 1
 fi
 say "all cells as required (summary: $SUMMARY)"

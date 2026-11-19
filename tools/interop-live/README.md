@@ -570,12 +570,14 @@ environment is unsuitable before anything ran. Under GitHub Actions an unset `PY
 
 Environment:
 - `INTEROP_SUMMARY_DIR`: where `mediator-leg.md`, `mediator-observations.json` and, on failure,
-  `mediator-logs/` go.
+  `mediator-logs/<run id>/` go (both files are rewritten by every run).
 - `INTEROP_CLI`: a prebuilt InteropCli.
 - `MEDIATOR_LEG_OWNER`: an extra `org.didcomm-dotnet.owner` label.
 
 For development only (each is refused when `CI=true`):
-- `MEDIATOR_LEG_WORK`: the scratch directory; a venv already in it is reused;
+- `MEDIATOR_LEG_WORK`: the scratch directory; a venv already in it is reused, and each run writes
+  everything else (identities, keys, the mediator's FIFO and ready file, logs, the summary) into a
+  new `runs/<run id>` inside it, so an earlier run's files are never taken for its own;
 - `MEDIATOR_LEG_IMAGES_ENV`: another images file (the unpullable-image test);
 - `MEDIATOR_LEG_ONLY=M-3,R-1`: run those cells only;
 - `MEDIATOR_LEG_DEBUG_FIRST_PORT`: the port-clash test;
