@@ -166,6 +166,11 @@ PR #130 (head `b32e8e3` at opening; CI green on ubuntu and windows). Adversarial
 | 44473234026 (`negative_controls`) | `7000bf4` | green: 14/14 sabotaged cells FAIL as designed |
 | 44484556900 | `b32e8e3` (after the harness QA round) | green: mediator leg 9/9; python/jvm tables byte-identical to 44298708738 |
 | 44484568467 (`negative_controls`) | `b32e8e3` | green: 18/18 sabotaged cells failed for their declared reason, 0 broken |
+| 44552695515 / 44552714806 (`negative_controls`) | `a7a9b04` (O-98-1 = 1a, M-8 gated) | green: mediator leg 10/10; 20/20 controls, 0 broken |
+| 44575803174 / 44575821054 (`negative_controls`) | `5d3fbba` (review round 1 done) | green: mediator leg 10/10; 20/20 controls, 0 broken |
+| 44597214056 | `12600cb` (review round 2 done) | green: mediator leg 10/10; python/jvm tables byte-identical to 44298708738 |
+| 44597230550 (`negative_controls`) | `12600cb` | red in the normal step only: M-5 timed out (squid tunnelled the CONNECT; Identus logged the WebSocket open and close with no request handled); 20/20 controls, 0 broken. 6/6 local M-5 repeats pass |
+| 44599890163 (`negative_controls`, re-dispatch) | `12600cb` | green: mediator leg 10/10; 20/20 controls, 0 broken |
 
 ### Interop observations against Identus 1.2.1 (recorded, not gated)
 
@@ -229,3 +234,14 @@ PR #130 (head `b32e8e3` at opening; CI green on ubuntu and windows). Adversarial
 - Follow-ups filed: #131, #132, #133. Nothing reported upstream to Identus (owner decision 2026-11-19).
 - **Owner decision "C2, D1" (2026-11-19).** C2: the `to` header is advisory in the Discover Features client (released Core) and the mediator client's matcher, per message_structure.md L120/L124; identity stays bound to keys (transports.md L76); a value-free warning when `to` doesn't name the asker; B1/B2 and every key check unchanged; the live stream byte-identical. D1: live mode against Identus stays as it is (B1 unchanged): documented in the interop README and cookbook CC, follow-up #134 (needs a written proposal and an owner decision before code). Recorded on #88 (7015491425).
 - **Identus:** not reported upstream (owner decision 2026-11-19); our conformance target is the DIDComm spec.
+
+### Review round 2 (PR #130, re-review of `5d3fbba`, comment 7018451785)
+
+| Finding | Fix | Proof |
+|---|---|---|
+| P2: a late status without `thid` could still complete a later call's request on the same WebSocket channel when that request was the only one waiting (the round-1 fix narrowed the window per call, not across calls) | `61d4538`, `c00c6e9`: root cause removed. Outside the HTTP response to its own request, an answer without `thid` completes no request (threading.md L17; message_structure.md L130; problems.md L55); dropped with a rate-limited, value-free warning. `OfferToOnlyCandidate`, `RequiresThread`, the `*ThreadedSpec`s and `gaveUp` are gone; `MediatorExchangeSpec.cs` and `DeliveryReader.cs` are byte-identical to `a6b1ebe` again. Unchanged: threaded matching, a thread-less `delivery` to the live stream, the HTTP-bound path. Supersedes the round-1 P2 fix (`efde6e6`, `c46e2dc`) | the cross-call test (next call `GetStatusAsync` or a second `AckAsync`) fails on `5d3fbba` ("found 50"); unit test of the matcher fails on `5d3fbba`; reinstating the old rule fails 13 tests; `LiveDeliveryStream.cs` byte-identical to `a6b1ebe`. Replied 7019662385 |
+| Nonblocking: the observation text and the leg header still described binary frames | `ecc1daa` | text only; replied 7019662884 |
+
+- Who relies on the removed rule: no peer we test against. Ours stamps `thid` on every answer (`ResponseThreadId`); Identus answers carry `thid` = the request id (O-4).
+- **Open for the owner:** whether an answer without `thid` that arrives in the HTTP response to our own request still counts as that request's answer (return_route L5 vs L26 and threading L17). Unchanged until decided.
+- Gate on `12600cb`: local Release build 0 warnings; Core 2574, Mediator 4646 (+8 skipped), Interop 1862 (+5 skipped); pack OK. CI 44597229930 green (ubuntu, windows). Live runs in the table above.
