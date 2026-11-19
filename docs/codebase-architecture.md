@@ -2254,13 +2254,21 @@ request.
 | thread names no waiting request of the pair | dropped (quiet) | dropped; R fails as no answer |
 | no thread, `delivery` | the live stream of (peer, local), never a request; no stream, or its buffer full → dropped, not acknowledged | completes R when R expects a `delivery` (else dropped, Warning); never a stream |
 | no thread, problem report | dropped (`pthid` is required) | completes R (it fails with the code) |
-| no thread, another answer type | the only waiting request of the pair expecting the type takes it; none → dropped; two or more → dropped, they keep waiting (Warning) | completes R when R expects the type, else dropped (Warning) |
+| no thread, another answer type | the only waiting request of the pair expecting the type takes it; none → dropped; two or more → dropped, they keep waiting (Warning); the only one requires a thread (`MediatorExchangeSpec.RequiresThread`) → dropped, it keeps waiting (Warning) | completes R when R expects the type, else dropped (Warning) |
 
 "Warning" and "quiet" are the rate-limited levels under Logging, below. So a thread-less live push
 never answers a waiting `delivery-request`, and a `delivery` with a thread is never taken for a
 push. Over HTTP the exchange binds the body to its request, so a
 third-party mediator that answers without `thid` works there; over a WebSocket a thread-less
 `delivery` reaches only a live stream (R-10, an interop point for #98).
+
+`RequiresThread` (#98 F-1, PR #130 review P2) is set only by `PickupClient.AckAsync`, on the
+requests it sends after it gave up waiting for an earlier one on a WebSocket
+(`DeliveryReader.MessagesReceivedThreadedSpec`, `StatusRequestThreadedSpec`). The given-up request
+is gone from the pending map, so its late thread-less `status` would otherwise be taken as the next
+request's answer. A request with the flag still counts as a candidate, so the candidates (and so
+what any other request, a live stream's included, is offered) are the same as without it; it is only
+never completed by a thread-less answer. A bound answer (the HTTP response) is not affected.
 
 ### Routes (`ResolveRouteAsync`)
 
@@ -2447,8 +2455,17 @@ is still a `MediationProtocolException`. How "no status" is known:
 - **On a WebSocket (any route that is not HTTP), after half of `RequestTimeout`.** Silence cannot be
   told from a slow answer there, so the chunk's `ExchangeAsync` runs under a `GuardedDeadline` of
   `RequestTimeout / 2` linked to the caller's token; when that deadline (not the caller) ends the
-  wait, the chunk counts as left without a status, and a late status for it is dropped by the
-  matcher as unclaimed.
+  wait, the chunk counts as left without a status. Its late status is not simply dropped: one with
+  its `thid` finds no waiting request (dropped, quiet), but one without `thid` would be the only
+  candidate for the next request of the pair, and the matcher would take it (the thread-less row of
+  the matcher table). So once a wait was given up, every later request of the call (the next chunks
+  and the `status-request`) uses a `RequiresThread` spec and takes only a status whose `thid` names
+  it. DIDComm threading requires a reply to carry `thid` (v2.1 "Threading", and "Threads" under
+  "When Problems Happen"); the Message Pickup 3.0 `status` example leaves it out, and that shape still
+  works whenever nothing was given up. The cost: a WebSocket mediator that both leaves out `thid`
+  and answers later than `RequestTimeout / 2` makes the call fail with `TimeoutException` (it would
+  have succeeded before #98 F-1 when it answered within `RequestTimeout`). Over HTTP nothing is
+  ever given up and nothing changes.
 
 The budget rule: a `messages-received` and the `status-request` that may follow it share one
 `RequestTimeout`, counted from when the `messages-received` is sent. The `status-request` runs under
@@ -2662,8 +2679,8 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 
 - **Rate-limited, Warning the first time and every 1000th, Debug otherwise:** drops that point at the
   mediator (an answer from a request's pair of a type it does not expect, an HTTP response whose
-  thread-less answer does not fit its request, an ambiguous thread-less answer, a push its stream's
-  full buffer refuses), problem reports received, and the pickup lines (messages beyond the limit,
+  thread-less answer does not fit its request, an ambiguous thread-less answer, a thread-less
+  answer whose only taker requires a thread, a push its stream's full buffer refuses), problem reports received, and the pickup lines (messages beyond the limit,
   unusable or repeated ids, unpack failures, filter mismatches, acknowledgement failures, cycle
   failures, ignored pushes, taken ids forgotten, failures at a stream's end). The pickup counters
   are per client, shared by its fetches and streams.
