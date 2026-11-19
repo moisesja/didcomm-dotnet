@@ -101,7 +101,7 @@ internal static class ObserveCommand
             "raw ClientWebSocket, Text frames: status-request, live-delivery-change true, an HTTP forward for B and the push it causes, live-delivery-change false, close",
             ct => run.WebSocketAsync(answers, ct), TimeSpan.FromSeconds(60));
         await run.Record(records, "O-2c", ["E-5", "E-37"], [], "Forwards after a live-mode socket closed without turning live mode off",
-            "raw ClientWebSocket: live-delivery-change true, one forward pushed, close with live mode on; then up to six HTTP forwards for B one after another, each with its own 15 s guard, stopping at the first without a response",
+            "raw ClientWebSocket: live-delivery-change true, one forward pushed, close with live mode on; then up to six HTTP forwards for B one after another, each with its own 15 s guard, stopping at the first without a response; then six at once",
             ct => run.ClosedLiveSocketAsync(ct), TimeSpan.FromSeconds(120));
 
         // Derived from every answer collected above (and the push in O-2).
@@ -453,6 +453,20 @@ internal static class ObserveCommand
                 }
             }
             value["answered_after_close"] = posts.Count(p => p?["wire"] is not null);
+
+            // Then six at once (a burst after the close), each with its own guard.
+            var burst = await Task.WhenAll(Enumerable.Range(1, 6).Select(async n =>
+            {
+                try
+                {
+                    return (JsonNode?)(await probe.PostAsync(await ForwardForRoutedAsync($"O-2c burst {n}", ct).ConfigureAwait(false), ct).ConfigureAwait(false)).Status;
+                }
+                catch (TimeoutException)
+                {
+                    return "no response";
+                }
+            })).ConfigureAwait(false);
+            value["burst_after_close"] = new JsonArray(burst);
             value["forwards_after_close"] = posts;
             try
             {
