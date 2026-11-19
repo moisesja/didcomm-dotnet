@@ -32,11 +32,11 @@ public sealed class D4CapturedLiveChangeLeaseTests(ITestOutputHelper output)
         // Mallory sends Bob's captured change first, on her own fresh socket, and never acknowledges.
         using var socket = await mediator.ConnectAsync();
         await ReturnRouteTestHost.SendAsync(socket, captured);
-        (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Binary, "the status for Bob, which Mallory cannot read");
+        (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Text, "the status for Bob, which Mallory cannot read");
 
         await Qa.SendNoteAsync(mediator, alice, bob);
         await MediatorTestServer.WaitUntilAsync(() => mediator.PushOutcome(PushOutcomes.PushedLive) == 1, "the first message is pushed to Mallory's socket");
-        (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Binary);
+        (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Text);
         var withinLease = (await mediator.FetchAsync(bob)).Count;
 
         // The lease runs out while Mallory still holds the socket; Bob does not poll in between, and
@@ -46,7 +46,7 @@ public sealed class D4CapturedLiveChangeLeaseTests(ITestOutputHelper output)
         await mediator.PushesIdleAsync();
         var pushedAfterExpiry = mediator.PushOutcome(PushOutcomes.PushedLive);
         for (var i = 1; i < pushedAfterExpiry; i++)
-            (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Binary);
+            (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Text);
         var afterExpiry = (await mediator.FetchAsync(bob)).Count;
         output.WriteLine($"D4 E-28: Bob fetched {withinLease} within the lease; pushes to Mallory after expiry+arrival {pushedAfterExpiry} (outcomes [{string.Join(",", mediator.PushOutcomes)}]); Bob fetched {afterExpiry} after");
 

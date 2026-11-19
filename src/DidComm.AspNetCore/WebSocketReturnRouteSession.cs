@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Text.Unicode;
 using System.Threading.Channels;
 using DidComm.Diagnostics;
 using DidComm.Facade;
@@ -378,7 +380,10 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
                 {
                     if (IsClosed || _mode != (int)ReturnRouteMode.All)
                         continue;
-                    send = _socket.SendAsync(frame.AsMemory(), WebSocketMessageType.Binary, endOfMessage: true, _connectionToken);
+                    // FR-TRN-09: a text frame. Every frame here is an envelope this session packed
+                    // itself (TrySendAsync), so it is always UTF-8 JSON, which a text frame requires.
+                    Debug.Assert(Utf8.IsValid(frame), "A return-route push is a packed envelope, so UTF-8 JSON.");
+                    send = _socket.SendAsync(frame.AsMemory(), WebSocketMessageType.Text, endOfMessage: true, _connectionToken);
                 }
                 await send.ConfigureAwait(false);
             }

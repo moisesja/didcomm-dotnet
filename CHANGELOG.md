@@ -6,6 +6,26 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — DIDComm messages go out as WebSocket text frames (#98, epic #88)
+
+`DidComm.Transports.WebSocket` and `DidComm.AspNetCore`: DIDComm messages are now sent as WebSocket
+text frames, not binary. That covers every DIDComm message these packages write to a WebSocket: the
+client transport's sends (on its pooled sockets and on return-route session sockets) and the
+server's same-socket replies and pushes, which include the mediator's live deliveries. Owner
+decision O-98-1 (2026-11-19). No public API changed.
+
+- **Who could notice:** a peer that accepts only binary frames. None is known. This library's
+  receive side has always accepted both frame types, and still does, so peers on 1.5.x are
+  unaffected in both directions.
+- **Why:** interop. The Hyperledger Identus mediator and browser wallets (such as the Identus
+  TypeScript SDK) read only text frames; the mediator drops binary ones, so until now this
+  library's client could not talk to it over a WebSocket. The DIDComm v2.1 spec doesn't name a
+  frame type.
+- **Unchanged:** STOMP frames (`UseStomp`, FR-TRN-12) are still binary.
+- **Cookbook:** section CC now says what a wallet sets to use the Identus mediator over a WebSocket
+  (`ReplayProtectionOptions.RequireCreatedTime = false` in its own container, because Identus puts
+  no timestamp on its answers) and what that gives up. Over HTTP nothing is needed.
+
 ### Added — Live interop: a mediator leg against the Hyperledger Identus mediator 1.2.1, and an adversarial review of the mediator service (#98, epic #88)
 
 The nightly live-interop job (`.github/workflows/interop-live.yml`, through

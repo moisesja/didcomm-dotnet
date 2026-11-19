@@ -283,7 +283,7 @@ public sealed class ReplayProtectionEndpointTests
         {
             response.Status.Should().Be(HttpStatusCode.Accepted, "WebSocket won: the dropped HTTP copy is answered 202");
             var frame = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-            frame.Type.Should().Be(WebSocketMessageType.Binary, "WebSocket won: its reply rides the socket");
+            frame.Type.Should().Be(WebSocketMessageType.Text, "WebSocket won: its reply rides the socket");
             await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         }
         host.LeakingLogLines().Should().BeEmpty();
@@ -302,7 +302,7 @@ public sealed class ReplayProtectionEndpointTests
         await ReturnRouteTestHost.SendAsync(socket, packed);
 
         var push = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-        push.Type.Should().Be(WebSocketMessageType.Binary);
+        push.Type.Should().Be(WebSocketMessageType.Text);
         (await host.Alice.Client.UnpackAsync(push.Text)).Message.Thid.Should().Be(inbound.Id);
         await AssertNothingWrittenThenCloseAsync(socket);
 

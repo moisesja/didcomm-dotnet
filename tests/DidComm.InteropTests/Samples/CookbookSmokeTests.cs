@@ -40,7 +40,7 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("Section O — Routing via a mediator (automatic forward wrapping)");
         transcript.Should().Contain("Section P — Send over a transport (HTTP chosen by endpoint scheme)");
         transcript.Should().Contain("Section Q — Receive over HTTP (ASP.NET Core MapDidCommEndpoint)");
-        transcript.Should().Contain("Section R — Receive over WebSocket (MapDidCommWebSocket + binary frames)");
+        transcript.Should().Contain("Section R — Receive over WebSocket (MapDidCommWebSocket + text frames)");
         transcript.Should().Contain("Section S — Trust Ping (liveness)");
         transcript.Should().Contain("Section T — Discover Features (initiator: ask, then await the answer)");
         transcript.Should().Contain("Section U — Report Problem (taxonomy, interpolation, escalation, cascade)");

@@ -396,8 +396,8 @@ public sealed class ReturnRouteAdversarialTests
             await ReturnRouteTestHost.SendAsync(socket, await host.AuthcryptAsync(host.Alice, message));
             var first = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
             var second = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-            first.Type.Should().Be(WebSocketMessageType.Binary, "message {0}: the connection survives the logging fault", i);
-            second.Type.Should().Be(WebSocketMessageType.Binary);
+            first.Type.Should().Be(WebSocketMessageType.Text, "message {0}: the connection survives the logging fault", i);
+            second.Type.Should().Be(WebSocketMessageType.Text);
             (await host.Alice.Client.UnpackAsync(first.Text)).Message.Thid.Should().Be(message.Id);
             (await host.Alice.Client.UnpackAsync(second.Text)).Message.Thid.Should().Be(message.Id);
         }

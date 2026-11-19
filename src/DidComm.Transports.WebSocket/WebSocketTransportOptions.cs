@@ -45,8 +45,8 @@ public sealed class WebSocketTransportOptions
 
     /// <summary>
     /// Opt in to minimal STOMP 1.2 framing over the WebSocket (FR-TRN-12). OFF by default —
-    /// the transport then sends each packed envelope as a bare binary WebSocket message
-    /// (FR-TRN-09), unchanged. When enabled, each new connection performs a
+    /// the transport then sends each packed envelope as a bare text WebSocket message
+    /// (FR-TRN-09), unchanged. STOMP frames are binary WebSocket messages. When enabled, each new connection performs a
     /// <c>CONNECT</c>(accept-version:1.2, heart-beat:0,0) → <c>CONNECTED</c> handshake, every
     /// envelope rides in one <c>SEND</c> frame with <c>destination</c>,
     /// <c>content-type: application/didcomm-encrypted+json</c> and <c>content-length</c>

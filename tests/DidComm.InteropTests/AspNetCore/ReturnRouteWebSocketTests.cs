@@ -50,8 +50,8 @@ public sealed class ReturnRouteWebSocketTests
 
         var first = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
         var second = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-        first.Type.Should().Be(WebSocketMessageType.Binary, "each push is one binary WebSocket message (FR-TRN-09)");
-        second.Type.Should().Be(WebSocketMessageType.Binary);
+        first.Type.Should().Be(WebSocketMessageType.Text, "each push is one text WebSocket message (FR-TRN-09, #98)");
+        second.Type.Should().Be(WebSocketMessageType.Text);
 
         var firstUnpacked = await host.Alice.Client.UnpackAsync(first.Text);
         var secondUnpacked = await host.Alice.Client.UnpackAsync(second.Text);
@@ -466,7 +466,7 @@ public sealed class ReturnRouteWebSocketTests
         var authcrypted = shape is EnvelopeShape.Authcrypt or EnvelopeShape.AnoncryptOfAuthcrypt or EnvelopeShape.AuthcryptOfSigned;
         var expectSession = authcrypted && header == "all";
         var first = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-        first.Type.Should().Be(WebSocketMessageType.Binary);
+        first.Type.Should().Be(WebSocketMessageType.Text);
         (await host.Alice.Client.UnpackAsync(first.Text)).Message.Thid
             .Should().Be(expectSession ? inbound.Id : sentinel.Id, "{0} + {1} {2} a session", shape, header, expectSession ? "opens" : "opens no");
 
@@ -500,7 +500,7 @@ public sealed class ReturnRouteWebSocketTests
         async Task ExpectPushForAsync(RecordedInbound inbound)
         {
             var frame = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-            frame.Type.Should().Be(WebSocketMessageType.Binary);
+            frame.Type.Should().Be(WebSocketMessageType.Text);
             (await host.Alice.Client.UnpackAsync(frame.Text)).Message.Thid.Should().Be(inbound.Message.Id, "no earlier push leaked onto the socket");
         }
 
@@ -868,7 +868,7 @@ public sealed class ReturnRouteWebSocketTests
         var probe = PushTo(host, host.Alice.Did, "probe", "p");
         (await survivor.TrySendAsync(probe, default)).Should().BeTrue();
         var frame = await survivorReceive;
-        frame.Type.Should().Be(WebSocketMessageType.Binary, "the surviving socket is still serving");
+        frame.Type.Should().Be(WebSocketMessageType.Text, "the surviving socket is still serving");
         (await host.Alice.Client.UnpackAsync(frame.Text)).Message.Id.Should().Be(probe.Id);
 
         (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 1, Timeout)).Should().BeTrue("the evicted connection ended");
@@ -948,7 +948,7 @@ public sealed class ReturnRouteWebSocketTests
         var open = host.Stamped(host.RecordingMessage(host.Alice, "open").WithReturnRoute(ReturnRouteMode.All)).Build();
         await ReturnRouteTestHost.SendAsync(socket, await host.AuthcryptAsync(host.Alice, open));
         for (var i = 0; i < 3; i++)
-            (await ReturnRouteTestHost.ReceiveAsync(socket, Timeout)).Type.Should().Be(WebSocketMessageType.Binary, "the pusher is live");
+            (await ReturnRouteTestHost.ReceiveAsync(socket, Timeout)).Type.Should().Be(WebSocketMessageType.Text, "the pusher is live");
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing under load", default).WaitAsync(Timeout);
         socket.Dispose();
