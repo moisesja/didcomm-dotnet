@@ -388,44 +388,68 @@ public sealed class CoordinateMediationAdversarialTests
 
     // ---- 1/6. which message types reach the registry ----------------------------------------------
 
-    public static TheoryData<string> TypeSpellings => new()
+    // The second column: whether the spelling changes the registry. Both versions' handlers share
+    // the store (#99), so a 2.x spelling the 2.0 handler applies is a state change too.
+    public static TheoryData<string, bool> TypeSpellings => new()
     {
-        "https://didcomm.org/coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3.1/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3.999999999/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3.0.0/recipient-update",
-        "https://didcomm.org/coordinate-mediation/03.0/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3.00/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3/recipient-update",
-        "https://didcomm.org/coordinate-mediation/2.0/keylist-update",
-        "https://didcomm.org/coordinate-mediation/4.0/recipient-update",
-        "https://DIDCOMM.org/coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org/Coordinate-Mediation/3.0/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3.0/Recipient-Update",
-        "HTTPS://didcomm.org/coordinate-mediation/3.0/recipient-update",
-        "http://didcomm.org/coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org/coordinate-mediation/3.0/recipient-update/",
-        "https://didcomm.org/coordinate-mediation/3.0/recipient-update?x=1",
-        "https://didcomm.org/coordinate-mediation/3.0/recipient-update#x",
-        "https://didcomm.org//coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org/x/../coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org/x/coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org:443/coordinate-mediation/3.0/recipient-update",
-        "https://user@didcomm.org/coordinate-mediation/3.0/recipient-update",
-        "https://didcomm.org.evil.example/coordinate-mediation/3.0/recipient-update",
-        "https://evil.example/coordinate-mediation/3.0/recipient-update",
-        "https://evil.example/https://didcomm.org/coordinate-mediation/3.0/recipient-update",
-        "did:sov:BzCbsNYhMrjHiqZDTUASHg;spec/coordinate-mediation/3.0/recipient-update",
-        "coordinate-mediation/3.0/recipient-update",
+        { "https://didcomm.org/coordinate-mediation/3.0/recipient-update", true },
+        { "https://didcomm.org/coordinate-mediation/3.1/recipient-update", true },
+        { "https://didcomm.org/coordinate-mediation/3.999999999/recipient-update", true },
+        { "https://didcomm.org/coordinate-mediation/3.0.0/recipient-update", false },
+        { "https://didcomm.org/coordinate-mediation/03.0/recipient-update", false },
+        { "https://didcomm.org/coordinate-mediation/3.00/recipient-update", false },
+        { "https://didcomm.org/coordinate-mediation/3/recipient-update", false },
+        { "https://didcomm.org/coordinate-mediation/2.0/keylist-update", true },
+        { "https://didcomm.org/coordinate-mediation/4.0/recipient-update", false },
+        { "https://DIDCOMM.org/coordinate-mediation/3.0/recipient-update", true },
+        { "https://didcomm.org/Coordinate-Mediation/3.0/recipient-update", true },
+        { "https://didcomm.org/coordinate-mediation/3.0/Recipient-Update", true },
+        { "HTTPS://didcomm.org/coordinate-mediation/3.0/recipient-update", true },
+        { "http://didcomm.org/coordinate-mediation/3.0/recipient-update", false },
+        { "https://didcomm.org/coordinate-mediation/3.0/recipient-update/", false },
+        { "https://didcomm.org/coordinate-mediation/3.0/recipient-update?x=1", false },
+        { "https://didcomm.org/coordinate-mediation/3.0/recipient-update#x", false },
+        { "https://didcomm.org//coordinate-mediation/3.0/recipient-update", false },
+        { "https://didcomm.org/x/../coordinate-mediation/3.0/recipient-update", false },
+        { "https://didcomm.org/x/coordinate-mediation/3.0/recipient-update", false },
+        { "https://didcomm.org:443/coordinate-mediation/3.0/recipient-update", false },
+        { "https://user@didcomm.org/coordinate-mediation/3.0/recipient-update", false },
+        { "https://didcomm.org.evil.example/coordinate-mediation/3.0/recipient-update", false },
+        { "https://evil.example/coordinate-mediation/3.0/recipient-update", false },
+        { "https://evil.example/https://didcomm.org/coordinate-mediation/3.0/recipient-update", false },
+        { "did:sov:BzCbsNYhMrjHiqZDTUASHg;spec/coordinate-mediation/3.0/recipient-update", false },
+        { "coordinate-mediation/3.0/recipient-update", false },
+        // Coordinate Mediation 2.x (#99): the same rules, through the 2.0 handler.
+        { "https://didcomm.org/coordinate-mediation/2.1/keylist-update", true },
+        { "https://didcomm.org/coordinate-mediation/2.999999999/keylist-update", true },
+        { "https://didcomm.org/coordinate_mediation/2.0/keylist_update", true },
+        { "https://DIDCOMM.org/Coordinate-Mediation/2.0/Keylist-Update", true },
+        { "HTTPS://didcomm.org/coordinate-mediation/2.0/keylist-update", true },
+        { "https://didcomm.org/coordinate-mediation/2.0.0/keylist-update", false },
+        { "https://didcomm.org/coordinate-mediation/02.0/keylist-update", false },
+        { "https://didcomm.org/coordinate-mediation/2/keylist-update", false },
+        { "https://didcomm.org/coordinate-mediation/1.0/keylist-update", false },
+        { "http://didcomm.org/coordinate-mediation/2.0/keylist-update", false },
+        { "https://didcomm.org/coordinate-mediation/2.0/keylist-update/", false },
+        { "https://didcomm.org/coordinate-mediation/2.0/keylist-update?x=1", false },
+        { "https://didcomm.org/x/coordinate-mediation/2.0/keylist-update", false },
+        { "https://didcomm.org.evil.example/coordinate-mediation/2.0/keylist-update", false },
+        { "https://evil.example/coordinate-mediation/2.0/keylist-update", false },
+        { "did:sov:BzCbsNYhMrjHiqZDTUASHg;spec/coordinate-mediation/2.0/keylist-update", false },
+        // A name of one version under the other's PIURI, and 2.0 answer names: never applied.
+        { "https://didcomm.org/coordinate-mediation/2.0/recipient-update", false },
+        { "https://didcomm.org/coordinate-mediation/3.0/keylist-update", false },
+        { "https://didcomm.org/coordinate-mediation/2.0/keylist", false },
+        { "https://didcomm.org/coordinate-mediation/2.0/keylist-update-response", false },
     };
 
     [Theory]
     [MemberData(nameof(TypeSpellings))]
-    public async Task A_type_the_handler_acts_on_is_the_didcomm_org_protocol_and_is_in_replay_scope(string type)
+    public async Task A_type_the_handler_acts_on_is_the_didcomm_org_protocol_and_is_in_replay_scope(string type, bool changesState)
     {
-        // The endpoint's replay guard (InboundReplayGate, FR-RR-08) and the handler decide
-        // separately whether a type is Coordinate Mediation. A spelling the handler applies but the
-        // gate calls out of scope would let a captured recipient-update be replayed.
+        // The endpoint's replay guard (InboundReplayGate, FR-RR-08) and the handlers decide
+        // separately whether a type is Coordinate Mediation. A spelling a handler applies but the
+        // gate calls out of scope would let a captured recipient-update (or keylist-update) be replayed.
         await using var fx = HandlerFixture.Create();
         var mediator = await fx.NewPeerAsync();
         var bob = await fx.NewPeerAsync();
@@ -438,15 +462,35 @@ public sealed class CoordinateMediationAdversarialTests
         if (unpackError is not null)
         {
             unpackError.Should().BeAssignableTo<DidCommException>();
+            changesState.Should().BeFalse("a spelling refused at unpack cannot change anything");
             return;
         }
         var dispatchError = await Record.ExceptionAsync(async () => await fx.Host.Dispatcher.DispatchAsync(received!, fx.Host.Client, fx.Host.Options, CancellationToken.None));
         (dispatchError is null or MalformedMessageException).Should().BeTrue();
 
-        if ((await fx.RegisteredAsync(bob.Did)).Count == 0)
+        var changed = (await fx.RegisteredAsync(bob.Did)).Count > 0;
+        changed.Should().Be(changesState);
+        if (!changed)
             return;
-        type.Contains("://didcomm.org/coordinate-mediation/3.", StringComparison.OrdinalIgnoreCase).Should().BeTrue("only the didcomm.org protocol may change the registry");
+
+        // The protocol name is compared ignoring case and -/_ (FR-PROTO-01/02).
+        var normalized = type.ToLowerInvariant().Replace('_', '-');
+        (normalized.StartsWith("https://didcomm.org/coordinate-mediation/2.", StringComparison.Ordinal)
+            || normalized.StartsWith("https://didcomm.org/coordinate-mediation/3.", StringComparison.Ordinal))
+            .Should().BeTrue("only the didcomm.org protocol, major 2 or 3, may change the registry");
+        MediatorServiceProtocols.IsMediatorServiceType(type).Should().BeTrue("a type that changes mediator state is a mediator-service type (FR-RR-08)");
         InboundReplayGate.IsInScope(received!, ReturnRouteHeader.Read(received!.Message)).Should().BeTrue("a message that changes mediator state must pass the replay guard");
+    }
+
+    [Fact]
+    public void The_spellings_that_change_state_cover_both_majors_and_every_one_of_them_is_a_mediator_service_type()
+    {
+        // The table above, read as a whole: the state-changing set is exactly the didcomm.org
+        // Coordinate Mediation 2.x and 3.x spellings the registry admits, both majors present.
+        var changing = TypeSpellings.Select(row => ((string)row[0], (bool)row[1])).Where(row => row.Item2).Select(row => row.Item1).ToArray();
+
+        changing.Should().Contain(t => t.Contains("/2.", StringComparison.Ordinal)).And.Contain(t => t.Contains("/3.", StringComparison.Ordinal));
+        changing.Should().OnlyContain(t => MediatorServiceProtocols.IsMediatorServiceType(t));
     }
 
     // ---- 7. DI --------------------------------------------------------------------------------------

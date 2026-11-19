@@ -18,8 +18,8 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator` — which also registers the shared `ForwardMetrics` and a cycle-guarded `ForwardHandler` factory — `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions` (including `TrustedProxy`), `HttpResiliencePipelineFactory`, `UseHttpTransport()`; internal `TrustedProxyRoute` (the checked copy of the named proxy and the test that recognises its socket) and `TrustedProxySnapshot` (one reading per container). |
 | `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound` and `TrustedProxy`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
-| `DidComm.Mediator.Client` | The recipient side of the mediator service and the message helpers both roles share (Phase 7; split out of `DidComm.Mediator` by #113 before either was published, namespaces unchanged). A wallet references this package only. **The recipient-side client** (#96), namespace `DidComm.Mediator.Client` — public: `MediationClient`, `PickupClient`, `MediatorClientOptions`, `CoordinateMediationVersion`, `PickupBatch`, `PickupItem`, `RecipientQueryResult`, `MediationProtocolException`, `MediationNotSupportedException`, `AddMediatorClient()` (`MediatorClientBuilderExtensions`) and `DidCommServiceBuilder.ForMediation(grant)` (`MediationServiceBuilderExtensions`, a C# 14 static extension member); internal, namespace `DidComm.Mediator.Client.Internal`: `MediatorClientChannel` (the correlator: pending map, matcher, routes, live-stream registry) behind `IMediatorExchange`, with `PendingRequest`, `MediatorAnswerTypes`, `MediatorExchangeSpec`, `MediatorRoute`, `GuardedDeadline`, `OwnDeadline`, `MediatorBusyException`, `MediatorProblemCode`, `SingleLoggerFactory`; `FeatureNegotiation`, `NegotiatedVersionCache` and `CoordinateMediationWire` (Coordinate Mediation); `DeliveryReader`, `LiveRegistration`, `LiveDeliveryStream` and `PickupLog` (pickup); `DeliveredMessageUnpacker`, `DeliveredOutcome` and `DuplicateFilter`. **Shared by both roles** — namespace `DidComm.Mediator.Coordination`, public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `MediationGrant`, `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums; internal: `MediationBodies` (body codecs), `BareDid`, and the 2.0 client codec `CoordinateMediation20`. Namespace `DidComm.Mediator.Pickup`, public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`; internal: `PickupBodies` (body and attachment codecs, with `ReadAttachmentsEach` / `DeliveredAttachment` for the client). Namespace `DidComm.Mediator.Internal`, internal: `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). Its package depends on `DidComm.Core`, `DidComm.Extensions.DependencyInjection`, `Microsoft.Extensions.DependencyInjection.Abstractions` and `Microsoft.Extensions.Logging.Abstractions` only (`Microsoft.Extensions.Options`, which `AddMediatorClient()` uses, arrives through Core and the DI package) — never `DidComm.Mediator`, `Microsoft.Extensions.Hosting.Abstractions` or ASP.NET Core (pinned by `ClientPackageReferencesTests`). Calls Core internals (`IInboundCorrelator`, `InboundMessageSnapshot`, `DidCommClient.UnpackDeliveredAsync`, …) through `InternalsVisibleTo`, and grants its own to `DidComm.Mediator` and the two test projects, so it ships in lockstep with both. |
-| `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0**, namespace `DidComm.Mediator.Coordination` — public: `IMediationStore` / `InMemoryMediationStore`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler`, `AddCoordinateMediation()`; internal: `MediationCoordinator` (the role's logic without the wire format), `MediationForwardRecipientRegistry`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). Internal, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule). The builders, parsers and wire records the roles speak, and the recipient-side client, come from `DidComm.Mediator.Client` (row above); the roles use its internals `MediatorLog`, `BareDid`, `PickupBodies.MaxIdLength` and the bounded parser overloads through `InternalsVisibleTo`. References `DidComm.Mediator.Client`, `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. A mediator references this package and gets the client with it. |
+| `DidComm.Mediator.Client` | The recipient side of the mediator service and the message helpers both roles share (Phase 7; split out of `DidComm.Mediator` by #113 before either was published, namespaces unchanged). A wallet references this package only. **The recipient-side client** (#96), namespace `DidComm.Mediator.Client` — public: `MediationClient`, `PickupClient`, `MediatorClientOptions`, `CoordinateMediationVersion`, `PickupBatch`, `PickupItem`, `RecipientQueryResult`, `MediationProtocolException`, `MediationNotSupportedException`, `AddMediatorClient()` (`MediatorClientBuilderExtensions`) and `DidCommServiceBuilder.ForMediation(grant)` (`MediationServiceBuilderExtensions`, a C# 14 static extension member); internal, namespace `DidComm.Mediator.Client.Internal`: `MediatorClientChannel` (the correlator: pending map, matcher, routes, live-stream registry) behind `IMediatorExchange`, with `PendingRequest`, `MediatorAnswerTypes`, `MediatorExchangeSpec`, `MediatorRoute`, `GuardedDeadline`, `OwnDeadline`, `MediatorBusyException`, `MediatorProblemCode`, `SingleLoggerFactory`; `FeatureNegotiation`, `NegotiatedVersionCache` and `CoordinateMediationWire` (Coordinate Mediation); `DeliveryReader`, `LiveRegistration`, `LiveDeliveryStream` and `PickupLog` (pickup); `DeliveredMessageUnpacker`, `DeliveredOutcome` and `DuplicateFilter`. **Shared by both roles** — namespace `DidComm.Mediator.Coordination`, public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `MediationGrant`, `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums; internal: `MediationBodies` (body codecs), `BareDid`, and the 2.0 codec `CoordinateMediation20` (both directions since #99: the client's requests and the mediator's answers). Namespace `DidComm.Mediator.Pickup`, public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`; internal: `PickupBodies` (body and attachment codecs, with `ReadAttachmentsEach` / `DeliveredAttachment` for the client). Namespace `DidComm.Mediator.Internal`, internal: `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). Its package depends on `DidComm.Core`, `DidComm.Extensions.DependencyInjection`, `Microsoft.Extensions.DependencyInjection.Abstractions` and `Microsoft.Extensions.Logging.Abstractions` only (`Microsoft.Extensions.Options`, which `AddMediatorClient()` uses, arrives through Core and the DI package) — never `DidComm.Mediator`, `Microsoft.Extensions.Hosting.Abstractions` or ASP.NET Core (pinned by `ClientPackageReferencesTests`). Calls Core internals (`IInboundCorrelator`, `InboundMessageSnapshot`, `DidCommClient.UnpackDeliveredAsync`, …) through `InternalsVisibleTo`, and grants its own to `DidComm.Mediator` and the two test projects, so it ships in lockstep with both. |
+| `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0 and 2.0**, namespace `DidComm.Mediator.Coordination` — public: `IMediationStore` / `InMemoryMediationStore`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler` (3.0), `CoordinateMediation20Handler` (2.0, #99), `AddCoordinateMediation()`; internal: `MediationCoordinator` (the role's logic without the wire format, one instance per handler), `MediationForwardRecipientRegistry`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). Internal, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule). The builders, parsers and wire records the roles speak, and the recipient-side client, come from `DidComm.Mediator.Client` (row above); the roles use its internals `MediatorLog`, `BareDid`, `PickupBodies.MaxIdLength` and the bounded parser overloads through `InternalsVisibleTo`. References `DidComm.Mediator.Client`, `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. A mediator references this package and gets the client with it. |
 | `DidComm.Mediator.AspNetCore` | The mediator's endpoints: `MediatorEndpointRouteBuilderExtensions` (`MapDidCommMediator`, `InvitationOobId`); internal `CompositeEndpointConventionBuilder` and `MediatorInvitationStore`. References `DidComm.Mediator` and `DidComm.AspNetCore`, and calls internals of both, so they ship in lockstep. |
 
 **Lockstep is enforced at pack time (#97).** A package that calls another's internals depends on it
@@ -66,8 +66,14 @@ that every grantee references its granter directly (pack pins direct references 
   invitation, conventions — and the acceptance suites `MediatorEndToEndTests`,
   `MediatorAcknowledgementTests`, `MediatorExpiryDelayAndAgeTests`,
   `MediatorRewrapAndRoutingKeysTests`, `MediatorStartupTests`, `MediatorTwoHopTests`,
-  `MediatorUnknownNextTests` and `MediatorLiveIsolationTests` (a live recipient whose key resolution
-  stalls holds up no other recipient's storage or pickup); the QA permutations are the `*QaTests.cs`
+  `MediatorUnknownNextTests`, `MediatorLiveIsolationTests` (a live recipient whose key resolution
+  stalls holds up no other recipient's storage or pickup) and `MediatorCoordinateMediation20Tests`
+  (#99: the real client pinned to 2.0 and negotiating against `AddMediator()`, one tenant across
+  versions, replay admission of 2.0 requests, `EnableV2 = false`; with its QA suites
+  `MediatorCoordinateMediation20Qa1Tests` and `Client/MediatorClientCoordinateMediation20Qa2Tests`,
+  and `Client/MediatorClientThirdPartyDiscoveryTests`, the client's question answered as the
+  Identus and Blocktrust mediators answer it);
+  the QA permutations are the `*QaTests.cs`
   files with `QaMediatorSupport`, and the adversarial passes the `*AdvTests.cs` files
   (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
   `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`, `MediatorLivePushAdv4Tests`); the
@@ -107,7 +113,10 @@ that every grantee references its granter directly (pack pins direct references 
   same-socket / STOMP scoping of the mediator WebSocket endpoint against the public
   `MapDidCommWebSocket`.
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
-  builders, store, handler, DI, adversarial; `Pickup`: wire format, store (its arrival sequence:
+  builders, store, handler, DI, adversarial, and for 2.0 (#99) `CoordinateMediation20HandlerTests`,
+  `CoordinateMediationCrossVersionTests`, `CoordinateMediation20InteropVectorTests` (request
+  shapes from the Identus and Blocktrust source), `CoordinateMediation20DiTests`,
+  `CoordinateMediation20Qa1Tests` and `CoordinateMediation20Adv99Tests`); `Pickup`: wire format, store (its arrival sequence:
   `MessagePickupStoreSequenceTests`, `MessagePickupStoreSequenceAdv6Tests`), sizing, handler
   decision table, identities, faults, logs, live delivery, DI, random ids, the mailbox age limit,
   revoke-and-purge; `Pipeline`: `MediatorOptions`, `AddMediator()` DI and conflicts,
@@ -1087,8 +1096,7 @@ Documented limits:
   message arrives and again after storing it, and a live push checks once more before it sends
   (#95; "Message Pickup 3.0" and "Mediator service" below). `MessagePickupQueue.RevokeAndPurgeAsync`
   revokes and drops what is queued in one call.
-- **Not here yet:** the 2.0 handler (#99, which reuses `MediationBodies`, `MediationCoordinator`
-  and the 2.0 type constants and codecs of `CoordinateMediation20`). The recipient role is
+- **Elsewhere:** the 2.0 handler is the next section (#99). The recipient role is
   `MediationClient` (#96, "Recipient-side client" below), and the start-up check of routing DIDs
   against their DID documents (FR-MED-07) is `AddMediator()`'s (#95, below).
 
@@ -1105,6 +1113,66 @@ Documented limits:
   `CoordinateMediation` builder and parser round-tripped. FF.1: an allow-list host;
   FF.2: `AddCoordinateMediation()` before `AddRoutingMediator()`, and the handler built without a
   container (`CoordinateMediationHandler`, every `CoordinateMediationOptions` property).
+
+### Coordinate Mediation 2.0, mediator role (#99)
+
+The same role in the version the Identus and Blocktrust mediators and their wallets speak
+(FR-MED-10; https://didcomm.org/coordinate-mediation/2.0/). `CoordinateMediation20Handler` is the
+3.0 handler's twin: the same pipeline (peer → parse → act → reply) over its own
+`MediationCoordinator` instance, built from the **same** `IMediationStore`, `IMediationPolicy` and
+`IMediatorIdentity` singletons. A peer is therefore one tenant in both versions: one grant, one set
+of registered DIDs, listed and removed through either version, and the store's ownership rule
+(D5) holds across them. Each handler has its own coordinator, so each logs under its own category
+and keeps its own rate-limited counters (at most twice the log lines, never shared state).
+
+What differs is only the wire layer, through the internal codec `CoordinateMediation20`
+(`DidComm.Mediator.Client`), which now works in both directions:
+
+| 3.0 | 2.0 |
+|---|---|
+| `mediate-grant` `routing_did`: array of every routing DID | a single string: the grant's **first** routing DID |
+| `recipient-update` → `recipient-update-response` | `keylist-update` → `keylist-update-response` |
+| `recipient-query` → `recipient` with `dids` | `keylist-query` → `keylist` with `keys` |
+
+- **The grant.** `MediationCoordinator.RequestAsync` returns the stored grant's routing DIDs (the
+  configured list when the grant was made, or the decrypting DID when none is configured); the 2.0
+  reply takes element 0 inside the reply's fault boundary, so a host store that returns a grant
+  without routing DIDs is "not answered", logged by exception type. A repeated request returns the
+  stored grant unchanged, so reordering the configuration later does not change what a peer was
+  given. The order rule (first = primary) is documented on `CoordinateMediationOptions.RoutingDids`
+  (FR-MED-07); forwards to every routing DID keep being relayed.
+- **Replies** always carry the canonical type strings (a 2.0 mediator in the field matches types by
+  exact string), `thid` per DD-11, and, for `keylist`, `pagination`. No problem reports: the
+  protocol defines none.
+- **Wiring.** `AddCoordinateMediation()` registers the 2.0 handler (a `TryAdd` factory, then
+  `AddProtocol<CoordinateMediation20Handler>()`) when `CoordinateMediationOptions.EnableV2` is `true`
+  in that call's settings (the default), read from the same scratch instance as
+  `UseAsForwardRecipientRegistry`. Both handlers' factories then run
+  `VerifyVersion2Registration`: the `EnableV2` in effect (`IOptions`) must agree with whether a 2.0
+  handler was registered, or building either handler throws `InvalidOperationException` naming the
+  property (a `Configure<>`, configuration binding, or two calls that disagree). Under `AddMediator()`
+  this happens at start-up, when the hosted service resolves the dispatcher. The registry keys the
+  two handlers by PIURI and resolves a type by major version, so 2.x and 3.x never cross; Discover
+  Features discloses both with `roles: ["mediator"]` (the order of disclosures is not fixed).
+- **Replay.** 2.0 is one of `MediatorServiceProtocols`, so the endpoints admit its requests under
+  FR-RR-08 before dispatch, and FR-RR-09 stamps the replies. A hand-built receive path must admit
+  them too (cookbook FF.2 (b)).
+- **Interop notes (from the real implementations' source, recorded in the #99 plan).** The Identus
+  wallet SDK sends `keylist-update` without `return_route`: the update is applied and the reply has
+  no channel over HTTP. Blocktrust's wallet sends no `created_time`, so replay admission refuses its
+  requests unless the host sets `Replay.RequireCreatedTime = false`. Both real 2.0 mediators write a
+  string `routing_did`, ignore `paginate` and send no `pagination`.
+- **The client side of the same release (owner decisions 2026-11-18).** The recipient client's
+  version question changed so that it works with the Identus mediator's Discover Features answer
+  (two version-prefix queries, and a `roles` list naming no role of the protocol says nothing; see
+  "Recipient-side client" below). The client still cannot enroll with a Blocktrust mediator: its
+  first answer comes from a new DID with a `from_prior` that has no `iat` and no `from`, and its
+  `keylist-update-response` has no `result`; Core and the client refuse those on purpose (the
+  library stays spec-strict), and #98 targets Identus.
+
+Demonstrated by: cookbook CC (a wallet pinned to 2.0 enrolls with the same mediator, gets the first
+routing DID and lists what it registered in 3.0), FF.2 (a) (`EnableV2`), FF.2 (b) (the handler built
+by hand over the 3.0 handler's store, policy and identity, answering a 2.0 `mediate-request`).
 
 ## Message Pickup 3.0, mediator role (Phase 7, #94)
 
@@ -2080,23 +2148,31 @@ and its acknowledgement, every request of a live stream.
   `NegotiatedVersionCache` answers: keyed by the mediator's DID subject, at most 64 entries, each
   used for 1 hour on the monotonic clock; when full, expired entries are dropped first and a full
   cache of live entries takes no new one; an entry stamped ahead of the clock counts as expired; the
-  clock is read inside the lock. Otherwise a Discover Features query
-  (`feature-type: protocol`, `match: https://didcomm.org/coordinate-mediation/*`) goes through the
-  exchange on the same route. `FeatureNegotiation` reads the `disclose`: at most the first 256
-  disclosures; `feature-type` `protocol`; an `id` of at most 256 printable ASCII characters that
-  parses as a PIURI; `roles` absent or `null` counts, and present it must name `mediator` (ignoring
-  case, among its first 32 entries); Coordinate Mediation 3.x wins over 2.x, matched by major.
-  Neither → `MediationNotSupportedException`, whose text carries only a count and whose
-  `DisclosedProtocols` lists up to 32 distinct clean protocol ids among those inspected, in any
-  role (D-11). A query that is not answered → `TimeoutException`: the client does not guess. Pin the
-  version for a mediator without Discover Features (Identus, for example).
+  clock is read inside the lock. Otherwise a Discover Features `queries` message with two queries
+  (`feature-type: protocol`, `match: https://didcomm.org/coordinate-mediation/3.*`, then
+  `…/2.*`; since #99, owner decision 2026-11-18) goes through the exchange on the same route. Each
+  match reads the same way as the spec's trailing wildcard, a whole-id regular expression (the
+  Identus mediator) and a prefix with `.*` removed (the Blocktrust mediator); the single
+  `coordinate-mediation/*` the client asked before matched nothing under the last two.
+  `FeatureNegotiation` reads the `disclose`: at most the first 256 disclosures; `feature-type`
+  `protocol`; an `id` of at most 256 printable ASCII characters that parses as a PIURI; `roles`
+  absent or `null` counts; a `roles` array (its first 32 entries, ignoring case) counts when it
+  names `mediator`, does not when it names `recipient` without `mediator`, and counts when it names
+  neither (empty, or only names such as Identus's `responder`: it says nothing about this
+  protocol's roles); a `roles` value that is not an array does not count. Coordinate Mediation 3.x
+  wins over 2.x, matched by major. Neither → `MediationNotSupportedException`, whose text carries
+  only a count and whose `DisclosedProtocols` lists up to 32 distinct clean protocol ids among those
+  inspected, in any role (D-11). A query that is not answered → `TimeoutException`: the client does
+  not guess. Pin the version for a mediator without Discover Features.
 - **Coordinate Mediation 2.0** (`Coordination/CoordinateMediation20`, internal): the 2.0 type URIs,
   builders for `mediate-request`, `keylist-update` and `keylist-query`, and strict parsers for
   `mediate-grant` (a string `routing_did`; an array is accepted too), `mediate-deny`,
   `keylist-update-response` and `keylist` (the list is `keys`). It writes and reads through
-  `MediationBodies`, since the entries are the same as in 3.0. Its remarks list what the 2.0
-  mediator role (#99) reuses and what it adds. The seven didcomm.org 2.0 examples, normalized, are
-  `fixtures/coordinate-mediation-2.0` in `DidComm.Mediator.Tests`.
+  `MediationBodies`, since the entries are the same as in 3.0. Since #99 it also holds the
+  mediator direction (the request parsers and the four answer builders) for
+  `CoordinateMediation20Handler` ("Coordinate Mediation 2.0, mediator role" above); it stays
+  internal. The seven didcomm.org 2.0 examples, normalized, are `fixtures/coordinate-mediation-2.0`
+  in `DidComm.Mediator.Tests`.
 - **Answer checks** (`CoordinateMediationWire`). Each refusal is a `MediationProtocolException`
   naming our request id and the rule; a shape error carries the parser's `MalformedMessageException`
   inside.
@@ -2630,9 +2706,8 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 
 ## Phase 7: still to build
 
-Open under epic #88: the live interop and adversarial gate (#98); Coordinate Mediation 2.0
-compatibility for the mediator role (#99; the recipient-side client already speaks 2.0, #96);
-Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; the push to a
+Open under epic #88: the live interop and adversarial gate (#98); Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; the push to a
 host-registered recipient endpoint, deferred from #95 (#110); and the recipient client's slow-sender
 hardening (#111). Sample 11, cookbook CC–FF and the sample 04 refresh landed with #97, which
-retired every Phase 7 entry of the DX allowlists.
+retired every Phase 7 entry of the DX allowlists. Coordinate Mediation 2.0 for the mediator role
+landed with #99.

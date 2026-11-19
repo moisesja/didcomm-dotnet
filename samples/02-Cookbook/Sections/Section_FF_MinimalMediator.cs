@@ -40,7 +40,7 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// Last, the replay protection itself and the clock rule it implies. The mediator references the <c>DidComm.Mediator</c> and
 /// <c>DidComm.Mediator.AspNetCore</c> packages; a wallet references <c>DidComm.Mediator.Client</c>
 /// and a transport.
-/// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-PICK-01..10, FR-ROUTE-09..11, FR-RR-08).
+/// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-MED-10, FR-PICK-01..10, FR-ROUTE-09..11, FR-RR-08).
 /// </summary>
 public static class Section_FF_MinimalMediator
 {
@@ -193,6 +193,7 @@ public static class Section_FF_MinimalMediator
                     o.MaxPageSize = 50;                  // one recipient-query page
                     o.MaxUpdatesPerMessage = 64;         // entries in one recipient-update
                     o.UseAsForwardRecipientRegistry = true; // the default; false when you bring your own directory
+                    o.EnableV2 = true;                   // the default: also answer wallets that speak 2.0 (Identus, Blocktrust)
                 })
                 // ...then the routing mediator, which hands each relayed forward to your sink...
                 .AddRoutingMediator()
@@ -300,17 +301,21 @@ public static class Section_FF_MinimalMediator
             Options.Create(pickupOptions), Options.Create(didCommOptions),
             NullLogger<MessagePickupQueue>.Instance);
         var pickupHandler = new MessagePickupHandler(queue, NullLogger<MessagePickupHandler>.Instance);
+        var policy = new DefaultMediationPolicy();                         // grants everyone: fine in-process, not in public
+        var identity = new MediatorIdentity(new List<string> { mediator.Did }); // the first routing DID is the primary one
         var mediationHandler = new CoordinateMediationHandler(
-            mediationStore,
-            new DefaultMediationPolicy(),                       // grants everyone: fine in-process, not in public
-            new MediatorIdentity(new List<string> { mediator.Did }),
-            Options.Create(mediationOptions),
-            NullLogger<CoordinateMediationHandler>.Instance);
+            mediationStore, policy, identity, Options.Create(mediationOptions), NullLogger<CoordinateMediationHandler>.Instance);
+        // The same role for wallets that speak the older version, 2.0. Built over the SAME store,
+        // policy and identity, so both versions serve one set of grants and registrations.
+        var mediation20Handler = new CoordinateMediation20Handler(
+            mediationStore, policy, identity, Options.Create(mediationOptions), NullLogger<CoordinateMediation20Handler>.Instance);
         narrator.Value("CoordinateMediationHandler.Roles", string.Join(", ", mediationHandler.Roles));
+        narrator.Value("CoordinateMediation20Handler", $"{mediation20Handler.ProtocolUri}, roles: {string.Join(", ", mediation20Handler.Roles)}");
         narrator.Value("MessagePickupHandler.Roles", string.Join(", ", pickupHandler.Roles));
 
         var registry = new ProtocolHandlerRegistry();
         registry.Register(mediationHandler);
+        registry.Register(mediation20Handler);
         registry.Register(pickupHandler);
         await using var dispatcher = new ProtocolDispatcher(registry, new InMemoryThreadStateStore());
 
@@ -370,6 +375,22 @@ public static class Section_FF_MinimalMediator
         var granted = CoordinateMediation.TryParseGrant(grantMessage, out var routingDids);
         narrator.Value("[bob] mediate-request answered with a grant", granted);
         narrator.Value("[bob] grant names the mediator", granted && routingDids![0] == mediator.Did);
+
+        // A wallet that speaks 2.0 asks the same mediator. The 2.0 messages are not public API (the
+        // library's client and mediator speak them for you), so this one is built by hand: the
+        // protocol's type, an empty body, stamped and authcrypted like any other request.
+        var request20 = new MessageBuilder()
+            .WithType(MediatorServiceProtocols.CoordinateMediation20 + "/mediate-request")
+            .WithFrom(ctx.Bob.Did)
+            .WithTo(mediator.Did)
+            .WithBody(new JsonObject())
+            .Build();
+        var grant20 = await AskAsync(await PackFromBobAsync(request20));
+        // In 2.0, routing_did is a single string: the grant's first routing DID.
+        var routingDid20 = grant20.Body?["routing_did"] is JsonValue value && value.TryGetValue<string>(out var single) ? single : null;
+        narrator.Value("[bob] 2.0 mediate-request answered with", grant20.Type);
+        narrator.Value("[bob] 2.0 grant: routing_did is one string, the mediator's DID", routingDid20 == mediator.Did);
+        narrator.Value("[mediator] grants held (Bob's one grant, both versions)", mediationStore.GrantCount);
 
         var statusRequest = await PackFromBobAsync(MessagePickup.CreateStatusRequest(ctx.Bob.Did, mediator.Did));
         var statusMessage = await AskAsync(statusRequest);

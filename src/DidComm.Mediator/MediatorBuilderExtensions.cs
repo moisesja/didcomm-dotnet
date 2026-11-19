@@ -35,8 +35,10 @@ public static class MediatorBuilderExtensions
         static sp => sp.GetRequiredService<MediatorForwardSink>();
 
     /// <summary>
-    /// Make this agent a complete mediator (FR-MED-07, FR-PICK-09/10): Coordinate Mediation 3.0,
-    /// the routing mediator that relays forwards, Message Pickup 3.0, the built-in protocols (Trust
+    /// Make this agent a complete mediator (FR-MED-07, FR-PICK-09/10): Coordinate Mediation 3.0
+    /// and 2.0 (one set of grants; 2.0 is what the Identus and Blocktrust wallets speak, and
+    /// <see cref="CoordinateMediationOptions.EnableV2"/> turns it off), the routing mediator that
+    /// relays forwards, Message Pickup 3.0, the built-in protocols (Trust
     /// Ping answers health checks; Discover Features discloses the mediator roles), and the delivery
     /// pipeline that puts each relayed message in the recipient's queue (pushing it live when the
     /// recipient has a live session). Map its endpoints with
@@ -47,8 +49,9 @@ public static class MediatorBuilderExtensions
     /// <strong>Routing DIDs.</strong> The mediator needs at least one routing DID, set in
     /// <see cref="MediatorOptions.CoordinateMediation"/> or supplied by an
     /// <see cref="IMediatorIdentity"/> registered before this call (<see cref="MediatorIdentity"/>
-    /// is a ready-made one). The first is the primary one: grants list it first and the mediator's
-    /// out-of-band invitation is issued from it. Each routing DID's document must have a
+    /// is a ready-made one). Order matters: the first is the primary one. A 3.0 grant lists it first,
+    /// a 2.0 grant carries only it, and the mediator's out-of-band invitation is issued from it; to
+    /// move to a new DID, list it first and keep the old one with its keys. Each routing DID's document must have a
     /// <c>DIDCommMessaging</c> service whose first entry names a plain transport URI
     /// (<c>http</c>, <c>https</c>, <c>ws</c> or <c>wss</c>, never a DID), and at least one
     /// <c>keyAgreement</c> key whose private key the registered secrets resolver holds; the

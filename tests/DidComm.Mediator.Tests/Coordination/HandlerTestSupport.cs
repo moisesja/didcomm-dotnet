@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Facade;
 using DidComm.Mediator.Coordination;
@@ -54,6 +55,11 @@ internal sealed class HandlerLogSink
 
     /// <summary>The lines the Coordinate Mediation handler itself wrote, in order.</summary>
     public IReadOnlyList<HandlerLogEntry> Handler => Entries.Where(e => e.Category == HandlerCategory).ToArray();
+
+    public static readonly string Handler20Category = typeof(CoordinateMediation20Handler).FullName!;
+
+    /// <summary>The lines the Coordinate Mediation 2.0 handler wrote, in order.</summary>
+    public IReadOnlyList<HandlerLogEntry> Handler20 => Entries.Where(e => e.Category == Handler20Category).ToArray();
 }
 
 /// <summary>An <c>ILogger&lt;T&gt;</c> that records everything, at every level, under the category of <typeparamref name="T"/>.</summary>
@@ -290,6 +296,12 @@ internal sealed class HandlerFixture : IAsyncDisposable
     /// <summary>The real in-memory store: the container's, or the one inside the fake.</summary>
     public InMemoryMediationStore Memory => FakeStore?.Inner ?? (InMemoryMediationStore)Host.Store;
 
+    /// <summary>
+    /// A dispatcher the test built over hand-built handlers. <c>null</c> (the default) means the
+    /// container's. The host still packs and unpacks: it holds every party's keys.
+    /// </summary>
+    public ProtocolDispatcher? Dispatcher { get; set; }
+
     public static HandlerFixture Create(
         Action<CoordinateMediationOptions>? configure = null,
         bool fakeStore = false,
@@ -356,7 +368,7 @@ internal sealed class HandlerFixture : IAsyncDisposable
     public async Task<DispatchOutcome> SendAsync(Message message, string mediatorDid, HandlerEnvelope shape = HandlerEnvelope.Authcrypt, string? sender = null, CancellationToken ct = default)
     {
         var received = await ReceiveAsync(message, mediatorDid, shape, sender);
-        return await Host.Dispatcher.DispatchAsync(received, Host.Client, Host.Options, ct);
+        return await (Dispatcher ?? Host.Dispatcher).DispatchAsync(received, Host.Client, Host.Options, ct);
     }
 
     /// <summary>Enrol <paramref name="peerDid"/> and return the grant's routing DIDs.</summary>
@@ -386,6 +398,41 @@ internal sealed class HandlerFixture : IAsyncDisposable
         return (dids, pagination);
     }
 
+    /// <summary>
+    /// Enrol <paramref name="peerDid"/> through Coordinate Mediation 2.0 and return the grant's
+    /// <c>routing_did</c>, which must be a JSON string (the 2.0 shape).
+    /// </summary>
+    public async Task<string> Enrol20Async(string peerDid, string mediatorDid)
+    {
+        var outcome = await SendAsync(CoordinateMediation20.CreateMediateRequest(peerDid, mediatorDid), mediatorDid);
+        if (outcome.Reply is not { } reply
+            || !CoordinateMediation20.TryParseGrant(reply, out _)
+            || reply.Body?["routing_did"] is not JsonValue routingDid
+            || routingDid.GetValueKind() != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"2.0 enrolment did not produce a mediate-grant with a string routing_did ({outcome.Result}).");
+        }
+        return routingDid.GetValue<string>();
+    }
+
+    /// <summary>Send a <c>keylist-update</c> as <paramref name="peerDid"/> and return the parsed results.</summary>
+    public async Task<IReadOnlyList<RecipientUpdateResult>> Update20Async(string peerDid, string mediatorDid, params RecipientUpdate[] updates)
+    {
+        var outcome = await SendAsync(CoordinateMediation20.CreateKeylistUpdate(peerDid, mediatorDid, updates), mediatorDid);
+        if (outcome.Reply is null || !CoordinateMediation20.TryParseKeylistUpdateResponse(outcome.Reply, out var updated))
+            throw new InvalidOperationException($"The update did not produce a keylist-update-response ({outcome.Result}).");
+        return updated;
+    }
+
+    /// <summary>Send a <c>keylist-query</c> as <paramref name="peerDid"/> and return the parsed page.</summary>
+    public async Task<(IReadOnlyList<string> Keys, RecipientPagination? Pagination)> Query20Async(string peerDid, string mediatorDid, RecipientQueryPaging? paginate = null)
+    {
+        var outcome = await SendAsync(CoordinateMediation20.CreateKeylistQuery(peerDid, mediatorDid, paginate), mediatorDid);
+        if (outcome.Reply is null || !CoordinateMediation20.TryParseKeylist(outcome.Reply, out var keys, out var pagination))
+            throw new InvalidOperationException($"The query did not produce a keylist message ({outcome.Result}).");
+        return (keys, pagination);
+    }
+
     /// <summary>Every DID the peer has registered, straight from the store.</summary>
     public async Task<IReadOnlyList<string>> RegisteredAsync(string peerDid)
         => (await Memory.ListRecipientsAsync(peerDid, 0, int.MaxValue, CancellationToken.None)).Dids;
@@ -397,6 +444,8 @@ internal sealed class HandlerFixture : IAsyncDisposable
 internal static class HandlerMessages
 {
     public const string Piuri = CoordinateMediation.ProtocolUri;
+
+    public const string Piuri20 = CoordinateMediation20.ProtocolUri;
 
     /// <summary>A message of any type with any body (or none), as a hostile or sloppy peer would send it.</summary>
     public static Message Raw(string type, string from, string mediator, JsonObject? body, string? id = null, string? thid = null)

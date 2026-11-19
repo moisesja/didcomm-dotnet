@@ -150,7 +150,7 @@ package per transport and integration. The badge at the top of this file shows t
 | `DidComm.Transports.Http`, `DidComm.Transports.WebSocket` | Sender-side transport bindings |
 | `DidComm.Adapters.NetDid` | Optional bridge from a NetDid key store to `ISecretsResolver` |
 | `DidComm.Mediator.Client` | The recipient side of a mediator, for a wallet or other edge agent: `MediationClient` (enrol, register DIDs), `PickupClient` (fetch, acknowledge, live delivery), `AddMediatorClient()`, and the Coordinate Mediation / Message Pickup message builders and parsers. No mediator roles, no hosting, no ASP.NET Core |
-| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline; brings `DidComm.Mediator.Client` with it |
+| `DidComm.Mediator` | Mediator service: Coordinate Mediation 3.0 and 2.0 and Message Pickup 3.0 (mediator role), store and policy contracts, and `AddMediator()` with the delivery pipeline; brings `DidComm.Mediator.Client` with it |
 | `DidComm.Mediator.AspNetCore` | `MapDidCommMediator`: the mediator's HTTP, WebSocket and out-of-band invitation endpoints |
 
 ```bash
@@ -200,7 +200,7 @@ repo publishes.
 | `DidComm.Transports.WebSocket` | WebSocket sender (FR-TRN-09..11): one binary message per packed envelope, per-endpoint pool, Polly exponential reconnect, lifecycle events; direct connections only, unless you name a proxy in `TrustedProxy` (FR-TRN-13) |
 | `DidComm.AspNetCore` | Minimal-API extensions: `MapDidCommEndpoint` (HTTP receive, FR-TRN-07), `MapDidCommWebSocket` (WS receive with frame reassembly, FR-TRN-09/10), `MapDidCommOobEndpoint` (short-form OOB retrieval); `MaxReceiveBytes` ⇒ 413 / 1009 (FR-API-06) |
 | `DidComm.Mediator.Client` | Recipient role (PRD §8b/§8c): `MediationClient` (FR-MED-09, Coordinate Mediation 3.0 with 2.0 negotiated or pinned), `PickupClient` (FR-PICK-11, Message Pickup 3.0 fetch / acknowledge / live), `AddMediatorClient()`, `DidCommServiceBuilder.ForMediation(grant)`; the message builders, parsers and records both roles share (`CoordinateMediation`, `MessagePickup`, `MediationGrant`, `RecipientUpdate`, `PickupStatus`, `DeliveredMessage`). Depends on `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and the Microsoft.Extensions DI and logging abstractions only: no `DidComm.Mediator`, no hosting, no ASP.NET Core |
-| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation 3.0 mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler`, `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10); the complete mediator — `AddMediator()`, `MediatorOptions`, the forward → live / queue pipeline, start-up checks of the routing DIDs (FR-MED-07, FR-PICK-09/10). References `DidComm.Mediator.Client` |
+| `DidComm.Mediator` | Mediator service (PRD §8b/§8c): Coordinate Mediation mediator role — `AddCoordinateMediation()`, `CoordinateMediationHandler` (3.0), `CoordinateMediation20Handler` (2.0, on by default), `IMediationStore` / `InMemoryMediationStore`, `IMediationPolicy` (FR-MED-01..06, -08, -10); Message Pickup 3.0 mediator role — `AddMessagePickup()`, `MessagePickupHandler`, `MessagePickupQueue`, `IMessageStore` / `InMemoryMessageStore` (FR-PICK-01..10); the complete mediator — `AddMediator()`, `MediatorOptions`, the forward → live / queue pipeline, start-up checks of the routing DIDs (FR-MED-07, FR-PICK-09/10). References `DidComm.Mediator.Client` |
 | `DidComm.Mediator.AspNetCore` | `MapDidCommMediator(pattern)`: the mediator's HTTP endpoint, its WebSocket endpoint with same-socket replies, and its out-of-band invitation endpoint |
 | `DidComm.TestSupport` *(not shipped)* | `InMemorySecretsResolver` for tests and samples — deliberately kept out of `DidComm.Core` per DD-02 |
 
@@ -348,7 +348,7 @@ didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PR
 | **4** | Routing & mediation (Forward protocol, mediator-as-DID-endpoint, rewrapping) | ✅ Complete |
 | **5** | Transports (HTTPS + ASP.NET Core receive, WebSocket) | ✅ Complete |
 | **6** | Protocols, cross-message concerns, live interop, samples, release | ✅ Complete |
-| **7** | Mediator service: return route, Coordinate Mediation, Message Pickup, `AddMediator()`, the recipient client, sample 11 | 🚧 In progress — the external-mediator interop gate, CM 2.0 (mediator role) and Pickup 4.0 remain ([#88](https://github.com/moisesja/didcomm-dotnet/issues/88)) |
+| **7** | Mediator service: return route, Coordinate Mediation, Message Pickup, `AddMediator()`, the recipient client, sample 11 | 🚧 In progress — the external-mediator interop gate and Pickup 4.0 remain ([#88](https://github.com/moisesja/didcomm-dotnet/issues/88)) |
 
 Phase 6, in detail:
 
@@ -376,7 +376,7 @@ didcomm-dotnet/
 │   ├── DidComm.Transports.WebSocket/              # WebSocket sender with pool + reconnect (FR-TRN-09..11)
 │   ├── DidComm.AspNetCore/                        # MapDidCommEndpoint / MapDidCommWebSocket / MapDidCommOobEndpoint
 │   ├── DidComm.Mediator.Client/                   # recipient side: MediationClient, PickupClient, AddMediatorClient() + the message builders/parsers both roles share
-│   ├── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 + Message Pickup 3.0 (mediator role), store + policy contracts, AddMediator() + delivery pipeline
+│   ├── DidComm.Mediator/                          # mediator service: Coordinate Mediation 3.0 + 2.0, Message Pickup 3.0 (mediator role), store + policy contracts, AddMediator() + delivery pipeline
 │   └── DidComm.Mediator.AspNetCore/               # MapDidCommMediator: the mediator's HTTP, WebSocket and invitation endpoints
 ├── tests/
 │   ├── DidComm.Core.Tests/                        # unit tests

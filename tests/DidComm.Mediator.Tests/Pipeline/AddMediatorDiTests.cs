@@ -70,6 +70,7 @@ public sealed class AddMediatorDiTests
 
         var handlers = sp.GetServices<IProtocolHandler>().ToArray();
         handlers.Should().ContainSingle(h => h is CoordinateMediationHandler);
+        handlers.Should().ContainSingle(h => h is CoordinateMediation20Handler, "Coordinate Mediation 2.0 is on by default (#99)");
         handlers.Should().ContainSingle(h => h is MessagePickupHandler);
         handlers.Should().ContainSingle(h => h is ForwardHandler);
         handlers.Should().ContainSingle(h => h is TrustPingHandler, "Trust Ping answers health checks");
@@ -393,9 +394,40 @@ public sealed class AddMediatorDiTests
 
         outcome.Result.Should().Be(DispatchResult.ReplyProduced);
         var disclosures = DiscoverFeaturesApi.ReadDisclosures(outcome.Reply!);
-        foreach (var piuri in new[] { ForwardConstants.ProtocolIdentifier, "https://didcomm.org/coordinate-mediation/3.0", "https://didcomm.org/messagepickup/3.0" })
+        foreach (var piuri in new[]
+                 {
+                     ForwardConstants.ProtocolIdentifier, "https://didcomm.org/coordinate-mediation/3.0",
+                     "https://didcomm.org/coordinate-mediation/2.0", "https://didcomm.org/messagepickup/3.0",
+                 })
             disclosures.Should().ContainSingle(d => d.Id == piuri).Which.Roles.Should().Equal("mediator");
         disclosures.Should().ContainSingle(d => d.Id == TrustPing.ProtocolUri);
+    }
+
+    [Fact]
+    public async Task With_EnableV2_false_coordinate_mediation_2_0_is_neither_registered_nor_disclosed()
+    {
+        await using var peers = new PipelinePeers();
+        var mediator = await peers.NewAsync();
+        var alice = await peers.NewAsync();
+        await using var sp = Build(b => b.AddMediator(o =>
+        {
+            o.CoordinateMediation.RoutingDids.Add(mediator.Did);
+            o.CoordinateMediation.EnableV2 = false;
+        }), secrets: peers.Secrets);
+        var client = sp.GetRequiredService<DidCommClient>();
+        var options = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
+
+        sp.GetServices<IProtocolHandler>().Should().NotContain(h => h is CoordinateMediation20Handler);
+        sp.GetService<CoordinateMediation20Handler>().Should().BeNull();
+
+        var query = DiscoverFeaturesApi.CreateQuery(alice.Did, mediator.Did,
+            new FeatureQuery { FeatureType = DiscoverFeaturesApi.FeatureTypeProtocol, Match = "*" });
+        var packed = await client.PackEncryptedAsync(query, new PackEncryptedOptions(Recipients: new[] { mediator.Did }, From: alice.Did));
+        var outcome = await sp.GetRequiredService<ProtocolDispatcher>().DispatchAsync(await client.UnpackAsync(packed.Message), client, options);
+
+        var disclosed = DiscoverFeaturesApi.ReadDisclosures(outcome.Reply!).Select(d => d.Id).ToArray();
+        disclosed.Should().Contain(new[] { ForwardConstants.ProtocolIdentifier, "https://didcomm.org/coordinate-mediation/3.0", "https://didcomm.org/messagepickup/3.0" });
+        disclosed.Should().NotContain(id => id.Contains("coordinate-mediation/2.", StringComparison.Ordinal));
     }
 
     // ---- the graph -----------------------------------------------------------------------------

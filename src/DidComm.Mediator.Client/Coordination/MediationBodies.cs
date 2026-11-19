@@ -51,6 +51,10 @@ internal static class MediationBodies
         return new JsonObject { [RoutingDid] = array };
     }
 
+    /// <summary>The 2.0 shape of <c>routing_did</c>: a single DID string.</summary>
+    public static JsonObject WriteRoutingDid(string routingDid)
+        => new() { [RoutingDid] = routingDid };
+
     public static JsonObject WriteUpdates(IReadOnlyList<RecipientUpdate> updates)
     {
         var array = new JsonArray();

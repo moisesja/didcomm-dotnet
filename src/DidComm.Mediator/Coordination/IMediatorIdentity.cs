@@ -20,7 +20,11 @@ namespace DidComm.Mediator.Coordination;
 /// </remarks>
 public interface IMediatorIdentity
 {
-    /// <summary>The routing DIDs, in the order the grant lists them. May be empty.</summary>
+    /// <summary>
+    /// The routing DIDs, in the order the grant lists them, the primary one first. May be empty. A
+    /// Coordinate Mediation 2.0 grant carries only the first (see
+    /// <see cref="CoordinateMediationOptions.RoutingDids"/> for the order rule).
+    /// </summary>
     IReadOnlyList<string> RoutingDids { get; }
 }
 

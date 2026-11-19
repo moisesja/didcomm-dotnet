@@ -34,12 +34,12 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// <c>DidComm.Mediator.AspNetCore</c> (here <see cref="CookbookMediatorHost"/>; section FF builds one).
 /// </para>
 /// <para>
-/// The section also shows what happens when the peer is not a mediator at all, how to recognise
-/// the "no address, hold my messages" queue URI, and every Coordinate Mediation message as it
-/// travels — for anyone writing a handler of their own, a shim for an older protocol version, or a
-/// fake mediator in tests.
+/// The section also shows a wallet that speaks the older protocol version, 2.0, enrolling with the
+/// same mediator; what happens when the peer is not a mediator at all; how to recognise the
+/// "no address, hold my messages" queue URI; and every Coordinate Mediation message as it travels —
+/// for anyone writing a handler of their own or a fake mediator in tests.
 /// </para>
-/// <para>Maps to PRD §14.2 task <strong>CC</strong> (FR-MED-01..09, FR-RR-06).</para>
+/// <para>Maps to PRD §14.2 task <strong>CC</strong> (FR-MED-01..10, FR-RR-06).</para>
 /// </remarks>
 public static class Section_CC_EnrollWithAMediator
 {
@@ -124,9 +124,52 @@ public static class Section_CC_EnrollWithAMediator
         if (page.Pagination is { } position)
             ctx.Narrator.Value("Page", $"count={position.Count}, offset={position.Offset}, remaining={position.Remaining}");
 
+        await OlderWalletAsync(ctx, mediator, walletSecrets, bobPublic.Did);
         await WrongPeerAsync(ctx, mediation);
         await QueueUriAsync(ctx, mediator);
         await MessagesOnTheWireAsync(ctx);
+    }
+
+    /// <summary>
+    /// A wallet built for an older mediator speaks Coordinate Mediation 2.0. The same mediator
+    /// answers it from the same registrations: Bob, asking again in 2.0, gets the grant he already
+    /// holds and sees the DID he registered in 3.0.
+    /// </summary>
+    private static async Task OlderWalletAsync(
+        CookbookContext ctx, CookbookMediatorHost mediator, InMemorySecretsResolver walletSecrets, string bobPublicDid)
+    {
+        ctx.Narrator.Step("An older wallet speaks Coordinate Mediation 2.0: Bob asks the same mediator again, pinned to 2.0.");
+
+        // A second wallet container with Bob's keys, pinned to 2.0: the client asks no version
+        // question first and sends 2.0 messages only (keylist-update, keylist-query).
+        var services = new ServiceCollection();
+        services.AddDidComm(b => b
+            .UseNetDidResolver()
+            .UseSecretsResolver(walletSecrets)
+            .UseHttpTransport(o => o.AllowedSchemes = ["http", "https"]) // loopback demo; production stays https
+            .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"))
+            .AddMediatorClient(o => o.CoordinateMediationVersion = CoordinateMediationVersion.V2));
+        await using var olderWallet = services.BuildServiceProvider();
+        var mediation20 = olderWallet.GetRequiredService<MediationClient>();
+
+        // Bob already holds a grant, so asking again (in either version) returns that grant.
+        var grant = await mediation20.RequestMediationAsync(mediator.Did, ctx.Bob.Did)
+            ?? throw new InvalidOperationException("The mediator refused to mediate (mediate-deny).");
+        ctx.Narrator.Value("[bob, 2.0] routing DIDs in the grant", grant.RoutingDids.Count);
+        ctx.Narrator.Value("[bob, 2.0] it is the mediator's first routing DID", grant.RoutingDids[0] == mediator.Did);
+
+        // The DIDs Bob registered in 3.0 are his in 2.0 too: one set of registrations.
+        var page = await mediation20.QueryRecipientsAsync(mediator.Did, ctx.Bob.Did);
+        ctx.Narrator.Value("[bob, 2.0] keylist shows the DID he registered in 3.0", page.Dids.Contains(bobPublicDid));
+
+        ctx.Narrator.Note("An older wallet, such as those built for the Identus or Blocktrust mediators, speaks version 2.0; the mediator serves both versions from one set of registrations.");
+        ctx.Narrator.Note("A 2.0 grant has room for one routing DID: the mediator's first. So a mediator lists its primary routing DID first; to move to a new one, it lists the new DID first and keeps the old one, with its keys, so mail sent to either keeps arriving.");
+        ctx.Narrator.Note("Talking to an Identus mediator needs no pin: the client asks its version question in a form that mediator understands, and picks 2.0 by itself. Pin a version only for a mediator that does not answer the question at all.");
+
+        // Two directions, two answers. Blocktrust's wallets can use this library's mediator; this
+        // library's client cannot use a Blocktrust mediator.
+        ctx.Narrator.Note("This client cannot enroll with a Blocktrust mediator, pinned or not. On first contact that mediator answers from a new identity, announced with a rotation token that lacks its issue time (iat) and arrives without a sender (from); and its answers to key-list updates leave out each entry's result. The DIDComm spec requires the issue time and the sender on a rotation, and the 2.0 protocol requires the result, so the library refuses those answers on purpose. Reported to the Blocktrust project: https://github.com/bsandmann/blocktrust.Mediator/issues/5");
+        ctx.Narrator.Note("The other way round works: a wallet built for Blocktrust can enroll with this library's mediator if the mediator accepts requests without a timestamp (MediatorOptions.Replay.RequireCreatedTime = false), because that wallet sends none. The cost: a captured copy of such a request can be played again once the replay window (5 minutes by default) has passed.");
     }
 
     /// <summary>
@@ -225,8 +268,8 @@ public static class Section_CC_EnrollWithAMediator
     /// <summary>
     /// Every Coordinate Mediation message, built with <see cref="CoordinateMediation"/>, sent as
     /// plaintext, and read back with the matching parser. <see cref="MediationClient"/> and the
-    /// mediator do all of this for you; this is for a handler of your own, a shim for Coordinate
-    /// Mediation 2.0, or a fake mediator in tests.
+    /// mediator do all of this for you; this is for a handler of your own or a fake mediator in
+    /// tests. (The 2.0 messages are not public API: the client and the mediator speak 2.0 for you.)
     /// </summary>
     private static async Task MessagesOnTheWireAsync(CookbookContext ctx)
     {
@@ -245,7 +288,7 @@ public static class Section_CC_EnrollWithAMediator
         var grantMessage = await OverTheWireAsync(ctx, CoordinateMediation.CreateGrant(mediatorDid, wallet, [mediatorDid], thid));
         if (CoordinateMediation.TryParseGrant(grantMessage, out var routingDids))
         {
-            // MediationClient returns this record; a shim builds it from the parsed grant.
+            // MediationClient returns this record; code of your own builds it from the parsed grant.
             var parsed = new MediationGrant(PeerDid: wallet, RoutingDids: routingDids);
             ctx.Narrator.Value("mediate-grant → TryParseGrant", $"routing_did [{string.Join(", ", parsed.RoutingDids)}], thid is the request's id: {grantMessage.Thid == request.Id}");
         }

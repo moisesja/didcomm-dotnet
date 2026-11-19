@@ -10,7 +10,9 @@ namespace DidComm.Mediator.Coordination;
 /// <remarks>
 /// The list is checked and copied when the instance is built, so it never changes afterwards;
 /// reading <see cref="RoutingDids"/> is cheap, thread-safe and never throws. The first DID is the
-/// primary one: grants list it first and the mediator's invitation is issued from it.
+/// primary one: 3.0 grants list it first, a 2.0 grant carries only it, and the mediator's
+/// invitation is issued from it. To move to a new DID, list it first and keep the old one with its
+/// keys (see <see cref="CoordinateMediationOptions.RoutingDids"/>).
 /// </remarks>
 public sealed class MediatorIdentity : IMediatorIdentity
 {

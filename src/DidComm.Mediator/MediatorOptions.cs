@@ -101,8 +101,9 @@ public sealed class MediatorOptions
     /// <summary>
     /// Coordinate Mediation settings (FR-MED-*): the routing DIDs handed out in grants (the
     /// mediator needs at least one, here or from a registered <see cref="IMediatorIdentity"/>; the
-    /// first is the primary one), the <c>recipient-query</c> page size, and the bounds of the
-    /// in-memory grant store.
+    /// first is the primary one, and the only one a 2.0 grant carries), whether 2.0 is served too
+    /// (<see cref="CoordinateMediationOptions.EnableV2"/>, on by default), the query page size, and
+    /// the bounds of the in-memory grant store.
     /// </summary>
     public CoordinateMediationOptions CoordinateMediation { get; }
 

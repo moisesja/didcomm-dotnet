@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AwesomeAssertions;
+using DidComm.Exceptions;
 using DidComm.Json;
 using DidComm.Mediator.Coordination;
 using DidComm.Messages;
@@ -10,8 +11,9 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Coordination;
 
 /// <summary>
-/// FR-MED-10 (client side): byte-exact checks of the internal Coordinate Mediation 2.0 codec
-/// against the seven messages of the didcomm.org coordinate-mediation 2.0 page
+/// FR-MED-10, both directions: byte-exact checks of the internal Coordinate Mediation 2.0 codec
+/// (the three requests a recipient builds and the four answers a mediator builds, each parsed by
+/// the side that receives it) against the seven messages of the didcomm.org coordinate-mediation 2.0 page
 /// (https://didcomm.org/coordinate-mediation/2.0/, source
 /// <c>site/content/protocols/coordinate-mediation/2.0/readme.md</c> of
 /// decentralized-identity/didcomm.org, read 2026-11-14).
@@ -37,6 +39,7 @@ public sealed class CoordinateMediation20FixtureTests
     private const string ExampleRouting = "did:peer:0z6Mkfriq1MqLBoPWecGoDLjguo1sB9brj6wT3qZ5BxkKpuP6";
     private const string From = "did:example:from";
     private const string To = "did:example:to";
+    private const string Thread = "thread-of-the-request";
 
     private static readonly string[] Names =
     {
@@ -130,7 +133,7 @@ public sealed class CoordinateMediation20FixtureTests
         CoordinateMediation20.TryParseKeylistUpdateResponse(message, out var updated).Should().BeTrue();
         var expected = new RecipientUpdateResult(ExampleRecipient, RecipientUpdateAction.Add, RecipientUpdateOutcome.Success);
         updated.Should().Equal(expected);
-        // What #99 reuses to build the answer.
+        // The writer the 2.0 answer builder uses (byte-exact below, Keylist_update_response_builder_…).
         MediationBodies.WriteUpdated(updated!).ToJsonString().Should().Be(BodyOf(message));
     }
 
@@ -145,30 +148,125 @@ public sealed class CoordinateMediation20FixtureTests
         MediationBodies.WriteRecipients(CoordinateMediation20.KeysList, keys!, pagination).ToJsonString().Should().Be(BodyOf(message));
     }
 
+    // ---- the mediator direction (#99): the four answers built, the three requests read -------
+
     [Fact]
-    public void Keylist_update_and_keylist_query_fixtures_read_through_the_shared_readers()
+    public void Mediate_grant_builder_emits_the_fixture_byte_exact()
     {
-        // The request bodies #99's mediator-direction parsers will read with the same readers.
-        MediationBodies.ReadUpdates(MediationBodies.ToElement(Read("keylist-update").Body), "keylist-update")
-            .Should().Equal(new RecipientUpdate(ExampleRecipient, RecipientUpdateAction.Add));
-        MediationBodies.ReadPaginate(MediationBodies.ToElement(Read("keylist-query").Body), "keylist-query")
-            .Should().Be(new RecipientQueryPaging(Limit: 30, Offset: 0));
+        var built = CoordinateMediation20.CreateGrant(From, To, ExampleRouting, Thread, new FixedId());
+
+        AsAnswered(built).Should().Be(ReadText("mediate-grant"), "a 2.0 grant names one routing DID, as a JSON string");
+    }
+
+    [Fact]
+    public void Mediate_deny_builder_emits_the_fixture_byte_exact()
+    {
+        var built = CoordinateMediation20.CreateDeny(From, To, Thread, new FixedId());
+
+        AsAnswered(built).Should().Be(ReadText("mediate-deny"));
+    }
+
+    [Fact]
+    public void Keylist_update_response_builder_emits_the_fixture_byte_exact()
+    {
+        var built = CoordinateMediation20.CreateKeylistUpdateResponse(From, To,
+            new[] { new RecipientUpdateResult(ExampleRecipient, RecipientUpdateAction.Add, RecipientUpdateOutcome.Success) }, Thread, new FixedId());
+
+        AsAnswered(built).Should().Be(ReadText("keylist-update-response"));
+    }
+
+    [Fact]
+    public void Keylist_builder_emits_the_fixture_byte_exact()
+    {
+        var built = CoordinateMediation20.CreateKeylist(From, To, new[] { ExampleRecipient },
+            new RecipientPagination(Count: 30, Offset: 30, Remaining: 100), Thread, new FixedId());
+
+        AsAnswered(built).Should().Be(ReadText("keylist"), "2.0 lists the DIDs as `keys`, never the 3.0 `dids`");
+    }
+
+    [Fact]
+    public void Mediate_request_fixture_is_read_by_the_request_parser_and_so_is_the_pages_own_shape_without_a_body()
+    {
+        CoordinateMediation20.TryParseMediateRequest(Read("mediate-request")).Should().BeTrue();
+
+        var pageShape = JsonSerializer.Deserialize<Message>(
+            $$"""{"id":"123456780","type":"{{CoordinateMediation20.MediateRequestType}}","return_route":"all"}""", DidCommJson.Default)!;
+        pageShape.Body.Should().BeNull();
+        CoordinateMediation20.TryParseMediateRequest(pageShape).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Keylist_update_fixture_is_read_by_the_request_parser_with_a_bound_it_just_meets()
+    {
+        CoordinateMediation20.TryParseKeylistUpdate(Read("keylist-update"), maxUpdates: 1, out var updates).Should().BeTrue();
+
+        updates.Should().Equal(new RecipientUpdate(ExampleRecipient, RecipientUpdateAction.Add));
+    }
+
+    [Fact]
+    public void Keylist_query_fixture_is_read_by_the_request_parser()
+    {
+        CoordinateMediation20.TryParseKeylistQuery(Read("keylist-query"), out var paginate).Should().BeTrue();
+
+        paginate.Should().Be(new RecipientQueryPaging(Limit: 30, Offset: 0));
     }
 
     [Theory]
     [MemberData(nameof(Fixtures))]
-    public void At_most_one_answer_parser_claims_each_fixture(string name)
+    public void Each_fixture_is_claimed_by_exactly_one_2_0_parser_its_own(string name)
     {
-        var message = Read(name);
-        var claims = new[]
+        var claims = ClaimsOf2_0Parsers(Read(name));
+
+        claims.Where(c => c.Value).Select(c => c.Key).Should().Equal(new[] { name },
+            "`keylist` must not be mistaken for `keylist-update` or `keylist-update-response`, nor a request for an answer");
+    }
+
+    public static TheoryData<string> ThreeZeroFixtures
+    {
+        get
         {
-            CoordinateMediation20.TryParseGrant(message, out _),
-            CoordinateMediation20.TryParseDeny(message),
-            CoordinateMediation20.TryParseKeylistUpdateResponse(message, out _),
-            CoordinateMediation20.TryParseKeylist(message, out _, out _),
-        };
-        var isAnswer = name is "mediate-grant" or "mediate-deny" or "keylist-update-response" or "keylist";
-        claims.Count(c => c).Should().Be(isAnswer ? 1 : 0, "`keylist` must not be mistaken for `keylist-update-response`, nor a request for an answer");
+            var data = new TheoryData<string>();
+            foreach (var name in new[] { "mediate-request", "mediate-grant", "mediate-deny", "recipient-update", "recipient-update-response", "recipient-query", "recipient" })
+                data.Add(name);
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(ThreeZeroFixtures))]
+    public void No_2_0_parser_claims_a_3_0_fixture(string name)
+    {
+        var message = JsonSerializer.Deserialize<Message>(
+            File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "fixtures", "coordinate-mediation-3.0", name + ".json")), DidCommJson.Default)!;
+        message.Type.Should().Be(CoordinateMediation.ProtocolUri + "/" + name, "the fixture is the 3.0 message");
+
+        ClaimsOf2_0Parsers(message).Where(c => c.Value).Select(c => c.Key).Should().BeEmpty(
+            "a 3.0 request reaches the 3.0 handler only: the versions differ in their major, which message types must agree on");
+    }
+
+    // Every 2.0 parser's answer to "is this yours?": true when it returned true, or when it
+    // recognised the type and refused the body (which is still a claim).
+    private static Dictionary<string, bool> ClaimsOf2_0Parsers(Message message) => new()
+    {
+        ["mediate-request"] = Claims(() => CoordinateMediation20.TryParseMediateRequest(message)),
+        ["mediate-grant"] = Claims(() => CoordinateMediation20.TryParseGrant(message, out _)),
+        ["mediate-deny"] = Claims(() => CoordinateMediation20.TryParseDeny(message)),
+        ["keylist-update"] = Claims(() => CoordinateMediation20.TryParseKeylistUpdate(message, int.MaxValue, out _)),
+        ["keylist-update-response"] = Claims(() => CoordinateMediation20.TryParseKeylistUpdateResponse(message, out _)),
+        ["keylist-query"] = Claims(() => CoordinateMediation20.TryParseKeylistQuery(message, out _)),
+        ["keylist"] = Claims(() => CoordinateMediation20.TryParseKeylist(message, out _, out _)),
+    };
+
+    private static bool Claims(Func<bool> parse)
+    {
+        try
+        {
+            return parse();
+        }
+        catch (MalformedMessageException)
+        {
+            return true;
+        }
     }
 
     [Theory]
@@ -198,6 +296,22 @@ public sealed class CoordinateMediation20FixtureTests
         built.From = null;
         built.To = null;
         ReturnRouteHeaderWriter.Write(built, ReturnRouteMode.All, thread: null);
+        return JsonSerializer.Serialize(built, DidCommJson.Default);
+    }
+
+    // What the mediator puts on the wire for an answer: the builder's message with the request's
+    // thread id and no return_route; `from`, `to` and `thid` are checked, then left out to compare
+    // with the page's examples, which carry none of them.
+    private static string AsAnswered(Message built)
+    {
+        built.From.Should().Be(From);
+        built.To.Should().Equal(To);
+        built.Thid.Should().Be(Thread, "an answer is threaded on the request (FR-MED-04, DD-11)");
+        built.CreatedTime.Should().BeNull("the builder never stamps; the send does (FR-RR-09)");
+        built.AdditionalHeaders.Should().BeNull("an answer asks for no return route");
+        built.From = null;
+        built.To = null;
+        built.Thid = null;
         return JsonSerializer.Serialize(built, DidCommJson.Default);
     }
 
