@@ -338,19 +338,31 @@ Inbound forward:
    **The wait is bounded (#98, D3-F3).** A 202 that cannot be committed (a client that pipelines
    requests and never reads, so the kernel buffers and Kestrel's output pipe fill up) used to keep
    its reservation for as long as the connection lived, and a self-enrolled stranger could hold
-   the whole budget so that every other tenant's forward was `Dropped-Saturated`. Now the endpoint
-   arms a deadline when the handler that ran is the `ForwardHandler`:
+   the whole budget so that every other tenant's forward was `Dropped-Saturated`. Now, when the
+   handler that ran is the `ForwardHandler`, the endpoint returns the 202 through
+   `HttpResponseAcknowledgement.WithDeadline`: its result writes the 202 (`Content-Length: 0`, as
+   the server would), starts it (the `OnStarting` callbacks) and completes it itself
+   (`Response.CompleteAsync()`), and once the server has taken the whole response it hands it over
+   — the deadline ends and the acknowledgement completes there, not when completion callbacks run.
+   Kestrel runs those only after the response was sent, one at a time and the last registered
+   first, so a middleware that registers slow `OnCompleted` cleanup after the endpoint used to delay
+   the acknowledgement's own callback past the deadline, which then cancelled it and aborted a
+   connection whose client already held its 202: silent loss (PR #130 review, P1). A client closing
+   its connection while such callbacks ran cancelled it too, through `RequestAborted`. Neither can
+   happen now: after the hand-over the abort registration is disposed. The deadline is
    `ForwardResponseDeadline`, 10 s from the handler's return, on the container's `TimeProvider`
-   (`TimeProvider.System` when none is registered). An honest client reads the empty 202 at once,
+   (`TimeProvider.System` when none is registered). An honest client takes the empty 202 at once,
    and Kestrel's own default data rate (240 B/s after a 5 s grace) would end a lone stalled 202
-   write in about 5.4 s. At the deadline `HttpResponseAcknowledgement` cancels the acknowledgement
-   first — the forward is `Dropped-Unacknowledged` and its reservation released, whatever the
-   server then does — and aborts the request (`HttpContext.Abort()`), so the sender never receives
-   that 202. The commit and the deadline are decided under one lock and the abort is made under
-   it, so a 202 committed first is relayed once and never followed by an abort (after
-   `OnCompleted` the server may reuse the context). The timer is disposed by the commit, a client
-   abort or its own firing. The deadline is armed for every forward the handler judged, registered
-   `next` or not, so the abort tells a sender nothing about registration (D7). Each abort is
+   write in about 5.4 s. If the write has not finished at the deadline, `HttpResponseAcknowledgement`
+   cancels the acknowledgement first — the forward is `Dropped-Unacknowledged` and its reservation
+   released, whatever the server then does — and aborts the request (`HttpContext.Abort()`), so the
+   sender never receives that 202. The hand-over and the deadline are decided under one lock and
+   the abort is made under it; a write that finished a moment before the deadline fired wins even
+   if its continuation has not handed it over yet (the deadline looks at the completion task). The
+   timer is disposed by the hand-over, a client abort or its own firing. The deadline is armed for
+   every forward the handler judged, registered `next` or not, so the abort tells a sender nothing
+   about registration (D7). Because the 202 is complete when the endpoint returns, middleware that
+   runs after the endpoint can no longer change it. Each abort is
    counted on a rate-limited line of the endpoint (first and every 1000th at Warning, no wire
    value). Within the 10 s a sender that does not read can still hold the shared bounds; it has to
    stall a connection again for every 10 s it wants to keep a reservation (Documented limits of the
@@ -627,10 +639,12 @@ registry events and does not count against the bounds):
   is never sent.
 - Response: bytes → `200` with `Content-Type: application/didcomm-encrypted+json`; none → `202`.
   The abort path and the post-handler uniform `400` also close the session and discard the slot.
-  `ProtocolContext.Acknowledged` completes once the `200` or `202` is committed; a forward never
-  has a session, so `ForwardHandler` always waits for a `202`. The public `MapDidCommEndpoint(pattern)`
-  puts no deadline on a `200`; `MapDidCommMediator`'s HTTP endpoint aborts one that is not
-  committed within the pickup lease (Mediator service, below).
+  `ProtocolContext.Acknowledged` completes once the `200` or `202` is committed (from
+  `Response.OnCompleted`, or, for a response under a deadline, when the endpoint's own result has
+  handed it to the transport); a forward never has a session, so `ForwardHandler` always waits for
+  a `202`. The public `MapDidCommEndpoint(pattern)` puts no deadline on a `200`;
+  `MapDidCommMediator`'s HTTP endpoint completes its `200`s itself and aborts one the server has
+  not taken within the pickup lease (Mediator service, below).
 
 WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
 
@@ -1499,12 +1513,12 @@ Documented limits:
 - **A delivery nobody reads (#98, D3-F2).** Over HTTP a delivery is the `200` of the request, and
   a client that never reads it used to hold it for as long as Kestrel's minimum data rate allowed
   (about 68 minutes for 1 MiB at 240 B/s) while the lease ran out every 60 s and served the same
-  records into another held response. `MapDidCommMediator`'s HTTP endpoint now aborts a `200` that
-  is not committed within `LeaseTimeout`, counted from when its dispatch began (before the handler
-  leased anything), on the container's `TimeProvider`: the abort comes no later than the lease runs
-  out, so a client that never reads holds at most one copy of a leased record at a time, and the
-  records are served again afterwards — nothing is lost. A delivery read before its deadline is
-  untouched. The public `MapDidCommEndpoint(pattern)` keeps no such bound (it knows no lease).
+  records into another held response. `MapDidCommMediator`'s HTTP endpoint now completes its `200`
+  itself and aborts one the server has not taken within `LeaseTimeout`, counted from when its
+  dispatch began (before the handler leased anything), on the container's `TimeProvider`: the
+  abort comes no later than the lease runs out, so a client that never reads holds at most one copy
+  of a leased record at a time, and the records are served again afterwards — nothing is lost. A
+  delivery the server has taken is untouched, however long later completion callbacks run. The public `MapDidCommEndpoint(pattern)` keeps no such bound (it knows no lease).
 - **Live deliveries must be acknowledged.** They stay stored and counted until `messages-received`;
   a recipient that never acknowledges fills its quota.
 - **Many-key recipients.** An envelope larger than the allowance means trimmed batches. A message
@@ -1877,7 +1891,7 @@ unless the host calls `PurgeExpiredAsync` itself.
 
 | Route | Endpoint |
 | --- | --- |
-| `POST {pattern}` | `MapDidCommEndpointCore(endpoints, pattern, returnedResponseDeadline: LeaseTimeout)`: the registry-aware `MapDidCommEndpoint(pattern)` — content type and size checks, unpack, `InboundAdmission`, and the 6-argument `DispatchAsync` with a real acknowledgement (the 202 is committed before the processor and the sink run, within the 10 s forward deadline) and the request's session — plus one bound: a returned `200` not committed within `MessagePickupOptions.LeaseTimeout`, counted from when its dispatch began, aborts its request |
+| `POST {pattern}` | `MapDidCommEndpointCore(endpoints, pattern, returnedResponseDeadline: LeaseTimeout)`: the registry-aware `MapDidCommEndpoint(pattern)` — content type and size checks, unpack, `InboundAdmission`, and the 6-argument `DispatchAsync` with a real acknowledgement (the 202 is committed before the processor and the sink run, within the 10 s forward deadline) and the request's session — plus one bound: a returned `200`, completed by the endpoint's result, that the server has not taken within `MessagePickupOptions.LeaseTimeout`, counted from when its dispatch began, aborts its request |
 | `GET {pattern}` | `MapDidCommWebSocketCore(endpoints, pattern, mediatorEndpoint: true)`: the receive loop of the registry-aware `MapDidCommWebSocket(pattern)` (admission on; acknowledgement `Task.CompletedTask`) with `DidCommReceiveOptions.ForMediatorEndpoint()` |
 | `GET {base}/oob` | `MapDidCommOobEndpoint(base + "/oob", MediatorInvitationStore)`, where `base` is `pattern.TrimEnd('/')` (so `"/"` gives `/oob`) |
 
@@ -1957,11 +1971,14 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
 - The mediator pushes only over live sessions; every other message waits for pickup.
 - Call `app.UseWebSockets()` before mapping, or the WebSocket endpoint answers `400`.
 - **Responses a client does not read** are bounded on the HTTP endpoint (#98): a forward's `202`
-  has 10 s from the handler's return to be committed — then the forward is
+  has 10 s from the handler's return to be taken by the server — then the forward is
   `Dropped-Unacknowledged`, its place in the forward queue is released and the request is aborted
   — and a `200` has `Pickup.LeaseTimeout` from its dispatch — then the request is aborted and the
   leased records come back when the lease runs out. Both are timed on the container's
-  `TimeProvider`. An abort ends the HTTP/1.1 connection (and every request pipelined on it) or
+  `TimeProvider` and hold only while the response is being written: the endpoint completes these
+  responses itself, so a slow `Response.OnCompleted` cleanup of other middleware, or a client that
+  closes its connection after reading, changes nothing once the server has the response — and
+  middleware after the endpoint cannot modify them any more. An abort ends the HTTP/1.1 connection (and every request pipelined on it) or
   resets the HTTP/2 stream; each is counted on a rate-limited line (first and every 1000th at
   Warning, no wire value). Everything else about slow or idle clients is Kestrel's, and its
   defaults are generous for a public endpoint: `KestrelServerLimits.MinResponseDataRate` (a slow

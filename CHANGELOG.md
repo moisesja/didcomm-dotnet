@@ -65,7 +65,9 @@ without the routing mediator, and every `MapDidCommWebSocket` endpoint, behave e
   the handler's return gives up its place (the forward is counted `Dropped-Unacknowledged`) and the
   request is aborted, so the sender never receives a 202 for a forward that was not relayed. A 202
   handed over in time is relayed once, as before. The rule is the same whether or not the forward's
-  `next` is registered, so it tells a sender nothing about who is registered.
+  `next` is registered, so it tells a sender nothing about who is registered. Only a write that is
+  still stalled is withdrawn: once the server has taken the 202, nothing that happens later takes
+  it back.
 - **A delivery nobody reads is cut off when its lease ends.** Over HTTP, `MapDidCommMediator`
   answers a `delivery-request` with the messages in the 200 body and leases them for
   `MessagePickupOptions.LeaseTimeout` (60 seconds). A client that never read that answer held it —
@@ -74,14 +76,27 @@ without the routing mediator, and every `MapDidCommWebSocket` endpoint, behave e
   handed over within the lease, counted from when the request was dispatched, is aborted: at most
   one copy of a leased message is held at a time, and the messages are delivered again afterwards,
   so nothing is lost.
-- **How.** One mechanism at the HTTP endpoint (`HttpResponseAcknowledgement`, internal): a one-shot
-  timer on the container's `TimeProvider` (the system clock when none is registered). At the
-  deadline it first cancels the transport acknowledgement — so the forward handler releases what it
-  reserved whatever the server then does — and then calls `HttpContext.Abort()`. A response handed
-  over first always wins: the two are decided under one lock, and nothing is aborted after
-  `Response.OnCompleted` has run. The timer is disposed by whichever ends the request first. Each
-  abort is counted on a rate-limited log line (the first and every 1000th at Warning) that carries
-  no wire value.
+- **How.** One mechanism at the HTTP endpoint (`HttpResponseAcknowledgement`, internal). For these
+  two responses the endpoint writes, starts and completes the response itself
+  (`Response.CompleteAsync()`), and a one-shot timer on the container's `TimeProvider` (the system
+  clock when none is registered) watches that write. If the server has not taken the whole response
+  by the deadline, the timer first cancels the transport acknowledgement — so the forward handler
+  releases what it reserved whatever the server then does — and then calls `HttpContext.Abort()`.
+  Once the server has taken it, the response is handed over: the timer is disposed and the
+  acknowledgement completes, and nothing after that can withdraw it. The deadline only ever
+  withdraws a response whose write is still stalled. Each abort is counted on a rate-limited log
+  line (the first and every 1000th at Warning) that carries no wire value. Because these responses
+  are complete when the endpoint returns, middleware that runs after the endpoint can no longer
+  change them.
+- **Fixed again after review (PR #130, P1).** The first version ended the deadline only when the
+  acknowledgement's own `Response.OnCompleted` callback ran. Kestrel runs completion callbacks after
+  it has sent the response, one at a time and the last registered first, so a middleware that adds
+  slow cleanup in `OnCompleted` after the endpoint ran delays that callback. If the cleanup took
+  longer than the deadline, the deadline cancelled the acknowledgement and aborted the connection
+  although the client already had its 202, and the forward was dropped: a message lost after a
+  successful response. The same happened, without any deadline, when the client closed its
+  connection while such a cleanup still ran. Now the hand-over decides, as described above, so a
+  202 the client holds is always relayed, exactly once.
 - **What is left.** Within the 10 seconds a sender that does not read can still hold the queue's
   bounds, and it can stall new connections again and again; rate limiting per client in front of
   the mediator, and a closed enrolment policy, close that. Kestrel's own limits
@@ -98,9 +113,17 @@ without the routing mediator, and every `MapDidCommWebSocket` endpoint, behave e
   same instant; a 202 no forward handler produced has no deadline; a held delivery is aborted at the
   lease and served again, never two held at once, and one read a tick before the lease is kept. Six
   fail on the code before this fix; the two cases of the guard that nothing else changed pass there.
-  `MediatorResponseDeadlineKestrelProbeTests` (opt-in, `DIDCOMM_ADV98_PROBES=1`) checks on real
-  Kestrel that the abort ends a stalled socket: the reservation went 10.0 s after the stall, and a
-  1 MB delivery with a 5 s lease was cut off at 5.0 s with its 10 messages still queued.
+  `MediatorAcknowledgementDeadlineKestrelTests` runs on real Kestrel with a cleanup callback held
+  after the client has its response: a forward whose 202 the client holds is relayed exactly once
+  when the cleanup outlasts the deadline, with the connection kept open and with the client closing
+  it after reading, and a delivery the client has read is not aborted when the cleanup outlasts the
+  lease. All three fail on the first version. `HttpResponseAcknowledgementTests` pins the orders a
+  server cannot produce on demand: a write that finished wins over a deadline that fires before its
+  continuation ran, a write still pending at the deadline is aborted, and a later abort cannot take
+  back a response that was handed over. `MediatorResponseDeadlineKestrelProbeTests` (opt-in,
+  `DIDCOMM_ADV98_PROBES=1`) checks on real Kestrel that the abort ends a stalled socket: the
+  reservation went 10.0 s after the stall, and a 1 MB delivery with a 5 s lease was cut off at
+  5.0 s with its 10 messages still queued.
 
 ### Fixed — the mediator no longer turns live delivery on over a WebSocket that the recipient has paused (FR-PICK-07, #98, epic #88)
 

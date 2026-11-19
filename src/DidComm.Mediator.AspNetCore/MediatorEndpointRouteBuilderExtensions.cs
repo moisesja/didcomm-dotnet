@@ -76,10 +76,10 @@ public static class MediatorEndpointRouteBuilderExtensions
     /// </para>
     /// <para>
     /// <b>Responses a client does not read.</b> A <c>202</c> the forward handler produced must be
-    /// committed within 10 seconds, as on every registry-aware endpoint, or the forward is dropped
-    /// (<c>Dropped-Unacknowledged</c>) and the request aborted: a sender that does not read its
-    /// responses cannot keep the forward queue's shared bound. A <c>200</c> — the answer to a
-    /// Coordinate Mediation or pickup request — must be committed within
+    /// taken by the server within 10 seconds, as on every registry-aware endpoint, or the forward is
+    /// dropped (<c>Dropped-Unacknowledged</c>) and the request aborted: a sender that does not read
+    /// its responses cannot keep the forward queue's shared bound. A <c>200</c> — the answer to a
+    /// Coordinate Mediation or pickup request — must be taken within
     /// <see cref="MessagePickupOptions.LeaseTimeout"/> of its dispatch, or the request is aborted:
     /// the messages a <c>delivery</c> carries are leased for that long, so a client that never reads
     /// holds at most one copy of them at a time, and once the lease runs out they are delivered
@@ -87,8 +87,12 @@ public static class MediatorEndpointRouteBuilderExtensions
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/> within the lease (1 MiB in 60 s, about
     /// 17 KB/s, at the defaults) therefore cannot finish a full delivery over HTTP: it asks for
     /// smaller batches, or the host raises the lease. Both deadlines are timed on the container's
-    /// <see cref="TimeProvider"/>. An abort ends the HTTP/1.1 connection (every request pipelined on
-    /// it) or resets the HTTP/2 stream. Every other slow or idle client is Kestrel's to bound: keep
+    /// <see cref="TimeProvider"/> and hold only while the response is being written: the endpoint
+    /// completes these responses itself, and once the server has taken one, neither a slow
+    /// <c>Response.OnCompleted</c> callback of other middleware nor the client closing its
+    /// connection afterwards aborts it or takes its acknowledgement back (and middleware that runs
+    /// after the endpoint can no longer change it). An abort ends the HTTP/1.1 connection (every
+    /// request pipelined on it) or resets the HTTP/2 stream. Every other slow or idle client is Kestrel's to bound: keep
     /// <c>KestrelServerLimits.MinResponseDataRate</c>, <c>MinRequestBodyDataRate</c>,
     /// <c>KeepAliveTimeout</c> and the connection limits suited to a public endpoint.
     /// </para>

@@ -7,28 +7,36 @@ namespace DidComm.AspNetCore;
 
 /// <summary>
 /// The transport acknowledgement of one request on the registry-aware HTTP endpoint
-/// (<see cref="ProtocolContext.Acknowledged"/>), and the deadline by which its response must be
-/// committed when the endpoint sets one.
+/// (<see cref="ProtocolContext.Acknowledged"/>), and, when the endpoint sets one, the deadline by
+/// which its response must be handed to the transport.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="Acknowledged"/> completes from <c>Response.OnCompleted</c> (the response has been committed to
-/// the connection) and is cancelled when the request aborts first (<c>RequestAborted</c>), when the
-/// endpoint turns the response into its uniform 400 (<see cref="Cancel"/>), or when the deadline
-/// passes first. The first of these wins; the rest change nothing.
+/// <strong>Without a deadline</strong> (every response but the two below) <see cref="Acknowledged"/>
+/// completes from <c>Response.OnCompleted</c> and is cancelled when the request aborts first
+/// (<c>RequestAborted</c>) or when the endpoint turns the response into its uniform 400
+/// (<see cref="Cancel"/>): the behaviour of every registry-aware endpoint since the acknowledgement
+/// exists.
 /// </para>
 /// <para>
-/// <strong>The deadline.</strong> <see cref="ArmDeadline"/> starts one one-shot timer on the
-/// container's <see cref="TimeProvider"/>. If the response has not been committed when it fires, the
-/// acknowledgement is cancelled first — so a handler waiting on it (the forward handler) drops its
-/// deferred work and releases what it reserved, whatever the server then does with the abort — and
-/// the request is aborted (<see cref="HttpContext.Abort"/>), so the client never receives that
-/// response. Completion wins: the commit and the deadline are decided under one lock and the abort is
-/// made under it, so nothing is aborted once <c>OnCompleted</c> has run (after that the server may
-/// reuse the context for the connection's next request). The timer is disposed by whichever ends the
-/// request first — the commit, a client abort, or its own firing — so none outlives its request by
-/// more than its due time. The callback never throws: a timer callback that throws would end the
-/// process.
+/// <strong>With a deadline</strong> (<see cref="WithDeadline"/>: the forward handler's 202, and the
+/// mediator endpoint's returned 200) the endpoint completes the response itself
+/// (<c>Response.CompleteAsync()</c>, inside its result), and the acknowledgement is decided there:
+/// once the response has been handed to the transport it completes, and nothing after that — a
+/// completion callback of other middleware, however slow, or the client closing its connection
+/// while such callbacks run — can cancel it. Kestrel runs the completion callbacks only after the
+/// response was sent, one at a time and the last registered first, so <c>OnCompleted</c> says
+/// nothing about how long ago the response left. If the deadline (one one-shot timer on the
+/// container's <see cref="TimeProvider"/>) passes while the response is still being written — a
+/// client that does not read, so the write cannot finish — the acknowledgement is cancelled first,
+/// so a handler waiting on it (the forward handler) drops its deferred work and releases what it
+/// reserved whatever the server then does, and the request is aborted
+/// (<see cref="HttpContext.Abort"/>), so the client never receives that response. The handing-over
+/// and the deadline are decided under one lock and the abort is made under it; a write that finished
+/// a moment before the deadline fired wins even if its continuation has not run yet. The timer is
+/// disposed by whichever comes first — the handing-over, a client abort, or its own firing — so none
+/// outlives its request by more than its due time. The timer callback never throws: one that throws
+/// would end the process.
 /// </para>
 /// </remarks>
 internal sealed class HttpResponseAcknowledgement
@@ -41,18 +49,21 @@ internal sealed class HttpResponseAcknowledgement
     private TimeSpan _dueTime;
     private ResponseDeadlineLog? _log;
     private ILogger? _logger;
-    // The request is over for the deadline: the response completed, the request aborted, or the deadline fired.
-    private bool _settled;
+    // The response's completion (Response.CompleteAsync), once the result has started it.
+    private Task? _writing;
+    // The deadline has no say any more: the response was handed to the transport, the request was
+    // aborted, the response completed, or the deadline fired.
+    private bool _deadlineOver;
 
     private HttpResponseAcknowledgement(HttpContext context) => _context = context;
 
-    /// <summary>Completes once the response has been committed; cancelled when it never will be.</summary>
+    /// <summary>Completes once the response has been handed to the transport; cancelled when it never will be.</summary>
     internal Task Acknowledged => _acknowledged.Task;
 
     /// <summary>
     /// Create the acknowledgement of <paramref name="context"/>'s request. Its abort registration is
-    /// kept until the response completes, not disposed when the endpoint returns: the response is
-    /// written after the endpoint returns.
+    /// kept until the response is handed over or completes, not disposed when the endpoint returns:
+    /// the response is written after the endpoint returns.
     /// </summary>
     /// <param name="context">The request.</param>
     internal static HttpResponseAcknowledgement Start(HttpContext context)
@@ -72,38 +83,72 @@ internal sealed class HttpResponseAcknowledgement
     internal void Cancel() => _acknowledged.TrySetCanceled();
 
     /// <summary>
-    /// Abort the request when its response is not committed within <paramref name="dueTime"/> from
-    /// now (at once when it is zero or less). Call once, after the handler ran; a second call, or a
-    /// call once the request is over, does nothing. A <paramref name="time"/> that cannot create the
-    /// timer leaves the request without a deadline.
+    /// Answer with <paramref name="response"/> under a deadline: the returned result writes it,
+    /// completes the response and then completes the acknowledgement; if the response has not been
+    /// handed to the transport within <paramref name="dueTime"/> from now (at once when it is zero or
+    /// less), the acknowledgement is cancelled and the request aborted. Call once, after the handler
+    /// ran. A <paramref name="time"/> that cannot create the timer leaves the response without a
+    /// deadline; it is still completed here.
     /// </summary>
+    /// <param name="response">The response the endpoint would have returned.</param>
     /// <param name="time">The container's clock.</param>
-    /// <param name="dueTime">How long the response has to be committed.</param>
+    /// <param name="dueTime">How long the response has to be handed to the transport.</param>
     /// <param name="log">The mapped endpoint's rate-limited abort line.</param>
     /// <param name="logger">Optional logger.</param>
-    internal void ArmDeadline(TimeProvider time, TimeSpan dueTime, ResponseDeadlineLog log, ILogger? logger)
+    internal IResult WithDeadline(IResult response, TimeProvider time, TimeSpan dueTime, ResponseDeadlineLog log, ILogger? logger)
     {
         lock (_gate)
         {
-            if (_settled || _deadline is not null)
-                return;
-            _dueTime = dueTime;
-            _log = log;
-            _logger = logger;
-            try
+            if (!_deadlineOver && _deadline is null)
             {
-                _deadline = time.CreateTimer(
-                    static state => ((HttpResponseAcknowledgement)state!).OnDeadline(),
-                    this,
-                    dueTime > TimeSpan.Zero ? dueTime : TimeSpan.Zero,
-                    Timeout.InfiniteTimeSpan);
-            }
-            catch (Exception)
-            {
-                // A host TimeProvider that cannot create the timer: the response goes out without a
-                // deadline, as it would without this endpoint's bound.
+                _dueTime = dueTime;
+                _log = log;
+                _logger = logger;
+                try
+                {
+                    _deadline = time.CreateTimer(
+                        static state => ((HttpResponseAcknowledgement)state!).OnDeadline(),
+                        this,
+                        dueTime > TimeSpan.Zero ? dueTime : TimeSpan.Zero,
+                        Timeout.InfiniteTimeSpan);
+                }
+                catch (Exception)
+                {
+                    // A host TimeProvider that cannot create the timer: the response goes out without a
+                    // deadline, as it would without this endpoint's bound.
+                }
             }
         }
+        return new HandedOverResult(this, response);
+    }
+
+    /// <summary>The response's completion has started; a deadline that finds it finished does not abort.</summary>
+    internal void Writing(Task completion)
+    {
+        lock (_gate)
+            _writing = completion;
+    }
+
+    /// <summary>The response has been handed to the transport: the deadline is over and the inbound is acknowledged.</summary>
+    internal void HandedOver()
+    {
+        ITimer? deadline;
+        lock (_gate)
+        {
+            if (_deadlineOver)
+                return; // the deadline aborted the request, or the request was aborted: already cancelled
+            _deadlineOver = true;
+            deadline = _deadline;
+            _deadline = null;
+        }
+        deadline?.Dispose();
+        // From here no abort can take the acknowledgement back. Disposing the registration waits for
+        // an abort callback already running; one that never ran is checked for on the token itself.
+        _abortRegistration.Dispose();
+        if (_context.RequestAborted.IsCancellationRequested)
+            _acknowledged.TrySetCanceled();
+        else
+            _acknowledged.TrySetResult();
     }
 
     private void OnResponseCompleted()
@@ -111,7 +156,7 @@ internal sealed class HttpResponseAcknowledgement
         ITimer? deadline;
         lock (_gate)
         {
-            _settled = true;
+            _deadlineOver = true;
             deadline = _deadline;
             _deadline = null;
         }
@@ -127,7 +172,7 @@ internal sealed class HttpResponseAcknowledgement
         ITimer? deadline;
         lock (_gate)
         {
-            _settled = true;
+            _deadlineOver = true;
             deadline = _deadline;
             _deadline = null;
         }
@@ -143,11 +188,12 @@ internal sealed class HttpResponseAcknowledgement
         {
             deadline = _deadline;
             _deadline = null;
-            if (!_settled)
+            // A write that has finished wins, even when its continuation has not run HandedOver yet.
+            if (!_deadlineOver && _writing is not { IsCompletedSuccessfully: true })
             {
-                _settled = true;
+                _deadlineOver = true;
                 // Cancel before aborting: whatever the server does with the abort, the inbound is
-                // not acknowledged, and the commit can no longer win.
+                // not acknowledged, and the handing-over can no longer win.
                 _acknowledged.TrySetCanceled();
                 try
                 {
@@ -163,6 +209,43 @@ internal sealed class HttpResponseAcknowledgement
         deadline?.Dispose();
         if (aborted)
             _log?.Aborted(_logger, _dueTime);
+    }
+
+    /// <summary>
+    /// Writes the endpoint's response, starts and completes it, and then marks it handed over. A
+    /// response without a body is sent with <c>Content-Length: 0</c>, as the server would have sent
+    /// it. Starting it runs the <c>OnStarting</c> callbacks (on a server whose <c>CompleteAsync</c>
+    /// does not, such as the test server, too); completing it waits until the server has taken the
+    /// whole response. A failure while writing cancels the acknowledgement; when the request was
+    /// aborted (by the deadline or the client) it is the end of that request, not an error, and is
+    /// not rethrown.
+    /// </summary>
+    private sealed class HandedOverResult(HttpResponseAcknowledgement owner, IResult response) : IResult
+    {
+        public async Task ExecuteAsync(HttpContext httpContext)
+        {
+            try
+            {
+                await response.ExecuteAsync(httpContext).ConfigureAwait(false);
+                if (!httpContext.Response.HasStarted && httpContext.Response.ContentLength is null)
+                    httpContext.Response.ContentLength = 0;
+                await httpContext.Response.StartAsync().ConfigureAwait(false);
+                var completion = httpContext.Response.CompleteAsync();
+                owner.Writing(completion);
+                await completion.ConfigureAwait(false);
+            }
+            catch (Exception) when (owner.Acknowledged.IsCanceled || httpContext.RequestAborted.IsCancellationRequested)
+            {
+                owner.Cancel();
+                return;
+            }
+            catch (Exception)
+            {
+                owner.Cancel();
+                throw;
+            }
+            owner.HandedOver();
+        }
     }
 }
 

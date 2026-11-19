@@ -119,7 +119,7 @@ public sealed class MediatorEndpointRelayTests
         // Review round 1, finding 1 (abort branch). TestServer cannot model a client dropping the
         // connection while the response is pending (its client-initiated abort is ignored once the
         // pipeline has returned, which is before OnStarting/OnCompleted run), so the abort is raised
-        // server-side: a middleware calls HttpContext.Abort() after the endpoint returned — the same
+        // server-side: a middleware calls HttpContext.Abort() when the response starts — the same
         // RequestAborted signal Kestrel raises for a dropped connection — with the handler having
         // admitted the forward and the 202 not yet committed. The forward must be dropped, not relayed.
         await using var host = await StartMediatorAsync(abortAfterEndpoint: true);
@@ -392,7 +392,7 @@ public sealed class MediatorEndpointRelayTests
 
     /// <param name="registerBob">Whether <c>did:example:bob</c> is a registered recipient.</param>
     /// <param name="responseGate">When set, a middleware holds every response at <c>OnStarting</c> until it completes, so the 202 cannot be written before the test allows it.</param>
-    /// <param name="abortAfterEndpoint">When set, a middleware aborts the request (<c>HttpContext.Abort()</c>, which fires <c>RequestAborted</c>) after the endpoint has returned and before the response is committed.</param>
+    /// <param name="abortAfterEndpoint">When set, a middleware aborts the request (<c>HttpContext.Abort()</c>, which fires <c>RequestAborted</c>) when the response starts: after the handler ran and before the response is committed.</param>
     private static async Task<MediatorHost> StartMediatorAsync(bool registerBob = true, TaskCompletionSource? responseGate = null, bool abortAfterEndpoint = false)
     {
         var actors = SpecActorRegistry.LoadDefault();
@@ -435,8 +435,15 @@ public sealed class MediatorEndpointRelayTests
         {
             app.Use(async (HttpContext ctx, RequestDelegate next) =>
             {
+                // When the response starts: the handler has run and the 202 is not committed yet. The
+                // endpoint completes a forward's 202 itself (#98), so aborting after `next` returned
+                // would come after the commit.
+                ctx.Response.OnStarting(static state =>
+                {
+                    ((HttpContext)state).Abort();
+                    return Task.CompletedTask;
+                }, ctx);
                 await next(ctx);
-                ctx.Abort();
             });
         }
         app.UseWebSockets();

@@ -365,7 +365,11 @@ internal sealed class MediatorRequestControls
         set => Volatile.Write(ref _responseGate, value);
     }
 
-    /// <summary>When set, the next POST is aborted after the endpoint returned and before its response is committed.</summary>
+    /// <summary>
+    /// When set, the next POST is aborted when its response starts, after the endpoint ran and before
+    /// the response is committed (a response under a deadline is completed inside the endpoint's
+    /// result, so a later point would be after the commit).
+    /// </summary>
     public bool AbortNextPost
     {
         set => Volatile.Write(ref _abortNextPost, value ? 1 : 0);
@@ -544,9 +548,15 @@ internal sealed class MediatorTestServer : IAsyncDisposable
             var post = HttpMethods.IsPost(context.Request.Method);
             if (post && controls.ResponseGate is { } gate)
                 context.Response.OnStarting(static state => ((TaskCompletionSource)state!).Task, gate);
-            await next(context);
             if (post && controls.TakeAbort())
-                context.Abort();
+            {
+                context.Response.OnStarting(static state =>
+                {
+                    ((HttpContext)state!).Abort();
+                    return Task.CompletedTask;
+                }, context);
+            }
+            await next(context);
         });
         app.UseWebSockets();
         options.ConfigurePipeline?.Invoke(app);
