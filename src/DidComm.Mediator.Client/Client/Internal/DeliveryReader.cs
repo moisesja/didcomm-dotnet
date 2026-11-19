@@ -32,6 +32,19 @@ internal static class DeliveryReader
     /// <summary><c>messages-received</c> → <c>status</c>.</summary>
     internal static readonly MediatorExchangeSpec MessagesReceivedSpec = new("messages-received", new[] { StatusUri }, ExpectsDelivery: false);
 
+    /// <summary>
+    /// <see cref="MessagesReceivedSpec"/> answered only by a <c>status</c> whose <c>thid</c> names it:
+    /// <see cref="PickupClient.AckAsync"/>'s chunks after it gave up on an earlier one on a WebSocket.
+    /// </summary>
+    internal static readonly MediatorExchangeSpec MessagesReceivedThreadedSpec = MessagesReceivedSpec with { RequiresThread = true };
+
+    /// <summary>
+    /// <see cref="StatusRequestSpec"/> answered only by a <c>status</c> whose <c>thid</c> names it:
+    /// the <c>status-request</c> <see cref="PickupClient.AckAsync"/> sends after it gave up on a chunk
+    /// on a WebSocket.
+    /// </summary>
+    internal static readonly MediatorExchangeSpec StatusRequestThreadedSpec = StatusRequestSpec with { RequiresThread = true };
+
     /// <summary><c>live-delivery-change</c> → <c>status</c> (or a problem report, which the exchange throws).</summary>
     internal static readonly MediatorExchangeSpec LiveDeliveryChangeSpec = new("live-delivery-change", new[] { StatusUri }, ExpectsDelivery: false);
 

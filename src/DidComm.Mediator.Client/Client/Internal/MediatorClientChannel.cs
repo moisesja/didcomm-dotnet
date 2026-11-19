@@ -48,7 +48,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// up — never when it is longer than <see cref="MaxThreadIdLength"/> — and the request completes
 /// only when its (mediator, local DID) pair and expected types agree. A message without a thread
 /// completes the one HTTP request whose response carried it, or the only waiting request of its
-/// pair that expects its type (none or several: dropped); a thread-less <c>delivery</c> is a live
+/// pair that expects its type (none or several: dropped; when that only request takes only an
+/// answer that names it, <see cref="MediatorExchangeSpec.RequiresThread"/>, dropped too); a thread-less <c>delivery</c> is a live
 /// push and reaches only the live stream of its pair, never a request. A message that does not
 /// complete anything leaves every pending request as it was, so a forgery can neither answer nor
 /// cancel one.
@@ -63,7 +64,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// <para>
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
 /// every 1000th, Debug otherwise): an answer to a waiting request that does not fit it, an ambiguous
-/// thread-less answer, a live push its stream's full buffer refuses. A message of an answer type
+/// thread-less answer (also one whose only taker requires a thread), a live push its stream's full
+/// buffer refuses. A message of an answer type
 /// that simply is not for a waiting request (late, or another part of this agent's) is a Debug line
 /// (the first and every 1000th, Trace otherwise). Neither ever claims the message.
 /// </para>
@@ -100,6 +102,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     private long _unclaimedAnswers;
     private long _mismatchedAnswers;
     private long _ambiguousAnswers;
+    private long _unattributedAnswers;
     private long _droppedPushes;
     private long _strayPushes;
     private long _problemReports;
@@ -588,6 +591,14 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             }
         }
 
+        // A request that takes only an answer naming it (RequiresThread) still counts above, so the
+        // candidates are the same as without the flag; it is just never completed by this answer.
+        if (candidates == 1 && only!.Spec.RequiresThread)
+        {
+            var level = MediatorLog.RateLimited(ref _unattributedAnswers, out var count);
+            MediatorLog.Write(Logger, level, "Dropped a mediator answer ({Answer}) without a thread: the only waiting request it could answer takes only an answer that names it, because an earlier request of the same call was given up and this may be that request's late answer. {Count} so far.", name, count);
+            return false;
+        }
         if (candidates == 1 && only!.TryComplete(received))
             return true;
         if (candidates > 1)
