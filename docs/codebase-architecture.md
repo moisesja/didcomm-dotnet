@@ -2033,7 +2033,10 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    the mediator may still have acted on it, so retry it". HTTP returns at most one message
    (FR-RR-04), so a 202, an identity-refused body or a body that answers nothing leaves nothing to
    wait for. A `TransportException` (status 200: over the cap, stalled or unreadable, FR-RR-07)
-   propagates as it is.
+   propagates as it is. The one exception is `ExchangeAllowingNoAnswerAsync`, used only by
+   `PickupClient.AckAsync` for `messages-received` (whose `status` is a SHOULD): there the waiting
+   request is abandoned through the same compare-and-swap (`TryAbandon`) and the call returns `null`.
+   An answer that won the race still holds.
 6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
    has already completed the request in step 5). It is awaited; then the continuation yields
    (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
@@ -2259,9 +2262,41 @@ does not set fetched messages aside delivers a failing message first on every fe
 host's `AckAsync` gets past it; the budget does not.
 
 `AckAsync(ids)` takes 1 to 10 000 ids (the count first, then a copy; each non-empty, at most 2048
-characters and unreserved URI characters). It sends 100 per `messages-received` and returns the last
-`status`; a failing chunk ends the call after the earlier chunks were sent. A mediator configured
-to accept fewer ids per message refuses a longer one as malformed, so call it with at most as many.
+characters and unreserved URI characters). It sends 100 per `messages-received` and returns the
+`status` after the last one; a failing chunk ends the call after the earlier chunks were sent. A
+mediator configured to accept fewer ids per message refuses a longer one as malformed, so call it
+with at most as many.
+
+Only that status confirms the acknowledgement (#98 F-1). Message Pickup 3.0 says the mediator
+SHOULD answer `messages-received` with an updated `status`, not that it must, and the Identus
+mediator v1.2.1 sends none (its `PickupExecuter` returns `NoReply`; over HTTP a 202 with an empty
+body). So a chunk left without a status is not an error: the next chunk goes out, and when the last
+one is left without a status the client sends one `status-request` (no `recipient_did`; a status
+that names one DID does not answer it) and returns its status, whose count is the confirmation. A
+mediator that does answer gets exactly one request per chunk. A problem report or a malformed status
+is still a `MediationProtocolException`. How "no status" is known:
+
+- **Over HTTP, at once.** The chunk goes through `IMediatorExchange.ExchangeAllowingNoAnswerAsync`:
+  the channel's HTTP no-answer branch, which for every other request throws `TimeoutException`
+  ("got no answer in the HTTP response"), settles the pending request with the same terminal CAS
+  (`TryAbandon`) and returns `null`. A real timeout (no response within `RequestTimeout`) is still a
+  `TimeoutException` and ends the call.
+- **On a WebSocket (any route that is not HTTP), after half of `RequestTimeout`.** Silence cannot be
+  told from a slow answer there, so the chunk's `ExchangeAsync` runs under a `GuardedDeadline` of
+  `RequestTimeout / 2` linked to the caller's token; when that deadline (not the caller) ends the
+  wait, the chunk counts as left without a status, and a late status for it is dropped by the
+  matcher as unclaimed.
+
+The budget rule: a `messages-received` and the `status-request` that may follow it share one
+`RequestTimeout`, counted from when the `messages-received` is sent. The `status-request` runs under
+a `GuardedDeadline` of what is left (over HTTP, the rest; on a WebSocket, the other half); with
+nothing left it is not sent. When it gets no answer (that deadline, or over HTTP an empty response)
+the call fails with a `TimeoutException` naming the request ids, never a DID; it never waits a second
+full `RequestTimeout`. Neither `FetchAsync`'s acknowledgement nor the live
+stream's takes this path: they still send through `ExchangeAsync` and treat a missing status as a
+failed acknowledgement (the fetch logs it and returns its batch; the live stream keeps the ids and
+sends them again after its back-off).
+
 `SetLiveDeliveryAsync` needs a WebSocket route, sends `live-delivery-change` and returns the
 `status`; a problem report is a `MediationProtocolException` with `ProblemCode`, for example
 `e.m.live-mode-not-supported`.
