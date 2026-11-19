@@ -149,8 +149,16 @@ that every grantee references its granter directly (pack pins direct references 
 - `tools/FixtureGen`: generates didcomm-dotnet's own packed vectors into the interop fixtures
   tree.
 - `tools/InteropCli`: command-line peer used by the live interop runs. Its `mediator-pickup` verb
-  runs a forward built by the counterpart library through an in-process didcomm-dotnet mediator.
-- `tools/interop-live`: cross-implementation legs (`python/`, `jvm/`) driven by `run-all.sh`.
+  runs a forward built by the counterpart library through an in-process didcomm-dotnet mediator,
+  and `mediator-serve` keeps a didcomm-dotnet mediator running (Kestrel, `AddMediator()`,
+  `MapDidCommMediator`) until its stdin closes, for counterparts that enrol with it.
+- `tools/interop-live`: cross-implementation legs driven by `run-all.sh`: `python/` and `jvm/`
+  (envelopes both ways against didcomm-python and didcomm-jvm) and the mediator leg
+  (`run-mediator-leg.sh`, `mediator/`: the Hyperledger Identus mediator 1.2.1 and its MongoDB in
+  Docker, pinned by digest, a squid forward proxy, `mediator/MediatorWallet`, a console wallet that
+  references only `DidComm.Mediator.Client` and the transports, and `mediator/python/mediator_peer.py`,
+  hand-written Coordinate Mediation 2.0 and Message Pickup 3.0 on didcomm-python). See
+  `tools/interop-live/README.md`.
 - `samples/01-Quickstart` through `samples/11-MediatedAgent` (sample 11 is two projects: the
   mediator host, and `Wallet/`, a class library that references only `DidComm.Mediator.Client` and
   the transports), with `samples/_shared` (`Narrator`, `PeerIdentityFactory`, `LoopbackPort`, which

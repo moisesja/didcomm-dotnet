@@ -111,19 +111,19 @@ Build/verify (an item is done only when all three are green, plus a green live r
 
 ## A. Harness (packets; contracts frozen first)
 
-- [ ] A1 `InteropCli mediator-serve` (ready file, stdin-EOF/SIGTERM shutdown, max lifetime, `--enable-v2`).
-- [ ] A2 `MediatorWallet` (enrol / fetch / ws-attempt / observe / boundary; JSON result per command; capturing logger; `--trusted-proxy`, `--allow-hosts`, `--expect-env-proxy`), in `DidComm.sln`; `MediatorWalletBoundaryTests`.
-- [ ] A3 `mediator_peer.py` (okp-keys, did-check, free-port, mint-routed, forward, post, post-many, cm2-enrol, pickup3).
-- [ ] A4 `run-mediator-leg.sh` + `images.env` + `squid.conf` + `initdb.js` + `check_boundary.py` + `render_summary.py`; `--negative-controls`, `--up`.
-- [ ] A5 `run-all.sh` third leg; `interop-live.yml` (timeout, docker provenance, dispatch input).
-- [ ] A6 Local green run (`caffeinate -dimsu`), python/jvm sections byte-identical to the last nightly.
+- [x] A1 `InteropCli mediator-serve` (ready file, stdin-EOF/SIGTERM shutdown, max lifetime, `--enable-v2`).
+- [x] A2 `MediatorWallet` (enrol / fetch / ws-attempt / observe / boundary; JSON result per command; capturing logger; `--trusted-proxy`, `--allow-hosts`, `--expect-env-proxy`), in `DidComm.sln`; `MediatorWalletBoundaryTests`.
+- [x] A3 `mediator_peer.py` (okp-keys, did-check, free-port, mint-routed, forward, post, post-many, cm2-enrol, pickup3).
+- [x] A4 `run-mediator-leg.sh` + `images.env` + `squid.conf` + `initdb.js` + `check_boundary.py` + `render_summary.py`; `--negative-controls`, `--up`.
+- [x] A5 `run-all.sh` third leg; `interop-live.yml` (timeout, docker provenance, dispatch input).
+- [x] A6 Local green run (`caffeinate -dimsu`), python/jvm sections byte-identical to the last nightly.
 - [ ] A7 Live run from the branch (`gh workflow run interop-live.yml --ref feat/mediator-interop-gate-98`), run ids recorded.
 
 ## B. Adversarial review (D1–D6) and triage
 
-- [ ] B1 D1 · [ ] B2 D2 · [ ] B3 D3 · [ ] B4 D4 · [ ] B5 D5 · [ ] B6 D6 (each: findings file, coverage table of owned E-ids)
-- [ ] B7 Triage: severity, released/unreleased, fix here / issue / private / documented limit.
-- [ ] B8 Fix-forward of local High/Medium in unreleased code, each with a test that fails on origin/main or under a named mutation.
+- [x] B1 D1 · [x] B2 D2 · [x] B3 D3 · [x] B4 D4 · [x] B5 D5 · [x] B6 D6 (each: findings file, coverage table of owned E-ids)
+- [x] B7 Triage: severity, released/unreleased, fix here / issue / private / documented limit.
+- [x] B8 Fix-forward of local High/Medium in unreleased code, each with a test that fails on origin/main or under a named mutation.
 
 ## C. QA on the harness
 
@@ -135,9 +135,9 @@ Build/verify (an item is done only when all three are green, plus a green live r
 ## D. Docs
 
 - [ ] D1 `tools/interop-live/README.md`: mediator leg, results table, how to run locally, pins and provenance, I-1..I-15 live re-check, Affinidi answer.
-- [ ] D2 `SECURITY.md`: mediator threat-model paragraph (Supported-versions table untouched: separate owner decision).
+- [x] D2 `SECURITY.md`: mediator threat-model paragraph (Supported-versions table untouched: separate owner decision).
 - [ ] D3 CHANGELOG, PRD (Phase 7 exit-criteria status), `docs/codebase-architecture.md`.
-- [ ] D4 `tasks/lessons.md`: E-60 lesson + anything surprising.
+- [x] D4 `tasks/lessons.md`: E-60 lesson + anything surprising.
 
 ## E. Gate and PR
 
@@ -147,4 +147,61 @@ Build/verify (an item is done only when all three are green, plus a green live r
 
 ## Review
 
-(filled in as the run goes)
+### How it was built (2026-11-19)
+
+- Two architects (harness; adversarial plan), then in parallel: two harness engineers (`wip/h98-net`: `InteropCli mediator-serve`, `MediatorWallet`; `wip/h98-leg`: `mediator_peer.py`, `run-mediator-leg.sh`, pins, squid, workflow), the `AckAsync` engineer (`wip/f98-ack`) and six red-team agents (D1–D6, findings in private scratch files, tests uncommitted). Then fix-forward engineers (`wip/fx98-resp`, `wip/fx98-mem`, `wip/fx98-small`), a test curator (`wip/cur98-tests`, 77 of the red-team tests, 5 runs + 1 loaded run each, no flakes), a docs engineer (`wip/doc98`) and an independent harness QA (no must-fix; 8 should-fix fixed in round 2). All merged into the gate branch with merge commits.
+- Design calls changed during the run: WebSocket against Identus is OBSERVED because Identus reads only text frames (owner decision O-98-1 pending); F-1 accepted by the coordinator under conditions (fix in `AckAsync`/fetch only, live stream byte-identical, no API change, one timeout budget); FX-2 option 1 (the sink gets an equal `UnpackResult`, rebuilt after the acknowledgement: `IForwardSink`/`ForwardHandler` are unreleased and identity was never a contract), and the recipient-kid list is charged; FX-3 answers `live-delivery-change{true}` on a downgraded session with the `e.m.live-mode-not-supported` report (the reply can't travel either; a flag already on stays on).
+
+### Live runs (branch)
+
+| run | head | result |
+|---|---|---|
+| 44473219657 | `7000bf4` | green: mediator leg 9/9; python 63/63 and jvm 60/60 (+3 n/a) tables byte-identical to main's last nightly (44298708738) |
+| 44473234026 (`negative_controls`) | `7000bf4` | green: 14/14 sabotaged cells FAIL as designed |
+
+### Interop observations against Identus 1.2.1 (recorded, not gated)
+
+- WebSocket: our frames are binary and Identus processes only text frames (`WS Error (type:Binary)`); its own pushes are one `delivery` per text frame, `thid` = the forward id, `to` = the routed DID, never taken as a push by our client (DD-13: reached by polling).
+- No `created_time` on any answer (HTTP or WebSocket), no `from_prior`; `thid` = the request id (problem reports use `pthid`); `Date` header 0 s off.
+- `messages-received` gets no answer (202 after 3 s) and removes only ONE message per request whatever the id count (Identus `UserAccountRepo.markAsDelivered` updates one entry), so a 12-message drain takes 13 rounds; no lease (the same ids on every fetch) and `limit` ignored, so ADV5-4 applies (#111).
+- Every NoReply costs 3 s; a forward to an unregistered `next` gets HTTP 200 with a signed `e.p.req.not_enroll`; Identus accepts an envelope it cannot decrypt with 202; a repeated envelope gets `e.p.crypto.message.dejavu` (keyed on the envelope hash); Discover Features `match: "*"` gets HTTP 500 (Java regex); a `keylist-update` adding a DID another account holds gets HTTP 500; after a live socket closes with live mode on, some concurrent forwards to that account never get a response.
+- Attachments come back JSON-equal to the inner envelope, not byte-equal; no `please_ack`/`return_route` on deliveries; Identus never relays (terminal mediator).
+- Affinidi mediator (v0.53.0, 2026-11-15, `affinidi/affinidi-messaging-mediator`): DIDComm v2 trust-ping 2.0, routing 2.0, messagepickup 3.0, discover-features 2.0, report-problem 2.0; **no Coordinate Mediation for DIDComm v2** (a v2 client enrols through Affinidi's own `https://affinidi.com/atm/1.0/authenticate`, which auto-registers the DID; CM 1.0 only for DIDComm v1). Image `ghcr.io/affinidi/messaging-mediator:<version>` pulls anonymously, but needs Redis (or a Fjall build) and an identity made by `mediator-setup`. No leg built (owner instruction).
+
+### Adversarial review (public-safe record; the #98 comment carries the same)
+
+- High: none. Medium: four, all in unreleased code, all fixed here (D3-F3 forward `202` held with no deadline; D3-F2 unread HTTP delivery re-served into more held answers; D3-F4 waiting forwards held 5–45× their charge; the uncharged recipient-kid list, ~9,000×). Low fixed: D4-F1. Interop fix: `AckAsync`/`FetchAsync` without a `status`.
+- Docs made precise: D1-F3, D1-F4, D1-F5, D2-F3, D2-F5, D2-F7, D3-F8, D3-F9, D4-F2, D4-F3, D5-F2, D5-F4, D6-F7.
+- Tracked: #126 (D1-F1/F2), #127 (D3-F3 residual), #128 (D2-F3/F4), #129 (D6-F3); #116 (E-61, existing).
+- Info: D2-F6, D2-F8, D4-F4, D4-F6, D5-F3, D3-F10, D3-F11.
+- **12 items are handled privately.**
+
+### Coverage of the #88 checklist
+
+| E | Covered by |
+|---|---|
+| E-1, E-19 | re-verified `InMemoryReplayGuardTests`, `ReplayClockSkew*` (+ `_purgedAt` mutation); new `D5TimestampFreeForwardJumpTests`; D5-F2 documented |
+| E-2, E-3, E-10, E-20, E-29 | re-verified (`MessagePickupWebSocketTests`, `MessagePickupAdversarialResourceTests`, `ReturnRouteAdversarialTests` F15h, `MediatorTimeBoundsQaTests`, `MessagePickupForwardProgressTests`) |
+| E-4, E-16, E-17, E-58, E-59 | re-verified with mutations; new `D1RegrantAfterRevokeTests`, `D1NoResolverBeforeCapTests`, `D3StoreFillBySelfMadeDidsTests`; D1-F5/D2-F5 documented; #126 |
+| E-5, E-14, E-22, E-23, E-31, E-32, E-35 | live observations (above; `mediator-observations.json`) |
+| E-6 | re-verified; new `D4KestrelAcknowledgementTests` (real Kestrel); D4-F3 documented |
+| E-7 | re-verified `MediatorBoundsQaTests`; D3-F4 fixed (`ForwardHandlerRetentionTests`) |
+| E-8 | new `D2RealConsoleEchoTests` (real JSON console with scopes) |
+| E-9, E-11, E-25 | re-verified F15a–g and all `*Qa*`/`*Adv*` suites; W-2/W-3/W-4 documented; D4-F1 fixed |
+| E-12, E-39 | `Qa.RaiseThreadPoolFloor` / serial collections in new tests; L-065 audits (curator, harness QA) |
+| E-13, E-15 | re-verified `HttpTransportResponseTests`, `ReturnRouteClientRedTeamRegressionTests`, two-host skew suites; E-15 documented |
+| E-18, E-37, E-52 | no external client in the harness: E-52 and the spec-example shapes emulated in R-1; E-37 n/a against Identus |
+| E-21, E-27, E-28, E-33, E-46, E-56 | documented limits checked; D3-F8, D4-F2, D5-F2, D6-F7 made precise; #111 limits recorded |
+| E-24, E-57 | direct push not built; Blocktrust never contacted |
+| E-26 | local route re-verified + new `D5RewrapSwapTests`; no external route (Identus never relays) |
+| E-30, E-50, E-51, E-55, E-54 | cells M-1/M-2/M-3/R-1; I-1..I-15 table in `tools/interop-live/README.md`; O-12 dejavu; O-9/O-13 silent 202 after 3 s; `AckAsync` fixed |
+| E-34 | re-verified forged-answer suites |
+| E-36 | cell B-0 + `MediatorWalletBoundaryTests` |
+| E-38 | new `D4RelayOrderTests` (WebSocket order); HTTP order documented |
+| E-40, E-41, E-42, E-43 | `PYTHON` from setup-python, 3.9–3.12 guard, refused empty under Actions; floating runner kept; README note on release runs |
+| E-44 | the sample hosts are internal/context-bound; the tests carry their own Kestrel host |
+| E-45, E-49 | checked; shared breaker is #88 candidate (b); #129; local `D6MediatedClientThroughTrustedProxyTests` |
+| E-47, E-48 | cells M-4/M-5 (squid as `TrustedProxy`) and M-6 (process proxy ignored); local theory over `HTTP_PROXY`/`ALL_PROXY`/`DefaultProxy` |
+| E-53 | O-1 + owner decision O-98-1 |
+| E-60 | L-067 |
+| E-61 | #116 |
