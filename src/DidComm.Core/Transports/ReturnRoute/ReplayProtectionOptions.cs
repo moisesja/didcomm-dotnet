@@ -56,6 +56,13 @@ public sealed class ReplayProtectionOptions
     /// limitation being that an identical captured request is accepted again once the window has
     /// passed.
     /// </summary>
+    /// <remarks>
+    /// The same happens after a clock jump. <see cref="InMemoryReplayGuard"/> guards against a host
+    /// clock that jumps forward and back only for messages with a <c>created_time</c>. A request
+    /// without one is remembered for <see cref="Window"/> from the clock reading it arrived at, so if
+    /// the host clock jumps forward past <see cref="Window"/> and back, the guard forgets it and the
+    /// same request is admitted again.
+    /// </remarks>
     public bool RequireCreatedTime { get; set; } = true;
 
     /// <summary>

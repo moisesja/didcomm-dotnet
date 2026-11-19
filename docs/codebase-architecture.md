@@ -698,7 +698,8 @@ Replay guard (`InMemoryReplayGuard`):
   `MaxEntries` (default 32 768) or at the bucket's `MaxEntriesPerPeer` (default 1024) — nothing
   evicted, `SaturationCount` incremented — else insert. A bucket keeps one copy of its sender
   subject, shared by its heap entries.
-- Retention property: an entry lives until `created_time + Window + ClockSkew` inclusive while age
+- Retention property (messages with `created_time`; the limits below cover those without): an
+  entry lives until `created_time + Window + ClockSkew` inclusive while age
   rejection starts at `created_time < now − Window`, so there is no instant at which a captured
   request is neither remembered nor too old — also when readings reach the lock out of order (the
   gate reads the clock before the lock, so two requests can race) or the host clock steps back,
@@ -741,12 +742,24 @@ Threat model (the CHANGELOG's #91 Security entry is the full list):
   bounded through `LogValues.Id` (#95).
 
 Known limitations (documented, not fixed; W-2..W-4 in the #91 plan; W-1, a server clock that
-jumps forward past an entry's retention and back re-admitting a request, is closed by #105 at the
-cost described under the retention property): freshly minted DIDs can saturate the global replay
+jumps forward past an entry's retention and back re-admitting a request, is closed by #105 for
+messages that carry `created_time`, at the cost described under the retention property): freshly
+minted DIDs can saturate the global replay
 budget and deny in-scope traffic for up to `Window + 2 × ClockSkew` (put rate limiting in front
 of a mediator: `MapDidCommMediator(...).RequireRateLimiting(...)`, #95); the first delivery of a captured
 authcrypted `all` message owns the session socket (confidentiality holds); a handler that throws
-after pushing gets the uniform `400` and its push is discarded.
+after pushing gets the uniform `400` and its push is discarded. Two more:
+
+- **A request without `created_time` and a clock jump.** The #105 rule needs a `created_time`. With
+  `RequireCreatedTime = false`, a request without one is remembered for `Window` from the clock
+  reading it arrived at. If the host clock jumps forward past `Window` and back, the guard forgets
+  it, and the same request is admitted again, as it is once `Window` has really passed.
+- **Self-made DIDs can hold every session.** A WebSocket session needs only an authcrypted message
+  with `return_route: all`, so freshly minted DIDs on idle WebSocket connections can fill the total
+  bound (`MaxSessions`, 4,096 by default). Until some of those sessions close, a new peer gets no
+  session: its messages are still dispatched, but nothing is sent back on its socket and nothing is
+  pushed to it live. HTTP requests are not affected. Limit how many WebSocket connections one
+  client may hold, in front of the endpoint.
 
 ### Demonstrated by (#97)
 
@@ -1108,19 +1121,31 @@ Documented limits:
 - **No proof of DID ownership.** The protocol asks for none; the first peer to register a DID gets
   it. `MayRegisterAsync` is where a host adds proof.
 - **A registration oracle toward enrolled peers.** `client_error` on an `add` tells a peer with a
-  grant that another grant holds the DID. Unauthenticated callers learn nothing.
+  grant that another grant holds the DID. A sender without a grant learns nothing, but under the
+  default open enrolment getting one is easy: a freshly made DID is granted after one
+  `mediate-request` and can ask with its second message. An allow-list `IMediationPolicy`, which
+  enrols known peers only, keeps strangers from asking.
 - **Open enrolment fills the store.** The default policy grants any authcrypt sender and grants do
   not expire on their own (owner decision: the protocol has no message that tells a recipient its
   grant lapsed; a host ends a grant with `RevokeAsync`). Self-made DIDs can exhaust `MaxGrants` and
   `MaxRecipients`; existing grants keep working. A public mediator needs an allow-list or rate
   limit in its policy.
 - **Forward lookup.** One probe either way; a hit compares one key more than a miss (the same as
-  `InMemoryForwardRecipientRegistry`).
+  `InMemoryForwardRecipientRegistry`). This is a limit, not a guarantee: after the lookup, a
+  forward to a registered `next` does more work than one that is dropped (it reserves its place in
+  the forward queue and is tracked until its `202` goes out). On a fast local network that small
+  difference can still be measured with many samples: about 2 microseconds, at 5,000 samples per
+  class over loopback.
 - **Revocation.** `RevokeAsync` stops new forwards for the grant's DIDs. A forward already admitted
   by `ForwardHandler` still reaches the sink; the pickup queue looks the recipient up when the
   message arrives and again after storing it, and a live push checks once more before it sends
   (#95; "Message Pickup 3.0" and "Mediator service" below). `MessagePickupQueue.RevokeAndPurgeAsync`
   revokes and drops what is queued in one call.
+- **A DID rotation moves nothing.** The mediator does not act on `from_prior`. A peer that rotates
+  to a new DID is a new peer here: the new DID asks for its own grant and sees only its own queue.
+  The old DID keeps its grant, its registered DIDs and its queued messages until the host revokes
+  it (`MessagePickupQueue.RevokeAndPurgeAsync`). While the old grant holds a DID, the new DID
+  cannot register it.
 - **Elsewhere:** the 2.0 handler is the next section (#99). The recipient role is
   `MediationClient` (#96, "Recipient-side client" below), and the start-up check of routing DIDs
   against their DID documents (FR-MED-07) is `AddMediator()`'s (#95, below).
@@ -1182,6 +1207,10 @@ What differs is only the wire layer, through the internal codec `CoordinateMedia
 - **Replay.** 2.0 is one of `MediatorServiceProtocols`, so the endpoints admit its requests under
   FR-RR-08 before dispatch, and FR-RR-09 stamps the replies. A hand-built receive path must admit
   them too (cookbook FF.2 (b)).
+- **The same documented limits.** The limits of the 3.0 role (its "Documented limits" above) apply
+  to 2.0 peers unchanged: the first peer to register a `recipient_did` gets it; `client_error` on a
+  `keylist-update` `add` tells an enrolled peer that another grant holds the DID; and under open
+  enrolment, self-made grants can fill the store.
 - **Interop notes (from the real implementations' source, recorded in the #99 plan).** The Identus
   wallet SDK sends `keylist-update` without `return_route`: the update is applied and the reply has
   no channel over HTTP. Blocktrust's wallet sends no `created_time`, so replay admission refuses its
@@ -1445,14 +1474,22 @@ Documented limits:
   messages without notice.
 - **A live session whose peer stops reading** can hold up to `MaxPendingPushes` packed deliveries.
 - **Revoked grants.** `RevokeAndPurgeAsync` revokes and purges in one call. A host that revokes
-  through `IMediationStore.RevokeAsync` alone leaves the grant's records stored — not delivered
-  while the peer has no grant, delivered again if the same peer is granted mediation again — until
-  it calls `IMessageStore.PurgeGrantAsync` (the mediation store raises no change notification).
+  through `IMediationStore.RevokeAsync` alone leaves the grant's records stored until it calls
+  `IMessageStore.PurgeGrantAsync` (the mediation store raises no change notification). They are
+  not delivered while the peer has no grant. A new grant for the same peer starts with no
+  registered DIDs, so a leftover comes back only if the peer registers its DID again first.
+  Otherwise the peer's first `delivery-request` without a `recipient_did` removes the leftover,
+  and a `status-request` without one still counts it until then. No leftover ever reaches another
+  peer, even one that has since registered the same DID.
 - **Lazy expiry.** Memory of expired records comes back when their grant is next touched, when the
   store runs full, or on `PurgeExpiredAsync` (which `AddMediator()`'s hosted service calls every
   `PurgeInterval`).
 - **Open enrolment.** Self-made grants can use up the store-wide bounds; what is held stays
   deliverable.
+- **A full store is observable by a peer that sends to itself.** A sender gets the same `202`
+  whether its forward is stored or dropped. But a peer can send a forward to a DID it registered
+  itself, while its own queue is below its quota. When the store is full, that forward is dropped
+  (`Dropped-Quota`) and nothing arrives in the peer's queue, so the peer learns the store is full.
 - **No session, no delivery.** Over the library endpoints a request without `return_route: all`
   gets nothing; over a WebSocket the endpoint needs `AllowSameSocketReplies` (the mediator's own
   WebSocket endpoint, `MapDidCommMediator`, has it on).
@@ -1890,6 +1927,12 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   `Pickup.LeaseTimeout` (1 MiB in 60 s, about 17 KB/s, at the defaults) cannot finish reading a full
   delivery over HTTP; it asks for smaller batches (`limit`), or the host raises the lease or lowers
   `MaxDeliveryBytes`.
+- **ASP.NET Core's own log lines** carry some request metadata: Hosting's "Request starting" line
+  includes the Content-Type with its parameters, and when a host turns on
+  `ActivityTrackingOptions.Baggage`, its logging scopes carry the inbound `baggage` header. Those
+  are framework logs the host configures. If an internet-facing endpoint's logs must not carry
+  request metadata, keep the `Microsoft.AspNetCore.Hosting` and `Microsoft.AspNetCore.Server.Kestrel`
+  categories at Warning or above, and leave `Baggage` off.
 
 ### Documented limits
 
@@ -1936,7 +1979,12 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   place: recipients de-duplicate by message id.
 - **A captured `live-delivery-change`.** A captured, not-yet-sent authcrypted
   `live-delivery-change` sent first on a fresh socket holds the victim's live session: the message
-  is authenticated, the channel is not bound to it (the same on `main`; on the #98 checklist).
+  is authenticated, the channel is not bound to it (the same on `main`; on the #98 checklist). The
+  attacker's socket also takes the leases: every message pushed to it stays leased to it for
+  `LeaseTimeout`, and once a lease runs out, the next arrival leases that message to the same
+  socket again. This goes on until the socket closes, which releases the leases. Meanwhile the
+  victim's own fetches get those messages only in the gap between a lease running out and the next
+  arrival. The attacker still cannot open them: they are encrypted to the victim.
 - **A host-registered `InMemoryMessageStore`** keeps the quotas it was built with;
   `MediatorOptions.Pickup` reaches only the store `AddMessagePickup()` builds.
 - **Revocation.** A push never sends a record the purge removed before the push took it, but a live
