@@ -94,8 +94,10 @@ public sealed class CoordinateMediation20Adv99Tests(ITestOutputHelper output)
         foreach (var message in new[] { update, query })
         {
             DispatchOutcome? outcome = null;
+            // Only the operation is captured; what it may throw is asserted outside the capture.
             var thrown = await Record.ExceptionAsync(async () => outcome = await fx.SendAsync(message, mediator.Did));
             output.WriteLine($"{Escape(message.Type)}: {(thrown is null ? $"{outcome!.Result} via {outcome.Handler?.GetType().Name}" : thrown.GetType().Name)}");
+            (thrown is null or MalformedMessageException).Should().BeTrue("a spelling is either dispatched or refused as malformed, never anything else");
             if (outcome?.Reply is not { } reply)
                 continue;
 
@@ -180,6 +182,7 @@ public sealed class CoordinateMediation20Adv99Tests(ITestOutputHelper output)
         DispatchOutcome? outcome = null;
         var thrown = await Record.ExceptionAsync(async () => outcome = await fx.SendAsync(forged, mediator.Did, sender: bob.Did));
         output.WriteLine(thrown is null ? $"dispatched: {outcome!.Result}" : $"refused: {thrown.GetType().Name}");
+        (thrown is null or ConsistencyException).Should().BeTrue("Core refuses a from that is not the sender key's DID with ConsistencyException, or the request acts for the sender");
 
         if (outcome?.Reply is { } reply)
         {
@@ -339,6 +342,7 @@ public sealed class CoordinateMediation20Adv99Tests(ITestOutputHelper output)
             output.WriteLine($"{ex.GetType().Name}: {Escape(ex.Message)}");
             ex.Message.Should().NotContain(Marker).And.NotContain("\u001b").And.NotContain(new string('a', 64));
         }
+        (thrown is null or MalformedMessageException).Should().BeTrue("a hostile body is answered or refused as malformed, never anything else");
         foreach (var line in fx.Logs.Entries)
             line.Everything.Should().NotContain(Marker).And.NotContain("\u001b");
     }
@@ -368,14 +372,16 @@ public sealed class CoordinateMediation20Adv99Tests(ITestOutputHelper output)
             return;
         }
 
-        var thrown = await Record.ExceptionAsync(async () =>
-        {
-            var outcome = await fx.SendAsync(message, mediator.Did);
-            output.WriteLine($"{outcome.Result} via {outcome.Handler?.GetType().Name}");
-            outcome.Reply.Should().BeNull();
-        });
+        // Only the operation is captured (PR #125 review, P2): the assertions on its outcome stay
+        // outside, so a reply or an unexpected exception fails the test instead of being recorded.
+        DispatchOutcome? outcome = null;
+        var thrown = await Record.ExceptionAsync(async () => outcome = await fx.SendAsync(message, mediator.Did));
         for (var ex = thrown; ex is not null; ex = ex.InnerException)
             output.WriteLine($"{ex.GetType().Name}: {Escape(ex.Message)}");
+        thrown.Should().BeNull("a name the 2.0 protocol does not define is ignored, not refused");
+        output.WriteLine($"{outcome!.Result} via {outcome.Handler?.GetType().Name}");
+        outcome.Handler.Should().BeOfType<CoordinateMediation20Handler>("the type is under the 2.0 PIURI");
+        outcome.Reply.Should().BeNull("the mediator role answers no message name it does not define");
         foreach (var line in fx.Logs.Entries)
             line.Everything.Should().NotContain(Marker);
         (await fx.RegisteredAsync(bob.Did)).Should().BeEmpty();
@@ -486,19 +492,10 @@ public sealed class CoordinateMediation20Adv99Tests(ITestOutputHelper output)
         }
         var message = Raw(Piuri20 + "/keylist-update", bob.Did, mediator.Did, body);
 
-        Exception? thrown;
-        try
-        {
-            thrown = await Record.ExceptionAsync(() => fx.SendAsync(message, mediator.Did));
-        }
-        catch (Exception ex)
-        {
-            thrown = ex;
-        }
+        var thrown = await Record.ExceptionAsync(() => fx.SendAsync(message, mediator.Did));
         output.WriteLine($"{thrown?.GetType().Name}: {Escape(thrown?.Message ?? "(none)")}");
-        thrown.Should().NotBeNull();
-        if (thrown is MalformedMessageException)
-            thrown.Message.Should().Contain("more than 4");
+        thrown.Should().BeOfType<MalformedMessageException>("the list is refused from its length")
+            .Which.Message.Should().Contain("more than 4");
         fx.FakeStore.UpdateCalls.Should().BeEmpty();
         fx.Policy!.Registrations.Should().BeEmpty();
     }
