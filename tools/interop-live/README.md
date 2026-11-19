@@ -428,10 +428,20 @@ All are recorded as observations; none fails the leg.
   from a slow answer there, so an acknowledgement over WebSocket waits for a status (`RequestTimeout`,
   half of it in `AckAsync`) and is then logged as failed although Identus applied it (M-8's fetch,
   O-1b). The client is unchanged.
-- **Live pushes** carry `thid` = the forward's id and no `created_time` (O-2), and are encrypted to
-  the routed DID the forward named, not to the DID the socket belongs to. Our client drops each one
-  (`LocalMismatch`, FR-RR-07), so the live stream reaches the messages with its next drain, one
-  `LivePollInterval` (1 minute) later (O-1b).
+- **Live mode delivers at the next poll, not at once** (O-1b; left as is by owner decision D1,
+  2026-11-19). Identus seals each live push for the DID the forward named (a DID the wallet
+  registered with `keylist-update`) and sends it on the connection the wallet's main DID opened; the
+  push also carries the forward's id as `thid` and no `created_time` (O-2). Our wallet keeps one DID
+  per connection: a message pushed on a connection must be decrypted with the key of the DID that
+  opened it (FR-RR-07), so it drops these pushes (`LocalMismatch`). **Nothing is lost:** the
+  messages stay queued at Identus, and the live stream fetches them at its next poll, one
+  `LivePollInterval` (1 minute by default) later. The specs don't settle which side should change.
+  Message Pickup 3.0 says only "When _Live Mode_ is enabled, messages that arrive when an existing
+  connection exists are delivered over the connection immediately", and its `delivery` example's
+  `thid` is "<message id of delivery-request message>"; the return-route extension says "`all`: Send
+  all messages for this DID over the connection". Neither says which DID a live `delivery` is sealed
+  for when the recipient registered several. A change is tracked in #134 (it needs a written
+  proposal and an owner decision first).
 - **An unregistered `next`** gets HTTP 200 with a signed `e.p.req.not_enroll` problem report
   (O-14; M-1's `unregistered-next` sabotage relies on it).
 - **Dejavu.** Identus refuses an identical envelope twice, but accepts a re-encrypted repeat of

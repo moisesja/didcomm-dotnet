@@ -173,6 +173,12 @@ public static class Section_CC_EnrollWithAMediator
         //     services.Configure<ReplayProtectionOptions>(o => o.RequireCreatedTime = false);
         // Over HTTP nothing is needed. This sample's mediator stamps its answers, so the wallet above
         // keeps the default.
+        // Live mode (section EE) against Identus delivers at the next poll (a minute by default), not at
+        // once. Identus seals each live push for the DID the forward named, a DID the wallet registered,
+        // and sends it on the connection the wallet's main DID opened; the wallet keeps one DID per
+        // connection, so it drops those pushes and fetches the messages at its next poll. Nothing is
+        // lost, and the specs don't say which DID a live delivery must be sealed for. Tracked in
+        // https://github.com/moisesja/didcomm-dotnet/issues/134.
         ctx.Narrator.Note("Talking to an Identus mediator over a WebSocket needs one setting in the wallet's own container: ReplayProtectionOptions.RequireCreatedTime = false, for example services.Configure<ReplayProtectionOptions>(o => o.RequireCreatedTime = false). Identus puts no timestamp (created_time) on its answers, and without the setting the wallet drops those answers when they arrive on a WebSocket. What the wallet gives up: a copy of a message that carries no timestamp can be replayed to it once the replay window (5 minutes by default) has passed, or sooner if the wallet's clock jumps forward (see ReplayProtectionOptions.RequireCreatedTime). Over HTTP nothing is needed.");
 
         // Two directions, two answers. Blocktrust's wallets can use this library's mediator; this
