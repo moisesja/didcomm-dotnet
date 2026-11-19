@@ -1247,6 +1247,16 @@ The pieces:
 5. **Act**, then reply with `status` (returned as the handler's reply), or push a `delivery`
    through the session and return nothing, or return the live-mode problem report.
 
+A `live-delivery-change` (`PickupCoordinator.SetLiveDeliveryAsync`): `live_delivery: true` needs a
+live (WebSocket) session in mode `all`. Without one (HTTP, no session, or a session the peer
+downgraded with `return_route: none`, `thread` or a malformed value, FR-RR-05) the answer is the
+`e.m.live-mode-not-supported` problem report and the flag is not touched (FR-PICK-07). A downgraded
+session can carry neither a status nor a push, so the report is not written either. A flag that was
+already on stays on, and its pushes resume when a later `all` restores the session. Otherwise the
+status is read first and its `HighWaterSequence` is the mark (FR-PICK-06). A closed session is
+answered `status{live_delivery: false}`, whenever the close lands. `live_delivery: false` turns the
+flag off and is answered with `status` on any connection.
+
 A `delivery-request`, step by step (`PickupCoordinator.LeaseAndPushAsync`):
 
 1. `limit` is clamped to `MaxDeliveryBatch`; 0, an unowned scope or no session → `status`, nothing

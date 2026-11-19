@@ -6,6 +6,26 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — the mediator no longer turns live delivery on over a WebSocket that the recipient has paused (FR-PICK-07, #98, epic #88)
+
+A recipient can pause its WebSocket with `return_route: none` (also `thread`, or a value nobody
+defines, which count as `none`). After that the mediator sends nothing on the socket until a later
+`return_route: all`. A `live-delivery-change` with `live_delivery: true` sent while paused was still
+applied, although its answer could not be sent. When `all` came back, the mediator pushed new
+messages to a recipient that had never been told live delivery was on, and the messages counted in
+that unsent status could only be picked up. The mediator package has not been released, so no
+released behaviour changes. No public API changes.
+
+- **Now:** a paused socket counts as a connection that cannot do live delivery, like HTTP. The answer
+  is the `e.m.live-mode-not-supported` problem report (which the paused socket does not carry
+  either), and the live flag is not touched. A flag that was already on stays on, and its pushes
+  resume with the next `all`. Turning live delivery off still works on a paused socket. A closed
+  socket is answered as before.
+- **Tests.** `D4LiveChangeOnDowngradedSessionTests` in the interop tests (from the #98 red team)
+  sends the change on a real WebSocket after `none`, and with the change itself carrying `none`,
+  `thread` or a malformed value; all four fail on the code before this fix. Two
+  `MessagePickupFlowTests` pin the problem report, and that a flag already on survives a pause.
+
 ### Fixed — `PickupClient.AckAsync` works with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
 
 Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated
