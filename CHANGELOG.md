@@ -77,8 +77,9 @@ released behaviour changes. No package, dependency or `InternalsVisibleTo` grant
   the library stays spec-strict). On first contact that mediator answers from a new DID, announced
   by a `from_prior` that has no `iat` on a message with no `from`, and its `keylist-update-response`
   entries have no `result`. The DIDComm spec requires the first two (§DID Rotation) and the 2.0
-  protocol the third, so the library refuses those answers. The gap is being reported upstream;
-  the interop gate (#98) runs its external-mediator checks against Identus.
+  protocol the third, so the library refuses those answers. The gap is reported upstream
+  (bsandmann/blocktrust.Mediator#5); the interop gate (#98) runs its external-mediator checks
+  against Identus.
 
 **Tests.** New: `CoordinateMediation20HandlerTests`, `CoordinateMediationCrossVersionTests`,
 `CoordinateMediation20InteropVectorTests` (request shapes taken from the Identus and Blocktrust source),

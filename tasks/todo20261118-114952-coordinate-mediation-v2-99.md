@@ -74,7 +74,7 @@ Commits: Identus mediator `hyperledger/identus-mediator@5664f1d` (M), its codecs
 
 - **O-1 = (b), owner decision.** The client asks with two queries (`…/coordinate-mediation/3.*`, `…/2.*`); a `roles` list that names no role of the protocol says nothing (like an absent list); a list naming `recipient` without `mediator` still does not count. Internal only (`FeatureNegotiation`), no public API change. Built in round 1 (item H1).
 - **O-2 = (a), owner decision.** The library stays spec-strict; #98 runs its external-mediator cells against Identus only and records Blocktrust as incompatible. Carried into #88 (comment) and #98's body (appended section), and into "Planning update after #99" at merge.
-- **Upstream report, owner decision.** Approved; drafted for the coordinator to review and post (`scratchpad/blocktrust-issue.md`); the cookbook's CC note gets the link when it exists.
+- **Upstream report, owner decision.** Approved; drafted here, reviewed and posted by the coordinator: https://github.com/bsandmann/blocktrust.Mediator/issues/5. Linked from cookbook CC, the CHANGELOG and #98.
 - **O-3.** Awareness only; documented (cookbook CC, CHANGELOG, PRD FR-MED-10).
 
 The options as raised:
@@ -125,7 +125,7 @@ The options as raised:
 
 - [x] H1 O-1: `FeatureNegotiation` asks `…/3.*` and `…/2.*` and reads roles by the owner's rule; client XML docs (`MediationClient`, `CoordinateMediationVersion.Negotiate`). Tests: the query body; each query under the three readings (spec wildcard, whole-id regex, prefix without `.*`) and the old single query under them; the Identus and Blocktrust answer shapes; the roles table; the 32-role bound; end to end, `MediatorClientThirdPartyDiscoveryTests` (an Identus-like and a Blocktrust-like Discover Features responder in front of the real 2.0 handler). Mutations: old role rule, old single query, recipient no longer ruling out, role bound ignored: each caught (old rule + old query = `6b116a0`).
 - [x] H2 Review P2: `CoordinateMediation20Adv99Tests` captures only the operation at every `Record.ExceptionAsync` site and asserts the permitted exception set and the reply outside it. Mutations: a reply to an ignored name, an exception from the ignored path, and an exception from every keylist path: each now fails the fixed sites. Sweep: no other new test wraps an assertion in `Record.Exception*` or a `catch`.
-- [x] H3 Review P3: cookbook CC: no pin needed for Identus; our client cannot enroll with a Blocktrust mediator (why, in plain words); a Blocktrust wallet can use our mediator with `RequireCreatedTime = false` (the cost). The upstream link is a `TODO(#99)` until the report is posted.
+- [x] H3 Review P3: cookbook CC: no pin needed for Identus; our client cannot enroll with a Blocktrust mediator (why, in plain words); a Blocktrust wallet can use our mediator with `RequireCreatedTime = false` (the cost). The upstream report (https://github.com/bsandmann/blocktrust.Mediator/issues/5) is linked in the note.
 - [x] H4 Docs: CHANGELOG (entry title, the client bullet, the Blocktrust note, the stale "Identus has no Discover Features" line in the #96 entry), PRD FR-MED-09/-10, architecture doc, this plan.
 - [x] H5 Title: `gh pr edit --title`.
 

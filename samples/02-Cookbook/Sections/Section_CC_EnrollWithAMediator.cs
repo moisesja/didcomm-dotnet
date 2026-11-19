@@ -168,8 +168,7 @@ public static class Section_CC_EnrollWithAMediator
 
         // Two directions, two answers. Blocktrust's wallets can use this library's mediator; this
         // library's client cannot use a Blocktrust mediator.
-        // TODO(#99): link the upstream Blocktrust report in the note below once it is posted.
-        ctx.Narrator.Note("This client cannot enroll with a Blocktrust mediator, pinned or not. On first contact that mediator answers from a new identity, announced with a rotation token that lacks its issue time (iat) and arrives without a sender (from); and its answers to key-list updates leave out each entry's result. The DIDComm spec requires the issue time and the sender on a rotation, and the 2.0 protocol requires the result, so the library refuses those answers on purpose.");
+        ctx.Narrator.Note("This client cannot enroll with a Blocktrust mediator, pinned or not. On first contact that mediator answers from a new identity, announced with a rotation token that lacks its issue time (iat) and arrives without a sender (from); and its answers to key-list updates leave out each entry's result. The DIDComm spec requires the issue time and the sender on a rotation, and the 2.0 protocol requires the result, so the library refuses those answers on purpose. Reported to the Blocktrust project: https://github.com/bsandmann/blocktrust.Mediator/issues/5");
         ctx.Narrator.Note("The other way round works: a wallet built for Blocktrust can enroll with this library's mediator if the mediator accepts requests without a timestamp (MediatorOptions.Replay.RequireCreatedTime = false), because that wallet sends none. The cost: a captured copy of such a request can be played again once the replay window (5 minutes by default) has passed.");
     }
 
