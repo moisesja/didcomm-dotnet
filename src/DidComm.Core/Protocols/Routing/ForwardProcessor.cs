@@ -41,6 +41,14 @@ namespace DidComm.Protocols.Routing;
 /// never consults the provider. The processor performs no transport I/O.
 /// </para>
 /// <para>
+/// <strong>The payload must be a DIDComm message (#98).</strong> In every mode, pass-through
+/// included, the attachment must decode to UTF-8 JSON with an object at the top level; anything else
+/// is refused as <see cref="MalformedMessageException"/> before it is transformed or relayed. The
+/// spec's forward <c>attachments</c> are "the DIDComm message(s) to send" to <c>next</c>, and every
+/// DIDComm encoding is <c>+json</c>. The payload is checked, not opened: an encrypted payload stays
+/// opaque to the mediator.
+/// </para>
+/// <para>
 /// <strong>Scheduling hints.</strong> <c>expires_time</c> is propagated; <c>delay_milli</c> is
 /// resolved to <see cref="ForwardProcessingResult.Delay"/> and, on the processor's
 /// <see cref="DidCommOptions"/> clock, to the absolute <see cref="ForwardProcessingResult.NotBefore"/>
@@ -66,6 +74,10 @@ public sealed class ForwardProcessor
     private readonly TimeSpan? _maxDelay;
     private readonly IRecipientRoutingKeyProvider _routingKeys;
     private readonly DidCommOptions _didCommOptions;
+
+    // No wire value: the bytes are the sender's.
+    private const string NotADidCommMessage =
+        "Forward attachment is not a DIDComm message: its payload must be UTF-8 JSON with an object at the top level (FR-ROUTE-01).";
 
     /// <summary>
     /// Initialise the processor with the routing keys from <see cref="ForwardProcessorOptions.ExtraRecipientRoutingKeys"/>
@@ -163,7 +175,7 @@ public sealed class ForwardProcessor
     /// <param name="unpacked">The unpack outcome of the inbound envelope — envelope metadata included, so the FR-ROUTE-11 posture can be judged.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ConsistencyException">The message is not a <c>forward</c>; or the envelope was not encrypted (plaintext or signed-only); or it was not decrypted with a key this mediator holds (no <see cref="UnpackResult.RecipientKid"/>); or the forward carries more than one attachment or an attachment with no data (FR-ROUTE-05/11). None of these messages quote wire values.</exception>
-    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64 or decodes to no bytes, or — in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward — the payload is not a JSON document or <c>next</c> has no DID part. Pass-through with no extra keys relays the bytes opaquely and never parses them.</exception>
+    /// <exception cref="MalformedMessageException">The forward violates FR-ROUTE-01 (missing <c>next</c> or attachments), its <c>next</c> exceeds the FR-API-09 bounds, its attachment's <c>data.base64</c> is not base64 or decodes to no bytes, its payload (in any mode, pass-through included) is not a DIDComm message — UTF-8 JSON with an object at the top level — or, in rewrap mode or with extra routing keys, where the payload is re-embedded in a fresh forward, <c>next</c> has no DID part.</exception>
     /// <exception cref="DidResolutionException">Rewrap mode only: the next hop resolves to no usable <c>keyAgreement</c> key.</exception>
     /// <exception cref="CryptoException">Rewrap mode or extra routing keys: the onward envelope could not be built.</exception>
     public Task<ForwardProcessingResult> ProcessAsync(UnpackResult unpacked, CancellationToken ct = default)
@@ -264,7 +276,7 @@ public sealed class ForwardProcessor
     /// <param name="selfAddressed">The forward whose <c>next</c> is the DID that decrypted it.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ConsistencyException">Not a forward, more than one attachment, or an attachment with no data.</exception>
-    /// <exception cref="MalformedMessageException">The attachment is not valid base64url or decodes to no bytes; the layer is not an anoncrypt envelope around a plaintext message without <c>from_prior</c>; or the unpack refuses what is inside.</exception>
+    /// <exception cref="MalformedMessageException">The attachment is not valid base64url, decodes to no bytes or is not a UTF-8 JSON object; the layer is not an anoncrypt envelope around a plaintext message without <c>from_prior</c>; or the unpack refuses what is inside.</exception>
     /// <exception cref="DidCommException">Any other refusal of the unpack (it cannot be decrypted with a held key, a key cannot be resolved, ...).</exception>
     internal async Task<UnpackResult> PeelAsync(UnpackResult selfAddressed, CancellationToken ct)
     {
@@ -306,16 +318,30 @@ public sealed class ForwardProcessor
 
     /// <summary>
     /// The bytes a forward's attachment carries (<c>data.json</c> serialized, or relaxed
-    /// <c>data.base64</c>). Invalid or empty base64 is refused as <see cref="MalformedMessageException"/>,
-    /// an attachment with neither form as <see cref="ConsistencyException"/>. The one
-    /// attachment-decoding rule: the mediator uses it to relay, and the recipient-side client to open a
-    /// delivery a mediator re-wrapped for it (FR-ROUTE-06).
+    /// <c>data.base64</c>), which must be a DIDComm message: UTF-8 JSON whose top level is an object
+    /// (#98). Invalid or empty base64, and a payload that is not a UTF-8 JSON object, are refused as
+    /// <see cref="MalformedMessageException"/>; an attachment with neither form as
+    /// <see cref="ConsistencyException"/>. The one attachment-decoding rule: the mediator uses it to
+    /// relay (pass-through included) and to screen a forward at intake (<see cref="ForwardHandler"/>),
+    /// and the recipient-side client to open a delivery a mediator re-wrapped for it (FR-ROUTE-06).
     /// </summary>
+    /// <remarks>
+    /// The forward's attachment is "the DIDComm message(s) to send to the party indicated in the
+    /// <c>next</c> body attribute" (DIDComm v2.1 §Routing, forward <c>attachments</c>), and every
+    /// DIDComm encoding is <c>+json</c> (§Message Structure), which travels as UTF-8 (RFC 8259 §8.1).
+    /// So bytes that are not a UTF-8 JSON object are not a message to relay. Passing them on would
+    /// also break the next hop's WebSocket: a DIDComm message goes out as a text frame, and a
+    /// receiver fails the whole connection on a text frame that is not UTF-8 (RFC 6455 §5.6, §8.1).
+    /// </remarks>
     /// <param name="attachment">The forward's single attachment.</param>
     internal static byte[] ExtractAttachmentBytes(Messages.Attachment attachment)
     {
         if (attachment.Data.Json is JsonNode json)
+        {
+            if (json is not JsonObject)
+                throw new MalformedMessageException(NotADidCommMessage);
             return Encoding.UTF8.GetBytes(json.ToJsonString());
+        }
 
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
         {
@@ -338,6 +364,8 @@ public sealed class ForwardProcessor
             // payload is not one (#95 Q-7). The sender's mistake, not the mediator's fault.
             if (decoded.Length == 0)
                 throw new MalformedMessageException("Forward attachment 'data.base64' decodes to no bytes; there is no packed message to relay.");
+            if (!Messages.DidCommWireShape.IsUtf8JsonObject(decoded))
+                throw new MalformedMessageException(NotADidCommMessage);
             return decoded;
         }
 

@@ -179,9 +179,11 @@ public sealed class ForwardHandlerOutcomeMetricsTests
     }
 
     [Fact]
-    public async Task Processor_refusing_a_payload_it_cannot_rewrap_counts_as_malformed()
+    public async Task A_payload_that_is_not_a_DIDComm_message_is_refused_at_intake_and_counts_as_malformed()
     {
-        // Rewrap over a non-JSON attachment: MalformedMessageException from the processor.
+        // Rewrap over a non-JSON attachment. #98: this used to reach the processor, which refused it
+        // with MalformedMessageException on the pump; the handler now refuses it at intake, before
+        // anything is reserved, with its own line. The outcome is unchanged.
         using var meters = new TestMeterFactory();
         using var outcomes = ForwardOutcomeRecorder.For(meters);
         await using var h = new ForwardHandlerTests.Harness(
@@ -197,7 +199,7 @@ public sealed class ForwardHandlerOutcomeMetricsTests
         await h.Dispatch(AsDecryptedByMediator(forward));
         await h.Handler.FlushAsync(Flush);
 
-        h.Logger.Entries.Should().Contain(e => e.Formatted.Contains(nameof(MalformedMessageException)));
+        h.Logger.Entries.Should().Contain(e => e.Formatted.Contains("is not a DIDComm message"));
         outcomes.Counts.Should().Equal(new Dictionary<string, long> { [ForwardOutcomes.DroppedMalformed] = 1 });
     }
 

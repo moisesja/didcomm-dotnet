@@ -104,7 +104,8 @@ public sealed class InboxRelaySinkTests
     private static Uri InboxAt(TcpListener listener)
         => new($"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/inbox");
 
-    private static ForwardProcessingResult Forward() => new(Bob, new byte[] { 1 }, ExpiresTime: null, Delay: null);
+    // #98: SendPackedAsync takes only a DIDComm message (UTF-8 JSON, an object): the smallest one.
+    private static ForwardProcessingResult Forward() => new(Bob, "{}"u8.ToArray(), ExpiresTime: null, Delay: null);
 
     // A loopback port nothing listens on: bind one, read it, release it.
     private static int ClosedLoopbackPort()
