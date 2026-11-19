@@ -730,6 +730,9 @@ internal sealed class MediatorTestServer : IAsyncDisposable
     /// <summary>Every forward admitted so far has been relayed, dropped or discarded (the handler's test seam).</summary>
     public Task FlushAsync() => Handler.FlushAsync(Timeout);
 
+    /// <summary>Every inbound message the mediator's dispatcher handed to its observers so far has reached them (their queue is drained).</summary>
+    public Task FlushObserversAsync() => App.Services.GetRequiredService<ProtocolDispatcher>().FlushObserversAsync(Timeout);
+
     /// <summary>The push workers are idle.</summary>
     public Task PushesIdleAsync() => Pushes.WaitForIdleAsync(Timeout);
 

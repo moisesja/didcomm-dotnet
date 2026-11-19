@@ -23,6 +23,7 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// </summary>
 public sealed class PickupClientAckWithoutStatusTests
 {
+    private const string DeliveryRequest = "delivery-request";
     private const string MessagesReceived = "messages-received";
     private const string StatusRequest = "status-request";
 
@@ -33,14 +34,13 @@ public sealed class PickupClientAckWithoutStatusTests
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, SilentOn(MessagePickup.MessagesReceivedType));
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 2);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
         mediator.Store.MessageCount.Should().Be(2);
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, failures);
 
         status.MessageCount.Should().Be(0, "the status the client asked for reports the acknowledgement as applied");
-        Sent(observer, bob, before).Should().Equal(MessagesReceived, StatusRequest);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, StatusRequest);
         mediator.Store.MessageCount.Should().Be(0, "the mediator applied the acknowledgement");
     }
 
@@ -50,14 +50,13 @@ public sealed class PickupClientAckWithoutStatusTests
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, SilentOn(MessagePickup.MessagesReceivedType));
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 2);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
         status.MessageCount.Should().Be(0, "both chunks were applied, and the status after the last one says so");
-        Sent(observer, bob, before).Should().Equal(MessagesReceived, MessagesReceived, StatusRequest);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived, StatusRequest);
         mediator.Store.MessageCount.Should().Be(0);
     }
 
@@ -69,14 +68,13 @@ public sealed class PickupClientAckWithoutStatusTests
         await using var mediator = await StartAsync(observer, (request, reply) =>
             Is(request, MessagePickup.MessagesReceivedType) && Interlocked.Increment(ref acknowledgements) == 1 ? null : reply);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 2);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
         status.MessageCount.Should().Be(0);
-        Sent(observer, bob, before).Should().Equal(MessagesReceived, MessagesReceived);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived);
     }
 
     [Fact]
@@ -87,14 +85,13 @@ public sealed class PickupClientAckWithoutStatusTests
         await using var mediator = await StartAsync(observer, (request, reply) =>
             Is(request, MessagePickup.MessagesReceivedType) && Interlocked.Increment(ref acknowledgements) == 2 ? null : reply);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 2);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
         status.MessageCount.Should().Be(0);
-        Sent(observer, bob, before).Should().Equal(MessagesReceived, MessagesReceived, StatusRequest);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived, StatusRequest);
     }
 
     [Fact]
@@ -104,14 +101,13 @@ public sealed class PickupClientAckWithoutStatusTests
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, answer: null);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 2);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
         status.MessageCount.Should().Be(0);
-        Sent(observer, bob, before).Should().Equal(MessagesReceived, MessagesReceived);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived);
     }
 
     [Fact]
@@ -120,14 +116,13 @@ public sealed class PickupClientAckWithoutStatusTests
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, SilentOn(MessagePickup.MessagesReceivedType, MessagePickup.StatusRequestType));
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 1);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 1);
 
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var thrown = await Record.ExceptionAsync(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, failures));
 
         thrown.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(StatusRequest).And.NotContain(bob.Did);
-        Sent(observer, bob, before).Should().Equal(MessagesReceived, StatusRequest);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, StatusRequest);
         mediator.Store.MessageCount.Should().Be(0, "the acknowledgement was applied; only the confirmation is missing");
     }
 
@@ -139,14 +134,13 @@ public sealed class PickupClientAckWithoutStatusTests
             ? ProblemReports.Create(request.To![0], request.From!, "e.p.req.refused-for-test", request.Id)
             : reply);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
-        var (bob, failures) = await QueueUnopenableAsync(mediator, harness, count: 1);
+        var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 1);
 
-        var before = observer.KindsFrom(bob.Did).Count;
 
         var thrown = await Record.ExceptionAsync(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, failures));
 
         thrown.Should().BeOfType<MediationProtocolException>().Which.ProblemCode.Should().Be("e.p.req.refused-for-test");
-        Sent(observer, bob, before).Should().Equal(MessagesReceived);
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived);
     }
 
     // ---- helpers ------------------------------------------------------------------------------
@@ -167,16 +161,18 @@ public sealed class PickupClientAckWithoutStatusTests
     private static Func<Message, Message?, Message?> SilentOn(params string[] types)
         => (request, reply) => types.Any(t => Is(request, t)) ? null : reply;
 
-    // What the mediator received from Bob after the first `before` requests (each is observed before
-    // it is answered, so everything a finished call sent is there).
-    private static IReadOnlyList<string> Sent(PickupRequestObserver observer, TestPeer bob, int before)
-        => observer.KindsFrom(bob.Did).Skip(before).ToArray();
+    // What the mediator received from Bob after the first `before` requests is exactly `expected`.
+    // The observer records asynchronously (a finished call's last request can still be on its
+    // way), so the records asserted on are waited for and the observer queue drained first.
+    private static async Task ShouldHaveSentAsync(MediatorTestServer mediator, PickupRequestObserver observer, TestPeer bob, int before, params string[] expected)
+        => (await observer.KindsFromAsync(mediator, bob.Did, before + expected.Length)).Skip(before).Should().Equal(expected);
 
     private static bool Is(Message message, string type) => string.Equals(message.Type, type, StringComparison.Ordinal);
 
     // Bob enrols, `count` messages he cannot open are queued for him, and a fetch returns them as
-    // failures (never acknowledged): their ids are what the tests acknowledge.
-    private static async Task<(TestPeer Bob, string[] Failures)> QueueUnopenableAsync(MediatorTestServer mediator, MediatorClientHarness harness, int count)
+    // failures (never acknowledged): their ids are what the tests acknowledge. `Before` is the
+    // baseline of what the mediator received from Bob: that fetch's delivery-request, once recorded.
+    private static async Task<(TestPeer Bob, string[] Failures, int Before)> QueueUnopenableAsync(MediatorTestServer mediator, MediatorClientHarness harness, PickupRequestObserver observer, int count)
     {
         var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
         var alice = await harness.NewAliceAsync();
@@ -184,7 +180,9 @@ public sealed class PickupClientAckWithoutStatusTests
             await PickupE2E.PostUnopenableAsync(mediator, alice, recipient);
         var batch = await harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 10);
         batch.Items.Should().HaveCount(count).And.OnlyContain(item => item.Error != null);
-        return (bob, batch.Items.Select(item => item.Id).ToArray());
+        var before = await observer.KindsFromAsync(mediator, bob.Did, 1);
+        before.Should().Equal(new[] { DeliveryRequest }, "nothing was acknowledged by the fetch");
+        return (bob, batch.Items.Select(item => item.Id).ToArray(), before.Count);
     }
 
     // 150 ids, two messages-received: the first failure's id in the first chunk, the second's in the

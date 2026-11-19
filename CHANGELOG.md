@@ -62,7 +62,27 @@ without the routing mediator, and every `MapDidCommWebSocket` endpoint, behave e
   Kestrel that the abort ends a stalled socket: the reservation went 10.0 s after the stall, and a
   1 MB delivery with a 5 s lease was cut off at 5.0 s with its 10 messages still queued.
 
-### Fixed — `PickupClient.AckAsync` works with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
+### Fixed — the mediator no longer turns live delivery on over a WebSocket that the recipient has paused (FR-PICK-07, #98, epic #88)
+
+A recipient can pause its WebSocket with `return_route: none` (also `thread`, or a value nobody
+defines, which count as `none`). After that the mediator sends nothing on the socket until a later
+`return_route: all`. A `live-delivery-change` with `live_delivery: true` sent while paused was still
+applied, although its answer could not be sent. When `all` came back, the mediator pushed new
+messages to a recipient that had never been told live delivery was on, and the messages counted in
+that unsent status could only be picked up. The mediator package has not been released, so no
+released behaviour changes. No public API changes.
+
+- **Now:** a paused socket counts as a connection that cannot do live delivery, like HTTP. The answer
+  is the `e.m.live-mode-not-supported` problem report (which the paused socket does not carry
+  either), and the live flag is not touched. A flag that was already on stays on, and its pushes
+  resume with the next `all`. Turning live delivery off still works on a paused socket. A closed
+  socket is answered as before.
+- **Tests.** `D4LiveChangeOnDowngradedSessionTests` in the interop tests (from the #98 red team)
+  sends the change on a real WebSocket after `none`, and with the change itself carrying `none`,
+  `thread` or a malformed value; all four fail on the code before this fix. Two
+  `MessagePickupFlowTests` pin the problem report, and that a flag already on survives a pause.
+
+### Fixed — `PickupClient.AckAsync` and `FetchAsync` work with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
 
 Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated
 `status`, not that it must. The Identus mediator v1.2.1 removes the messages and sends nothing back
@@ -87,10 +107,18 @@ changes: same signature, same `Task<PickupStatus>`.
   harmless).
 - **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
   confirms an acknowledgement, and give the time rule.
-- **Not changed.** `FetchAsync`'s own acknowledgement and the live stream's still expect the
-  status. Against a mediator that sends none they treat the acknowledgement as failed: the fetch logs
-  it and returns its batch as before, and the live stream keeps the ids and sends them again after
-  its back-off. That is left for a separate decision.
+- **`FetchAsync` no longer logs a false warning over HTTP.** A fetch acknowledges what it returns
+  by itself and never reads the status that may follow. Against Identus every fetch logged the
+  Warning "Acknowledgement … failed (TimeoutException); the mediator delivers them again", although
+  the acknowledgement had been applied. Over HTTP an empty answer now counts as sent: nothing is
+  logged and nothing more is asked. A problem report, no response within `RequestTimeout`, or a
+  transport error is still logged as before, and the batch is returned either way. The `FetchAsync`
+  remarks say so.
+- **Not changed.** On a WebSocket a fetch's acknowledgement still waits up to `RequestTimeout` for
+  the status, and logs the acknowledgement as failed when none comes: there, silence looks the same
+  as a slow answer. The live stream's acknowledgement still expects the status too: against a
+  mediator that sends none it keeps the ids and sends them again after its back-off. That is left for
+  a separate decision.
 - **Tests.** `PickupClientAckWithoutStatusTests` in the interop tests runs the client against this
   library's mediator with its answer to `messages-received` dropped (the Identus shape: a real HTTP
   202 with an empty body), with one or both of two chunks unanswered, with the `status-request`
@@ -98,7 +126,10 @@ changes: same signature, same `Task<PickupStatus>`.
   the code before this fix with "got no answer in the HTTP response"; the two that pass there are the
   unchanged mediator and the problem report, whose behaviour stays the same. The unit tests of the
   same name pin the time rule on the test clock: half of `RequestTimeout` on a WebSocket, the rest of
-  it over HTTP, the call ending at exactly one `RequestTimeout`.
+  it over HTTP, the call ending at exactly one `RequestTimeout`. `PickupClientFetchAckWithoutStatusTests`
+  does the same for a fetch: an empty 202 logs no failure and the next status shows the
+  acknowledgement applied (this one fails on the code before this fix); a problem report, no answer
+  within `RequestTimeout`, and a WebSocket with no status are still logged.
 
 ### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll; the client's version question works with the Identus mediator (FR-MED-10, #99, epic #88)
 

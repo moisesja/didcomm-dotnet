@@ -297,8 +297,8 @@ internal sealed class PickupCoordinator
 
     /// <summary>
     /// <c>live-delivery-change</c>: turn live delivery on (with the framing to use for this
-    /// session's pushes) or off, and report the status. Turning it on needs a live session;
-    /// without one the answer is the problem report and nothing changes.
+    /// session's pushes) or off, and report the status. Turning it on needs a live session that
+    /// is not downgraded; without one the answer is the problem report and nothing changes.
     /// </summary>
     public async Task<PickupOutcome> SetLiveDeliveryAsync(
         string peerDid,
@@ -311,7 +311,11 @@ internal sealed class PickupCoordinator
         try
         {
             var state = _tracker.Track(session);
-            if (liveDelivery && state is null)
+            // A downgraded session (after a none, a thread or a malformed value, FR-RR-05) can
+            // carry neither the status nor a push, so it is a connection incapable of live
+            // delivery (FR-PICK-07): the problem report, and the flag is not touched (one already
+            // on stays on, and its pushes resume with the next all).
+            if (liveDelivery && (state is null || IsDowngraded(session!)))
                 return PickupOutcome.LiveModeNotSupported;
 
             // The status is read first: if the store cannot be read there is no reply, and the
@@ -696,6 +700,13 @@ internal sealed class PickupCoordinator
 
     private bool IsLive(IReturnRouteSession? session)
         => session is not null && _tracker.Find(session)?.Live is not null;
+
+    // Open but not in mode all. A downgrade is the connection's state when the change arrives:
+    // only the session's own receive loop applies a header, and it waits for this change. A
+    // close can land at any moment, so a closed session is left to SetLive's rule instead (the
+    // status, live off), which answers the same whenever it lands.
+    private static bool IsDowngraded(IReturnRouteSession session)
+        => session.Mode != ReturnRouteMode.All && !session.Closed.IsCancellationRequested;
 
     // Lease, check, push, trim — and look further when a batch came to nothing. Returns the
     // outcome when the request is settled here, or null when nothing could be delivered and the

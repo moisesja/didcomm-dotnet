@@ -204,7 +204,11 @@ public sealed class PickupClient
     /// <para>
     /// Cancelling before the acknowledgement is sent leaves everything with the mediator. If the
     /// acknowledgement itself fails, the batch is still returned (and logged); those messages come
-    /// back later and are recognised as repeats. A message that failed stays leased to you for the
+    /// back later and are recognised as repeats. A mediator that sends no status back after it
+    /// (Message Pickup 3.0 allows that; the Identus mediator over HTTP answers with an empty 202)
+    /// has not failed it: over HTTP nothing is logged. On a WebSocket the client cannot tell that
+    /// silence from a slow answer, so there it is still logged as failed after
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. A message that failed stays leased to you for the
     /// mediator's lease, so a loop that fetches until drained gets past failures to what is behind
     /// them (for messages that are slow to open, only so many: see the known limits below); one that
     /// polls more slowly than the lease, with more failures than <paramref name="limit"/>, keeps
@@ -734,14 +738,16 @@ public sealed class PickupClient
 
     // Acknowledge on a deadline of our own (RequestTimeout), not the caller's token: the batch is
     // committed, so a cancellation now would only make the messages come back. Any failure is
-    // logged by type name; the messages come back and are then recognised as repeats.
+    // logged by type name; the messages come back and are then recognised as repeats. The status
+    // that may answer is not read, and Message Pickup 3.0 lets a mediator send none (it SHOULD, not
+    // MUST): over HTTP an empty response is that, not a failure. On a WebSocket the wait is as before.
     private async Task AcknowledgeQuietlyAsync(MediatorRoute route, string mediatorDid, string from, IReadOnlyList<string> ids)
     {
         var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, ids, UuidV4MessageIdGenerator.Instance);
         try
         {
             using var deadline = OwnDeadline.Start(Exchange.Time, Exchange.Options.RequestTimeout);
-            await Exchange.ExchangeAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
+            await Exchange.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

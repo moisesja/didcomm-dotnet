@@ -160,6 +160,61 @@ public sealed class MessagePickupFlowTests
         (await fixture.SendAsync(MessagePickup.CreateLiveDeliveryChange(peer, mediator, true), mediator)).Reply!.Type.Should().Be(ProblemReports.MessageType);
     }
 
+    [Fact]
+    public async Task Live_mode_on_a_downgraded_session_is_answered_with_the_problem_report_and_stays_off()
+    {
+        await using var fixture = PickupFixture.Create();
+        var (mediator, peer) = await fixture.EnrolledAsync();
+        var socket = fixture.Session(peer, mediator, live: true);
+        // return_route none (or thread, or a malformed value) on the socket: it carries no reply and no push (FR-RR-05).
+        socket.Downgrade();
+
+        var request = MessagePickup.CreateLiveDeliveryChange(peer, mediator, true);
+        var report = (await fixture.SendAsync(request, mediator, socket)).Reply!;
+        report.Type.Should().Be("https://didcomm.org/report-problem/2.0/problem-report");
+        report.Pthid.Should().Be(request.Id);
+        ProblemReports.ReadCode(report).Should().Be("e.m.live-mode-not-supported");
+        ProblemReports.ReadComment(report).Should().Be("Connection does not support Live Delivery");
+        // Turning it off there is not a problem: status, live_delivery false.
+        (await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket, on: false)).LiveDelivery.Should().BeFalse();
+
+        // return_route all again: live delivery was never turned on, so a new arrival waits for pickup.
+        socket.Resume();
+        (await MessagePickupLive.StatusAsync(fixture, peer, mediator, socket)).LiveDelivery.Should().BeFalse("the change was refused on a session that could not carry live delivery (FR-PICK-07)");
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        socket.Attempts.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_downgraded_session_keeps_the_live_flag_it_had_and_its_pushes_resume_with_the_next_all()
+    {
+        await using var fixture = PickupFixture.Create();
+        var (mediator, peer) = await fixture.EnrolledAsync();
+        var socket = fixture.Session(peer, mediator, live: true);
+        (await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket)).LiveDelivery.Should().BeTrue();
+        socket.Downgrade();
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 1))).Outcome.Should().Be(PickupDeliveryOutcome.Queued, "nothing is pushed to a downgraded session (FR-RR-05)");
+
+        // Asked again while downgraded: the problem report, and the flag is not touched.
+        var report = (await fixture.SendAsync(MessagePickup.CreateLiveDeliveryChange(peer, mediator, true), mediator, socket)).Reply!;
+        ProblemReports.ReadCode(report).Should().Be("e.m.live-mode-not-supported");
+
+        // return_route all again: the flag it had is still on, and new arrivals are pushed.
+        socket.Resume();
+        (await MessagePickupLive.StatusAsync(fixture, peer, mediator, socket)).LiveDelivery.Should().BeTrue();
+        var pushed = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 2));
+        pushed.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+        MessagePickup.TryParseDelivery(socket.Sent.Should().ContainSingle().Subject, out var delivered, out _).Should().BeTrue();
+        delivered!.Should().ContainSingle().Which.Id.Should().Be(pushed.MessageId);
+
+        // Turning it off works on a downgraded session too, answered with the status.
+        socket.Downgrade();
+        (await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket, on: false)).LiveDelivery.Should().BeFalse();
+        socket.Resume();
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30, 3))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        socket.Sent.Should().ContainSingle();
+    }
+
     [Theory]
     [InlineData(HandlerEnvelope.Plaintext)]
     [InlineData(HandlerEnvelope.Anoncrypt)]

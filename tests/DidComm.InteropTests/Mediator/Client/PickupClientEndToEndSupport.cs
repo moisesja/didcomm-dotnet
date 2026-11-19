@@ -35,7 +35,10 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// What the mediator received of the pickup client's requests, through a protocol observer on the
 /// mediator's own dispatcher: the type and the <c>created_time</c> of every Message Pickup message,
 /// so a test can show each one was stamped from the client's injected clock by the send path
-/// (FR-RR-09), never by hand.
+/// (FR-RR-09), never by hand. The record is asynchronous: the dispatcher hands a message to its
+/// observers' background queue when its dispatch ends, before the answer is sent, and the queue
+/// delivers it later. So a finished client call does not mean its requests are recorded yet: read
+/// them with <see cref="KindsFromAsync"/>, or wait for them (L-065).
 /// </summary>
 internal sealed class PickupRequestObserver : IProtocolObserver
 {
@@ -61,12 +64,26 @@ internal sealed class PickupRequestObserver : IProtocolObserver
 
     /// <summary>
     /// Wait until at least <paramref name="count"/> pickup messages from <paramref name="from"/> were
-    /// observed: the mediator's dispatcher has handled each one. The observer is handed each message
-    /// before the mediator sends its answer, so this says nothing about the client: a test that moves
-    /// the client's clock next must first wait for the client's own state (#119).
+    /// observed: the mediator's dispatcher has handled each one. A message is handed to the observer
+    /// queue before the mediator sends its answer, so this says nothing about the client: a test that
+    /// moves the client's clock next must first wait for the client's own state (#119).
     /// </summary>
     public Task WaitForAsync(string from, int count)
         => MediatorTestServer.WaitUntilAsync(() => _seen.Count(s => s.From == from) >= count, $"the mediator observed {count} pickup message(s) of the DID");
+
+    /// <summary>
+    /// The kinds of the pickup messages from <paramref name="from"/> (as <see cref="KindsFrom"/>),
+    /// read once the <paramref name="count"/> records the caller asserts on are there and the
+    /// mediator's observer queue is drained. The wait covers the records asserted on; the drain also
+    /// brings in a message beyond them that was handed over by then, so a call that sent one more
+    /// request than expected shows it.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> KindsFromAsync(MediatorTestServer mediator, string from, int count)
+    {
+        await WaitForAsync(from, count);
+        await mediator.FlushObserversAsync();
+        return KindsFrom(from);
+    }
 }
 
 /// <summary>One Message Pickup message the mediator received.</summary>
