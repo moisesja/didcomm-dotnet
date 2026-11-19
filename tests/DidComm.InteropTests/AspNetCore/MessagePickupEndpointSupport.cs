@@ -304,7 +304,7 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
         do
         {
             result = await socket.ReceiveAsync(buffer, cts.Token);
-            result.MessageType.Should().Be(WebSocketMessageType.Binary, "each message of the mediator is one binary WebSocket message");
+            result.MessageType.Should().Be(WebSocketMessageType.Text, "each message of the mediator is one text WebSocket message (#98)");
             ms.Write(buffer, 0, result.Count);
         }
         while (!result.EndOfMessage);

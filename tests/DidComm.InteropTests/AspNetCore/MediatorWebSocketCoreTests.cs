@@ -179,7 +179,7 @@ public sealed class MediatorWebSocketCoreTests
         host.Registry.Count.Should().Be(0);
 
         // The mediator endpoint ignores the global STOMP switch: a bare envelope (which STOMP would
-        // refuse with a 1002 close) opens a session and its reply comes back as one binary message.
+        // refuse with a 1002 close) opens a session and its reply comes back as one text message.
         var bare = host.Inbound(host.Alice);
         using (var socket = await host.ConnectAsync(MediatorPath))
         {
@@ -432,11 +432,11 @@ public sealed class MediatorWebSocketCoreTests
             => App.GetTestServer().CreateWebSocketClient().ConnectAsync(
                 new UriBuilder(App.GetTestServer().BaseAddress) { Scheme = "ws", Path = path }.Uri, default);
 
-        /// <summary>Receive the next whole message on <paramref name="socket"/>: one binary frame, authcrypted by the server to exactly <paramref name="peer"/>.</summary>
+        /// <summary>Receive the next whole message on <paramref name="socket"/>: one text frame (#98), authcrypted by the server to exactly <paramref name="peer"/>.</summary>
         public async Task<Message> ReceiveReplyAsync(WebSocket socket, TestPeer peer)
         {
             var (type, text) = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-            type.Should().Be(WebSocketMessageType.Binary, "each reply is one binary WebSocket message");
+            type.Should().Be(WebSocketMessageType.Text, "each reply is one text WebSocket message (FR-TRN-09, #98)");
             var unpacked = await peer.Client.UnpackAsync(text);
             unpacked.Encrypted.Should().BeTrue();
             unpacked.Authenticated.Should().BeTrue();

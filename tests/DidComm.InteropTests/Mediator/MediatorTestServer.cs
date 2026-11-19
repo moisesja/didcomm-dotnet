@@ -710,7 +710,7 @@ internal sealed class MediatorTestServer : IAsyncDisposable
     public async Task<PickupAnswer> ReceiveOverSocketAsync(WebSocket socket, TestPeer peer)
     {
         var (type, text) = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-        type.Should().Be(WebSocketMessageType.Binary, "each message of the mediator is one binary WebSocket message, never a STOMP frame");
+        type.Should().Be(WebSocketMessageType.Text, "each message of the mediator is one text WebSocket message (#98), never a STOMP frame");
         return await UnpackAnswerAsync(peer, Encoding.UTF8.GetBytes(text));
     }
 
