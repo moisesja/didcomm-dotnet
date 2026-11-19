@@ -55,7 +55,7 @@ Ports and DIDs change every run; the structure is stable:
 
 == Section 2 — Trust ping — is anybody out there? (FR-PROTO-04) ==
   • [alice transport] Connected → ws://127.0.0.1:<port>/didcomm
-  • [alice] sent ping (id = …) as one binary WebSocket message (FR-TRN-09).
+  • [alice] sent ping (id = …) as one text WebSocket message (FR-TRN-09).
   • [bob] handler produced ping-response — sending it out of band.
     ping-response thid == ping.id = True
     ping-response authenticated = True

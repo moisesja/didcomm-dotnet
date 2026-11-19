@@ -166,6 +166,15 @@ public static class Section_CC_EnrollWithAMediator
         ctx.Narrator.Note("A 2.0 grant has room for one routing DID: the mediator's first. So a mediator lists its primary routing DID first; to move to a new one, it lists the new DID first and keeps the old one, with its keys, so mail sent to either keeps arriving.");
         ctx.Narrator.Note("Talking to an Identus mediator needs no pin: the client asks its version question in a form that mediator understands, and picks 2.0 by itself. Pin a version only for a mediator that does not answer the question at all.");
 
+        // Identus over a WebSocket: that mediator puts no timestamp (created_time) on its answers, and
+        // a wallet drops the mediator's unstamped answers that arrive on a WebSocket, because its
+        // replay protection asks for one. A wallet that talks to Identus over a WebSocket turns that
+        // requirement off in its own container (the wallet's, not the mediator's):
+        //     services.Configure<ReplayProtectionOptions>(o => o.RequireCreatedTime = false);
+        // Over HTTP nothing is needed. This sample's mediator stamps its answers, so the wallet above
+        // keeps the default.
+        ctx.Narrator.Note("Talking to an Identus mediator over a WebSocket needs one setting in the wallet's own container: ReplayProtectionOptions.RequireCreatedTime = false, for example services.Configure<ReplayProtectionOptions>(o => o.RequireCreatedTime = false). Identus puts no timestamp (created_time) on its answers, and without the setting the wallet drops those answers when they arrive on a WebSocket. What the wallet gives up: a copy of a message that carries no timestamp can be replayed to it once the replay window (5 minutes by default) has passed, or sooner if the wallet's clock jumps forward (see ReplayProtectionOptions.RequireCreatedTime). Over HTTP nothing is needed.");
+
         // Two directions, two answers. Blocktrust's wallets can use this library's mediator; this
         // library's client cannot use a Blocktrust mediator.
         ctx.Narrator.Note("This client cannot enroll with a Blocktrust mediator, pinned or not. On first contact that mediator answers from a new identity, announced with a rotation token that lacks its issue time (iat) and arrives without a sender (from); and its answers to key-list updates leave out each entry's result. The DIDComm spec requires the issue time and the sender on a rotation, and the 2.0 protocol requires the result, so the library refuses those answers on purpose. Reported to the Blocktrust project: https://github.com/bsandmann/blocktrust.Mediator/issues/5");

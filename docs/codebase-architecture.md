@@ -169,7 +169,8 @@ that every grantee references its granter directly (pack pins direct references 
 ## Inbound flow
 
 1. A packed envelope arrives at `MapDidCommEndpoint` (HTTP POST) or `MapDidCommWebSocket` (one
-   message per binary frame, optional STOMP session via `StompServerSession`). A mediator maps both
+   envelope per WebSocket message, text or binary, both accepted; optional STOMP session via
+   `StompServerSession`). A mediator maps both
    with `MapDidCommMediator` (see "Mediator service" below).
 2. The endpoint checks the content type (415 on mismatch) and caps the body at
    `DidCommOptions.MaxReceiveBytes` (413 on HTTP, close code 1009 on WebSocket).
@@ -222,7 +223,8 @@ below).
    route, `MaxResponseBytes`.
 7. `ITransportRouter.SendAsync` picks the `IDidCommTransport` whose `Scheme` matches the endpoint
    (`HttpDidCommTransport` or `WebSocketDidCommTransport`), which delivers one packed envelope —
-   over WebSocket on the endpoint's pooled socket or on a return-route session socket — and returns
+   over WebSocket on the endpoint's pooled socket or on a return-route session socket, as one text
+   WebSocket message (FR-TRN-09, #98; a STOMP SEND frame under `UseStomp` is binary) — and returns
    a `TransportResult`. Both connect directly (FR-TRN-13): their `SocketsHttpHandler` has
    `UseProxy = false`, so no proxy from the environment is used, and its `ConnectCallback` runs
    `OutboundEndpointGuard.ConnectAsync` on every connection, pinning it to a vetted address. See
@@ -659,7 +661,9 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
   The size-bounded overload (#94) compares the packed frame with the caller's bound before the
   write: over it the answer is `TooLarge`, nothing is queued and the slot goes back.
   It never blocks the handler. The writer task is the only code that sends on or close-outputs the
-  socket, and its "may I send?" check and the start of `SendAsync` share a lock with `ApplyHeader`
+  socket; it writes each frame as one text WebSocket message (FR-TRN-09, #98: every frame is an
+  envelope the session packed itself, so UTF-8 JSON), and its "may I send?" check and the start
+  of `SendAsync` share a lock with `ApplyHeader`
   and `RequestClose`, so nothing starts after a downgrade or a close was applied (a send already
   in flight completes).
 - `RequestClose(reason)` (idempotent; the first reason wins): `Mode = None`, channel completed,

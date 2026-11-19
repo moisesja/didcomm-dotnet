@@ -82,7 +82,7 @@ public static class Program
                 Recipients: new[] { bob.Identity.Did },
                 From: alice.Identity.Did,
                 ServiceEndpointOverride: bob.Endpoint));
-            narrator.Step($"[alice] sent ping (id = {ping.Id[..8]}…) as one binary WebSocket message (FR-TRN-09).");
+            narrator.Step($"[alice] sent ping (id = {ping.Id[..8]}…) as one text WebSocket message (FR-TRN-09).");
 
             var pong = await alice.WaitForInboundAsync(
                 r => string.Equals(r.Message.Type, TrustPingApi.ResponseType, StringComparison.Ordinal)
@@ -169,7 +169,7 @@ public static class Program
             narrator.Section("6", "STOMP 1.2 framing (FR-TRN-12) — the wire dialect behind UseStomp");
 
             // Some WebSocket infrastructure (message brokers, ActiveMQ/RabbitMQ gateways) speaks
-            // STOMP rather than raw binary frames. Both ends opt in through options — the
+            // STOMP rather than plain DIDComm frames. Both ends opt in through options — the
             // sending transport via UseStomp + the destination header it should address, the
             // ASP.NET Core endpoint via DidCommReceiveOptions.UseStomp — and each envelope then
             // rides as one SEND frame. The codec those paths share is public, one call each way.
