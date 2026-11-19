@@ -164,12 +164,30 @@ def s_o0(v):
 
 def s_o1(v):
     attempt = v.get("attempt") or {}
-    before = _g(v, "identus_ws_binary_errors_logged", "before")
-    after = _g(v, "identus_ws_binary_errors_logged", "after")
-    rose = before is not None and after is not None and after > before
-    return (f"Our WebSocket call (defaults) ended in {_g(attempt, 'outcome', default='?')} "
-            f"({_exception(attempt)}, {_g(attempt, 'elapsed_ms', default='?')} ms); Identus "
-            f"{'logged our frame as an unexpected Binary frame' if rose else 'logged no Binary-frame error'}.")
+    return (f"With the defaults (RequireCreatedTime on) our WebSocket status call ended in "
+            f"{_g(attempt, 'outcome', default='?')} ({_exception(attempt)}, {_g(attempt, 'elapsed_ms', default='?')} ms). "
+            f"Cause: {v.get('cause', '?')}; Identus logged {v.get('identus_status_requests_logged_added', '?')} status-request(s) "
+            f"and {v.get('identus_binary_frame_errors_added', '?')} Binary-frame error(s).")
+
+
+def s_o1b(v):
+    stream = v.get("stream") or {}
+    items = stream.get("items") or []
+    when = ", ".join(f"{round(i.get('at_ms', 0) / 1000, 1)} s" for i in items) or "never"
+    sent = stream.get("requests_sent") or {}
+    unanswered = stream.get("requests_without_answer") or {}
+    added = v.get("identus_logged_added") or {}
+    templates = stream.get("log_templates") or {}
+    unhandled = sum(n for t, n in templates.items() if "No protocol handler registered" in t)
+    return (f"Live mode on (Identus logged {added.get('LiveModeChange', '?')} live-mode change(s)); two forwards posted after it: "
+            f"the stream yielded {len(items)} item(s) at {when} ({stream.get('ending', '?')}); pushes it ignored: "
+            f"{len(stream.get('pushes_ignored') or [])}; inbound messages our client dropped: "
+            f"{', '.join(str(x) for x in stream.get('inbound_dropped') or []) or 'none'}; inbound messages that reached no "
+            f"handler: {unhandled}. It sent {sent.get('messages-received', 0)} "
+            f"messages-received ({unanswered.get('messages-received', 0)} without an answer; acknowledgements logged as failed: "
+            f"{stream.get('acknowledgements_failed', '?')}) and {sent.get('delivery-request', 0)} delivery-request(s); leaving "
+            f"the loop took {stream.get('leaving_took_ms', '?')} ms. Identus logged {added.get('MessagesReceived', '?')} "
+            f"messages-received.")
 
 
 def s_o2(v):
@@ -334,7 +352,7 @@ def s_o21(v):
 
 
 SUMMARIZERS = {
-    "O-0": s_o0, "O-1": s_o1, "O-2": s_o2, "O-2c": s_o2c, "O-3": s_o3,
+    "O-0": s_o0, "O-1": s_o1, "O-1b": s_o1b, "O-2": s_o2, "O-2c": s_o2c, "O-3": s_o3,
     "O-4": s_answers("answers", s_o4), "O-4-answers": s_o4a, "O-5": s_answers("answers", s_o5),
     "O-5-host": s_o5host, "O-6": s_answers("answers", s_o6), "O-7": s_o7, "O-8": s_o8, "O-9": s_o9,
     "O-10": s_o10, "O-11": s_o11, "O-11-python": s_o11p, "O-12": s_o12, "O-13": s_o13, "O-14": s_o14,

@@ -149,6 +149,27 @@ internal sealed class WalletHost : IAsyncDisposable
         return services.Select(s => s.Uri).ToArray();
     }
 
+    /// <summary>
+    /// The <c>RequireCreatedTime</c> the client's replay admission reads (the
+    /// <c>IOptions&lt;ReplayProtectionOptions&gt;</c> its <c>IInboundReplayGuard</c> is built from),
+    /// so a command can record that <c>--relax-created-time</c> took effect.
+    /// </summary>
+    public bool RequireCreatedTimeInEffect
+        => _services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ReplayProtectionOptions>>().Value.RequireCreatedTime;
+
+    /// <summary>
+    /// The WebSocket address a command uses: <c>auto</c> takes the first ws(s) address of the
+    /// mediator's resolved DID document; anything else is taken as the address itself.
+    /// </summary>
+    public async Task<Uri> WebSocketEndpointAsync(string mediatorDid, string requested, CommandResult result, CancellationToken ct)
+    {
+        if (requested != "auto")
+            return new Uri(requested, UriKind.Absolute);
+        var endpoints = await result.StepAsync("resolve-mediator-endpoints", () => ResolveEndpointsAsync(mediatorDid, ct),
+            e => new JsonArray(e.Select(x => (JsonNode?)x).ToArray()));
+        return new Uri(First(endpoints, "ws", "wss") ?? throw new ExpectationException("The mediator's DID document names no ws(s) address."));
+    }
+
     public static string? First(IEnumerable<string> endpoints, params string[] schemes)
         => endpoints.FirstOrDefault(e => Uri.TryCreate(e, UriKind.Absolute, out var u) && schemes.Contains(u.Scheme, StringComparer.OrdinalIgnoreCase));
 

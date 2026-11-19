@@ -26,20 +26,9 @@ internal static class WsAttemptCommand
         using var capture = new CaptureLoggerProvider(common.LogOut);
         await using var host = WalletHost.Create(common, state.LoadSecrets(), capture, requestTimeout: timeout);
 
-        Uri endpoint;
-        if (requested == "auto")
-        {
-            var endpoints = await result.StepAsync("resolve-mediator-endpoints",
-                () => host.ResolveEndpointsAsync(state.MediatorDid, CancellationToken.None),
-                e => new JsonArray(e.Select(x => (JsonNode?)x).ToArray()));
-            endpoint = new Uri(WalletHost.First(endpoints, "ws", "wss")
-                ?? throw new ExpectationException("The mediator's DID document names no ws(s) address."));
-        }
-        else
-        {
-            endpoint = new Uri(requested, UriKind.Absolute);
-        }
+        var endpoint = await host.WebSocketEndpointAsync(state.MediatorDid, requested, result, CancellationToken.None);
         result.Observed["ws_endpoint"] = endpoint.AbsoluteUri;
+        result.Observed["require_created_time_in_effect"] = host.RequireCreatedTimeInEffect;
 
         if (common.ExpectEnvProxy is { } envProxy)
             result.Observed["env_proxy_precondition"] = WalletHost.AssertEnvProxy(envProxy, new[] { endpoint });
@@ -68,6 +57,11 @@ internal static class WsAttemptCommand
         result.Observed["log"] = new JsonArray(capture.Records
             .Where(r => r.Level >= LogLevel.Debug && r.Category.StartsWith("DidComm", StringComparison.Ordinal))
             .Select(r => (JsonNode?)new JsonObject { ["category"] = r.Category, ["level"] = r.Level.ToString(), ["template"] = r.Template })
+            .ToArray());
+        // Answers our client dropped, and why (the replay admission's verdict: no DIDs or content).
+        result.Observed["dropped"] = new JsonArray(capture.Records
+            .Where(r => r.Template?.Contains("dropped", StringComparison.Ordinal) == true && r.Values.ContainsKey("Admission"))
+            .Select(r => (JsonNode?)new JsonObject { ["template"] = r.Template, ["admission"] = r.Values["Admission"] })
             .ToArray());
         await result.StepAsync("ws-call", () => Task.CompletedTask, outcome.DeepClone());
         return 0;

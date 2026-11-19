@@ -110,8 +110,8 @@ LEG_WATCHDOG_S="${MEDIATOR_LEG_DEBUG_WATCHDOG:-$LEG_WATCHDOG_S}"
 
 # The cells this mode runs, in order. "<id>|<sabotage>" (sabotage empty = the real cell). In
 # --negative-controls mode M-1's "Identus stopped after the 202" runs last: it stops Identus.
-GATE_PLAN="B-0| M-1| M-2| M-3| M-4| M-5| M-6| R-1| R-2|"
-NC_PLAN="B-0|forbid-client M-1|pin-v3 M-1|unregistered-next M-1|wrong-message M-2|expect-13 M-3|no-forward M-4|no-proxy M-5|no-proxy M-5|no-frame M-6|with-trusted-proxy M-6|no-proxy-env M-6|proxy-in-b M-6|squid-request-in-window R-2|expect-v2 R-2|ws-wrong-path R-1|no-created-time R-1|v2-disabled M-1|identus-stopped"
+GATE_PLAN="B-0| M-1| M-2| M-3| M-4| M-5| M-6| M-8| R-1| R-2|"
+NC_PLAN="B-0|forbid-client M-1|pin-v3 M-1|unregistered-next M-1|wrong-message M-2|expect-13 M-3|no-forward M-4|no-proxy M-5|no-proxy M-5|ws-wrong-path M-6|with-trusted-proxy M-6|no-proxy-env M-6|proxy-in-b M-6|squid-request-in-window M-8|no-relax M-8|fetch-no-relax R-2|expect-v2 R-2|ws-wrong-path R-1|no-created-time R-1|v2-disabled M-1|identus-stopped"
 case "$MODE" in nc) PLAN="$NC_PLAN" ;; *) PLAN="$GATE_PLAN" ;; esac
 if [ -n "${MEDIATOR_LEG_ONLY:-}" ]; then
     filtered=""
@@ -127,7 +127,7 @@ plan_needs() { # $1=cell id → 0 if the plan runs it
     for entry in $PLAN; do [ "${entry%%|*}" = "$1" ] && return 0; done
     return 1
 }
-plan_needs_wallet() { plan_needs B-0 || plan_needs M-1 || plan_needs M-2 || plan_needs M-4 || plan_needs M-5 || plan_needs M-6 || plan_needs R-2; }
+plan_needs_wallet() { plan_needs B-0 || plan_needs M-1 || plan_needs M-2 || plan_needs M-4 || plan_needs M-5 || plan_needs M-6 || plan_needs M-8 || plan_needs R-2; }
 
 # ── hang guards and waits ─────────────────────────────────────────────────────────────────
 # deadline_guard <seconds> <pid>: a background watchdog that TERMs (then, 5 s later, KILLs) the
@@ -612,7 +612,10 @@ squid_barrier() { # a marker request through squid, then wait until squid has lo
 binary_frames() { # $1=container → how many "WS Error (type:Binary)" lines it has logged
     docker logs "$1" 2>&1 | grep -c 'WS Error (type:Binary)' || true
 }
-frames_above() { [ "$(binary_frames "$1")" -gt "$2" ]; }
+identus_logged() { # $1=container $2=what PickupExecuter logged (StatusRequest, LiveModeChange, …) → count
+    docker logs "$1" 2>&1 | grep -cE "PickupExecuter.* $2 *\$" || true
+}
+identus_logged_above() { [ "$(identus_logged "$1" "$2")" -gt "$3" ]; }
 
 # ── the dotnet mediator (mediator-serve), for R-1 and R-2 ─────────────────────────────────
 SERVE_HTTP="" SERVE_WS="" SERVE_DID="" SERVE_DIR=""
@@ -888,30 +891,46 @@ cell_M4() { # HTTP through TrustedProxy (E-47, HTTP half)
     echo "wallet POSTs relayed by squid in the window: $(grep ' POST http://identus-px:8080/ ' "$C/squid-window.log" 2>/dev/null | grep -vc 'Python-urllib' || true)"
 }
 
-cell_M5() { # WebSocket through TrustedProxy (E-47, WebSocket half; the call's outcome is observed)
+cell_M5() { # WebSocket through TrustedProxy (E-47, WebSocket half)
     local proxy=(--trusted-proxy "$SQUID_URL") target=auto expected=ws://identus-px:8080/ws
     [ "$1" = no-proxy ] && proxy=()
-    # no-frame: the tunnel opens, but the handshake asks for a path with no WebSocket behind it,
-    # so no frame is sent: the frame check (not the CONNECT check) must fail.
-    if [ "$1" = no-frame ]; then target=ws://identus-px:8080/no-websocket-here; expected="$target"; fi
+    # ws-wrong-path: the tunnel opens, but the handshake asks for a path with no WebSocket behind
+    # it: the CONNECT check passes and the call must fail.
+    if [ "$1" = ws-wrong-path ]; then target=ws://identus-px:8080/no-websocket-here; expected="$target"; fi
     px_get /invitation >"$C/invitation.json"
     enrol_wallet w "$C/invitation.json" "$PX_DID" --expect-version 2.0 --allow-hosts identus-px \
         --resolve-dns-names false --trusted-proxy "$SQUID_URL" || { cfail "enrol through the proxy: $(wallet_error w)"; return 1; }
-    local start before
-    start="$(squid_lines)"
-    before="$(binary_frames "$IDENTUS_PX")"
-    step "ws-attempt to the first ws service of the proxy-only Identus DID"
+    local start; start="$(squid_lines)"
+    step "a status over the WebSocket transport, through TrustedProxy (RequireCreatedTime off: Identus does not stamp its answers)"
     wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint "$target" --timeout 10 --allow-hosts identus-px \
-        --resolve-dns-names false ${proxy[@]+"${proxy[@]}"}
-    echo "ws-attempt outcome (recorded, not gated): exit $WALLET_RC, $(json_get "$C/ws.json" observed.attempt)"
+        --resolve-dns-names false --relax-created-time ${proxy[@]+"${proxy[@]}"}
     local endpoint; endpoint="$(json_get "$C/ws.json" observed.ws_endpoint)"
     [ "$endpoint" = "$expected" ] || { cfail "ws-attempt used '${endpoint:-no endpoint}', expected $expected"; return 1; }
     step "squid logs the CONNECT tunnel once it closes"
     tunnel_logged() { squid_window "$start" | grep -F 'CONNECT identus-px:8080 200 TCP_TUNNEL' >/dev/null; }
     wait_for 30 "squid CONNECT identus-px:8080 200 TCP_TUNNEL line" tunnel_logged || { cfail "$WAIT_WHAT"; return 1; }
-    step "the proxy-only Identus received our frame (its 'WS Error (type:Binary)' count rose)"
-    wait_for 30 "identus-px logged a binary frame" frames_above "$IDENTUS_PX" "$before" || { cfail "$WAIT_WHAT"; return 1; }
     squid_window "$start" >"$C/squid-window.log"
+    step "the call itself: answered, opened and matched"
+    ws_call_ok "WebSocket call through the proxy" || return 1
+}
+
+# ws_call_ok <label>: $C/ws.json's call ended ok (an answer opened and matched to the request);
+# otherwise CELL_DETAIL says how it ended, and why an answer was dropped when one was.
+ws_call_ok() {
+    local outcome kind dropped
+    outcome="$(json_get "$C/ws.json" observed.attempt.outcome)"
+    if [ "$WALLET_RC" = 0 ] && [ "$outcome" = ok ]; then
+        echo "$1: ok ($(json_get "$C/ws.json" observed.attempt.elapsed_ms) ms, status counts $(json_get "$C/ws.json" observed.attempt.message_count))"
+        return 0
+    fi
+    kind="$(json_get "$C/ws.json" observed.attempt.exception.type)"
+    dropped="$("$VPY" -I -c 'import json, sys
+try:
+    d = (json.load(open(sys.argv[1])).get("observed") or {}).get("dropped") or []
+except (OSError, ValueError):
+    d = []
+print(", ".join(sorted({"answer (replay admission: %s)" % x.get("admission") for x in d})))' "$C/ws.json")"
+    cfail "$1: ${outcome:-not made} (${kind##*.}${dropped:+; our client dropped: $dropped})"
 }
 
 cell_M6() { # process proxy variables are ignored (E-48)
@@ -922,9 +941,8 @@ cell_M6() { # process proxy variables are ignored (E-48)
     [ "$sab" = no-proxy-env ] && noproxy=(NO_PROXY=127.0.0.1 no_proxy=127.0.0.1)
     local envp=(env -u NO_PROXY -u no_proxy HTTP_PROXY="$SQUID_URL" HTTPS_PROXY="$SQUID_URL" ALL_PROXY="$SQUID_URL"
         http_proxy="$SQUID_URL" https_proxy="$SQUID_URL" all_proxy="$SQUID_URL" ${noproxy[@]+"${noproxy[@]}"})
-    local start before
+    local start
     start="$(squid_lines)"
-    before="$(binary_frames "$IDENTUS")"
     direct_get /invitation >"$C/invitation.json"
     step "(a) the M-1 flow against 127.0.0.1 with every proxy variable pointing at squid (which denies 127.0.0.1)"
     WALLET_ENV=("${envp[@]}")
@@ -945,12 +963,12 @@ cell_M6() { # process proxy variables are ignored (E-48)
     WALLET_ENV=()
     [ "$rc" = 0 ] || { cfail "fetch with proxy variables set: $(wallet_error fetch)"; return 1; }
     assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
-    step "(a) a direct WebSocket attempt reaches Identus"
+    step "(a) a WebSocket call to Identus succeeds: it went direct (squid answers 127.0.0.1 with 403)"
     WALLET_ENV=("${envp[@]}")
     wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint auto --timeout 10 --allow-hosts 127.0.0.1 \
-        --expect-env-proxy "$SQUID_URL" ${proxy[@]+"${proxy[@]}"}
+        --relax-created-time --expect-env-proxy "$SQUID_URL" ${proxy[@]+"${proxy[@]}"}
     WALLET_ENV=()
-    wait_for 30 "Identus logged the direct binary frame" frames_above "$IDENTUS" "$before" || { cfail "$WAIT_WHAT"; return 1; }
+    ws_call_ok "(a) WebSocket call with the proxy variables set" || return 1
     step "(b) enrolment with the proxy-only Identus fails: the variables are not used even where they would help"
     px_get /invitation >"$C/px-invitation.json"
     WALLET_ENV=("${envp[@]}")
@@ -973,6 +991,39 @@ cell_M6() { # process proxy variables are ignored (E-48)
     squid_window "$start" >"$C/squid-window.log"
     cat "$C/squid-window.log"
     [ ! -s "$C/squid-window.log" ] || { cfail "(c) squid logged $(wc -l <"$C/squid-window.log" | tr -d ' ') line(s) in the window, expected none"; return 1; }
+}
+
+cell_M8() { # dotnet recipient via Identus over WebSocket (O-98-1 = 1a: text frames)
+    # Identus answers over a WebSocket without created_time, so the wallet sets
+    # ReplayProtectionOptions.RequireCreatedTime = false (--relax-created-time; the cell checks it
+    # took effect). no-relax / fetch-no-relax leave it on for the status / the fetch.
+    local relax=(--relax-created-time) fetch_relax=(--relax-created-time)
+    [ "$1" = no-relax ] && relax=()
+    [ "$1" = fetch-no-relax ] && fetch_relax=()
+    direct_get /invitation >"$C/invitation.json"
+    enrol_wallet w "$C/invitation.json" "$IDENTUS_DID" --expect-version 2.0 --allow-hosts 127.0.0.1 ||
+        { cfail "enrol: $(wallet_error w)"; return 1; }
+    step "a status over the WebSocket transport, to the first ws service of the Identus DID"
+    wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint auto --timeout 10 --allow-hosts 127.0.0.1 \
+        ${relax[@]+"${relax[@]}"}
+    local endpoint; endpoint="$(json_get "$C/ws.json" observed.ws_endpoint)"
+    [ "$endpoint" = "ws://127.0.0.1:$IDENTUS_PORT/ws" ] || { cfail "ws-attempt used '${endpoint:-no endpoint}'"; return 1; }
+    ws_call_ok "status over WebSocket" || return 1
+    [ "$(json_get "$C/ws.json" observed.require_created_time_in_effect)" = false ] ||
+        { cfail "RequireCreatedTime was not off in the client's replay admission"; return 1; }
+    step "python forwards one message to the routed DID via Identus (HTTP)"
+    local routed; routed="$(json_get "$C/w.state.json" routedDid)"
+    python_forward "$routed" "$IDENTUS_DID" m || { cfail "python forward failed"; return 1; }
+    peer post --url "$IDENTUS_URL" --in "$C/m.fwd.json" --expect-status 202 --meta-out "$C/m.post.json" ||
+        { cfail "forward not accepted: HTTP $(json_get "$C/m.post.json" status)"; return 1; }
+    # Every call of the fetch goes over the WebSocket. Its quiet acknowledgement waits for a status
+    # Identus never sends on a WebSocket (logged, not an error), so a short request timeout keeps
+    # the cell fast; the client is unchanged.
+    step "the wallet fetches over WebSocket until drained"
+    wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --ws-endpoint auto \
+        --request-timeout 3 --wait-timeout 15 --allow-hosts 127.0.0.1 ${fetch_relax[@]+"${fetch_relax[@]}"} ||
+        { cfail "fetch over WebSocket: $(wallet_error fetch)"; return 1; }
+    assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
 }
 
 cell_R1() { # python recipient via the dotnet mediator (reverse)
@@ -1035,8 +1086,9 @@ cell_title() {
         M-2) echo "burst of 12 via Identus, fetched with limit 5 until drained (E-35)" ;;
         M-3) echo "dotnet sender via Identus to a python recipient (CM 2.0 + Pickup 3.0 by hand)" ;;
         M-4) echo "HTTP through TrustedProxy to a proxy-only Identus (E-47)" ;;
-        M-5) echo "WebSocket through TrustedProxy: CONNECT tunnel and our frame at Identus (E-47)" ;;
+        M-5) echo "WebSocket through TrustedProxy: CONNECT tunnel and an answered status (E-47)" ;;
         M-6) echo "process proxy variables ignored (E-48)" ;;
+        M-8) echo "dotnet recipient via Identus over WebSocket: a status, then a fetch of a python-forwarded message (E-53)" ;;
         R-1) echo "python recipient via the dotnet mediator (CM 2.0 + Pickup 3.0 by hand)" ;;
         R-2) echo "control: the same wallet against the dotnet mediator (CM 3.0, AckAsync, a WebSocket status call)" ;;
     esac
@@ -1061,11 +1113,13 @@ nc_expect() {
         "M-3|no-forward") echo "^pickup3: status counted 0 after .* expected 1" ;;
         "M-4|no-proxy") echo "at request-mediation: HttpRequestException \(inner SocketException\).*connects directly.*identus-px" ;;
         "M-5|no-proxy") echo "^squid CONNECT identus-px:8080 200 TCP_TUNNEL line \(not within" ;;
-        "M-5|no-frame") echo "^identus-px logged a binary frame \(not within" ;;
+        "M-5|ws-wrong-path") echo "^WebSocket call through the proxy: error" ;;
         "M-6|with-trusted-proxy") echo "^enrol with proxy variables set: .*status 403" ;;
         "M-6|no-proxy-env") echo "^precondition: .*PreconditionException" ;;
         "M-6|proxy-in-b") echo "^\(b\) enrolment with identus-px succeeded" ;;
         "M-6|squid-request-in-window") echo "^\(c\) squid logged 1 line\(s\) in the window" ;;
+        "M-8|no-relax") echo "^status over WebSocket: timeout \(TimeoutException; our client dropped: .*MissingCreatedTime" ;;
+        "M-8|fetch-no-relax") echo "^fetch over WebSocket: exit 1 at wait-for-status: TimeoutException" ;;
         "R-1|no-created-time"|"R-1|v2-disabled") echo "^cm2-enrol: expected HTTP 200 with a reply, got 202" ;;
         "R-2|expect-v2") echo "negotiated-version-is-expected" ;;
         "R-2|ws-wrong-path") echo "^WebSocket call to our mediator: (error|timeout)" ;;
@@ -1227,22 +1281,75 @@ json.dump(out, open(sys.argv[3], "w"), indent=2)' "$C/o14.post.json" "$C/o14.bod
         obs O-14 "forward naming an unregistered next: HTTP status and answer" "post meta" "" "I-9" "$C/o14.json"
 
         if [ -x "$WALLET_BIN" ]; then
-            step "observer wallet at Identus: O-1 (WebSocket with defaults), then the raw probe (MediatorWallet observe)"
+            step "observer wallet at Identus: O-1 (WebSocket with the defaults), O-1b (the live stream), then the raw probe (MediatorWallet observe)"
             direct_get /invitation >"$C/invitation.json"
             if enrol_wallet obs "$C/invitation.json" "$IDENTUS_DID" --expect-version 2.0 --allow-hosts 127.0.0.1; then
-                local before; before="$(binary_frames "$IDENTUS")"
+                local before_bin before_status
+                before_bin="$(binary_frames "$IDENTUS")"
+                before_status="$(identus_logged "$IDENTUS" StatusRequest)"
+                # The defaults: RequireCreatedTime on. Identus answers (its log counts the
+                # status-request) without created_time, so our client's replay admission drops it.
                 wallet o1 ws-attempt --state "$C/obs.state.json" --ws-endpoint auto --timeout 10 --allow-hosts 127.0.0.1
-                wait_for 30 "Identus logged the binary frame" frames_above "$IDENTUS" "$before"
+                wait_for 30 "Identus logged the status-request" identus_logged_above "$IDENTUS" StatusRequest "$before_status"
                 "$VPY" -I -c 'import json, sys
 try:
-    attempt = (json.load(open(sys.argv[1])).get("observed") or {}).get("attempt")
+    observed = json.load(open(sys.argv[1])).get("observed") or {}
 except (OSError, ValueError):
-    attempt = None
-json.dump({"attempt": attempt, "wallet_exit": int(sys.argv[2]),
-           "identus_ws_binary_errors_logged": {"before": int(sys.argv[3]), "after": int(sys.argv[4])}},
-          open(sys.argv[5], "w"), indent=2)' \
-                    "$C/o1.json" "$WALLET_RC" "$before" "$(binary_frames "$IDENTUS")" "$C/o1.value.json"
-                obs O-1 "our client over WebSocket with defaults against Identus: outcome and cause" "ws-attempt + Identus log" "E-53" "" "$C/o1.value.json"
+    observed = {}
+binary = int(sys.argv[4]) - int(sys.argv[3])
+answered = int(sys.argv[6]) - int(sys.argv[5])
+dropped = observed.get("dropped") or []
+if binary > 0:
+    cause = "binary frame ignored by Identus"
+elif dropped:
+    cause = "answer dropped by our replay admission (" + ", ".join(sorted({str(d.get("admission")) for d in dropped})) + ")"
+elif answered > 0:
+    cause = "Identus answered; no drop recorded"
+else:
+    cause = "unknown"
+json.dump({"attempt": observed.get("attempt"), "require_created_time_in_effect": observed.get("require_created_time_in_effect"),
+           "dropped": dropped, "identus_binary_frame_errors_added": binary, "identus_status_requests_logged_added": answered,
+           "cause": cause}, open(sys.argv[7], "w"), indent=2)' \
+                    "$C/o1.json" "$WALLET_RC" "$before_bin" "$(binary_frames "$IDENTUS")" \
+                    "$before_status" "$(identus_logged "$IDENTUS" StatusRequest)" "$C/o1.value.json"
+                obs O-1 "our client over WebSocket with the defaults (RequireCreatedTime on) against Identus: outcome and cause" "ws-attempt + Identus log" "E-53,E-14" "" "$C/o1.value.json"
+
+                step "O-1b ReceiveLiveAsync against Identus over WebSocket (RequireCreatedTime off), with a wallet of its own"
+                direct_get /invitation >"$C/live-invitation.json"
+                if enrol_wallet live "$C/live-invitation.json" "$IDENTUS_DID" --expect-version 2.0 --allow-hosts 127.0.0.1; then
+                    local live_routed lm0 dr0 mr0 live_job posted=no
+                    live_routed="$(json_get "$C/live.state.json" routedDid)"
+                    python_forward "$live_routed" "$IDENTUS_DID" live1 && python_forward "$live_routed" "$IDENTUS_DID" live2
+                    lm0="$(identus_logged "$IDENTUS" LiveModeChange)"
+                    dr0="$(identus_logged "$IDENTUS" DeliveryRequest)"
+                    mr0="$(identus_logged "$IDENTUS" MessagesReceived)"
+                    wallet o1b live --state "$C/live.state.json" --ws-endpoint auto --expect-count 2 --guard 120 \
+                        --relax-created-time --allow-hosts 127.0.0.1 &
+                    live_job=$!
+                    # The two forwards go in once Identus has turned live mode on for the stream.
+                    if wait_for 30 "Identus logged the live-mode change" identus_logged_above "$IDENTUS" LiveModeChange "$lm0"; then
+                        peer post --url "$IDENTUS_URL" --in "$C/live1.fwd.json" --expect-status 202 --meta-out "$C/live1.post.json" &&
+                        peer post --url "$IDENTUS_URL" --in "$C/live2.fwd.json" --expect-status 202 --meta-out "$C/live2.post.json" &&
+                        posted=yes
+                    fi
+                    wait "$live_job"
+                    "$VPY" -I -c 'import json, sys
+try:
+    observed = json.load(open(sys.argv[1])).get("observed") or {}
+except (OSError, ValueError):
+    observed = {}
+json.dump({"forwards_posted_after_live_on": sys.argv[2] == "yes", "stream": observed.get("live"),
+           "require_created_time_in_effect": observed.get("require_created_time_in_effect"),
+           "exception": observed.get("exception"),
+           "identus_logged_added": {"LiveModeChange": int(sys.argv[4]) - int(sys.argv[3]),
+                                    "DeliveryRequest": int(sys.argv[6]) - int(sys.argv[5]),
+                                    "MessagesReceived": int(sys.argv[8]) - int(sys.argv[7])}},
+          open(sys.argv[9], "w"), indent=2)' \
+                        "$C/o1b.json" "$posted" "$lm0" "$(identus_logged "$IDENTUS" LiveModeChange)" \
+                        "$dr0" "$(identus_logged "$IDENTUS" DeliveryRequest)" "$mr0" "$(identus_logged "$IDENTUS" MessagesReceived)" \
+                        "$C/o1b.value.json"
+                    obs O-1b "ReceiveLiveAsync against Identus over WebSocket (RequireCreatedTime off): live mode on, two forwards, what the stream yields and when, its messages-received" "MediatorWallet live + Identus log" "E-5,E-37,E-54" "" "$C/o1b.value.json"
+                fi
                 # Triggers (the wallet's contract): NAME.forward.json, a forward to Identus for the
                 # observer's routed DID, and NAME.inner.json, the envelope inside it; the probe posts
                 # each once and compares the delivered attachment with the inner envelope (O-11).
