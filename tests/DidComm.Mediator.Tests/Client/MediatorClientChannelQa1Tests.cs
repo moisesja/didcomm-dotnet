@@ -28,8 +28,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// QA-1 (#96): the channel's correlation, bound and lifetime under permutations — a long mixed run
 /// (success over each transport, timeout, cancellation, transport failure, HTTP no-answer, problem
-/// report) that must leave no slot, timer or active count behind; the thread-less fallback across
-/// local DIDs and mediators, ambiguity and its resolution, wrong types; late answers; the caller
+/// report) that must leave no slot, timer or active count behind; answers without a thread across
+/// local DIDs and mediators (taken by no request since #98: DIDComm v2.1 threading), wrong types;
+/// late answers; the caller
 /// cancelling mid-send; disposal in each phase; the Discover Features query's own timeout; the
 /// request deadline's documented scope; the dispatcher's no-handler level. Every interleaving is a
 /// rendezvous or the manual clock (L-044).
@@ -140,53 +141,78 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
         _time.ScheduledTimers.Should().Be(0);
     }
 
-    // ---- the thread-less fallback (§4.2 row 5, unbound) ------------------------------------
+    // ---- answers without a thread (§4.2 row 5, unbound) -----------------------------------------
+    // Before #98 (PR #130 review, round 2) a thread-less answer was taken by the only waiting request
+    // of its pair that expected its type. DIDComm v2.1 threading (threading.md L17, problems.md L55)
+    // makes a reply carry the `thid` of the message it answers, and a message without it is not part
+    // of that thread, so these tests now pin that no request takes one, and that the keys still
+    // choose the pair for an answer that names its request.
 
     [Fact]
-    public async Task Without_a_thread_two_local_DIDs_at_one_mediator_each_take_only_their_own_answer()
+    public async Task Two_local_DIDs_at_one_mediator_take_no_answer_without_a_thread_and_each_takes_only_its_own_threaded_answer()
     {
-        var (_, forLocal) = Start(_w.Local.Did);
-        var (_, forOther) = Start(_w.OtherLocal.Did);
+        var (localRequest, forLocal) = Start(_w.Local.Did);
+        var (otherRequest, forOther) = Start(_w.OtherLocal.Did);
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null, to: _w.OtherLocal.Did), to: _w.OtherLocal.Did)).Should().BeTrue();
+        var unthreadedOther = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null, to: _w.OtherLocal.Did), to: _w.OtherLocal.Did));
+        var unthreadedLocal = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null)));
+        var crossed = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(localRequest.Id, to: _w.OtherLocal.Did), to: _w.OtherLocal.Did));
+        var pendingAfter = !forLocal.IsCompleted && !forOther.IsCompleted;
+        var other = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(otherRequest.Id, to: _w.OtherLocal.Did), to: _w.OtherLocal.Did));
+        var local = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(localRequest.Id)));
+
+        unthreadedOther.Should().BeFalse();
+        unthreadedLocal.Should().BeFalse();
+        crossed.Should().BeFalse("decrypted by the other DID: not the pair of the request it names");
+        pendingAfter.Should().BeTrue();
+        other.Should().BeTrue();
+        local.Should().BeTrue();
         (await forOther.WaitAsync(TimeSpan.FromSeconds(10))).To.Should().Equal(_w.OtherLocal.Did);
-        forLocal.IsCompleted.Should().BeFalse("not ambiguous: the pair differs");
-
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null))).Should().BeTrue();
         (await forLocal.WaitAsync(TimeSpan.FromSeconds(10))).To.Should().Equal(_w.Local.Did);
     }
 
     [Fact]
-    public async Task Without_a_thread_one_local_DID_at_two_mediators_takes_each_answer_from_its_own_mediator()
+    public async Task One_local_DID_at_two_mediators_takes_no_answer_without_a_thread_and_each_threaded_answer_only_from_its_own_mediator()
     {
         // Mallory plays a second mediator here.
-        var (_, atMediator) = Start(_w.Local.Did);
-        var (_, atSecond) = Start(_w.Local.Did, _w.Mallory.Did);
+        var (atMediatorRequest, atMediator) = Start(_w.Local.Did);
+        var (atSecondRequest, atSecond) = Start(_w.Local.Did, _w.Mallory.Did);
+        JsonObject Routing() => new() { ["routing_did"] = new JsonArray(_w.Mallory.Did) };
 
-        var fromSecond = _w.Answer(CoordinateMediation.MediateGrantType, thid: null, from: _w.Mallory.Did, body: new JsonObject { ["routing_did"] = new JsonArray(_w.Mallory.Did) });
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(fromSecond)).Should().BeTrue();
+        var unthreaded = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Answer(CoordinateMediation.MediateGrantType, thid: null, from: _w.Mallory.Did, body: Routing())));
+        var crossed = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Answer(CoordinateMediation.MediateGrantType, atMediatorRequest.Id, from: _w.Mallory.Did, body: Routing())));
+        var pendingAfter = !atMediator.IsCompleted && !atSecond.IsCompleted;
+        var second = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Answer(CoordinateMediation.MediateGrantType, atSecondRequest.Id, from: _w.Mallory.Did, body: Routing())));
+        var first = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(atMediatorRequest.Id)));
+
+        unthreaded.Should().BeFalse();
+        crossed.Should().BeFalse("from the second mediator: not the pair of the request it names");
+        pendingAfter.Should().BeTrue();
+        second.Should().BeTrue();
+        first.Should().BeTrue();
         (await atSecond.WaitAsync(TimeSpan.FromSeconds(10))).From.Should().Be(_w.Mallory.Did);
-        atMediator.IsCompleted.Should().BeFalse();
-
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null))).Should().BeTrue();
         (await atMediator.WaitAsync(TimeSpan.FromSeconds(10))).From.Should().Be(_w.Mediator.Did);
     }
 
     [Fact]
-    public async Task An_ambiguous_threadless_answer_is_dropped_and_once_one_request_is_answered_by_thread_the_next_threadless_one_takes_the_other()
+    public async Task An_answer_without_a_thread_is_dropped_whether_one_or_two_requests_wait()
     {
         var (first, firstExchange) = Start(_w.Local.Did);
-        var (_, secondExchange) = Start(_w.Local.Did);
+        var (second, secondExchange) = Start(_w.Local.Did);
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null))).Should().BeFalse("two candidates: ambiguous");
-        firstExchange.IsCompleted.Should().BeFalse();
-        secondExchange.IsCompleted.Should().BeFalse();
-
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(first.Id))).Should().BeTrue();
+        var withTwo = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null)));
+        var answeredFirst = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(first.Id)));
         await firstExchange.WaitAsync(TimeSpan.FromSeconds(10));
-
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null))).Should().BeTrue("one candidate left");
+        var withOne = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null)));
+        var secondPending = !secondExchange.IsCompleted;
+        var answeredSecond = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(second.Id)));
         await secondExchange.WaitAsync(TimeSpan.FromSeconds(10));
+
+        withTwo.Should().BeFalse();
+        answeredFirst.Should().BeTrue();
+        withOne.Should().BeFalse("one request left is no reason to take an answer that names none");
+        secondPending.Should().BeTrue();
+        answeredSecond.Should().BeTrue();
         _channel.PendingCount.Should().Be(0);
     }
 
@@ -205,14 +231,19 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_threadless_disclose_completes_the_only_waiting_Discover_Features_query()
+    public async Task A_disclose_without_a_thread_does_not_complete_the_only_waiting_Discover_Features_query_and_one_with_its_thid_does()
     {
         var query = FeatureNegotiation.CreateQuery(_w.Local.Did, _w.Mediator.Did);
         var exchange = _channel.ExchangeAsync(WebSocketRoute, query, FeatureNegotiation.QuerySpec, _w.Mediator.Did, _w.Local.Did, default);
-        var disclose = _w.Answer(DiscoverFeatures.DiscloseType, thid: null, body: new JsonObject { ["disclosures"] = new JsonArray() });
+        JsonObject Empty() => new() { ["disclosures"] = new JsonArray() };
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(disclose)).Should().BeTrue();
+        var unthreaded = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Answer(DiscoverFeatures.DiscloseType, thid: null, body: Empty())));
+        var pendingAfter = !exchange.IsCompleted;
+        var threaded = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Answer(DiscoverFeatures.DiscloseType, query.Id, body: Empty())));
 
+        unthreaded.Should().BeFalse();
+        pendingAfter.Should().BeTrue();
+        threaded.Should().BeTrue();
         (await exchange.WaitAsync(TimeSpan.FromSeconds(10))).Type.Should().Be(DiscoverFeatures.DiscloseType);
     }
 

@@ -13,17 +13,17 @@ using static DidComm.Mediator.Tests.Client.ClientChannels;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// <see cref="PickupClient.AckAsync"/> over the real <see cref="MediatorClientChannel"/> and its
-/// matcher (#98 F-1, PR #130 review P2): answers are real authcrypted messages unpacked as the
-/// recipient and handed to the channel the way the dispatcher hands them over
-/// (<see cref="IInboundCorrelator.OnInbound"/>), on the manual clock. On a WebSocket the client
-/// stops waiting for a <c>messages-received</c>'s status after half of
-/// <see cref="MediatorClientOptions.RequestTimeout"/> and goes on (to the next chunk, or to a
-/// <c>status-request</c>). A <c>status</c> without <c>thid</c> that arrives after that may be the
-/// late answer to the request it gave up on, so every later request of the call takes only a status
-/// whose <c>thid</c> names it (DIDComm threading: a reply carries <c>thid</c>). Before anything is
-/// given up, and over HTTP, where the response is the answer, a status without <c>thid</c> is taken
-/// as before.
+/// <see cref="PickupClient.AckAsync"/> and the next calls over the real <see cref="MediatorClientChannel"/>
+/// and its matcher (#98 F-1, PR #130 review P2 and round 2): answers are real authcrypted messages
+/// unpacked as the recipient and handed to the channel the way the dispatcher hands them over
+/// (<see cref="IInboundCorrelator.OnInbound"/>), on the manual clock. On a WebSocket the client stops
+/// waiting for a <c>messages-received</c>'s status after half of
+/// <see cref="MediatorClientOptions.RequestTimeout"/> and goes on, so the given-up status can still
+/// arrive later. DIDComm v2.1 threading: a reply carries the <c>thid</c> of the message it answers,
+/// and a message without that <c>thid</c> is not part of the thread. So an answer arriving on its own
+/// completes a request only when its <c>thid</c> names it; one without <c>thid</c> completes none,
+/// in the same call or a later one. Over HTTP, the response to a request is its answer, with or
+/// without <c>thid</c>.
 /// </summary>
 public sealed class PickupClientAckThreadingTests : IAsyncLifetime
 {
@@ -99,12 +99,65 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData(true)]
     [InlineData(false)]
-    public async Task Over_a_WebSocket_a_mediator_that_answers_each_chunk_in_time_gets_one_request_per_chunk_with_or_without_thid(bool threaded)
+    [InlineData(true)]
+    public async Task Over_a_WebSocket_a_late_status_without_thid_does_not_answer_the_next_call_on_the_same_channel(bool nextIsAnAcknowledgement)
     {
-        // Nothing is given up, so a status without thid (the Message Pickup 3.0 example's shape) is
-        // still the only waiting request's answer, as before.
+        // The review's case (PR #130, round 2): AckAsync gives up on chunk 1 at t=15, chunk 2 is
+        // answered, the call returns; at t=16 the next call starts (GetStatusAsync, or another
+        // AckAsync); at t=20 chunk 1's late status (no thid, 50 still queued) arrives. Without a thid
+        // it is not part of any request's thread, so the next call does not take it.
+        var time = new ManualTimeProvider();
+        var (send, sent) = Recorded();
+        await using var channel = Create(_w, send, time: time);
+        var pickup = new PickupClient(channel, logger: null);
+        var mark = time.Mark();
+
+        var acking = Observed(pickup.AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(150), serviceEndpointOverride: Wss));
+        await NextAsync(sent);
+        await time.WaitForTimerAsync(Half, mark, PickupTest.Timeout);
+        time.Advance(Half).Should().Be(1, "only the wait for chunk 1's status comes due at t=15");
+        var second = await NextAsync(sent);
+        channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(second.Id, count: 0))).Should().BeTrue();
+        var acknowledged = await PickupTest.Within(acking);
+        time.Advance(TimeSpan.FromSeconds(1)).Should().Be(0);
+        var next = Observed(nextIsAnAcknowledgement
+            ? pickup.AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(1), serviceEndpointOverride: Wss)
+            : pickup.GetStatusAsync(_w.Mediator.Did, _w.Local.Did, serviceEndpointOverride: Wss));
+        var ask = await NextAsync(sent);
+        time.Advance(TimeSpan.FromSeconds(4)).Should().Be(0);
+        var late = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(thid: null, count: 50)));
+        var own = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(ask.Id, count: 0)));
+        var status = await PickupTest.Within(next);
+
+        status.MessageCount.Should().Be(0, "the next call's own status, not chunk 1's late one");
+        acknowledged.MessageCount.Should().Be(0);
+        late.Should().BeFalse("a status without thid is not part of the next call's thread (DIDComm v2.1 threading)");
+        own.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Over_a_WebSocket_a_status_without_thid_is_not_taken_by_the_only_waiting_request_and_the_same_status_with_its_thid_is()
+    {
+        var (send, sent) = Recorded();
+        await using var channel = Create(_w, send, time: new ManualTimeProvider());
+        var request = _w.Request(MessagePickup.StatusRequestType);
+
+        var exchange = channel.ExchangeAsync(WebSocketRoute, request, DeliveryReader.StatusRequestSpec, _w.Mediator.Did, _w.Local.Did, CancellationToken.None).Observed();
+        await NextAsync(sent);
+        var unthreaded = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(thid: null, count: 9)));
+        var pendingAfter = !exchange.IsCompleted;
+        var threaded = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(request.Id, count: 1)));
+
+        unthreaded.Should().BeFalse("outside the HTTP response to its request, an answer without thid belongs to no request's thread");
+        pendingAfter.Should().BeTrue();
+        threaded.Should().BeTrue();
+        (await PickupTest.Within(exchange)).Thid.Should().Be(request.Id);
+    }
+
+    [Fact]
+    public async Task Over_a_WebSocket_a_mediator_that_answers_each_chunk_in_time_with_its_thid_gets_one_request_per_chunk()
+    {
         var time = new ManualTimeProvider();
         var (send, sent) = Recorded();
         await using var channel = Create(_w, send, time: time);
@@ -113,7 +166,7 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
         {
             await sent.Writer.WriteAsync(request);
             left -= request.Body![PickupBodies.MessageIdList]!.AsArray().Count;
-            channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(threaded ? request.Id : null, count: left)));
+            channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(request.Id, count: left)));
             return FakeSend.Accepted(options.ServiceEndpointOverride!);
         };
 
@@ -122,6 +175,41 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
         status.MessageCount.Should().Be(0);
         send.Calls.Select(c => c.Message.Type).Should().Equal(MessagePickup.MessagesReceivedType, MessagePickup.MessagesReceivedType);
         time.ScheduledTimers.Should().Be(0, "no deadline is left behind");
+    }
+
+    [Fact]
+    public async Task Over_a_WebSocket_a_mediator_whose_statuses_leave_out_thid_is_treated_as_one_that_sends_none_and_the_call_times_out_within_one_RequestTimeout()
+    {
+        // The Message Pickup 3.0 example's shape (a status without thid), answered at once to every
+        // request: none of them is taken, so each chunk is given up at half the budget and the
+        // status-request after the last one is not answered either.
+        var time = new ManualTimeProvider();
+        var (send, sent) = Recorded();
+        await using var channel = Create(_w, send, time: time);
+        var taken = new List<bool>();
+        send.Respond = async (request, options, _) =>
+        {
+            await sent.Writer.WriteAsync(request);
+            taken.Add(channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(thid: null, count: 0))));
+            return FakeSend.Accepted(options.ServiceEndpointOverride!);
+        };
+        var started = time.GetUtcNow();
+        var mark = time.Mark();
+
+        var acking = Observed(new PickupClient(channel, logger: null).AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(1), serviceEndpointOverride: Wss));
+        await NextAsync(sent);
+        await time.WaitForTimerAsync(Half, mark, PickupTest.Timeout);
+        mark = time.Mark();
+        time.Advance(Half).Should().Be(1);
+        var ask = await NextAsync(sent);
+        await time.WaitForTimerAsync(Half, mark, PickupTest.Timeout);
+        time.Advance(Half).Should().Be(1);
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(acking));
+
+        ask.Type.Should().Be(MessagePickup.StatusRequestType);
+        taken.Should().Equal(false, false);
+        thrown.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(ask.Id);
+        (time.GetUtcNow() - started).Should().Be(Budget);
     }
 
     [Fact]
@@ -141,32 +229,6 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
         send.Calls.Select(c => c.Message.Type).Should().Equal(
             MessagePickup.MessagesReceivedType, MessagePickup.MessagesReceivedType, MessagePickup.StatusRequestType);
         time.ScheduledTimers.Should().Be(0);
-    }
-
-    [Fact]
-    public async Task A_request_that_takes_only_a_status_naming_it_still_counts_so_a_status_without_thid_stays_ambiguous_for_another_waiting_request()
-    {
-        // The flag never changes what another request (a live stream's, say) is offered: with two
-        // requests of the pair waiting, a status without thid answers neither, as without the flag.
-        var time = new ManualTimeProvider();
-        var (send, sent) = Recorded();
-        await using var channel = Create(_w, send, time: time);
-        var threaded = _w.Request(MessagePickup.StatusRequestType);
-        var plain = _w.Request(MessagePickup.StatusRequestType);
-
-        var first = channel.ExchangeAsync(WebSocketRoute, threaded, DeliveryReader.StatusRequestThreadedSpec, _w.Mediator.Did, _w.Local.Did, CancellationToken.None).Observed();
-        var second = channel.ExchangeAsync(WebSocketRoute, plain, DeliveryReader.StatusRequestSpec, _w.Mediator.Did, _w.Local.Did, CancellationToken.None).Observed();
-        await NextAsync(sent);
-        await NextAsync(sent);
-        var unthreaded = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(thid: null, count: 9)));
-        var answeredFirst = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(threaded.Id, count: 1)));
-        var answeredSecond = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(plain.Id, count: 2)));
-
-        unthreaded.Should().BeFalse("two requests of the pair wait for a status: it is ambiguous, flag or not");
-        answeredFirst.Should().BeTrue();
-        answeredSecond.Should().BeTrue();
-        (await PickupTest.Within(first)).Thid.Should().Be(threaded.Id);
-        (await PickupTest.Within(second)).Thid.Should().Be(plain.Id);
     }
 
     // ---- helpers ------------------------------------------------------------------------------
