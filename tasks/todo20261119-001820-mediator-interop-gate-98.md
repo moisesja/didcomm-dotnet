@@ -213,3 +213,17 @@ PR #130 (head `b32e8e3` at opening; CI green on ubuntu and windows). Adversarial
 | E-53 | O-1 + owner decision O-98-1 |
 | E-60 | L-067 |
 | E-61 | #116 |
+
+### Review round 1 (PR #130, review of `fec76c3`, comment 7010079291) and the owner decisions of 2026-11-19
+
+| Finding | Fix | Proof |
+|---|---|---|
+| P1: the 10 s deadline could withdraw a 202 the client already held (a slow completion callback registered after ours); also, without any deadline, a client closing after reading while such a callback ran cancelled the acknowledgement | `ffd566a`: the endpoint completes the 202 (and the mediator's 200) itself; once the server has taken the whole response it is handed over and nothing can withdraw it; the deadline only withdraws a stalled write | `MediatorAcknowledgementDeadlineKestrelTests` (real Kestrel, 3 cases) fail on `7def86e`; `HttpResponseAcknowledgementTests`; 11 mutations caught |
+| P2: a late status without `thid` could answer the next `AckAsync` request on a WebSocket | `efde6e6`, `c46e2dc`: after a WebSocket wait is given up, later requests in the call accept only a status whose `thid` names them (spec: a reply that continues a protocol MUST carry `thid`, problems.md L55) | `PickupClientAckThreadingTests` through the real matcher fail on `fec76c3`; live stream byte-identical |
+| P2: reusing `MEDIATOR_LEG_WORK` broke on the leftover FIFO / `ready.json` | `8041050`: per-run directory, ready file checked against the server's pid | two runs in one work dir 10/10 each; stale-ready test fails on the old code |
+
+- O-98-1 = 1a: text frames always (`e61343f`, `bc04a9a`, `d517a8b`, `bfd33fe`); Identus WebSocket cells gated (`b3b9078`, M-8; M-5/M-6 gate the WebSocket call); 20/20 negative controls.
+- Frame-rule correction: the binary fallback was ours and is removed; the spec-faithful fix is to refuse a forward whose attachment is not UTF-8 JSON at intake. **Open (stop):** the spec doesn't say how a mediator answers an invalid forward; raised to the coordinator with options (recommendation: the existing malformed-forward answer, 202 and Dropped-Malformed).
+- `bd86695`: the heap-retention probe is opt-in (it failed once at ×2.01 in a full parallel run: a heap delta counts other tests' allocations).
+- O-1b (observed): against Identus our live stream receives its items at the next drain (one `LivePollInterval`), because Identus addresses its live push to the forward's `next`, which our client refuses on the account's socket (`LocalMismatch`); its acknowledgement on leaving waits one `RequestTimeout` for a status Identus never sends. The live stream is unchanged (owner rule).
+- Follow-ups filed: #131, #132, #133. Identus upstream reports drafted, not posted.
