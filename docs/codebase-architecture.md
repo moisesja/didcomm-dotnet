@@ -232,7 +232,11 @@ below).
 8. The facade surfaces it as `SendResult`; for a return-route send over HTTP it first turns the
    response body into `SendResult.Returned`, or a `TransportException` when the body was over the
    cap, late or unreadable. See "Return-route client side" below. `DidCommClient.SendPackedAsync`
-   delivers bytes already packed: no steps 3–4 or 6, the guard always, no response read.
+   delivers bytes already packed: no steps 3–4 or 6, the guard always, no response read; the bytes
+   must be a DIDComm message (UTF-8 JSON with an object at the top level, #98).
+   `WebSocketDidCommTransport` refuses a payload that is not valid UTF-8 (`TransportException`)
+   before any socket is used, on every path: a text frame must be UTF-8 and a receiver fails the
+   connection on one that is not (RFC 6455 §5.6, §8.1).
 
 ## Outbound connections and the trusted proxy (FR-TRN-13)
 
@@ -316,9 +320,17 @@ Inbound forward:
    `DidCommOptions.Clock` with `ExpiresClockSkew`; `DidSubjectOf(next)` and
    `IForwardRecipientRegistry.IsRegisteredAsync` — when that subject is the DID that decrypted the
    forward (a forward addressed to the mediator itself, below), the layers are opened here first
-   and the lookup is for the forward found inside. Every failure is a drop: a log line carrying the
+   and the lookup is for the forward found inside. Before the lookup and before anything is
+   reserved, the attachment of the forward to relay is decoded and checked with the processor's own
+   rule (`ForwardProcessor.ExtractAttachmentBytes`, #98): it must be a DIDComm message, UTF-8 JSON
+   with an object at the top level (`DidCommWireShape.IsUtf8JsonObject`), or the forward is
+   dropped as `Dropped-Malformed` (its own rate-limited line); the decoded bytes are discarded, the
+   item keeps only the plaintext. A forward without exactly one attachment, or whose attachment has
+   no data, is still left to the processor. Every failure is a drop: a log line carrying the
    message id only (rate-limited per reason, below), one count on the outcome counter, a `null`
-   reply, no problem report. `please_ack` is never read.
+   reply, no problem report — the 202 the transport writes for every forward. The spec does not
+   say how a mediator answers an invalid forward; this answer is the owner's choice (D4; A1,
+   2026-11-19). `please_ack` is never read.
 4. An admitted forward reserves its place on a bounded channel inline (`DefaultCapacity` 1024
    outstanding and `DefaultByteBudget` 64 MiB of the bytes they hold, the charge described below;
    the newest is dropped beyond either bound, decided on the request) and the handler returns
@@ -402,7 +414,9 @@ Inbound forward:
    internal `ForwardProcessor.ProcessAsync(UnpackResult, delay, notBefore)`
    overload with the schedule fixed at admission (the public overloads resolve it when called):
    parse, posture, attachment count, attachment decode (an attachment that decodes to no bytes is
-   malformed, #95), then pass-through (verbatim, or one extra wrap per key the
+   malformed, #95; one that is not a DIDComm message — UTF-8 JSON with an object at the top level —
+   is malformed in every mode, pass-through included, #98: checked, never opened), then
+   pass-through (verbatim, or one extra wrap per key the
    `IRecipientRoutingKeyProvider` returns for the DID subject of `next`) or rewrap
    (`RewrapMode.ReanoncryptToNext`: a fresh forward, addressed to the DID subject of `next` — path,
    query and fragment dropped (#95) — anoncrypted to every keyAgreement key of that DID; the
@@ -1032,7 +1046,9 @@ Every drop kind is rate-limited (the first and every 1000th at Warning with the 
 otherwise) and every line is written through a guarded call.
 
 `SendPackedAsync(packed, endpoint, mediaType, ct)` (JC-20): `ArgumentNullException` for the endpoint
-or media type; `ArgumentException` for an empty payload, a relative endpoint or a media type that
+or media type; `ArgumentException` for an empty payload, a payload that is not a DIDComm message
+(not UTF-8 JSON with an object at the top level, `DidCommWireShape.IsUtf8JsonObject`, #98; the
+message quotes none of it), a relative endpoint or a media type that
 is not one of the three DIDComm types (normalized to the canonical constant); no router →
 `InvalidOperationException`; the queue URI → `TransportException`; `OutboundEndpointGuard` always.
 It sends a plain `TransportRequest` (no return-route fields: no affinity, no body read) under the
