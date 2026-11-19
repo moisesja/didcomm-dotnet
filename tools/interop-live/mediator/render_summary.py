@@ -259,12 +259,16 @@ def s_o8(v):
 
 def s_o9(v):
     ack = v.get("ack_async") or {}
+    outcome = _g(ack, "outcome", default="?")
+    if outcome == "exception":
+        result = f"failed ({_exception(ack)})"
+    elif outcome == "status":
+        result = f"returned a status counting {_g(ack, 'message_count', default='?')}"
+    else:
+        result = str(outcome)
     return (f"A raw messages-received got HTTP {_g(v, 'raw_messages_received', 'http_status', default='?')} after "
-            f"{_g(v, 'raw_messages_received', 'elapsed_ms', default='?')} ms with no answer. AckAsync: "
-            f"{_g(ack, 'outcome', default='?')}"
-            + (f" ({_exception(ack)})" if _g(ack, 'outcome') not in (None, 'ok') else
-               f" (status {_g(ack, 'message_count', default=_g(ack, 'status_count', default='?'))})")
-            + f" in {_g(ack, 'elapsed_ms', default='?')} ms; status afterwards {v.get('status_after_ack_async', '?')}.")
+            f"{_g(v, 'raw_messages_received', 'elapsed_ms', default='?')} ms with no answer. AckAsync {result} in "
+            f"{_g(ack, 'elapsed_ms', default='?')} ms; a status afterwards counts {v.get('status_after_ack_async', '?')}.")
 
 
 def s_o10(v):

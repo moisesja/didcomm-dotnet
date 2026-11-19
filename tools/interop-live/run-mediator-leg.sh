@@ -261,6 +261,9 @@ cleanup() {
     [ -n "$WATCHDOG_PID" ] && stop_guard "$WATCHDOG_PID"
     [ -s "$WORK/logs/watchdog.log" ] && cat "$WORK/logs/watchdog.log" >&2
     stop_serve
+    # Whatever still runs under the leg (a command a signal or the watchdog cut short, and its
+    # hang guard) stops now, so nothing outlives the leg.
+    command -v pkill >/dev/null 2>&1 && pkill -TERM -P $$ 2>/dev/null
     if [ "$DOCKER_OK" = 1 ]; then
         local id name
         for id in $(docker ps -aq --filter "label=$LEG_LABEL" 2>/dev/null); do
