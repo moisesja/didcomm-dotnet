@@ -11,7 +11,7 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | Package (`src/`) | What it holds |
 | --- | --- |
 | `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
-| `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter) and `RateLimitedLog`), `Trace`, `TrustPing`. |
+| `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96, and `Detach` / `Detached` since #98); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter), `RateLimitedLog` and `HeldForward` (what a waiting forward keeps, #98)), `Trace`, `TrustPing`. |
 | `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), and `TransportRouter.Select` (the one transport selection for a send and for questions about it). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
 | `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options), `MapDidCommEndpointCore` (the registry-aware HTTP endpoint, optionally with a deadline for a returned `200`) and `DidCommReceiveOptions.ForMediatorEndpoint()`; internal response deadlines: `HttpResponseAcknowledgement`, `ResponseDeadlineLog`. |
@@ -310,9 +310,9 @@ Inbound forward:
    message id only (rate-limited per reason, below), one count on the outcome counter, a `null`
    reply, no problem report. `please_ack` is never read.
 4. An admitted forward reserves its place on a bounded channel inline (`DefaultCapacity` 1024
-   outstanding and `DefaultByteBudget` 64 MiB of their plaintext UTF-8 bytes, the exact size the
-   unpack path recorded in `InboundMessageSnapshot`; the newest is dropped beyond either bound,
-   decided on the request) and the handler returns `null`. The item is published to the pump only
+   outstanding and `DefaultByteBudget` 64 MiB of the bytes they hold, the charge described below;
+   the newest is dropped beyond either bound, decided on the request) and the handler returns
+   `null`. The item is published to the pump only
    once `ProtocolContext.Acknowledged` completes: the registry-aware `MapDidCommEndpoint` creates
    it per request, completes it from `Response.OnCompleted` (the 202 is committed) and cancels it
    on `RequestAborted` or a post-handler 400, passing it through the
@@ -349,9 +349,35 @@ Inbound forward:
    mediator service). The
    clock was read once, at step 3: the same instant fixes the `delay_milli` schedule
    (`ForwardProcessor.ResolveDelay`, under the processor's `MaxDelay` cap → `NotBefore`) carried in
-   the queued item. The item is the dispatcher's
-   `ProtocolContext` plus that schedule; the request token is not stored.
-5. The pump calls the internal `ForwardProcessor.ProcessAsync(UnpackResult, delay, notBefore)`
+   the queued item. The item is a `HeldForward` (the dispatcher's `ProtocolContext`, held as below)
+   plus that schedule; the request token is not stored. **What a waiting forward holds, and its
+   charge (#98, L-062):** from admission until the pump takes it, the item holds, of what the wire
+   sized, the plaintext as UTF-8 bytes (from `InboundMessageSnapshot.Detach`), the envelope's
+   recipient kid list (`UnpackResult.AllRecipientKids`: any number of kids, of any length, the
+   sender's verbatim) in one string, and the thread id of the context's thread state (the
+   dispatcher's, shared with its thread store: the message's `thid` or `id`, which no FR-API-09 bound
+   caps); for a forward addressed to the mediator itself, also the plaintext and kid list of the
+   forward found inside it. The charge against the byte budget is exactly that (`HeldForward.Bytes`):
+   the plaintext's UTF-8 bytes, plus 2 bytes for each character of the kid lists and the thread id,
+   plus 4 bytes for each kid. It is taken before the registry lookup, so the inline work is the same
+   whether or not `next` is registered. Everything else the item holds is bounded and not charged:
+   the forward's id for logs (at most 128 characters); the kids the unpack resolved or holds, the
+   `from_prior` claims and the key bindings (FR-API-09: 4 096 characters a kid, 2 048 a DID); the
+   algorithm names, the envelope stack and the parsed `return_route` header; the context's shared
+   services — a few hundred bytes for a typical forward, under about 100 KB per forward with every
+   capped value at its limit. It never holds the parsed `Message`: a JSON attachment of many small entries parses to a
+   DOM tens of times its plaintext (about 45× for 190 000 one-character entries). Measured with
+   forwards held behind their acknowledgement, the heap they hold is 1.0–1.3× what they are charged:
+   32 flat, 4 many-entries and 8 forwards naming 192 kids of 4 000 characters (it was 3×, 45× and
+   about 9 000×; `ForwardHandlerRetentionProbeTests`).
+5. The pump first rebuilds the held results (`HeldForward.Restore`, one forward at a time). **The
+   sink gets an equal result, not the original object:** its context is the one the handler was
+   given except that `ProtocolContext.Received` is an equal `UnpackResult` rebuilt after the
+   acknowledgement, with a new `Message` parsed from the same plaintext and a new kid list of the same
+   kids; a verified unpack's snapshot is registered for that message with the same trust fields, so
+   `InboundObservation.FromUnpackResult` reads the same facts. A failure there could only be the
+   mediator's own (the plaintext parsed once already) and is `Faulted`. It then calls the
+   internal `ForwardProcessor.ProcessAsync(UnpackResult, delay, notBefore)`
    overload with the schedule fixed at admission (the public overloads resolve it when called):
    parse, posture, attachment count, attachment decode (an attachment that decodes to no bytes is
    malformed, #95), then pass-through (verbatim, or one extra wrap per key the
@@ -401,7 +427,8 @@ than its carrier, because a `data.json` attachment is re-serialized); one more l
 `Dropped-Malformed`. Only the decrypting DID counts as "itself": another DID of the mediator
 named as `next` is looked up and dropped as unknown. The forward found inside is then looked up in
 the registry (the request's one lookup) and admitted in the received forward's place: the work item
-carries it, the byte budget is charged with the received forward's plaintext plus its own, its
+carries it (as its plaintext and kid list, like the received forward), the byte budget is charged
+with the received forward's plaintext and kid list plus its own, and the thread id once, its
 not-before is the latest of the holds asked for by the received forward and by every opened layer
 — each capped and drawn at the receipt reading, never added, so a chain is held at most the cap —
 and its `expires_time`

@@ -122,6 +122,57 @@ released behaviour changes. No public API changes.
   `thread` or a malformed value; all four fail on the code before this fix. Two
   `MessagePickupFlowTests` pin the problem report, and that a flag already on survives a pause.
 
+### Fixed — a forward waiting in the mediator is charged what it holds, and holds no parsed message (#98, epic #88)
+
+The mediator's forward handler limits the forwards that wait for their 202, or wait behind a slow
+sink, to 64 MiB. That limit counted only each forward's plaintext, but a waiting forward held more:
+
+- **Its parsed message.** A parsed JSON attachment is much bigger than its text: about 3 times for a
+  flat payload, and about 45 times for an attachment of many tiny entries (190 000 one-character
+  strings fit in one 1 MiB envelope).
+- **The envelope's list of recipient key ids** (`UnpackResult.AllRecipientKids`), which was not
+  counted at all. A sender chooses how many recipients it names and how long their key ids are, so a
+  forward with a few hundred bytes of plaintext could hold more than a megabyte of key ids.
+
+So the 64 MiB could stand for about 200 MiB to 3 GiB of memory, and any sender could fill it. The
+handler has not been released, so no released behaviour changes. No public API changes.
+
+- **What a waiting forward holds now, and what it is charged.** It holds its plaintext as UTF-8
+  bytes, its recipient key id list in one string, and its thread id (the dispatcher's thread state,
+  which keeps the message's `thid` or `id`; no length limit applies to those). The 64 MiB now counts
+  exactly that: the plaintext's UTF-8 bytes, plus 2 bytes for each character of the key id list and
+  the thread id, plus 4 bytes for each key id. A forward addressed to the mediator itself also holds,
+  and is charged for, the forward found inside it, as before. Everything else a forward holds has
+  a length limit already (key ids and DIDs, FR-API-09): a few hundred bytes for a typical forward,
+  under about 100 KB with every value at its limit. The
+  parsed message is no longer held: the pump parses it again, one forward at a time, just before it
+  processes the forward. Measured with forwards held behind their acknowledgement, the memory they
+  hold is 1.0 to 1.3 times what they are charged (it was 3 times for a flat payload, 45 times for
+  the many-entries one and about 9 000 times for a small forward naming 192 key ids of 4 000
+  characters).
+- **What changes for a sender.** A forward is charged a little more than before: its key id list
+  and its thread id, usually a few hundred bytes. A forward with a long key id list is now dropped as
+  `Dropped-Saturated` when that list does not fit, where before it was admitted for its plaintext.
+- **What changes for a sink.** `IForwardSink.AcceptAsync` gets an equal unpack result rebuilt after
+  the acknowledgement, not the object the unpack returned: a new `Message` with the same content, a
+  new key id list with the same key ids, and the same verified unpack facts for observers. The
+  forwards relayed, the bytes relayed and the order are the same.
+- **Tests.** `ForwardHandlerRetentionTests` (Core): a forward waiting for its acknowledgement, and one
+  queued behind a busy sink, keep neither the parsed message nor its attachment (checked with weak
+  references, for a verified and for a host-built unpack result). The sink gets an equal unpack
+  outcome and the same verified facts. A forward is charged its key id list and thread id, and the
+  sink gets the same key ids. Under a 64 KiB budget, a forward whose plaintext fits but whose key id
+  list does not is dropped as saturated. `ForwardHandlerRetentionProbeTests` (category `Adv98Probe`)
+  measures retained memory against the charge for the three shapes above and requires at most 2
+  times. These tests fail on the code before the change. Changed on purpose, for the new charge:
+  `ForwardHandlerAdversarialTests.Byte_budget_drops_the_forward_that_would_exceed_it_and_recovers_when_slots_drain`
+  and `.A_forward_larger_than_the_whole_budget_is_always_dropped` (the exact fit is the whole
+  charge), `.A_really_unpacked_forward_is_charged_its_exact_plaintext_length_and_what_else_it_holds_without_re_serialization`
+  (renamed; it expects the key id list and thread id too),
+  `ForwardPeelAdv3Tests.A_self_addressed_forward_is_charged_for_the_received_and_the_opened_forward_and_one_byte_over_is_dropped_inline`
+  (both layers' key id lists and the thread id), and `RoutingMediatorDiTests.Anoncrypt_forward_for_a_registered_recipient_reaches_the_sink_with_the_inner_payload`
+  (the sink's result is equal to the unpack's, no longer the same object).
+
 ### Fixed — `PickupClient.AckAsync` and `FetchAsync` work with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
 
 Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated
