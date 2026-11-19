@@ -50,12 +50,15 @@ the leg itself; the fixes it and the review led to have their own entries below.
 - **Each cell can fail.** Every cell has a sabotaged twin that must fail for the expected reason;
   the workflow's `negative_controls` input runs them. A test (`MediatorWalletBoundaryTests`) pins
   the wallet's package boundary on every PR.
-- **Recorded, not gated:** what Identus does that the specs leave open. It reads only text WebSocket
-  frames (this library sends binary ones, so WebSocket against Identus is recorded, not gated); it
-  sends no `status` after `messages-received` and answers such requests with an empty `202` after
-  3 s; it does not lease fetched messages and ignores `limit`; it stamps no `created_time`; it
-  refuses an envelope it has already seen. The README lists them all, with the I-1..I-15 interop
-  table from #99 re-checked against the pinned image.
+- **Over WebSocket too.** Our wallet talks to Identus over a WebSocket directly and through the
+  proxy (status and fetch), now that DIDComm messages go out as text frames (entry above). Identus
+  stamps no `created_time` on its answers, so the wallet sets `RequireCreatedTime = false` for these
+  cells; what that gives up is in the cookbook (section CC).
+- **Recorded, not gated:** what Identus does that the specs leave open. It sends no `status` after
+  `messages-received` and answers such requests with an empty `202` after 3 s; it does not lease
+  fetched messages and ignores `limit`; it stamps no `created_time`; it refuses an envelope it has
+  already seen; our live stream's behaviour against it. The README lists them all, with the I-1..I-15
+  interop table from #99 re-checked against the pinned image.
 - **Not in the gate:** Blocktrust (incompatible with this spec-strict client, see #99) and the
   Affinidi mediator (it enrols through its own authentication protocol, not Coordinate Mediation).
 - **Adversarial review.** Six passes over the mediator service (authorization and identifiers,
