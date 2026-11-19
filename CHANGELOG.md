@@ -196,8 +196,19 @@ changes: same signature, same `Task<PickupStatus>`.
   status and then asks, in the other half. If the `status-request` is not answered either, the call
   fails with a `TimeoutException` (the messages may still have been removed; acknowledging again is
   harmless).
+- **A late status is never taken for the wrong message** (PR #130 review). On a WebSocket, a status
+  the client stopped waiting for can still arrive later. If it has no `thid`, the client used to take
+  it as the answer to the next message it was waiting for, because it was the only one waiting. For
+  example, with 150 ids it could return the count from before the second chunk was applied (50
+  instead of 0). DIDComm requires a reply to carry the `thid` of the message it answers; the Message
+  Pickup 3.0 example of a `status` leaves it out, so the client takes a status without `thid` only
+  while it cannot belong to anything else. Now, once the client has stopped waiting for a status on a
+  WebSocket, the later messages of the same call and the `status-request` take only a status whose
+  `thid` names them. A mediator that threads its replies loses nothing. A WebSocket mediator that
+  leaves out `thid` and also answers later than half of `RequestTimeout` now makes the call fail with
+  `TimeoutException`. Over HTTP nothing changes: the response to a message is its answer.
 - **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
-  confirms an acknowledgement, and give the time rule.
+  confirms an acknowledgement, and give the time rule and the `thid` rule.
 - **`FetchAsync` no longer logs a false warning over HTTP.** A fetch acknowledges what it returns
   by itself and never reads the status that may follow. Against Identus every fetch logged the
   Warning "Acknowledgement … failed (TimeoutException); the mediator delivers them again", although
@@ -221,6 +232,14 @@ changes: same signature, same `Task<PickupStatus>`.
   does the same for a fetch: an empty 202 logs no failure and the next status shows the
   acknowledgement applied (this one fails on the code before this fix); a problem report, no answer
   within `RequestTimeout`, and a WebSocket with no status are still logged.
+  `PickupClientAckThreadingTests` runs `AckAsync` over the real channel and its matcher, with real
+  authcrypted answers on the test clock: a late status without `thid` arriving after a chunk was
+  given up is not taken for the next chunk, nor for the `status-request` (both fail on the code
+  before this round and return 50); a mediator that answers each chunk in time, with or without
+  `thid`, still gets one message per chunk; over HTTP a status without `thid` in the response still
+  answers; and a request that takes only a status naming it still counts when the client decides
+  whether a status without `thid` is ambiguous, so what any other waiting request is offered (a live
+  stream's included) does not change.
 
 ### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll; the client's version question works with the Identus mediator (FR-MED-10, #99, epic #88)
 
