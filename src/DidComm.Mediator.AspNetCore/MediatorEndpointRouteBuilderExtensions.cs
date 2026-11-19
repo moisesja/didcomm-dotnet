@@ -83,7 +83,10 @@ public static class MediatorEndpointRouteBuilderExtensions
     /// <see cref="MessagePickupOptions.LeaseTimeout"/> of its dispatch, or the request is aborted:
     /// the messages a <c>delivery</c> carries are leased for that long, so a client that never reads
     /// holds at most one copy of them at a time, and once the lease runs out they are delivered
-    /// again (at-least-once: nothing is lost). Both are timed on the container's
+    /// again (at-least-once: nothing is lost). A recipient whose link cannot carry
+    /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/> within the lease (1 MiB in 60 s, about
+    /// 17 KB/s, at the defaults) therefore cannot finish a full delivery over HTTP: it asks for
+    /// smaller batches, or the host raises the lease. Both deadlines are timed on the container's
     /// <see cref="TimeProvider"/>. An abort ends the HTTP/1.1 connection (every request pipelined on
     /// it) or resets the HTTP/2 stream. Every other slow or idle client is Kestrel's to bound: keep
     /// <c>KestrelServerLimits.MinResponseDataRate</c>, <c>MinRequestBodyDataRate</c>,

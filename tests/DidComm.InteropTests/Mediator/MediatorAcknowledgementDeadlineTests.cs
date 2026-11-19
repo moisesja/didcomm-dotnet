@@ -1,6 +1,6 @@
 using System.Net;
 using AwesomeAssertions;
-using DidComm.Facade;
+using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -261,17 +261,24 @@ public sealed class MediatorAcknowledgementDeadlineTests
         }
     }
 
-    [Fact]
-    public async Task A_202_the_forward_handler_did_not_produce_has_no_deadline()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_202_the_forward_handler_did_not_produce_has_no_deadline(bool registeredHandler)
     {
-        // A message the mediator has no handler for (an authcrypted basic message, no return_route) is
-        // answered 202 exactly as before: nothing waits on its acknowledgement, so nothing bounds its commit.
+        // Answered 202 exactly as before, whether no handler ran (an authcrypted basic message) or a
+        // registered one did (a mediate-request without return_route: the grant is only logged).
+        // Nothing waits on such an acknowledgement, so nothing bounds the commit.
         var time = new QaManualTimeProvider();
         var responses = new DeadlineResponseTracker(HttpMethods.Post);
         await using var mediator = await StartAsync(time, responses);
-        var alice = await mediator.NewSenderAsync();
-        var note = alice.Note(mediator.Did);
-        var packed = (await alice.Client.PackEncryptedAsync(note, new PackEncryptedOptions(Recipients: new[] { mediator.Did }, From: alice.Did, Forward: false))).Message;
+        var alice = await mediator.NewPeerAsync();
+        var message = registeredHandler
+            ? DidComm.Mediator.Coordination.CoordinateMediation.CreateMediateRequest(alice.Did, mediator.Did)
+            : new MessageBuilder().WithType("https://didcomm.org/basicmessage/2.0/message").WithFrom(alice.Did).WithTo(mediator.Did)
+                .WithBody(new System.Text.Json.Nodes.JsonObject { ["content"] = "hello" }).Build();
+        message.CreatedTime = mediator.Clock.Now.ToUnixTimeSeconds(); // fresh for replay admission; no return_route
+        var packed = await mediator.AuthcryptAsync(alice, message);
         var timers = time.ScheduledTimers;
         var startedBefore = responses.Started;
 
@@ -290,7 +297,10 @@ public sealed class MediatorAcknowledgementDeadlineTests
             gate.SetResult();
             var response = await post.WaitAsync(MediatorTestServer.Timeout);
             response.Status.Should().Be(HttpStatusCode.Accepted);
-            mediator.Logs.Entries.Should().Contain(e => e.Contains("No protocol handler registered", StringComparison.Ordinal));
+            response.Body.Should().BeEmpty();
+            mediator.Logs.Entries.Should().Contain(e => e.Contains(
+                registeredHandler ? "Protocol dispatch produced a reply (handler=https://didcomm.org/coordinate-mediation/" : "No protocol handler registered",
+                StringComparison.Ordinal));
             mediator.Outcomes.Should().BeEmpty();
         }
         finally

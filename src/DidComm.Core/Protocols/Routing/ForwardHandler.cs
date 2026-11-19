@@ -61,6 +61,18 @@ namespace DidComm.Protocols.Routing;
 /// acknowledgement or queued behind a slow sink never moves it.
 /// </para>
 /// <para>
+/// <strong>An acknowledgement that does not come.</strong> A reservation waits for its
+/// acknowledgement for as long as the transport takes to decide, so the bounds above hold only as
+/// well as the transport bounds that wait. The registry-aware HTTP endpoint gives a 202 of this
+/// handler 10 seconds to be committed: a 202 that is not committed by then (a client that does not
+/// read its responses) cancels the acknowledgement — the forward is dropped as
+/// <c>Dropped-Unacknowledged</c> and its reservation released — and aborts the request, for a
+/// registered and an unknown <c>next</c> alike. One sender therefore cannot keep the shared bounds
+/// longer than that; within those 10 seconds it can still fill them, which is why the mediator's
+/// endpoints want rate limiting in front. A host that dispatches with an acknowledgement of its own
+/// owns that bound.
+/// </para>
+/// <para>
 /// <strong>Logging contract.</strong> Every line carries the message id — bounded: an id longer
 /// than 128 characters is written as its length — and, on a failure, the exception type name(s)
 /// only. No exception object — and so no exception message — is ever
