@@ -6,6 +6,47 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — `DiscoverFeaturesClient` accepts an answer with no `to`, or whose `to` does not name the requester, with a warning; so does the mediator client (#98, owner decision C2, epic #88)
+
+**Behaviour change in a published package (`DidComm.Core`).** `DiscoverFeaturesClient` used to
+ignore a `disclose` that had no `to` header, or whose `to` did not name the DID that sent the
+query, so the query ran into its timeout. It now accepts both. DIDComm v2.1 says, on the `to`
+header (`docs/spec-files-v2.1-snapshot/message_structure.md` L120 and L124 at
+decentralized-identity/didcomm-messaging `c78bcc4`): "If the header is omitted, each recipient SHOULD
+assume they are the only recipient", and "the recipient SHOULD verify that their own identifier
+appears in the list. Implementations MUST NOT fail to accept a message when this is not the case,
+but SHOULD give a warning to their user". **Who could notice:** a host that relied on Discover
+Features ignoring such answers; those queries now complete instead of timing out. No public API
+changes.
+
+- **What still decides.** Identity stays bound to the keys, as the spec's transports section puts
+  it (`transports.md` L76): "The trust of each message MUST be associated with DIDComm encryption or signing, not from the
+  socket connection itself." A `disclose` still completes a query only when its envelope
+  authenticates the sender, every sender and signer key id has the DID of `from`, `from` is the DID
+  that was asked, and, when it is encrypted, the requester's own key decrypted it. Its `thid` must be
+  the id of the pending query, which the requester's client made up for that one query.
+- **The warning.** A `disclose` whose `to` does not name the requester completes the query and logs
+  one Warning. The line names only the message id (bounded, as the library's other lines do) and
+  the reason `NotAddressedToRequester`, never a DID or a key id. A `disclose` with no `to` logs
+  nothing.
+- **The mediator client** (`DidComm.Mediator.Client`, not yet published) treats `to` the same way.
+  An answer whose `to` does not name the DID that decrypted it is matched by its thread and its keys
+  as any other, with a rate-limited Warning that names only the answer type. An answer decrypted by
+  another of the host's DIDs is still refused, whatever its `to` says.
+- **Unchanged.** Unpacking still refuses an encrypted message whose `to` leaves out the DID whose
+  key decrypted it (FR-CONSIST-02), so for encrypted answers the relaxed check is reached only when
+  `to` is absent. The receive side of a return-route WebSocket still drops a message that another of
+  the host's DIDs decrypted (`LocalMismatch`), and the live stream never yields it. The live stream's
+  code is unchanged.
+- **Tests.** `DiscoverFeaturesClientTests`: a `disclose` with no `to` or an empty one completes the
+  query with no warning; one whose `to` names another DID completes it, encrypted and signed-only,
+  with exactly one Warning that holds no DID or key id; one decrypted by another of the host's DIDs
+  is still ignored, also when its `to` names that DID. `MediatorClientChannelAddressingTests`: the
+  same for the mediator client's matcher, the warning rate-limited like the channel's other lines.
+  `PickupClientLiveForeignPushTests`: a push shaped like Identus's (encrypted to another DID the
+  wallet holds, `to` naming it, with a `thid`, on the account DID's WebSocket) is dropped as
+  `LocalMismatch` and never yielded. The new acceptance tests fail on the code before this change.
+
 ### Changed — Only DIDComm messages are passed on, and they go out as WebSocket text frames (#98, epic #88)
 
 Behaviour changes in the published packages:

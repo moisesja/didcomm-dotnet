@@ -193,6 +193,21 @@ that every grantee references its granter directly (pack pins direct references 
    overloads skip steps 4–6 and hand the `UnpackResult` straight to the application; the
    session-aware HTTP callback gets each admitted message with its session and returns the reply.
 
+In-process correlators (`IInboundCorrelator`) see each verified inbound before the handlers: the
+Discover Features client (`DiscoverFeaturesClient`) completes a pending query with a `disclose`
+whose `thid` is the query's id, whose envelope authenticates its sender (authcrypt or a verified
+signature), whose every sender and signer key id has the DID subject of `from`, whose `from` is the
+queried responder, and, when encrypted, whose decrypting key is the requester's. Its `to` header is
+advisory since #98 (owner decision C2; DIDComm v2.1 message_structure: without a `to` a recipient
+may assume it is the only one; a recipient SHOULD check a present one, MUST NOT fail to accept a
+message that does not name it, and SHOULD warn). A `disclose` with no `to` completes the query; one
+whose `to` does not name the requester completes it too and logs one Warning that names only the
+message id (bounded, `LogValues.Id`) and the reason `NotAddressedToRequester`, never a DID or a key
+id. The binding to the requester comes from the keys and the thread: the `thid` is a query id this
+client minted for one requester. A refused `disclose` is logged by `LogRejected` (which still writes
+DIDs, #115) and neither completes nor cancels the query. The recipient-side mediator client's
+matcher treats `to` the same way (see "Matching answers" below).
+
 Messages a peer pushes back on a return-route session socket this agent opened as a client do not
 come through these endpoints: the WebSocket transport's receive loop hands them to the
 `IInboundFrameConsumer` (see "Return-route client side" below). The recipient-side mediator client
@@ -2273,10 +2288,19 @@ request.
    fields are the caller's claims); `ReturnRouteEligibility.TryGetPeer(snapshot, …)` passes
    (authcrypt; the sender key's DID subject is the peer; a signer, if any, agrees; the decrypting
    key's subject is the local DID; not a forward), the same rule as the receive side and
-   `Returned`, now with a snapshot overload over one shared core; the `from`'s DID subject is the
-   peer; and `to` is absent or empty (it is optional in DIDComm v2.1, and the decrypting key already
-   names the local DID) or one of its first 64 entries names the local DID. A failure is other
-   traffic: it returns silently and is not logged.
+   `Returned`, now with a snapshot overload over one shared core; and the `from`'s DID subject is
+   the peer. A failure is other traffic: it returns silently and is not logged. The `to` header does
+   not gate (#98, owner decision C2). DIDComm v2.1 (message_structure) says that without a `to` each
+   recipient may assume it is the only one, and that a recipient SHOULD check a present `to` for its
+   own identifier, MUST NOT fail to accept a message when it is missing, and SHOULD warn. So when
+   `to` is present and none of its first 64 entries names the local DID, the matcher logs a
+   rate-limited Warning that names only the answer's constant name, and the answer goes on to the
+   thread and pair checks below. The pair is what the keys decide (the sender key names the peer,
+   the decrypting key names the local DID), so an answer decrypted by another of our DIDs still
+   completes nothing of this one's. Core's unpack already refuses an encrypted message whose `to`
+   leaves out the decrypting DID (FR-CONSIST-02), so for a real authcrypt answer the warning cannot
+   fire; only a crafted verified snapshot reaches it (`MediatorClientChannelAddressingTests`). Before
+   C2 such an answer was dropped here.
 4. **Thread.** `pthid`, else `thid`, for a problem report; `thid` otherwise. A thread longer than
    64 characters is never looked up.
 
@@ -2713,9 +2737,11 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 - **Rate-limited, Warning the first time and every 1000th, Debug otherwise:** drops that point at the
   mediator (an answer from a request's pair of a type it does not expect, an HTTP response whose
   thread-less answer does not fit its request, an ambiguous thread-less answer, a thread-less
-  answer whose only taker requires a thread, a push its stream's full buffer refuses), problem reports received, and the pickup lines (messages beyond the limit,
-  unusable or repeated ids, unpack failures, filter mismatches, acknowledgement failures, cycle
-  failures, ignored pushes, taken ids forgotten, failures at a stream's end). The pickup counters
+  answer whose only taker requires a thread, a push its stream's full buffer refuses), an answer
+  whose `to` does not name the DID that decrypted it (not a drop: it is still matched), problem
+  reports received, and the pickup lines (messages beyond the limit, unusable or repeated ids,
+  unpack failures, filter mismatches, acknowledgement failures, cycle failures, ignored pushes,
+  taken ids forgotten, failures at a stream's end). The pickup counters
   are per client, shared by its fetches and streams.
 - **Quiet, Debug the first time and every 1000th, Trace otherwise:** a message of an answer type that
   no waiting request takes (late, or meant for another part of this agent, such as a `disclose` for
