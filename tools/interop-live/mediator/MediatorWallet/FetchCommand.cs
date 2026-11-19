@@ -8,7 +8,7 @@ using DidComm.Mediator.Pickup;
 namespace MediatorWallet;
 
 /// <summary>
-/// <c>fetch --state S --expect-count N [--limit L] [--explicit-ack] [--wait-timeout s] --out-dir D</c>:
+/// <c>fetch --state S --expect-count N [--limit L] [--explicit-ack] [--wait-timeout s] [--ws-endpoint auto|U] --out-dir D</c>:
 /// pick up through the shipped <see cref="PickupClient"/> only.
 /// <list type="number">
 /// <item>Wait until <c>GetStatusAsync</c> counts at least N (100 ms pacing; hang guard
@@ -47,6 +47,15 @@ internal static class FetchCommand
         using var capture = new CaptureLoggerProvider(common.LogOut);
         await using var host = WalletHost.Create(common, state.LoadSecrets(), capture);
         var endpoint = state.Override;
+        if (line.Get("ws-endpoint") is { } requestedWs)
+        {
+            // Every call of this fetch over the WebSocket transport: the status, the deliveries,
+            // the acknowledgements (which wait up to RequestTimeout for a status a mediator may
+            // never send on a WebSocket, then are logged as failed).
+            endpoint = await host.WebSocketEndpointAsync(state.MediatorDid, requestedWs, result, CancellationToken.None);
+            result.Observed["ws_endpoint"] = endpoint.AbsoluteUri;
+        }
+        result.Observed["require_created_time_in_effect"] = host.RequireCreatedTimeInEffect;
         if (common.ExpectEnvProxy is { } envProxy)
             result.Observed["env_proxy_precondition"] = WalletHost.AssertEnvProxy(envProxy, MediatorAddresses(state));
 

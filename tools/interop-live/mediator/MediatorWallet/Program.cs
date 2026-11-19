@@ -24,6 +24,7 @@ internal static class Program
                 "enrol" => await EnrolCommand.RunAsync(line, result).ConfigureAwait(false),
                 "fetch" => await FetchCommand.RunAsync(line, result).ConfigureAwait(false),
                 "ws-attempt" => await WsAttemptCommand.RunAsync(line, result).ConfigureAwait(false),
+                "live" => await LiveCommand.RunAsync(line, result).ConfigureAwait(false),
                 "observe" => await ObserveCommand.RunAsync(line, result).ConfigureAwait(false),
                 "boundary" => await BoundaryCommand.RunAsync(line, result).ConfigureAwait(false),
                 _ => throw new UsageException($"Unknown command '{command}'."),
@@ -62,8 +63,9 @@ internal static class Program
               MediatorWallet enrol --identity-dir <dir> --invitation <invitation.json> --expect-mediator-did <did>
                                    [--expect-version 2.0|3.0] [--pin V2|V3] [--endpoint-override <url>] --out <state.json>
               MediatorWallet fetch --state <state.json> --expect-count <n> [--limit <n>] [--explicit-ack]
-                                   [--wait-timeout <s>] --out-dir <dir>
+                                   [--wait-timeout <s>] [--ws-endpoint auto|<url>] --out-dir <dir>
               MediatorWallet ws-attempt --state <state.json> --ws-endpoint auto|<url> [--timeout <s>]
+              MediatorWallet live --state <state.json> --ws-endpoint auto|<url> --expect-count <n> [--guard <s>]
               MediatorWallet observe --state <state.json> [--triggers <dir>] --out <observations.json>
               MediatorWallet boundary --out <refs.json> [--forbid <name>[,<prefix>*...]]
             Common options:

@@ -367,7 +367,7 @@ own wallet through **our** mediator, as the attribution control.
 | `identus` | Identus mediator v1.2.1 on `127.0.0.1:<P>` (a free port, retried up to 5 times on a clash). Its DID advertises `http://127.0.0.1:<P>` then `ws://127.0.0.1:<P>/ws`. Keys are generated per run (`mediator_peer.py okp-keys`, passed in an env file), never the compose demo keys. Its MongoDB 6.0 runs with `--auth` on tmpfs (no volumes), initialised by Identus's own `initdb.js` (vendored, below). |
 | `identus-px` | A second Identus with its own MongoDB, reachable only on the leg's Docker network under the name `identus-px`, port 8080, with no host port. Its DID advertises `http://identus-px:8080` and `ws://identus-px:8080/ws`. A client on the host can reach it only through the proxy. |
 | `squid` | Squid (`ubuntu/squid`), deny by default (`mediator/squid/squid.conf`); its log and spool directories are tmpfs mounts, so a run leaves no anonymous volumes. It allows plain HTTP and CONNECT to `identus-px:8080` only, and answers 403 to everything else, 127.0.0.1 included. Before any cell runs, the leg checks all three: a request routed to `identus-px`, a CONNECT tunnel to it, and a 403 for `127.0.0.1:<P>`. |
-| `mediator/MediatorWallet` | Our wallet: `DidComm.Mediator.Client`, the HTTP and WebSocket transports and DI, the reference set of sample 11's wallet. No mediator package, no ASP.NET Core. Commands `enrol`, `fetch`, `ws-attempt`, `observe` and `boundary`, each printing one JSON result. It is built inside the leg, so a build break fails this leg only. |
+| `mediator/MediatorWallet` | Our wallet: `DidComm.Mediator.Client`, the HTTP and WebSocket transports and DI, the reference set of sample 11's wallet. No mediator package, no ASP.NET Core. Commands `enrol`, `fetch` (over HTTP, or `--ws-endpoint` over WebSocket), `ws-attempt`, `live`, `observe` and `boundary`, each printing one JSON result. It is built inside the leg, so a build break fails this leg only. |
 | `tools/InteropCli` | `pack --forward true` is the dotnet sender. `mediator-serve` runs a didcomm-dotnet mediator on `127.0.0.1` for the reverse cells. Its stdin is a FIFO the leg holds open, so the mediator stops when the leg does; its own lifetime limit equals the leg watchdog. |
 | `mediator/python/mediator_peer.py` | didcomm-python 0.3.2, in the python leg's pinned venv (`python/requirements.txt`; helpers imported from `python/interop_peer.py`, unchanged). It wraps forwards explicitly (`wrap_in_forward`: didcomm-python 0.3.2 does not wrap for a service whose `uri` is a DID without `routingKeys`). It also enrols and picks up with Coordinate Mediation 2.0 and Message Pickup 3.0 messages built by hand. Every request carries `from`, exactly one `to`, `created_time` in seconds and `return_route: all`, and is authcrypted. Every HTTP call goes through an explicit `ProxyHandler`. |
 
@@ -395,17 +395,20 @@ reason)` and counts as a broken control, like one that passes.
 | M-2 | E-35 (L-055 against a mediator that ignores `limit`) | 12 forwards are posted at once and all get 202. `fetch --expect-count 12 --limit 5` gets 12 unique items, exactly the 12 sent, and the final status is 0. | `expect-13`: the hang guard ends the wait |
 | M-3 | Our sender to a python recipient through Identus | Python enrols at Identus (CM 2.0) and registers P2, whose service `uri` is the Identus DID. `InteropCli pack --forward true` wraps one forward for Identus (FR-ROUTE-04) and Identus accepts it with 202. Python's Pickup 3.0 gets the message; `messages-received` gets HTTP 202 and nothing else, as Identus does, then the status is 0. `assert` passes. | `no-forward`: Identus still answers 202 (it cannot decrypt the envelope and says nothing), so nothing is queued and the pickup's hang guard fails the cell |
 | M-4 | E-47, the HTTP half: `TrustedProxy` | The wallet (`--trusted-proxy`, `--resolve-dns-names false`) enrols with `identus-px` and fetches through squid; python posts through squid; `assert` passes. `identus-px` has no other route (no host port, a name only the leg's network resolves), so the passing flow is the proof. Squid's log for the window is kept as evidence, with the wallet's POSTs counted apart from python's by User-Agent; the count is not gated. | `no-proxy`: enrolment fails at `request-mediation` with a direct-connect error for `identus-px` |
-| M-5 | E-47, the WebSocket half, at transport level | `ws-attempt --ws-endpoint auto` through the proxy uses `ws://identus-px:8080/ws`. Squid logs `CONNECT identus-px:8080 200 TCP_TUNNEL`, and `identus-px`'s count of `WS Error (type:Binary)` rises, so our frame crossed the tunnel. The call's own outcome (a timeout, see below) is recorded, not gated. | `no-proxy`: no CONNECT line. `no-frame`: the tunnel opens but the handshake asks for a path with no WebSocket behind it, so no frame reaches Identus (exercises the frame check). |
-| M-6 | E-48: the process proxy is ignored | All six variables `HTTP(S)_PROXY`, `ALL_PROXY` (both cases) point at squid and `NO_PROXY` is unset. Precondition (the wallet exits 3 otherwise): `HttpClient.DefaultProxy` would send each Identus address to squid. Then: (a) the M-1 flow against `127.0.0.1` passes, which squid's 403 makes impossible through squid, and a direct WebSocket attempt reaches Identus; (b) enrolment with `identus-px` fails at `request-mediation` with `HttpRequestException` over a `SocketException` for `identus-px` (a direct connection attempt), although squid could have reached it; (c) squid logs nothing in the window. | `with-trusted-proxy`: squid denies it (403), so the flow fails. `no-proxy-env`: `NO_PROXY=127.0.0.1` fails the precondition. `proxy-in-b`: `TrustedProxy` on the (b) enrolment only, which then succeeds. `squid-request-in-window`: one request through squid inside the window, which (c) must see. |
+| M-5 | E-47, the WebSocket half | `ws-attempt --ws-endpoint auto` through the proxy, with `RequireCreatedTime` off (see below), uses `ws://identus-px:8080/ws`. Squid logs `CONNECT identus-px:8080 200 TCP_TUNNEL`, and the call ends `ok`: Identus's answer came back through the tunnel, was opened and matched to the request. | `no-proxy`: no CONNECT line. `ws-wrong-path`: the tunnel opens, but the handshake asks for a path with no WebSocket behind it, so the call fails. |
+| M-6 | E-48: the process proxy is ignored | All six variables `HTTP(S)_PROXY`, `ALL_PROXY` (both cases) point at squid and `NO_PROXY` is unset. Precondition (the wallet exits 3 otherwise): `HttpClient.DefaultProxy` would send each Identus address to squid. Then: (a) the M-1 flow against `127.0.0.1` passes, which squid's 403 makes impossible through squid, and so does a WebSocket status call (`RequireCreatedTime` off), which must end `ok`; (b) enrolment with `identus-px` fails at `request-mediation` with `HttpRequestException` over a `SocketException` for `identus-px` (a direct connection attempt), although squid could have reached it; (c) squid logs nothing in the window. | `with-trusted-proxy`: squid denies it (403), so the flow fails. `no-proxy-env`: `NO_PROXY=127.0.0.1` fails the precondition. `proxy-in-b`: `TrustedProxy` on the (b) enrolment only, which then succeeds. `squid-request-in-window`: one request through squid inside the window, which (c) must see. |
+| M-8 | E-53: our client with Identus over WebSocket (M-7, a two-mediator route, was cut) | The wallet enrols over HTTP, then with `RequireCreatedTime` off (`--relax-created-time`; the cell checks the client's replay admission really reads it as off) a `status-request` over WebSocket to the first ws service of the Identus DID ends `ok`. Python forwards one message (HTTP, 202), and `fetch --ws-endpoint auto` gets it with every call over the WebSocket: status, delivery, acknowledgement, status 0. `assert` passes. The fetch's quiet acknowledgement waits for a status Identus never sends on a WebSocket and is then logged as failed (Identus applied it); a 3 s request timeout keeps the cell to a few seconds. | `no-relax`: the status call times out, because our client drops Identus's unstamped answer (replay admission `MissingCreatedTime`). `fetch-no-relax`: the same for the fetch's first status. |
 | R-1 | Python as the recipient through **our** mediator (I-4, I-5, E-52) | CM 2.0 by hand: the grant has the canonical type, `thid` = request id, a string `routing_did` equal to our mediator's DID, `from`, `to` and `created_time` (FR-RR-09). `keylist-update` answers `success`, and `keylist-query` lists P with `pagination`. Variants: a `mediate-request` with no body is granted; a `keylist-update` without `return_route` gets 202 and is still applied. Then forward, 202, Pickup 3.0 (status 1, delivery, unpack, `messages-received` answered with status 0), and `assert` passes. | `no-created-time`: 202 with no grant (FR-RR-08). `v2-disabled`: `mediate-request` is not answered. |
-| R-2 | Control: the same wallet against our mediator | `enrol --expect-version 3.0 --endpoint-override <ready.json http>`, python forward, `fetch --explicit-ack`, and `assert` passes. `AckAsync` must answer a status of 0 (compare O-9); `FetchAsync` has already acknowledged those ids, so this proves AckAsync's answer, not its effect. Then the one gated WebSocket exchange: `ws-attempt` against our mediator's `ws` endpoint must end `ok` (a status over the WebSocket transport). | `expect-v2`: our mediator negotiates 3.0. `ws-wrong-path`: the WebSocket call goes to a path with no endpoint behind it. |
+| R-2 | Control: the same wallet against our mediator | `enrol --expect-version 3.0 --endpoint-override <ready.json http>`, python forward, `fetch --explicit-ack`, and `assert` passes. `AckAsync` must answer a status of 0 (compare O-9); `FetchAsync` has already acknowledged those ids, so this proves AckAsync's answer, not its effect. Then a WebSocket status call against our mediator, with the defaults (our mediator stamps its answers), must end `ok`. | `expect-v2`: our mediator negotiates 3.0. `ws-wrong-path`: the WebSocket call goes to a path with no endpoint behind it. |
 
-**WebSocket against Identus is observed, never gated** (an open owner decision on #98, O-98-1, whether to send text frames). Our transports
-send every envelope as a Binary frame. The DIDComm v2.1 transports section names no frame type.
-Identus (scala-did 0.1.0-M48) processes only Text frames and logs `WS Error (type:Binary):
-Unexpected event` for the rest. So every WebSocket call from our client to Identus times out.
-M-5 and M-6 gate only what the transport did: whether it went through the proxy, and whether
-the frame arrived. The one WebSocket exchange that is gated is R-2's, against our own mediator.
+**WebSocket with Identus is gated** (M-5, M-6 (a), M-8). Our transports send each DIDComm
+message as a Text frame (owner decision O-98-1, option 1a), the only kind Identus (scala-did
+0.1.0-M48) reads. Identus does not put `created_time` on its answers, and our client by default
+drops an answer without one on a WebSocket (FR-RR-08: replay protection). **A wallet that talks to
+Identus over WebSocket must therefore set `ReplayProtectionOptions.RequireCreatedTime = false`.**
+What it gives up: a message without a timestamp is remembered only for the replay window (5 minutes
+by default), so a copy of such a message captured on the wire can be played to the wallet again once
+that window has passed. Over HTTP the setting is not needed: answers come back in the HTTP response.
 
 ### Identus behaviours the leg is built around
 
@@ -419,6 +422,16 @@ All are recorded as observations; none fails the leg.
   `FetchAsync` + `GetStatusAsync`, and M-2's fetch of 12 takes about 13 rounds of 3 s each.
   O-8 and O-9 record both behaviours.
 - **No lease, and `limit` is ignored.** Every `delivery-request` returns every undelivered message.
+- **No `created_time` on WebSocket answers either** (O-1, O-2). With our defaults the answer is
+  dropped and the call times out (O-1, M-8's `no-relax`); hence `RequireCreatedTime = false` above.
+- **On a WebSocket, `messages-received` also gets no answer.** Our client cannot tell that silence
+  from a slow answer there, so an acknowledgement over WebSocket waits for a status (`RequestTimeout`,
+  half of it in `AckAsync`) and is then logged as failed although Identus applied it (M-8's fetch,
+  O-1b). The client is unchanged.
+- **Live pushes** carry `thid` = the forward's id and no `created_time` (O-2), and are encrypted to
+  the routed DID the forward named, not to the DID the socket belongs to. Our client drops each one
+  (`LocalMismatch`, FR-RR-07), so the live stream reaches the messages with its next drain, one
+  `LivePollInterval` (1 minute) later (O-1b).
 - **An unregistered `next`** gets HTTP 200 with a signed `e.p.req.not_enroll` problem report
   (O-14; M-1's `unregistered-next` sabotage relies on it).
 - **Dejavu.** Identus refuses an identical envelope twice, but accepts a re-encrypted repeat of
@@ -441,7 +454,13 @@ All are recorded as observations; none fails the leg.
 `return_route`, against a python-built trigger forward), O-12 (dejavu), O-13 (a malformed
 `keylist-update`, an unparseable body) and O-15 (the Discover Features disclosure). The leg adds:
 
-- O-1: our client over WebSocket with the defaults;
+- O-1: our client over WebSocket with the defaults (`RequireCreatedTime` on): the call times out,
+  and the record names why (Identus's unstamped answer dropped by our replay admission, now that
+  frames are Text; before 1a it was the Binary frame Identus ignored);
+- O-1b: `ReceiveLiveAsync` against Identus over WebSocket (`RequireCreatedTime` off), with a wallet
+  of its own: live mode on, two forwards posted once Identus has logged the live-mode change, and
+  what the stream yields and when, the `messages-received` it sends and whether they get an answer,
+  and how long leaving the loop takes; bounded by a 120 s guard;
 - O-5-host: the container's clock against the host's;
 - O-7: one page of `QueryRecipientsAsync(Limit 1)` from M-1's enrolment (Identus ignores
   `paginate`);
@@ -474,12 +493,12 @@ between the two). Each row of the #99 plan's table I-1..I-15
 | I-4 | the Identus SDK sends `keylist-update` without `return_route` | not observable (no SDK in the leg); that shape is sent to **our** mediator in R-1 and is applied | R-1 |
 | I-5 | Identus requires `from` and exactly one `to` | confirmed: our requests carry both and are accepted | M-1 |
 | I-6 | a second `mediate-request` re-grants | confirmed: an identical grant | M-1 |
-| I-7 | answers carry `thid` = the request id; no `created_time` | confirmed (problem reports use `pthid`) | O-4, O-5 |
+| I-7 | answers carry `thid` = the request id; no `created_time` | confirmed (problem reports use `pthid`), over HTTP and WebSocket alike; on a WebSocket our wallet needs `RequireCreatedTime = false` | O-4, O-5, O-1, M-8 |
 | I-8 | anoncrypt and signed requests are accepted | confirmed: an anoncrypt `status-request` is answered with an authcrypt `status` | O-0 |
 | I-9 | its own problem codes | confirmed: `e.p.msg.unsupported` (a 3.0 request), `e.p.req.not_enroll` (an unregistered `next`), `e.p.crypto.message.dejavu` (a repeated envelope) | M-1 `pin-v3`, O-14, O-12 |
 | I-10 | Discover Features: CM 2.0 under role `responder`; `match` is a regular expression | confirmed; our `…/3.*` and `…/2.*` queries work and the client picks 2.0 with no pin; a `match` of `*` gets HTTP 500 | M-1, O-15 |
 | I-11 | (Blocktrust) `from_prior` on first contact | not applicable: no Identus answer carries `from_prior` | observe |
-| I-12 | the SDK sends `created_time`; Identus stamps none | confirmed for Identus's answers | O-5 |
+| I-12 | the SDK sends `created_time`; Identus stamps none | confirmed for Identus's answers and pushes; over WebSocket our client drops them unless `RequireCreatedTime = false` | O-5, O-1, M-8 |
 | I-13 | (Blocktrust) `custom_headers` | not applicable | — |
 | I-14 | Identus dispatches on the exact type string | confirmed with our canonical `/2.0/` types; R-1 checks that ours are canonical too | M-1, R-1 |
 | I-15 | the grant's `from` is the mediator DID | confirmed: `from` = `routing_did` = the invitation's `from` | M-1 |
@@ -553,12 +572,14 @@ environment is unsuitable before anything ran. Under GitHub Actions an unset `PY
 
 Environment:
 - `INTEROP_SUMMARY_DIR`: where `mediator-leg.md`, `mediator-observations.json` and, on failure,
-  `mediator-logs/` go.
+  `mediator-logs/<run id>/` go (both files are rewritten by every run).
 - `INTEROP_CLI`: a prebuilt InteropCli.
 - `MEDIATOR_LEG_OWNER`: an extra `org.didcomm-dotnet.owner` label.
 
 For development only (each is refused when `CI=true`):
-- `MEDIATOR_LEG_WORK`: the scratch directory; a venv already in it is reused;
+- `MEDIATOR_LEG_WORK`: the scratch directory; a venv already in it is reused, and each run writes
+  everything else (identities, keys, the mediator's FIFO and ready file, logs, the summary) into a
+  new `runs/<run id>` inside it, so an earlier run's files are never taken for its own;
 - `MEDIATOR_LEG_IMAGES_ENV`: another images file (the unpullable-image test);
 - `MEDIATOR_LEG_ONLY=M-3,R-1`: run those cells only;
 - `MEDIATOR_LEG_DEBUG_FIRST_PORT`: the port-clash test;
