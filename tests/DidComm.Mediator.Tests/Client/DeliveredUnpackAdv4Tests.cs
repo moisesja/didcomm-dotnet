@@ -5,6 +5,7 @@ using AwesomeAssertions;
 using DidComm.Facade;
 using DidComm.Mediator.Client;
 using DidComm.Mediator.Client.Internal;
+using DidComm.Mediator.Tests.Pickup;
 using DidComm.Mediator.Tests.Pipeline;
 using DidComm.Messages;
 using Xunit;
@@ -200,6 +201,11 @@ public sealed class DeliveredUnpackAdv4Tests
     [Fact]
     public async Task Host_code_that_throws_on_its_thread_after_the_shutdown_is_observed_and_gives_its_slot_back()
     {
+        // The two unpacks below park two pool threads. Raise the floor first, or on a 4-vCPU runner
+        // (the test host holds threads of its own) nothing else in the process, this test's own
+        // steps included, runs until new threads arrive, which can take longer than the gate's
+        // 10 s hang guard (#120's windows failure; #98).
+        MessagePickupLive.RaiseThreadPoolFloor(2);
         var marker = "adv4-unobserved-" + Guid.NewGuid().ToString("N");
         var unobserved = 0;
         EventHandler<UnobservedTaskExceptionEventArgs> handler = (_, e) =>
