@@ -6,6 +6,36 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — the mediator client: a reply without `thid` no longer completes a pending request on any path, the HTTP response to that request included (#98, the owner's answer "2", epic #88)
+
+**Behaviour change in `DidComm.Mediator.Client` (not yet published); no published package
+changes.** Over HTTP the mediator client used to take the message in the response to its request
+as that request's answer, with or without `thid`. It now takes it only when its `thid` (for a
+problem report, its `pthid`) is the request's id, as on a WebSocket. A message without one completes
+nothing: it is logged with the same rate-limited Warning as on a WebSocket, naming only the answer
+type, and the request fails at once with a `TimeoutException` ("got no answer in the HTTP
+response"; the mediator may have acted, and every request these clients send is safe to repeat). A
+`delivery` without `thid` in an HTTP response is not acknowledged, so the mediator delivers it
+again; it never reaches a live stream.
+
+- **Why.** One rule on every path. The owner chose to require `thid` here too (option 2 of the
+  question left open after PR #130's second review round). Our reading of DIDComm v2.1 behind it
+  (`docs/spec-files-v2.1-snapshot` at decentralized-identity/didcomm-messaging `c78bcc4`):
+  "Messages that do not share the same `thid` MUST NOT be considered a part of the same thread"
+  (`threading.md` L17); when `thid` is absent, "the `id` property of the message MUST be treated as
+  the value of the `thid`" (`message_structure.md` L130), so a reply without one is a thread of its
+  own; and "Any DIDComm message that continues a previously begun application-level protocol MUST
+  use a `thid` property that associates it with the prior context" (`problems.md` L55). The
+  return-route extension's "Messages can flow back in response to inbound messages over the same
+  connection" (L5) is about the transport, not the thread.
+- **Who could notice:** a mediator that answers without `thid` over HTTP, such as a Coordinate
+  Mediation 2.0 host that follows the protocol page's examples, which leave `thid` out. Its
+  requests now fail as unanswered. This library's mediator (Coordinate Mediation 3.0 and 2.0,
+  Message Pickup 3.0, Discover Features) and the Identus mediator 1.2.1 put the request's `thid` on
+  every answer; the live leg against Identus is unchanged.
+- **Unchanged:** threaded matching on every path; a `delivery` without `thid` received on its own
+  over a WebSocket is a live push; the live stream's code.
+
 ### Changed — `DiscoverFeaturesClient` accepts an answer with no `to`, or whose `to` does not name the requester, with a warning; so does the mediator client (#98, owner decision C2, epic #88)
 
 **Behaviour change in a published package (`DidComm.Core`).** `DiscoverFeaturesClient` used to
@@ -340,14 +370,15 @@ changes: same signature, same `Task<PickupStatus>`.
   HTTP response to its own request completes a request only when its `thid` names it; one without
   `thid` completes none and is logged (a rate-limited Warning naming only the answer type).
   **Who could notice:** a mediator that leaves `thid` out of its answers over a WebSocket. This
-  library's mediator and the Identus mediator put it on every answer. Unchanged: over HTTP the
-  response to a request is its answer, with or without `thid`; a thread-less `delivery` is still a
-  live push. A first fix had only narrowed the window inside one `AckAsync` call; it is gone, the
+  library's mediator and the Identus mediator put it on every answer. A thread-less `delivery` is
+  still a live push. Over HTTP the response to a request stayed its answer with or without `thid`
+  until the owner's answer "2"; the entry at the top of this section extends the rule to the HTTP
+  response. A first fix had only narrowed the window inside one `AckAsync` call; it is gone, the
   rule replaces it.
 - **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
   confirms an acknowledgement, and give the time rule and the `thid` rule. The mediator client's
   matcher docs, the PRD (FR-MED-04, FR-MED-09) and the architecture map say that an answer without
-  `thid` outside the HTTP response completes no request.
+  `thid` completes no request (on any path since the entry at the top of this section).
 - **`FetchAsync` no longer logs a false warning over HTTP.** A fetch acknowledges what it returns
   by itself and never reads the status that may follow. Against Identus every fetch logged the
   Warning "Acknowledgement … failed (TimeoutException); the mediator delivers them again", although
