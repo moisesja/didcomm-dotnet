@@ -1,10 +1,12 @@
 using DidComm.AspNetCore;
+using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Pipeline;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 // L-014: alias the static OutOfBand API class so the same-named namespace doesn't shadow it.
 using OutOfBandApi = DidComm.Protocols.OutOfBand.OutOfBand;
@@ -29,10 +31,12 @@ public static class MediatorEndpointRouteBuilderExtensions
     /// pattern:
     /// <list type="bullet">
     /// <item><description><c>POST {pattern}</c> receives DIDComm messages over HTTP. It is the
-    /// registry-aware <c>MapDidCommEndpoint(pattern)</c>, unchanged: a forward is answered
-    /// <c>202</c> before anything is relayed or queued (FR-ROUTE-11), and Coordinate Mediation and
-    /// pickup requests sent with <c>return_route: all</c> get their answer as the <c>200</c> body
-    /// (FR-RR-04).</description></item>
+    /// registry-aware <c>MapDidCommEndpoint(pattern)</c>: a forward is answered <c>202</c> before
+    /// anything is relayed or queued (FR-ROUTE-11), and Coordinate Mediation and pickup requests sent
+    /// with <c>return_route: all</c> get their answer as the <c>200</c> body (FR-RR-04). One thing is
+    /// added: a <c>200</c> must be committed within <see cref="MessagePickupOptions.LeaseTimeout"/>
+    /// (60 s by default) of when its request was dispatched, or the request is aborted (see the
+    /// remarks).</description></item>
     /// <item><description><c>GET {pattern}</c> accepts WebSocket connections. Replies and pickup
     /// deliveries — including live delivery — come back on the same socket (FR-RR-05).</description></item>
     /// <item><description><c>GET {base}/oob</c>, where <c>{base}</c> is the pattern without its
@@ -69,6 +73,24 @@ public static class MediatorEndpointRouteBuilderExtensions
     /// A rate limiter counts HTTP requests, so on the WebSocket endpoint it counts connections, not
     /// the messages sent on one. Do not apply a convention that must be unique per endpoint (such as
     /// an endpoint name): the three endpoints would all carry it.
+    /// </para>
+    /// <para>
+    /// <b>Responses a client does not read.</b> A <c>202</c> the forward handler produced must be
+    /// committed within 10 seconds, as on every registry-aware endpoint, or the forward is dropped
+    /// (<c>Dropped-Unacknowledged</c>) and the request aborted: a sender that does not read its
+    /// responses cannot keep the forward queue's shared bound. A <c>200</c> — the answer to a
+    /// Coordinate Mediation or pickup request — must be committed within
+    /// <see cref="MessagePickupOptions.LeaseTimeout"/> of its dispatch, or the request is aborted:
+    /// the messages a <c>delivery</c> carries are leased for that long, so a client that never reads
+    /// holds at most one copy of them at a time, and once the lease runs out they are delivered
+    /// again (at-least-once: nothing is lost). A recipient whose link cannot carry
+    /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/> within the lease (1 MiB in 60 s, about
+    /// 17 KB/s, at the defaults) therefore cannot finish a full delivery over HTTP: it asks for
+    /// smaller batches, or the host raises the lease. Both deadlines are timed on the container's
+    /// <see cref="TimeProvider"/>. An abort ends the HTTP/1.1 connection (every request pipelined on
+    /// it) or resets the HTTP/2 stream. Every other slow or idle client is Kestrel's to bound: keep
+    /// <c>KestrelServerLimits.MinResponseDataRate</c>, <c>MinRequestBodyDataRate</c>,
+    /// <c>KeepAliveTimeout</c> and the connection limits suited to a public endpoint.
     /// </para>
     /// <para>
     /// <b>The WebSocket endpoint.</b> It turns same-socket replies on for itself only — the host's
@@ -124,10 +146,12 @@ public static class MediatorEndpointRouteBuilderExtensions
 
         var mapped = new CompositeEndpointConventionBuilder(new[]
         {
-            // HTTP: the public registry-aware endpoint, unchanged — the transport acknowledgement
-            // (202 committed before the forward is relayed), InboundAdmission and the 6-argument
-            // dispatch with the request's session.
-            endpoints.MapDidCommEndpoint(pattern),
+            // HTTP: the registry-aware endpoint — the transport acknowledgement (202 committed
+            // before the forward is relayed, within the forward deadline), InboundAdmission and the
+            // 6-argument dispatch with the request's session — with one addition: a returned 200
+            // not committed within the pickup lease aborts its request, so a client that never
+            // reads holds at most one copy of the records a delivery leased (#98).
+            DidCommEndpointRouteBuilderExtensions.MapDidCommEndpointCore(endpoints, pattern, returnedResponseDeadline: static sp => sp.GetRequiredService<IOptions<MessagePickupOptions>>().Value.LeaseTimeout),
             // WebSocket: the same receive loop as MapDidCommWebSocket(pattern), with same-socket
             // replies on and STOMP off for this endpoint only.
             DidCommEndpointRouteBuilderExtensions.MapDidCommWebSocketCore(endpoints, pattern, mediatorEndpoint: true),

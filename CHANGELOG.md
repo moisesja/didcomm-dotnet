@@ -6,6 +6,62 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — A mediator client that does not read its HTTP responses can no longer hold the forward queue or pile up copies of a delivery (#98, epic #88)
+
+Two ways a stranger could tie up a mediator by sending requests and never reading the answers,
+both found by the #98 adversarial review (D3-F3 and D3-F2). Both are in code that has not been
+released: the forward handler's wait for its 202 (#90) and the HTTP pickup answer (#91, #94). No
+public API changes, and no new `InternalsVisibleTo` grant. Hosts that map `MapDidCommEndpoint`
+without the routing mediator, and every `MapDidCommWebSocket` endpoint, behave exactly as before.
+
+- **A forward's 202 now has 10 seconds.** The mediator answers a forward with an empty 202 and
+  relays it only once that 202 has been handed to the connection. Until then the forward keeps its
+  place in one queue shared by every tenant (1 024 forwards, 64 MiB). A client that sent its
+  requests on one connection and never read the answers kept that place for as long as the
+  connection lived (over 10 minutes in the review's test; Kestrel's own limit would allow about 45),
+  and a stranger who enrolled itself could fill the whole queue, so every other tenant's forward was
+  dropped. Now, on the registry-aware HTTP endpoint (`MapDidCommEndpoint(pattern)`, and so
+  `MapDidCommMediator`), a 202 of the forward handler that is not handed over within 10 seconds of
+  the handler's return gives up its place (the forward is counted `Dropped-Unacknowledged`) and the
+  request is aborted, so the sender never receives a 202 for a forward that was not relayed. A 202
+  handed over in time is relayed once, as before. The rule is the same whether or not the forward's
+  `next` is registered, so it tells a sender nothing about who is registered.
+- **A delivery nobody reads is cut off when its lease ends.** Over HTTP, `MapDidCommMediator`
+  answers a `delivery-request` with the messages in the 200 body and leases them for
+  `MessagePickupOptions.LeaseTimeout` (60 seconds). A client that never read that answer held it —
+  up to about 1 MiB for a 2 KB request — for as long as Kestrel allowed (about an hour), and every
+  time the lease ran out the same messages went into another held answer. Now a 200 that is not
+  handed over within the lease, counted from when the request was dispatched, is aborted: at most
+  one copy of a leased message is held at a time, and the messages are delivered again afterwards,
+  so nothing is lost.
+- **How.** One mechanism at the HTTP endpoint (`HttpResponseAcknowledgement`, internal): a one-shot
+  timer on the container's `TimeProvider` (the system clock when none is registered). At the
+  deadline it first cancels the transport acknowledgement — so the forward handler releases what it
+  reserved whatever the server then does — and then calls `HttpContext.Abort()`. A response handed
+  over first always wins: the two are decided under one lock, and nothing is aborted after
+  `Response.OnCompleted` has run. The timer is disposed by whichever ends the request first. Each
+  abort is counted on a rate-limited log line (the first and every 1000th at Warning) that carries
+  no wire value.
+- **What is left.** Within the 10 seconds a sender that does not read can still hold the queue's
+  bounds, and it can stall new connections again and again; rate limiting per client in front of
+  the mediator, and a closed enrolment policy, close that. Kestrel's own limits
+  (`MinResponseDataRate`, `MinRequestBodyDataRate`, `KeepAliveTimeout`, connection limits) still
+  decide everything else about slow or idle clients. A recipient on a link slower than
+  `MaxDeliveryBytes` per lease (1 MiB in 60 s, about 17 KB/s, at the defaults) cannot finish a full
+  delivery over HTTP any more: it asks for smaller batches, or the host raises the lease. "Operating
+  a mediator" in `docs/codebase-architecture.md` says so.
+- **Tests.** `MediatorAcknowledgementDeadlineTests` and `MediatorPickupResponseDeadlineTests` in the
+  interop tests hold responses unread on a TestServer and move a hand-driven `TimeProvider`: a
+  stranger's 1 024 held 202s, and its held 64 MiB, lose every reservation exactly at the deadline
+  and another tenant's forward is then relayed; a 202 handed over one tick before the deadline is
+  relayed exactly once and its timer is gone; an unknown and a registered `next` are aborted at the
+  same instant; a 202 no forward handler produced has no deadline; a held delivery is aborted at the
+  lease and served again, never two held at once, and one read a tick before the lease is kept. Six
+  fail on the code before this fix; the two cases of the guard that nothing else changed pass there.
+  `MediatorResponseDeadlineKestrelProbeTests` (opt-in, `DIDCOMM_ADV98_PROBES=1`) checks on real
+  Kestrel that the abort ends a stalled socket: the reservation went 10.0 s after the stall, and a
+  1 MB delivery with a 5 s lease was cut off at 5.0 s with its 10 messages still queued.
+
 ### Fixed — `PickupClient.AckAsync` works with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
 
 Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated

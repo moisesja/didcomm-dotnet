@@ -150,7 +150,8 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     /// signal. <paramref name="acknowledged"/> becomes the handler's
     /// <see cref="ProtocolContext.Acknowledged"/>: it completes once the transport has committed
     /// its acknowledgement of the inbound on the wire (HTTP: the 202 response), and is cancelled
-    /// or faulted when that never happens (client abort, or a rejection after the handler ran).
+    /// or faulted when that never happens (client abort, a rejection after the handler ran, or a
+    /// response the transport aborted because it was not committed by its deadline).
     /// A handler whose contract is "nothing observable before the acknowledgement" — the mediator's
     /// <see cref="Routing.ForwardHandler"/> (FR-ROUTE-11) — awaits it before starting its deferred
     /// work; every other handler ignores it. The dispatch itself does not wait for it.

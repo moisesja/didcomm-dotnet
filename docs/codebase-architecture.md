@@ -14,7 +14,7 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter) and `RateLimitedLog`), `Trace`, `TrustPing`. |
 | `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), and `TransportRouter.Select` (the one transport selection for a send and for questions about it). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
-| `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options) and `DidCommReceiveOptions.ForMediatorEndpoint()`. |
+| `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options), `MapDidCommEndpointCore` (the registry-aware HTTP endpoint, optionally with a deadline for a returned `200`) and `DidCommReceiveOptions.ForMediatorEndpoint()`; internal response deadlines: `HttpResponseAcknowledgement`, `ResponseDeadlineLog`. |
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator` — which also registers the shared `ForwardMetrics` and a cycle-guarded `ForwardHandler` factory — `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions` (including `TrustedProxy`), `HttpResiliencePipelineFactory`, `UseHttpTransport()`; internal `TrustedProxyRoute` (the checked copy of the named proxy and the test that recognises its socket) and `TrustedProxySnapshot` (one reading per container). |
 | `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound` and `TrustedProxy`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
@@ -317,13 +317,36 @@ Inbound forward:
    it per request, completes it from `Response.OnCompleted` (the 202 is committed) and cancels it
    on `RequestAborted` or a post-handler 400, passing it through the
    `ProtocolDispatcher.DispatchAsync(…, Task acknowledged, …)` overload — so neither the processing
-   nor the sink runs before the sender holds the 202 (only a forward addressed to the mediator
-   itself is opened before it, inline; see below). The WebSocket endpoint and a direct
+   nor the sink runs before the 202 is committed (only a forward addressed to the mediator
+   itself is opened before it, inline; see below). "Committed" means the server has taken the 202
+   for the connection, not that the client has read it: when a client that pipelined requests and
+   stopped reading is reset, the 202s still in the server's buffers were committed and are lost,
+   and their forwards are relayed (at-least-once; the sender may send them again). The WebSocket endpoint and a direct
    dispatcher caller pass `Task.CompletedTask` and publish immediately. The pump relays in
    publication order, so forwards received on one WebSocket connection are relayed in the order
    they arrived, while forwards of separate HTTP requests are published as each response completes
    and two sent one after the other may be relayed in either order (#119). A cancelled or faulted
-   acknowledgement releases the reservation and drops the forward with a warning (id only). The
+   acknowledgement releases the reservation and drops the forward with a warning (id only).
+   **The wait is bounded (#98, D3-F3).** A 202 that cannot be committed (a client that pipelines
+   requests and never reads, so the kernel buffers and Kestrel's output pipe fill up) used to keep
+   its reservation for as long as the connection lived, and a self-enrolled stranger could hold
+   the whole budget so that every other tenant's forward was `Dropped-Saturated`. Now the endpoint
+   arms a deadline when the handler that ran is the `ForwardHandler`:
+   `ForwardResponseDeadline`, 10 s from the handler's return, on the container's `TimeProvider`
+   (`TimeProvider.System` when none is registered). An honest client reads the empty 202 at once,
+   and Kestrel's own default data rate (240 B/s after a 5 s grace) would end a lone stalled 202
+   write in about 5.4 s. At the deadline `HttpResponseAcknowledgement` cancels the acknowledgement
+   first — the forward is `Dropped-Unacknowledged` and its reservation released, whatever the
+   server then does — and aborts the request (`HttpContext.Abort()`), so the sender never receives
+   that 202. The commit and the deadline are decided under one lock and the abort is made under
+   it, so a 202 committed first is relayed once and never followed by an abort (after
+   `OnCompleted` the server may reuse the context). The timer is disposed by the commit, a client
+   abort or its own firing. The deadline is armed for every forward the handler judged, registered
+   `next` or not, so the abort tells a sender nothing about registration (D7). Each abort is
+   counted on a rate-limited line of the endpoint (first and every 1000th at Warning, no wire
+   value). Within the 10 s a sender that does not read can still hold the shared bounds; it has to
+   stall a connection again for every 10 s it wants to keep a reservation (Documented limits of the
+   mediator service). The
    clock was read once, at step 3: the same instant fixes the `delay_milli` schedule
    (`ForwardProcessor.ResolveDelay`, under the processor's `MaxDelay` cap → `NotBefore`) carried in
    the queued item. The item is the dispatcher's
@@ -416,8 +439,8 @@ whoever built the handler (an `AsyncLocal`, a request's activity).
 `Dropped-NotEncrypted`, `Dropped-Expired` (on arrival or while queued), `Dropped-Unknown` (`next`
 not a DID or not registered, or, in rewrap mode, a next hop whose DID resolves to no usable
 `keyAgreement` key or is of a refused method — `DidResolutionException`,
-`UnsupportedDidMethodException`, logged "the next hop cannot be reached"), `Dropped-Saturated`, `Dropped-Unacknowledged` (the acknowledgement was cancelled or faulted, or the
-request was cancelled), `Dropped-Shutdown`, or `Faulted` (a fault of the mediator's own
+`UnsupportedDidMethodException`, logged "the next hop cannot be reached"), `Dropped-Saturated`, `Dropped-Unacknowledged` (the acknowledgement was cancelled or faulted — over HTTP also when the
+202 was not committed within the 10 s deadline — or the request was cancelled), `Dropped-Shutdown`, or `Faulted` (a fault of the mediator's own
 collaborators: the registry, clock or logger while screening, the processor or the sink on the
 pump, a resolver or key service that throws anything else — never a layer a sender built that fails
 to open). A
@@ -570,7 +593,9 @@ registry events and does not count against the bounds):
 - Response: bytes → `200` with `Content-Type: application/didcomm-encrypted+json`; none → `202`.
   The abort path and the post-handler uniform `400` also close the session and discard the slot.
   `ProtocolContext.Acknowledged` completes once the `200` or `202` is committed; a forward never
-  has a session, so `ForwardHandler` always waits for a `202`.
+  has a session, so `ForwardHandler` always waits for a `202`. The public `MapDidCommEndpoint(pattern)`
+  puts no deadline on a `200`; `MapDidCommMediator`'s HTTP endpoint aborts one that is not
+  committed within the pickup lease (Mediator service, below).
 
 WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
 
@@ -1397,6 +1422,15 @@ Documented limits:
 
 - **At-least-once.** A lease that ran out, or a connection that closed mid-delivery, makes a
   message deliverable again; recipients acknowledge by id.
+- **A delivery nobody reads (#98, D3-F2).** Over HTTP a delivery is the `200` of the request, and
+  a client that never reads it used to hold it for as long as Kestrel's minimum data rate allowed
+  (about 68 minutes for 1 MiB at 240 B/s) while the lease ran out every 60 s and served the same
+  records into another held response. `MapDidCommMediator`'s HTTP endpoint now aborts a `200` that
+  is not committed within `LeaseTimeout`, counted from when its dispatch began (before the handler
+  leased anything), on the container's `TimeProvider`: the abort comes no later than the lease runs
+  out, so a client that never reads holds at most one copy of a leased record at a time, and the
+  records are served again afterwards — nothing is lost. A delivery read before its deadline is
+  untouched. The public `MapDidCommEndpoint(pattern)` keeps no such bound (it knows no lease).
 - **Live deliveries must be acknowledged.** They stay stored and counted until `messages-received`;
   a recipient that never acknowledges fills its quota.
 - **Many-key recipients.** An envelope larger than the allowance means trimmed batches. A message
@@ -1761,7 +1795,7 @@ unless the host calls `PurgeExpiredAsync` itself.
 
 | Route | Endpoint |
 | --- | --- |
-| `POST {pattern}` | the registry-aware `MapDidCommEndpoint(pattern)`, unchanged: content type and size checks, unpack, `InboundAdmission`, and the 6-argument `DispatchAsync` with a real acknowledgement (the 202 is committed before the processor and the sink run) and the request's session |
+| `POST {pattern}` | `MapDidCommEndpointCore(endpoints, pattern, returnedResponseDeadline: LeaseTimeout)`: the registry-aware `MapDidCommEndpoint(pattern)` — content type and size checks, unpack, `InboundAdmission`, and the 6-argument `DispatchAsync` with a real acknowledgement (the 202 is committed before the processor and the sink run, within the 10 s forward deadline) and the request's session — plus one bound: a returned `200` not committed within `MessagePickupOptions.LeaseTimeout`, counted from when its dispatch began, aborts its request |
 | `GET {pattern}` | `MapDidCommWebSocketCore(endpoints, pattern, mediatorEndpoint: true)`: the receive loop of the registry-aware `MapDidCommWebSocket(pattern)` (admission on; acknowledgement `Task.CompletedTask`) with `DidCommReceiveOptions.ForMediatorEndpoint()` |
 | `GET {base}/oob` | `MapDidCommOobEndpoint(base + "/oob", MediatorInvitationStore)`, where `base` is `pattern.TrimEnd('/')` (so `"/"` gives `/oob`) |
 
@@ -1784,8 +1818,8 @@ unless the host calls `PurgeExpiredAsync` itself.
   (`RequireRateLimiting`, host filters, authorization) to all three endpoints. On the WebSocket
   endpoint a rate limiter counts connections, not messages.
 - One Information line at map time, with the paths only.
-- `DidComm.Mediator.AspNetCore` reaches `MapDidCommWebSocketCore`, `ForMediatorEndpoint` and
-  `SafeLog` in `DidComm.AspNetCore`, and `MediatorMarker` / `MediatorInvitationHolder` in
+- `DidComm.Mediator.AspNetCore` reaches `MapDidCommWebSocketCore`, `MapDidCommEndpointCore`,
+  `ForMediatorEndpoint` and `SafeLog` in `DidComm.AspNetCore`, and `MediatorMarker` / `MediatorInvitationHolder` in
   `DidComm.Mediator`, through `InternalsVisibleTo`: no public surface was added to the released
   `DidComm.AspNetCore` for one caller, and the packages ship with one version.
 
@@ -1840,6 +1874,22 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   replay `ClockSkew`.
 - The mediator pushes only over live sessions; every other message waits for pickup.
 - Call `app.UseWebSockets()` before mapping, or the WebSocket endpoint answers `400`.
+- **Responses a client does not read** are bounded on the HTTP endpoint (#98): a forward's `202`
+  has 10 s from the handler's return to be committed — then the forward is
+  `Dropped-Unacknowledged`, its place in the forward queue is released and the request is aborted
+  — and a `200` has `Pickup.LeaseTimeout` from its dispatch — then the request is aborted and the
+  leased records come back when the lease runs out. Both are timed on the container's
+  `TimeProvider`. An abort ends the HTTP/1.1 connection (and every request pipelined on it) or
+  resets the HTTP/2 stream; each is counted on a rate-limited line (first and every 1000th at
+  Warning, no wire value). Everything else about slow or idle clients is Kestrel's, and its
+  defaults are generous for a public endpoint: `KestrelServerLimits.MinResponseDataRate` (a slow
+  reader of any other response), `MinRequestBodyDataRate` (a body sent fast and then stalled is
+  held about bytes / 240 s), `KeepAliveTimeout`, `MaxConcurrentConnections` and
+  `MaxConcurrentUpgradedConnections` still decide how long and how many. The lease bound has a
+  cost for slow honest recipients: one whose link is slower than `Pickup.MaxDeliveryBytes` /
+  `Pickup.LeaseTimeout` (1 MiB in 60 s, about 17 KB/s, at the defaults) cannot finish reading a full
+  delivery over HTTP; it asks for smaller batches (`limit`), or the host raises the lease or lowers
+  `MaxDeliveryBytes`.
 
 ### Documented limits
 
@@ -1898,6 +1948,18 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   decided by the store's arrival sequence, and the cooldown is measured on the monotonic clock, so a
   step of the wall clock changes neither.
 - **Outside a generic host** there are no start-up checks, no invitation and no purge (above).
+- **Ten seconds of a stranger's held 202s.** The forward deadline bounds how long one stalled 202
+  keeps its reservation, not how many a sender can hold within it: each stalled HTTP/1.1
+  connection holds one reservation (an HTTP/2 connection, whose streams share one output, can
+  hold one per open stream), and the shared
+  bounds (1 024 forwards, 64 MiB) are one sender's for as long as it re-stalls connections every
+  10 s, which costs it the requests that fill the buffers each time. Rate limiting per client in
+  front of the endpoint, and an enrolment policy that is not open, close it.
+- **Held deliveries, one per record.** A client that never reads still gets a delivery's `200`
+  (up to `MaxDeliveryBytes` for a 2 KB request) and can ask again each lease; what changed is that
+  a leased record is in at most one held response at a time. All held deliveries together therefore
+  carry at most what the store holds (`MaxStoreBytes`, 128 MiB, times the delivery's encoding
+  overhead), and self-made grants under open enrolment can use that up.
 
 ### Demonstrated by (#97)
 
