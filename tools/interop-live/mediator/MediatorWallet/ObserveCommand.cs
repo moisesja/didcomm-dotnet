@@ -648,7 +648,8 @@ internal static class ObserveCommand
                     cases.Add(("trigger " + name, File.ReadAllText(file), File.Exists(innerPath) ? File.ReadAllText(innerPath) : null));
                 }
             }
-            value["triggers_dir"] = triggers;
+            // The trigger names only: the directory is a runner temp path, not data about the mediator.
+            value["triggers"] = new JsonArray(cases.Skip(1).Select(c => (JsonNode?)c.Name).ToArray());
 
             var results = new JsonArray();
             foreach (var (name, outer, inner) in cases)
