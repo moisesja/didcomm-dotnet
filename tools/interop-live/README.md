@@ -428,8 +428,10 @@ All are recorded as observations; none fails the leg.
   from a slow answer there, so an acknowledgement over WebSocket waits for a status (`RequestTimeout`,
   half of it in `AckAsync`) and is then logged as failed although Identus applied it (M-8's fetch,
   O-1b). The client is unchanged.
-- **Live pushes** carry `thid` = the forward's id and no `created_time` (O-2). Our live stream does
-  not yield them as they come; it reaches the messages with its next drain (O-1b).
+- **Live pushes** carry `thid` = the forward's id and no `created_time` (O-2), and are encrypted to
+  the routed DID the forward named, not to the DID the socket belongs to. Our client drops each one
+  (`LocalMismatch`, FR-RR-07), so the live stream reaches the messages with its next drain, one
+  `LivePollInterval` (1 minute) later (O-1b).
 - **An unregistered `next`** gets HTTP 200 with a signed `e.p.req.not_enroll` problem report
   (O-14; M-1's `unregistered-next` sabotage relies on it).
 - **Dejavu.** Identus refuses an identical envelope twice, but accepts a re-encrypted repeat of
