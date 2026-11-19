@@ -86,9 +86,11 @@ namespace DidComm.Protocols.Routing;
 /// <para>
 /// <strong>An acknowledgement that does not come.</strong> A reservation waits for its
 /// acknowledgement for as long as the transport takes to decide, so the bounds above hold only as
-/// well as the transport bounds that wait. The registry-aware HTTP endpoint gives a 202 of this
-/// handler 10 seconds to be committed: a 202 that is not committed by then (a client that does not
-/// read its responses) cancels the acknowledgement — the forward is dropped as
+/// well as the transport bounds that wait. The registry-aware HTTP endpoint completes a 202 of this
+/// handler itself and acknowledges it as soon as the server has taken it (a later completion
+/// callback or client abort cannot take that back), and gives it 10 seconds: a 202 the server has
+/// not taken by then (a client that does not read its responses) cancels the acknowledgement — the
+/// forward is dropped as
 /// <c>Dropped-Unacknowledged</c> and its reservation released — and aborts the request, for a
 /// registered and an unknown <c>next</c> alike. One sender therefore cannot keep the shared bounds
 /// longer than that; within those 10 seconds it can still fill them, which is why the mediator's

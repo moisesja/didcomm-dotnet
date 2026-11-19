@@ -191,16 +191,23 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// </para>
     /// <para>
     /// <b>A forward's 202 has 10 seconds.</b> When the handler that ran is the
-    /// <see cref="ForwardHandler"/>, its <c>202</c> must be committed within 10 seconds of the
-    /// handler's return; otherwise the acknowledgement is cancelled — the forward is dropped as
+    /// <see cref="ForwardHandler"/>, the endpoint completes the <c>202</c> itself, and the
+    /// acknowledgement completes as soon as the server has taken the whole response for the
+    /// connection — not later, when completion callbacks run: a slow <c>Response.OnCompleted</c>
+    /// callback of other middleware, or the client closing its connection while such callbacks run,
+    /// can no longer take the acknowledgement back. If the server has not taken the 202 within 10
+    /// seconds of the handler's return (a client that does not read its responses, so the write
+    /// cannot finish), the acknowledgement is cancelled — the forward is dropped as
     /// <c>Dropped-Unacknowledged</c> and its place in the handler's queue bound is released — and the
     /// request is aborted, so the sender never receives a 202 for a forward that was not relayed. An
-    /// honest client reads the empty 202 at once; one that does not read its responses (requests
+    /// honest client takes the empty 202 at once; one that does not read its responses (requests
     /// pipelined on one connection and never read) could otherwise keep a forward reserved for as
     /// long as the connection lives. The deadline is the same whether or not <c>next</c> is
     /// registered, and it is timed on the container's <see cref="TimeProvider"/>
-    /// (<see cref="TimeProvider.System"/> when none is registered). No other response of this
-    /// endpoint has a deadline.
+    /// (<see cref="TimeProvider.System"/> when none is registered). Because the response is complete
+    /// when the endpoint returns, middleware that runs after it can no longer change that 202. No
+    /// other response of this endpoint has a deadline, and the others are completed by the server
+    /// as before.
     /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
@@ -274,13 +281,14 @@ public static class DidCommEndpointRouteBuilderExtensions
             var startTimestamp = Stopwatch.GetTimestamp();
 
             // The transport acknowledgement handed to the handler (ProtocolContext.Acknowledged):
-            // completes once the response has been committed to the connection (Response.OnCompleted)
-            // — every path below that reaches the handler returns 202, or the 200 carrying the
-            // returned message. Cancelled when the request aborts before that, so a forward whose
-            // sender never received its 202 is not relayed; and cancelled, then aborted, when a
-            // deadline armed below passes before the commit, so a response the client does not read
-            // cannot keep what the handler reserved for it (HttpResponseAcknowledgement). Whichever
-            // comes first wins; the commit, once it has won, is never followed by an abort.
+            // completes once the response has been committed to the connection — every path below
+            // that reaches the handler returns 202, or the 200 carrying the returned message.
+            // Cancelled when the request aborts before that, so a forward whose sender never received
+            // its 202 is not relayed. A response returned under a deadline (below) is completed by its
+            // result, and the acknowledgement is decided when it has been handed to the transport;
+            // if the deadline passes first (a client that does not read), it is cancelled, then the
+            // request aborted, so the response cannot keep what the handler reserved for it. Any
+            // other response completes it from Response.OnCompleted (HttpResponseAcknowledgement).
             var acknowledgement = HttpResponseAcknowledgement.Start(httpContext);
 
             // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException),
@@ -327,18 +335,23 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // a push still packing now returns false and never reaches this response.
                 var returnedBody = session?.TakeResponseAndClose();
                 // The only exits after the handler ran: the 202, or the 200 carrying the returned
-                // message. OnCompleted then completes the acknowledgement once it is committed.
+                // message.
+                // Under a deadline the result completes the response itself, and the acknowledgement
+                // is decided when the response has been handed to the transport: a completion callback
+                // of other middleware that runs late can neither delay nor cancel it.
                 if (returnedBody is null)
                 {
+                    var accepted = Results.StatusCode(StatusCodes.Status202Accepted);
                     // Every forward the ForwardHandler judged, registered next or not, gets the same
-                    // deadline (D7): one whose 202 is not committed in time is never relayed.
-                    if (outcome.Handler is ForwardHandler)
-                        acknowledgement.ArmDeadline(time ?? Clock(sp), ForwardResponseDeadline, deadlineLog, logger);
-                    return Results.StatusCode(StatusCodes.Status202Accepted);
+                    // deadline (D7): one whose 202 is not handed over in time is never relayed.
+                    return outcome.Handler is ForwardHandler
+                        ? acknowledgement.WithDeadline(accepted, time ?? Clock(sp), ForwardResponseDeadline, deadlineLog, logger)
+                        : accepted;
                 }
-                if (time is not null)
-                    acknowledgement.ArmDeadline(time, returnedResponseDeadline!(sp) - time.GetElapsedTime(dispatchStarted), deadlineLog, logger);
-                return Results.Bytes(returnedBody, DidCommMediaTypes.Encrypted);
+                var answer = Results.Bytes(returnedBody, DidCommMediaTypes.Encrypted);
+                return time is null
+                    ? answer
+                    : acknowledgement.WithDeadline(answer, time, returnedResponseDeadline!(sp) - time.GetElapsedTime(dispatchStarted), deadlineLog, logger);
             }
             catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {

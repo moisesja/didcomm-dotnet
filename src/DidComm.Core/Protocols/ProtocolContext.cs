@@ -34,8 +34,9 @@ public sealed record ProtocolContext(
     /// ordering — dispatcher-only use (tests, samples, the WebSocket endpoints), where the handler
     /// proceeds immediately. A cancelled or faulted task means the inbound was never acknowledged
     /// (the client aborted, the response turned into a rejection after the handler ran, or the
-    /// response missed the endpoint's deadline — the registry-aware HTTP endpoint gives a 202 of the
-    /// <see cref="Routing.ForwardHandler"/> 10 seconds to be committed, then aborts the request); a
+    /// response missed the endpoint's deadline — the registry-aware HTTP endpoint completes a 202 of
+    /// the <see cref="Routing.ForwardHandler"/> itself, acknowledges it once the server has taken it,
+    /// and aborts the request when that takes longer than 10 seconds); a
     /// handler that was waiting on it must drop the deferred work. Set by
     /// <see cref="ProtocolDispatcher.DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, CancellationToken)"/>.
     /// </summary>
