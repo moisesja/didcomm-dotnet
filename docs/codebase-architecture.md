@@ -2309,17 +2309,18 @@ request.
 | thread = a waiting request P of the same pair; a type P expects, or a problem report | completes P | completes P (P may be another request than R; R then fails as no answer) |
 | thread = a waiting request P of the same pair; a type P does not expect | dropped (Warning); P keeps waiting | dropped (Warning); R fails as no answer |
 | thread names no waiting request of the pair | dropped (quiet) | dropped; R fails as no answer |
-| no thread, `delivery` | the live stream of (peer, local), never a request; no stream, or its buffer full → dropped, not acknowledged | completes R when R expects a `delivery` (else dropped, Warning); never a stream |
-| no thread, problem report | dropped (`pthid` is required) | completes R (it fails with the code) |
-| no thread, another answer type | dropped (Warning): it belongs to no request's thread, however many requests of the pair wait (since #98) | completes R when R expects the type, else dropped (Warning) |
+| no thread, `delivery` | the live stream of (peer, local), never a request; no stream, or its buffer full → dropped, not acknowledged | dropped (Warning), not acknowledged; never a stream (an HTTP exchange is never live); R fails as no answer (since #98) |
+| no thread, problem report | dropped (`pthid` is required) | dropped (Warning); R fails as no answer (since #98) |
+| no thread, another answer type | dropped (Warning): it belongs to no request's thread, however many requests of the pair wait (since #98) | dropped (Warning); R fails as no answer (since #98) |
 
 "Warning" and "quiet" are the rate-limited levels under Logging, below. So a thread-less live push
 never answers a waiting `delivery-request`, and a `delivery` with a thread is never taken for a
-push. Over HTTP the exchange binds the body to its request, so a
-third-party mediator that answers without `thid` works there; over a WebSocket a thread-less
-`delivery` reaches only a live stream (R-10, an interop point for #98).
+push. A mediator that answers without `thid` gets no answer taken on any path, the HTTP response
+to our own request included; over a WebSocket a thread-less `delivery` reaches only a live stream
+(R-10, an interop point for #98).
 
-**No thread-less correlation outside the HTTP response** (#98, PR #130 review rounds 1 and 2).
+**No thread-less correlation, on any path** (#98, PR #130 review rounds 1 and 2, and the owner's
+answer "2" after round 2).
 DIDComm v2.1 threading: "All subsequent messages in a thread MUST include a `thid` header that
 contains the same value as the `thid` set in the first message of the thread. Messages that do not
 share the same `thid` MUST NOT be considered a part of the same thread" (threading.md L17); "Any
@@ -2332,9 +2333,17 @@ late thread-less `status` for a request given up on complete whatever request of
 waiting next: the next chunk of an `AckAsync`, its `status-request`, or a later call on the same
 channel. A first fix narrowed the window inside one `AckAsync` call (a per-request
 `RequiresThread` flag); the review showed it across calls, and the fallback itself was removed,
-which made the flag dead (removed too). Unchanged: the HTTP-bound path (the response to our own
-request is its answer, with or without `thid`; a separate owner decision), a thread-less `delivery`
-as a live push, and threaded matching.
+which made the flag dead (removed too). The HTTP-bound path kept its exception until the owner
+answered "2" (require `thid` there too): the response to our own request used to be its answer with
+or without `thid`; now a thread-less message there completes nothing either, is logged with the same
+Warning (the answer type only), and R fails at once as no answer (`TimeoutException`, the mediator
+may have acted, the call is safe to repeat). Our reading of the spec behind it: threading.md L17
+above, and message_structure.md L130 (without `thid`, "the `id` property of the message MUST be
+treated as the value of the `thid`", so a thread-less reply is a thread of its own). The return-route
+extension's "Messages can flow back in response to inbound messages over the same connection" (L5)
+is about the transport, not the thread. Our mediator, the CM 2.0 answers included, and Identus 1.2.1
+(observation O-4) put the request's `thid` on every answer. Unchanged: a thread-less `delivery`
+received on its own as a live push, and threaded matching.
 
 ### Routes (`ResolveRouteAsync`)
 
@@ -2528,7 +2537,8 @@ is still a `MediationProtocolException`. How "no status" is known:
   leaves `thid` out; a mediator that does so over a WebSocket is treated as one that sends no
   status, and its thread-less answer to the `status-request` is not taken either, so the call ends
   with `TimeoutException` (before #98 such a mediator worked over a WebSocket through the
-  fallback). Over HTTP the response is the answer, with or without `thid`.
+  fallback). The same holds over HTTP: the response answers the `status-request` only with its
+  `thid` (before #98 it was the answer with or without one).
 
 The budget rule: a `messages-received` and the `status-request` that may follow it share one
 `RequestTimeout`, counted from when the `messages-received` is sent. The `status-request` runs under
@@ -2741,9 +2751,9 @@ id, an attachment or queue id, a message id the mediator or a sender chose, or a
 or text. Every call goes through `MediatorLog.Write`, so a throwing provider changes nothing.
 
 - **Rate-limited, Warning the first time and every 1000th, Debug otherwise:** drops that point at the
-  mediator (an answer from a request's pair of a type it does not expect, an HTTP response whose
-  thread-less answer does not fit its request, a thread-less answer outside the HTTP response to
-  its request, a push its stream's full buffer refuses), an answer
+  mediator (an answer from a request's pair of a type it does not expect, a thread-less answer
+  (anything thread-less in an HTTP response; anything but a live push or a problem report
+  otherwise), a push its stream's full buffer refuses), an answer
   whose `to` does not name the DID that decrypted it (not a drop: it is still matched), problem
   reports received, and the pickup lines (messages beyond the limit, unusable or repeated ids,
   unpack failures, filter mismatches, acknowledgement failures, cycle failures, ignored pushes,
@@ -2804,8 +2814,9 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
   the pair; a hand-built `UnpackResult` dispatched by host code has `Verified = false`
   (`MediatorResponseMatcherTests`).
 - **Replays.** A captured genuine answer with a thread can only complete a request id that is
-  waiting now (a fresh UUID v4 per request), and a thread-less answer completes no request (since
-  #98; before, a thread-less `disclose` was the exception). A captured thread-less push replayed to a host endpoint meets the shared
+  waiting now (a fresh UUID v4 per request), and a thread-less answer completes no request on any
+  path (since #98; before, a thread-less `disclose` and then a thread-less HTTP response were the
+  exceptions). A captured thread-less push replayed to a host endpoint meets the shared
   FR-RR-08 cache (duplicate, or too old); if admitted, the duplicate filter recognises it, and it is
   acknowledged again harmlessly.
 - **Resources.** Pending requests ≤ 64; live streams ≤ 16, each ≤ 8 buffered snapshots of at most
