@@ -356,18 +356,6 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Row3_bound_a_threadless_delivery_completes_the_HTTP_delivery_request_and_never_reaches_a_stream()
-    {
-        using var stream = _channel.RegisterLiveStream(_w.Mediator.Did, _w.Local.Did);
-        _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Delivery(thid: null)));
-
-        var answer = await _channel.ExchangeAsync(HttpRoute, _w.Request(MessagePickup.DeliveryRequestType), ClientSpecs.DeliveryRequest, _w.Mediator.Did, _w.Local.Did, default);
-
-        answer.Type.Should().Be(MessagePickup.DeliveryType);
-        stream.Pushes.TryRead(out _).Should().BeFalse();
-    }
-
-    [Fact]
     public async Task Row3_bound_a_threadless_delivery_to_a_request_that_does_not_expect_one_fails_it_and_never_reaches_a_stream()
     {
         using var stream = _channel.RegisterLiveStream(_w.Mediator.Did, _w.Local.Did);
@@ -391,21 +379,6 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(report)).Should().BeFalse();
 
         exchange.IsCompleted.Should().BeFalse("pthid is REQUIRED");
-    }
-
-    [Fact]
-    public async Task Row4_bound_a_threadless_problem_report_fails_its_HTTP_request_with_the_code()
-    {
-        _send.ReturnWith(async m =>
-        {
-            var report = _w.Problem(m.Id, "e.p.req.not-enrolled");
-            report.Pthid = null;
-            return await _w.ReceiveAsync(report);
-        });
-
-        var act = () => _channel.ExchangeAsync(HttpRoute, _w.Request(), ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
-
-        (await act.Should().ThrowAsync<MediationProtocolException>()).Which.ProblemCode.Should().Be("e.p.req.not-enrolled");
     }
 
     // ---- row 5: another answer type without a thread ----
@@ -458,22 +431,6 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         await FluentActions.Awaiting(() => second).Should().ThrowAsync<TimeoutException>();
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Row5_bound_a_threadless_answer_completes_its_HTTP_request_only_when_it_expects_the_type(bool expected)
-    {
-        _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Grant(thid: null)));
-        var spec = expected ? ClientSpecs.MediateRequest : ClientSpecs.StatusRequest;
-
-        var act = () => _channel.ExchangeAsync(HttpRoute, _w.Request(), spec, _w.Mediator.Did, _w.Local.Did, default);
-
-        if (expected)
-            (await act()).Type.Should().Be(CoordinateMediation.MediateGrantType);
-        else
-            await act.Should().ThrowAsync<TimeoutException>();
-    }
-
     [Fact]
     public async Task Row5_bound_a_threadless_answer_from_another_pair_does_not_complete_the_HTTP_request()
     {
@@ -482,6 +439,59 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         var act = () => _channel.ExchangeAsync(HttpRoute, _w.Request(), ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, default);
 
         await act.Should().ThrowAsync<TimeoutException>();
+    }
+
+    // ---- the HTTP response to our own request: only the thread names the request ----
+    // Before #98 (PR #130 review, round 2 follow-up) the HTTP response bound a thread-less answer to
+    // the request it answered. Now one rule holds on every path: the owner chose to require `thid`
+    // here too (option 2). Our reading of DIDComm v2.1 behind it: threading.md L17 ("Messages that
+    // do not share the same `thid` MUST NOT be considered a part of the same thread") and
+    // message_structure.md L130 (without `thid`, the message's own `id` is its thread).
+
+    public static TheoryData<string> HttpAnswers => new() { "mediate-grant", "status", "delivery", "problem-report" };
+
+    [Theory]
+    [MemberData(nameof(HttpAnswers))]
+    public async Task Bound_an_answer_without_thid_in_the_HTTP_response_to_its_own_request_completes_nothing_and_never_reaches_a_stream(string answer)
+    {
+        using var stream = _channel.RegisterLiveStream(_w.Mediator.Did, _w.Local.Did);
+        var (spec, requestType) = HttpExchangeOf(answer);
+        _send.ReturnWith(async m => await _w.ReceiveAsync(HttpAnswer(answer, m.Id, threaded: false)));
+        var request = _w.Request(requestType);
+
+        var act = () => _channel.ExchangeAsync(HttpRoute, request, spec, _w.Mediator.Did, _w.Local.Did, default);
+
+        var thrown = (await act.Should().ThrowAsync<TimeoutException>(answer)).Which;
+        thrown.Message.Should().Contain("no answer in the HTTP response").And.Contain(request.Id);
+        _time.ScheduledTimers.Should().Be(0, "it failed at once on the manual clock, without waiting out the deadline");
+        _channel.PendingCount.Should().Be(0);
+        stream.Pushes.TryRead(out _).Should().BeFalse("an HTTP exchange is never live");
+    }
+
+    [Theory]
+    [MemberData(nameof(HttpAnswers))]
+    public async Task Bound_the_same_answer_with_its_requests_thid_in_the_HTTP_response_completes_it(string answer)
+    {
+        using var stream = _channel.RegisterLiveStream(_w.Mediator.Did, _w.Local.Did);
+        var (spec, requestType) = HttpExchangeOf(answer);
+        _send.ReturnWith(async m => await _w.ReceiveAsync(HttpAnswer(answer, m.Id, threaded: true)));
+        var request = _w.Request(requestType);
+
+        var exchange = _channel.ExchangeAsync(HttpRoute, request, spec, _w.Mediator.Did, _w.Local.Did, default);
+
+        if (answer == "problem-report")
+        {
+            var thrown = (await FluentActions.Awaiting(() => exchange).Should().ThrowAsync<MediationProtocolException>()).Which;
+            thrown.RequestId.Should().Be(request.Id);
+            thrown.ProblemCode.Should().Be("e.p.req.not-enrolled");
+        }
+        else
+        {
+            var completed = await exchange;
+            completed.Thid.Should().Be(request.Id);
+        }
+        _time.ScheduledTimers.Should().Be(0);
+        stream.Pushes.TryRead(out _).Should().BeFalse();
     }
 
     // ---- the fast path ----
@@ -541,6 +551,34 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         var exchange = _channel.ExchangeAsync(WebSocketRoute, request, spec, _w.Mediator.Did, local ?? _w.Local.Did, default).Observed();
         exchange.IsCompleted.Should().BeFalse("the request waits for its answer");
         return (request, exchange);
+    }
+
+    // The request an HTTP answer of the theories above answers: its spec and its type.
+    private static (MediatorExchangeSpec Spec, string RequestType) HttpExchangeOf(string answer) => answer switch
+    {
+        "mediate-grant" => (ClientSpecs.MediateRequest, CoordinateMediation.MediateRequestType),
+        "delivery" => (ClientSpecs.DeliveryRequest, MessagePickup.DeliveryRequestType),
+        _ => (ClientSpecs.StatusRequest, MessagePickup.StatusRequestType),
+    };
+
+    // The answer, threaded to the request (a problem report in pthid, as it MUST) or with no thread at all.
+    private Message HttpAnswer(string answer, string requestId, bool threaded)
+    {
+        var thid = threaded ? requestId : null;
+        switch (answer)
+        {
+            case "mediate-grant":
+                return _w.Grant(thid);
+            case "status":
+                return _w.Status(thid, count: 2);
+            case "delivery":
+                return _w.Delivery(thid);
+            default:
+                var report = _w.Problem(requestId, "e.p.req.not-enrolled");
+                if (!threaded)
+                    report.Pthid = null;
+                return report;
+        }
     }
 
     // The same message without its `to` header.

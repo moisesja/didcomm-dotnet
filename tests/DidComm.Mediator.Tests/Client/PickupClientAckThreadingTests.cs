@@ -212,23 +212,31 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
         (time.GetUtcNow() - started).Should().Be(Budget);
     }
 
-    [Fact]
-    public async Task Over_HTTP_an_empty_response_is_followed_by_a_status_request_whose_response_is_its_answer_with_or_without_thid()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Over_HTTP_an_empty_response_is_followed_by_a_status_request_whose_response_answers_it_only_with_its_thid(bool withThid)
     {
-        // Unchanged over HTTP: nothing is ever given up; the response to a request is its answer.
+        // Over HTTP nothing is ever given up. Before #98 (PR #130 review, round 2 follow-up) the
+        // response to the status-request was its answer with or without thid; without one it now
+        // belongs to no request's thread, so the status-request gets no answer and the call fails
+        // at once (TimeoutException: the mediator may have acted, the call is safe to repeat).
         var time = new ManualTimeProvider();
         var send = new FakeSend();
         await using var channel = Create(_w, send, time: time);
         send.Respond = async (request, options, _) => request.Type == MessagePickup.StatusRequestType
-            ? FakeSend.Accepted(options.ServiceEndpointOverride!, await _w.ReceiveAsync(_w.Status(thid: null, count: 0)), status: 200)
+            ? FakeSend.Accepted(options.ServiceEndpointOverride!, await _w.ReceiveAsync(_w.Status(thid: withThid ? request.Id : null, count: 0)), status: 200)
             : FakeSend.Accepted(options.ServiceEndpointOverride!);
 
-        var status = await PickupTest.Within(new PickupClient(channel, logger: null).AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(150), serviceEndpointOverride: Https));
+        var call = new PickupClient(channel, logger: null).AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(150), serviceEndpointOverride: Https);
 
-        status.MessageCount.Should().Be(0);
+        if (withThid)
+            (await PickupTest.Within(call)).MessageCount.Should().Be(0);
+        else
+            (await FluentActions.Awaiting(() => PickupTest.Within(call)).Should().ThrowAsync<TimeoutException>()).Which.Message.Should().Contain("no answer in the HTTP response");
         send.Calls.Select(c => c.Message.Type).Should().Equal(
             MessagePickup.MessagesReceivedType, MessagePickup.MessagesReceivedType, MessagePickup.StatusRequestType);
-        time.ScheduledTimers.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "nothing waited on the clock");
     }
 
     // ---- helpers ------------------------------------------------------------------------------

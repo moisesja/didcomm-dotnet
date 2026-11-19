@@ -59,9 +59,11 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
     [Fact]
     public async Task Ten_thousand_mixed_operations_leave_no_slot_timer_or_active_count_behind()
     {
-        // A thread-less grant bound to the HTTP request whose response carried it: one real envelope,
-        // reused (a snapshot is immutable).
-        var httpAnswer = await _w.ReceiveAsync(_w.Grant(thid: null));
+        // A grant in the HTTP response, threaded to the request it answers: one request id and one
+        // real envelope, reused (a snapshot is immutable; one request at a time, so the id is free
+        // again each time).
+        var httpRequest = _w.Request(CoordinateMediation.MediateRequestType);
+        var httpAnswer = await _w.ReceiveAsync(_w.Grant(httpRequest.Id));
         var outcomes = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
 
         for (var i = 0; i < 10_000; i++)
@@ -77,7 +79,7 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
                     _channel.AsCorrelator().OnInbound(Crafted(_w.Grant(message.Id))).Should().BeTrue();
                     return Task.FromResult(FakeSend.Accepted(options.ServiceEndpointOverride!));
                 },
-                // 1: answered in the HTTP response, without a thread.
+                // 1: answered in the HTTP response, threaded to the request.
                 1 => (_, options, _) => Task.FromResult(FakeSend.Accepted(options.ServiceEndpointOverride!, httpAnswer, 200)),
                 // 2: timeout; 3: caller cancels; both accepted with nothing back.
                 2 or 3 => (_, options, _) => Task.FromResult(FakeSend.Accepted(options.ServiceEndpointOverride!)),
@@ -93,7 +95,7 @@ public sealed class MediatorClientChannelQa1Tests : IAsyncLifetime
                 },
             };
 
-            var request = _w.Request(CoordinateMediation.MediateRequestType);
+            var request = kind == 1 ? httpRequest : _w.Request(CoordinateMediation.MediateRequestType);
             var exchange = _channel.ExchangeAsync(route, request, ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, cts.Token);
             if (kind == 2)
                 _time.Advance(_channel.Options.RequestTimeout);

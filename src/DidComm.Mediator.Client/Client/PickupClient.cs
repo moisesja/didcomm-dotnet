@@ -467,12 +467,12 @@ public sealed class PickupClient
     /// <para>
     /// <strong>Which status answers which message.</strong> DIDComm threading: a reply carries the
     /// <c>thid</c> of the message it answers, and a message without that <c>thid</c> is not part of
-    /// its thread. So a status that arrives on its own, as over a WebSocket, answers a message only
-    /// when its <c>thid</c> names that message; one without <c>thid</c> answers none and is dropped,
-    /// which also keeps a late status for a message given up on from being taken for another. Over
-    /// HTTP the response to a message is its answer, with or without <c>thid</c>. A mediator that
-    /// leaves <c>thid</c> out of its status over a WebSocket is therefore treated as one that sends no
-    /// status: the call asks with a <c>status-request</c>, whose answer needs a <c>thid</c> too.
+    /// its thread. So a status answers a message only when its <c>thid</c> names that message, over
+    /// a WebSocket and in the HTTP response to it alike; one without <c>thid</c> answers none and is
+    /// dropped, which also keeps a late status for a message given up on from being taken for
+    /// another. A mediator that leaves <c>thid</c> out of its status is therefore treated as one that
+    /// sends no status: the call asks with a <c>status-request</c>, whose answer needs a <c>thid</c>
+    /// too (without one the call fails with <see cref="TimeoutException"/>).
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>

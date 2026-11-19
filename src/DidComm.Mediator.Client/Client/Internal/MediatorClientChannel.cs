@@ -49,12 +49,14 @@ namespace DidComm.Mediator.Client.Internal;
 /// other; an absent one is the normal case (it is optional). Only then is its thread (<c>pthid</c>, else <c>thid</c>, for a problem report) looked
 /// up — never when it is longer than <see cref="MaxThreadIdLength"/> — and the request completes
 /// only when its (mediator, local DID) pair and expected types agree. A message without a thread
-/// completes only the HTTP request whose response carried it. Arriving on its own (over a
-/// WebSocket), it completes no request: DIDComm v2.1 threading makes a reply carry the
-/// <c>thid</c> of the message it answers, and a message without it is not part of that thread, so
-/// it is dropped and logged, even when only one request waits (it could be the late answer to a
-/// request given up on). A thread-less <c>delivery</c> is a live push and reaches only the live
-/// stream of its pair, never a request. A message that does not
+/// completes no request, on any path: DIDComm v2.1 threading makes a reply carry the <c>thid</c>
+/// of the message it answers ("Messages that do not share the same <c>thid</c> MUST NOT be
+/// considered a part of the same thread"), and a message without one is its own thread. So it is
+/// dropped and logged, even when it came in the HTTP response to our own request, and even when
+/// only one request waits (it could be the late answer to a request given up on). Arriving on its
+/// own (over a WebSocket), a thread-less <c>delivery</c> is a live push and reaches only the live
+/// stream of its pair, never a request; in an HTTP response it reaches nothing (an HTTP exchange is
+/// never live). A message that does not
 /// complete anything leaves every pending request as it was, so a forgery can neither answer nor
 /// cancel one.
 /// </para>
@@ -68,7 +70,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// <para>
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
 /// every 1000th, Debug otherwise): an answer to a waiting request that does not fit it, an answer
-/// without a thread that did not come in the HTTP response to its request, a live push its stream's
+/// without a thread (anything thread-less in an HTTP response; anything but a live push or a problem
+/// report otherwise), a live push its stream's
 /// full buffer refuses, an answer whose <c>to</c> does not name the DID that decrypted it (not a drop: it
 /// is still matched). A message of an answer type
 /// that simply is not for a waiting request (late, or another part of this agent's) is a Debug line
@@ -351,10 +354,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 throw Unanswered(pending, deadline, ct);
         }
 
-        // The HTTP response's message, bound to this request (§4.2): it was identity-checked by
-        // SendAsync and is checked again by the matcher, like any other answer.
+        // The HTTP response's message (§4.2): it was identity-checked by SendAsync and goes through
+        // the matcher like any other answer. It answers this request only when its thid names it.
         if (sent?.Returned is { } returned && InboundMessageSnapshot.TryGetFor(returned.Message, out var snapshot))
-            Offer(snapshot, pending);
+            Offer(snapshot, inHttpResponse: true);
 
         // Over HTTP the response is the only channel for the answer (FR-RR-04): waiting is pointless.
         // For a request the mediator may leave unanswered, no answer is an outcome, not a failure; the
@@ -444,9 +447,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     }
 
     /// <summary>
-    /// The matcher's unbound entry point (design §4.2): fast path when idle, identity before any
-    /// lookup, then complete the pending request the snapshot answers or hand a thid-less delivery
-    /// to its live stream. Never awaits, never parses a body.
+    /// The matcher's entry point for what the dispatcher receives (design §4.2): fast path when
+    /// idle, identity before any lookup, then complete the pending request the snapshot answers or
+    /// hand a thid-less delivery to its live stream. Never awaits, never parses a body.
     /// </summary>
     /// <param name="received">The verified snapshot the dispatcher created at unpack.</param>
     /// <returns><c>true</c> when the snapshot completed a pending request or reached a live stream.</returns>
@@ -454,7 +457,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     {
         try
         {
-            return Offer(received, boundTo: null);
+            return Offer(received, inHttpResponse: false);
         }
         catch
         {
@@ -465,18 +468,20 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     /// <summary>
     /// The matcher (design §4.2): offer <paramref name="received"/> to the pending requests and the
-    /// live streams. <paramref name="boundTo"/> is the HTTP request whose response carried it, or
-    /// <c>null</c> for a message the dispatcher received. Completes at most one request; never
-    /// awaits, never parses a body, never removes or cancels anything.
+    /// live streams. Only its thread names the request it answers, wherever it came from. Completes
+    /// at most one request; never awaits, never parses a body, never removes or cancels anything.
     /// </summary>
     /// <param name="received">The snapshot.</param>
-    /// <param name="boundTo">The HTTP request whose response carried it, or <c>null</c>.</param>
+    /// <param name="inHttpResponse"><c>true</c> when it came in the HTTP response to one of our
+    /// requests (then, without a thread, it reaches nothing); <c>false</c> for a message the
+    /// dispatcher received.</param>
     /// <returns><c>true</c> when it completed a pending request or reached a live stream.</returns>
-    internal bool Offer(InboundMessageSnapshot received, PendingRequest? boundTo)
+    internal bool Offer(InboundMessageSnapshot received, bool inHttpResponse)
     {
         ArgumentNullException.ThrowIfNull(received);
-        // 0. Idle: one volatile read for a host that is also a mediator.
-        if (boundTo is null && Volatile.Read(ref _active) == 0)
+        // 0. Idle: one volatile read for a host that is also a mediator. (In an HTTP response, the
+        //    request that carried it is still registered, so the channel is never idle then.)
+        if (Volatile.Read(ref _active) == 0)
             return false;
 
         // 1. Only mediator answer types are looked at.
@@ -502,7 +507,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         var thread = kind == MediatorAnswerKind.ProblemReport && !string.IsNullOrEmpty(received.Pthid) ? received.Pthid : received.Thid;
         return !string.IsNullOrEmpty(thread)
             ? OfferThreaded(received, type!, name, kind, thread, peer, local)
-            : OfferUnthreaded(received, type!, name, kind, peer, local, boundTo);
+            : OfferUnthreaded(received, name, kind, peer, local, inHttpResponse);
     }
 
     // §4.2 row 1–2: a thread names the request; bound or unbound alike (it may answer another request).
@@ -527,29 +532,18 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         return false;
     }
 
-    // §4.2 rows 3–5: no thread.
-    private bool OfferUnthreaded(InboundMessageSnapshot received, MessageTypeUri type, string name, MediatorAnswerKind kind, string peer, string local, PendingRequest? boundTo)
+    // §4.2 rows 3–5: no thread. DIDComm v2.1 threading: a reply continues the thread of the
+    // message it answers and MUST carry its `thid`; messages that do not share the `thid` MUST NOT
+    // be taken as part of the same thread, and a message without one is its own thread. So nothing
+    // here completes a request, on any path.
+    private bool OfferUnthreaded(InboundMessageSnapshot received, string name, MediatorAnswerKind kind, string peer, string local, bool inHttpResponse)
     {
-        if (boundTo is not null)
+        if (inHttpResponse)
         {
-            // The HTTP exchange binds a thread-less answer to its own request — never to a stream.
-            var pairOk = string.Equals(boundTo.MediatorSubject, peer, StringComparison.Ordinal)
-                & string.Equals(boundTo.LocalSubject, local, StringComparison.Ordinal);
-            var typeOk = kind switch
-            {
-                MediatorAnswerKind.Delivery => boundTo.Spec.ExpectsDelivery,
-                MediatorAnswerKind.ProblemReport => true,
-                _ => MediatorAnswerTypes.Expects(boundTo.Spec, type),
-            };
-            if (!(pairOk & typeOk))
-            {
-                // The response to our own request carried something that does not answer it.
-                LogMismatched(name, boundTo);
-                return false;
-            }
-            if (boundTo.TryComplete(received))
-                return true;
-            LogUnclaimed(name);
+            // In the HTTP response to our own request, yet not in its thread: the mediator's
+            // mistake (the request gets no answer). Never a live push either: an HTTP exchange is
+            // never live. A delivery dropped here was not acknowledged, so it is delivered again.
+            LogUnthreaded(name);
             return false;
         }
 
@@ -576,12 +570,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 return false;
 
             default:
-                // DIDComm v2.1 threading: a reply continues the thread of the message it answers
-                // and MUST carry its `thid`; messages that do not share the `thid` MUST NOT be
-                // taken as part of the same thread. Outside the HTTP response to its own request,
-                // an answer without one belongs to no request's thread, so it completes none: not
-                // even the only waiting one, which it could be a late answer to an earlier request
-                // of (PR #130 review). It is logged and dropped.
+                // An answer without a thread belongs to no request's thread, so it completes none:
+                // not even the only waiting one, which it could be a late answer to an earlier
+                // request of (PR #130 review). It is logged and dropped.
                 LogUnthreaded(name);
                 return false;
         }
@@ -696,13 +687,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     // A mediator (or anyone the identity rule admits) can repeat every line below, so each is
     // rate-limited. The answer is named by its constant, never by the wire type or id.
 
-    // An answer of a request type without a thread that did not come in the HTTP response to its
-    // own request (DIDComm v2.1 threading: it belongs to no request's thread). A mediator problem:
-    // Warning the first and every 1000th time. Named by its constant, never a DID or wire value.
+    // An answer without a thread (DIDComm v2.1 threading: it belongs to no request's thread), in
+    // the HTTP response to our own request or on its own. A mediator problem: Warning the first and
+    // every 1000th time. Named by its constant, never a DID or wire value.
     private void LogUnthreaded(string answer)
     {
         var level = MediatorLog.RateLimited(ref _unthreadedAnswers, out var count);
-        MediatorLog.Write(Logger, level, "Dropped a mediator answer ({Answer}) without a thread: outside the HTTP response to its own request, an answer without thid belongs to no request's thread (DIDComm v2.1 threading), so it completes none. {Count} so far.", answer, count);
+        MediatorLog.Write(Logger, level, "Dropped a mediator answer ({Answer}) without a thread: an answer without thid belongs to no request's thread (DIDComm v2.1 threading), so it completes none, even in the HTTP response to its own request. {Count} so far.", answer, count);
     }
 
     // The `to` header of an answer whose identity passed does not name the DID that decrypted it

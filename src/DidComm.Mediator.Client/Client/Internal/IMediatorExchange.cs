@@ -44,7 +44,8 @@ internal interface IMediatorExchange
     /// <paramref name="route"/>'s endpoint as the override, never stamped by hand (FR-RR-09), awaited
     /// under <see cref="MediatorClientOptions.RequestTimeout"/>. The answer is a verified snapshot
     /// authcrypted by <paramref name="mediatorDid"/> to <paramref name="localDid"/>, threaded to the
-    /// request (or, without a thread, only the HTTP response to it; §4.2), whose type is one of
+    /// request (its <c>thid</c>, or a problem report's <c>pthid</c>, names it, on every path, the HTTP
+    /// response to it included; §4.2), whose type is one of
     /// <paramref name="spec"/>'s. The continuation never runs on the receive path.
     /// </summary>
     /// <param name="route">The operation's route, from <see cref="ResolveRouteAsync"/>.</param>
