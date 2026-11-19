@@ -20,7 +20,8 @@ namespace MediatorWallet;
 /// <item>Exactly N items, every one opened, no message id twice; the drained fetch's status counts
 /// 0, and so does a separate <c>GetStatusAsync</c>.</item>
 /// <item>With <c>--explicit-ack</c>, <c>AckAsync</c> with the fetched ids must answer a status of 0
-/// (works against our mediator; against Identus see O-9).</item>
+/// (works against our mediator; against Identus see O-9). <c>FetchAsync</c> has acknowledged those
+/// ids already, so this proves AckAsync's answer, not its effect on the queue.</item>
 /// </list>
 /// Each item goes to <c>D/item-N.unpacked.json</c> in <c>InteropCli unpack</c>'s
 /// <c>{message, metadata}</c> schema; <c>D/fetch.json</c> lists them.
@@ -50,19 +51,26 @@ internal static class FetchCommand
             result.Observed["env_proxy_precondition"] = WalletHost.AssertEnvProxy(envProxy, MediatorAddresses(state));
 
         // 1. Wait for the count (the forward may still be on its way into the mediator's store).
+        //    --wait-timeout bounds the waiting: once it has passed, the next round reports the last
+        //    count instead of polling again. Each poll has its own hang guard (the client's request
+        //    timeout plus a margin), never the remainder of the wait, so a slow last poll fails as
+        //    itself rather than as a bare cancellation.
+        var pollGuard = common.RequestTimeout + TimeSpan.FromSeconds(10);
         var waited = await result.StepAsync("wait-for-status", async () =>
         {
             var watch = Stopwatch.StartNew();
             var polls = 0;
+            var lastCount = -1;
             while (true)
             {
-                using var stepGuard = new CancellationTokenSource(waitTimeout - watch.Elapsed > TimeSpan.Zero ? waitTimeout - watch.Elapsed : TimeSpan.FromMilliseconds(1));
+                if (polls > 0 && watch.Elapsed >= waitTimeout)
+                    throw new TimeoutException($"The mediator counted {lastCount} message(s), not {expectCount}, within {waitTimeout.TotalSeconds} s ({polls} polls).");
+                using var guard = new CancellationTokenSource(pollGuard);
                 polls++;
-                var status = await host.Pickup.GetStatusAsync(state.MediatorDid, state.WalletDid, serviceEndpointOverride: endpoint, ct: stepGuard.Token).ConfigureAwait(false);
+                var status = await host.Pickup.GetStatusAsync(state.MediatorDid, state.WalletDid, serviceEndpointOverride: endpoint, ct: guard.Token).ConfigureAwait(false);
+                lastCount = status.MessageCount;
                 if (status.MessageCount >= expectCount)
                     return (status, polls);
-                if (watch.Elapsed >= waitTimeout)
-                    throw new TimeoutException($"The mediator counted {status.MessageCount} message(s), not {expectCount}, within {waitTimeout.TotalSeconds} s ({polls} polls).");
                 await Task.Delay(100).ConfigureAwait(false);
             }
         }, w => new JsonObject { ["message_count"] = w.status.MessageCount, ["polls"] = w.polls });
@@ -139,6 +147,9 @@ internal static class FetchCommand
                 () => host.Pickup.AckAsync(state.MediatorDid, state.WalletDid, ids, endpoint),
                 s => s.MessageCount);
             explicitAckOutcome = new JsonObject { ["ids"] = ids.Length, ["status_count"] = acked.MessageCount };
+            // FetchAsync has already acknowledged these ids, so this proves AckAsync's answer (a
+            // status counting 0), not its effect on the queue.
+            result.Check("explicit-ack-status-counts-zero", acked.MessageCount == 0, acked.MessageCount);
         }
 
         var summary = new JsonObject

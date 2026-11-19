@@ -39,14 +39,18 @@
 #   INTEROP_SUMMARY_DIR  where mediator-leg.md, mediator-observations.json (and, on failure,
 #                        mediator-logs/) are copied
 #   INTEROP_CLI          prebuilt InteropCli binary (default: build Release from source)
-#   MEDIATOR_LEG_WORK    scratch dir (default: mktemp -d; kept for debugging; a venv in it is reused)
-#   MEDIATOR_LEG_IMAGES_ENV  images file to use instead of mediator/images.env
 #   MEDIATOR_LEG_OWNER   adds the label org.didcomm-dotnet.owner=<value> to every Docker object
 # Development only (each refused when CI=true):
+#   MEDIATOR_LEG_WORK    scratch dir (default: mktemp -d; kept for debugging; a venv in it is reused)
+#   MEDIATOR_LEG_IMAGES_ENV  images file to use instead of mediator/images.env
 #   MEDIATOR_LEG_ONLY    comma-separated cell ids to run (e.g. M-3,R-1)
 #   MEDIATOR_LEG_DEBUG_FIRST_PORT            first host port tried for Identus (port-clash test)
 #   MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD  wrong Mongo password for Identus (readiness test)
-#   MEDIATOR_LEG_DEBUG_WATCHDOG              seconds for the leg watchdog instead of 1800 (its test)
+#   MEDIATOR_LEG_DEBUG_WATCHDOG              seconds for the leg watchdog (its test)
+#
+# The leg watchdog (a hang guard on the whole leg) is 1500 s for the cells and 900 s for
+# --negative-controls, so both in one CI job stay inside its 60 minutes together with the
+# python and jvm legs (about 3 minutes in CI).
 #
 # bash 3.2 compatible (macOS /bin/bash): no associative arrays, no {fd} redirections, no
 # `wait -n`, no timeout(1). No fixed sleeps: every wait re-checks the exact condition it needs,
@@ -72,7 +76,8 @@ for arg in "$@"; do
 done
 
 if [ "${CI:-}" = "true" ]; then
-    for var in MEDIATOR_LEG_ONLY MEDIATOR_LEG_DEBUG_FIRST_PORT MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD MEDIATOR_LEG_DEBUG_WATCHDOG; do
+    for var in MEDIATOR_LEG_ONLY MEDIATOR_LEG_WORK MEDIATOR_LEG_IMAGES_ENV MEDIATOR_LEG_DEBUG_FIRST_PORT \
+               MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD MEDIATOR_LEG_DEBUG_WATCHDOG; do
         if [ -n "${!var:-}" ]; then
             say "$var is a development setting and is refused when CI=true"
             exit 2
@@ -100,10 +105,13 @@ NET="$PREFIX-net"
 DOCKER_LABELS=(--label "$LEG_LABEL")
 [ -n "${MEDIATOR_LEG_OWNER:-}" ] && DOCKER_LABELS+=(--label "org.didcomm-dotnet.owner=$MEDIATOR_LEG_OWNER")
 
+case "$MODE" in nc) LEG_WATCHDOG_S=900 ;; up) LEG_WATCHDOG_S=1800 ;; *) LEG_WATCHDOG_S=1500 ;; esac
+LEG_WATCHDOG_S="${MEDIATOR_LEG_DEBUG_WATCHDOG:-$LEG_WATCHDOG_S}"
+
 # The cells this mode runs, in order. "<id>|<sabotage>" (sabotage empty = the real cell). In
 # --negative-controls mode M-1's "Identus stopped after the 202" runs last: it stops Identus.
 GATE_PLAN="B-0| M-1| M-2| M-3| M-4| M-5| M-6| R-1| R-2|"
-NC_PLAN="B-0|forbid-client M-1|pin-v3 M-1|unregistered-next M-1|wrong-message M-2|expect-13 M-3|no-forward M-4|no-proxy M-5|no-proxy M-6|with-trusted-proxy M-6|no-proxy-env R-2|expect-v2 R-1|no-created-time R-1|v2-disabled M-1|identus-stopped"
+NC_PLAN="B-0|forbid-client M-1|pin-v3 M-1|unregistered-next M-1|wrong-message M-2|expect-13 M-3|no-forward M-4|no-proxy M-5|no-proxy M-5|no-frame M-6|with-trusted-proxy M-6|no-proxy-env M-6|proxy-in-b M-6|squid-request-in-window R-2|expect-v2 R-2|ws-wrong-path R-1|no-created-time R-1|v2-disabled M-1|identus-stopped"
 case "$MODE" in nc) PLAN="$NC_PLAN" ;; *) PLAN="$GATE_PLAN" ;; esac
 if [ -n "${MEDIATOR_LEG_ONLY:-}" ]; then
     filtered=""
@@ -200,8 +208,19 @@ env_unsuitable() { # exit 2: nothing ran
     copy_summary
     exit 2
 }
+# redact: stdin → stdout with this run's private values replaced (Identus logs its per-run private
+# keys at start-up; the Mongo root password is per run). Used for every log or log tail that
+# leaves the work dir.
+redact() {
+    local args=() value
+    for value in $(cat "$WORK/identus-keys.env" "$WORK/identus-px-keys.env" "$WORK/mongo-root.env" 2>/dev/null |
+                   grep -E '^(KEY_[A-Z]+_D|MONGO_INITDB_ROOT_PASSWORD)=' | cut -d= -f2); do
+        args+=(-e "s/$value/<redacted>/g")
+    done
+    if [ "${#args[@]}" -gt 0 ]; then sed "${args[@]}"; else cat; fi
+}
 setup_fail() { # $1=step $2=reason → exit 1
-    local reason; reason="$(printf '%s' "$2" | tr '\n\t|' '  /' | cut -c1-400)"
+    local reason; reason="$(printf '%s' "$2" | redact | tr '\n\t|' '  /' | cut -c1-400)"
     say "set-up failed at $1: $reason"
     { summary_header; echo "**Leg aborted at set-up ($1: $reason)** — cells not run: $(plan_count)"; } > "$SUMMARY"
     SUMMARY_WRITTEN=1
@@ -217,7 +236,7 @@ WATCHDOG_PID=""
 serve_gone() { ! kill -0 "$SERVE_PID" 2>/dev/null; }
 stop_serve() {
     [ -n "$SERVE_PID" ] || return 0
-    exec 7>&- 2>/dev/null
+    { exec 7>&-; } 2>/dev/null
     if ! wait_for 15 "mediator-serve exit after stdin EOF" serve_gone; then
         kill -TERM "$SERVE_PID" 2>/dev/null
         wait_for 5 "mediator-serve exit after SIGTERM" serve_gone || kill -KILL "$SERVE_PID" 2>/dev/null
@@ -235,7 +254,9 @@ render_summary() {
 }
 cleanup() {
     local rc=$?
-    trap - EXIT INT TERM
+    # No second INT/TERM may stop the removal half-way; EXIT is cleared so the exit below ends it.
+    trap - EXIT
+    trap '' INT TERM
     exec 1>&8 2>&9
     [ -n "$WATCHDOG_PID" ] && stop_guard "$WATCHDOG_PID"
     [ -s "$WORK/logs/watchdog.log" ] && cat "$WORK/logs/watchdog.log" >&2
@@ -269,17 +290,12 @@ cleanup() {
         fi
     fi
     if [ "$LEG_FAILED" = 1 ] && [ -n "${INTEROP_SUMMARY_DIR:-}" ]; then
-        # The uploaded logs go out with the private values of this run redacted: Identus logs its
-        # (per-run, throwaway) private keys at start-up, and the Mongo root password is per run.
-        local redact=() value file
-        for value in $(cat "$WORK/identus-keys.env" "$WORK/identus-px-keys.env" "$WORK/mongo-root.env" 2>/dev/null |
-                       grep -E '^(KEY_[A-Z]+_D|MONGO_INITDB_ROOT_PASSWORD)=' | cut -d= -f2); do
-            redact+=(-e "s/$value/<redacted>/g")
-        done
+        # The uploaded logs go out with this run's private values redacted.
+        local file
         mkdir -p "$INTEROP_SUMMARY_DIR/mediator-logs"
         for file in "$WORK"/logs/*.log "$WORK"/serve-*/stderr.log; do
             [ -f "$file" ] || continue
-            sed ${redact[@]+"${redact[@]}"} "$file" >"$INTEROP_SUMMARY_DIR/mediator-logs/$(basename "$(dirname "$file")")-$(basename "$file")"
+            redact <"$file" >"$INTEROP_SUMMARY_DIR/mediator-logs/$(basename "$(dirname "$file")")-$(basename "$file")"
         done
         rmdir "$INTEROP_SUMMARY_DIR/mediator-logs" 2>/dev/null # nothing to upload (e.g. Docker absent)
     fi
@@ -331,7 +347,7 @@ if [ -x "$VENV/bin/python" ]; then check_python "$VENV/bin/python"; else check_p
 LEFTOVERS="$(docker ps -a --filter label=org.didcomm-dotnet.interop-leg --format '{{.Names}}' 2>/dev/null | grep '^dcmed-' || true)"
 [ -n "$LEFTOVERS" ] && say "warning: containers of an earlier mediator leg are still present (not touched): $(echo $LEFTOVERS)"
 
-# Leg watchdog: the whole leg is a hang guard of 1800 s (the CI job allows 60 min for three legs).
+# Leg watchdog: the whole leg is a hang guard of LEG_WATCHDOG_S seconds (see the header).
 # It TERMs the leg, then the leg's children, so a hung foreground command returns and the EXIT
 # trap's cleanup runs (it never KILLs the leg: that would skip the cleanup).
 leg_watchdog() {
@@ -343,7 +359,7 @@ leg_watchdog() {
       command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$1" ) </dev/null >/dev/null 2>&1 8>&- 9>&- &
     WATCHDOG_PID=$!
 }
-[ "$MODE" != up ] && leg_watchdog $$ "${MEDIATOR_LEG_DEBUG_WATCHDOG:-1800}"
+[ "$MODE" != up ] && leg_watchdog $$ "$LEG_WATCHDOG_S"
 
 # ── set-up: venv, tools, files ────────────────────────────────────────────────────────────
 STEP_T0=$SECONDS
@@ -376,7 +392,9 @@ print("" if d is None else json.dumps(d) if isinstance(d, (dict, list)) else str
 }
 
 if [ -z "${INTEROP_CLI:-}" ]; then
-    dotnet build "$REPO_ROOT/tools/InteropCli/InteropCli.csproj" -c Release --nologo -v quiet >"$WORK/logs/build-interopcli.log" 2>&1 ||
+    # 8>&- 9>&-: the build servers dotnet leaves running must not inherit the leg's output (fds 8, 9),
+    # or whoever reads the leg's output would wait for them.
+    dotnet build "$REPO_ROOT/tools/InteropCli/InteropCli.csproj" -c Release --nologo -v quiet >"$WORK/logs/build-interopcli.log" 2>&1 8>&- 9>&- ||
         setup_fail "build InteropCli" "$(grep -m1 -E 'error' "$WORK/logs/build-interopcli.log")"
     INTEROP_CLI="$REPO_ROOT/tools/InteropCli/bin/Release/net10.0/InteropCli"
 fi
@@ -385,7 +403,7 @@ WALLET_BIN_DIR="$MED/MediatorWallet/bin/Release/net10.0"
 WALLET_BIN="$WALLET_BIN_DIR/MediatorWallet"
 if plan_needs_wallet; then
     # Built here, not in run-all.sh, so a wallet build break fails this leg only.
-    dotnet build "$WALLET_PROJECT" -c Release --nologo -v quiet >"$WORK/logs/build-wallet.log" 2>&1 ||
+    dotnet build "$WALLET_PROJECT" -c Release --nologo -v quiet >"$WORK/logs/build-wallet.log" 2>&1 8>&- 9>&- ||
         setup_fail "build MediatorWallet" "$(grep -m1 -E 'error|MSB' "$WORK/logs/build-wallet.log")"
 fi
 
@@ -554,7 +572,10 @@ IDENTUS_DID="$(cat "$WORK/identus.did")"
 PX_DID="$(cat "$WORK/identus-px.did")"
 
 SQUID="$PREFIX-squid"
+# The image declares /var/log/squid and /var/spool/squid as volumes: tmpfs mounts (owned by its
+# proxy user, uid 13) keep a run from leaving anonymous, unlabelled volumes behind.
 docker run -d --name "$SQUID" "${DOCKER_LABELS[@]}" --network "$NET" -p 127.0.0.1::3128 \
+    --tmpfs /var/log/squid:uid=13,gid=13,mode=0755 --tmpfs /var/spool/squid:uid=13,gid=13,mode=0755 \
     -v "$MED/squid/squid.conf:/etc/squid/squid.conf:ro" "$SQUID_IMAGE" >/dev/null 2>"$WORK/logs/squid.run.err" ||
     setup_fail squid "docker run failed: $(tail -1 "$WORK/logs/squid.run.err")"
 SQUID_PORT="$(docker port "$SQUID" 3128/tcp 2>/dev/null | head -1 | sed 's/.*://')"
@@ -602,9 +623,10 @@ start_serve() { # $1=tag, rest: extra mediator-serve options
     SERVE_DIR="$WORK/serve-$tag"
     mkdir -p "$SERVE_DIR"
     mkfifo "$SERVE_DIR/stdin" || return 1
-    # stdin is a FIFO held open on fd 7: the mediator stops when the leg closes it or dies.
+    # stdin is a FIFO held open on fd 7: the mediator stops when the leg closes it or dies. Its own
+    # lifetime limit is the leg watchdog's, so it never stops before the leg would.
     "$INTEROP_CLI" mediator-serve --mediator "$WORK/dotnet-medsvc.json" --ready-file "$SERVE_DIR/ready.json" \
-        --max-lifetime 900 "$@" <"$SERVE_DIR/stdin" >"$SERVE_DIR/stdout.log" 2>"$SERVE_DIR/stderr.log" 8>&- 9>&- &
+        --max-lifetime "$LEG_WATCHDOG_S" "$@" <"$SERVE_DIR/stdin" >"$SERVE_DIR/stdout.log" 2>"$SERVE_DIR/stderr.log" 8>&- 9>&- &
     SERVE_PID=$!
     exec 7>"$SERVE_DIR/stdin"
     if ! wait_for 60 "mediator-serve ready.json" serve_ready; then
@@ -655,12 +677,48 @@ wallet() {
     echo "wallet $1 → exit $rc: $(head -c 600 "$C/$name.json")"
     [ "$rc" = 0 ] && [ "$(json_get "$C/$name.json" ok)" = true ]
 }
-wallet_error() { # $1=name → a one-line reason from the wallet's JSON
-    local type message code
-    type="$(json_get "$C/$1.json" error.type)"
-    message="$(json_get "$C/$1.json" error.message)"
-    code="$(json_get "$C/$1.json" error.problem_code)"
-    echo "exit $WALLET_RC${type:+: ${type##*.}}${message:+: $message}${code:+ [problem code $code]}"
+wallet_error() { # $1=name → a one-line reason from the wallet's JSON: step, type, problem code, message
+    "$VPY" -I -c 'import json, sys
+try:
+    r = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    r = {}
+e = r.get("error") or {}
+failed = [s.get("name") for s in r.get("steps") or [] if not s.get("ok")]
+kind = str(e.get("type") or "").rsplit(".", 1)[-1]
+inner = "/".join(str(i).rsplit(".", 1)[-1] for i in e.get("inner") or [])
+text = "exit %s" % sys.argv[2]
+if failed:
+    text += " at " + str(failed[-1])
+if kind:
+    text += ": " + kind + (" (inner " + inner + ")" if inner else "")
+if e.get("problem_code"):
+    text += " [problem code %s]" % e["problem_code"]
+if e.get("message"):
+    text += ": " + str(e["message"])
+print(text)' "$C/$1.json" "$WALLET_RC"
+}
+# wallet_failure_is <name> <step> <exception type> <inner type> <text>: 0 when the command failed
+# at that step with that exception (type names match by suffix), an inner exception of that type,
+# and a message containing <text>.
+wallet_failure_is() {
+    "$VPY" -I -c 'import json, sys
+r = json.load(open(sys.argv[1]))
+e = r.get("error") or {}
+failed = [s.get("name") for s in r.get("steps") or [] if not s.get("ok")]
+ok = (r.get("ok") is False and failed[-1:] == [sys.argv[2]]
+      and str(e.get("type", "")).endswith(sys.argv[3])
+      and any(str(i).endswith(sys.argv[4]) for i in e.get("inner") or [])
+      and sys.argv[5] in str(e.get("message", "")))
+sys.exit(0 if ok else 1)' "$C/$1.json" "$2" "$3" "$4" "$5" 2>/dev/null
+}
+# assert_message <mode> <expected> <unpacked>: interop_peer assert; on failure CELL_DETAIL names
+# the first mismatch.
+assert_message() {
+    local out rc
+    out="$(ipeer assert --mode "$1" --expected "$2" --unpacked "$3" 2>&1)"; rc=$?
+    [ -n "$out" ] && echo "$out"
+    [ "$rc" = 0 ] || cfail "assert: $(echo "$out" | grep -m1 'ASSERT FAIL' | sed 's/^ASSERT FAIL: //')"
 }
 peer() { "${PEER[@]}" "$@"; }
 ipeer() { "${IPEER[@]}" "$@"; }
@@ -692,16 +750,22 @@ python_forward() {
 # PASS; on FAIL it sets CELL_DETAIL (cfail).
 
 cell_B0() { # wallet boundary (E-36)
-    local forbid=()
+    local forbid=() problems=""
     [ "$1" = forbid-client ] && forbid=(--forbid DidComm.Mediator.Client)
-    step "compiled references of the wallet"
-    wallet boundary boundary --out "$C/refs.json" || { cfail "MediatorWallet boundary: $(wallet_error boundary)"; return 1; }
-    step "package graph, framework references, runtimeconfig, deps.json, compiled references"
-    "$VPY" -I "$MED/check_boundary.py" --project-dir "$MED/MediatorWallet" --bin-dir "$WALLET_BIN_DIR" \
-        --refs "$C/refs.json" ${forbid[@]+"${forbid[@]}"} >"$C/check.txt" 2>&1
-    local rc=$?
-    cat "$C/check.txt"
-    [ "$rc" = 0 ] || { cfail "$(grep -m1 'FAIL' "$C/check.txt")"; return 1; }
+    # Both checks always run (the control must turn both red), and the cell reports both.
+    step "compiled references of the wallet (MediatorWallet boundary)"
+    wallet boundary boundary --out "$C/refs.json" ${forbid[@]+"${forbid[@]}"} ||
+        problems="MediatorWallet boundary: $(wallet_error boundary)"
+    step "package graph, framework references, runtimeconfig, deps.json, output, compiled references"
+    if [ -s "$C/refs.json" ]; then
+        "$VPY" -I "$MED/check_boundary.py" --project-dir "$MED/MediatorWallet" --bin-dir "$WALLET_BIN_DIR" \
+            --refs "$C/refs.json" ${forbid[@]+"${forbid[@]}"} >"$C/check.txt" 2>&1 ||
+            problems="${problems:+$problems; }check_boundary: $(grep -m1 '^FAIL' "$C/check.txt")"
+        cat "$C/check.txt"
+    else
+        problems="${problems:+$problems; }check_boundary: no refs.json to read"
+    fi
+    [ -z "$problems" ] || { cfail "$problems"; return 1; }
 }
 
 cell_M1() { # dotnet recipient via Identus over HTTP (E-30, E-51)
@@ -735,12 +799,12 @@ cell_M1() { # dotnet recipient via Identus over HTTP (E-30, E-51)
         { cfail "fetch: $(wallet_error fetch)"; return 1; }
     local expected="$C/m.msg.json"
     if [ "$sab" = wrong-message ]; then
-        ipeer gen-message --to "$routed" --from "$WORK/python-base.json" --out "$C/other.msg.json"
+        ipeer gen-message --to "$routed" --from "$WORK/python-base.json" --out "$C/other.msg.json" ||
+            { cfail "gen-message failed"; return 1; }
         expected="$C/other.msg.json"
     fi
     step "assert the unpacked message and its authcrypt metadata"
-    ipeer assert --mode authcrypt --expected "$expected" --unpacked "$C/fetch/item-1.unpacked.json" ||
-        { cfail "assert failed on the fetched message"; return 1; }
+    assert_message authcrypt "$expected" "$C/fetch/item-1.unpacked.json" || return 1
 }
 
 cell_M2() { # burst of 12 via Identus, fetched with limit 5 (E-35; Identus ignores limit)
@@ -784,7 +848,8 @@ cell_M3() { # dotnet sender via Identus to a python recipient (CM 2.0 + Pickup 3
     peer cm2-enrol --identity "$C/py-w2.json" --mediator "$IDENTUS_DID" --url "$IDENTUS_URL" \
         --register "$C/p2.json" --out "$C/enrol.json" || { cfail "cm2-enrol at Identus failed"; return 1; }
     step "InteropCli packs for P2 (its service uri is the Identus DID: one forward for Identus, FR-ROUTE-04)"
-    ipeer gen-message --to "$C/p2.json" --from "$WORK/dotnet-base.json" --out "$C/m.msg.json"
+    ipeer gen-message --to "$C/p2.json" --from "$WORK/dotnet-base.json" --out "$C/m.msg.json" ||
+        { cfail "gen-message failed"; return 1; }
     "$INTEROP_CLI" pack --identity "$WORK/dotnet-base.json" --to "$C/p2.json" --mode authcrypt \
         --message "$C/m.msg.json" --out "$C/m.fwd.json" ${forward[@]+"${forward[@]}"} || { cfail "InteropCli pack failed"; return 1; }
     peer post --url "$IDENTUS_URL" --in "$C/m.fwd.json" --expect-status 202 --meta-out "$C/m.post.json" ||
@@ -793,8 +858,7 @@ cell_M3() { # dotnet sender via Identus to a python recipient (CM 2.0 + Pickup 3
     peer pickup3 --identity "$C/py-w2.json" --mediator "$IDENTUS_DID" --url "$IDENTUS_URL" --recipient "$C/p2.json" \
         --expect-count 1 --expect-ack-status no --out-dir "$C/pick" --out "$C/pick.json" ||
         { cfail "pickup3: $(json_get "$C/pick.json" error)"; return 1; }
-    ipeer assert --mode authcrypt --expected "$C/m.msg.json" --unpacked "$C/pick/item-1.unpacked.json" ||
-        { cfail "assert failed on the picked-up message"; return 1; }
+    assert_message authcrypt "$C/m.msg.json" "$C/pick/item-1.unpacked.json" || return 1
 }
 
 cell_M4() { # HTTP through TrustedProxy (E-47, HTTP half)
@@ -811,19 +875,22 @@ cell_M4() { # HTTP through TrustedProxy (E-47, HTTP half)
         --meta-out "$C/m.post.json" || { cfail "forward through squid: HTTP $(json_get "$C/m.post.json" status)"; return 1; }
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --allow-hosts identus-px \
         --resolve-dns-names false ${proxy[@]+"${proxy[@]}"} || { cfail "fetch through the proxy: $(wallet_error fetch)"; return 1; }
-    ipeer assert --mode authcrypt --expected "$C/m.msg.json" --unpacked "$C/fetch/item-1.unpacked.json" ||
-        { cfail "assert failed"; return 1; }
-    step "squid's log for the cell window"
-    squid_barrier || { cfail "$WAIT_WHAT"; return 1; }
-    squid_window "$start" >"$C/squid-window.log"
-    cat "$C/squid-window.log"
-    local posts; posts="$(grep -c ' POST http://identus-px:8080/ ' "$C/squid-window.log" || true)"
-    [ "$posts" -ge 6 ] || { cfail "squid logged $posts POST http://identus-px:8080/ line(s) in the window, expected ≥ 6"; return 1; }
+    assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
+    # Not gated: identus-px has no route but squid (no host port; its name resolves only on the
+    # leg's network), so the passing flow is the proof. The window is kept as evidence, with the
+    # wallet's requests told from python's by User-Agent.
+    step "squid's log for the cell window (evidence)"
+    squid_barrier && squid_window "$start" >"$C/squid-window.log"
+    cat "$C/squid-window.log" 2>/dev/null
+    echo "wallet POSTs relayed by squid in the window: $(grep ' POST http://identus-px:8080/ ' "$C/squid-window.log" 2>/dev/null | grep -vc 'Python-urllib' || true)"
 }
 
 cell_M5() { # WebSocket through TrustedProxy (E-47, WebSocket half; the call's outcome is observed)
-    local proxy=(--trusted-proxy "$SQUID_URL")
+    local proxy=(--trusted-proxy "$SQUID_URL") target=auto expected=ws://identus-px:8080/ws
     [ "$1" = no-proxy ] && proxy=()
+    # no-frame: the tunnel opens, but the handshake asks for a path with no WebSocket behind it,
+    # so no frame is sent: the frame check (not the CONNECT check) must fail.
+    if [ "$1" = no-frame ]; then target=ws://identus-px:8080/no-websocket-here; expected="$target"; fi
     px_get /invitation >"$C/invitation.json"
     enrol_wallet w "$C/invitation.json" "$PX_DID" --expect-version 2.0 --allow-hosts identus-px \
         --resolve-dns-names false --trusted-proxy "$SQUID_URL" || { cfail "enrol through the proxy: $(wallet_error w)"; return 1; }
@@ -831,13 +898,11 @@ cell_M5() { # WebSocket through TrustedProxy (E-47, WebSocket half; the call's o
     start="$(squid_lines)"
     before="$(binary_frames "$IDENTUS_PX")"
     step "ws-attempt to the first ws service of the proxy-only Identus DID"
-    wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint auto --timeout 10 --allow-hosts identus-px \
+    wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint "$target" --timeout 10 --allow-hosts identus-px \
         --resolve-dns-names false ${proxy[@]+"${proxy[@]}"}
     echo "ws-attempt outcome (recorded, not gated): exit $WALLET_RC, $(json_get "$C/ws.json" observed.attempt)"
     local endpoint; endpoint="$(json_get "$C/ws.json" observed.ws_endpoint)"
-    if [ -n "$endpoint" ] && [ "$endpoint" != ws://identus-px:8080/ws ]; then
-        cfail "ws-attempt used $endpoint, expected ws://identus-px:8080/ws"; return 1
-    fi
+    [ "$endpoint" = "$expected" ] || { cfail "ws-attempt used '${endpoint:-no endpoint}', expected $expected"; return 1; }
     step "squid logs the CONNECT tunnel once it closes"
     tunnel_logged() { squid_window "$start" | grep -F 'CONNECT identus-px:8080 200 TCP_TUNNEL' >/dev/null; }
     wait_for 30 "squid CONNECT identus-px:8080 200 TCP_TUNNEL line" tunnel_logged || { cfail "$WAIT_WHAT"; return 1; }
@@ -847,8 +912,10 @@ cell_M5() { # WebSocket through TrustedProxy (E-47, WebSocket half; the call's o
 }
 
 cell_M6() { # process proxy variables are ignored (E-48)
-    local sab="$1" proxy=() noproxy=()
+    local sab="$1" proxy=() noproxy=() proxy_b=()
     [ "$sab" = with-trusted-proxy ] && proxy=(--trusted-proxy "$SQUID_URL")
+    # proxy-in-b: TrustedProxy on the (b) enrolment only, so (b) succeeds and must turn the cell red.
+    [ "$sab" = proxy-in-b ] && proxy_b=(--trusted-proxy "$SQUID_URL")
     [ "$sab" = no-proxy-env ] && noproxy=(NO_PROXY=127.0.0.1 no_proxy=127.0.0.1)
     local envp=(env -u NO_PROXY -u no_proxy HTTP_PROXY="$SQUID_URL" HTTPS_PROXY="$SQUID_URL" ALL_PROXY="$SQUID_URL"
         http_proxy="$SQUID_URL" https_proxy="$SQUID_URL" all_proxy="$SQUID_URL" ${noproxy[@]+"${noproxy[@]}"})
@@ -874,8 +941,7 @@ cell_M6() { # process proxy variables are ignored (E-48)
     rc=$?
     WALLET_ENV=()
     [ "$rc" = 0 ] || { cfail "fetch with proxy variables set: $(wallet_error fetch)"; return 1; }
-    ipeer assert --mode authcrypt --expected "$C/m.msg.json" --unpacked "$C/fetch/item-1.unpacked.json" ||
-        { cfail "assert failed"; return 1; }
+    assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
     step "(a) a direct WebSocket attempt reaches Identus"
     WALLET_ENV=("${envp[@]}")
     wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint auto --timeout 10 --allow-hosts 127.0.0.1 \
@@ -886,11 +952,19 @@ cell_M6() { # process proxy variables are ignored (E-48)
     px_get /invitation >"$C/px-invitation.json"
     WALLET_ENV=("${envp[@]}")
     enrol_wallet px "$C/px-invitation.json" "$PX_DID" --expect-version 2.0 --allow-hosts identus-px \
-        --resolve-dns-names false --request-timeout 10 ${proxy[@]+"${proxy[@]}"}
+        --resolve-dns-names false --request-timeout 10 ${proxy[@]+"${proxy[@]}"} ${proxy_b[@]+"${proxy_b[@]}"}
     rc=$?
     WALLET_ENV=()
-    if [ "$rc" = 0 ]; then cfail "(b) enrolment with identus-px succeeded: the process proxy was used"; return 1; fi
-    echo "(b) enrolment with identus-px failed as required: $(wallet_error px)"
+    if [ "$rc" = 0 ]; then cfail "(b) enrolment with identus-px succeeded: a proxy was used"; return 1; fi
+    # Only a direct connection attempt counts: the first request (request-mediation) failing with
+    # HttpRequestException over a SocketException for identus-px, the name only squid can resolve.
+    wallet_failure_is px request-mediation HttpRequestException SocketException identus-px ||
+        { cfail "(b) enrolment with identus-px failed, but not with a direct-connect error: $(wallet_error px)"; return 1; }
+    echo "(b) enrolment with identus-px failed with a direct-connect error, as required: $(wallet_error px)"
+    if [ "$sab" = squid-request-in-window ]; then
+        step "sabotage: one request through squid inside the window"
+        curl -s -o /dev/null --noproxy '' -x "$SQUID_URL" --max-time 5 http://identus-px:8080/health
+    fi
     step "(c) squid saw nothing in the window"
     squid_barrier || { cfail "$WAIT_WHAT"; return 1; }
     squid_window "$start" >"$C/squid-window.log"
@@ -925,13 +999,14 @@ cell_R1() { # python recipient via the dotnet mediator (reverse)
     peer pickup3 --identity "$C/py-r1.json" --mediator "$med" --url "$url" --recipient "$C/p.json" \
         --expect-count 1 --expect-ack-status yes --out-dir "$C/pick" --out "$C/pick.json" ||
         { cfail "pickup3: $(json_get "$C/pick.json" error)"; return 1; }
-    ipeer assert --mode authcrypt --expected "$C/m.msg.json" --unpacked "$C/pick/item-1.unpacked.json" ||
-        { cfail "assert failed"; return 1; }
+    assert_message authcrypt "$C/m.msg.json" "$C/pick/item-1.unpacked.json" || return 1
 }
 
 cell_R2() { # attribution control: the same wallet against the dotnet mediator (CM 3.0)
-    local version=3.0
+    local version=3.0 ws="$SERVE_WS"
     [ "$1" = expect-v2 ] && version=2.0
+    # ws-wrong-path: a path with no WebSocket endpoint behind it, so the gated WebSocket call fails.
+    [ "$1" = ws-wrong-path ] && ws="${SERVE_WS%/didcomm}/no-websocket-here"
     oob_invitation "$SERVE_DID" "$C/invitation.json"
     enrol_wallet w "$C/invitation.json" "$SERVE_DID" --expect-version "$version" --endpoint-override "$SERVE_HTTP" \
         --allow-hosts 127.0.0.1 || { cfail "enrol with the dotnet mediator: $(wallet_error w)"; return 1; }
@@ -941,8 +1016,13 @@ cell_R2() { # attribution control: the same wallet against the dotnet mediator (
         { cfail "forward not accepted"; return 1; }
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --explicit-ack --out-dir "$C/fetch" \
         --allow-hosts 127.0.0.1 || { cfail "fetch + AckAsync: $(wallet_error fetch)"; return 1; }
-    ipeer assert --mode authcrypt --expected "$C/m.msg.json" --unpacked "$C/fetch/item-1.unpacked.json" ||
-        { cfail "assert failed"; return 1; }
+    assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
+    step "the one gated WebSocket exchange: our client and our mediator (status over ws)"
+    wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint "$ws" --timeout 10 --allow-hosts 127.0.0.1
+    local outcome; outcome="$(json_get "$C/ws.json" observed.attempt.outcome)"
+    [ "$WALLET_RC" = 0 ] && [ "$outcome" = ok ] ||
+        { cfail "WebSocket call to our mediator: ${outcome:-not made} ($(json_get "$C/ws.json" observed.attempt.exception.type)) at $ws"; return 1; }
+    echo "WebSocket call to our mediator: ok, status counts $(json_get "$C/ws.json" observed.attempt.message_count)"
 }
 
 cell_title() {
@@ -955,7 +1035,7 @@ cell_title() {
         M-5) echo "WebSocket through TrustedProxy: CONNECT tunnel and our frame at Identus (E-47)" ;;
         M-6) echo "process proxy variables ignored (E-48)" ;;
         R-1) echo "python recipient via the dotnet mediator (CM 2.0 + Pickup 3.0 by hand)" ;;
-        R-2) echo "control: the same wallet against the dotnet mediator (CM 3.0, AckAsync)" ;;
+        R-2) echo "control: the same wallet against the dotnet mediator (CM 3.0, AckAsync, a WebSocket status call)" ;;
     esac
 }
 
@@ -964,6 +1044,31 @@ cell_title() {
 # prefixes `env …` (M-6's proxy variables).
 WALLET_ENV=()
 wallet_exec() { exec ${WALLET_ENV[@]+"${WALLET_ENV[@]}"} "$WALLET_BIN" "$@"; }
+
+# nc_expect <id> <sabotage>: the extended regex the FAIL's detail must match. A sabotaged cell that
+# fails for another reason proves nothing about the check it targets: a broken control.
+nc_expect() {
+    case "$1|$2" in
+        "B-0|forbid-client") echo "no-forbidden-reference.*check_boundary: FAIL .*forbidden \['DidComm\.Mediator\.Client'\]" ;;
+        "M-1|pin-v3") echo "at request-mediation: MediationProtocolException \[problem code e\.p\.msg\.unsupported\]" ;;
+        "M-1|unregistered-next") echo "forward not accepted: HTTP 200, expected 202" ;;
+        "M-1|wrong-message") echo "^assert: message\.id: expected" ;;
+        "M-1|identus-stopped") echo "^fetch: exit 1 at wait-for-status: HttpRequestException.*Connection refused" ;;
+        "M-2|expect-13") echo "at wait-for-status: TimeoutException.*counted 12 message\(s\), not 13" ;;
+        "M-3|no-forward") echo "^pickup3: status counted 0 after .* expected 1" ;;
+        "M-4|no-proxy") echo "at request-mediation: HttpRequestException \(inner SocketException\).*connects directly.*identus-px" ;;
+        "M-5|no-proxy") echo "^squid CONNECT identus-px:8080 200 TCP_TUNNEL line \(not within" ;;
+        "M-5|no-frame") echo "^identus-px logged a binary frame \(not within" ;;
+        "M-6|with-trusted-proxy") echo "^enrol with proxy variables set: .*status 403" ;;
+        "M-6|no-proxy-env") echo "^precondition: .*PreconditionException" ;;
+        "M-6|proxy-in-b") echo "^\(b\) enrolment with identus-px succeeded" ;;
+        "M-6|squid-request-in-window") echo "^\(c\) squid logged 1 line\(s\) in the window" ;;
+        "R-1|no-created-time"|"R-1|v2-disabled") echo "^cm2-enrol: expected HTTP 200 with a reply, got 202" ;;
+        "R-2|expect-v2") echo "negotiated-version-is-expected" ;;
+        "R-2|ws-wrong-path") echo "^WebSocket call to our mediator: (error|timeout)" ;;
+        *) echo "(no expected detail declared)" ;;
+    esac
+}
 
 run_cell() { # $1=id $2=sabotage
     local id="$1" sab="$2" fn rc t0=$SECONDS
@@ -977,13 +1082,21 @@ run_cell() { # $1=id $2=sabotage
     if [ -z "$sab" ]; then
         if [ "$rc" = 0 ]; then result=PASS; else result=FAIL; LEG_FAILED=1; fi
     else
-        # A sabotaged cell must FAIL; one that passes is a broken control.
-        if [ "$rc" = 0 ]; then result="PASS (control broken)"; LEG_FAILED=1; CELL_DETAIL="the sabotage did not make the cell fail"; else result="FAIL (as required)"; fi
+        # A sabotaged cell must FAIL, and for the reason its sabotage causes.
+        local expect; expect="$(nc_expect "$id" "$sab")"
+        if [ "$rc" = 0 ]; then
+            result="PASS (control broken)"; LEG_FAILED=1; CELL_DETAIL="the sabotage did not make the cell fail"
+        elif printf '%s\n' "$CELL_DETAIL" | grep -E -- "$expect" >/dev/null; then
+            result="FAIL (as required)"
+        else
+            result="FAIL (wrong reason)"; LEG_FAILED=1
+            CELL_DETAIL="expected /$expect/, got: $CELL_DETAIL"
+        fi
     fi
     local detail; detail="$(printf '%s' "$CELL_DETAIL" | tr '\t\n|' '  /' | cut -c1-300)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$sab" "$result" "$detail" "$((SECONDS - t0))" "$(cell_title "$id")" >>"$CELLS_TSV"
     printf '%-4s %-22s %-22s %4ss  %s\n' "$id" "${sab:--}" "$result" "$((SECONDS - t0))" "$detail"
-    if [ "$result" = FAIL ] || [ "$result" = "PASS (control broken)" ]; then
+    if [ "$result" = FAIL ] || [ "$result" = "PASS (control broken)" ] || [ "$result" = "FAIL (wrong reason)" ]; then
         echo "--- $id${sab:+ ($sab)} log ($C/cell.log): ---" >&2
         cat "$C/cell.log" >&2
     fi

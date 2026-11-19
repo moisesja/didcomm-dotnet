@@ -31,7 +31,9 @@ jobs:
   live-interop:
     name: live round-trips (python + jvm + mediator)
     runs-on: ubuntu-latest
-    # Three legs; the mediator leg pulls three images and takes a few minutes on its own.
+    # Three legs (about 7 minutes in CI, the mediator leg about 4 of them) plus, on demand, the
+    # negative controls (about 3). The mediator leg's own watchdog is 25 minutes for the cells and
+    # 15 for the controls, so even both hung legs stop inside this limit with their cleanup run.
     timeout-minutes: 60
     steps:
       - name: Checkout
