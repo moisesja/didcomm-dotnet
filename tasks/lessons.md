@@ -1319,3 +1319,34 @@ Format per entry:
   orphan-proof) and falls back to SIGTERM, then SIGKILL.
 - **How to apply:** A long-running helper started by a script listens for stdin EOF and SIGTERM; the
   script's cleanup closes the pipe, waits with a deadline, then escalates.
+
+## L-073 — Keep "the owner decided X" apart from "we chose Y to implement X"; check every spec claim against the text first.
+
+- **Lesson:** Never present an agent's or the coordinator's technical choice as the owner's
+  decision. When implementing an owner decision forces a further choice, report it as ours, with the
+  reason, and let the owner overrule it. Any "the spec says / allows / is silent on" claim that will
+  reach the owner is checked against the spec text (quoted, with file and line at the pinned commit)
+  before it is sent.
+- **Why:** On 2026-11-19 the owner decided "send DIDComm messages as WebSocket text frames" (O-98-1 =
+  1a). While building it, the orchestrator added "bytes that aren't valid UTF-8 stay binary" and
+  described it as within the owner's decision; the coordinator relayed it the same way. The owner
+  rejected it: the spec defines a forward's attachment as a DIDComm message, so the fallback relayed
+  something the spec says is invalid.
+- **How to apply:** In every hand-back and planning comment, label each item "owner decision" or
+  "implementation choice (ours)". Before a spec claim leaves the session, paste the spec lines it rests
+  on into the note. See [[L-066]].
+
+## L-074 — Spec over local rules is absolute: refuse what the spec makes invalid; never route it around a problem.
+
+- **Lesson:** Where the spec defines what is valid, refuse what is invalid, at intake, before it is
+  accepted, charged or stored. Never add a content-dependent fallback that lets invalid input travel on
+  in a different form. Where the spec does not settle a piece (for example how to answer the refusal),
+  stop and ask; don't fill the gap with a rule of our own.
+- **Why:** #98: text frames must be valid UTF-8 (RFC 6455), and a relay passing on a forward's
+  attachment unread could hand a text frame bytes that aren't UTF-8. The first fix kept such bytes as
+  binary frames. The spec settles it differently: a forward's `attachments` are "the DIDComm
+  message(s)" (routing.md L57), DIDComm encodings are `+json` (message_structure.md L69) and JSON
+  between systems is UTF-8 (RFC 8259 §8.1), so such a forward is invalid and is refused at intake.
+- **How to apply:** When a fix starts with "if the input is X, do Y instead", ask whether the spec
+  makes X invalid. If it does, the fix is a refusal at the boundary, with a test that the invalid input
+  is refused. Extends [[L-050]] and the "spec over local rules" memory.
