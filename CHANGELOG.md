@@ -410,7 +410,7 @@ changes: same signature, same `Task<PickupStatus>`.
   mediator that answers each chunk in time with its `thid` gets one message per chunk; a mediator
   whose statuses leave out `thid` is treated as one that sends none, and the call ends with
   `TimeoutException` at one `RequestTimeout`; over HTTP a status without `thid` in the response
-  still answers. The matcher's own tests that pinned the thread-less fallback now pin its absence
+  answers nothing either (since the entry at the top of this section). The matcher's own tests that pinned the thread-less fallback now pin its absence
   (`MediatorResponseMatcherTests`, `MediatorClientChannelQa1Tests`, `MediatorClientChannelAdv1Tests`,
   `MediatorClientLogLevelTests`).
 
@@ -1311,7 +1311,7 @@ deferred to #111 are checked in skipped, their skip reason naming #111. Fix roun
   requests time out instead of being refused. With `DedupeCapacity` 0 a live stream yields a message
   that comes twice in one delivery twice. For the interop gate (#98): a mediator that does not stamp
   `created_time` on its WebSocket answers has them dropped; one that answers `delivery-request`
-  without `thid` works over HTTP only; one that puts a `thid` on its live pushes is reached by
+  without `thid` works over HTTP only (until #98; now on no path); one that puts a `thid` on its live pushes is reached by
   polling only; one without Discover Features needs a pinned version.
 
 ### Added — mediator service: delivery pipeline, AddMediator(), MapDidCommMediator in the new DidComm.Mediator.AspNetCore package (FR-ROUTE-09..11, FR-MED-07, FR-PICK-09/10, #95, epic #88)

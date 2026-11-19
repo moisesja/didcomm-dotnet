@@ -22,8 +22,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// arrive later. DIDComm v2.1 threading: a reply carries the <c>thid</c> of the message it answers,
 /// and a message without that <c>thid</c> is not part of the thread. So an answer arriving on its own
 /// completes a request only when its <c>thid</c> names it; one without <c>thid</c> completes none,
-/// in the same call or a later one. Over HTTP, the response to a request is its answer, with or
-/// without <c>thid</c>.
+/// in the same call or a later one. The same holds over HTTP: a thread-less reply in the response to
+/// a request completes no request.
 /// </summary>
 public sealed class PickupClientAckThreadingTests : IAsyncLifetime
 {
@@ -149,7 +149,7 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
         var pendingAfter = !exchange.IsCompleted;
         var threaded = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(request.Id, count: 1)));
 
-        unthreaded.Should().BeFalse("outside the HTTP response to its request, an answer without thid belongs to no request's thread");
+        unthreaded.Should().BeFalse("an answer without thid belongs to no request's thread, on any path");
         pendingAfter.Should().BeTrue();
         threaded.Should().BeTrue();
         (await PickupTest.Within(exchange)).Thid.Should().Be(request.Id);

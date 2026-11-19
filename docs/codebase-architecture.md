@@ -2234,8 +2234,9 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    handed is never stamped by hand or modified. A send abandoned at the deadline is observed
    (`GuardedDeadline.ObserveAbandoned`), so a later fault never becomes an unobserved task
    exception.
-5. **HTTP.** The verified snapshot of `SendResult.Returned` is offered to the matcher, bound to this
-   request. If the request is still waiting after that, it fails at once (`PendingRequest.TryFail`,
+5. **HTTP.** The verified snapshot of `SendResult.Returned` is offered to the matcher like any other
+   answer: it completes this request only when its thread names it (a thread-less one completes
+   nothing, since #98). If the request is still waiting after that, it fails at once (`PendingRequest.TryFail`,
    which marks its fault observed) with `TimeoutException`: "got no answer in the HTTP response;
    the mediator may still have acted on it, so retry it". HTTP returns at most one message
    (FR-RR-04), so a 202, an identity-refused body or a body that answers nothing leaves nothing to
@@ -2789,8 +2790,8 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
   logged. The acknowledgement is exactly what unpacked plus the repeats, so a mediator cannot make
   the client acknowledge a failure or an id it never delivered. A delivery whose messages all lack a
   usable id is refused rather than spinning a loop. Unsolicited answers complete nothing unless a
-  waiting request matches its thread (an answer without one completes nothing outside the HTTP
-  response to its request, since #98). The routing DID of a grant
+  waiting request matches its thread (an answer without one completes nothing on any path, the
+  HTTP response to its request included, since #98). The routing DID of a grant
   is the mediator's word (publish it only for a mediator you trust).
 - **Misaddressed payloads.** A message encrypted to someone else fails to unpack and is reported.
   Under a `recipientDid` filter, a message that a key of another of our DIDs opened is a failure;
