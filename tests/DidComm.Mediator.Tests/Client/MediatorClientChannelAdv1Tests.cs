@@ -141,20 +141,18 @@ public sealed class MediatorClientChannelAdv1Tests : IAsyncLifetime
         pushed.Should().BeSameAs(genuine);
     }
 
-    // ---- a residual: thread-less answers outside the FR-RR-08 scope --------------------------------
+    // ---- thread-less answers outside the FR-RR-08 scope (a residual until #98) -----------------------
 
     /// <summary>
-    /// Residual, pinned (not a defect of the matcher): the plan's §7 says "a captured genuine answer
-    /// can match only a request id that is pending now … so in practice none". That holds for a
-    /// threaded answer. A thread-less one (the type + mediator fallback, for mediators that omit
-    /// <c>thid</c>) matches whichever request of its pair is waiting for its type; and a
-    /// <c>disclose</c> is not a mediator-service type, so FR-RR-08 does not admit it once — the
-    /// same genuine thread-less <c>disclose</c> answers every later Discover Features query of the
-    /// pair. Exploiting it needs a mediator that omits <c>thid</c> on <c>disclose</c> (which DIDComm
-    /// requires) and a captured envelope of its authcrypt to us.
+    /// Was a pinned residual: a <c>disclose</c> is not a mediator-service type, so FR-RR-08 does not
+    /// admit it once, and a genuine thread-less <c>disclose</c> (from a mediator that omits the
+    /// <c>thid</c> DIDComm requires) answered every later Discover Features query of its pair through
+    /// the thread-less fallback. Since #98 (PR #130 review, round 2; DIDComm v2.1 threading) an answer
+    /// without a thread that arrives on its own completes no request, so the same captured
+    /// <c>disclose</c> answers none of them; each query's own threaded <c>disclose</c> does.
     /// </summary>
     [Fact]
-    public async Task A_threadless_disclose_is_outside_replay_admission_and_answers_every_later_query_of_its_pair()
+    public async Task A_threadless_disclose_outside_replay_admission_answers_no_query_of_its_pair()
     {
         var answer = await _w.ReceiveAsync(new MessageBuilder()
             .WithType(DiscoverFeatures.DiscloseType).WithFrom(M).WithTo(L)
@@ -167,8 +165,16 @@ public sealed class MediatorClientChannelAdv1Tests : IAsyncLifetime
         {
             var query = FeatureNegotiation.CreateQuery(L, M);
             var exchange = _channel.ExchangeAsync(WebSocketRoute, query, FeatureNegotiation.QuerySpec, M, L, default).Observed();
-            Offer(snapshot).Should().BeTrue("the same thread-less disclose answers query {0}", i + 1);
-            (await exchange).Should().BeSameAs(snapshot);
+            var replayed = Offer(snapshot);
+            var pendingAfter = !exchange.IsCompleted;
+            var own = Offer(await _w.SnapshotAsync(new MessageBuilder()
+                .WithType(DiscoverFeatures.DiscloseType).WithFrom(M).WithTo(L).WithThid(query.Id)
+                .WithBody(new System.Text.Json.Nodes.JsonObject { ["disclosures"] = new System.Text.Json.Nodes.JsonArray() }).Build()));
+
+            replayed.Should().BeFalse("the thread-less disclose answers query {0} no more", i + 1);
+            pendingAfter.Should().BeTrue();
+            own.Should().BeTrue();
+            (await exchange).Thid.Should().Be(query.Id);
         }
     }
 

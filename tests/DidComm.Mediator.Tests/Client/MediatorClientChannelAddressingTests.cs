@@ -26,16 +26,15 @@ public sealed class MediatorClientChannelAddressingTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _w.DisposeAsync();
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task An_answer_whose_to_names_only_another_DID_still_completes_its_request_and_logs_one_warning_without_any_DID(bool threaded)
+    [Fact]
+    public async Task An_answer_whose_to_names_only_another_DID_still_completes_its_request_and_logs_one_warning_without_any_DID()
     {
+        // Threaded: since #98 an answer without a thread that arrives on its own completes no request.
         var logs = new ClientLogCapture();
         await using var channel = Create(_w, new FakeSend(), time: new ManualTimeProvider(), logs: logs);
         var request = _w.Request();
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, CancellationToken.None).Observed();
-        var misaddressed = CraftedSnapshot.Verified(_w.Status(threaded ? request.Id : null, count: 3, to: _w.OtherLocal.Did),
+        var misaddressed = CraftedSnapshot.Verified(_w.Status(request.Id, count: 3, to: _w.OtherLocal.Did),
             senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid);
 
         var claimed = channel.AsCorrelator().OnInbound(misaddressed);

@@ -58,7 +58,8 @@ public sealed class MediatorClientHostEndpointAdv1Tests
         // 2. Her problem report naming it in pthid.
         var problem = Stamped(ProblemReport.Create(mallory.Did, host.Did, "e.p.req.not-enrolled", pthid: pendingId));
         (await host.PostAsync(await mallory.AuthcryptAsync(problem, host.Did))).Should().NotBe(HttpStatusCode.InternalServerError);
-        // 3. A thread-less status (the type + mediator fallback).
+        // 3. A thread-less status (until #98 the type + mediator fallback could take it; now an
+        //    answer without a thread that arrives on its own completes no request).
         var threadless = Stamped(MessagePickup.CreateStatus(mallory.Did, host.Did, new PickupStatus(42)));
         (await host.PostAsync(await mallory.AuthcryptAsync(threadless, host.Did))).Should().NotBe(HttpStatusCode.InternalServerError);
         // 4. Anoncrypt, claiming the upstream mediator in 'from'.
@@ -67,8 +68,13 @@ public sealed class MediatorClientHostEndpointAdv1Tests
         (await host.PostAsync(anoncrypted)).Should().NotBe(HttpStatusCode.InternalServerError);
 
         // The three authcrypted forgeries passed the endpoint's admission and the matcher's identity
-        // rule (they are what they say: Mallory's) and were looked up; nothing was completed.
-        await MediatorTestServer.WaitUntilAsync(() => channel.Lookups - lookups >= 3, "the forgeries reached the matcher");
+        // rule (they are what they say: Mallory's): the two threaded ones were looked up, the
+        // thread-less one was dropped without a lookup (since #98, logged as such); nothing was
+        // completed.
+        await MediatorTestServer.WaitUntilAsync(() => channel.Lookups - lookups >= 2, "the threaded forgeries reached the matcher");
+        await MediatorTestServer.WaitUntilAsync(
+            () => host.Logs.Entries.Any(l => l.Contains("without a thread", StringComparison.Ordinal)),
+            "the thread-less forgery reached the matcher and was dropped");
         pending.IsCompleted.Should().BeFalse("no forgery answers or fails the pending request");
 
         parked.Release();

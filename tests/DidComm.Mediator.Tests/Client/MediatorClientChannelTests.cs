@@ -512,7 +512,7 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         using var channel = Create(_w, _send, o => o.MaxPendingRequests = 8, time: _time, logs: logs);
         const string attachmentId = "attachment-id-that-must-not-be-logged";
 
-        // Answers for nobody (twice), an ambiguous answer, a dropped push, a problem report, an HTTP
+        // Answers for nobody (twice), a thread-less answer, a dropped push, a problem report, an HTTP
         // no-answer, a timeout, an identity failure and a completed request.
         var a = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, default);
         var b = channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, default);
@@ -545,7 +545,7 @@ public sealed class MediatorClientChannelTests : IAsyncLifetime
         unclaimed.Should().HaveCountGreaterThanOrEqualTo(3);
         unclaimed[0].Level.Should().Be(LogLevel.Debug, "the first of a peer-repeatable line that is not a mediator problem");
         unclaimed.Skip(1).Should().OnlyContain(l => l.Level == LogLevel.Trace, "the rest until the 1000th");
-        lines.Should().Contain(l => l.Formatted.Contains("more than one waiting request", StringComparison.Ordinal));
+        lines.Should().Contain(l => l.Formatted.Contains("without a thread", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Formatted.Contains("live delivery push", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Formatted.Contains("problem report", StringComparison.Ordinal));
         lines.Should().Contain(l => l.Level == LogLevel.Debug && l.Formatted.Contains("ms", StringComparison.Ordinal) && l.Formatted.Contains("status-request", StringComparison.Ordinal));

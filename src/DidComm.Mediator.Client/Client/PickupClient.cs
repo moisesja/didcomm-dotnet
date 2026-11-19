@@ -465,17 +465,14 @@ public sealed class PickupClient
     /// moves on: to the next message, or to the <c>status-request</c>, which gets the other half.
     /// </para>
     /// <para>
-    /// <strong>Which status answers which message.</strong> DIDComm threading says a reply carries
-    /// the <c>thid</c> of the message it answers; the Message Pickup 3.0 example of a <c>status</c>
-    /// has none, so a status without <c>thid</c> is taken when it can only answer the one message
-    /// waiting. Once the client has stopped waiting for a status on a WebSocket, that is no longer
-    /// so: the status may still come, late, without <c>thid</c>. So from then on in the same call,
-    /// the later messages and the <c>status-request</c> take only a status whose <c>thid</c> names
-    /// them; a status without one is dropped. A mediator that threads its replies, as the spec
-    /// requires, loses nothing. One that does not, and also takes longer than half of
-    /// <c>RequestTimeout</c> to answer on a WebSocket, makes the call end with a
-    /// <see cref="TimeoutException"/>. Over HTTP nothing changes: the response to a message is its
-    /// answer, with or without <c>thid</c>.
+    /// <strong>Which status answers which message.</strong> DIDComm threading: a reply carries the
+    /// <c>thid</c> of the message it answers, and a message without that <c>thid</c> is not part of
+    /// its thread. So a status that arrives on its own, as over a WebSocket, answers a message only
+    /// when its <c>thid</c> names that message; one without <c>thid</c> answers none and is dropped,
+    /// which also keeps a late status for a message given up on from being taken for another. Over
+    /// HTTP the response to a message is its answer, with or without <c>thid</c>. A mediator that
+    /// leaves <c>thid</c> out of its status over a WebSocket is therefore treated as one that sends no
+    /// status: the call asks with a <c>status-request</c>, whose answer needs a <c>thid</c> too.
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
@@ -498,29 +495,23 @@ public sealed class PickupClient
         RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
 
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
+        var spec = DeliveryReader.MessagesReceivedSpec;
         PickupStatus? status = null;
         var lastId = string.Empty;
         var lastSentAt = 0L;
-        // Set once a chunk was given up on a WebSocket: from then on a status without a thread may be
-        // that chunk's late answer, so every later request takes only a status that names it.
-        var gaveUp = false;
         for (var start = 0; start < copy.Length; start += AckChunk)
         {
             var chunk = copy.AsSpan(start, Math.Min(AckChunk, copy.Length - start)).ToArray();
             var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, chunk, UuidV4MessageIdGenerator.Instance);
-            var spec = gaveUp ? DeliveryReader.MessagesReceivedThreadedSpec : DeliveryReader.MessagesReceivedSpec;
             lastId = request.Id;
             lastSentAt = Exchange.Time.GetTimestamp();
-            var answer = await AcknowledgeChunkAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
-            // A message left without a status is confirmed by the status after the last one. Only
-            // a WebSocket wait is given up: over HTTP the empty response is the mediator's answer.
-            gaveUp |= answer is null && !route.IsHttp;
+            var answer = await AcknowledgeChunkAsync(route, request, mediatorDid, from, ct).ConfigureAwait(false);
+            // A message left without a status is confirmed by the status after the last one.
             status = answer is null
                 ? null
                 : DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
         }
-        var ask = gaveUp ? DeliveryReader.StatusRequestThreadedSpec : DeliveryReader.StatusRequestSpec;
-        return status ?? await AskForStatusAsync(route, ask, mediatorDid, from, lastId, lastSentAt, ct).ConfigureAwait(false);
+        return status ?? await AskForStatusAsync(route, mediatorDid, from, lastId, lastSentAt, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -702,8 +693,9 @@ public sealed class PickupClient
     // route (a WebSocket) silence cannot be told from a slow answer: the status is waited for half of
     // RequestTimeout, which leaves the other half for the status-request that may follow, and then
     // the wait is given up.
-    private async Task<InboundMessageSnapshot?> AcknowledgeChunkAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string from, CancellationToken ct)
+    private async Task<InboundMessageSnapshot?> AcknowledgeChunkAsync(MediatorRoute route, Message request, string mediatorDid, string from, CancellationToken ct)
     {
+        var spec = DeliveryReader.MessagesReceivedSpec;
         if (route.IsHttp)
             return await Exchange.ExchangeAllowingNoAnswerAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
 
@@ -724,8 +716,8 @@ public sealed class PickupClient
 
     // The status-request after the last messages-received when the mediator sent no status for it,
     // in what is left of that message's RequestTimeout (counted from `sentAt`): never a
-    // RequestTimeout of its own. `spec` takes only a status naming it once a wait was given up.
-    private async Task<PickupStatus> AskForStatusAsync(MediatorRoute route, MediatorExchangeSpec spec, string mediatorDid, string from, string acknowledgementId, long sentAt, CancellationToken ct)
+    // RequestTimeout of its own.
+    private async Task<PickupStatus> AskForStatusAsync(MediatorRoute route, string mediatorDid, string from, string acknowledgementId, long sentAt, CancellationToken ct)
     {
         var timeout = Exchange.Options.RequestTimeout;
         var left = timeout - Exchange.Time.GetElapsedTime(sentAt);
@@ -735,6 +727,7 @@ public sealed class PickupClient
                 $"Mediator request '{acknowledgementId}' (messages-received) got no status back, and no time was left within {timeout} (MediatorClientOptions.RequestTimeout) to ask for one; the mediator may still have applied it, so retry it (acknowledging twice is harmless)."));
         }
 
+        var spec = DeliveryReader.StatusRequestSpec;
         var request = MessagePickup.CreateStatusRequest(from, mediatorDid, recipientDid: null, UuidV4MessageIdGenerator.Instance);
         using var budget = new GuardedDeadline(Exchange.Time, left, ct);
         InboundMessageSnapshot answer;

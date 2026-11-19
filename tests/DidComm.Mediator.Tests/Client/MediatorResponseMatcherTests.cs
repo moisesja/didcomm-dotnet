@@ -171,12 +171,14 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Without_a_to_header_a_threadless_answer_still_finds_the_only_waiting_request_of_its_pair()
+    public async Task Without_a_to_header_an_answer_naming_its_request_is_matched_by_the_key_that_decrypted_it()
     {
+        // Before #98 this ran without a thread, through the thread-less fallback (row 5, which now
+        // takes nothing). The pair is still the keys' choice: our other DID's answer completes its own.
         var (_, forLocal) = Start(ClientSpecs.MediateRequest);
-        var (_, forOther) = Start(ClientSpecs.MediateRequest, local: _w.OtherLocal.Did);
+        var (otherRequest, forOther) = Start(ClientSpecs.MediateRequest, local: _w.OtherLocal.Did);
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(WithoutTo(_w.Grant(thid: null)), to: _w.OtherLocal.Did)).Should().BeTrue();
+        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(WithoutTo(_w.Grant(otherRequest.Id)), to: _w.OtherLocal.Did)).Should().BeTrue();
 
         await forOther;
         forLocal.IsCompleted.Should().BeFalse("the key that decrypted it chose the pair");
@@ -407,18 +409,27 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     }
 
     // ---- row 5: another answer type without a thread ----
+    // Before #98 (PR #130 review, round 2) the only waiting request of the pair expecting the type
+    // took it, and two candidates were ambiguous. DIDComm v2.1 threading (threading.md L17,
+    // problems.md L55): a reply carries the `thid` of the message it answers, and a message without
+    // it is not part of that thread. Unbound, it now completes no request, one candidate or two.
 
     [Fact]
-    public async Task Row5_unbound_the_only_waiting_request_of_the_pair_expecting_the_type_takes_it()
+    public async Task Row5_unbound_an_answer_without_a_thread_completes_no_request_even_the_only_one_that_expects_its_type_and_with_its_thid_it_does()
     {
         var (_, statusExchange) = Start(ClientSpecs.StatusRequest);
-        var (_, grantExchange) = Start(ClientSpecs.MediateRequest);
+        var (grantRequest, grantExchange) = Start(ClientSpecs.MediateRequest);
         var (_, otherLocal) = Start(ClientSpecs.MediateRequest, local: _w.OtherLocal.Did);
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null))).Should().BeTrue();
+        var unthreaded = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null)));
+        var nonePending = !statusExchange.IsCompleted && !grantExchange.IsCompleted && !otherLocal.IsCompleted;
+        var threaded = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(grantRequest.Id)));
 
+        unthreaded.Should().BeFalse("without a thid it belongs to no request's thread");
+        nonePending.Should().BeTrue();
+        threaded.Should().BeTrue();
         (await grantExchange).Type.Should().Be(CoordinateMediation.MediateGrantType);
-        statusExchange.IsCompleted.Should().BeFalse("it does not expect a grant");
+        statusExchange.IsCompleted.Should().BeFalse();
         otherLocal.IsCompleted.Should().BeFalse("another pair");
     }
 
@@ -433,7 +444,7 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Row5_unbound_two_candidates_are_ambiguous_and_both_keep_waiting_until_they_time_out()
+    public async Task Row5_unbound_with_two_candidates_the_answer_is_dropped_and_both_keep_waiting_until_they_time_out()
     {
         var (_, first) = Start(ClientSpecs.MediateRequest);
         var (_, second) = Start(ClientSpecs.MediateRequest);

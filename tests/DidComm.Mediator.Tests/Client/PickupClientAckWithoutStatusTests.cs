@@ -45,7 +45,7 @@ public sealed class PickupClientAckWithoutStatusTests
         status.MessageCount.Should().Be(3, "the status the status-request was answered with");
         exchange.Sent.Select(s => s.Type).Should().Equal(MessagePickup.MessagesReceivedType, MessagePickup.StatusRequestType);
         var ask = exchange.SentOf(MessagePickup.StatusRequestType).Single();
-        ask.Spec.Should().BeSameAs(DeliveryReader.StatusRequestThreadedSpec, "a status without thid could be the late answer to the chunk given up");
+        ask.Spec.Should().BeSameAs(DeliveryReader.StatusRequestSpec);
         ask.RecipientDid.Should().BeNull("it asks about all of the mailbox's messages");
         ask.Request.From.Should().Be(L);
         (clock.GetUtcNow() - started).Should().Be(Half);
@@ -97,9 +97,6 @@ public sealed class PickupClientAckWithoutStatusTests
 
         status.MessageCount.Should().Be(4, "the status after the last message confirms both");
         exchange.SentOf(MessagePickup.MessagesReceivedType).Select(s => s.Ids.Count).Should().Equal(100, 50);
-        exchange.SentOf(MessagePickup.MessagesReceivedType).Select(s => s.Spec).Should().Equal(
-            new[] { DeliveryReader.MessagesReceivedSpec, DeliveryReader.MessagesReceivedThreadedSpec },
-            (a, b) => ReferenceEquals(a, b), "after chunk 1 was given up, chunk 2 takes only a status that names it");
         exchange.SentOf(MessagePickup.StatusRequestType).Should().BeEmpty("the last message was answered with a status");
     }
 
