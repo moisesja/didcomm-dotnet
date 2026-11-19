@@ -570,11 +570,13 @@ def cmd_cm2_enrol(args):
     step = exchange.send("keylist-update", update, expect_reply=not no_route)
     if not no_route and exchange.check_reply(step, CM2 + "keylist-update-response", args.require_created_time):
         updated = (step["reply"].get("body") or {}).get("updated")
-        want = sorted((did, "add", "success") for did in register)
         got = sorted(
             (u.get("recipient_did"), u.get("action"), u.get("result")) for u in (updated or []) if isinstance(u, dict)
         )
-        exchange.expect(step, got == want, f"updated {got}, expected {want}")
+        extra["updated"] = [{"recipient_did": d, "action": a, "result": r} for d, a, r in got]
+        if args.expect_update_result != "any":
+            want = sorted((did, "add", args.expect_update_result) for did in register)
+            exchange.expect(step, got == want, f"updated {got}, expected {want}")
     if not step["ok"]:
         return finish("cm2-enrol", args, exchange, extra)
 
@@ -803,6 +805,8 @@ def main():
     p.add_argument("--expect-routing-did", dest="expect_routing_did", help="default: the mediator DID")
     p.add_argument("--require-created-time", dest="require_created_time", action="store_true")
     p.add_argument("--require-pagination", dest="require_pagination", action="store_true")
+    p.add_argument("--expect-update-result", dest="expect_update_result", default="success",
+                   help="the result every keylist-update entry must have (default success); any: record only")
     p.add_argument("--proxy")
     p.add_argument("--timeout", type=float, default=30.0)
     p.set_defaults(func=cmd_cm2_enrol)

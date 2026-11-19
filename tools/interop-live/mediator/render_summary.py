@@ -16,6 +16,7 @@ a separate table and never change the leg's exit code. Stdlib only; run with -I.
 
 import argparse
 import glob
+import itertools
 import json
 import os
 import sys
@@ -101,11 +102,11 @@ def wallet_records(path):
 
 
 def id_key(record):
+    """O-n records in numeric order (O-5, O-5-host, O-10 …), then the others (I-…) by name."""
     rid = record["id"]
-    try:
-        return (0, int(rid.split("-", 1)[1]), rid)
-    except (IndexError, ValueError):
-        return (1, 0, rid)
+    prefix, _, rest = rid.partition("-")
+    digits = "".join(itertools.takewhile(str.isdigit, rest))
+    return (0 if prefix == "O" and digits else 1, int(digits) if digits else 0, rid)
 
 
 def compact(value, limit=420):

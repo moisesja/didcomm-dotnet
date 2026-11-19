@@ -46,6 +46,7 @@
 #   MEDIATOR_LEG_ONLY    comma-separated cell ids to run (e.g. M-3,R-1)
 #   MEDIATOR_LEG_DEBUG_FIRST_PORT            first host port tried for Identus (port-clash test)
 #   MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD  wrong Mongo password for Identus (readiness test)
+#   MEDIATOR_LEG_DEBUG_WATCHDOG              seconds for the leg watchdog instead of 1800 (its test)
 #
 # bash 3.2 compatible (macOS /bin/bash): no associative arrays, no {fd} redirections, no
 # `wait -n`, no timeout(1). No fixed sleeps: every wait re-checks the exact condition it needs,
@@ -65,13 +66,13 @@ for arg in "$@"; do
     case "$arg" in
         --negative-controls) MODE=nc ;;
         --up) MODE=up ;;
-        -h|--help) sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) say "unknown argument '$arg' (see --help)"; exit 2 ;;
     esac
 done
 
 if [ "${CI:-}" = "true" ]; then
-    for var in MEDIATOR_LEG_ONLY MEDIATOR_LEG_DEBUG_FIRST_PORT MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD; do
+    for var in MEDIATOR_LEG_ONLY MEDIATOR_LEG_DEBUG_FIRST_PORT MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD MEDIATOR_LEG_DEBUG_WATCHDOG; do
         if [ -n "${!var:-}" ]; then
             say "$var is a development setting and is refused when CI=true"
             exit 2
@@ -79,6 +80,10 @@ if [ "${CI:-}" = "true" ]; then
     done
     if [ "$MODE" = up ]; then say "--up is for local development and is refused when CI=true"; exit 2; fi
 fi
+
+# The leg's own stdout and stderr, kept on fds 8 and 9: the EXIT trap may run while a cell's
+# output is redirected to its log, and its messages belong on the leg's stderr.
+exec 8>&1 9>&2
 
 WORK="${MEDIATOR_LEG_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/didcomm-interop-mediator.XXXXXX")}"
 mkdir -p "$WORK/logs" "$WORK/cells" "$WORK/obs"
@@ -126,7 +131,7 @@ deadline_guard() {
       kill -TERM "$2" 2>/dev/null
       sleep 5 & s=$!
       wait "$s"
-      kill -KILL "$2" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+      kill -KILL "$2" 2>/dev/null ) </dev/null >/dev/null 2>&1 8>&- 9>&- &
     GUARD_PID=$!
 }
 stop_guard() { kill -TERM "$1" 2>/dev/null; wait "$1" 2>/dev/null; return 0; }
@@ -154,7 +159,7 @@ wait_for() {
     ( sleep "$secs" & s=$!
       trap 'kill "$s" 2>/dev/null; exit 0' TERM
       wait "$s"
-      : > "$flag" ) </dev/null >/dev/null 2>&1 &
+      : > "$flag" ) </dev/null >/dev/null 2>&1 8>&- 9>&- &
     local guard=$!
     while :; do
         "$@"; rc=$?
@@ -173,6 +178,9 @@ wait_for() {
 VPY=""            # the venv interpreter, once it exists
 DOCKER_OK=0       # 1 once the daemon answered: cleanup then removes our labelled objects
 LEG_FAILED=0
+SUMMARY_WRITTEN=0 # 1 once mediator-leg.md holds this run's outcome
+CELLS_STARTED=0
+HEADER=""
 copy_summary() {
     if [ -n "${INTEROP_SUMMARY_DIR:-}" ]; then
         mkdir -p "$INTEROP_SUMMARY_DIR"
@@ -188,6 +196,7 @@ summary_header() {
 env_unsuitable() { # exit 2: nothing ran
     say "$*"
     { summary_header; echo "**Leg not run (environment unsuitable: $*)** — cells not run: $(plan_count)"; } > "$SUMMARY"
+    SUMMARY_WRITTEN=1
     copy_summary
     exit 2
 }
@@ -195,6 +204,7 @@ setup_fail() { # $1=step $2=reason → exit 1
     local reason; reason="$(printf '%s' "$2" | tr '\n\t|' '  /' | cut -c1-400)"
     say "set-up failed at $1: $reason"
     { summary_header; echo "**Leg aborted at set-up ($1: $reason)** — cells not run: $(plan_count)"; } > "$SUMMARY"
+    SUMMARY_WRITTEN=1
     LEG_FAILED=1
     exit 1
 }
@@ -202,10 +212,33 @@ setup_fail() { # $1=step $2=reason → exit 1
 # ── cleanup ───────────────────────────────────────────────────────────────────────────────
 SERVE_PID=""
 WATCHDOG_PID=""
+# The dotnet mediator (started later, for R-1 / R-2) stops on stdin EOF: close fd 7, wait 15 s,
+# then SIGTERM, then SIGKILL.
+serve_gone() { ! kill -0 "$SERVE_PID" 2>/dev/null; }
+stop_serve() {
+    [ -n "$SERVE_PID" ] || return 0
+    exec 7>&- 2>/dev/null
+    if ! wait_for 15 "mediator-serve exit after stdin EOF" serve_gone; then
+        kill -TERM "$SERVE_PID" 2>/dev/null
+        wait_for 5 "mediator-serve exit after SIGTERM" serve_gone || kill -KILL "$SERVE_PID" 2>/dev/null
+    fi
+    wait "$SERVE_PID" 2>/dev/null
+    SERVE_PID=""
+    return 0
+}
+# render_summary: the cells table, observations and totals → mediator-leg.md (+ JSON); the
+# totals line(s) in $WORK/totals.txt.
+render_summary() {
+    "$VPY" -I "$MED/render_summary.py" render --mode "$MODE" --cells "$CELLS_TSV" --obs-dir "$WORK/obs" \
+        --wallet-obs "$WORK/cells/observations/wallet-observations.json" --md "$SUMMARY" --json "$OBS_JSON" \
+        --header "$HEADER" >"$WORK/totals.txt" 2>>"$WORK/logs/render.log"
+}
 cleanup() {
     local rc=$?
     trap - EXIT INT TERM
+    exec 1>&8 2>&9
     [ -n "$WATCHDOG_PID" ] && stop_guard "$WATCHDOG_PID"
+    [ -s "$WORK/logs/watchdog.log" ] && cat "$WORK/logs/watchdog.log" >&2
     stop_serve
     if [ "$DOCKER_OK" = 1 ]; then
         local id name
@@ -225,10 +258,30 @@ cleanup() {
         fi
     fi
     [ "$rc" = 0 ] || LEG_FAILED=1
+    if [ "$SUMMARY_WRITTEN" = 0 ]; then
+        # Stopped before its summary (a signal, the watchdog, a crash): say so, with the cells that
+        # completed, so the artifact never shows a stale or missing outcome.
+        if [ "$CELLS_STARTED" = 1 ] && [ -n "$VPY" ] && render_summary; then
+            echo >>"$SUMMARY"
+            echo "**Leg stopped (exit $rc) before it finished** — the table lists only the cells that completed." >>"$SUMMARY"
+        else
+            { summary_header; echo "**Leg stopped (exit $rc) during set-up** — cells not run: $(plan_count)"; } >"$SUMMARY"
+        fi
+    fi
     if [ "$LEG_FAILED" = 1 ] && [ -n "${INTEROP_SUMMARY_DIR:-}" ]; then
+        # The uploaded logs go out with the private values of this run redacted: Identus logs its
+        # (per-run, throwaway) private keys at start-up, and the Mongo root password is per run.
+        local redact=() value file
+        for value in $(cat "$WORK/identus-keys.env" "$WORK/identus-px-keys.env" "$WORK/mongo-root.env" 2>/dev/null |
+                       grep -E '^(KEY_[A-Z]+_D|MONGO_INITDB_ROOT_PASSWORD)=' | cut -d= -f2); do
+            redact+=(-e "s/$value/<redacted>/g")
+        done
         mkdir -p "$INTEROP_SUMMARY_DIR/mediator-logs"
-        cp "$WORK"/logs/*.log "$INTEROP_SUMMARY_DIR/mediator-logs/" 2>/dev/null
-        cp "$WORK"/serve-*/stderr.log "$INTEROP_SUMMARY_DIR/mediator-logs/" 2>/dev/null
+        for file in "$WORK"/logs/*.log "$WORK"/serve-*/stderr.log; do
+            [ -f "$file" ] || continue
+            sed ${redact[@]+"${redact[@]}"} "$file" >"$INTEROP_SUMMARY_DIR/mediator-logs/$(basename "$(dirname "$file")")-$(basename "$file")"
+        done
+        rmdir "$INTEROP_SUMMARY_DIR/mediator-logs" 2>/dev/null # nothing to upload (e.g. Docker absent)
     fi
     copy_summary
     exit "$rc"
@@ -242,8 +295,12 @@ command -v docker >/dev/null 2>&1 || env_unsuitable "no docker CLI on PATH"
 command -v curl >/dev/null 2>&1 || env_unsuitable "no curl on PATH"
 command -v dotnet >/dev/null 2>&1 || env_unsuitable "no dotnet on PATH"
 command -v git >/dev/null 2>&1 || env_unsuitable "no git on PATH"
-DOCKER_SERVER="$(with_deadline 30 docker info --format '{{.ServerVersion}}' 2>"$WORK/logs/docker-info.err")" ||
-    env_unsuitable "the Docker daemon did not answer within 30 s ($(tail -1 "$WORK/logs/docker-info.err" 2>/dev/null))"
+DOCKER_SERVER="$(with_deadline 30 docker info --format '{{.ServerVersion}}' 2>"$WORK/logs/docker-info.err")"
+case $? in
+    0) ;;
+    143) env_unsuitable "the Docker daemon did not answer within 30 s" ;;
+    *) env_unsuitable "the Docker daemon is unreachable ($(tail -1 "$WORK/logs/docker-info.err" 2>/dev/null))" ;;
+esac
 [ -n "$DOCKER_SERVER" ] || env_unsuitable "the Docker daemon gave no version"
 DOCKER_OK=1
 say "Docker server $DOCKER_SERVER"
@@ -275,7 +332,18 @@ LEFTOVERS="$(docker ps -a --filter label=org.didcomm-dotnet.interop-leg --format
 [ -n "$LEFTOVERS" ] && say "warning: containers of an earlier mediator leg are still present (not touched): $(echo $LEFTOVERS)"
 
 # Leg watchdog: the whole leg is a hang guard of 1800 s (the CI job allows 60 min for three legs).
-if [ "$MODE" != up ]; then deadline_guard 1800 $$; WATCHDOG_PID=$GUARD_PID; fi
+# It TERMs the leg, then the leg's children, so a hung foreground command returns and the EXIT
+# trap's cleanup runs (it never KILLs the leg: that would skip the cleanup).
+leg_watchdog() {
+    ( sleep "$2" & s=$!
+      trap 'kill "$s" 2>/dev/null; exit 0' TERM
+      wait "$s"
+      echo "mediator leg: the $2 s watchdog fired; stopping the leg" >"$WORK/logs/watchdog.log"
+      kill -TERM "$1" 2>/dev/null
+      command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$1" ) </dev/null >/dev/null 2>&1 8>&- 9>&- &
+    WATCHDOG_PID=$!
+}
+[ "$MODE" != up ] && leg_watchdog $$ "${MEDIATOR_LEG_DEBUG_WATCHDOG:-1800}"
 
 # ── set-up: venv, tools, files ────────────────────────────────────────────────────────────
 STEP_T0=$SECONDS
@@ -526,7 +594,8 @@ frames_above() { [ "$(binary_frames "$1")" -gt "$2" ]; }
 SERVE_HTTP="" SERVE_WS="" SERVE_DID="" SERVE_DIR=""
 serve_ready() {
     kill -0 "$SERVE_PID" 2>/dev/null || return 3
-    [ -s "$SERVE_DIR/ready.json" ] && [ -n "$(json_get "$SERVE_DIR/ready.json" http)" ]
+    [ -s "$SERVE_DIR/ready.json" ] && [ -n "$(json_get "$SERVE_DIR/ready.json" http)" ] &&
+        [ -n "$(json_get "$SERVE_DIR/ready.json" ws)" ] && [ -n "$(json_get "$SERVE_DIR/ready.json" did)" ]
 }
 start_serve() { # $1=tag, rest: extra mediator-serve options
     local tag="$1"; shift
@@ -535,7 +604,7 @@ start_serve() { # $1=tag, rest: extra mediator-serve options
     mkfifo "$SERVE_DIR/stdin" || return 1
     # stdin is a FIFO held open on fd 7: the mediator stops when the leg closes it or dies.
     "$INTEROP_CLI" mediator-serve --mediator "$WORK/dotnet-medsvc.json" --ready-file "$SERVE_DIR/ready.json" \
-        --max-lifetime 900 "$@" <"$SERVE_DIR/stdin" >"$SERVE_DIR/stdout.log" 2>"$SERVE_DIR/stderr.log" &
+        --max-lifetime 900 "$@" <"$SERVE_DIR/stdin" >"$SERVE_DIR/stdout.log" 2>"$SERVE_DIR/stderr.log" 8>&- 9>&- &
     SERVE_PID=$!
     exec 7>"$SERVE_DIR/stdin"
     if ! wait_for 60 "mediator-serve ready.json" serve_ready; then
@@ -545,18 +614,6 @@ start_serve() { # $1=tag, rest: extra mediator-serve options
     SERVE_HTTP="$(json_get "$SERVE_DIR/ready.json" http)"
     SERVE_WS="$(json_get "$SERVE_DIR/ready.json" ws)"
     SERVE_DID="$(json_get "$SERVE_DIR/ready.json" did)"
-}
-serve_gone() { ! kill -0 "$SERVE_PID" 2>/dev/null; }
-stop_serve() {
-    [ -n "$SERVE_PID" ] || return 0
-    exec 7>&- 2>/dev/null
-    if ! wait_for 15 "mediator-serve exit after stdin EOF" serve_gone; then
-        kill -TERM "$SERVE_PID" 2>/dev/null
-        wait_for 5 "mediator-serve exit after SIGTERM" serve_gone || kill -KILL "$SERVE_PID" 2>/dev/null
-    fi
-    wait "$SERVE_PID" 2>/dev/null
-    SERVE_PID=""
-    return 0
 }
 
 if plan_needs R-1 || plan_needs R-2 || [ "$MODE" = up ]; then
@@ -575,6 +632,8 @@ SERVE_DID=$SERVE_DID
 WORK=$WORK
 EOF
     cat "$WORK/up.env"
+    { summary_header; echo "**--up (development): set up and torn down; no cells run**"; } >"$SUMMARY"
+    SUMMARY_WRITTEN=1
     say "up: press Enter (or close stdin) to tear everything down"
     read -r _ || true
     exit 0
@@ -931,6 +990,8 @@ run_cell() { # $1=id $2=sabotage
 }
 
 # ── run ───────────────────────────────────────────────────────────────────────────────────
+HEADER="didcomm-dotnet @ $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown) · Identus $IDENTUS_VERSION ($IDENTUS_IMAGE) · didcomm-python $DIDCOMM_PY_VERSION on $PY_VERSION · Docker $DOCKER_SERVER"
+CELLS_STARTED=1
 echo
 echo "mediator leg ($MODE): $(plan_count) cell run(s)"
 for entry in $PLAN; do
@@ -966,7 +1027,7 @@ c = int(out) if out.isdigit() else None
 json.dump({"container_ns": c, "host_ns_before": before, "host_ns_after": after,
            "offset_ms": None if c is None else round((c - (before + after) / 2) / 1e6, 1),
            "uncertainty_ms": round((after - before) / 2e6, 1)}, open(sys.argv[2], "w"), indent=2)' "$IDENTUS" "$C/o5.json"
-        obs O-5 "clock offset: Identus container vs host (docker exec date, midpoint of the call)" "bash" "E-23" "I-12" "$C/o5.json"
+        obs O-5-host "clock offset, host side: the Identus container's clock vs the host's (docker exec date, midpoint of the call)" "bash" "E-23" "I-12" "$C/o5.json"
 
         step "python recipient at Identus for O-10, O-11, O-14"
         ipeer mint --out "$C/py-w.json" >/dev/null && peer mint-routed --service-uri "$IDENTUS_DID" --out "$C/p.json" >/dev/null &&
@@ -988,7 +1049,7 @@ json.dump({"delivered_vs_python_inner_envelope": same,
            "delivery_please_ack": (pick.get("delivery_shape") or {}).get("please_ack"),
            "delivery_return_route": (pick.get("delivery_shape") or {}).get("return_route"),
            "ack": pick.get("ack")}, open(os.path.join(d, "o11.json"), "w"), indent=2)' "$C"
-        obs O-11 "Identus delivery: attachment vs the python inner envelope; please_ack / return_route on the delivery" "pickup3 + forward --inner-out" "E-31" "" "$C/o11.json"
+        obs O-11-python "Identus delivery to a python recipient: the attachment vs python's inner envelope; please_ack / return_route on the delivery; the unanswered messages-received" "pickup3 + forward --inner-out" "E-31,E-54" "" "$C/o11.json"
         "$VPY" -I -c 'import json, os, sys
 items = []
 for label, path in (("Identus delivery (M-3, python sees it)", sys.argv[1]), ("dotnet mediator delivery (R-1, python sees it)", sys.argv[2]), ("Identus delivery (observation run)", sys.argv[3])):
@@ -999,6 +1060,35 @@ for label, path in (("Identus delivery (M-3, python sees it)", sys.argv[1]), ("d
         items.append({"source": label, "encodings": None})
 json.dump(items, open(sys.argv[4], "w"), indent=2)' "$WORK/cells/M-3/pick.json" "$WORK/cells/R-1/pick.json" "$C/pick.json" "$C/o10.json"
         obs O-10 "delivery attachment encoding (alphabet, padding, strict decoders) as python sees it" "pickup3 meta" "E-22" "" "$C/o10.json"
+
+        step "O-7 one page of one recipient (the shipped client, in M-1's enrol)"
+        if [ -f "$WORK/cells/M-1/w.json" ]; then
+            json_get "$WORK/cells/M-1/w.json" observed.query_limit_1 >"$C/o7.json"
+        else
+            echo '"not measured: M-1 did not run"' >"$C/o7.json"
+        fi
+        obs O-7 "QueryRecipientsAsync(Limit 1, Offset 0) with two DIDs registered: DIDs returned, pagination" "shipped MediationClient (M-1 enrol)" "E-35" "I-3" "$C/o7.json"
+
+        step "O-16 a second account adds a DID the M-1 wallet registered"
+        local taken; taken="$(json_get "$WORK/cells/M-1/w.state.json" routedDid)"
+        if [ -n "$taken" ]; then
+            ipeer mint --out "$C/py-second.json" >/dev/null &&
+            peer cm2-enrol --identity "$C/py-second.json" --mediator "$IDENTUS_DID" --url "$IDENTUS_URL" --register "$taken" \
+                --expect-update-result any --out "$C/o16.enrol.json"
+            "$VPY" -I -c 'import json, sys
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, ValueError) as ex:
+    record = {"error": str(ex)}
+step = next((s for s in record.get("steps", []) if s.get("name") == "keylist-update"), {})
+json.dump({"keylist_update_http_status": step.get("status"), "elapsed_ms": step.get("elapsed_ms"),
+           "body_bytes": step.get("body_bytes"), "reply_type": (step.get("reply") or {}).get("type"),
+           "updated": record.get("updated"), "cm2_enrol_error": record.get("error")}, open(sys.argv[2], "w"), indent=2)' \
+                "$C/o16.enrol.json" "$C/o16.json"
+        else
+            echo '"not measured: M-1 did not run"' >"$C/o16.json"
+        fi
+        obs O-16 "a second account adds a DID another account registered: the keylist-update result (FCFS, ADV-1)" "python cm2-enrol (CM 2.0 by hand)" "E-59" "" "$C/o16.json"
 
         step "O-14 forward to an unregistered next"
         stranger="$(ipeer mint --out "$C/stranger.json")"
@@ -1037,14 +1127,13 @@ json.dump({"attempt": attempt, "wallet_exit": int(sys.argv[2]),
           open(sys.argv[5], "w"), indent=2)' \
                     "$C/o1.json" "$WALLET_RC" "$before" "$(binary_frames "$IDENTUS")" "$C/o1.value.json"
                 obs O-1 "our client over WebSocket with defaults against Identus: outcome and cause" "ws-attempt + Identus log" "E-53" "" "$C/o1.value.json"
+                # Triggers (the wallet's contract): NAME.forward.json, a forward to Identus for the
+                # observer's routed DID, and NAME.inner.json, the envelope inside it; the probe posts
+                # each once and compares the delivered attachment with the inner envelope (O-11).
                 mkdir -p "$C/triggers"
                 local routed; routed="$(json_get "$C/obs.state.json" routedDid)"
-                local i=1
-                while [ "$i" -le 12 ]; do
-                    python_forward "$routed" "$IDENTUS_DID" "t$i" && cp "$C/t$i.fwd.json" "$C/triggers/good-forward-$i.json"
-                    i=$((i + 1))
-                done
-                python_forward "$stranger" "$IDENTUS_DID" tu && cp "$C/tu.fwd.json" "$C/triggers/unregistered-next.json"
+                python_forward "$routed" "$IDENTUS_DID" trig &&
+                    cp "$C/trig.fwd.json" "$C/triggers/python.forward.json" && cp "$C/trig.inner.json" "$C/triggers/python.inner.json"
                 wallet observe observe --state "$C/obs.state.json" --triggers "$C/triggers" --out "$C/wallet-observations.json" \
                     --allow-hosts 127.0.0.1
             fi
@@ -1057,11 +1146,12 @@ if [ "$MODE" = gate ] && [ -z "${MEDIATOR_LEG_ONLY:-}" ]; then
 fi
 
 # ── summary ───────────────────────────────────────────────────────────────────────────────
-WALLET_OBS="$WORK/cells/observations/wallet-observations.json"
-"$VPY" -I "$MED/render_summary.py" render --mode "$MODE" --cells "$CELLS_TSV" --obs-dir "$WORK/obs" \
-    ${WALLET_OBS:+--wallet-obs "$WALLET_OBS"} --md "$SUMMARY" --json "$OBS_JSON" \
-    --header "didcomm-dotnet @ $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown) · Identus $IDENTUS_VERSION ($IDENTUS_IMAGE) · didcomm-python $DIDCOMM_PY_VERSION on $PY_VERSION · Docker $DOCKER_SERVER" \
-    >"$WORK/totals.txt" 2>>"$WORK/logs/render.log" || { say "render_summary failed (see $WORK/logs/render.log)"; LEG_FAILED=1; }
+if render_summary; then
+    SUMMARY_WRITTEN=1
+else
+    say "render_summary failed (see $WORK/logs/render.log)"
+    LEG_FAILED=1
+fi
 echo
 cat "$WORK/totals.txt" 2>/dev/null
 if [ "$LEG_FAILED" = 1 ]; then

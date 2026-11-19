@@ -17,3 +17,10 @@ the Decentralized Identity Foundation (DIF):
 
 The specification's test vectors (Appendix A/B/C) are vendored verbatim into
 the test suite as required by the conformance plan.
+
+The live interop harness vendors one file from the Hyperledger Identus mediator
+(https://github.com/hyperledger-identus/mediator), unmodified:
+tools/interop-live/mediator/identus/initdb.js, from tag v1.2.1 (git blob
+5d9bd69def43d27dc835a55ec936fe0c2de91cc7), Copyright 2024 Input Output Global,
+licensed under the Apache License, Version 2.0. It initialises the MongoDB the
+harness runs the Identus mediator against and is not part of any package.
