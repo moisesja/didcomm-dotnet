@@ -1235,6 +1235,13 @@ Format per entry:
   runs are not a reproduction. In QA briefs, ask for one mutation per fixed test and one
   slow-but-correct run. See [[L-044]], [[L-060]] and [[L-045]].
 
+- **Corollary (#98, 2026-11-19): a test that parks thread-pool threads raises the pool floor first.**
+  Otherwise it starves every other test in the same process: on a 4-vCPU windows runner, two client
+  tests that blocked pool threads on a gate stalled the whole test host for about 10 s, and an
+  unrelated live-stream test's 10 s hang guard fired. To diagnose a hang-guard failure, read the TRX:
+  if the other test processes kept finishing tests while this one made no progress, the stall was
+  inside that one process (look for a neighbour that parks pool threads), not in the test that failed.
+
 ## L-066 — Put a decision to the owner from first principles, in everyday words, before the options.
 
 - **Lesson:** When an agent asks the owner to decide something, it first explains the mechanism in

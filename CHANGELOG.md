@@ -57,6 +57,15 @@ forward; this answer is the owner's choice (A1, 2026-11-19).
   (`ReplayProtectionOptions.RequireCreatedTime = false` in its own container, because Identus puts
   no timestamp on its answers) and what that gives up. Over HTTP nothing is needed.
 
+### Fixed — tests: two client tests no longer stall every test running beside them (#98, epic #88)
+
+No behaviour change. Two recipient-client tests (`DeliveredUnpackFix3Tests`, the blocked-thread case,
+and `DeliveredUnpackAdv4Tests`, the host code that throws) park thread-pool threads on purpose. On a
+4-vCPU windows runner they starved the test host for about 10 s, and an unrelated live-stream test's
+hang guard fired (CI run 44542264815). They now raise the pool floor before parking threads, as the
+other tests that do this already did. The failure was reproduced on demand (pool injection held back)
+and fixed in the tests only; the live-stream test that failed is unchanged.
+
 ### Added — Live interop: a mediator leg against the Hyperledger Identus mediator 1.2.1, and an adversarial review of the mediator service (#98, epic #88)
 
 The nightly live-interop job (`.github/workflows/interop-live.yml`, through
