@@ -243,5 +243,78 @@ PR #130 (head `b32e8e3` at opening; CI green on ubuntu and windows). Adversarial
 | Nonblocking: the observation text and the leg header still described binary frames | `ecc1daa` | text only; replied 7019662884 |
 
 - Who relies on the removed rule: no peer we test against. Ours stamps `thid` on every answer (`ResponseThreadId`); Identus answers carry `thid` = the request id (O-4).
-- **Open for the owner:** whether an answer without `thid` that arrives in the HTTP response to our own request still counts as that request's answer (return_route L5 vs L26 and threading L17). Unchanged until decided.
+- **Asked the owner:** whether an answer without `thid` that arrives in the HTTP response to our own request still counts as that request's answer (return_route L5 vs L26 and threading L17). Answered below.
 - Gate on `12600cb`: local Release build 0 warnings; Core 2574, Mediator 4646 (+8 skipped), Interop 1862 (+5 skipped); pack OK. CI 44597229930 green (ubuntu, windows). Live runs in the table above.
+
+### After review round 2: the owner's answer "2" (a reply without `thid` in the HTTP response)
+
+The owner's literal answer was "2": require `thid` on the HTTP-bound path too. The spec reading
+behind the change is ours, not the owner's: threading.md L17 ("Messages that do not share the
+same `thid` MUST NOT be considered a part of the same thread"); message_structure.md L130 (without
+`thid`, "the `id` property of the message MUST be treated as the value of the `thid`"). We read
+return_route L5 ("Messages can flow back in response to inbound messages over the same
+connection") as being about the transport, not the thread.
+
+- [x] Code (`c9254fa`): one rule on every path. A reply completes a pending request only when its
+  `thid` (a problem report's `pthid`) is the request's id. A thread-less message in an HTTP
+  response is dropped with the same rate-limited Warning (the answer type only), and the request
+  fails at once as unanswered (`TimeoutException`). A thread-less `delivery` there is not
+  acknowledged and never reaches a live stream. `Offer(snapshot, bool inHttpResponse)` replaces
+  the bound request, which nothing read any more. `LiveDeliveryStream.cs` is still byte-identical
+  to `a6b1ebe`.
+- [x] Tests (`c9254fa`), all on the manual clock with no waits:
+  - New theory over `mediate-grant`, `status`, `delivery` and a problem report without `pthid`:
+    `MediatorResponseMatcherTests.Bound_an_answer_without_thid_in_the_HTTP_response_to_its_own_request_completes_nothing_and_never_reaches_a_stream`.
+    The call fails at once, `ScheduledTimers` is 0, and the open stream gets nothing.
+  - Its counterpart `Bound_the_same_answer_with_its_requests_thid_in_the_HTTP_response_completes_it`.
+  - Mutation: restoring the HTTP exception fails 8 of the new cases; the threaded cases pass both ways.
+  - Existing tests that relied on the exception, changed on purpose:
+    - `MediatorResponseMatcherTests`: three tests are replaced by the two theories above:
+      - `Row3_bound_a_threadless_delivery_completes_the_HTTP_delivery_request_and_never_reaches_a_stream`;
+      - `Row4_bound_a_threadless_problem_report_fails_its_HTTP_request_with_the_code`;
+      - the `Row5_bound_a_threadless_answer_completes_its_HTTP_request_only_when_it_expects_the_type` theory.
+    - `MediatorClientLogLevelTests.An_HTTP_response_whose_threadless_answer_does_not_fit_its_request_is_a_Warning`
+      became `An_answer_without_a_thread_in_the_HTTP_response_to_its_own_request_is_a_Warning_naming_only_its_type`,
+      for an expected type and another type. The line names the type only.
+    - `PickupClientAckThreadingTests.Over_HTTP_an_empty_response_is_followed_by_a_status_request_whose_response_is_its_answer_with_or_without_thid`
+      became the theory `…_whose_response_answers_it_only_with_its_thid`. Without `thid`, the
+      result is `TimeoutException`.
+    - `MediatorClientChannelQa1Tests.Ten_thousand_mixed_operations_leave_no_slot_timer_or_active_count_behind`:
+      the HTTP answer (kind 1) carries the request's `thid`. The counts are unchanged.
+    - `MediatorClientCoordinateMediation20Tests`: the `omitThid: true` case of the enrol theory is
+      now `A_2_0_host_whose_answers_leave_out_thid_gets_no_answer_taken_and_the_mediate_request_fails_as_unanswered`.
+- [x] Server side, audited (read-only). Every reply this library sends to a request carries `thid`:
+  - the CM 3.0 and 2.0 answers, and every Pickup 3.0 `status` and `delivery`, set it through
+    `ResponseThreadId` (the request's `thid`, else its `id`);
+  - the Pickup problem report carries `pthid`;
+  - the Discover Features `disclose` and the trust-ping `ping-response` set it to the request's `id`.
+
+  The only thread-less message our mediator sends is the live-push `delivery`. HTTP sessions are
+  never live. InteropCli `mediator-serve` runs the real mediator. Nothing in this PR's scope needed
+  a fix.
+- Candidates outside this PR's scope (reported to the coordinator, not fixed):
+  - Discover Features `disclose` (`DiscoverFeaturesHandler.cs:84`) and `ping-response`
+    (`TrustPing.cs:81`) use the request's `id` even when the request carries a `thid`. That
+    differs from `ResponseThreadId`. Released; not reachable from our client.
+  - InteropCli `mediator-pickup` (`tools/InteropCli/Program.cs:460-468`) and
+    `samples/04-MediatorAgent/Program.cs:393` take `SendResult.Returned` as the answer without a
+    `thid` check. Released; both talk only to our mediator, which sets `thid`.
+  - `MessagePickup.CreateStatus` / `CreateDelivery` accept `thid = null` (public builders); no
+    call site in `src/` passes null.
+  - The MediatorWallet raw probe reads HTTP bodies without a thread check on purpose (it records
+    O-4).
+- [x] Docs (`d7dd389`): CHANGELOG lead entry; PRD FR-MED-04/09/10; the architecture map (matcher
+  table, the thread rule, AckAsync over HTTP, log levels, replays); the `PickupClient.AckAsync`
+  and `IMediatorExchange` docs. The cookbook does not mention it.
+- [x] Gate on `a98799b`:
+  - Local Release build: 0 warnings. Core 2574, Mediator 4652 (+8 skipped), Interop 1862 (+5 skipped); pack OK.
+  - CI 44623097393: green (ubuntu, windows).
+  - Live 44623104892: green. Mediator leg 10/10; python and jvm tables identical to nightly 44298708738.
+  - Negative controls 44623119035: the mediator leg 10/10 and 20/20 controls (0 broken), but the
+    run was red because the jvm leg's Maven fetch got a transient 404 (follow-up (c)).
+    Re-dispatched as 44624953631: green (python, jvm and the mediator leg 10/10, then 20/20
+    controls, 0 broken).
+- [x] PR comment for the reviewer (asks for a check of the threading.md L17 reading) and the #88
+  decision note; follow-up drafts (M-5 retry, `ObserverDelivery.FlushAsync` race, jvm fetch retry)
+  go to the coordinator, to be filed at merge.
+
