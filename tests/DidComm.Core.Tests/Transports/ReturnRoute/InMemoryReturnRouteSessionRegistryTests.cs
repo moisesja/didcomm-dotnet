@@ -22,6 +22,11 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
     /// <summary>The longest a gated subscriber ever blocks, so a failing run cannot hold a pool thread for good.</summary>
     private static readonly TimeSpan Cap = TimeSpan.FromSeconds(30);
 
+    // The registry's notifier runs on a pool thread, and most tests here either park it (a gated
+    // subscriber) or block their own pool thread until it delivers: two parties at most at once (see
+    // ThreadPoolFloor).
+    public InMemoryReturnRouteSessionRegistryTests() => ThreadPoolFloor.Raise(2);
+
     private static readonly AsyncLocal<string?> Ambient = new();
 
     private sealed class FakeSession : IReturnRouteSession
