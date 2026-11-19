@@ -5,7 +5,7 @@
     <RootNamespace>InteropCli</RootNamespace>
     <AssemblyName>InteropCli</AssemblyName>
     <IsPackable>false</IsPackable>
-    <Description>Live cross-implementation interop CLI (FR-IX-04/05): mints did:peer:2 identities via net-did, and packs/unpacks DIDComm v2 envelopes with the real DidCommClient + NetDidKeyService so shell harnesses (tools/interop-live) can round-trip messages against the SICPA reference implementations. It also runs a didcomm-dotnet mediator in process (mediator-pickup) so a counterpart-built forward travels through the real endpoint, pipeline and pickup queue. Usage: dotnet run --project tools/InteropCli -- mint|pack|unpack|unwrap-forward|mediator-pickup [options]</Description>
+    <Description>Live cross-implementation interop CLI (FR-IX-04/05): mints did:peer:2 identities via net-did, and packs/unpacks DIDComm v2 envelopes with the real DidCommClient + NetDidKeyService so shell harnesses (tools/interop-live) can round-trip messages against the SICPA reference implementations. It also runs a didcomm-dotnet mediator in process (mediator-pickup) so a counterpart-built forward travels through the real endpoint, pipeline and pickup queue, or until told to stop (mediator-serve) for a counterpart that enrols and picks up itself. Usage: dotnet run --project tools/InteropCli -- mint|pack|unpack|unwrap-forward|mediator-pickup|mediator-serve [options]</Description>
   </PropertyGroup>
 
   <!-- mediator-pickup hosts a Kestrel mediator: the ASP.NET Core shared framework provides the
