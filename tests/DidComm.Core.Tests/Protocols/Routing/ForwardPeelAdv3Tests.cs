@@ -226,7 +226,12 @@ public sealed class ForwardPeelAdv3Tests
         var outerBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(received.Message, DidComm.Json.DidCommJson.Default));
         var opened = await f.Client.UnpackAsync(received.Message.Attachments![0].Data.Json!.ToJsonString());
         InboundMessageSnapshot.TryGetFor(opened.Message, out var snapshot).Should().BeTrue();
-        long charge = outerBytes + snapshot.Utf8ByteCount;
+        // #98: each layer is charged its plaintext and its recipient kid list (2 bytes a character,
+        // 4 a kid), and the context its thread id (2 bytes a character): what the forward holds.
+        static long KidBytes(UnpackResult r) => r.AllRecipientKids.Sum(k => 2L * k.Length + 4);
+        long charge = outerBytes + KidBytes(received) + snapshot.Utf8ByteCount + KidBytes(opened)
+                      + 2L * received.Message.Id.Length;
+        charge.Should().Be(ChargeOf(received, opened));
 
         // Exactly at the budget: admitted, and both layers are charged while it waits for its 202.
         var exact = f.NewHandler(charge);

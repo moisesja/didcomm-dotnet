@@ -20,6 +20,16 @@ namespace DidComm.Protocols.Routing;
 /// DID — and swallowed; it never reaches the transport.
 /// </para>
 /// <para>
+/// <strong>An equal context, rebuilt.</strong> While a forward waits, the handler keeps only the
+/// bytes its byte budget charges, not the parsed message (#98). So the <c>context</c> a
+/// sink receives is the dispatch context rebuilt after the acknowledgement: equal to the one the
+/// handler was given, except that its <see cref="ProtocolContext.Received"/> is an equal
+/// <see cref="Facade.UnpackResult"/> with a new <c>Message</c> parsed from the same plaintext and a
+/// new recipient kid list of the same kids, not the object the unpack returned. A verified unpack's
+/// trust facts carry over, so <see cref="InboundObservation.FromUnpackResult(Facade.UnpackResult)"/>
+/// reads the same facts from it.
+/// </para>
+/// <para>
 /// <strong>DI rule.</strong> An implementation MUST NOT take <see cref="ProtocolHandlerRegistry"/>
 /// or <see cref="ProtocolDispatcher"/> in its constructor: the registry's factory constructs every
 /// <see cref="IProtocolHandler"/>, including <see cref="ForwardHandler"/>, which takes the sink —

@@ -310,9 +310,9 @@ Inbound forward:
    message id only (rate-limited per reason, below), one count on the outcome counter, a `null`
    reply, no problem report. `please_ack` is never read.
 4. An admitted forward reserves its place on a bounded channel inline (`DefaultCapacity` 1024
-   outstanding and `DefaultByteBudget` 64 MiB of their plaintext UTF-8 bytes, the exact size the
-   unpack path recorded in `InboundMessageSnapshot`; the newest is dropped beyond either bound,
-   decided on the request) and the handler returns `null`. The item is published to the pump only
+   outstanding and `DefaultByteBudget` 64 MiB of the bytes they hold, the charge described below;
+   the newest is dropped beyond either bound, decided on the request) and the handler returns
+   `null`. The item is published to the pump only
    once `ProtocolContext.Acknowledged` completes: the registry-aware `MapDidCommEndpoint` creates
    it per request, completes it from `Response.OnCompleted` (the 202 is committed) and cancels it
    on `RequestAborted` or a post-handler 400, passing it through the
@@ -327,22 +327,33 @@ Inbound forward:
    clock was read once, at step 3: the same instant fixes the `delay_milli` schedule
    (`ForwardProcessor.ResolveDelay`, under the processor's `MaxDelay` cap → `NotBefore`) carried in
    the queued item. The item is a `HeldForward` (the dispatcher's `ProtocolContext`, held as below)
-   plus that schedule; the request token is not stored. **What a waiting forward holds (#98, L-062):**
-   from admission until the pump takes it, the item keeps the bytes it is charged — the plaintext as
-   UTF-8, taken from `InboundMessageSnapshot` (`Detach`) before the registry lookup, so the inline
-   work is the same whether or not `next` is registered — plus the other members of the unpack
-   result and the context, which are small, and the forward's id bounded for logs. It never keeps the
-   parsed `Message`: a JSON attachment of many small entries parses to a DOM tens of times its
-   plaintext (about 50× for 190 000 one-character entries), so the 64 MiB would otherwise stand for
-   gigabytes. Measured with 32 flat and 4 many-entries forwards held behind their acknowledgement, the
-   heap they hold is 1.01× what they are charged (it was 3× and 45×;
-   `ForwardHandlerRetentionProbeTests`). One part is not charged: the envelope's recipient kid list
-   (`UnpackResult.AllRecipientKids`), which the sink receives with the unpack result.
-5. The pump first parses the held messages again (`HeldForward.Restore`, one forward at a time):
-   the context the sink gets is the one the handler was given, with a new `Message` of the same
-   content, and a verified unpack's snapshot is registered for that message with the same trust
-   fields, so `InboundObservation.FromUnpackResult` reads the same facts. A failure there could only
-   be the mediator's own (the plaintext parsed once already) and is `Faulted`. It then calls the
+   plus that schedule; the request token is not stored. **What a waiting forward holds, and its
+   charge (#98, L-062):** from admission until the pump takes it, the item holds, of what the wire
+   sized, the plaintext as UTF-8 bytes (from `InboundMessageSnapshot.Detach`), the envelope's
+   recipient kid list (`UnpackResult.AllRecipientKids`: any number of kids, of any length, the
+   sender's verbatim) in one string, and the thread id of the context's thread state (the
+   dispatcher's, shared with its thread store: the message's `thid` or `id`, which no FR-API-09 bound
+   caps); for a forward addressed to the mediator itself, also the plaintext and kid list of the
+   forward found inside it. The charge against the byte budget is exactly that (`HeldForward.Bytes`):
+   the plaintext's UTF-8 bytes, plus 2 bytes for each character of the kid lists and the thread id,
+   plus 4 bytes for each kid. It is taken before the registry lookup, so the inline work is the same
+   whether or not `next` is registered. Everything else the item holds is bounded and not charged:
+   the forward's id for logs (at most 128 characters); the kids the unpack resolved or holds, the
+   `from_prior` claims and the key bindings (FR-API-09: 4 096 characters a kid, 2 048 a DID); the
+   algorithm names, the envelope stack and the parsed `return_route` header; the context's shared
+   services — a few hundred bytes for a typical forward, under about 100 KB per forward with every
+   capped value at its limit. It never holds the parsed `Message`: a JSON attachment of many small entries parses to a
+   DOM tens of times its plaintext (about 45× for 190 000 one-character entries). Measured with
+   forwards held behind their acknowledgement, the heap they hold is 1.0–1.3× what they are charged:
+   32 flat, 4 many-entries and 8 forwards naming 192 kids of 4 000 characters (it was 3×, 45× and
+   about 9 000×; `ForwardHandlerRetentionProbeTests`).
+5. The pump first rebuilds the held results (`HeldForward.Restore`, one forward at a time). **The
+   sink gets an equal result, not the original object:** its context is the one the handler was
+   given except that `ProtocolContext.Received` is an equal `UnpackResult` rebuilt after the
+   acknowledgement, with a new `Message` parsed from the same plaintext and a new kid list of the same
+   kids; a verified unpack's snapshot is registered for that message with the same trust fields, so
+   `InboundObservation.FromUnpackResult` reads the same facts. A failure there could only be the
+   mediator's own (the plaintext parsed once already) and is `Faulted`. It then calls the
    internal `ForwardProcessor.ProcessAsync(UnpackResult, delay, notBefore)`
    overload with the schedule fixed at admission (the public overloads resolve it when called):
    parse, posture, attachment count, attachment decode (an attachment that decodes to no bytes is
@@ -393,8 +404,8 @@ than its carrier, because a `data.json` attachment is re-serialized); one more l
 `Dropped-Malformed`. Only the decrypting DID counts as "itself": another DID of the mediator
 named as `next` is looked up and dropped as unknown. The forward found inside is then looked up in
 the registry (the request's one lookup) and admitted in the received forward's place: the work item
-carries it (as its plaintext, like the received forward), the byte budget is charged with the
-received forward's plaintext plus its own, its
+carries it (as its plaintext and kid list, like the received forward), the byte budget is charged
+with the received forward's plaintext and kid list plus its own, and the thread id once, its
 not-before is the latest of the holds asked for by the received forward and by every opened layer
 — each capped and drawn at the receipt reading, never added, so a chain is held at most the cap —
 and its `expires_time`

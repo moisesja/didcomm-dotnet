@@ -229,7 +229,14 @@ public sealed class RoutingMediatorDiTests
         // JsonNode, which keeps every member and value (key order is not significant in a JWE).
         JsonNode.DeepEquals(JsonNode.Parse(Encoding.UTF8.GetString(result.OnwardPacked)), JsonNode.Parse(inner))
             .Should().BeTrue("pass-through mode relays the inner payload unchanged");
-        sink.Contexts.Single().Received.Should().BeSameAs(unpacked, "the sink sees the mediator's own unpack");
+        // The sink sees the mediator's own unpack, but not the same object (#98, L-062): while a
+        // forward waits it keeps only the bytes its budget charges, and the pump rebuilds the result
+        // after the acknowledgement. So: the same unpack outcome, the same message content, and the
+        // same verified facts an observer reads.
+        var seen = sink.Contexts.Single().Received;
+        seen.Should().BeEquivalentTo(unpacked, o => o.Excluding(r => r.Message), "the sink sees the mediator's own unpack outcome");
+        JsonSerializer.Serialize(seen.Message, DidCommJson.Default).Should().Be(JsonSerializer.Serialize(unpacked.Message, DidCommJson.Default), "with the same message");
+        InboundObservation.FromUnpackResult(seen).Should().BeEquivalentTo(InboundObservation.FromUnpackResult(unpacked), o => o.Excluding(x => x.Message), "and the same verified facts");
 
         // Bob: the relayed bytes are Alice's authenticated message.
         var bobUnpack = await client.UnpackAsync(Encoding.UTF8.GetString(result.OnwardPacked));
