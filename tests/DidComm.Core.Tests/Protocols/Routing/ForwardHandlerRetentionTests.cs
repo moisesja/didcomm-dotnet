@@ -311,6 +311,10 @@ public sealed class ForwardRetentionProbeCollection
 /// on a thread leave megabytes in its cache that are not the handler's. So K forwards run end to end
 /// (the pump's own parse warms up), then K more are held on the measuring thread before the baseline,
 /// with nothing in between that can move the test to another thread. The charge is a delta too.
+/// Opt-in (<c>DIDCOMM_ADV98_PROBES=1</c>): a heap delta also counts what other test classes in the same
+/// process allocate, so a full parallel run can push the ratio past its bound with no change in the
+/// handler. The deterministic tests above (what a waiting forward references, and its exact charge)
+/// are the regression; this probe is the measurement behind them.
 /// </remarks>
 [Collection(ForwardRetentionProbeCollection.Name)]
 [Trait("Category", "Adv98Probe")]
@@ -320,7 +324,7 @@ public sealed class ForwardHandlerRetentionProbeTests
 
     public ForwardHandlerRetentionProbeTests(ITestOutputHelper output) => _out = output;
 
-    [Theory]
+    [Adv98ProbeTheory]
     [InlineData("one flat string", 32)]
     [InlineData("190k tiny entries", 4)]
     [InlineData("192 long recipient kids", 8)]
@@ -378,5 +382,15 @@ public sealed class ForwardHandlerRetentionProbeTests
     {
         var unpacked = await f.Client.UnpackAsync(packed);
         (await f.Handler.HandleAsync(unpacked.Message, f.Context(unpacked, acknowledged), CancellationToken.None)).Should().BeNull();
+    }
+}
+
+/// <summary>A <see cref="TheoryAttribute"/> that runs only when <c>DIDCOMM_ADV98_PROBES=1</c>.</summary>
+internal sealed class Adv98ProbeTheoryAttribute : TheoryAttribute
+{
+    public Adv98ProbeTheoryAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("DIDCOMM_ADV98_PROBES") != "1")
+            Skip = "A heap measurement that other tests in the process disturb: set DIDCOMM_ADV98_PROBES=1 to run it.";
     }
 }
