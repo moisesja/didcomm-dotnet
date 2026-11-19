@@ -86,7 +86,10 @@ public sealed record RelayRecord(
 /// does not remove the problem, it only caps it: because this sample relays one forward at a time,
 /// a slow inbox still delays each forward queued behind it by up to the bound (a known limit). A
 /// production relay hands each forward to a bounded queue per recipient, served by its own
-/// workers, so a slow recipient only delays its own messages.
+/// workers, so a slow recipient only delays its own messages. That protects other recipients from a
+/// slow one, not from a failing one: the HTTP transport has one circuit breaker for every
+/// destination, so repeated failed attempts at one inbox (retries included) can open it, and while
+/// it is open every recipient's relay fails.
 /// </para>
 /// </remarks>
 public sealed class InboxRelaySink : IForwardSink
