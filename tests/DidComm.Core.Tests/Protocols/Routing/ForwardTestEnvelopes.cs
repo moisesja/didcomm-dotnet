@@ -1,6 +1,7 @@
 using DidComm.Facade;
 using DidComm.Jose;
 using DidComm.Messages;
+using DidComm.Protocols;
 using DidComm.Protocols.Routing;
 using DidComm.Resolution;
 using DidComm.Secrets;
@@ -82,6 +83,25 @@ internal static class ForwardTestEnvelopes
     /// </summary>
     public static UnpackResult AsEncryptedWithoutRecipientKid(Message message)
         => AsDecryptedByMediator(message) with { RecipientKid = null, AllRecipientKids = Array.Empty<string>() };
+
+    /// <summary>
+    /// What <see cref="ForwardHandler"/> charges a forward against its byte budget (#98, L-062), worked
+    /// out here from the documented unit, not read back from the handler: for the received forward and
+    /// the forward opened out of it, if any, the plaintext's UTF-8 bytes plus 2 bytes for each character
+    /// of the envelope's recipient kid list and 4 for each kid; and 2 bytes for each character of the
+    /// thread id the context's thread state holds (the dispatcher's: the message's thid, or its id).
+    /// </summary>
+    /// <param name="received">The received forward.</param>
+    /// <param name="opened">The forward found inside it, when it was addressed to the mediator itself.</param>
+    public static long ChargeOf(UnpackResult received, UnpackResult? opened = null)
+        => HeldBytesOf(received) + (opened is null ? 0 : HeldBytesOf(opened))
+           + 2L * (received.Message.Thid ?? received.Message.Id).Length;
+
+    private static long HeldBytesOf(UnpackResult unpacked)
+        => (InboundMessageSnapshot.TryGetFor(unpacked.Message, out var snapshot)
+               ? snapshot.Utf8ByteCount
+               : InboundMessageSnapshot.CreateFallback(unpacked).Utf8ByteCount)
+           + unpacked.AllRecipientKids.Sum(kid => 2L * kid.Length + 4);
 
     /// <summary>A facade over empty secrets and an empty key service: unpacks plaintext, resolves nothing.</summary>
     public static DidCommClient NewClient(DidCommOptions? options = null)

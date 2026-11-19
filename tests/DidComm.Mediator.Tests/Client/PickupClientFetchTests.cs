@@ -39,7 +39,7 @@ public sealed class PickupClientFetchTests
         request.Limit.Should().Be(7);
         request.RecipientDid.Should().BeNull();
         request.Spec.Should().BeSameAs(DeliveryReader.DeliveryRequestSpec);
-        request.Spec.ExpectsDelivery.Should().BeTrue("over HTTP a thid-less delivery must still complete the request");
+        request.Spec.ExpectsDelivery.Should().BeTrue("a delivery threaded to the delivery-request is its answer");
         request.Request.From.Should().Be(L);
         request.Request.To.Should().Equal(M);
         request.Request.CreatedTime.Should().BeNull("the send path stamps created_time (FR-RR-09), never the client");

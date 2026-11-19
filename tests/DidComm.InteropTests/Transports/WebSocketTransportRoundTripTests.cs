@@ -30,7 +30,7 @@ namespace DidComm.InteropTests.Transports;
 
 /// <summary>
 /// Phase 5 Checkpoints D + E — end-to-end FR-TRN-09/10 over WebSocket: Alice packs authcrypt
-/// for Bob and sends as one binary WebSocket message via
+/// for Bob and sends as one text WebSocket message via
 /// <see cref="WebSocketDidCommTransport"/>; the in-process <see cref="TestServer"/> accepts
 /// the WS, the <c>MapDidCommWebSocket</c> loop reassembles fragments + unpacks + dispatches
 /// to the receiver delegate. Includes the FR-TRN-09 reassembly assertion via the
@@ -74,7 +74,7 @@ public sealed class WebSocketTransportRoundTripTests
 
         var buffer = new byte[64 * 1024];
         var result = await socket.ReceiveAsync(buffer, default);
-        result.MessageType.Should().Be(WebSocketMessageType.Binary);
+        result.MessageType.Should().Be(WebSocketMessageType.Text, "the same-socket reply is one text frame (FR-TRN-09, #98)");
         result.EndOfMessage.Should().BeTrue();
 
         var replyEnvelope = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
@@ -347,7 +347,7 @@ public sealed class WebSocketTransportRoundTripTests
         var buffer = new byte[64 * 1024];
         var result = await socket.ReceiveAsync(buffer, timeout.Token);
 
-        result.MessageType.Should().Be(WebSocketMessageType.Binary, "the first frame back is the reply to the valid ping");
+        result.MessageType.Should().Be(WebSocketMessageType.Text, "the first frame back is the reply to the valid ping");
         result.EndOfMessage.Should().BeTrue();
         var reply = await client.UnpackAsync(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count));
         reply.Message.Type.Should().Be(TrustPing.ResponseType);

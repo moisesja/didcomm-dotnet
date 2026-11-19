@@ -206,13 +206,15 @@ public sealed class ForwardHandlerAdversarialTests
         h.Logger.Warnings.Should().BeEmpty();
     }
 
-    // ── Probe 7: the plaintext byte budget behind the 202 ─────────────────────────────────
+    // ── Probe 7: the byte budget behind the 202 ───────────────────────────────────────────
 
     [Fact]
     public async Task Byte_budget_drops_the_forward_that_would_exceed_it_and_recovers_when_slots_drain()
     {
+        // #98: the charge is what a waiting forward holds (plaintext, kid list, thread id), so the
+        // exact fit is computed with ChargeOf; every forward here has the same shape and charge.
         var sample = AsDecryptedByMediator(ForwardHandlerTests.Forward(Bob));
-        var size = InboundMessageSnapshot.CreateFallback(sample).Utf8ByteCount;
+        var size = ChargeOf(sample);
         await using var h = new Harness(capacity: 100, byteBudget: 2L * size);
         h.Sink.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -245,8 +247,9 @@ public sealed class ForwardHandlerAdversarialTests
     [Fact]
     public async Task A_forward_larger_than_the_whole_budget_is_always_dropped()
     {
+        // #98: one byte under the forward's whole charge (plaintext, kid list, thread id).
         var sample = AsDecryptedByMediator(ForwardHandlerTests.Forward(Bob));
-        var size = InboundMessageSnapshot.CreateFallback(sample).Utf8ByteCount;
+        var size = ChargeOf(sample);
         await using var h = new Harness(byteBudget: size - 1);
 
         var outcome = await h.Dispatch(AsDecryptedByMediator(ForwardHandlerTests.Forward(Bob)));
@@ -287,10 +290,11 @@ public sealed class ForwardHandlerAdversarialTests
     }
 
     [Fact]
-    public async Task A_really_unpacked_forward_is_charged_its_exact_plaintext_length_without_re_serialization()
+    public async Task A_really_unpacked_forward_is_charged_its_exact_plaintext_length_and_what_else_it_holds_without_re_serialization()
     {
         // The verified-at-unpack snapshot carries the exact plaintext; the handler must use it (no
-        // second serialization on the request path) and charge precisely that many UTF-8 bytes.
+        // second serialization on the request path) and charge precisely that many UTF-8 bytes, plus
+        // (#98) what else it holds of what the wire sized: the recipient kid list and the thread id.
         var mediatorKey = TestKeyMaterial.Generate(KeyType.X25519, Mediator + "#ka-1");
         var resolver = new SpyDidResolver(LengthCap.Doc(Mediator, keyAgreement: mediatorKey.PublicJwk));
         var mediator = new DidCommClient(new SpySecretsResolver(mediatorKey.PrivateJwk), new NetDidKeyService(resolver), new DidCommOptions());
@@ -305,7 +309,9 @@ public sealed class ForwardHandlerAdversarialTests
         await h.Dispatch(unpacked);
         await h.Sink.Started.Task.WaitAsync(Flush);
 
-        h.Handler.OutstandingBytes.Should().Be(Encoding.UTF8.GetByteCount(snapshot.PlaintextJson));
+        var kids = unpacked.AllRecipientKids.Should().ContainSingle().Subject;
+        h.Handler.OutstandingBytes.Should().Be(
+            Encoding.UTF8.GetByteCount(snapshot.PlaintextJson) + (2L * kids.Length + 4) + 2L * unpacked.Message.Id.Length);
         h.Sink.Gate.TrySetResult();
         await h.Handler.FlushAsync(Flush);
         h.Handler.OutstandingBytes.Should().Be(0);
@@ -387,7 +393,9 @@ public sealed class ForwardHandlerAdversarialTests
         var act = async () => await processor.ProcessAsync(AsDecryptedByMediator(forward));
 
         var failure = (await act.Should().ThrowAsync<MalformedMessageException>()).Which;
-        failure.InnerException.Should().BeOfType<ArgumentException>();
+        // #98: refused when the attachment is read, before any re-wrap is tried (it used to be the
+        // re-wrap's ArgumentException, mapped); the re-wrap mapping is pinned by the no-DID-part test.
+        failure.InnerException.Should().BeNull();
         failure.ShouldNotQuoteTheValue();
         failure.Message.Should().NotContain(Marker);
     }
@@ -407,19 +415,23 @@ public sealed class ForwardHandlerAdversarialTests
     }
 
     [Fact]
-    public async Task Pass_through_without_extra_keys_still_relays_non_JSON_bytes_opaquely()
+    public async Task Pass_through_without_extra_keys_refuses_a_payload_that_is_not_a_DIDComm_message_without_quoting_it()
     {
-        // Pins that the re-embed mapping does not reach into the verbatim path.
+        // #98: this test used to pin that pass-through relayed non-JSON bytes opaquely. A forward's
+        // attachment is a DIDComm message, so UTF-8 JSON; pass-through now checks that (without
+        // opening it) and refuses anything else, as rewrap and extra keys already did.
         var forward = new MessageBuilder()
             .WithType(ForwardConstants.ForwardTypeUri)
             .WithTo(Mediator)
             .WithBody(new JsonObject { ["next"] = Bob })
-            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = DidComm.Jose.Base64Url.EncodeUtf8("opaque") } })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = DidComm.Jose.Base64Url.EncodeUtf8("opaque " + Marker) } })
             .Build();
 
-        var result = await NewProcessor().ProcessAsync(AsDecryptedByMediator(forward));
+        var act = async () => await NewProcessor().ProcessAsync(AsDecryptedByMediator(forward));
 
-        Encoding.UTF8.GetString(result.OnwardPacked).Should().Be("opaque");
+        var failure = (await act.Should().ThrowAsync<MalformedMessageException>()).Which;
+        failure.ShouldNotQuoteTheValue();
+        failure.Message.Should().NotContain(Marker);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

@@ -164,11 +164,11 @@ public sealed class MediatorReplayAndSocketsQaTests
         return true;
     }
 
-    /// <summary>Start the close handshake and count the binary messages received before the close.</summary>
+    /// <summary>Start the close handshake and count the messages (text or binary) received before the close.</summary>
     private static async Task<int> DrainUntilCloseAsync(WebSocket socket)
     {
         await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", default);
-        var binary = 0;
+        var messages = 0;
         while (true)
         {
             WebSocketMessageType type;
@@ -178,12 +178,11 @@ public sealed class MediatorReplayAndSocketsQaTests
             }
             catch (WebSocketException)
             {
-                return binary; // the server dropped the connection
+                return messages; // the server dropped the connection
             }
             if (type == WebSocketMessageType.Close)
-                return binary;
-            if (type == WebSocketMessageType.Binary)
-                binary++;
+                return messages;
+            messages++;
         }
     }
 }

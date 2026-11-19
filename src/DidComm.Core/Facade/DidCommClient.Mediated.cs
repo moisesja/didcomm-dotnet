@@ -117,7 +117,7 @@ public sealed partial class DidCommClient
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The innermost unpack result, the innermost packed text, and how many forward layers were opened.</returns>
     /// <exception cref="ConsistencyException">A layer is a <c>forward</c> that is not a delivery re-wrapped for this agent (another <c>next</c>, authcrypt, signed, <c>from_prior</c>, another envelope inside, or not exactly one attachment), or its attachment has no data.</exception>
-    /// <exception cref="MalformedMessageException">More than the maximum number of forward layers, an attachment that is not valid base64url or decodes to nothing, or a layer that fails to unpack (FR-API-05 expiry and FR-API-06 size included).</exception>
+    /// <exception cref="MalformedMessageException">More than the maximum number of forward layers, an attachment that is not valid base64url, decodes to nothing or is not a UTF-8 JSON object, or a layer that fails to unpack (FR-API-05 expiry and FR-API-06 size included).</exception>
     /// <exception cref="DidCommException">Any other refusal of a layer's unpack.</exception>
     internal async Task<DeliveredUnpack> UnpackDeliveredAsync(string packed, CancellationToken ct)
     {

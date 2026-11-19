@@ -68,7 +68,10 @@ public sealed class DidCommOptions
     /// list. Comparison is by DID subject, so a DID URL entry matches its bare DID. Empty by
     /// default: unconfigured agents are still covered on encrypted envelopes via the decrypting
     /// kid, while signed-only and plaintext messages report
-    /// <see cref="RecipientAddressing.NotEvaluated"/>. Advisory only — never affects delivery.
+    /// <see cref="RecipientAddressing.NotEvaluated"/>. On unpack it only feeds that report: it never
+    /// decides whether a message is accepted or delivered. A mediator also uses it: under
+    /// <c>AddCoordinateMediation()</c> (and so <c>AddMediator()</c>), peers may not register these
+    /// DIDs as recipients (FR-MED-05).
     /// </summary>
     public IReadOnlyCollection<string> OwnIdentifiers { get; set; } = Array.Empty<string>();
 

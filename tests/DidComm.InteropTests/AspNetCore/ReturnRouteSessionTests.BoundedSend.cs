@@ -216,7 +216,7 @@ public sealed partial class ReturnRouteSessionTests
         var unpacked = await _alice.Client.UnpackAsync(Encoding.UTF8.GetString(frame));
         unpacked.Message.Id.Should().Be(message.Id);
         unpacked.SenderKid.Should().StartWith(_serverDid + "#");
-        socket.MessageTypes.Should().Equal(WebSocketMessageType.Binary);
+        socket.MessageTypes.Should().Equal(WebSocketMessageType.Text);
         _logs.Entries.Should().NotContain(e => e.Contains("over the caller's bound"));
     }
 

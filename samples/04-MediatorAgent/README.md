@@ -41,7 +41,9 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   limit: this sample relays one forward at a time, so a slow inbox still delays every forward
   queued behind it by up to that bound each. A production relay hands each forward to a bounded
   queue per recipient, served by its own workers, so a slow recipient only delays its own
-  messages.
+  messages. That protects other recipients from a slow one, not from a failing one: the HTTP
+  transport has one circuit breaker for every destination, so repeated failed attempts at one
+  inbox (retries included) can open it, and while it is open every recipient's relay fails.
 - **A registered recipient with no inbox** — Carol is registered but the host knows no inbox for
   her, so the relay hands her forward to the library's `NullForwardSink`, which drops it and logs
   the message id.

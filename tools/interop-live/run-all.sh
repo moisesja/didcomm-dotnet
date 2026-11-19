@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 #
-# Live cross-implementation interop, all legs (PRD §13.6 FR-IX-04/05/08).
+# Live cross-implementation interop, all legs (PRD §13.6 FR-IX-04/05/08; PRD §12 Phase 7).
 #
-# Runs the python leg (didcomm-dotnet ↔ sicpa-dlab/didcomm-python) and the JVM leg
-# (didcomm-dotnet ↔ sicpa-dlab/didcomm-jvm), builds InteropCli once and shares it, and
-# produces a combined markdown summary. A leg failure does not stop the other leg; the exit
-# code is nonzero if ANY leg failed. The nightly workflow (.github/workflows/interop-live.yml)
-# uploads $INTEROP_SUMMARY_DIR as its artifact.
+# Runs the python leg (didcomm-dotnet ↔ sicpa-dlab/didcomm-python), the JVM leg
+# (didcomm-dotnet ↔ sicpa-dlab/didcomm-jvm) and the mediator leg (didcomm-dotnet ↔ the
+# Hyperledger Identus mediator in Docker, #98), builds InteropCli once and shares it, and
+# produces a combined markdown summary. A leg failure does not stop the other legs; the exit
+# code is nonzero if ANY leg failed. The mediator leg builds its own wallet
+# (tools/interop-live/mediator/MediatorWallet), so a break there fails that leg only. The
+# nightly workflow (.github/workflows/interop-live.yml) uploads $INTEROP_SUMMARY_DIR as its
+# artifact.
 #
 # Usage: bash tools/interop-live/run-all.sh
 #   INTEROP_SUMMARY_DIR  where the per-leg + combined summaries land
@@ -19,7 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 export INTEROP_SUMMARY_DIR="${INTEROP_SUMMARY_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/didcomm-interop-summary.XXXXXX")}"
 mkdir -p "$INTEROP_SUMMARY_DIR"
 
-# Build the didcomm-dotnet side once; both legs reuse it.
+# Build the didcomm-dotnet side once; every leg reuses it.
 set -e
 dotnet build "$REPO_ROOT/tools/InteropCli/InteropCli.csproj" -c Release --nologo -v quiet >&2
 export INTEROP_CLI="$REPO_ROOT/tools/InteropCli/bin/Release/net10.0/InteropCli"
@@ -37,6 +40,12 @@ echo "=== jvm leg ==="
 bash "$SCRIPT_DIR/run-jvm-leg.sh"
 if [ $? -eq 0 ]; then LEG_STATUS+=("jvm: PASS"); else LEG_STATUS+=("jvm: FAIL"); OVERALL=1; fi
 
+echo
+echo "=== mediator leg ==="
+bash "$SCRIPT_DIR/run-mediator-leg.sh"
+MEDIATOR_EXIT=$?
+if [ "$MEDIATOR_EXIT" -eq 0 ]; then LEG_STATUS+=("mediator: PASS"); else LEG_STATUS+=("mediator: FAIL (exit $MEDIATOR_EXIT)"); OVERALL=1; fi
+
 COMBINED="$INTEROP_SUMMARY_DIR/summary.md"
 {
     echo "# Live cross-implementation interop (FR-IX-04/05)"
@@ -45,7 +54,7 @@ COMBINED="$INTEROP_SUMMARY_DIR/summary.md"
     echo
     for status in "${LEG_STATUS[@]}"; do echo "- $status"; done
     echo
-    for leg in python-leg jvm-leg; do
+    for leg in python-leg jvm-leg mediator-leg; do
         if [ -f "$INTEROP_SUMMARY_DIR/$leg.md" ]; then
             cat "$INTEROP_SUMMARY_DIR/$leg.md"
             echo

@@ -264,7 +264,7 @@ public sealed partial class ReturnRouteSessionTests : IAsyncLifetime
         foreach (var frame in socket.Frames)
             types.Add((await _alice.Client.UnpackAsync(Encoding.UTF8.GetString(frame))).Message.Type);
         types.Should().Equal(TestType("p1"), TestType("p2"), TestType("p3"));
-        socket.MessageTypes.Should().AllSatisfy(t => t.Should().Be(WebSocketMessageType.Binary));
+        socket.MessageTypes.Should().AllSatisfy(t => t.Should().Be(WebSocketMessageType.Text));
 
         (await session.StopAsync()).Should().BeTrue();
         socket.CloseOutputs.Should().BeEmpty("only an eviction sends a close frame from the writer");

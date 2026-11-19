@@ -96,6 +96,34 @@ public sealed class DiscoverFeaturesClientTests
         }
     }
 
+    private static (DiscoverFeaturesClient Client, TaskCompletionSource<Message> Sent) LoggedClient(ILogger<DiscoverFeaturesClient> logger)
+    {
+        var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new DiscoverFeaturesClient((message, _, _) => { sent.TrySetResult(message); return Task.CompletedTask; }, logger);
+        return (client, sent);
+    }
+
+    /// <summary>One captured line: its level, the rendered text and every structured value.</summary>
+    private sealed record LogEntry(LogLevel Level, string Formatted, string Everything);
+
+    /// <summary>A logger that keeps every line it is given, at every level.</summary>
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<LogEntry> _entries = new();
+        public IReadOnlyList<LogEntry> Entries => _entries.ToArray();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var formatted = formatter(state, exception);
+            var values = state is IEnumerable<KeyValuePair<string, object?>> pairs
+                ? string.Join("\n", pairs.Select(p => p.Key + "=" + p.Value))
+                : string.Empty;
+            _entries.Enqueue(new LogEntry(logLevel, formatted, formatted + "\n" + values));
+        }
+    }
+
     private sealed class CountingLogger<T> : ILogger<T>
     {
         private int _warnings;
@@ -306,18 +334,74 @@ public sealed class DiscoverFeaturesClientTests
         (await task).Should().ContainSingle(d => d.Id == "legit");
     }
 
-    [Fact]
-    public async Task Disclose_not_addressed_to_the_query_requester_is_ignored()
+    // ---- `to` is advisory (DIDComm v2.1 message_structure: a recipient SHOULD check it, MUST NOT
+    //      refuse a message over it, SHOULD warn; an absent `to` means "you are the only recipient") ----
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_disclose_without_a_to_header_completes_the_query_without_a_warning(bool emptyList)
     {
-        var client = Client(out var sent);
+        var logger = new RecordingLogger<DiscoverFeaturesClient>();
+        var (client, sent) = LoggedClient(logger);
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
-        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
+        var query = await sent.Task.WaitAsync(SyncTimeout);
+        var disclose = Disclose(query.Id, disclosures: Legit());
+        disclose.Message.To = emptyList ? new List<string>() : null;
 
-        await Feed(client, Disclose(query.Id, to: Mallory, disclosures: Forged()));
-        task.IsCompleted.Should().BeFalse("a response for another local identity cannot answer Alice's query");
+        var claimed = ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(disclose));
 
+        claimed.Should().BeTrue("without a to header each recipient may assume it is the only one (L120)");
+        (await task.WaitAsync(SyncTimeout)).Should().ContainSingle(d => d.Id == "legit");
+        logger.Entries.Should().BeEmpty("an absent to is not a warning");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_disclose_whose_to_names_another_DID_completes_the_query_and_logs_one_warning_without_any_DID(bool encrypted)
+    {
+        // Encrypted: decrypted by Alice's own key (the binding that still holds). Signed only: the
+        // signature by Bob's key and the thread (a query id Alice's client minted) bind it.
+        var logger = new RecordingLogger<DiscoverFeaturesClient>();
+        var (client, sent) = LoggedClient(logger);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(SyncTimeout);
+        var disclose = encrypted
+            ? Disclose(query.Id, to: Mallory, recipientKid: $"{Alice}#key-1", disclosures: Legit())
+            : Disclose(query.Id, to: Mallory, senderKid: null, signerKid: $"{Bob}#sig-1", encrypted: false, disclosures: Legit());
+
+        var claimed = ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(disclose));
+
+        claimed.Should().BeTrue("a to that does not name the requester must not make it refuse the answer (L124)");
+        (await task.WaitAsync(SyncTimeout)).Should().ContainSingle(d => d.Id == "legit");
+        var warning = logger.Entries.Should().ContainSingle("one warning per such message (L124: SHOULD give a warning)").Subject;
+        warning.Level.Should().Be(LogLevel.Warning);
+        warning.Everything.Should().Contain(disclose.Message.Id, "the line names the message by its id");
+        foreach (var identifier in new[] { "did:", Alice, Bob, Mallory, $"{Alice}#key-1", "did:peer:bob#key-1", $"{Bob}#sig-1" })
+            warning.Everything.Should().NotContain(identifier, "the line carries no DID and no key id");
+    }
+
+    [Fact]
+    public async Task An_encrypted_disclose_decrypted_by_another_local_identity_is_ignored_even_when_its_to_names_that_identity()
+    {
+        // The realistic shape of a reply meant for another of the host's DIDs: addressed to it and
+        // decrypted by its key. The decrypting key, not `to`, decides; nothing is completed.
+        var logger = new RecordingLogger<DiscoverFeaturesClient>();
+        var (client, sent) = LoggedClient(logger);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(5));
+        var query = await sent.Task.WaitAsync(SyncTimeout);
+
+        var claimed = ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(
+            Disclose(query.Id, to: Mallory, recipientKid: $"{Mallory}#key-1", disclosures: Forged())));
+        var pendingAfter = task.IsCompleted;
         await Feed(client, Disclose(query.Id, disclosures: Legit()));
-        (await task).Should().ContainSingle(d => d.Id == "legit");
+
+        claimed.Should().BeFalse("the envelope was not decrypted by the requester");
+        pendingAfter.Should().BeFalse();
+        (await task.WaitAsync(SyncTimeout)).Should().ContainSingle(d => d.Id == "legit");
+        logger.Entries.Should().ContainSingle("only the refusal is logged, not an addressing warning")
+            .Which.Formatted.Should().Contain("envelope was not decrypted by the requester");
     }
 
     [Fact]
@@ -429,6 +513,7 @@ public sealed class DiscoverFeaturesClientTests
     [Fact]
     public async Task Disclosure_parsing_runs_after_the_inline_correlator_returns()
     {
+        ThreadPoolFloor.Raise(1); // the parser below parks a pool thread until the test lets it go
         var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
         var parserStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseParser = new ManualResetEventSlim();

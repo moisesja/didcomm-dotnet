@@ -6,6 +6,414 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — the mediator client: a reply without `thid` no longer completes a pending request on any path, the HTTP response to that request included (#98, the owner's answer "2", epic #88)
+
+**Behaviour change in `DidComm.Mediator.Client` (not yet published); no published package
+changes.** Over HTTP the mediator client used to take the message in the response to its request
+as that request's answer, with or without `thid`. It now takes it only when its `thid` (for a
+problem report, its `pthid`) is the request's id, as on a WebSocket. A message without one completes
+nothing: it is logged with the same rate-limited Warning as on a WebSocket, naming only the answer
+type, and the request fails at once with a `TimeoutException` ("got no answer in the HTTP
+response"; the mediator may have acted, and every request these clients send is safe to repeat). A
+`delivery` without `thid` in an HTTP response is not acknowledged, so the mediator delivers it
+again; it never reaches a live stream.
+
+- **Why.** One rule on every path. The owner chose to require `thid` here too (option 2 of the
+  question left open after PR #130's second review round). Our reading of DIDComm v2.1 behind it
+  (`docs/spec-files-v2.1-snapshot` at decentralized-identity/didcomm-messaging `c78bcc4`):
+  "Messages that do not share the same `thid` MUST NOT be considered a part of the same thread"
+  (`threading.md` L17); when `thid` is absent, "the `id` property of the message MUST be treated as
+  the value of the `thid`" (`message_structure.md` L130), so a reply without one is a thread of its
+  own; and "Any DIDComm message that continues a previously begun application-level protocol MUST
+  use a `thid` property that associates it with the prior context" (`problems.md` L55). The
+  return-route extension's "Messages can flow back in response to inbound messages over the same
+  connection" (L5) is about the transport, not the thread.
+- **Who could notice:** a mediator that answers without `thid` over HTTP, such as a Coordinate
+  Mediation 2.0 host that follows the protocol page's examples, which leave `thid` out. Its
+  requests now fail as unanswered. This library's mediator (Coordinate Mediation 3.0 and 2.0,
+  Message Pickup 3.0, Discover Features) and the Identus mediator 1.2.1 put the request's `thid` on
+  every answer; the live leg against Identus is unchanged.
+- **Unchanged:** threaded matching on every path; a `delivery` without `thid` received on its own
+  over a WebSocket is a live push; the live stream's code.
+
+### Changed — `DiscoverFeaturesClient` accepts an answer with no `to`, or whose `to` does not name the requester, with a warning; so does the mediator client (#98, owner decision C2, epic #88)
+
+**Behaviour change in a published package (`DidComm.Core`).** `DiscoverFeaturesClient` used to
+ignore a `disclose` that had no `to` header, or whose `to` did not name the DID that sent the
+query, so the query ran into its timeout. It now accepts both. DIDComm v2.1 says, on the `to`
+header (`docs/spec-files-v2.1-snapshot/message_structure.md` L120 and L124 at
+decentralized-identity/didcomm-messaging `c78bcc4`): "If the header is omitted, each recipient SHOULD
+assume they are the only recipient", and "the recipient SHOULD verify that their own identifier
+appears in the list. Implementations MUST NOT fail to accept a message when this is not the case,
+but SHOULD give a warning to their user". **Who could notice:** a host that relied on Discover
+Features ignoring such answers; those queries now complete instead of timing out. No public API
+changes.
+
+- **What still decides.** Identity stays bound to the keys, as the spec's transports section puts
+  it (`transports.md` L76): "The trust of each message MUST be associated with DIDComm encryption or signing, not from the
+  socket connection itself." A `disclose` still completes a query only when its envelope
+  authenticates the sender, every sender and signer key id has the DID of `from`, `from` is the DID
+  that was asked, and, when it is encrypted, the requester's own key decrypted it. Its `thid` must be
+  the id of the pending query, which the requester's client made up for that one query.
+- **The warning.** A `disclose` whose `to` does not name the requester completes the query and logs
+  one Warning. The line names only the message id (bounded, as the library's other lines do) and
+  the reason `NotAddressedToRequester`, never a DID or a key id. A `disclose` with no `to` logs
+  nothing.
+- **The mediator client** (`DidComm.Mediator.Client`, not yet published) treats `to` the same way.
+  An answer whose `to` does not name the DID that decrypted it is matched by its thread and its keys
+  as any other, with a rate-limited Warning that names only the answer type. An answer decrypted by
+  another of the host's DIDs is still refused, whatever its `to` says.
+- **Unchanged.** Unpacking still refuses an encrypted message whose `to` leaves out the DID whose
+  key decrypted it (FR-CONSIST-02), so for encrypted answers the relaxed check is reached only when
+  `to` is absent. The receive side of a return-route WebSocket still drops a message that another of
+  the host's DIDs decrypted (`LocalMismatch`), and the live stream never yields it. The live stream's
+  code is unchanged.
+- **Tests.** `DiscoverFeaturesClientTests`: a `disclose` with no `to` or an empty one completes the
+  query with no warning; one whose `to` names another DID completes it, encrypted and signed-only,
+  with exactly one Warning that holds no DID or key id; one decrypted by another of the host's DIDs
+  is still ignored, also when its `to` names that DID. `MediatorClientChannelAddressingTests`: the
+  same for the mediator client's matcher, the warning rate-limited like the channel's other lines.
+  `PickupClientLiveForeignPushTests`: a push shaped like Identus's (encrypted to another DID the
+  wallet holds, `to` naming it, with a `thid`, on the account DID's WebSocket) is dropped as
+  `LocalMismatch` and never yielded. The new acceptance tests fail on the code before this change.
+
+### Changed — Only DIDComm messages are passed on, and they go out as WebSocket text frames (#98, epic #88)
+
+Behaviour changes in the published packages:
+
+- **`DidComm.Core`, `ForwardProcessor`: pass-through refuses a forward whose attachment is not a
+  DIDComm message.** A DIDComm message is UTF-8 JSON with an object at the top level. Until now
+  pass-through relayed the attachment's bytes without reading them (rewrap and extra routing keys
+  already needed JSON). Now every mode checks the payload, without opening it (an encrypted
+  payload stays opaque), and refuses anything else with `MalformedMessageException` before it is
+  transformed or relayed.
+- **`DidComm.Transports.WebSocket`: a payload that is not valid UTF-8 is refused** with
+  `TransportException` before anything is written, on the pooled, return-route session and STOMP
+  paths. A connection that is already open keeps serving.
+- **`DidComm.Transports.WebSocket` and `DidComm.AspNetCore`: DIDComm messages are now sent as
+  WebSocket text frames, not binary.** That covers every DIDComm message these packages write to a
+  WebSocket: the client transport's sends (on its pooled sockets and on return-route session
+  sockets) and the server's same-socket replies and pushes, which include the mediator's live
+  deliveries. STOMP frames (`UseStomp`, FR-TRN-12) are still binary. The receive side has always
+  accepted both frame types, and still does.
+
+The parts of this release that are new follow the same rule. `DidCommClient.SendPackedAsync`
+refuses bytes that are not a DIDComm message with `ArgumentException` (quoting none of them) before
+anything is resolved or sent. The mediator's `ForwardHandler` refuses such a forward at intake,
+before it is queued, charged to the byte budget or stored: the sender gets the 202 every malformed
+forward gets, nothing is stored or relayed, the outcome is `Dropped-Malformed`, and one log line
+carries the bounded message id only. The spec does not say how a mediator answers an invalid
+forward; this answer is the owner's choice (A1, 2026-11-19).
+
+- **Who could notice:** only a host or a sender that passes on something that is not a DIDComm
+  message: a forward whose attachment decodes to bytes that are not UTF-8 JSON, or a call to
+  `SendPackedAsync` or the WebSocket transport with such bytes. A peer that accepts only binary
+  WebSocket frames would notice the text frames; none is known, and peers on 1.5.x are unaffected
+  in both directions.
+- **Why, from the specs:**
+  - A forward's `attachments` are "the DIDComm message(s) to send to the party indicated in the
+    `next` body attribute" (DIDComm v2.1, Routing). DIDComm messages have only `+json` encodings,
+    binary ones only "if future versions of this spec allow" (Message Structure). JSON exchanged
+    between systems MUST be UTF-8 (RFC 8259 §8.1).
+  - A WebSocket text frame carries UTF-8 (RFC 6455 §5.6), and a receiver must fail the whole
+    connection on one that is not (§8.1). A relay that passed such bytes on as a text frame broke
+    its next hop's connection and lost what came after; that reproduction is now a regression test.
+  - Interop: the Hyperledger Identus mediator and browser wallets (such as the Identus TypeScript
+    SDK) read only text frames; the mediator drops binary ones, so until now this library's client
+    could not talk to it over a WebSocket. The DIDComm v2.1 spec names no frame type. Owner decision
+    O-98-1 (2026-11-19).
+- **No public signature changed.** The refusals are documented on `ForwardProcessor.ProcessAsync`,
+  `DidCommClient.SendPackedAsync` and `WebSocketDidCommTransport.SendAsync`.
+- **Cookbook:** section CC now says what a wallet sets to use the Identus mediator over a WebSocket
+  (`ReplayProtectionOptions.RequireCreatedTime = false` in its own container, because Identus puts
+  no timestamp on its answers) and what that gives up. Over HTTP nothing is needed.
+
+### Fixed — tests: two client tests no longer stall every test running beside them (#98, epic #88)
+
+No behaviour change. Two recipient-client tests (`DeliveredUnpackFix3Tests`, the blocked-thread case,
+and `DeliveredUnpackAdv4Tests`, the host code that throws) park thread-pool threads on purpose. On a
+4-vCPU windows runner they starved the test host for about 10 s, and an unrelated live-stream test's
+hang guard fired (CI run 44542264815). They now raise the pool floor before parking threads, as the
+other tests that do this already did. The failure was reproduced on demand (pool injection held back)
+and fixed in the tests only; the live-stream test that failed is unchanged. The same happened once in the Core tests (run 44571350171): the return-route session registry's
+tests park the pool thread its notifier needs, and a busy neighbour held the rest; that class and one
+Discover Features test now raise the floor as well (`ThreadPoolFloor`), proved the same way.
+
+### Added — Live interop: a mediator leg against the Hyperledger Identus mediator 1.2.1, and an adversarial review of the mediator service (#98, epic #88)
+
+The nightly live-interop job (`.github/workflows/interop-live.yml`, through
+`tools/interop-live/run-all.sh`) has a third leg, `tools/interop-live/run-mediator-leg.sh`. It
+starts the Identus mediator 1.2.1 and its MongoDB in Docker, both pinned by image digest, and checks
+this library's mediator pieces against a mediator someone else wrote. No library code changed for
+the leg itself; the fixes it and the review led to have their own entries below.
+
+- **Our wallet through Identus, over HTTP.** A wallet that references only `DidComm.Mediator.Client`
+  and the transports asks Identus which Coordinate Mediation version it speaks, picks 2.0 with no
+  pin, enrols, registers two DIDs and lists them. didcomm-python then sends a forward through
+  Identus, and the wallet fetches it, checks it and sees the queue at 0. A burst of 12 is fetched
+  the same way.
+- **Our sender through Identus** to a didcomm-python recipient that enrolled with hand-written
+  Coordinate Mediation 2.0 messages.
+- **Proxies.** The same flow through a real forward proxy (squid) set as `TrustedProxy` on both
+  transports, with Identus reachable only through it; and with `HTTP_PROXY`, `HTTPS_PROXY` and
+  `ALL_PROXY` set, which the transports ignore.
+- **The other direction.** didcomm-python enrols with this library's mediator (new
+  `InteropCli mediator-serve`) using hand-written Coordinate Mediation 2.0, including the shapes the
+  Identus wallet SDK sends, and picks a message up with Message Pickup 3.0.
+- **Each cell can fail.** Every cell has a sabotaged twin that must fail for the expected reason;
+  the workflow's `negative_controls` input runs them. A test (`MediatorWalletBoundaryTests`) pins
+  the wallet's package boundary on every PR.
+- **Over WebSocket too.** Our wallet talks to Identus over a WebSocket directly and through the
+  proxy (status and fetch), now that DIDComm messages go out as text frames (entry above). Identus
+  stamps no `created_time` on its answers, so the wallet sets `RequireCreatedTime = false` for these
+  cells; what that gives up is in the cookbook (section CC).
+- **Recorded, not gated:** what Identus does that the specs leave open. It sends no `status` after
+  `messages-received` and answers such requests with an empty `202` after 3 s; it does not lease
+  fetched messages and ignores `limit`; it stamps no `created_time`; it refuses an envelope it has
+  already seen; our live stream's behaviour against it. The README lists them all, with the I-1..I-15
+  interop table from #99 re-checked against the pinned image.
+- **Not in the gate:** Blocktrust (incompatible with this spec-strict client, see #99) and the
+  Affinidi mediator (it enrols through its own authentication protocol, not Coordinate Mediation).
+- **Adversarial review.** Six passes over the mediator service (authorization and identifiers,
+  information leaks, resource exhaustion, sessions and acknowledgement, crypto integrity and replay,
+  transports and the proxied path). The fixes are the entries below; the regression tests are under
+  `tests/*/Adv98/`. The documented limits are now stated precisely (`docs/codebase-architecture.md`),
+  and `SECURITY.md` has a mediator threat model.
+- **Third-party file:** `tools/interop-live/mediator/identus/initdb.js` is Identus's MongoDB set-up
+  script, vendored unchanged (Apache-2.0; `NOTICE`).
+
+### Fixed — A mediator client that does not read its HTTP responses can no longer hold the forward queue or pile up copies of a delivery (#98, epic #88)
+
+Two ways a stranger could tie up a mediator by sending requests and never reading the answers,
+both found by the #98 adversarial review (D3-F3 and D3-F2). Both are in code that has not been
+released: the forward handler's wait for its 202 (#90) and the HTTP pickup answer (#91, #94). No
+public API changes, and no new `InternalsVisibleTo` grant. Hosts that map `MapDidCommEndpoint`
+without the routing mediator, and every `MapDidCommWebSocket` endpoint, behave exactly as before.
+
+- **A forward's 202 now has 10 seconds.** The mediator answers a forward with an empty 202 and
+  relays it only once that 202 has been handed to the connection. Until then the forward keeps its
+  place in one queue shared by every tenant (1 024 forwards, 64 MiB). A client that sent its
+  requests on one connection and never read the answers kept that place for as long as the
+  connection lived (over 10 minutes in the review's test; Kestrel's own limit would allow about 45),
+  and a stranger who enrolled itself could fill the whole queue, so every other tenant's forward was
+  dropped. Now, on the registry-aware HTTP endpoint (`MapDidCommEndpoint(pattern)`, and so
+  `MapDidCommMediator`), a 202 of the forward handler that is not handed over within 10 seconds of
+  the handler's return gives up its place (the forward is counted `Dropped-Unacknowledged`) and the
+  request is aborted, so the sender never receives a 202 for a forward that was not relayed. A 202
+  handed over in time is relayed once, as before. The rule is the same whether or not the forward's
+  `next` is registered, so it tells a sender nothing about who is registered. Only a write that is
+  still stalled is withdrawn: once the server has taken the 202, nothing that happens later takes
+  it back.
+- **A delivery nobody reads is cut off when its lease ends.** Over HTTP, `MapDidCommMediator`
+  answers a `delivery-request` with the messages in the 200 body and leases them for
+  `MessagePickupOptions.LeaseTimeout` (60 seconds). A client that never read that answer held it —
+  up to about 1 MiB for a 2 KB request — for as long as Kestrel allowed (about an hour), and every
+  time the lease ran out the same messages went into another held answer. Now a 200 that is not
+  handed over within the lease, counted from when the request was dispatched, is aborted: at most
+  one copy of a leased message is held at a time, and the messages are delivered again afterwards,
+  so nothing is lost.
+- **How.** One mechanism at the HTTP endpoint (`HttpResponseAcknowledgement`, internal). For these
+  two responses the endpoint writes, starts and completes the response itself
+  (`Response.CompleteAsync()`), and a one-shot timer on the container's `TimeProvider` (the system
+  clock when none is registered) watches that write. If the server has not taken the whole response
+  by the deadline, the timer first cancels the transport acknowledgement — so the forward handler
+  releases what it reserved whatever the server then does — and then calls `HttpContext.Abort()`.
+  Once the server has taken it, the response is handed over: the timer is disposed and the
+  acknowledgement completes, and nothing after that can withdraw it. The deadline only ever
+  withdraws a response whose write is still stalled. Each abort is counted on a rate-limited log
+  line (the first and every 1000th at Warning) that carries no wire value. Because these responses
+  are complete when the endpoint returns, middleware that runs after the endpoint can no longer
+  change them.
+- **Fixed again after review (PR #130, P1).** The first version ended the deadline only when the
+  acknowledgement's own `Response.OnCompleted` callback ran. Kestrel runs completion callbacks after
+  it has sent the response, one at a time and the last registered first, so a middleware that adds
+  slow cleanup in `OnCompleted` after the endpoint ran delays that callback. If the cleanup took
+  longer than the deadline, the deadline cancelled the acknowledgement and aborted the connection
+  although the client already had its 202, and the forward was dropped: a message lost after a
+  successful response. The same happened, without any deadline, when the client closed its
+  connection while such a cleanup still ran. Now the hand-over decides, as described above, so a
+  202 the client holds is always relayed, exactly once.
+- **What is left.** Within the 10 seconds a sender that does not read can still hold the queue's
+  bounds, and it can stall new connections again and again; rate limiting per client in front of
+  the mediator, and a closed enrolment policy, close that. Kestrel's own limits
+  (`MinResponseDataRate`, `MinRequestBodyDataRate`, `KeepAliveTimeout`, connection limits) still
+  decide everything else about slow or idle clients. A recipient on a link slower than
+  `MaxDeliveryBytes` per lease (1 MiB in 60 s, about 17 KB/s, at the defaults) cannot finish a full
+  delivery over HTTP any more: it asks for smaller batches, or the host raises the lease. "Operating
+  a mediator" in `docs/codebase-architecture.md` says so.
+- **Tests.** `MediatorAcknowledgementDeadlineTests` and `MediatorPickupResponseDeadlineTests` in the
+  interop tests hold responses unread on a TestServer and move a hand-driven `TimeProvider`: a
+  stranger's 1 024 held 202s, and its held 64 MiB, lose every reservation exactly at the deadline
+  and another tenant's forward is then relayed; a 202 handed over one tick before the deadline is
+  relayed exactly once and its timer is gone; an unknown and a registered `next` are aborted at the
+  same instant; a 202 no forward handler produced has no deadline; a held delivery is aborted at the
+  lease and served again, never two held at once, and one read a tick before the lease is kept. Six
+  fail on the code before this fix; the two cases of the guard that nothing else changed pass there.
+  `MediatorAcknowledgementDeadlineKestrelTests` runs on real Kestrel with a cleanup callback held
+  after the client has its response: a forward whose 202 the client holds is relayed exactly once
+  when the cleanup outlasts the deadline, with the connection kept open and with the client closing
+  it after reading, and a delivery the client has read is not aborted when the cleanup outlasts the
+  lease. All three fail on the first version. `HttpResponseAcknowledgementTests` pins the orders a
+  server cannot produce on demand: a write that finished wins over a deadline that fires before its
+  continuation ran, a write still pending at the deadline is aborted, and a later abort cannot take
+  back a response that was handed over. `MediatorResponseDeadlineKestrelProbeTests` (opt-in,
+  `DIDCOMM_ADV98_PROBES=1`) checks on real Kestrel that the abort ends a stalled socket: the
+  reservation went 10.0 s after the stall, and a 1 MB delivery with a 5 s lease was cut off at
+  5.0 s with its 10 messages still queued.
+
+### Fixed — the mediator no longer turns live delivery on over a WebSocket that the recipient has paused (FR-PICK-07, #98, epic #88)
+
+A recipient can pause its WebSocket with `return_route: none` (also `thread`, or a value nobody
+defines, which count as `none`). After that the mediator sends nothing on the socket until a later
+`return_route: all`. A `live-delivery-change` with `live_delivery: true` sent while paused was still
+applied, although its answer could not be sent. When `all` came back, the mediator pushed new
+messages to a recipient that had never been told live delivery was on, and the messages counted in
+that unsent status could only be picked up. The mediator package has not been released, so no
+released behaviour changes. No public API changes.
+
+- **Now:** a paused socket counts as a connection that cannot do live delivery, like HTTP. The answer
+  is the `e.m.live-mode-not-supported` problem report (which the paused socket does not carry
+  either), and the live flag is not touched. A flag that was already on stays on, and its pushes
+  resume with the next `all`. Turning live delivery off still works on a paused socket. A closed
+  socket is answered as before.
+- **Tests.** `D4LiveChangeOnDowngradedSessionTests` in the interop tests (from the #98 red team)
+  sends the change on a real WebSocket after `none`, and with the change itself carrying `none`,
+  `thread` or a malformed value; all four fail on the code before this fix. Two
+  `MessagePickupFlowTests` pin the problem report, and that a flag already on survives a pause.
+
+### Fixed — a forward waiting in the mediator is charged what it holds, and holds no parsed message (#98, epic #88)
+
+The mediator's forward handler limits the forwards that wait for their 202, or wait behind a slow
+sink, to 64 MiB. That limit counted only each forward's plaintext, but a waiting forward held more:
+
+- **Its parsed message.** A parsed JSON attachment is much bigger than its text: about 3 times for a
+  flat payload, and about 45 times for an attachment of many tiny entries (190 000 one-character
+  strings fit in one 1 MiB envelope).
+- **The envelope's list of recipient key ids** (`UnpackResult.AllRecipientKids`), which was not
+  counted at all. A sender chooses how many recipients it names and how long their key ids are, so a
+  forward with a few hundred bytes of plaintext could hold more than a megabyte of key ids.
+
+So the 64 MiB could stand for about 200 MiB to 3 GiB of memory, and any sender could fill it. The
+handler has not been released, so no released behaviour changes. No public API changes.
+
+- **What a waiting forward holds now, and what it is charged.** It holds its plaintext as UTF-8
+  bytes, its recipient key id list in one string, and its thread id (the dispatcher's thread state,
+  which keeps the message's `thid` or `id`; no length limit applies to those). The 64 MiB now counts
+  exactly that: the plaintext's UTF-8 bytes, plus 2 bytes for each character of the key id list and
+  the thread id, plus 4 bytes for each key id. A forward addressed to the mediator itself also holds,
+  and is charged for, the forward found inside it, as before. Everything else a forward holds has
+  a length limit already (key ids and DIDs, FR-API-09): a few hundred bytes for a typical forward,
+  under about 100 KB with every value at its limit. The
+  parsed message is no longer held: the pump parses it again, one forward at a time, just before it
+  processes the forward. Measured with forwards held behind their acknowledgement, the memory they
+  hold is 1.0 to 1.3 times what they are charged (it was 3 times for a flat payload, 45 times for
+  the many-entries one and about 9 000 times for a small forward naming 192 key ids of 4 000
+  characters).
+- **What changes for a sender.** A forward is charged a little more than before: its key id list
+  and its thread id, usually a few hundred bytes. A forward with a long key id list is now dropped as
+  `Dropped-Saturated` when that list does not fit, where before it was admitted for its plaintext.
+- **What changes for a sink.** `IForwardSink.AcceptAsync` gets an equal unpack result rebuilt after
+  the acknowledgement, not the object the unpack returned: a new `Message` with the same content, a
+  new key id list with the same key ids, and the same verified unpack facts for observers. The
+  forwards relayed, the bytes relayed and the order are the same.
+- **Tests.** `ForwardHandlerRetentionTests` (Core): a forward waiting for its acknowledgement, and one
+  queued behind a busy sink, keep neither the parsed message nor its attachment (checked with weak
+  references, for a verified and for a host-built unpack result). The sink gets an equal unpack
+  outcome and the same verified facts. A forward is charged its key id list and thread id, and the
+  sink gets the same key ids. Under a 64 KiB budget, a forward whose plaintext fits but whose key id
+  list does not is dropped as saturated. `ForwardHandlerRetentionProbeTests` (category `Adv98Probe`)
+  measures retained memory against the charge for the three shapes above and requires at most 2
+  times. These tests fail on the code before the change. Changed on purpose, for the new charge:
+  `ForwardHandlerAdversarialTests.Byte_budget_drops_the_forward_that_would_exceed_it_and_recovers_when_slots_drain`
+  and `.A_forward_larger_than_the_whole_budget_is_always_dropped` (the exact fit is the whole
+  charge), `.A_really_unpacked_forward_is_charged_its_exact_plaintext_length_and_what_else_it_holds_without_re_serialization`
+  (renamed; it expects the key id list and thread id too),
+  `ForwardPeelAdv3Tests.A_self_addressed_forward_is_charged_for_the_received_and_the_opened_forward_and_one_byte_over_is_dropped_inline`
+  (both layers' key id lists and the thread id), and `RoutingMediatorDiTests.Anoncrypt_forward_for_a_registered_recipient_reaches_the_sink_with_the_inner_payload`
+  (the sink's result is equal to the unpack's, no longer the same object).
+
+### Fixed — `PickupClient.AckAsync` and `FetchAsync` work with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
+
+Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated
+`status`, not that it must. The Identus mediator v1.2.1 removes the messages and sends nothing back
+(over HTTP, a 202 with an empty body). `AckAsync` required that status, so against Identus it always
+threw `TimeoutException`, although the messages had been removed: the client had turned a SHOULD
+into a MUST. The client has not been released, so no released behaviour changes. No public API
+changes: same signature, same `Task<PickupStatus>`.
+
+- **No status is not an error any more.** When the last `messages-received` of a call gets no
+  status, the client asks for one with a `status-request` and returns that status. Its count is the
+  confirmation that the acknowledgement was applied. An earlier chunk (the call sends 100 ids per
+  message) that gets no status is not asked about: the next chunk goes out, and the status after the
+  last one covers them all. A mediator that does send its status, like this library's, gets exactly
+  the requests it got before: one per 100 ids. A problem report or a malformed status is still a
+  `MediationProtocolException`.
+- **The same time limit.** A `messages-received` and the `status-request` after it share one
+  `MediatorClientOptions.RequestTimeout`; the `status-request` gets what is left, never a second
+  full timeout. Over HTTP the empty response shows at once that no status came. On a WebSocket,
+  silence looks the same as a slow answer, so the client waits half of `RequestTimeout` for the
+  status and then asks, in the other half. If the `status-request` is not answered either, the call
+  fails with a `TimeoutException` (the messages may still have been removed; acknowledging again is
+  harmless).
+- **An answer without `thid` that arrives on its own is no longer taken as an answer** (PR #130
+  review, rounds 1 and 2). On a WebSocket, a status the client stopped waiting for can still arrive
+  later. The mediator client used to take an answer without `thid` as the answer of the only
+  request of its mediator and DID that was waiting for that type. So a late status could complete
+  the wrong request: the next chunk of the same `AckAsync`, its `status-request`, or a later call
+  on the same container, such as a `GetStatusAsync` that then returned the count from before the
+  acknowledgement (50 instead of 0). DIDComm v2.1 rules this out: "All subsequent messages in a
+  thread MUST include a `thid` header that contains the same value as the `thid` set in the first
+  message of the thread. Messages that do not share the same `thid` MUST NOT be considered a part of
+  the same thread" (`threading.md` L17), and "Any DIDComm message that continues a previously begun
+  application-level protocol MUST use a `thid` property that associates it with the prior context"
+  (`problems.md` L55). Now an answer (a `status`, a grant, a `disclose`, …) that arrives outside the
+  HTTP response to its own request completes a request only when its `thid` names it; one without
+  `thid` completes none and is logged (a rate-limited Warning naming only the answer type).
+  **Who could notice:** a mediator that leaves `thid` out of its answers over a WebSocket. This
+  library's mediator and the Identus mediator put it on every answer. A thread-less `delivery` is
+  still a live push. Over HTTP the response to a request stayed its answer with or without `thid`
+  until the owner's answer "2"; the entry at the top of this section extends the rule to the HTTP
+  response. A first fix had only narrowed the window inside one `AckAsync` call; it is gone, the
+  rule replaces it.
+- **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
+  confirms an acknowledgement, and give the time rule and the `thid` rule. The mediator client's
+  matcher docs, the PRD (FR-MED-04, FR-MED-09) and the architecture map say that an answer without
+  `thid` completes no request (on any path since the entry at the top of this section).
+- **`FetchAsync` no longer logs a false warning over HTTP.** A fetch acknowledges what it returns
+  by itself and never reads the status that may follow. Against Identus every fetch logged the
+  Warning "Acknowledgement … failed (TimeoutException); the mediator delivers them again", although
+  the acknowledgement had been applied. Over HTTP an empty answer now counts as sent: nothing is
+  logged and nothing more is asked. A problem report, no response within `RequestTimeout`, or a
+  transport error is still logged as before, and the batch is returned either way. The `FetchAsync`
+  remarks say so.
+- **Not changed.** On a WebSocket a fetch's acknowledgement still waits up to `RequestTimeout` for
+  the status, and logs the acknowledgement as failed when none comes: there, silence looks the same
+  as a slow answer. The live stream's acknowledgement still expects the status too: against a
+  mediator that sends none it keeps the ids and sends them again after its back-off. That is left for
+  a separate decision.
+- **Tests.** `PickupClientAckWithoutStatusTests` in the interop tests runs the client against this
+  library's mediator with its answer to `messages-received` dropped (the Identus shape: a real HTTP
+  202 with an empty body), with one or both of two chunks unanswered, with the `status-request`
+  unanswered too, with a problem report, and unchanged (no extra request). Five of the seven fail on
+  the code before this fix with "got no answer in the HTTP response"; the two that pass there are the
+  unchanged mediator and the problem report, whose behaviour stays the same. The unit tests of the
+  same name pin the time rule on the test clock: half of `RequestTimeout` on a WebSocket, the rest of
+  it over HTTP, the call ending at exactly one `RequestTimeout`. `PickupClientFetchAckWithoutStatusTests`
+  does the same for a fetch: an empty 202 logs no failure and the next status shows the
+  acknowledgement applied (this one fails on the code before this fix); a problem report, no answer
+  within `RequestTimeout`, and a WebSocket with no status are still logged.
+  `PickupClientAckThreadingTests` runs `AckAsync` and the next calls over the real channel and its
+  matcher, with real authcrypted answers on the test clock: a late status without `thid` arriving
+  after a chunk was given up is taken neither by the next chunk, the `status-request`, nor the next
+  `GetStatusAsync` or `AckAsync` on the same channel (each returned 50 on the code before); a status
+  without `thid` is not taken by the only waiting request, and the same status with its `thid` is; a
+  mediator that answers each chunk in time with its `thid` gets one message per chunk; a mediator
+  whose statuses leave out `thid` is treated as one that sends none, and the call ends with
+  `TimeoutException` at one `RequestTimeout`; over HTTP a status without `thid` in the response
+  answers nothing either (since the entry at the top of this section). The matcher's own tests that pinned the thread-less fallback now pin its absence
+  (`MediatorResponseMatcherTests`, `MediatorClientChannelQa1Tests`, `MediatorClientChannelAdv1Tests`,
+  `MediatorClientLogLevelTests`).
+
 ### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll; the client's version question works with the Identus mediator (FR-MED-10, #99, epic #88)
 
 **Behaviour change for mediator hosts.** `AddCoordinateMediation()`, and so `AddMediator()`, now also
@@ -903,7 +1311,7 @@ deferred to #111 are checked in skipped, their skip reason naming #111. Fix roun
   requests time out instead of being refused. With `DedupeCapacity` 0 a live stream yields a message
   that comes twice in one delivery twice. For the interop gate (#98): a mediator that does not stamp
   `created_time` on its WebSocket answers has them dropped; one that answers `delivery-request`
-  without `thid` works over HTTP only; one that puts a `thid` on its live pushes is reached by
+  without `thid` works over HTTP only (until #98; now on no path); one that puts a `thid` on its live pushes is reached by
   polling only; one without Discover Features needs a pinned version.
 
 ### Added — mediator service: delivery pipeline, AddMediator(), MapDidCommMediator in the new DidComm.Mediator.AspNetCore package (FR-ROUTE-09..11, FR-MED-07, FR-PICK-09/10, #95, epic #88)

@@ -12,8 +12,9 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// #96 acceptance for Coordinate Mediation 2.0 on the client (FR-MED-09, FR-MED-10): against a host
 /// whose Discover Features discloses only 2.0 (<see cref="FakeCoordinateMediation20Mediator"/>, the
 /// registry-aware endpoint with a test handler answering in the 2.0 page's shapes), the client
-/// negotiates 2.0 and enrols, updates and lists in 2.0 messages, whether the answers carry a
-/// <c>thid</c> or not (over HTTP the response is the answer). A host disclosing neither version is
+/// negotiates 2.0 and enrols, updates and lists in 2.0 messages when its answers carry the request's
+/// <c>thid</c>; one whose answers leave it out gets no answer taken, even in the HTTP response to the
+/// request (DIDComm v2.1 threading). A host disclosing neither version is
 /// <see cref="MediationNotSupportedException"/>; a mediator disclosing 3.0 and 2.0 (this library's
 /// own, as <c>AddMediator()</c> registers it) is spoken to in 3.0. A 2.0 host that ignores <c>paginate</c> (its whole list at offset 0, with or without a
 /// <c>pagination</c>) is listed in one page larger than asked for, and one holding more than 1000
@@ -21,13 +22,11 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// </summary>
 public sealed class MediatorClientCoordinateMediation20Tests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Against_a_2_0_only_host_the_client_negotiates_2_0_and_enrols_updates_and_lists_in_2_0(bool omitThid)
+    [Fact]
+    public async Task Against_a_2_0_only_host_the_client_negotiates_2_0_and_enrols_updates_and_lists_in_2_0()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
-        await using var fake = await FakeCoordinateMediation20Mediator.StartAsync(mediator, omitThid: omitThid);
+        await using var fake = await FakeCoordinateMediation20Mediator.StartAsync(mediator);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var bob = await harness.NewPeerAsync();
 
@@ -47,6 +46,27 @@ public sealed class MediatorClientCoordinateMediation20Tests
         var entry = DidCommServiceBuilder.ForMediation(grant).Build();
         entry.ServiceEndpoint!.Map!["uri"].GetString().Should().Be(fake.Did);
         mediator.LeakingLogLines(published.Did).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_2_0_host_whose_answers_leave_out_thid_gets_no_answer_taken_and_the_mediate_request_fails_as_unanswered()
+    {
+        // Before #98 (PR #130 review, round 2 follow-up) the HTTP response was the answer with or
+        // without thid, so this host enrolled. Without thid an answer belongs to no request's thread
+        // (DIDComm v2.1 threading.md L17, message_structure.md L130), on every path.
+        await using var mediator = await MediatorTestServer.StartAsync();
+        await using var fake = await FakeCoordinateMediation20Mediator.StartAsync(mediator, omitThid: true);
+        await using var harness = await MediatorClientHarness.CreateAsync(mediator);
+        var bob = await harness.NewPeerAsync();
+
+        var thrown = (await FluentActions.Awaiting(() => harness.Mediation.RequestMediationAsync(fake.Did, bob.Did))
+            .Should().ThrowAsync<TimeoutException>()).Which;
+
+        thrown.Message.Should().Contain("no answer in the HTTP response").And.NotContain(fake.Did).And.NotContain(bob.Did);
+        fake.Handler!.Handled.Select(m => m.Type).Should().Equal(new[] { CoordinateMediation20.MediateRequestType },
+            "the version was negotiated (the disclose carries its thid) and the mediate-request sent; nothing after it");
+        harness.Channel.Versions.TryGet(fake.Did, out var version).Should().BeTrue();
+        version.Should().Be(CoordinateMediationVersion.V2);
     }
 
     [Fact]

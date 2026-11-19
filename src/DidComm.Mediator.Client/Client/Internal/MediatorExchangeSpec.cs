@@ -12,5 +12,5 @@ namespace DidComm.Mediator.Client.Internal;
 /// </summary>
 /// <param name="Name">The request's message name for log lines and exception texts (a constant such as <c>mediate-request</c>; never a wire value).</param>
 /// <param name="Expected">The answer types that complete the request.</param>
-/// <param name="ExpectsDelivery">Whether a Message Pickup <c>delivery</c> is an expected answer. Over HTTP a thid-less <c>delivery</c> completes the request it answers only when this is set; over a WebSocket a thid-less <c>delivery</c> is a live push and never completes a request.</param>
+/// <param name="ExpectsDelivery">Whether a Message Pickup <c>delivery</c> is an expected answer; it must agree with <paramref name="Expected"/> (<see cref="MediatorAnswerTypes.Validate"/>). A <c>delivery</c> completes the request only when its <c>thid</c> names it, on every path: one without <c>thid</c> completes no request, in the HTTP response to it as anywhere else (over a WebSocket it is a live push).</param>
 internal sealed record MediatorExchangeSpec(string Name, IReadOnlyList<MessageTypeUri> Expected, bool ExpectsDelivery);

@@ -36,7 +36,7 @@ public static class Section_R_ReceiveWebSocket
     /// <param name="ctx">The shared cookbook context.</param>
     public static async Task RunAsync(CookbookContext ctx)
     {
-        ctx.Narrator.Section("R", "Receive over WebSocket (MapDidCommWebSocket + binary frames)");
+        ctx.Narrator.Section("R", "Receive over WebSocket (MapDidCommWebSocket + text frames)");
 
         var received = new List<UnpackResult>();
         var bobServer = await BuildBobInboxAsync(ctx, received);
@@ -75,7 +75,7 @@ public static class Section_R_ReceiveWebSocket
         var router = new TransportRouter(new IDidCommTransport[] { transport });
         var aliceSender = new DidCommClient(secrets, keyService, serviceResolver, router, new DidCommOptions());
 
-        ctx.Narrator.Step("Alice sends one envelope as a single binary WebSocket message.");
+        ctx.Narrator.Step("Alice sends one envelope as a single text WebSocket message.");
         var message = new MessageBuilder()
             .WithType("https://didcomm.org/basicmessage/2.0/message")
             .WithFrom(ctx.Alice.Did)
@@ -156,7 +156,7 @@ public static class Section_R_ReceiveWebSocket
         // any rejection takes (a timing-oracle defense), whether the socket honours a
         // `return_route: all` request from an authenticated peer (off here, so the dispatching
         // endpoint answers nothing on the socket — the return-route extension, FR-RR-05), and
-        // whether the socket speaks raw binary frames or STOMP (section 05-WebSocketChat shows STOMP).
+        // whether the socket speaks plain DIDComm frames or STOMP (section 05-WebSocketChat shows STOMP).
         var receiveOptions = new DidCommReceiveOptions
         {
             AllowSameSocketReplies = false,

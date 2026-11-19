@@ -50,6 +50,9 @@ namespace InteropCli;
 /// <item><c>mediator-pickup --mediator mediator.json --recipient id.json --in forward.json</c> — run
 /// a didcomm-dotnet mediator in process, post the counterpart's forward to it, pick the message up
 /// as the recipient and print the same JSON as <c>unpack</c>.</item>
+/// <item><c>mediator-serve --mediator mediator.json --ready-file ready.json</c> — run a
+/// didcomm-dotnet mediator until told to stop, for a counterpart that enrols and picks up itself
+/// (the mediator leg, #98).</item>
 /// </list>
 /// stdout carries only the artifact (envelope / unpack JSON); diagnostics go to stderr, and the
 /// exit code is 0 on success, 1 on failure, 2 on usage errors — so shell harnesses can pipe.
@@ -79,6 +82,7 @@ internal static class Program
                 "unpack" => await UnpackAsync(opts).ConfigureAwait(false),
                 "unwrap-forward" => await UnwrapForwardAsync(opts).ConfigureAwait(false),
                 "mediator-pickup" => await MediatorPickupAsync(opts).ConfigureAwait(false),
+                "mediator-serve" => await MediatorServeAsync(opts).ConfigureAwait(false),
                 _ => Usage(),
             };
         }
@@ -106,6 +110,8 @@ internal static class Program
               InteropCli unwrap-forward --identity <mediator.json> [--in <file|->] [--out <file>]
               InteropCli mediator-pickup --mediator <mediator.json> --recipient <identity.json>
                               [--in <file|->] [--out <file>] [--timeout <seconds>]
+              InteropCli mediator-serve --mediator <mediator.json> --ready-file <ready.json>
+                              [--max-lifetime <seconds>] [--enable-v2 true|false]
             """);
         return 2;
     }
@@ -513,6 +519,113 @@ internal static class Program
             }
             Console.Error.WriteLine("mediator-pickup: delivered, acknowledged, queue empty");
             return 0;
+        }
+        finally
+        {
+            await app.StopAsync().ConfigureAwait(false);
+        }
+    }
+
+    // ── mediator-serve ──────────────────────────────────────────────────────────────────
+
+    /// <summary>Exit code of <c>mediator-serve</c> when <c>--max-lifetime</c> ran out before anyone stopped it.</summary>
+    private const int ExitLifetimeReached = 4;
+
+    /// <summary>
+    /// Run a didcomm-dotnet mediator until told to stop, for a counterpart that enrols, forwards
+    /// and picks up on its own (the mediator leg, #98: python as the recipient, and our own wallet
+    /// as the attribution control).
+    /// <list type="bullet">
+    /// <item>Kestrel on <c>127.0.0.1</c>, an ephemeral port; <c>AddMediator()</c> with
+    /// <c>--mediator</c>'s DID as the routing DID; <c>MapDidCommMediator("/didcomm")</c> with
+    /// WebSockets on. Start-up runs the FR-MED-07 checks, so the DID must name an http(s) or ws(s)
+    /// <c>DIDCommMessaging</c> endpoint (<c>mint --endpoint</c>); only its scheme is checked.</item>
+    /// <item><c>--enable-v2 false</c> serves Coordinate Mediation 3.0 only (default <c>true</c>: 3.0
+    /// and 2.0).</item>
+    /// <item>Once listening, <c>--ready-file</c> is written atomically (a temporary file renamed
+    /// into place): <c>{"http", "ws", "did", "pid"}</c>, the two endpoint URLs, the routing DID and
+    /// this process id. Nothing else is written to stdout.</item>
+    /// <item>It stops on end of stdin (so a harness that dies takes it along: keep stdin open, for
+    /// example from a FIFO, for as long as it should run), on SIGTERM or SIGINT, or when
+    /// <c>--max-lifetime</c> seconds (default 900) have passed. A background job of a
+    /// non-interactive shell starts with SIGINT ignored (POSIX), and .NET leaves an ignored SIGINT
+    /// ignored: such a launcher stops it with SIGTERM or by closing stdin.</item>
+    /// <item>Logs of the <c>DidComm.Mediator*</c> categories at Information, everything else at
+    /// Warning, one line each, to stderr.</item>
+    /// </list>
+    /// Exit code 0 when stopped, 1 when it could not start, 4 when the lifetime ran out.
+    /// </summary>
+    private static async Task<int> MediatorServeAsync(Dictionary<string, string> opts)
+    {
+        var mediator = Identity.Load(Require(opts, "mediator"));
+        var readyFile = Path.GetFullPath(Require(opts, "ready-file"));
+        var maxLifetime = TimeSpan.FromSeconds(int.Parse(opts.GetValueOrDefault("max-lifetime", "900"), NumberStyles.None, CultureInfo.InvariantCulture));
+        var enableV2 = opts.GetValueOrDefault("enable-v2", "true") switch
+        {
+            "true" => true,
+            "false" => false,
+            var other => throw new ArgumentException($"Unknown --enable-v2 '{other}' (true|false)."),
+        };
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.ClearProviders();
+        builder.Logging.SetMinimumLevel(LogLevel.Warning);
+        builder.Logging.AddFilter("DidComm.Mediator", LogLevel.Information);
+        builder.Logging.AddSimpleConsole(o =>
+        {
+            o.SingleLine = true;
+            o.UseUtcTimestamp = true;
+            o.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ ";
+        });
+        builder.Services.Configure<Microsoft.Extensions.Logging.Console.ConsoleLoggerOptions>(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
+        builder.Services.AddDidComm(b => b
+            .UseNetDidResolver()
+            .UseSecretsResolver(mediator.Secrets)
+            .AddMediator(o =>
+            {
+                o.CoordinateMediation.RoutingDids.Add(mediator.Did);
+                o.CoordinateMediation.EnableV2 = enableV2;
+            }));
+        await using var app = builder.Build();
+        app.UseWebSockets();
+        app.MapDidCommMediator("/didcomm");
+        await app.StartAsync().ConfigureAwait(false);
+        try
+        {
+            var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault()
+                ?? throw new InvalidOperationException("The mediator did not report its address.");
+            var http = new Uri(new Uri(address), "/didcomm");
+            var ws = new UriBuilder(http) { Scheme = "ws" }.Uri;
+
+            var ready = new JsonObject
+            {
+                ["http"] = http.AbsoluteUri,
+                ["ws"] = ws.AbsoluteUri,
+                ["did"] = mediator.Did,
+                ["pid"] = Environment.ProcessId,
+            };
+            var temporary = $"{readyFile}.{Environment.ProcessId}.tmp";
+            File.WriteAllText(temporary, ready.ToJsonString(OutputJson) + "\n");
+            File.Move(temporary, readyFile, overwrite: true);
+            Console.Error.WriteLine($"mediator-serve: listening at {http} and {ws} (Coordinate Mediation 2.0 {(enableV2 ? "on" : "off")}); ready file {readyFile}");
+
+            // SIGTERM / SIGINT: the host's console lifetime turns them into ApplicationStopping.
+            var stopping = Task.Delay(Timeout.Infinite, app.Lifetime.ApplicationStopping);
+            var stdinClosed = Task.Run(async () =>
+            {
+                await using var stdin = Console.OpenStandardInput();
+                var buffer = new byte[256];
+                while (await stdin.ReadAsync(buffer).ConfigureAwait(false) > 0)
+                {
+                }
+            });
+            var lifetime = Task.Delay(maxLifetime);
+
+            var first = await Task.WhenAny(stopping, stdinClosed, lifetime).ConfigureAwait(false);
+            var reason = first == lifetime ? "lifetime reached" : first == stdinClosed ? "stdin closed" : "signal";
+            Console.Error.WriteLine($"mediator-serve: stopping ({reason})");
+            return first == lifetime ? ExitLifetimeReached : 0;
         }
         finally
         {

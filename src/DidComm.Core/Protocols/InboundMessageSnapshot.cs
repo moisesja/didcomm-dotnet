@@ -209,6 +209,87 @@ internal sealed class InboundMessageSnapshot
         => JsonSerializer.Deserialize<Message>(PlaintextJson, DidCommJson.Default)
            ?? throw new JsonException("Inbound plaintext snapshot deserialized to null.");
 
+    /// <summary>
+    /// This snapshot in the form kept by a holder that must keep only bounded values while it waits
+    /// (L-062; the forward handler between admission and its pump): the plaintext as UTF-8 bytes,
+    /// which is exactly what a byte budget charges, and the trust fields. The headers parsed from the
+    /// plaintext are not kept. <see cref="Detached.Reattach"/> rebuilds the message from those bytes.
+    /// </summary>
+    internal Detached Detach() => new(this);
+
+    /// <summary>
+    /// A snapshot taken apart by <see cref="Detach"/>: the plaintext as UTF-8 bytes and the trust fields
+    /// unpack established for it (or, for a <see cref="CreateFallback"/> snapshot, no trust at all).
+    /// </summary>
+    internal sealed class Detached
+    {
+        private readonly byte[] _utf8Plaintext;
+        private readonly bool _verified;
+        private readonly bool _encrypted;
+        private readonly bool _authenticated;
+        private readonly bool _nonRepudiation;
+        private readonly bool _anonymousSender;
+        private readonly string? _senderKid;
+        private readonly string? _signerKid;
+        private readonly string? _recipientKid;
+        private readonly VerifiedKeyBinding? _senderKeyBinding;
+        private readonly VerifiedKeyBinding? _signerKeyBinding;
+        private readonly VerifiedKeyBinding? _recipientKeyBinding;
+        private readonly RecipientAddressing _recipientAddressing;
+
+        internal Detached(InboundMessageSnapshot snapshot)
+        {
+            _utf8Plaintext = Encoding.UTF8.GetBytes(snapshot.PlaintextJson);
+            _verified = snapshot.Verified;
+            _encrypted = snapshot.Encrypted;
+            _authenticated = snapshot.Authenticated;
+            _nonRepudiation = snapshot.NonRepudiation;
+            _anonymousSender = snapshot.AnonymousSender;
+            _senderKid = snapshot.SenderKid;
+            _signerKid = snapshot.SignerKid;
+            _recipientKid = snapshot.RecipientKid;
+            _senderKeyBinding = snapshot.SenderKeyBinding;
+            _signerKeyBinding = snapshot.SignerKeyBinding;
+            _recipientKeyBinding = snapshot.RecipientKeyBinding;
+            _recipientAddressing = snapshot.RecipientAddressing;
+        }
+
+        /// <summary>The plaintext's UTF-8 size: the same count as <see cref="InboundMessageSnapshot.Utf8ByteCount"/>, and all the plaintext this holds.</summary>
+        internal int Utf8ByteCount => _utf8Plaintext.Length;
+
+        /// <summary>
+        /// Parse a fresh message from the plaintext. For a verified snapshot, register the same trust
+        /// fields for it: the plaintext is the one unpack verified, unchanged, so the fresh message is
+        /// what unpack would have produced, and observers read the same facts from it. A fallback
+        /// snapshot's message gets no snapshot, as the message it was taken from had none.
+        /// </summary>
+        internal Message Reattach()
+        {
+            var plaintextJson = Encoding.UTF8.GetString(_utf8Plaintext);
+            var message = JsonSerializer.Deserialize<Message>(plaintextJson, DidCommJson.Default)
+                          ?? throw new JsonException("Inbound plaintext snapshot deserialized to null.");
+            if (_verified)
+            {
+                RegisterVerified(
+                    message,
+                    plaintextJson,
+                    _encrypted,
+                    _authenticated,
+                    _nonRepudiation,
+                    _anonymousSender,
+                    _senderKid,
+                    _signerKid,
+                    _recipientKid,
+                    _recipientAddressing,
+                    _senderKeyBinding,
+                    _signerKeyBinding,
+                    _recipientKeyBinding);
+            }
+
+            return message;
+        }
+    }
+
     private static IReadOnlyList<string> CopyRecipients(IList<string>? recipients)
         => recipients is null || recipients.Count == 0
             ? Array.Empty<string>()

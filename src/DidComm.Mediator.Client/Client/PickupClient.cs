@@ -1,3 +1,4 @@
+using System.Globalization;
 using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Facade;
@@ -5,6 +6,7 @@ using DidComm.Mediator.Client.Internal;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Messages;
+using DidComm.Protocols;
 using Microsoft.Extensions.Logging;
 
 namespace DidComm.Mediator.Client;
@@ -73,6 +75,14 @@ namespace DidComm.Mediator.Client;
 /// <strong>Retrying is safe.</strong> A <see cref="TimeoutException"/> means the answer did not
 /// arrive, not that nothing happened. Repeat the call: a message delivered but never acknowledged
 /// comes back.
+/// </para>
+/// <para>
+/// <strong>What confirms an acknowledgement.</strong> Only a status does. Message Pickup 3.0 says a
+/// mediator SHOULD answer <c>messages-received</c> with its status, not that it must, and some send
+/// none (the Identus mediator). <see cref="AckAsync"/> then asks for one with a
+/// <c>status-request</c> and returns it: the count that status reports is the confirmation. The
+/// acknowledgement a fetch sends is not confirmed to you: if the mediator did not apply it, the
+/// messages come back and are recognised as repeats.
 /// </para>
 /// <para>
 /// <strong>Clocks.</strong> Every request carries the time from <c>DidCommOptions.Clock</c>
@@ -194,7 +204,11 @@ public sealed class PickupClient
     /// <para>
     /// Cancelling before the acknowledgement is sent leaves everything with the mediator. If the
     /// acknowledgement itself fails, the batch is still returned (and logged); those messages come
-    /// back later and are recognised as repeats. A message that failed stays leased to you for the
+    /// back later and are recognised as repeats. A mediator that sends no status back after it
+    /// (Message Pickup 3.0 allows that; the Identus mediator over HTTP answers with an empty 202)
+    /// has not failed it: over HTTP nothing is logged. On a WebSocket the client cannot tell that
+    /// silence from a slow answer, so there it is still logged as failed after
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. A message that failed stays leased to you for the
     /// mediator's lease, so a loop that fetches until drained gets past failures to what is behind
     /// them (for messages that are slow to open, only so many: see the known limits below); one that
     /// polls more slowly than the lease, with more failures than <paramref name="limit"/>, keeps
@@ -425,21 +439,52 @@ public sealed class PickupClient
     /// Sent 100 ids per message.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// 100 ids per message is what this library's mediator accepts by default. A mediator can be
     /// configured to accept fewer (this library's down to its delivery batch size, 10 by default);
     /// such a mediator refuses a longer message as malformed, so call this method with at most as
     /// many ids as it accepts.
+    /// </para>
+    /// <para>
+    /// <strong>Only the returned status confirms the acknowledgement.</strong> The mediator has
+    /// applied it when the status it returns no longer counts the messages it removed. Message
+    /// Pickup 3.0 says a mediator SHOULD answer <c>messages-received</c> with its status, not that it
+    /// must, and some send none (the Identus mediator). A mediator that sends no status after the
+    /// last message is asked for one with a <c>status-request</c>, and the count that status reports
+    /// is the confirmation; after an earlier message that gets no status, the next message is sent
+    /// without asking. A mediator that does answer with its status gets one message per 100 ids and
+    /// nothing more.
+    /// </para>
+    /// <para>
+    /// <strong>Time.</strong> Each <c>messages-received</c> and the <c>status-request</c> that may
+    /// follow it share one <see cref="MediatorClientOptions.RequestTimeout"/>, counted from when the
+    /// <c>messages-received</c> is sent; the <c>status-request</c> never gets a
+    /// <c>RequestTimeout</c> of its own. Over HTTP the response shows at once that no status came,
+    /// and the <c>status-request</c> gets the rest of that time. On a WebSocket, silence cannot be
+    /// told from a slow answer, so the client waits half of <c>RequestTimeout</c> for the status, then
+    /// moves on: to the next message, or to the <c>status-request</c>, which gets the other half.
+    /// </para>
+    /// <para>
+    /// <strong>Which status answers which message.</strong> DIDComm threading: a reply carries the
+    /// <c>thid</c> of the message it answers, and a message without that <c>thid</c> is not part of
+    /// its thread. So a status answers a message only when its <c>thid</c> names that message, over
+    /// a WebSocket and in the HTTP response to it alike; one without <c>thid</c> answers none and is
+    /// dropped, which also keeps a late status for a message given up on from being taken for
+    /// another. A mediator that leaves <c>thid</c> out of its status is therefore treated as one that
+    /// sends no status: the call asks with a <c>status-request</c>, whose answer needs a <c>thid</c>
+    /// too (without one the call fails with <see cref="TimeoutException"/>).
+    /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
     /// <param name="ids">1 to 10 000 ids, each exactly as <see cref="PickupItem.Id"/> gave it.</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>The mediator's <c>status</c> after the last message.</returns>
+    /// <returns>The mediator's <c>status</c> after the last message: its answer to that message, or, when it sent none, its answer to the <c>status-request</c> that asked for it.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="ids"/> is empty, longer than 10 000 or has an empty, over-long or non-URI-safe id (the message names its index), or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">As for <see cref="GetStatusAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer in time; retry (acknowledging twice is harmless).</exception>
-    /// <exception cref="MediationProtocolException">A problem report or a malformed status.</exception>
+    /// <exception cref="TimeoutException">No status in time (see the remarks): a message got no answer within <see cref="MediatorClientOptions.RequestTimeout"/>, or the <c>status-request</c> after the last one got none in the time left (over HTTP, none in its response). The mediator may still have applied the acknowledgement; retry (acknowledging twice is harmless).</exception>
+    /// <exception cref="MediationProtocolException">A problem report or a malformed status; for the <c>status-request</c>, also a status about one DID only (it asked about all of yours).</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public async Task<PickupStatus> AckAsync(string mediatorDid, string from, IReadOnlyList<string> ids, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
@@ -452,14 +497,21 @@ public sealed class PickupClient
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
         var spec = DeliveryReader.MessagesReceivedSpec;
         PickupStatus? status = null;
+        var lastId = string.Empty;
+        var lastSentAt = 0L;
         for (var start = 0; start < copy.Length; start += AckChunk)
         {
             var chunk = copy.AsSpan(start, Math.Min(AckChunk, copy.Length - start)).ToArray();
             var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, chunk, UuidV4MessageIdGenerator.Instance);
-            var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
-            status = DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
+            lastId = request.Id;
+            lastSentAt = Exchange.Time.GetTimestamp();
+            var answer = await AcknowledgeChunkAsync(route, request, mediatorDid, from, ct).ConfigureAwait(false);
+            // A message left without a status is confirmed by the status after the last one.
+            status = answer is null
+                ? null
+                : DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
         }
-        return status!;
+        return status ?? await AskForStatusAsync(route, mediatorDid, from, lastId, lastSentAt, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -636,16 +688,77 @@ public sealed class PickupClient
 
     // ---- helpers ------------------------------------------------------------------------------
 
+    // One messages-received of AckAsync: the mediator's answer, or null when it sent no status
+    // (Message Pickup 3.0: it SHOULD, not MUST). Over HTTP the response says so at once. On any other
+    // route (a WebSocket) silence cannot be told from a slow answer: the status is waited for half of
+    // RequestTimeout, which leaves the other half for the status-request that may follow, and then
+    // the wait is given up.
+    private async Task<InboundMessageSnapshot?> AcknowledgeChunkAsync(MediatorRoute route, Message request, string mediatorDid, string from, CancellationToken ct)
+    {
+        var spec = DeliveryReader.MessagesReceivedSpec;
+        if (route.IsHttp)
+            return await Exchange.ExchangeAllowingNoAnswerAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+
+        using var wait = new GuardedDeadline(Exchange.Time, Exchange.Options.RequestTimeout / 2, ct);
+        try
+        {
+            return await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, wait.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(ct);
+        }
+        catch (OperationCanceledException) when (wait.TimedOut)
+        {
+            return null;
+        }
+    }
+
+    // The status-request after the last messages-received when the mediator sent no status for it,
+    // in what is left of that message's RequestTimeout (counted from `sentAt`): never a
+    // RequestTimeout of its own.
+    private async Task<PickupStatus> AskForStatusAsync(MediatorRoute route, string mediatorDid, string from, string acknowledgementId, long sentAt, CancellationToken ct)
+    {
+        var timeout = Exchange.Options.RequestTimeout;
+        var left = timeout - Exchange.Time.GetElapsedTime(sentAt);
+        if (left <= TimeSpan.Zero)
+        {
+            throw new TimeoutException(string.Create(CultureInfo.InvariantCulture,
+                $"Mediator request '{acknowledgementId}' (messages-received) got no status back, and no time was left within {timeout} (MediatorClientOptions.RequestTimeout) to ask for one; the mediator may still have applied it, so retry it (acknowledging twice is harmless)."));
+        }
+
+        var spec = DeliveryReader.StatusRequestSpec;
+        var request = MessagePickup.CreateStatusRequest(from, mediatorDid, recipientDid: null, UuidV4MessageIdGenerator.Instance);
+        using var budget = new GuardedDeadline(Exchange.Time, left, ct);
+        InboundMessageSnapshot answer;
+        try
+        {
+            answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, budget.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(ct);
+        }
+        catch (OperationCanceledException) when (budget.TimedOut)
+        {
+            throw new TimeoutException(string.Create(CultureInfo.InvariantCulture,
+                $"Mediator request '{acknowledgementId}' (messages-received) got no status back, and the status-request '{request.Id}' that asked for one was not answered within {timeout} of it (MediatorClientOptions.RequestTimeout); the mediator may still have applied it, so retry it (acknowledging twice is harmless)."));
+        }
+        return DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, filter: null);
+    }
+
     // Acknowledge on a deadline of our own (RequestTimeout), not the caller's token: the batch is
     // committed, so a cancellation now would only make the messages come back. Any failure is
-    // logged by type name; the messages come back and are then recognised as repeats.
+    // logged by type name; the messages come back and are then recognised as repeats. The status
+    // that may answer is not read, and Message Pickup 3.0 lets a mediator send none (it SHOULD, not
+    // MUST): over HTTP an empty response is that, not a failure. On a WebSocket the wait is as before.
     private async Task AcknowledgeQuietlyAsync(MediatorRoute route, string mediatorDid, string from, IReadOnlyList<string> ids)
     {
         var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, ids, UuidV4MessageIdGenerator.Instance);
         try
         {
             using var deadline = OwnDeadline.Start(Exchange.Time, Exchange.Options.RequestTimeout);
-            await Exchange.ExchangeAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
+            await Exchange.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

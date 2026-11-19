@@ -58,7 +58,7 @@ internal sealed class FakeCoordinateMediation20Mediator : IAsyncDisposable
     /// <summary>Start the host on <paramref name="mediator"/>'s network and clock.</summary>
     /// <param name="mediator">The #95 test server whose network and clock the host joins (its log capture too).</param>
     /// <param name="speaks20">Register the 2.0 handler.</param>
-    /// <param name="omitThid">The handler answers without <c>thid</c>, as the 2.0 page's examples do.</param>
+    /// <param name="omitThid">The handler answers without <c>thid</c>, as the 2.0 page's examples do; our client takes no such answer (DIDComm v2.1 threading).</param>
     /// <param name="paging">How the handler answers a <c>keylist-query</c>'s <c>paginate</c>.</param>
     public static async Task<FakeCoordinateMediation20Mediator> StartAsync(MediatorTestServer mediator, bool speaks20 = true, bool omitThid = false, KeylistPaging paging = KeylistPaging.Honoured)
     {

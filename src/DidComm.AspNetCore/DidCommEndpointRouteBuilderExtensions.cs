@@ -11,6 +11,7 @@ using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.OutOfBand;
+using DidComm.Protocols.Routing;
 using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.AspNetCore.Builder;
@@ -188,18 +189,63 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// mediator's <c>ForwardHandler</c>, whose processor and sink never run before the response is
     /// on the wire (FR-ROUTE-11) — waits on it; other handlers ignore it.
     /// </para>
+    /// <para>
+    /// <b>A forward's 202 has 10 seconds.</b> When the handler that ran is the
+    /// <see cref="ForwardHandler"/>, the endpoint completes the <c>202</c> itself, and the
+    /// acknowledgement completes as soon as the server has taken the whole response for the
+    /// connection — not later, when completion callbacks run: a slow <c>Response.OnCompleted</c>
+    /// callback of other middleware, or the client closing its connection while such callbacks run,
+    /// can no longer take the acknowledgement back. If the server has not taken the 202 within 10
+    /// seconds of the handler's return (a client that does not read its responses, so the write
+    /// cannot finish), the acknowledgement is cancelled — the forward is dropped as
+    /// <c>Dropped-Unacknowledged</c> and its place in the handler's queue bound is released — and the
+    /// request is aborted, so the sender never receives a 202 for a forward that was not relayed. An
+    /// honest client takes the empty 202 at once; one that does not read its responses (requests
+    /// pipelined on one connection and never read) could otherwise keep a forward reserved for as
+    /// long as the connection lives. The deadline is the same whether or not <c>next</c> is
+    /// registered, and it is timed on the container's <see cref="TimeProvider"/>
+    /// (<see cref="TimeProvider.System"/> when none is registered). Because the response is complete
+    /// when the endpoint returns, middleware that runs after it can no longer change that 202. No
+    /// other response of this endpoint has a deadline, and the others are completed by the server
+    /// as before.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
     public static IEndpointConventionBuilder MapDidCommEndpoint(
         this IEndpointRouteBuilder endpoints,
         string pattern)
+        => MapDidCommEndpointCore(endpoints, pattern, returnedResponseDeadline: null);
+
+    /// <summary>
+    /// How long a <c>202</c> the <see cref="ForwardHandler"/> produced has to be committed, counted
+    /// from the handler's return: an honest client takes the empty 202 at once, and Kestrel's own
+    /// default minimum data rate (240 B/s after a 5 s grace) would end a single stalled 202 write in
+    /// about 5.4 s; 10 s leaves room for a server under load and for an HTTP/2 connection queueing the
+    /// 202 behind other streams' data.
+    /// </summary>
+    internal static readonly TimeSpan ForwardResponseDeadline = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The registry-aware HTTP endpoint behind <see cref="MapDidCommEndpoint(IEndpointRouteBuilder, string)"/>.
+    /// With <paramref name="returnedResponseDeadline"/> set (the mediator package's endpoint, which
+    /// passes the pickup lease) a <c>200</c> carrying a returned message must also be committed within
+    /// that time, counted from when its dispatch began, or the request is aborted.
+    /// </summary>
+    /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
+    /// <param name="pattern">URL pattern.</param>
+    /// <param name="returnedResponseDeadline">The deadline of a returned <c>200</c>, read from the request services when one is produced; <c>null</c> for none (the public overload's behaviour).</param>
+    internal static IEndpointConventionBuilder MapDidCommEndpointCore(
+        IEndpointRouteBuilder endpoints,
+        string pattern,
+        Func<IServiceProvider, TimeSpan>? returnedResponseDeadline)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentException.ThrowIfNullOrEmpty(pattern);
 
         // Per mapped endpoint: the log rate limiters (JC-22); the JC-17 defaults are per application.
         var admissionEndpoint = new InboundAdmissionEndpoint(endpoints.ServiceProvider);
+        var deadlineLog = new ResponseDeadlineLog();
 
         return endpoints.MapPost(pattern, async (HttpContext httpContext) =>
         {
@@ -235,22 +281,15 @@ public static class DidCommEndpointRouteBuilderExtensions
             var startTimestamp = Stopwatch.GetTimestamp();
 
             // The transport acknowledgement handed to the handler (ProtocolContext.Acknowledged):
-            // completes once the response has been committed to the client (Response.OnCompleted),
-            // which — because every path below that reaches the handler returns 202, or the 200
-            // carrying the returned message — means "the sender holds the response". Cancelled when
-            // the request aborts before that, so a forward whose sender never received its 202 is
-            // not relayed (the abort registration is kept until OnCompleted fires, not disposed when
-            // this delegate returns, because the response is written after it returns). If the
-            // response completed first, TrySetResult has already won and the late cancel is a no-op.
-            var acknowledged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var abortRegistration = httpContext.RequestAborted.Register(static state => ((TaskCompletionSource)state!).TrySetCanceled(), acknowledged);
-            httpContext.Response.OnCompleted(static state =>
-            {
-                var (tcs, registration) = ((TaskCompletionSource, CancellationTokenRegistration))state;
-                registration.Dispose();
-                tcs.TrySetResult();
-                return Task.CompletedTask;
-            }, (acknowledged, abortRegistration));
+            // completes once the response has been committed to the connection — every path below
+            // that reaches the handler returns 202, or the 200 carrying the returned message.
+            // Cancelled when the request aborts before that, so a forward whose sender never received
+            // its 202 is not relayed. A response returned under a deadline (below) is completed by its
+            // result, and the acknowledgement is decided when it has been handed to the transport;
+            // if the deadline passes first (a client that does not read), it is cancelled, then the
+            // request aborted, so the response cannot keep what the handler reserved for it. Any
+            // other response completes it from Response.OnCompleted (HttpResponseAcknowledgement).
+            var acknowledgement = HttpResponseAcknowledgement.Start(httpContext);
 
             // Unpack AND dispatch share one opaque exit: a handler bug (FR-THR-04 InvalidOperationException),
             // an unpack rejection (crypto/malformed/consistency/resolution), and a downstream
@@ -273,7 +312,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                 if (admission.SessionEligible)
                     session = new HttpReturnRouteSession(client, admission.PeerDid!, admission.LocalDid!, logger);
 
-                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, acknowledged.Task, session, httpContext.RequestAborted).ConfigureAwait(false);
+                // A returned 200's deadline counts from here, before the handler leases anything, so
+                // the response is aborted no later than the lease it carries runs out.
+                var time = returnedResponseDeadline is null ? null : Clock(sp);
+                var dispatchStarted = time?.GetTimestamp() ?? 0;
+                var outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, acknowledgement.Acknowledged, session, httpContext.RequestAborted).ConfigureAwait(false);
 
                 // Without a session a reply is logged, not sent: an automatic inbound-triggered send to
                 // anyone but the authenticated sender is deliberately absent (see the remarks above).
@@ -292,15 +335,28 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // a push still packing now returns false and never reaches this response.
                 var returnedBody = session?.TakeResponseAndClose();
                 // The only exits after the handler ran: the 202, or the 200 carrying the returned
-                // message. OnCompleted then completes the acknowledgement once it is committed.
-                return returnedBody is null
-                    ? Results.StatusCode(StatusCodes.Status202Accepted)
-                    : Results.Bytes(returnedBody, DidCommMediaTypes.Encrypted);
+                // message.
+                // Under a deadline the result completes the response itself, and the acknowledgement
+                // is decided when the response has been handed to the transport: a completion callback
+                // of other middleware that runs late can neither delay nor cancel it.
+                if (returnedBody is null)
+                {
+                    var accepted = Results.StatusCode(StatusCodes.Status202Accepted);
+                    // Every forward the ForwardHandler judged, registered next or not, gets the same
+                    // deadline (D7): one whose 202 is not handed over in time is never relayed.
+                    return outcome.Handler is ForwardHandler
+                        ? acknowledgement.WithDeadline(accepted, time ?? Clock(sp), ForwardResponseDeadline, deadlineLog, logger)
+                        : accepted;
+                }
+                var answer = Results.Bytes(returnedBody, DidCommMediaTypes.Encrypted);
+                return time is null
+                    ? answer
+                    : acknowledgement.WithDeadline(answer, time, returnedResponseDeadline!(sp) - time.GetElapsedTime(dispatchStarted), deadlineLog, logger);
             }
             catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
                 session?.TakeResponseAndClose();
-                acknowledged.TrySetCanceled();
+                acknowledgement.Cancel();
                 throw; // genuine client abort — propagate
             }
             catch (Exception ex)
@@ -310,11 +366,14 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // whose reply the dispatcher refused under FR-THR-04) drops its deferred work instead
                 // of publishing it. The session closes without a response: nothing it held is sent.
                 session?.TakeResponseAndClose();
-                acknowledged.TrySetCanceled();
+                acknowledgement.Cancel();
                 return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
             }
         });
     }
+
+    /// <summary>The container's clock for response deadlines: its registered <see cref="TimeProvider"/>, else the system clock.</summary>
+    private static TimeProvider Clock(IServiceProvider services) => services.GetService<TimeProvider>() ?? TimeProvider.System;
 
     /// <summary>
     /// Map an HTTP POST endpoint that unpacks DIDComm envelopes, runs return-route admission, and
@@ -555,7 +614,7 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// on and it is registered in the <see cref="IReturnRouteSessionRegistry"/>, where handlers find
     /// it for live pushes. Handler replies and <see cref="IReturnRouteSession.TrySendAsync(Message, CancellationToken)"/> pushes
     /// are authcrypted from the DID that decrypted the opening message to exactly that peer and
-    /// written as one binary WebSocket message each, by a single writer. A later header-less message
+    /// written as one text WebSocket message each (FR-TRN-09), by a single writer. A later header-less message
     /// leaves the mode unchanged; a later <c>none</c> (or <c>thread</c>) from the same pair stops
     /// pushes and <c>all</c> resumes them. A message authenticated by another DID on the same socket
     /// is dispatched without a session and its reply is not written. A header-less message on a

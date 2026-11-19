@@ -1235,6 +1235,13 @@ Format per entry:
   runs are not a reproduction. In QA briefs, ask for one mutation per fixed test and one
   slow-but-correct run. See [[L-044]], [[L-060]] and [[L-045]].
 
+- **Corollary (#98, 2026-11-19): a test that parks thread-pool threads raises the pool floor first.**
+  Otherwise it starves every other test in the same process: on a 4-vCPU windows runner, two client
+  tests that blocked pool threads on a gate stalled the whole test host for about 10 s, and an
+  unrelated live-stream test's 10 s hang guard fired. To diagnose a hang-guard failure, read the TRX:
+  if the other test processes kept finishing tests while this one made no progress, the stall was
+  inside that one process (look for a neighbour that parks pool threads), not in the test that failed.
+
 ## L-066 — Put a decision to the owner from first principles, in everyday words, before the options.
 
 - **Lesson:** When an agent asks the owner to decide something, it first explains the mechanism in
@@ -1249,3 +1256,104 @@ Format per entry:
   make sense to someone who has not read the code: one sentence on what the feature does, one on how
   it fails, one on who is hit. Then "1. … (cost: …)", "2. … (cost: …)", and "Recommendation: …".
   Applies to hand-backs, #88 planning updates and PR comments alike. See [[L-063]].
+
+## L-067 — A test captures only the operation, never its own assertions.
+
+- **Lesson:** Never put `Should()` (or any assertion) inside `Record.Exception*` or inside a
+  `try`/`catch`. Capture only the operation under test, then assert the permitted exception and the
+  outcome outside the capture.
+- **Why:** PR #125 review P2: a failed assertion inside the capture was recorded as "the exception
+  the operation threw", and the test passed.
+- **How to apply:** In every test that expects an exception, the capture block holds exactly one
+  call to the product. Grep new tests for `Record.Exception` blocks that contain `Should`, and for
+  `catch` blocks in test code that contain assertions.
+
+## L-068 — A wire choice the spec leaves open is still an interop decision: check what the field reads.
+
+- **Lesson:** When the spec does not fix a wire detail (a WebSocket frame's text/binary label, a
+  header's spelling, padding), our choice is only interoperable if the implementations in the field
+  accept it. Read what they accept at a pinned commit before calling a choice spec-neutral.
+- **Why:** #98: our transports send every DIDComm envelope as a binary WebSocket frame. The DIDComm
+  spec says nothing about the label. The Identus mediator (scala-did 0.1.0-M48) processes only text
+  frames and drops binary ones, so our client could not talk to it over WebSocket at all. Self
+  round-trips and our own receive side (which accepts both) never showed it.
+- **How to apply:** For every transport-level choice, list the external peers we target and check
+  their receive code. Prefer the form every reader accepts (text frames for JSON). See [[L-005]].
+
+## L-069 — A SHOULD on the other side is optional for the peer: a client must work without it.
+
+- **Lesson:** When a protocol says a peer SHOULD send something, a client that requires it has
+  turned a SHOULD into a MUST. Handle its absence explicitly (ask for it, or proceed without it) and
+  document what then confirms the outcome.
+- **Why:** #98: Message Pickup 3.0 says the mediator SHOULD answer `messages-received` with a
+  `status`. Identus v1.2.1 answers nothing (an empty 202). `PickupClient.AckAsync` required the
+  status and always threw `TimeoutException` against Identus, although the acknowledgement was
+  applied; `FetchAsync` logged a false warning.
+- **How to apply:** For each answer the client waits for, check whether the spec says MUST or SHOULD.
+  For a SHOULD, write the test with a peer that never sends it, from a real implementation's shape.
+
+## L-070 — A budget must charge what the waiting work holds, measured; and work waiting on a peer needs a deadline.
+
+- **Lesson:** A bound on memory is only as good as the unit it counts. Measure retained heap against
+  the charge (a probe with a compacting GC) for the worst shapes an attacker can choose: deep or wide
+  JSON, many or long identifiers. And a reservation that is released only when a peer acts (reads a
+  response) must also end at a deadline, or the peer decides how long it lasts.
+- **Why:** #98 red team: the forward budget charged plaintext bytes while a waiting forward held
+  about 5× that (flat), about 45× (an attachment of 190k tiny JSON entries, parsed) and about 9,000×
+  (a long recipient-kid list). And a forward whose 202 the client never read kept its reservation
+  in the one shared budget with no timeout, so one client could deny every tenant's forwards. The
+  fixes: hold only the bytes charged (re-parse after the acknowledgement), charge the kid list, and
+  withdraw a 202 not taken within 10 s; an HTTP delivery not read within the lease is aborted too.
+- **How to apply:** For every reservation, write down (a) what the work item references while it
+  waits, (b) what the charge counts, (c) who ends the wait. Any gap between (a) and (b), or a (c)
+  that is "the peer", is a finding. Extends [[L-062]] and [[L-059]].
+
+## L-071 — After reverting a mutation, rebuild before trusting any test result.
+
+- **Lesson:** `git checkout -- <file>` restores the source, not the compiled test host: the DLLs
+  still hold the mutant until the project is rebuilt.
+- **Why:** #98: a red-team agent saw about 20 false failures after reverting a mutation, until a
+  clean rebuild.
+- **How to apply:** Mutation loops are edit → build → test → revert → build → test. Record the
+  post-revert green run as part of the mutation evidence.
+
+## L-072 — A background job of a non-interactive shell ignores SIGINT; stop it with SIGTERM or stdin EOF.
+
+- **Lesson:** POSIX shells start background jobs of a non-interactive script with SIGINT ignored, and
+  .NET keeps that disposition, so `kill -INT` does nothing to a server the harness started with `&`.
+- **Why:** #98: `InteropCli mediator-serve`, launched in the background by the live leg, did not stop
+  on SIGINT. The leg now stops it by closing its stdin (it exits on EOF, which also makes it
+  orphan-proof) and falls back to SIGTERM, then SIGKILL.
+- **How to apply:** A long-running helper started by a script listens for stdin EOF and SIGTERM; the
+  script's cleanup closes the pipe, waits with a deadline, then escalates.
+
+## L-073 — Keep "the owner decided X" apart from "we chose Y to implement X"; check every spec claim against the text first.
+
+- **Lesson:** Never present an agent's or the coordinator's technical choice as the owner's
+  decision. When implementing an owner decision forces a further choice, report it as ours, with the
+  reason, and let the owner overrule it. Any "the spec says / allows / is silent on" claim that will
+  reach the owner is checked against the spec text (quoted, with file and line at the pinned commit)
+  before it is sent.
+- **Why:** On 2026-11-19 the owner decided "send DIDComm messages as WebSocket text frames" (O-98-1 =
+  1a). While building it, the orchestrator added "bytes that aren't valid UTF-8 stay binary" and
+  described it as within the owner's decision; the coordinator relayed it the same way. The owner
+  rejected it: the spec defines a forward's attachment as a DIDComm message, so the fallback relayed
+  something the spec says is invalid.
+- **How to apply:** In every hand-back and planning comment, label each item "owner decision" or
+  "implementation choice (ours)". Before a spec claim leaves the session, paste the spec lines it rests
+  on into the note. See [[L-066]].
+
+## L-074 — Spec over local rules is absolute: refuse what the spec makes invalid; never route it around a problem.
+
+- **Lesson:** Where the spec defines what is valid, refuse what is invalid, at intake, before it is
+  accepted, charged or stored. Never add a content-dependent fallback that lets invalid input travel on
+  in a different form. Where the spec does not settle a piece (for example how to answer the refusal),
+  stop and ask; don't fill the gap with a rule of our own.
+- **Why:** #98: text frames must be valid UTF-8 (RFC 6455), and a relay passing on a forward's
+  attachment unread could hand a text frame bytes that aren't UTF-8. The first fix kept such bytes as
+  binary frames. The spec settles it differently: a forward's `attachments` are "the DIDComm
+  message(s)" (routing.md L57), DIDComm encodings are `+json` (message_structure.md L69) and JSON
+  between systems is UTF-8 (RFC 8259 §8.1), so such a forward is invalid and is refused at intake.
+- **How to apply:** When a fix starts with "if the input is X, do Y instead", ask whether the spec
+  makes X invalid. If it does, the fix is a refusal at the boundary, with a test that the invalid input
+  is refused. Extends [[L-050]] and the "spec over local rules" memory.

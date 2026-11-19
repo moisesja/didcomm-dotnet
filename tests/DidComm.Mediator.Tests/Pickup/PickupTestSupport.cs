@@ -69,6 +69,13 @@ internal sealed class PickupFakeSession : IReturnRouteSession
     /// <summary>The peer downgraded the session (<c>return_route: none</c>): pushes are refused from now on.</summary>
     public void Downgrade() => Volatile.Write(ref _mode, (int)ReturnRouteMode.None);
 
+    /// <summary>The peer sent <c>return_route: all</c> again after a downgrade: pushes are allowed again (never after <see cref="Close"/>).</summary>
+    public void Resume()
+    {
+        if (!_closed.IsCancellationRequested)
+            Volatile.Write(ref _mode, (int)ReturnRouteMode.All);
+    }
+
     /// <summary>End the session: fires <see cref="Closed"/> and refuses every later send.</summary>
     public void Close()
     {

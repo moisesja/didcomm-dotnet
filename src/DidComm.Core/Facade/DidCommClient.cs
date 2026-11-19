@@ -828,13 +828,13 @@ public sealed partial class DidCommClient
     /// message. The queue URI <c>didcomm:transport/queue</c> is refused (FR-RR-06). Failures are
     /// recorded on the same span and logged the same way as <see cref="SendAsync"/>.
     /// </remarks>
-    /// <param name="packed">The packed envelope bytes (UTF-8 JSON); must not be empty.</param>
+    /// <param name="packed">The packed envelope bytes: a DIDComm message, so UTF-8 JSON with an object at the top level (#98).</param>
     /// <param name="endpoint">The absolute transport URI to deliver to.</param>
     /// <param name="mediaType">The envelope's DIDComm media type: one of <see cref="MediaTypes.Encrypted"/>, <see cref="MediaTypes.Signed"/> or <see cref="MediaTypes.Plaintext"/> (the <c>application/</c> prefix may be omitted, FR-MSG-06).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The transport's result.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="endpoint"/> or <paramref name="mediaType"/> is <c>null</c>.</exception>
-    /// <exception cref="ArgumentException"><paramref name="packed"/> is empty, <paramref name="endpoint"/> is not absolute, or <paramref name="mediaType"/> is not a DIDComm media type.</exception>
+    /// <exception cref="ArgumentException"><paramref name="packed"/> is empty or is not a DIDComm message (not UTF-8 JSON with an object at the top level; refused before anything is resolved or sent, and the message quotes none of it), <paramref name="endpoint"/> is not absolute, or <paramref name="mediaType"/> is not a DIDComm media type.</exception>
     /// <exception cref="InvalidOperationException">No <see cref="ITransportRouter"/> is wired in.</exception>
     /// <exception cref="TransportException"><paramref name="endpoint"/> is the queue URI or a blocked destination, or the transport failed.</exception>
     public async Task<TransportResult> SendPackedAsync(ReadOnlyMemory<byte> packed, Uri endpoint, string mediaType, CancellationToken ct = default)
@@ -846,6 +846,11 @@ public sealed partial class DidCommClient
         {
             if (packed.IsEmpty)
                 throw new ArgumentException("The packed message is empty.", nameof(packed));
+            // #98: every DIDComm encoding is +json, sent as UTF-8 (RFC 8259 §8.1). Bytes that are
+            // not would also break a WebSocket next hop, which reads a DIDComm message as a text
+            // frame and must fail the connection on one that is not UTF-8 (RFC 6455 §8.1).
+            if (!DidCommWireShape.IsUtf8JsonObject(packed.Span))
+                throw new ArgumentException("The packed message is not a DIDComm message: it must be UTF-8 JSON with an object at the top level.", nameof(packed));
             if (!endpoint.IsAbsoluteUri)
                 throw new ArgumentException("The endpoint must be an absolute URI.", nameof(endpoint));
             var canonicalType = CanonicalDidCommMediaType(mediaType)

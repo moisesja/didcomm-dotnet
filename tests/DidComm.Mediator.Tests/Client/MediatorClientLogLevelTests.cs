@@ -15,7 +15,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// The level of each "dropped" line of the channel (QA-1 observation): a Warning only when the drop
 /// points at a mediator problem — an answer to a waiting request, from its pair, that does not fit
-/// it; an ambiguous thread-less answer; a push its stream's full buffer refuses — and a quiet Debug
+/// it; an answer without a thread that did not come in the HTTP response to its request (#98: it
+/// belongs to no request's thread); a push its stream's full buffer refuses — and a quiet Debug
 /// line for a message of an answer type that simply is not for a waiting request (late, another
 /// peer's, an application's problem report, a <c>disclose</c> another client takes) or a push that
 /// arrives as or after its stream ends. Both kinds are rate-limited (the first and every 1000th at
@@ -47,7 +48,6 @@ public sealed class MediatorClientLogLevelTests : IAsyncLifetime
         "an application's problem report",
         "a disclose for a query this client did not send",
         "another peer's answer naming our request",
-        "a threadless answer no waiting request expects",
     };
 
     [Theory]
@@ -75,10 +75,16 @@ public sealed class MediatorClientLogLevelTests : IAsyncLifetime
         exchange.IsCompleted.Should().BeFalse("it keeps waiting");
     }
 
-    [Fact]
-    public async Task An_HTTP_response_whose_threadless_answer_does_not_fit_its_request_is_a_Warning()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_answer_without_a_thread_in_the_HTTP_response_to_its_own_request_is_a_Warning_naming_only_its_type(bool ofAnExpectedType)
     {
-        _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Status(thid: null)));
+        // Before #98 (PR #130 review, round 2 follow-up) a thread-less answer of an expected type
+        // completed the request whose HTTP response carried it, and one of another type was a
+        // Warning naming the request. Without thid it now belongs to no request's thread on any path.
+        var answer = ofAnExpectedType ? _w.Grant(thid: null) : _w.Status(thid: null);
+        _send.ReturnWith(async _ => await _w.ReceiveAsync(answer));
         var request = _w.Request(CoordinateMediation.MediateRequestType);
 
         await FluentActions.Awaiting(() => _channel.ExchangeAsync(HttpRoute, request, ClientSpecs.MediateRequest, _w.Mediator.Did, _w.Local.Did, default))
@@ -86,19 +92,29 @@ public sealed class MediatorClientLogLevelTests : IAsyncLifetime
 
         var line = Dropped().Should().ContainSingle().Which;
         line.Level.Should().Be(LogLevel.Warning);
-        line.Formatted.Should().Contain(request.Id);
+        line.Formatted.Should().Contain("without a thread").And.Contain(ofAnExpectedType ? "mediate-grant" : "status");
+        foreach (var identifier in _w.Identifiers)
+            line.Everything.Should().NotContain(identifier);
     }
 
-    [Fact]
-    public async Task An_ambiguous_threadless_answer_is_a_Warning()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task An_answer_without_a_thread_outside_an_HTTP_response_is_a_Warning_naming_only_its_type_however_many_requests_wait(int waiting)
     {
-        Start();
-        Start();
+        // Before #98 a thread-less answer went to the only waiting request of its pair, and was a
+        // Warning only when two could take it. It now belongs to no request's thread either way.
+        for (var i = 0; i < waiting; i++)
+            Start();
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null))).Should().BeFalse();
+        var claimed = _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Grant(thid: null)));
 
-        _logs.Of<MediatorClientChannel>().Should().ContainSingle(l => l.Formatted.Contains("more than one waiting request", StringComparison.Ordinal))
-            .Which.Level.Should().Be(LogLevel.Warning);
+        claimed.Should().BeFalse();
+        var line = _logs.Of<MediatorClientChannel>().Should().ContainSingle(l => l.Formatted.Contains("without a thread", StringComparison.Ordinal)).Subject;
+        line.Level.Should().Be(LogLevel.Warning);
+        line.Formatted.Should().Contain("mediate-grant");
+        foreach (var identifier in _w.Identifiers)
+            line.Everything.Should().NotContain(identifier);
     }
 
     [Fact]
@@ -156,7 +172,6 @@ public sealed class MediatorClientLogLevelTests : IAsyncLifetime
         "an application's problem report" => await _w.SnapshotAsync(_w.Problem(Guid.NewGuid().ToString(), code: "e.p.msg.app-specific", from: _w.Alice.Did)),
         "a disclose for a query this client did not send" => await _w.SnapshotAsync(_w.Answer(DiscoverFeatures.DiscloseType, Guid.NewGuid().ToString(), body: new JsonObject { ["disclosures"] = new JsonArray() })),
         "another peer's answer naming our request" => await _w.SnapshotAsync(_w.Grant(requestId, from: _w.Mallory.Did)),
-        "a threadless answer no waiting request expects" => await _w.SnapshotAsync(_w.Status(thid: null)),
         _ => throw new ArgumentOutOfRangeException(nameof(message)),
     };
 }

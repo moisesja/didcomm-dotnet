@@ -5,6 +5,7 @@ using DidComm.Facade;
 using DidComm.Mediator.Client;
 using DidComm.Mediator.Client.Internal;
 using DidComm.Mediator.Pickup;
+using DidComm.Mediator.Tests.Pickup;
 using DidComm.Mediator.Tests.Pipeline;
 using DidComm.Messages;
 using Xunit;
@@ -45,6 +46,11 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
     [Fact]
     public async Task Unpacks_run_off_the_callers_stack_and_ones_that_block_their_threads_keep_their_slots_until_they_return()
     {
+        // The four unpacks below park four pool threads until this test lets them go. Without a
+        // higher floor that is the whole pool of a 4-vCPU runner (the test host holds threads of its
+        // own), and on a busy machine new threads come seconds apart: every test running beside
+        // this one stalled for 10 s and one timed out on windows CI (#98).
+        MessagePickupLive.RaiseThreadPoolFloor(DeliveredMessageUnpacker.FetchConcurrency);
         var time = new ManualTimeProvider();
         using var gate = new ManualResetEventSlim(false);
         using var entered = new SemaphoreSlim(0);

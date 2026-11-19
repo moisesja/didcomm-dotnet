@@ -365,7 +365,11 @@ internal sealed class MediatorRequestControls
         set => Volatile.Write(ref _responseGate, value);
     }
 
-    /// <summary>When set, the next POST is aborted after the endpoint returned and before its response is committed.</summary>
+    /// <summary>
+    /// When set, the next POST is aborted when its response starts, after the endpoint ran and before
+    /// the response is committed (a response under a deadline is completed inside the endpoint's
+    /// result, so a later point would be after the commit).
+    /// </summary>
     public bool AbortNextPost
     {
         set => Volatile.Write(ref _abortNextPost, value ? 1 : 0);
@@ -544,9 +548,15 @@ internal sealed class MediatorTestServer : IAsyncDisposable
             var post = HttpMethods.IsPost(context.Request.Method);
             if (post && controls.ResponseGate is { } gate)
                 context.Response.OnStarting(static state => ((TaskCompletionSource)state!).Task, gate);
-            await next(context);
             if (post && controls.TakeAbort())
-                context.Abort();
+            {
+                context.Response.OnStarting(static state =>
+                {
+                    ((HttpContext)state!).Abort();
+                    return Task.CompletedTask;
+                }, context);
+            }
+            await next(context);
         });
         app.UseWebSockets();
         options.ConfigurePipeline?.Invoke(app);
@@ -710,7 +720,7 @@ internal sealed class MediatorTestServer : IAsyncDisposable
     public async Task<PickupAnswer> ReceiveOverSocketAsync(WebSocket socket, TestPeer peer)
     {
         var (type, text) = await ReturnRouteTestHost.ReceiveAsync(socket, Timeout);
-        type.Should().Be(WebSocketMessageType.Binary, "each message of the mediator is one binary WebSocket message, never a STOMP frame");
+        type.Should().Be(WebSocketMessageType.Text, "each message of the mediator is one text WebSocket message (#98), never a STOMP frame");
         return await UnpackAnswerAsync(peer, Encoding.UTF8.GetBytes(text));
     }
 
@@ -729,6 +739,9 @@ internal sealed class MediatorTestServer : IAsyncDisposable
 
     /// <summary>Every forward admitted so far has been relayed, dropped or discarded (the handler's test seam).</summary>
     public Task FlushAsync() => Handler.FlushAsync(Timeout);
+
+    /// <summary>Every inbound message the mediator's dispatcher handed to its observers so far has reached them (their queue is drained).</summary>
+    public Task FlushObserversAsync() => App.Services.GetRequiredService<ProtocolDispatcher>().FlushObserversAsync(Timeout);
 
     /// <summary>The push workers are idle.</summary>
     public Task PushesIdleAsync() => Pushes.WaitForIdleAsync(Timeout);
