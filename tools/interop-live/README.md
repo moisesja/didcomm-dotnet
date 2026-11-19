@@ -354,8 +354,6 @@ ones plus this cell.
 
 ## Mediator leg (#98)
 
-> **DRAFT** (packet C of #98): the results table below is filled from the CI run on the branch.
-
 The external-mediator gate of PRD §12 Phase 7 ("at least one external-mediator leg … green
 nightly against a pinned image"). `run-mediator-leg.sh` runs the **Hyperledger Identus
 mediator v1.2.1**, pinned by digest, and drives it from both sides: our client as the recipient
@@ -402,7 +400,7 @@ reason)` and counts as a broken control, like one that passes.
 | R-1 | Python as the recipient through **our** mediator (I-4, I-5, E-52) | CM 2.0 by hand: the grant has the canonical type, `thid` = request id, a string `routing_did` equal to our mediator's DID, `from`, `to` and `created_time` (FR-RR-09). `keylist-update` answers `success`, and `keylist-query` lists P with `pagination`. Variants: a `mediate-request` with no body is granted; a `keylist-update` without `return_route` gets 202 and is still applied. Then forward, 202, Pickup 3.0 (status 1, delivery, unpack, `messages-received` answered with status 0), and `assert` passes. | `no-created-time`: 202 with no grant (FR-RR-08). `v2-disabled`: `mediate-request` is not answered. |
 | R-2 | Control: the same wallet against our mediator | `enrol --expect-version 3.0 --endpoint-override <ready.json http>`, python forward, `fetch --explicit-ack`, and `assert` passes. `AckAsync` must answer a status of 0 (compare O-9); `FetchAsync` has already acknowledged those ids, so this proves AckAsync's answer, not its effect. Then the one gated WebSocket exchange: `ws-attempt` against our mediator's `ws` endpoint must end `ok` (a status over the WebSocket transport). | `expect-v2`: our mediator negotiates 3.0. `ws-wrong-path`: the WebSocket call goes to a path with no endpoint behind it. |
 
-**WebSocket against Identus is observed, never gated** (owner decision O-98-1). Our transports
+**WebSocket against Identus is observed, never gated** (an open owner decision on #98, O-98-1, whether to send text frames). Our transports
 send every envelope as a Binary frame. The DIDComm v2.1 transports section names no frame type.
 Identus (scala-did 0.1.0-M48) processes only Text frames and logs `WS Error (type:Binary):
 Unexpected event` for the rest. So every WebSocket call from our client to Identus times out.
@@ -460,6 +458,47 @@ Each record is
 `{"id","e":[],"i":[],"title","value","method","gateable":false}`. All of them go to
 `mediator-observations.json`. The summary's second table shows one plain-language line per record
 (the data stays in the JSON; no runner paths are recorded).
+
+### The #99 interop table, re-checked against the pinned image (E-50)
+
+#99 read the Identus source at `main` `5664f1d` with scala-did 0.1.2. The pinned image is `v1.2.1`
+with scala-did 0.1.0-M48 (the Coordinate Mediation and Discover Features executers are unchanged
+between the two). Each row of the #99 plan's table I-1..I-15
+(`tasks/todo20261118-114952-coordinate-mediation-v2-99.md`), as the leg finds it:
+
+| # | #99 (source read) | On the pinned image | Where |
+|---|---|---|---|
+| I-1 | `routing_did` is a string | confirmed: a JSON string, equal to the Identus DID | M-1, O-15 |
+| I-2 | `result` is only `success` / `no_change` | confirmed for adds; adding a DID another account holds gets HTTP 500 after 3 s, not a `server_error` entry | M-1, O-16 |
+| I-3 | `paginate` ignored, no `pagination` | confirmed: `Limit 1` returns both DIDs, no `pagination` | O-7 |
+| I-4 | the Identus SDK sends `keylist-update` without `return_route` | not observable (no SDK in the leg); that shape is sent to **our** mediator in R-1 and is applied | R-1 |
+| I-5 | Identus requires `from` and exactly one `to` | confirmed: our requests carry both and are accepted | M-1 |
+| I-6 | a second `mediate-request` re-grants | confirmed: an identical grant | M-1 |
+| I-7 | answers carry `thid` = the request id; no `created_time` | confirmed (problem reports use `pthid`) | O-4, O-5 |
+| I-8 | anoncrypt and signed requests are accepted | confirmed: an anoncrypt `status-request` is answered with an authcrypt `status` | O-0 |
+| I-9 | its own problem codes | confirmed: `e.p.msg.unsupported` (a 3.0 request), `e.p.req.not_enroll` (an unregistered `next`), `e.p.crypto.message.dejavu` (a repeated envelope) | M-1 `pin-v3`, O-14, O-12 |
+| I-10 | Discover Features: CM 2.0 under role `responder`; `match` is a regular expression | confirmed; our `…/3.*` and `…/2.*` queries work and the client picks 2.0 with no pin; a `match` of `*` gets HTTP 500 | M-1, O-15 |
+| I-11 | (Blocktrust) `from_prior` on first contact | not applicable: no Identus answer carries `from_prior` | observe |
+| I-12 | the SDK sends `created_time`; Identus stamps none | confirmed for Identus's answers | O-5 |
+| I-13 | (Blocktrust) `custom_headers` | not applicable | — |
+| I-14 | Identus dispatches on the exact type string | confirmed with our canonical `/2.0/` types; R-1 checks that ours are canonical too | M-1, R-1 |
+| I-15 | the grant's `from` is the mediator DID | confirmed: `from` = `routing_did` = the invitation's `from` | M-1 |
+
+### Other mediators
+
+- **Blocktrust** (`bsandmann/blocktrust.Mediator`): no cell. Our client cannot enroll with it, by
+  design: its first answer comes from a new DID with a `from_prior` that has no `iat` and no `from`,
+  and its `keylist-update-response` entries have no `result`; the library refuses both, as the spec
+  requires (owner decision on #99; reported upstream as bsandmann/blocktrust.Mediator#5). The hosted
+  instance is never contacted. Re-check only if upstream fixes it.
+- **Affinidi** (`affinidi/affinidi-messaging-mediator`, checked at v0.53.0, 2026-11-15): no cell.
+  For DIDComm v2 it speaks trust-ping 2.0, routing 2.0, Message Pickup 3.0, Discover Features 2.0 and
+  Report Problem 2.0, but **not Coordinate Mediation**: a v2 client enrols through Affinidi's own
+  authentication protocol (`https://affinidi.com/atm/1.0/authenticate`), which registers the DID
+  (Coordinate Mediation 1.0 exists only for DIDComm v1). Its image,
+  `ghcr.io/affinidi/messaging-mediator:<version>`, pulls without credentials, but needs Redis (or a
+  build with the embedded store) and an identity made by its `mediator-setup` tool. A leg would need
+  that proprietary authentication step, so none is built (owner instruction on #98).
 
 ### Pins and provenance
 
