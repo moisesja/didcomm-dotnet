@@ -573,7 +573,10 @@ present, the cells in about 2 minutes (M-2 alone about 45 s), and the observatio
 
 | run | where | cells | negative controls | notes |
 |---|---|---|---|---|
-| _(placeholder: filled from the CI run on the branch)_ | | | | |
+| [44484556900](https://github.com/moisesja/didcomm-dotnet/actions/runs/44484556900) | CI, `b32e8e3` (PR #130): Ubuntu 26.04 (`ubuntu26 20261111.196.1`), x86_64, Docker 29.4.2, CPython 3.12.16, Identus image `linux/amd64` with scala-did 0.1.0-M48 | 9/9 | — | python 63/63 and jvm 60/60 (+3 n/a) tables byte-identical to `main`'s nightly 44298708738 |
+| [44484568467](https://github.com/moisesja/didcomm-dotnet/actions/runs/44484568467) | CI, `b32e8e3`, `negative_controls` | 9/9 | 18/18 failed, each for its declared reason; 0 broken | |
+| [44473219657](https://github.com/moisesja/didcomm-dotnet/actions/runs/44473219657), [44473234026](https://github.com/moisesja/didcomm-dotnet/actions/runs/44473234026) | CI, `7000bf4` (the first version of the leg, before its QA round) | 9/9 | 14/14 failed | |
+| local | macOS arm64, Docker 29.9.2, CPython 3.12.7, Identus image `linux/arm64` | 9/9 (236 s) | 18/18 for the declared reason (211 s) | failure modes and hygiene checked (no Docker objects or processes left) |
 
 ### Releases (E-43)
 

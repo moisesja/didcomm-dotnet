@@ -117,7 +117,7 @@ Build/verify (an item is done only when all three are green, plus a green live r
 - [x] A4 `run-mediator-leg.sh` + `images.env` + `squid.conf` + `initdb.js` + `check_boundary.py` + `render_summary.py`; `--negative-controls`, `--up`.
 - [x] A5 `run-all.sh` third leg; `interop-live.yml` (timeout, docker provenance, dispatch input).
 - [x] A6 Local green run (`caffeinate -dimsu`), python/jvm sections byte-identical to the last nightly.
-- [ ] A7 Live run from the branch (`gh workflow run interop-live.yml --ref feat/mediator-interop-gate-98`), run ids recorded.
+- [x] A7 Live run from the branch (`gh workflow run interop-live.yml --ref feat/mediator-interop-gate-98`), run ids recorded.
 
 ## B. Adversarial review (D1–D6) and triage
 
@@ -127,25 +127,29 @@ Build/verify (an item is done only when all three are green, plus a green live r
 
 ## C. QA on the harness
 
-- [ ] C1 Negative control per cell, demonstrated (`--negative-controls` all FAIL as designed).
-- [ ] C2 Failure modes: image pull failure, mediator not ready, port clash, Docker absent.
-- [ ] C3 Nightly wiring and summary table checked on the dispatched run.
-- [ ] C4 L-065 sweep of the harness and new tests (no fixed sleeps).
+- [x] C1 Negative control per cell, demonstrated (`--negative-controls` all FAIL as designed).
+- [x] C2 Failure modes: image pull failure, mediator not ready, port clash, Docker absent.
+- [x] C3 Nightly wiring and summary table checked on the dispatched run.
+- [x] C4 L-065 sweep of the harness and new tests (no fixed sleeps).
 
 ## D. Docs
 
-- [ ] D1 `tools/interop-live/README.md`: mediator leg, results table, how to run locally, pins and provenance, I-1..I-15 live re-check, Affinidi answer.
+- [x] D1 `tools/interop-live/README.md`: mediator leg, results table, how to run locally, pins and provenance, I-1..I-15 live re-check, Affinidi answer.
 - [x] D2 `SECURITY.md`: mediator threat-model paragraph (Supported-versions table untouched: separate owner decision).
-- [ ] D3 CHANGELOG, PRD (Phase 7 exit-criteria status), `docs/codebase-architecture.md`.
+- [x] D3 CHANGELOG, PRD (Phase 7 exit-criteria status), `docs/codebase-architecture.md`.
 - [x] D4 `tasks/lessons.md`: E-60 lesson + anything surprising.
 
 ## E. Gate and PR
 
-- [ ] E1 Build / test / pack green; live run green on the branch.
+- [x] E1 Build / test / pack green; live run green on the branch.
 - [ ] E2 PR (Closes #98, Part of #88; live-run table; public-safe adversarial summary; fix-forward list); CI green.
-- [ ] E3 Adversarial report comment on #98 (public-safe).
+- [x] E3 Adversarial report comment on #98 (public-safe).
 
 ## Review
+
+### PR
+
+PR #130 (head `b32e8e3` at opening; CI green on ubuntu and windows). Adversarial report comment on #98: 7003391277. Follow-ups filed: #126, #127, #128, #129.
 
 ### How it was built (2026-11-19)
 
@@ -158,6 +162,8 @@ Build/verify (an item is done only when all three are green, plus a green live r
 |---|---|---|
 | 44473219657 | `7000bf4` | green: mediator leg 9/9; python 63/63 and jvm 60/60 (+3 n/a) tables byte-identical to main's last nightly (44298708738) |
 | 44473234026 (`negative_controls`) | `7000bf4` | green: 14/14 sabotaged cells FAIL as designed |
+| 44484556900 | `b32e8e3` (after the harness QA round) | green: mediator leg 9/9; python/jvm tables byte-identical to 44298708738 |
+| 44484568467 (`negative_controls`) | `b32e8e3` | green: 18/18 sabotaged cells failed for their declared reason, 0 broken |
 
 ### Interop observations against Identus 1.2.1 (recorded, not gated)
 
