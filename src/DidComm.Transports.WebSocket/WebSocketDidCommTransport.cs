@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Net.WebSockets;
-using System.Text.Unicode;
 using DidComm.Exceptions;
 using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
@@ -18,11 +17,10 @@ namespace DidComm.Transports.WebSocket;
 
 /// <summary>
 /// WebSocket-flavored <see cref="IDidCommTransport"/> (PRD §9.3 / FR-TRN-09..11). Sends each
-/// packed DIDComm envelope as exactly one WebSocket text message (FR-TRN-09; bytes that are not
-/// valid UTF-8 and STOMP frames go as binary, see <see cref="FrameTypeFor"/>); the receiver
-/// MUST reassemble fragmented frames before processing. Connections are pooled by endpoint and
-/// reconnect with exponential backoff (1s / 30s / 0.5 jitter — DD-05) on send failures.
-/// Optionally wraps each envelope in minimal STOMP 1.2 framing when
+/// packed DIDComm envelope as exactly one WebSocket text message (FR-TRN-09; STOMP frames are
+/// binary); the receiver MUST reassemble fragmented frames before processing. Connections are
+/// pooled by endpoint and reconnect with exponential backoff (1s / 30s / 0.5 jitter — DD-05) on
+/// send failures. Optionally wraps each envelope in minimal STOMP 1.2 framing when
 /// <see cref="WebSocketTransportOptions.UseStomp"/> is enabled (FR-TRN-12); plain framing is
 /// the default and is byte-for-byte unchanged.
 /// </summary>
@@ -533,11 +531,12 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                     (pending ??= new()).Add((WebSocketLifecycleEventKind.Connected, null));
                 using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                 sendCts.CancelAfter(_options.SendTimeout);
-                // FR-TRN-09: one logical WebSocket message per packed envelope, as a text frame
-                // (FrameTypeFor); a STOMP SEND frame stays binary (FR-TRN-12). We always send
-                // the full buffer with EndOfMessage = true; receivers MUST loop until they see
-                // EndOfMessage to handle fragmentation at the wire layer.
-                var frameType = _options.UseStomp ? WebSocketMessageType.Binary : FrameTypeFor(payload.Span);
+                // FR-TRN-09: one logical WebSocket message per packed envelope, as a text frame: a
+                // DIDComm message is UTF-8 JSON, and some peers (the Identus mediator, browser
+                // wallets) read only text frames. A STOMP SEND frame stays binary (FR-TRN-12). We
+                // always send the full buffer with EndOfMessage = true; receivers MUST loop until
+                // they see EndOfMessage to handle fragmentation at the wire layer.
+                var frameType = _options.UseStomp ? WebSocketMessageType.Binary : WebSocketMessageType.Text;
                 await socket.SendAsync(payload, frameType, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -641,9 +640,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
                 using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                 sendCts.CancelAfter(_options.SendTimeout);
-                // FR-TRN-09: one logical WebSocket message per packed envelope, as a text frame
-                // (FrameTypeFor). Never STOMP-framed: session sockets are off under UseStomp.
-                await session.Socket.SendAsync(payload, FrameTypeFor(payload.Span), endOfMessage: true, sendCts.Token).ConfigureAwait(false);
+                // FR-TRN-09: one logical WebSocket message per packed envelope, as a text frame (see
+                // SendOnPoolAsync). Never STOMP-framed: session sockets are off under UseStomp.
+                await session.Socket.SendAsync(payload, WebSocketMessageType.Text, endOfMessage: true, sendCts.Token).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1144,19 +1143,6 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             throw;
         }
     }
-
-    /// <summary>
-    /// The WebSocket frame type of one outbound DIDComm message (FR-TRN-09). Text: every DIDComm
-    /// message is UTF-8 JSON, and some peers read only text frames (the Identus mediator drops
-    /// binary ones; browser wallets expect text). Binary for bytes that are not valid UTF-8, which
-    /// no packed message is but a relay can pass on unread (a forward's <c>data.base64</c> payload
-    /// through <c>DidCommClient.SendPackedAsync</c>, or a direct <see cref="IDidCommTransport"/>
-    /// caller): a text frame must be valid UTF-8, and a receiver fails the whole connection on one
-    /// that is not (RFC 6455 §8.1), losing what was sent after it.
-    /// </summary>
-    /// <param name="payload">The bytes of one outbound message (never STOMP-framed).</param>
-    internal static WebSocketMessageType FrameTypeFor(ReadOnlySpan<byte> payload)
-        => Utf8.IsValid(payload) ? WebSocketMessageType.Text : WebSocketMessageType.Binary;
 
     /// <summary>Wrap the packed envelope in one STOMP SEND frame (FR-TRN-12).</summary>
     private ReadOnlyMemory<byte> BuildStompSendPayload(TransportRequest request)
