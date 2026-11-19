@@ -6,6 +6,35 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — a forward waiting in the mediator holds about the bytes its budget counts, not its parsed message (#98, epic #88)
+
+The mediator's forward handler limits the forwards that wait for their 202, or wait behind a slow
+sink, to 64 MiB of plaintext. But each waiting forward kept its parsed message, and a parsed JSON
+attachment is much bigger than its text: about 3 times for a flat payload, and about 50 times for an
+attachment of many tiny entries (190 000 one-character strings fit in one 1 MiB envelope). So the
+64 MiB limit could stand for about 200 MiB to 3 GiB of memory, and any sender could fill it. The
+handler has not been released, so no released behaviour changes. No public API changes.
+
+- **What a waiting forward keeps now.** Its plaintext as the UTF-8 bytes the limit counts, plus the
+  small fields of its unpack result and its dispatch context. The pump parses the message again,
+  one forward at a time, just before it processes the forward. Measured with forwards held behind
+  their acknowledgement, the memory they hold is 1.01 times what they are counted (it was 3 times
+  for a flat payload and 45 times for the many-entries one).
+- **Same behaviour.** The same forwards are admitted, relayed and dropped, with the same outcomes,
+  the same relayed bytes and the same order. The sink gets the same context, with a newly parsed
+  message of the same content, and observers read the same verified unpack facts from it. On the
+  request, the work before the registry lookup is still the same whether or not `next` is
+  registered.
+- **Not counted yet.** The envelope's list of recipient key ids (`UnpackResult.AllRecipientKids`)
+  stays with the forward for the sink and is not part of the 64 MiB. Only `MaxReceiveBytes` limits it,
+  per forward.
+- **Tests.** `ForwardHandlerRetentionTests` (Core): a forward waiting for its acknowledgement, and
+  one queued behind a busy sink, keep neither the parsed message nor its attachment (checked with
+  weak references, for a verified and for a host-built unpack result). The sink gets the same unpack
+  outcome and the same verified facts, and a forward that is never acknowledged still drops with its
+  bounded id. `ForwardHandlerRetentionProbeTests` (category `Adv98Probe`) measures the ratio and
+  requires at most 2 times. The weak-reference tests and the probe fail on the code before the fix.
+
 ### Fixed — `PickupClient.AckAsync` works with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
 
 Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated

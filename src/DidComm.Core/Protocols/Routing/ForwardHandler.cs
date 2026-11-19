@@ -48,10 +48,23 @@ namespace DidComm.Protocols.Routing;
 /// with a Warning — fail closed. The queued work runs on this handler's own shutdown token, never
 /// the request token: a client that aborts after the 202 must not cancel the relay. The queue is
 /// bounded twice — <see cref="DefaultCapacity"/> forwards reserved, queued or in flight, and
-/// <see cref="DefaultByteBudget"/> of their plaintext UTF-8 bytes, because each queued item pins
-/// the decoded message graph (attachment included) and the item cap alone would let a sender park
-/// 1024 × <c>MaxReceiveBytes</c> behind a slow sink. A forward that would exceed either bound is
-/// dropped with a rate-limited Warning — fail closed, never block the request.
+/// <see cref="DefaultByteBudget"/> of their plaintext UTF-8 bytes, because the item cap alone would
+/// let a sender park 1024 × <c>MaxReceiveBytes</c> behind a slow sink. A forward that would exceed
+/// either bound is dropped with a rate-limited Warning — fail closed, never block the request.
+/// </para>
+/// <para>
+/// <strong>What a waiting forward holds.</strong> From admission until the pump takes it, a forward
+/// keeps the bytes it is charged: its plaintext as UTF-8 (for a forward addressed to this mediator
+/// itself, also the plaintext of the forward found inside it, which is charged too), plus the other
+/// members of its unpack result and dispatch context, which are small. It never keeps the parsed
+/// message: a JSON attachment of many small entries parses to a DOM tens of times the size of its
+/// plaintext, so keeping it would let the budget's bytes stand for far more memory. The pump parses
+/// the message again, one forward at a time, just before processing it. The processor and the sink
+/// get the same unpack outcome as before: a new <c>Message</c> with the same content, and the same
+/// verified unpack facts for observers. So the memory that waiting forwards hold is about the bytes
+/// the budget charges (L-062). One part is not charged: the envelope's recipient kid list
+/// (<see cref="Facade.UnpackResult.AllRecipientKids"/>), which the sink receives with the unpack
+/// result.
 /// </para>
 /// <para>
 /// <strong>Schedule fixed at receipt.</strong> The clock is read once per forward, inline: the
@@ -145,7 +158,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     /// <summary>
     /// Default bound on the plaintext UTF-8 bytes of the forwards queued or in flight (64 MiB): the
     /// same exact-plaintext accounting <c>ObserverDelivery</c> uses, so the queue honours
-    /// <c>MaxReceiveBytes</c> in aggregate and not only per message (epic #88, D7).
+    /// <c>MaxReceiveBytes</c> in aggregate and not only per message (epic #88, D7). Those bytes are
+    /// what the forwards keep while they wait, not their parsed messages (see the remarks).
     /// </summary>
     internal const long DefaultByteBudget = 64L * 1024 * 1024;
 
@@ -211,22 +225,22 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         Count,
     }
 
-    // The dispatcher-built ProtocolContext (an immutable record) is everything the detached work
-    // needs: the UnpackResult, the options/clock and the facade. The request token is NOT stored.
-    // Bytes is the plaintext UTF-8 charge the item holds against the byte budget until released.
-    // Delay/NotBefore are the delay_milli schedule fixed at admission (FR-ROUTE-10). Opened: when the
-    // received forward was addressed to this mediator itself, the forward found inside it — opened
-    // inline, on the request (FR-ROUTE-06) — which is what the pump processes; null otherwise. The
-    // context stays the received forward's: its acknowledgement, its id in the logs, the sink's view.
-    // OpenedExpiresTime: the earliest expires_time of the received forward and every layer opened,
-    // which bounds the relayed payload (FR-ROUTE-09).
+    // Held: the dispatcher-built ProtocolContext and, when the received forward was addressed to this
+    // mediator itself, the forward found inside it (opened inline, on the request, FR-ROUTE-06; what
+    // the pump processes) — kept as their plaintext bytes and bounded fields only, never the parsed
+    // messages (L-062), and parsed again on the pump. The request token is NOT stored. The context
+    // stays the received forward's: its acknowledgement, its id in the logs, the sink's view. Null
+    // for the flush barrier. Bytes is the plaintext UTF-8 charge the item holds against the byte
+    // budget until released: exactly the plaintext bytes Held keeps. Delay/NotBefore are the
+    // delay_milli schedule fixed at admission (FR-ROUTE-10). OpenedExpiresTime: the earliest
+    // expires_time of the received forward and every layer opened, which bounds the relayed payload
+    // (FR-ROUTE-09).
     private sealed record WorkItem(
-        ProtocolContext? Context,
+        HeldForward? Held,
         int Bytes,
         TimeSpan? Delay,
         DateTimeOffset? NotBefore,
         TaskCompletionSource? Barrier,
-        Facade.UnpackResult? Opened = null,
         long? OpenedExpiresTime = null);
 
     /// <summary>Create the handler with the default queue bound and shutdown grace.</summary>
@@ -355,7 +369,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         int bytes;
         TimeSpan? delay;
         DateTimeOffset? notBefore;
-        Facade.UnpackResult? opened = null;
+        HeldForward.Plaintext received;
+        HeldForward.Plaintext? opened = null;
         long? openedExpiresTime = null;
         try
         {
@@ -409,11 +424,12 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
             // (e) Size the forward for the byte budget before the registration lookup, so the
             //     work done inline is the same whether or not `next` is registered: the exact
-            //     plaintext length the unpack path preserved (no re-serialization); a host-built
-            //     synthetic result is serialized once. A sizing failure is a drop, never a throw.
-            bytes = InboundMessageSnapshot.TryGetFor(message, out var snapshot)
-                ? snapshot.Utf8ByteCount
-                : InboundMessageSnapshot.CreateFallback(context.Received).Utf8ByteCount;
+            //     plaintext the unpack path preserved (no re-serialization), taken as the UTF-8
+            //     bytes the budget charges, which is what the forward keeps while it waits (L-062);
+            //     a host-built synthetic result is serialized once. A sizing failure is a drop,
+            //     never a throw.
+            received = HeldForward.Plaintext.Of(context.Received);
+            bytes = received.Utf8ByteCount;
 
             // (f) A forward whose next is the DID that decrypted it is a rewrapped layer addressed to
             //     this mediator itself (FR-ROUTE-06). It is opened here, on the sender's own request
@@ -425,13 +441,13 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             {
                 if (await OpenSelfAddressedAsync(context.Received, receivedAt, context.Options.ExpiresClockSkew, logId, ct).ConfigureAwait(false) is not { } inside)
                     return null; // dropped and counted
-                opened = inside.Forward;
+                opened = HeldForward.Plaintext.Of(inside.Forward);
                 openedExpiresTime = inside.ExpiresTime;
                 subject = inside.Subject;
                 if (inside.NotBefore is { } later && (notBefore is not { } earlier || later > earlier))
                     (delay, notBefore) = (inside.Delay, inside.NotBefore); // a hold an outer layer asked for is kept
                 // The opened forward is held with the received one: both count against the budget.
-                bytes = (int)Math.Min(int.MaxValue, (long)bytes + PlaintextBytes(inside.Forward));
+                bytes = (int)Math.Min(int.MaxValue, (long)bytes + opened.Utf8ByteCount);
             }
 
             // (g) The forward to relay must name a registered recipient: one constant-work lookup,
@@ -462,7 +478,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         // Admit: reserve the slot and the bytes inline, so saturation is decided on the request
         // like every other drop. Everything that depends on the registration (processing, the
         // sink) happens on the pump, and only after the transport has acknowledged the inbound.
-        var item = new WorkItem(context, bytes, delay, notBefore, Barrier: null, opened, openedExpiresTime);
+        var item = new WorkItem(new HeldForward(context, received, opened, logId), bytes, delay, notBefore, Barrier: null, openedExpiresTime);
         var reserved = false;
         var publishNow = false;
         var published = false;
@@ -514,13 +530,13 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     /// </summary>
     private async Task PublishWhenAcknowledgedAsync(WorkItem item)
     {
-        var context = item.Context!;
-        var id = LogValues.Id(context.Received.Message.Id);
+        var held = item.Held!;
+        var id = held.LogId;
         try
         {
             // The shutdown token, not the request token: a shutdown must release the reservation
             // promptly even when the host's acknowledgement never completes.
-            await context.Acknowledged.WaitAsync(_shutdownToken).ConfigureAwait(false);
+            await held.Acknowledged.WaitAsync(_shutdownToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_shutdownToken.IsCancellationRequested)
         {
@@ -615,8 +631,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
     private async Task ProcessOneAsync(WorkItem item, CancellationToken shutdown)
     {
-        var context = item.Context!;
-        var id = LogValues.Id(context.Received.Message.Id);
+        var held = item.Held!;
+        var id = held.LogId;
         // Which stage a fault came from decides its outcome: a processor that refuses the forward
         // as inconsistent or malformed ends a malformed forward, and one that cannot resolve the next
         // hop (rewrap mode) ends a forward for a recipient that cannot be reached; anything else is a
@@ -624,13 +640,17 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         var processed = false;
         try
         {
+            // The forward waited as its plaintext bytes (L-062): its messages are parsed again here,
+            // one forward at a time, for the processor and the sink. They were parsed once already,
+            // so only a fault of the mediator's own (memory) can stop this: Faulted.
+            var (context, opened) = held.Restore();
             // The schedule was fixed at admission (FR-ROUTE-10); the processor does not re-read the
             // clock. An opened forward was screened inline; the pump only processes and sinks it.
-            var result = await _processor.ProcessAsync(item.Opened ?? context.Received, item.Delay, item.NotBefore, shutdown).ConfigureAwait(false);
+            var result = await _processor.ProcessAsync(opened ?? context.Received, item.Delay, item.NotBefore, shutdown).ConfigureAwait(false);
             // A payload taken out of layers addressed to this mediator must not outlive any of them:
             // the earliest expiry of the received forward and every layer opened bounds it (FR-ROUTE-09),
             // for the check below and for the queue that stores it.
-            if (item.Opened is not null)
+            if (opened is not null)
                 result = result with { ExpiresTime = item.OpenedExpiresTime };
             processed = true;
 
@@ -786,13 +806,6 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
     }
 
-    /// <summary>The exact plaintext size of an unpacked message, as the unpack path recorded it (serialized once otherwise).</summary>
-    /// <param name="unpacked">The unpack outcome.</param>
-    private static int PlaintextBytes(Facade.UnpackResult unpacked)
-        => InboundMessageSnapshot.TryGetFor(unpacked.Message, out var snapshot)
-            ? snapshot.Utf8ByteCount
-            : InboundMessageSnapshot.CreateFallback(unpacked).Utf8ByteCount;
-
     /// <summary>
     /// Whether a forward is addressed to this mediator itself: the DID subject of its
     /// <c>next</c> is the DID of the key that decrypted it. Only that DID counts — not another DID
@@ -833,7 +846,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
                 ThrowIfShutdown();
                 // Admission is capped at _capacity while the channel has _capacity + 1 physical
                 // slots, and Flush calls are serialized. The barrier therefore fits.
-                if (!_channel.Writer.TryWrite(new WorkItem(Context: null, Bytes: 0, Delay: null, NotBefore: null, Barrier: barrier)))
+                if (!_channel.Writer.TryWrite(new WorkItem(Held: null, Bytes: 0, Delay: null, NotBefore: null, Barrier: barrier)))
                     throw new InvalidOperationException("Forward flush barrier could not be admitted despite its reserved channel slot.");
             }
 
