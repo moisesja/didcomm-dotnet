@@ -601,7 +601,7 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// on and it is registered in the <see cref="IReturnRouteSessionRegistry"/>, where handlers find
     /// it for live pushes. Handler replies and <see cref="IReturnRouteSession.TrySendAsync(Message, CancellationToken)"/> pushes
     /// are authcrypted from the DID that decrypted the opening message to exactly that peer and
-    /// written as one binary WebSocket message each, by a single writer. A later header-less message
+    /// written as one text WebSocket message each (FR-TRN-09), by a single writer. A later header-less message
     /// leaves the mode unchanged; a later <c>none</c> (or <c>thread</c>) from the same pair stops
     /// pushes and <c>all</c> resumes them. A message authenticated by another DID on the same socket
     /// is dispatched without a session and its reply is not written. A header-less message on a
