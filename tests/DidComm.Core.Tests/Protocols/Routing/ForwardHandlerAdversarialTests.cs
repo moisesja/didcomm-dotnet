@@ -393,7 +393,9 @@ public sealed class ForwardHandlerAdversarialTests
         var act = async () => await processor.ProcessAsync(AsDecryptedByMediator(forward));
 
         var failure = (await act.Should().ThrowAsync<MalformedMessageException>()).Which;
-        failure.InnerException.Should().BeOfType<ArgumentException>();
+        // #98: refused when the attachment is read, before any re-wrap is tried (it used to be the
+        // re-wrap's ArgumentException, mapped); the re-wrap mapping is pinned by the no-DID-part test.
+        failure.InnerException.Should().BeNull();
         failure.ShouldNotQuoteTheValue();
         failure.Message.Should().NotContain(Marker);
     }
@@ -413,19 +415,23 @@ public sealed class ForwardHandlerAdversarialTests
     }
 
     [Fact]
-    public async Task Pass_through_without_extra_keys_still_relays_non_JSON_bytes_opaquely()
+    public async Task Pass_through_without_extra_keys_refuses_a_payload_that_is_not_a_DIDComm_message_without_quoting_it()
     {
-        // Pins that the re-embed mapping does not reach into the verbatim path.
+        // #98: this test used to pin that pass-through relayed non-JSON bytes opaquely. A forward's
+        // attachment is a DIDComm message, so UTF-8 JSON; pass-through now checks that (without
+        // opening it) and refuses anything else, as rewrap and extra keys already did.
         var forward = new MessageBuilder()
             .WithType(ForwardConstants.ForwardTypeUri)
             .WithTo(Mediator)
             .WithBody(new JsonObject { ["next"] = Bob })
-            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = DidComm.Jose.Base64Url.EncodeUtf8("opaque") } })
+            .WithAttachment(new Attachment { Data = new AttachmentData { Base64 = DidComm.Jose.Base64Url.EncodeUtf8("opaque " + Marker) } })
             .Build();
 
-        var result = await NewProcessor().ProcessAsync(AsDecryptedByMediator(forward));
+        var act = async () => await NewProcessor().ProcessAsync(AsDecryptedByMediator(forward));
 
-        Encoding.UTF8.GetString(result.OnwardPacked).Should().Be("opaque");
+        var failure = (await act.Should().ThrowAsync<MalformedMessageException>()).Which;
+        failure.ShouldNotQuoteTheValue();
+        failure.Message.Should().NotContain(Marker);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────

@@ -299,7 +299,8 @@ public sealed class ForwardProcessorTests
         // RFC 0017), and the mediator only relays the bytes for the recipient to re-parse — so a peer's
         // '=' padded forward attachment must still be relayed, not refused. (Only the strict JOSE/JWT/
         // OOB paths reject padding.)
-        var innerPayload = "forward-me!"; // 11 bytes → base64 carries a trailing '=' pad
+        // #98: the payload is a DIDComm message (a JSON object); 16 bytes → base64 carries '==' padding.
+        var innerPayload = """{"forward":"me"}""";
         var bytes = Encoding.UTF8.GetBytes(innerPayload);
         var paddedBase64Url = Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_'); // padded base64url
         paddedBase64Url.Should().EndWith("="); // sanity: this value really is padded
