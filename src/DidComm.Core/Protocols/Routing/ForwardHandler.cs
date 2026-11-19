@@ -481,10 +481,11 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             //      stored, so a payload that is not one never holds a place in the queue or the budget.
             //      The answer is the one every malformed forward gets: the transport's 202, nothing
             //      stored or relayed, Dropped-Malformed, one log line with the bounded id only. The
-            //      spec does not settle how a mediator answers an invalid forward: Routing's MAY to
-            //      ignore unsupported headers is about headers, it discourages sending anything back
-            //      toward the sender of a forward, Problem Reports are general, and Transports only
-            //      requires a 2xx for a successful receipt and leaves failures open. Answering like
+            //      spec does not settle how a mediator answers an invalid forward: Routing (L25) only
+            //      says a mediator MAY return a problem report for a header it doesn't support, and
+            //      (L27) that `please_ack` on a forward MUST NOT be honored, to spare mediators
+            //      sourceward communication; Problem Reports are general; Transports (L67) requires a
+            //      2xx for a successful receipt and leaves failures open. Answering like
             //      this is the owner's choice within that gap (2026-11-19), not a spec rule.
             if (CarriesNonDidCommPayload(relayed))
             {
