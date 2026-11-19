@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>MediatorWallet</RootNamespace>
+    <AssemblyName>MediatorWallet</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <Description>The wallet of the mediator interop leg (#98): enrols with an external mediator (the Identus mediator) through DidComm.Mediator.Client, registers DIDs reached through it, picks its messages up, attempts a WebSocket call, and probes the mediator's wire behaviour with raw requests. Like sample 11's wallet it references the client package and the transports only: no mediator package, no ASP.NET Core. Usage: MediatorWallet enrol|fetch|ws-attempt|observe|boundary [options]</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetDid.Core" />
+  </ItemGroup>
+
+  <!-- Exactly the reference set of samples/11-MediatedAgent/Wallet: DidComm.Mediator.Client plus
+       the transports. Never DidComm.Mediator, DidComm.Mediator.AspNetCore, DidComm.AspNetCore or
+       ASP.NET Core (E-36): tests/DidComm.InteropTests/InteropLive/MediatorWalletBoundaryTests.cs and
+       the leg's B-0 cell check this project's restore graph and compiled references. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\src\DidComm.Mediator.Client\DidComm.Mediator.Client.csproj" />
+    <ProjectReference Include="..\..\..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
+    <ProjectReference Include="..\..\..\..\src\DidComm.Transports.WebSocket\DidComm.Transports.WebSocket.csproj" />
+    <ProjectReference Include="..\..\..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="..\..\..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
+    <ProjectReference Include="..\..\..\..\samples\_shared\_shared.csproj" />
+  </ItemGroup>
+
+</Project>
