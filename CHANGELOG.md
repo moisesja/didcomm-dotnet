@@ -105,7 +105,9 @@ and `DeliveredUnpackAdv4Tests`, the host code that throws) park thread-pool thre
 4-vCPU windows runner they starved the test host for about 10 s, and an unrelated live-stream test's
 hang guard fired (CI run 44542264815). They now raise the pool floor before parking threads, as the
 other tests that do this already did. The failure was reproduced on demand (pool injection held back)
-and fixed in the tests only; the live-stream test that failed is unchanged.
+and fixed in the tests only; the live-stream test that failed is unchanged. The same happened once in the Core tests (run 44571350171): the return-route session registry's
+tests park the pool thread its notifier needs, and a busy neighbour held the rest; that class and one
+Discover Features test now raise the floor as well (`ThreadPoolFloor`), proved the same way.
 
 ### Added — Live interop: a mediator leg against the Hyperledger Identus mediator 1.2.1, and an adversarial review of the mediator service (#98, epic #88)
 
