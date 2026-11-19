@@ -1,7 +1,12 @@
 # Live cross-implementation interop harness (PRD §13.6 FR-IX-04/05, cadence per FR-IX-08:
 # nightly + on release + on demand). Round-trips didcomm-dotnet ↔ SICPA didcomm-python and
-# didcomm-jvm over did:peer:2 in both directions via tools/interop-live/run-all.sh, uploads
-# the per-cell PASS/FAIL/N-A summary as an artifact, and fails on any FAIL cell.
+# didcomm-jvm over did:peer:2 in both directions, and runs the mediator leg against the
+# digest-pinned Hyperledger Identus mediator in Docker (PRD §12 Phase 7 exit criteria, #98),
+# via tools/interop-live/run-all.sh; uploads the per-cell PASS/FAIL/N-A summary as an
+# artifact, and fails on any FAIL cell. Every image the mediator leg runs is pinned by digest
+# (tools/interop-live/mediator/images.env), so no continue-on-error: a red mediator leg is a
+# change on our side or in the runner, never a moved third-party tag. No secrets: the images
+# are public and the Identus keys are generated per run.
 #
 # Offline interop (the static fixture suite) gates every PR in ci.yml — this workflow is the
 # live half only, kept off the PR path because it exercises third-party runtimes.
@@ -11,6 +16,11 @@ on:
   schedule:
     - cron: '17 3 * * *' # nightly, off-peak UTC
   workflow_dispatch:
+    inputs:
+      negative_controls:
+        description: 'Also run the mediator leg with every cell sabotaged (each must FAIL)'
+        type: boolean
+        default: false
   release:
     types: [published]
 
@@ -19,8 +29,10 @@ permissions:
 
 jobs:
   live-interop:
-    name: live round-trips (python + jvm)
+    name: live round-trips (python + jvm + mediator)
     runs-on: ubuntu-latest
+    # Three legs; the mediator leg pulls three images and takes a few minutes on its own.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -49,6 +61,11 @@ jobs:
           distribution: temurin
           java-version: '17' # didcomm-jvm 0.3.2 targets 8; validated on 17 (CI) and 25 (local)
 
+      # Provenance of the container runtime the mediator leg runs on (E-42: ubuntu-latest floats,
+      # so the log names the Docker version each run used).
+      - name: Docker (mediator leg)
+        run: docker version && docker info
+
       - name: Run live interop harness
         env:
           # Seed the python leg's venv from exactly the interpreter installed above, not from
@@ -60,6 +77,20 @@ jobs:
           bash tools/interop-live/run-all.sh
           status=$?
           cat "$INTEROP_SUMMARY_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          exit $status
+
+      # On demand only: every mediator-leg cell run with its sabotage; the step fails unless each
+      # sabotaged run FAILED (a sabotage that passes means the cell cannot detect what it gates).
+      - name: Mediator leg negative controls
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.negative_controls }}
+        env:
+          PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          export INTEROP_SUMMARY_DIR="$RUNNER_TEMP/interop-summary/negative-controls"
+          set +e
+          bash tools/interop-live/run-mediator-leg.sh --negative-controls
+          status=$?
+          cat "$INTEROP_SUMMARY_DIR/mediator-leg.md" >> "$GITHUB_STEP_SUMMARY" || true
           exit $status
 
       - name: Upload summary

@@ -16,7 +16,8 @@ this harness runs nightly, on release, and on demand
 | `python/interop_peer.py` | The didcomm-python side: same CLI shape, driving `didcomm==0.3.2` (sicpa-dlab/didcomm-python) directly. Pins in `python/requirements.txt`. |
 | `jvm/src/InteropPeer.java` | The didcomm-jvm side: same CLI shape, driving `org.didcommx:didcomm:0.3.2` — plain `javac`/`java`, jars pinned by version + SHA-256 in `jvm/fetch-deps.sh` (no Gradle/Maven). |
 | `run-python-leg.sh` / `run-jvm-leg.sh` | One leg each: mint the identity set, run the matrix in both directions, verify the published vectors, print/emit a per-cell PASS/FAIL/N-A table, exit 1 on any FAIL. A missing or empty `packed/didcomm-dotnet/` vector set hard-fails the leg — FR-IX-06 is a MUST, so an uninitialized fixtures submodule turns the leg red instead of silently shrinking the tally. The python leg exits 2 before running anything if its interpreter is outside CPython 3.9–3.12 (see Pinned versions). |
-| `run-all.sh` | Both legs + a combined `summary.md` (the CI artifact). |
+| `run-mediator-leg.sh` | The mediator leg: the Hyperledger Identus mediator in Docker against our wallet, our sender and our mediator (see [Mediator leg](#mediator-leg-98)). Exits 2 before running anything when Docker, curl, dotnet or a CPython 3.9–3.12 is missing. |
+| `run-all.sh` | All three legs + a combined `summary.md` (the CI artifact). |
 
 Every cell round-trips a fresh C.1-style payload and asserts (a) the recovered plaintext
 equals the original (`id`, `type`, `body`, `from`, `to`, `created_time`) and (b) the unpack
@@ -351,6 +352,188 @@ JDK 25):
 Every other cell gave the same result as in the tables above in the same runs; the totals are the earlier
 ones plus this cell.
 
+## Mediator leg (#98)
+
+> **DRAFT** (packet C of #98): the results table below is filled from the CI run on the branch.
+
+The external-mediator gate of PRD §12 Phase 7 ("at least one external-mediator leg … green
+nightly against a pinned image"). `run-mediator-leg.sh` runs the **Hyperledger Identus
+mediator v1.2.1**, pinned by digest, and drives it from both sides: our client as the recipient
+and as the sender, a didcomm-python recipient through it, and the same python recipient and our
+own wallet through **our** mediator, as the attribution control.
+
+### What runs
+
+| Piece | Role |
+|---|---|
+| `identus` | Identus mediator v1.2.1 on `127.0.0.1:<P>` (a free port, retried up to 5 times on a clash). Its DID advertises `http://127.0.0.1:<P>` then `ws://127.0.0.1:<P>/ws`. Keys are generated per run (`mediator_peer.py okp-keys`, passed in an env file), never the compose demo keys. Its MongoDB 6.0 runs with `--auth` on tmpfs (no volumes), initialised by Identus's own `initdb.js` (vendored, below). |
+| `identus-px` | A second Identus with its own MongoDB, reachable only on the leg's Docker network under the name `identus-px`, port 8080, with no host port. Its DID advertises `http://identus-px:8080` and `ws://identus-px:8080/ws`. A client on the host can reach it only through the proxy. |
+| `squid` | Squid (`ubuntu/squid`), deny by default (`mediator/squid/squid.conf`). It allows plain HTTP and CONNECT to `identus-px:8080` only, and answers 403 to everything else, 127.0.0.1 included. Before any cell runs, the leg checks all three: a request routed to `identus-px`, a CONNECT tunnel to it, and a 403 for `127.0.0.1:<P>`. |
+| `mediator/MediatorWallet` | Our wallet: `DidComm.Mediator.Client`, the HTTP and WebSocket transports and DI, the reference set of sample 11's wallet. No mediator package, no ASP.NET Core. Commands `enrol`, `fetch`, `ws-attempt`, `observe` and `boundary`, each printing one JSON result. It is built inside the leg, so a build break fails this leg only. |
+| `tools/InteropCli` | `pack --forward true` is the dotnet sender. `mediator-serve` runs a didcomm-dotnet mediator on `127.0.0.1` for the reverse cells. Its stdin is a FIFO the leg holds open, so the mediator stops when the leg does. |
+| `mediator/python/mediator_peer.py` | didcomm-python 0.3.2, in the python leg's pinned venv (`python/requirements.txt`; helpers imported from `python/interop_peer.py`, unchanged). It wraps forwards explicitly (`wrap_in_forward`: didcomm-python 0.3.2 does not wrap for a service whose `uri` is a DID without `routingKeys`). It also enrols and picks up with Coordinate Mediation 2.0 and Message Pickup 3.0 messages built by hand. Every request carries `from`, exactly one `to`, `created_time` in seconds and `return_route: all`, and is authcrypted. Every HTTP call goes through an explicit `ProxyHandler`. |
+
+Every Docker object has the label `org.didcomm-dotnet.interop-leg=mediator-<run id>`. On exit the
+leg removes its objects by that label, whatever ended it (a failure, Ctrl-C, or the 30-minute
+watchdog), and it never prunes. Waits re-check the exact condition they need (a log line, a
+status code, a count) at most 0.2 s apart. Time is only a hang guard, a background sleep, since
+macOS has no `timeout(1)`. The script runs on bash 3.2.
+
+### Cells
+
+Gating: the leg exits 1 when any of these fails. `--negative-controls` runs each sabotage instead,
+and exits 0 only when every sabotaged run FAILED.
+
+| cell | what it proves | PASS when | sabotage (must FAIL) |
+|---|---|---|---|
+| B-0 | E-36: the wallet references only the client package | `check_boundary.py` finds no `DidComm.Mediator`, `DidComm.Mediator.AspNetCore`, `DidComm.AspNetCore` or `Microsoft.AspNetCore.*` in any of five views: the restore graph, the framework references, `runtimeconfig.json`, `deps.json`, and the compiled references from `MediatorWallet boundary`. `DidComm.Mediator.Client` must be present (positive control). | `forbid-client`: forbid the client package itself |
+| M-1 | E-30, E-51; I-1, 2, 3, 5, 6, 7, 10, 14, 15: our client as a recipient through Identus, over HTTP | `/version` is `1.2.1` and `/did` matches the per-run keys and endpoints. The invitation is from that DID, with goal code `request-mediate`. `enrol` with no version pinned negotiates 2.0, and the captured negotiation record says so. The grant is for the wallet DID, with routing DIDs exactly [Identus], and a second request gets the identical grant. B and B2 are registered with `Success` each, and listing gives exactly {B, B2}. Python's forward gets 202. `fetch` waits for the status, fetches until drained (exactly one item), and both the drained status and a separate status count 0. `assert` passes on the authcrypt plaintext and metadata. | `pin-v3`: Identus answers with a problem report. `unregistered-next`: HTTP 200, not 202. `wrong-message`: the assert fails. `identus-stopped`: Identus stopped after the 202, so the fetch fails. |
+| M-2 | E-35 (L-055 against a mediator that ignores `limit`) | 12 forwards are posted at once and all get 202. `fetch --expect-count 12 --limit 5` gets 12 unique items, exactly the 12 sent, and the final status is 0. | `expect-13`: the hang guard ends the wait |
+| M-3 | Our sender to a python recipient through Identus | Python enrols at Identus (CM 2.0) and registers P2, whose service `uri` is the Identus DID. `InteropCli pack --forward true` wraps one forward for Identus (FR-ROUTE-04) and Identus accepts it with 202. Python's Pickup 3.0 gets the message; `messages-received` gets HTTP 202 and nothing else, as Identus does, then the status is 0. `assert` passes. | `no-forward`: Identus still answers 202 (it cannot decrypt the envelope and says nothing), so nothing is queued and the pickup's hang guard fails the cell |
+| M-4 | E-47, the HTTP half: `TrustedProxy` | The wallet (`--trusted-proxy`, `--resolve-dns-names false`) enrols with `identus-px` and fetches through squid; python posts through squid; `assert` passes. After a marker barrier, squid's log for the cell holds at least 6 `POST http://identus-px:8080/` lines. | `no-proxy`: enrolment fails at once |
+| M-5 | E-47, the WebSocket half, at transport level | `ws-attempt --ws-endpoint auto` through the proxy uses `ws://identus-px:8080/ws`. Squid logs `CONNECT identus-px:8080 200 TCP_TUNNEL`, and `identus-px`'s count of `WS Error (type:Binary)` rises, so our frame crossed the tunnel. The call's own outcome (a timeout, see below) is recorded, not gated. | `no-proxy`: no CONNECT line |
+| M-6 | E-48: the process proxy is ignored | All six variables `HTTP(S)_PROXY`, `ALL_PROXY` (both cases) point at squid and `NO_PROXY` is unset. Precondition (the wallet exits 3 otherwise): `HttpClient.DefaultProxy` would send each Identus address to squid. Then: (a) the M-1 flow against `127.0.0.1` passes, which squid's 403 makes impossible through squid, and a direct WebSocket attempt reaches Identus; (b) enrolment with `identus-px` fails with a direct-connect error, although squid could have reached it; (c) squid logs nothing in the window. | `with-trusted-proxy`: squid denies it, so the flow fails. `no-proxy-env`: `NO_PROXY=127.0.0.1` fails the precondition. |
+| R-1 | Python as the recipient through **our** mediator (I-4, I-5, E-52) | CM 2.0 by hand: the grant has the canonical type, `thid` = request id, a string `routing_did` equal to our mediator's DID, `from`, `to` and `created_time` (FR-RR-09). `keylist-update` answers `success`, and `keylist-query` lists P with `pagination`. Variants: a `mediate-request` with no body is granted; a `keylist-update` without `return_route` gets 202 and is still applied. Then forward, 202, Pickup 3.0 (status 1, delivery, unpack, `messages-received` answered with status 0), and `assert` passes. | `no-created-time`: 202 with no grant (FR-RR-08). `v2-disabled`: `mediate-request` is not answered. |
+| R-2 | Control: the same wallet against our mediator | `enrol --expect-version 3.0 --endpoint-override <ready.json http>`, python forward, `fetch --explicit-ack` (`AckAsync` answers a status of 0 here; compare O-9), and `assert` passes. | `expect-v2`: our mediator negotiates 3.0 |
+
+**WebSocket against Identus is observed, never gated** (owner decision O-98-1). Our transports
+send every envelope as a Binary frame. The DIDComm v2.1 transports section names no frame type.
+Identus (scala-did 0.1.0-M48) processes only Text frames and logs `WS Error (type:Binary):
+Unexpected event` for the rest. So every WebSocket call from our client to Identus times out.
+M-5 and M-6 gate only what the transport did: whether it went through the proxy, and whether
+the frame arrived.
+
+### Identus behaviours the leg is built around
+
+All are recorded as observations; none fails the leg.
+
+- **No answer costs 3 s.** Identus answers HTTP 202 only after its 3 s outbound queue times out.
+  That covers a successful forward, `messages-received`, an envelope it cannot decrypt (log: `No
+  Agent to inform`), and a `keylist-query` from a DID that is not enrolled.
+- **`messages-received` gets no `status`.** Pickup 3.0 says the mediator SHOULD send one. Also,
+  each `messages-received` marks one message delivered, however many ids it names. So M-1 uses
+  `FetchAsync` + `GetStatusAsync`, and M-2's fetch of 12 takes about 13 rounds of 3 s each.
+  O-8 and O-9 record both behaviours.
+- **No lease, and `limit` is ignored.** Every `delivery-request` returns every undelivered message.
+- **An unregistered `next`** gets HTTP 200 with a signed `e.p.req.not_enroll` problem report
+  (O-14; M-1's `unregistered-next` sabotage relies on it).
+- **Dejavu.** Identus refuses an identical envelope twice, but accepts a re-encrypted repeat of
+  the same message id (O-12).
+- **A DID another account registered.** A `keylist-update` that adds it got HTTP 500 after 3 s
+  in the local runs, not a `keylist-update-response` with `server_error` (O-16; first come, first
+  served either way).
+- **Identus logs its private keys at start-up.** They are per-run and thrown away with the
+  containers. Uploaded failure logs (`mediator-logs/`) have them, and the per-run Mongo root
+  password, redacted.
+
+### Observations (data, not gated)
+
+`MediatorWallet observe` runs after the cells, against an observer wallet it enrolled with
+`identus`. It is a raw probe that uses only `DidCommClient` pack/unpack, a proxy-less
+`HttpClient` and a `ClientWebSocket`. It records O-0 (crypto in each direction), O-2 and O-2c
+(Text-frame WebSocket answers, live push framing, forwards after a live socket closed), O-3
+(lease, head-of-line), O-4, O-5 and O-6 (`thid`, `created_time` and `to` on every answer), O-8
+(`limit`), O-9 (`messages-received`, `AckAsync`), O-11 (rewrap and `please_ack` /
+`return_route`, against a python-built trigger forward), O-12 (dejavu), O-13 (a malformed
+`keylist-update`, an unparseable body) and O-15 (the Discover Features disclosure). The leg adds:
+
+- O-1: our client over WebSocket with the defaults;
+- O-5-host: the container's clock against the host's;
+- O-7: one page of `QueryRecipientsAsync(Limit 1)` from M-1's enrolment (Identus ignores
+  `paginate`);
+- O-10: delivery attachment encoding as python sees it, from Identus and from our mediator;
+- O-11-python: the Identus delivery against python's inner envelope;
+- O-14: an unregistered `next`;
+- O-16: a second account adding a DID that M-1's wallet registered (first come, first served;
+  ADV-1);
+- O-21: provenance (`/version`, the scala-did jars, the image refs and architecture as run,
+  Docker, the runner image, CPython, didcomm-python);
+- O-19 and O-20: not applicable here, with the reason.
+
+Each record is
+`{"id","e":[],"i":[],"title","value","method","gateable":false}`. All of them go to
+`mediator-observations.json`; the summary's second table shows them compacted.
+
+### Pins and provenance
+
+`mediator/images.env` pins three images by tag **and** digest (the multi-arch index). The leg
+parses that file, never sources it. It refuses a ref without a digest, pulls each ref (3 attempts),
+and then requires `docker image inspect` to list the pinned digest in `RepoDigests`.
+
+| image | pin | verified |
+|---|---|---|
+| Identus mediator | `hyperledgeridentus/identus-mediator:1.2.1@sha256:0f0378d9…412b` | `docker buildx imagetools inspect` (amd64 `b046dc37…`, arm64 `ef2f31fe…`); labels `version=1.2.1`, `revision=b85da0bf…` (the `v1.2.1` tag commit); bundles `app.fmgp.did*_3-0.1.0-M48` |
+| MongoDB | `library/mongo:6.0.28-jammy@sha256:a90cef01…f5fd` | `imagetools inspect` (the floating `6.0` tag is a different index) |
+| Squid | `ubuntu/squid:6.6-24.04_beta@sha256:6a097f68…e029` | re-verified 2026-11-19 with `imagetools inspect` (amd64 `8fafd41d…`, arm64 `eecf3533…`); the image runs Squid 6.13 |
+
+`mediator/identus/initdb.js` is Identus's file from tag `v1.2.1`, vendored verbatim with
+`gh api "repos/hyperledger-identus/mediator/contents/initdb.js?ref=v1.2.1"`. The leg refuses to
+start unless `git hash-object` gives its blob, `5d9bd69def43d27dc835a55ec936fe0c2de91cc7`. It is
+Apache-2.0 and named in `NOTICE`.
+
+**Pin bump** (its own PR; never a floating tag):
+
+1. `docker buildx imagetools inspect <repo>:<new tag>`: note the index digest and check that
+   linux/amd64 and linux/arm64 manifests exist.
+2. For Identus:
+   - Check the labels with `docker image inspect` (`version`, and `revision` = the release tag's
+     commit: `gh api repos/hyperledger-identus/mediator/git/refs/tags/v<X>`, then the tag object).
+   - Check the bundled scala-did version (`docker run --rm --entrypoint ls <ref> /opt/docker/lib`),
+     and re-check I-1..I-15 of the #99 plan against it.
+   - Vendor that tag's `initdb.js` again, and update `INITDB_BLOB` in `run-mediator-leg.sh` and
+     the blob in `NOTICE`.
+3. Update the ref and its provenance comment in `images.env`.
+4. Run locally: `PYTHON=python3.12 bash tools/interop-live/run-mediator-leg.sh`, then the same with
+   `--negative-controls`.
+5. Dispatch the workflow on the branch with negative controls on
+   (`gh workflow run interop-live.yml --ref <branch> -f negative_controls=true`), and record the
+   run id in the results table below.
+
+### Running the leg locally
+
+Prereqs: Docker (Docker Desktop on macOS works: every image is multi-arch, so there is no
+emulation on Apple Silicon), the .NET 10 SDK, `curl`, `git`, and CPython 3.9–3.12. Set `PYTHON`
+when the default `python3` is 3.13+.
+
+```bash
+PYTHON=python3.12 bash tools/interop-live/run-mediator-leg.sh                       # the cells + observations
+PYTHON=python3.12 bash tools/interop-live/run-mediator-leg.sh --negative-controls   # every sabotage must FAIL
+PYTHON=python3.12 bash tools/interop-live/run-mediator-leg.sh --up                  # set up, print endpoints, Enter tears down
+```
+
+Exit codes: 0 when all cells passed (or, with `--negative-controls`, every sabotage failed); 1 on a
+FAIL or a set-up failure (the summary says `Leg aborted at set-up (<step>: <reason>)`); 2 when the
+environment is unsuitable before anything ran. Under GitHub Actions an unset `PYTHON` is exit 2.
+
+Environment:
+- `INTEROP_SUMMARY_DIR`: where `mediator-leg.md`, `mediator-observations.json` and, on failure,
+  `mediator-logs/` go.
+- `INTEROP_CLI`: a prebuilt InteropCli.
+- `MEDIATOR_LEG_WORK`: the scratch directory; a venv already in it is reused.
+- `MEDIATOR_LEG_IMAGES_ENV`: another images file.
+- `MEDIATOR_LEG_OWNER`: an extra `org.didcomm-dotnet.owner` label.
+
+For development only (each is refused when `CI=true`):
+- `MEDIATOR_LEG_ONLY=M-3,R-1`: run those cells only;
+- `MEDIATOR_LEG_DEBUG_FIRST_PORT`: the port-clash test;
+- `MEDIATOR_LEG_DEBUG_IDENTUS_MONGO_PASSWORD`: the "never ready" test;
+- `MEDIATOR_LEG_DEBUG_WATCHDOG`: the leg watchdog's seconds (default 1800), to test it.
+
+A local run takes about 4 minutes on an Apple Silicon Mac: about 10 s of set-up once the images are
+present, the cells in about 2 minutes (M-2 alone about 45 s), and the observations in about 2 minutes.
+
+### Results
+
+| run | where | cells | negative controls | notes |
+|---|---|---|---|---|
+| _(placeholder: filled from the CI run on the branch)_ | | | | |
+
+### Releases (E-43)
+
+A `release: published` run uses the workflow file **at the released tag**. A release cut from a
+commit before this leg merged runs the python and jvm legs only, so 1.6.0 must be cut after this
+merges for its release run to include the mediator leg.
+
 ## Pinned versions
 
 | Stack | Pin |
@@ -358,13 +541,15 @@ ones plus this cell.
 | didcomm-python | `didcomm==0.3.2` + full transitive freeze in `python/requirements.txt`; CPython 3.12 on CI. The stack imports only on CPython 3.9–3.12: its pydantic 1.9.2 (pydantic v1) breaks `import didcomm` on 3.13 (`TypeError: multiple bases have instance lay-out conflict`) and 3.14 (`ConfigError: unable to infer type for attribute "accept"`), and Authlib 1.6.12 needs 3.9+. The leg checks the interpreter first and exits 2 outside that range. CI runs the newest interpreter in that range; it is a stopgap that lasts while the runner image has a 3.12 build (3.12 reaches end of life in 2028-10). The lasting fix is a counterpart stack that is off pydantic v1. |
 | didcomm-jvm | `org.didcommx:didcomm:0.3.2`, `tink:1.6.1`, `protobuf-java:3.14.0`, `gson:2.8.6`, `varint:1.0.0`, `kotlin-stdlib:1.9.24` — each SHA-256-pinned in `jvm/fetch-deps.sh`; Temurin 17 on CI (validated on 25 locally) |
 | didcomm-dotnet | whatever the checkout builds (`tools/InteropCli`, Release) |
+| Identus mediator, MongoDB, Squid | by digest in `mediator/images.env` (see [Pins and provenance](#pins-and-provenance)) |
 
 ## Running locally
 
 ```bash
-bash tools/interop-live/run-all.sh          # both legs + combined summary
+bash tools/interop-live/run-all.sh          # all three legs + combined summary
 bash tools/interop-live/run-python-leg.sh   # one leg
 bash tools/interop-live/run-jvm-leg.sh
+bash tools/interop-live/run-mediator-leg.sh # needs Docker; see "Running the leg locally" above
 ```
 
 Prereqs: .NET 10 SDK, CPython 3.9–3.12 as `python3` or named by `PYTHON` (e.g.
@@ -378,7 +563,10 @@ an executed / passed / failed / declared-n-a tally, so a reader can tell coverag
 
 `interop-live.yml` runs on `schedule` (nightly 03:17 UTC), `workflow_dispatch`, and
 `release: published`; it uploads `summary.md` + per-leg tables as the `live-interop-summary`
-artifact and fails on any FAIL cell. The python-leg results above were executed locally on
+artifact and fails on any FAIL cell. The one job (`live round-trips (python + jvm + mediator)`,
+`timeout-minutes: 60`) logs `docker version` and `docker info` before the harness runs. A manual
+dispatch with the boolean input `negative_controls` also runs `run-mediator-leg.sh
+--negative-controls` (its summary lands in `negative-controls/` inside the artifact). The python-leg results above were executed locally on
 macOS arm64 / CPython 3.12.7. The nightly proves the same matrix on `ubuntu-latest` (Ubuntu
 26.04 since 2026-11-08) with CPython 3.12 and Temurin 17. The workflow hands the leg the exact
 interpreter `setup-python` installed (`PYTHON`), and the leg logs the CPython version it ran on.
