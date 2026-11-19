@@ -62,6 +62,27 @@ internal interface IMediatorExchange
     Task<InboundMessageSnapshot> ExchangeAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct);
 
     /// <summary>
+    /// <see cref="ExchangeAsync"/> for a request the mediator may leave without an answer: Message
+    /// Pickup 3.0 says a mediator SHOULD answer <c>messages-received</c> with a <c>status</c>, not
+    /// that it must (the Identus mediator sends none). Over HTTP, a response that carried no answer
+    /// to the request returns <c>null</c> at once, where <see cref="ExchangeAsync"/> throws
+    /// <see cref="TimeoutException"/>. Everything else is as for <see cref="ExchangeAsync"/>: the
+    /// deadline, the matcher, a problem report, a transport failure, and on any other route the wait
+    /// (silence there cannot be told from a slow answer, so it never returns <c>null</c>). The
+    /// default implementation, for test exchanges that do not model an empty HTTP response, never
+    /// returns <c>null</c>.
+    /// </summary>
+    /// <param name="route">The operation's route, from <see cref="ResolveRouteAsync"/>.</param>
+    /// <param name="request">The request (as for <see cref="ExchangeAsync"/>).</param>
+    /// <param name="spec">What the request expects back.</param>
+    /// <param name="mediatorDid">The mediator's DID.</param>
+    /// <param name="localDid">Our DID.</param>
+    /// <param name="ct">The caller's cancellation.</param>
+    /// <returns>The answer's snapshot, or <c>null</c> when the HTTP response carried none.</returns>
+    async Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
+        => await ExchangeAsync(route, request, spec, mediatorDid, localDid, ct).ConfigureAwait(false);
+
+    /// <summary>
     /// Open the live-push mailbox of (<paramref name="mediatorDid"/>, <paramref name="localDid"/>)
     /// (design D-18). Thid-less <c>delivery</c> messages from that mediator to that DID arriving over
     /// a WebSocket are buffered in it from now until it is disposed. The live stream disposes it when
