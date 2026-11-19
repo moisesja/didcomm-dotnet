@@ -51,7 +51,6 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         "plaintext",
         "authcrypt from another DID (a self-consistent forgery with our thid)",
         "decrypted by another local DID",
-        "local DID missing from to",
         "forward type",
         "fallback snapshot of the genuine answer",
         "crafted: from is not the sender key's DID",
@@ -147,15 +146,14 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task An_answer_with_an_empty_to_completes_the_request_and_one_whose_to_names_only_another_DID_does_not()
+    public async Task An_answer_with_an_empty_to_completes_the_request()
     {
+        // A `to` that names only another DID completes it too, with a warning (the `to` header is
+        // advisory, #98 owner decision C2): MediatorClientChannelAddressingTests.
         var (request, exchange) = Start(ClientSpecs.MediateRequest);
-        var elsewhere = CraftedSnapshot.Verified(_w.Grant(request.Id, to: _w.OtherLocal.Did), senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid);
         var empty = _w.Grant(request.Id);
         empty.To = new List<string>();
 
-        _channel.AsCorrelator().OnInbound(elsewhere).Should().BeFalse("a to that is present must name the DID that decrypted the answer");
-        exchange.IsCompleted.Should().BeFalse();
         _channel.AsCorrelator().OnInbound(CraftedSnapshot.Verified(empty, senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid)).Should().BeTrue();
         await exchange;
     }
@@ -554,10 +552,6 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
                 return await _w.SnapshotAsync(_w.Grant(thid, from: _w.Mallory.Did));
             case "decrypted by another local DID":
                 return await _w.SnapshotAsync(_w.Grant(thid, to: _w.OtherLocal.Did), to: _w.OtherLocal.Did);
-            case "local DID missing from to":
-                // Unpack refuses it (the decrypting key's DID must be in `to`), so a crafted
-                // verified snapshot shows the matcher's own rule.
-                return CraftedSnapshot.Verified(_w.Grant(thid, to: _w.OtherLocal.Did), senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid);
             case "forward type":
             {
                 var forward = ForwardMessage.Create(_w.Local.Did, _w.Local.Did, new[] { await _w.PackAsync(grant) });

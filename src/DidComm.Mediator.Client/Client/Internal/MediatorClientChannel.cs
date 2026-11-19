@@ -42,9 +42,11 @@ namespace DidComm.Mediator.Client.Internal;
 /// type (<see cref="MediatorAnswerTypes"/>). Then, before any pending request or live stream is
 /// looked up, it must be a verified snapshot (never a hand-built one) authcrypted by its
 /// <c>from</c> to one of our DIDs (<see cref="ReturnRouteEligibility"/>, the return-route identity
-/// rule: the key that decrypted it names the DID), and a <c>to</c>, when it has one (it is optional
-/// in DIDComm v2.1), must name that DID: every comparison runs, combined without short-circuit, and
-/// a failure returns silently. Only then is its thread (<c>pthid</c>, else <c>thid</c>, for a problem report) looked
+/// rule: the key that decrypted it names the DID): every comparison runs, combined without
+/// short-circuit, and a failure returns silently. The <c>to</c> header is advisory, as DIDComm v2.1
+/// says (a recipient SHOULD check it, MUST NOT refuse a message over it, SHOULD warn): one that does
+/// not name the decrypting DID is logged (rate-limited, no DID) and the answer is matched as any
+/// other; an absent one is the normal case (it is optional). Only then is its thread (<c>pthid</c>, else <c>thid</c>, for a problem report) looked
 /// up — never when it is longer than <see cref="MaxThreadIdLength"/> — and the request completes
 /// only when its (mediator, local DID) pair and expected types agree. A message without a thread
 /// completes the one HTTP request whose response carried it, or the only waiting request of its
@@ -65,7 +67,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
 /// every 1000th, Debug otherwise): an answer to a waiting request that does not fit it, an ambiguous
 /// thread-less answer (also one whose only taker requires a thread), a live push its stream's full
-/// buffer refuses. A message of an answer type
+/// buffer refuses, an answer whose <c>to</c> does not name the DID that decrypted it (not a drop: it
+/// is still matched). A message of an answer type
 /// that simply is not for a waiting request (late, or another part of this agent's) is a Debug line
 /// (the first and every 1000th, Trace otherwise). Neither ever claims the message.
 /// </para>
@@ -103,6 +106,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     private long _mismatchedAnswers;
     private long _ambiguousAnswers;
     private long _unattributedAnswers;
+    private long _notAddressedAnswers;
     private long _droppedPushes;
     private long _strayPushes;
     private long _problemReports;
@@ -480,14 +484,18 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
         // 2. Identity before any lookup (D-7): a verified snapshot (never a hand-built one),
         //    authcrypted by the sender key's DID (the return-route rule: signer agrees, not a
-        //    forward), whose `from` is that DID and whose `to`, when present, names the DID that
-        //    decrypted it. Every comparison runs; they are combined without short-circuit. A
-        //    failure is other traffic: returned silently, not logged.
+        //    forward), whose `from` is that DID. Every comparison runs; they are combined without
+        //    short-circuit. A failure is other traffic: returned silently, not logged. The `to`
+        //    header is advisory (DIDComm v2.1: check it, MUST NOT refuse over it, SHOULD warn): one
+        //    that does not name the DID that decrypted the answer is logged and the answer goes on
+        //    to be matched by its thread and its pair, which the keys decide.
         var eligible = ReturnRouteEligibility.TryGetPeer(received, out var peer, out var local, out _);
         var fromOk = string.Equals(DidSubject.DidSubjectOf(received.From), peer, StringComparison.Ordinal);
-        var toOk = IsAddressedTo(received.To, local);
-        if (!(received.Verified & eligible & fromOk & toOk))
+        var addressed = IsAddressedTo(received.To, local);
+        if (!(received.Verified & eligible & fromOk))
             return false;
+        if (!addressed)
+            LogNotAddressed(name);
 
         // 3. The thread: a problem report names the request in pthid (else thid).
         var thread = kind == MediatorAnswerKind.ProblemReport && !string.IsNullOrEmpty(received.Pthid) ? received.Pthid : received.Thid;
@@ -650,7 +658,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     // `to` is optional (DIDComm v2.1) and the key that decrypted the answer already names `local`:
     // an answer without one (or with an empty one) is addressed to `local`; one with a `to` that
-    // does not name it is not. Single pass, no early exit.
+    // does not name it is not, which is only warned about (Offer). Single pass, no early exit.
     private static bool IsAddressedTo(IReadOnlyList<string> to, string local)
     {
         var found = to.Count == 0;
@@ -719,6 +727,14 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     // A mediator (or anyone the identity rule admits) can repeat every line below, so each is
     // rate-limited. The answer is named by its constant, never by the wire type or id.
+
+    // The `to` header of an answer whose identity passed does not name the DID that decrypted it
+    // (DIDComm v2.1: SHOULD warn, MUST NOT refuse). Named by its constant, never a DID or wire value.
+    private void LogNotAddressed(string answer)
+    {
+        var level = MediatorLog.RateLimited(ref _notAddressedAnswers, out var count);
+        MediatorLog.Write(Logger, level, "A mediator answer ({Answer}) has a 'to' header that does not name the DID that decrypted it; it is still matched by its thread and its keys (the 'to' header is advisory in DIDComm v2.1). {Count} so far.", answer, count);
+    }
 
     // Not a mediator problem: a late answer, or a message of an answer type meant for another part
     // of this agent (an application's problem report, a disclose the Discover Features client

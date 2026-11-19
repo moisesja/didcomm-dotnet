@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using DidComm.Consistency;
+using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Messages;
 using DidComm.Protocols;
@@ -32,6 +33,17 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// <c>from</c> is the DID the query was sent to (compared as a DID subject). An anoncrypt/plaintext
 /// disclosure, or one from a third party that guessed the query id, is logged and ignored — and
 /// deliberately does NOT cancel the pending query, so a forgery cannot deny the legitimate response.
+/// An encrypted <c>disclose</c> must also have been decrypted by the requester's own key.
+/// </para>
+/// <para>
+/// <strong>The <c>to</c> header is advisory.</strong> DIDComm v2.1 says that without a <c>to</c>
+/// each recipient may assume it is the only one, and that a recipient SHOULD check a present
+/// <c>to</c> for its own identifier but MUST NOT refuse a message when it is missing, and SHOULD
+/// warn. So a <c>disclose</c> with no <c>to</c> completes the query, and one whose <c>to</c> does not
+/// name the requester completes it too and logs one Warning that names only the message id and the
+/// reason (<c>NotAddressedToRequester</c>), never a DID or a key id. The binding to the requester
+/// comes from the keys and the thread, as above: the <c>thid</c> is the id of a query this client
+/// minted for one requester. (Before #98 such a <c>disclose</c> was ignored.)
 /// </para>
 /// <para>Thread-safe; intended as a singleton (registered by <c>AddBuiltInProtocols()</c>).</para>
 /// </remarks>
@@ -269,15 +281,13 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
             return false;
         }
 
-        // Bind the response to the local identity that originated this exact query. `to` is covered by
-        // the authenticated envelope/signature; on encrypted messages RecipientKid additionally proves
-        // which local DID actually decrypted it in a multi-tenant secrets store.
-        if (!received.To.Any(to => DidSubject.SameDidSubject(to, pending.RequesterDid)))
-        {
-            LogRejected(pending, thid, received,
-                "message is not addressed to the requester");
-            return false;
-        }
+        // `to` is advisory (DIDComm v2.1, message_structure): an absent or empty `to` means the
+        // recipient may assume it is the only one; a present `to` that does not name the requester is
+        // checked and warned about, never a reason to refuse ("Implementations MUST NOT fail to accept
+        // a message when this is not the case"). The binding to the requester comes from the keys and
+        // the thread: an encrypted reply must have been decrypted by the requester's key, and the
+        // thread is the id of a query this client minted for exactly one requester.
+        var addressed = received.To.Count == 0 || received.To.Any(to => DidSubject.SameDidSubject(to, pending.RequesterDid));
         if (received.Encrypted && !DidSubject.SameDidSubject(received.RecipientKid, pending.RequesterDid))
         {
             LogRejected(pending, thid, received,
@@ -290,8 +300,18 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         if (!pending.TryComplete(received))
             return false;
         RemovePending(thid, pending);
+        if (!addressed)
+            LogNotAddressed(received);
         return true;
     }
+
+    // One line per accepted disclose whose `to` leaves out the requester (the spec's SHOULD warn). It
+    // names the message by its bounded id and the reason; never a DID or a key id (D7), unlike
+    // LogRejected below (#115).
+    private void LogNotAddressed(InboundMessageSnapshot received)
+        => _logger?.LogWarning(
+            "Accepted the 'disclose' {MessageId} for a pending query although its 'to' header does not name the requester ({Reason}). The 'to' header is advisory in DIDComm v2.1; the answer is bound by its thread and its keys.",
+            LogValues.Id(received.Id), "NotAddressedToRequester");
 
     private void LogRejected(
         PendingQuery pending,
