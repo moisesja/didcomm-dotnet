@@ -70,7 +70,9 @@ that every grantee references its granter directly (pack pins direct references 
   stalls holds up no other recipient's storage or pickup) and `MediatorCoordinateMediation20Tests`
   (#99: the real client pinned to 2.0 and negotiating against `AddMediator()`, one tenant across
   versions, replay admission of 2.0 requests, `EnableV2 = false`; with its QA suites
-  `MediatorCoordinateMediation20Qa1Tests` and `Client/MediatorClientCoordinateMediation20Qa2Tests`);
+  `MediatorCoordinateMediation20Qa1Tests` and `Client/MediatorClientCoordinateMediation20Qa2Tests`,
+  and `Client/MediatorClientThirdPartyDiscoveryTests`, the client's question answered as the
+  Identus and Blocktrust mediators answer it);
   the QA permutations are the `*QaTests.cs`
   files with `QaMediatorSupport`, and the adversarial passes the `*AdvTests.cs` files
   (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
@@ -1160,6 +1162,13 @@ What differs is only the wire layer, through the internal codec `CoordinateMedia
   no channel over HTTP. Blocktrust's wallet sends no `created_time`, so replay admission refuses its
   requests unless the host sets `Replay.RequireCreatedTime = false`. Both real 2.0 mediators write a
   string `routing_did`, ignore `paginate` and send no `pagination`.
+- **The client side of the same release (owner decisions 2026-11-18).** The recipient client's
+  version question changed so that it works with the Identus mediator's Discover Features answer
+  (two version-prefix queries, and a `roles` list naming no role of the protocol says nothing; see
+  "Recipient-side client" below). The client still cannot enroll with a Blocktrust mediator: its
+  first answer comes from a new DID with a `from_prior` that has no `iat` and no `from`, and its
+  `keylist-update-response` has no `result`; Core and the client refuse those on purpose (the
+  library stays spec-strict), and #98 targets Identus.
 
 Demonstrated by: cookbook CC (a wallet pinned to 2.0 enrolls with the same mediator, gets the first
 routing DID and lists what it registered in 3.0), FF.2 (a) (`EnableV2`), FF.2 (b) (the handler built
@@ -2139,16 +2148,22 @@ and its acknowledgement, every request of a live stream.
   `NegotiatedVersionCache` answers: keyed by the mediator's DID subject, at most 64 entries, each
   used for 1 hour on the monotonic clock; when full, expired entries are dropped first and a full
   cache of live entries takes no new one; an entry stamped ahead of the clock counts as expired; the
-  clock is read inside the lock. Otherwise a Discover Features query
-  (`feature-type: protocol`, `match: https://didcomm.org/coordinate-mediation/*`) goes through the
-  exchange on the same route. `FeatureNegotiation` reads the `disclose`: at most the first 256
-  disclosures; `feature-type` `protocol`; an `id` of at most 256 printable ASCII characters that
-  parses as a PIURI; `roles` absent or `null` counts, and present it must name `mediator` (ignoring
-  case, among its first 32 entries); Coordinate Mediation 3.x wins over 2.x, matched by major.
-  Neither → `MediationNotSupportedException`, whose text carries only a count and whose
-  `DisclosedProtocols` lists up to 32 distinct clean protocol ids among those inspected, in any
-  role (D-11). A query that is not answered → `TimeoutException`: the client does not guess. Pin the
-  version for a mediator without Discover Features (Identus, for example).
+  clock is read inside the lock. Otherwise a Discover Features `queries` message with two queries
+  (`feature-type: protocol`, `match: https://didcomm.org/coordinate-mediation/3.*`, then
+  `…/2.*`; since #99, owner decision 2026-11-18) goes through the exchange on the same route. Each
+  match reads the same way as the spec's trailing wildcard, a whole-id regular expression (the
+  Identus mediator) and a prefix with `.*` removed (the Blocktrust mediator); the single
+  `coordinate-mediation/*` the client asked before matched nothing under the last two.
+  `FeatureNegotiation` reads the `disclose`: at most the first 256 disclosures; `feature-type`
+  `protocol`; an `id` of at most 256 printable ASCII characters that parses as a PIURI; `roles`
+  absent or `null` counts; a `roles` array (its first 32 entries, ignoring case) counts when it
+  names `mediator`, does not when it names `recipient` without `mediator`, and counts when it names
+  neither (empty, or only names such as Identus's `responder`: it says nothing about this
+  protocol's roles); a `roles` value that is not an array does not count. Coordinate Mediation 3.x
+  wins over 2.x, matched by major. Neither → `MediationNotSupportedException`, whose text carries
+  only a count and whose `DisclosedProtocols` lists up to 32 distinct clean protocol ids among those
+  inspected, in any role (D-11). A query that is not answered → `TimeoutException`: the client does
+  not guess. Pin the version for a mediator without Discover Features.
 - **Coordinate Mediation 2.0** (`Coordination/CoordinateMediation20`, internal): the 2.0 type URIs,
   builders for `mediate-request`, `keylist-update` and `keylist-query`, and strict parsers for
   `mediate-grant` (a string `routing_did`; an array is accepted too), `mediate-deny`,

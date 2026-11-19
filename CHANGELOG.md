@@ -6,7 +6,7 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
-### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll (FR-MED-10, #99, epic #88)
+### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll; the client's version question works with the Identus mediator (FR-MED-10, #99, epic #88)
 
 **Behaviour change for mediator hosts.** `AddCoordinateMediation()`, and so `AddMediator()`, now also
 answer Coordinate Mediation 2.0 (`https://didcomm.org/coordinate-mediation/2.0`) and Discover
@@ -43,10 +43,22 @@ released behaviour changes. No package, dependency or `InternalsVisibleTo` grant
   binding, or two calls that disagree) fails with `InvalidOperationException` when the Coordinate
   Mediation handlers are first built (at start-up in a generic host with `AddMediator()`), naming the
   property and never a DID. With 2.0 off, a 2.0 request finds no handler and is not answered.
-- **Recipient side: unchanged.** `MediationClient` already speaks 2.0 (#96): it asks the mediator
-  first and prefers 3.0, or uses the version pinned with
-  `MediatorClientOptions.CoordinateMediationVersion` (the issue's "preferred version"). Against the
-  new handler, a pinned 2.0 client enrolls, registers and lists, and a negotiating client picks 3.0.
+- **Recipient side: the version question now works with the 2.0 mediators in the field (owner
+  decision of 2026-11-18).** `MediationClient` already spoke 2.0 (#96): it asks the mediator with
+  Discover Features and prefers 3.0, or uses the version pinned with
+  `MediatorClientOptions.CoordinateMediationVersion` (the issue's "preferred version"). Its question
+  was one `coordinate-mediation/*` query, which the Identus mediator reads as a regular expression
+  and the Blocktrust mediator as a prefix, so both answered with nothing, and the answers it got
+  named the role `responder` (Identus) or no role (Blocktrust), which the client did not count. Now:
+  - the question is two queries, `https://didcomm.org/coordinate-mediation/3.*` and `…/2.*`, which
+    the spec's wildcard, a whole-id regular expression and a prefix all read the same way;
+  - a `roles` list that names no role of the protocol (empty, or only names such as `responder`)
+    says nothing, like an absent list, and the disclosure counts;
+  - a list that names `recipient` without `mediator` still does not count.
+
+  So a client pointed at an Identus mediator picks 2.0 without a pin. Nothing public changed. Against
+  the new handler, a pinned 2.0 client enrolls, registers and lists, and a negotiating client picks
+  3.0.
 - **The internal 2.0 message codec** (`CoordinateMediation20`, in `DidComm.Mediator.Client`) now works
   in both directions: the request parsers and the four answer builders were added for the mediator.
   It stays internal; 2.0 adds no public message API.
@@ -61,6 +73,12 @@ released behaviour changes. No package, dependency or `InternalsVisibleTo` grant
   window, so a captured copy can be replayed after the window ends.
 - Both real 2.0 mediators answer with a single-string `routing_did`, never send `pagination` and
   ignore `paginate`; our handler writes the string, honours `paginate` and always sends `pagination`.
+- **This library's client cannot enroll with a Blocktrust mediator** (owner decision of 2026-11-18:
+  the library stays spec-strict). On first contact that mediator answers from a new DID, announced
+  by a `from_prior` that has no `iat` on a message with no `from`, and its `keylist-update-response`
+  entries have no `result`. The DIDComm spec requires the first two (§DID Rotation) and the 2.0
+  protocol the third, so the library refuses those answers. The gap is being reported upstream;
+  the interop gate (#98) runs its external-mediator checks against Identus.
 
 **Tests.** New: `CoordinateMediation20HandlerTests`, `CoordinateMediationCrossVersionTests`,
 `CoordinateMediation20InteropVectorTests` (request shapes taken from the Identus and Blocktrust source),
@@ -70,7 +88,8 @@ direction, and `CoordinateMediation20DiTests` covers `EnableV2` and the disclosu
 QA added `CoordinateMediation20Qa1Tests`, `MediatorCoordinateMediation20Qa1Tests` (replay edges over
 HTTP and WebSocket, the page walker, caps, DID-URL spellings, log scans) and
 `MediatorClientCoordinateMediation20Qa2Tests` (the client against a host serving only the real 2.0
-role, over HTTP and WebSocket); the adversarial pass added `CoordinateMediation20Adv99Tests`
+role, over HTTP and WebSocket) and `MediatorClientThirdPartyDiscoveryTests` (the client's question
+answered the way the Identus and Blocktrust mediators answer it, in front of the real 2.0 role); the adversarial pass added `CoordinateMediation20Adv99Tests`
 (cross-version spellings, hostile numbers and stores, error-text echo, timing ratios). Every new test
 was shown to fail under a mutation of the code it guards.
 
@@ -442,8 +461,8 @@ mediator role (#99), Pickup 4.0 (#100) and the push to a host-registered endpoin
   (up to 64 mediators). A mediator that discloses neither fails with
   `MediationNotSupportedException`, whose `DisclosedProtocols` lists what it did disclose, cleaned
   (its message text quotes nothing the mediator sent). **A mediator that does not answer Discover
-  Features at all** (Identus, for example) **fails with `TimeoutException`: the client does not
-  guess.** Pin `CoordinateMediationVersion` to `V3` or `V2` for such a mediator, and no query is
+  Features at all fails with `TimeoutException`: the client does not guess.** (The Identus
+  mediator does answer it; see the #99 entry above for how the question changed to fit its answer.) Pin `CoordinateMediationVersion` to `V3` or `V2` for such a mediator, and no query is
   sent. 2.0 (`keylist-update`, `keylist-query`, a string `routing_did`) is spoken through an internal
   codec; the 2.0 mediator role is #99.
 - **`DidCommServiceBuilder.ForMediation(grant)`** starts the service entry of the DID you publish,

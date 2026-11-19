@@ -164,7 +164,13 @@ public static class Section_CC_EnrollWithAMediator
 
         ctx.Narrator.Note("An older wallet, such as those built for the Identus or Blocktrust mediators, speaks version 2.0; the mediator serves both versions from one set of registrations.");
         ctx.Narrator.Note("A 2.0 grant has room for one routing DID: the mediator's first. So a mediator lists its primary routing DID first; to move to a new one, it lists the new DID first and keeps the old one, with its keys, so mail sent to either keeps arriving.");
-        ctx.Narrator.Note("A wallet that talks to an Identus or Blocktrust mediator pins 2.0 this way: those mediators do not describe themselves in a form the version question can read.");
+        ctx.Narrator.Note("Talking to an Identus mediator needs no pin: the client asks its version question in a form that mediator understands, and picks 2.0 by itself. Pin a version only for a mediator that does not answer the question at all.");
+
+        // Two directions, two answers. Blocktrust's wallets can use this library's mediator; this
+        // library's client cannot use a Blocktrust mediator.
+        // TODO(#99): link the upstream Blocktrust report in the note below once it is posted.
+        ctx.Narrator.Note("This client cannot enroll with a Blocktrust mediator, pinned or not. On first contact that mediator answers from a new identity, announced with a rotation token that lacks its issue time (iat) and arrives without a sender (from); and its answers to key-list updates leave out each entry's result. The DIDComm spec requires the issue time and the sender on a rotation, and the 2.0 protocol requires the result, so the library refuses those answers on purpose.");
+        ctx.Narrator.Note("The other way round works: a wallet built for Blocktrust can enroll with this library's mediator if the mediator accepts requests without a timestamp (MediatorOptions.Replay.RequireCreatedTime = false), because that wallet sends none. The cost: a captured copy of such a request can be played again once the replay window (5 minutes by default) has passed.");
     }
 
     /// <summary>
