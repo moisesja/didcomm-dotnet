@@ -8,12 +8,12 @@ namespace DidComm.Mediator.Client;
 public enum CoordinateMediationVersion
 {
     /// <summary>
-    /// Ask the mediator first, with a Discover Features query, and use 3.0 when it supports it in
-    /// the mediator role, 2.0 otherwise. The answer is remembered per mediator for an hour. A
-    /// mediator that discloses neither version in the mediator role fails the call with
-    /// <see cref="MediationNotSupportedException"/>; one that does not answer the query at all fails
-    /// it with <see cref="TimeoutException"/> — pin a version for such a mediator (Identus, for
-    /// example, has no Discover Features).
+    /// Ask the mediator first, with Discover Features, and use 3.0 when it discloses it, 2.0
+    /// otherwise (a disclosure whose roles name <c>recipient</c> without <c>mediator</c> does not
+    /// count). The answer is remembered per mediator for an hour. A mediator that discloses neither
+    /// version fails the call with <see cref="MediationNotSupportedException"/>; one that does not
+    /// answer the query at all fails it with <see cref="TimeoutException"/> — pin a version for such
+    /// a mediator.
     /// </summary>
     Negotiate = 0,
 

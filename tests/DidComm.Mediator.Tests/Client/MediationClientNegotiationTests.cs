@@ -14,7 +14,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// Coordinate Mediation version negotiation (#96 design §4.4, D-10, D-11; FR-MED-09, FR-MED-10):
 /// a pinned version sends no query; otherwise a Discover Features query on the operation's own
 /// route, whose answer is read within bounds (the first 256 disclosures, ids of at most 256
-/// printable characters, roles), prefers 3.x over 2.x in the mediator role and is remembered per
+/// printable characters, roles: a list that names no role of the protocol says nothing, one that
+/// names recipient without mediator rules the entry out, #99), prefers 3.x over 2.x and is remembered per
 /// mediator DID subject (64 entries, one hour, no insert when full); neither version is
 /// <see cref="MediationNotSupportedException"/> with a cleaned <c>DisclosedProtocols</c> and a text
 /// free of wire values; an unanswered query is the exchange's <see cref="TimeoutException"/>.
@@ -44,7 +45,8 @@ public sealed class MediationClientNegotiationTests
         query.Message.To.Should().Equal(Mediator);
         query.Message.CreatedTime.Should().BeNull();
         MediationClientTests.IsUuidV4(query.Message.Id).Should().BeTrue();
-        query.Message.Body!.ToJsonString().Should().Be("""{"queries":[{"feature-type":"protocol","match":"https://didcomm.org/coordinate-mediation/*"}]}""");
+        // Two queries, one per version (owner decision 2026-11-18, #99): see the three readings below.
+        query.Message.Body!.ToJsonString().Should().Be("""{"queries":[{"feature-type":"protocol","match":"https://didcomm.org/coordinate-mediation/3.*"},{"feature-type":"protocol","match":"https://didcomm.org/coordinate-mediation/2.*"}]}""");
         exchange.Sent.Select(s => s.Message.Type).Should().Equal(DiscoverFeatures.QueriesType, CoordinateMediation.MediateRequestType);
     }
 
@@ -132,9 +134,17 @@ public sealed class MediationClientNegotiationTests
         { "case is ignored", new JsonArray("Mediator"), true },
         { "among others", new JsonArray("recipient", "MEDIATOR"), true },
         { "recipient only", new JsonArray("recipient"), false },
-        { "empty roles", new JsonArray(), false },
+        { "recipient, case ignored", new JsonArray("RECIPIENT"), false },
+        { "recipient with a role this protocol does not define", new JsonArray("responder", "recipient"), false },
+        // Owner decision 2026-11-18 (#99): a list that names no role of this protocol says nothing,
+        // like an absent list.
+        { "empty roles (the Blocktrust mediator's shape) say nothing", new JsonArray(), true },
+        { "only a role this protocol does not define (the Identus mediator's responder) says nothing", new JsonArray("responder"), true },
+        { "several undefined roles say nothing", new JsonArray("responder", "sender"), true },
+        { "entries that are not strings name no role", new JsonArray(1, 2), true },
+        { "a role named like recipient is not recipient", new JsonArray("recipients", " recipient"), true },
         { "roles not an array", JsonValue.Create("mediator"), false },
-        { "roles not strings", new JsonArray(1, 2), false },
+        { "roles an object", new JsonObject { ["mediator"] = true }, false },
     };
 
     [Theory]
@@ -314,14 +324,137 @@ public sealed class MediationClientNegotiationTests
     [Fact]
     public async Task At_most_32_roles_are_read_per_disclosure()
     {
-        var tooFar = new JsonArray(Enumerable.Range(0, 32).Select(i => (JsonNode)$"role{i}").Append("mediator").ToArray());
-        var within = new JsonArray(Enumerable.Range(0, 31).Select(i => (JsonNode)$"role{i}").Append("mediator").ToArray());
+        // A recipient role within the first 32 entries rules the mediator out; one beyond them is
+        // never read, so the list names no role of this protocol and says nothing (#99).
+        var within = new JsonArray(Enumerable.Range(0, 31).Select(i => (JsonNode)$"role{i}").Append("recipient").ToArray());
+        var tooFar = new JsonArray(Enumerable.Range(0, 32).Select(i => (JsonNode)$"role{i}").Append("recipient").ToArray());
 
-        var refused = DisclosingRaw(new JsonArray(new JsonObject { ["feature-type"] = "protocol", ["id"] = Cm3, ["roles"] = tooFar }));
+        var refused = DisclosingRaw(new JsonArray(new JsonObject { ["feature-type"] = "protocol", ["id"] = Cm3, ["roles"] = within }));
         await FluentActions.Awaiting(() => refused.Client().RequestMediationAsync(Mediator, Me)).Should().ThrowAsync<MediationNotSupportedException>();
 
-        var accepted = DisclosingRaw(new JsonArray(new JsonObject { ["feature-type"] = "protocol", ["id"] = Cm3, ["roles"] = within }));
-        await FluentActions.Awaiting(() => accepted.Client().RequestMediationAsync(Mediator, Me)).Should().NotThrowAsync();
+        var unread = DisclosingRaw(new JsonArray(new JsonObject { ["feature-type"] = "protocol", ["id"] = Cm3, ["roles"] = tooFar }));
+        await FluentActions.Awaiting(() => unread.Client().RequestMediationAsync(Mediator, Me)).Should().NotThrowAsync();
+        unread.Operations.Single().Message.Type.Should().Be(CoordinateMediation.MediateRequestType);
+    }
+
+    // ---- the answers of the 2.0 mediators in the field (owner decision 2026-11-18, #99) ------
+
+    // The match strings of the two queries, read the three ways mediators in the field read them:
+    // the spec's wildcard (a trailing *: this library's FeatureMatch), a regular expression that must
+    // match the whole id (the Identus mediator: scala.util.matching.Regex(match).matches(id),
+    // identus-mediator@5664f1d DiscoverFeaturesExecuter.scala#L61-L62), and a prefix once ".*" is
+    // removed (the Blocktrust mediator: id.StartsWith(match.Replace(".*", "")),
+    // blocktrust.Mediator@36b8dfd ProcessDiscoverFeaturesHandler.cs).
+    public static TheoryData<string> Readings => new() { "spec wildcard", "whole-id regex", "prefix after removing .*" };
+
+    private static bool Reads(string reading, string match, string id) => reading switch
+    {
+        "spec wildcard" => FeatureMatch.Matches(match, id),
+        "whole-id regex" => System.Text.RegularExpressions.Regex.IsMatch(id, "^(?:" + match + ")$"),
+        "prefix after removing .*" => id.StartsWith(match.Replace(".*", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal),
+        _ => throw new ArgumentOutOfRangeException(nameof(reading)),
+    };
+
+    [Theory]
+    [MemberData(nameof(Readings))]
+    public void Each_query_matches_its_version_and_only_its_version_however_the_mediator_reads_match(string reading)
+    {
+        var queries = FeatureNegotiation.CreateQuery(Me, Mediator).Body!["queries"]!.AsArray()
+            .Select(q => q!["match"]!.GetValue<string>()).ToArray();
+        queries.Should().Equal(FeatureNegotiation.QueryMatch3, FeatureNegotiation.QueryMatch2);
+
+        Reads(reading, FeatureNegotiation.QueryMatch3, Cm3).Should().BeTrue();
+        Reads(reading, FeatureNegotiation.QueryMatch3, "https://didcomm.org/coordinate-mediation/3.1").Should().BeTrue();
+        Reads(reading, FeatureNegotiation.QueryMatch3, Cm2).Should().BeFalse();
+        Reads(reading, FeatureNegotiation.QueryMatch2, Cm2).Should().BeTrue();
+        Reads(reading, FeatureNegotiation.QueryMatch2, Cm3).Should().BeFalse();
+        foreach (var other in new[] { "https://didcomm.org/messagepickup/3.0", "https://didcomm.org/routing/2.0", "https://didcomm.org/discover-features/2.0" })
+        {
+            Reads(reading, FeatureNegotiation.QueryMatch3, other).Should().BeFalse();
+            Reads(reading, FeatureNegotiation.QueryMatch2, other).Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public void The_single_wildcard_query_the_client_asked_before_matched_nothing_under_the_regex_and_prefix_readings()
+    {
+        // Why the question changed: before #99 the client asked one coordinate-mediation/* query.
+        const string old = "https://didcomm.org/coordinate-mediation/*";
+        Reads("spec wildcard", old, Cm2).Should().BeTrue();
+        Reads("whole-id regex", old, Cm2).Should().BeFalse("Identus answered it with no disclosure");
+        Reads("prefix after removing .*", old, Cm2).Should().BeFalse("Blocktrust answered it with no disclosure");
+    }
+
+    [Fact]
+    public async Task The_Identus_mediators_answer_negotiates_2_0()
+    {
+        // What the Identus mediator discloses for our two queries: its CM 2.0 entry, in the role it
+        // names "responder" (identus-mediator@5664f1d DiscoverFeaturesExecuter.scala#L38-L42).
+        var exchange = DisclosingRaw(JsonNode.Parse("""
+            [{"feature-type":"protocol","id":"https://didcomm.org/coordinate-mediation/2.0","roles":["responder"]}]
+            """)!.AsArray());
+
+        await exchange.Client().RequestMediationAsync(Mediator, Me);
+
+        exchange.Operations.Single().Message.Type.Should().Be(CoordinateMediation20.MediateRequestType);
+    }
+
+    [Fact]
+    public async Task The_Identus_mediators_full_feature_list_negotiates_2_0()
+    {
+        // Its whole list, as a broader query gets it: the other entries are not Coordinate Mediation.
+        var exchange = DisclosingRaw(JsonNode.Parse("""
+            [{"feature-type":"protocol","id":"https://didcomm.org/routing/2.0","roles":["mediator"]},
+             {"feature-type":"protocol","id":"https://didcomm.org/coordinate-mediation/2.0","roles":["responder"]},
+             {"feature-type":"protocol","id":"https://didcomm.org/messagepickup/3.0","roles":["mediator"]},
+             {"feature-type":"protocol","id":"https://didcomm.org/trust-ping/2.0","roles":["receiver"]},
+             {"feature-type":"protocol","id":"https://didcomm.org/discover-features/2.0","roles":["responder"]}]
+            """)!.AsArray());
+
+        await exchange.Client().RequestMediationAsync(Mediator, Me);
+
+        exchange.Operations.Single().Message.Type.Should().Be(CoordinateMediation20.MediateRequestType);
+    }
+
+    [Fact]
+    public async Task The_Blocktrust_mediators_answer_negotiates_2_0()
+    {
+        // What the Blocktrust mediator discloses for our two queries: its CM 2.0 entry with an empty
+        // roles list (blocktrust.Mediator@36b8dfd DiscoverFeature.cs#L19-L21). Negotiation works; its
+        // enrolment answers are still refused (owner decision O-2, 2026-11-18).
+        var exchange = DisclosingRaw(JsonNode.Parse("""
+            [{"feature-type":"protocol","id":"https://didcomm.org/coordinate-mediation/2.0","roles":[]}]
+            """)!.AsArray());
+
+        await exchange.Client().RequestMediationAsync(Mediator, Me);
+
+        exchange.Operations.Single().Message.Type.Should().Be(CoordinateMediation20.MediateRequestType);
+    }
+
+    [Fact]
+    public async Task A_3_0_disclosure_that_names_recipient_still_loses_to_a_2_0_one_that_names_no_role()
+    {
+        var exchange = DisclosingRaw(JsonNode.Parse($$"""
+            [{"feature-type":"protocol","id":"{{Cm3}}","roles":["recipient","responder"]},
+             {"feature-type":"protocol","id":"{{Cm2}}","roles":["responder"]}]
+            """)!.AsArray());
+
+        await exchange.Client().RequestMediationAsync(Mediator, Me);
+
+        exchange.Operations.Single().Message.Type.Should().Be(CoordinateMediation20.MediateRequestType);
+    }
+
+    [Fact]
+    public async Task A_3_0_disclosure_that_names_no_role_wins_over_2_0()
+    {
+        var exchange = DisclosingRaw(JsonNode.Parse($$"""
+            [{"feature-type":"protocol","id":"{{Cm2}}","roles":["mediator"]},
+             {"feature-type":"protocol","id":"{{Cm3}}","roles":[]}]
+            """)!.AsArray());
+
+        await exchange.Client().RequestMediationAsync(Mediator, Me);
+
+        exchange.Operations.Single().Message.Type.Should().Be(CoordinateMediation.MediateRequestType);
     }
 
     // ---- the cache --------------------------------------------------------------------------

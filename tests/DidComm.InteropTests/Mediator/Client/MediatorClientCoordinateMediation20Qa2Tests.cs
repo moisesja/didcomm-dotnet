@@ -3,6 +3,7 @@ using DidComm.AspNetCore;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Mediator.Client;
 using DidComm.Mediator.Coordination;
+using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Samples.Shared;
 using DidComm.TestSupport;
@@ -318,7 +319,13 @@ internal sealed class CoordinateMediation20OnlyHost : IAsyncDisposable
     /// <summary>Every verified inbound the host's dispatcher saw.</summary>
     public Qa1Recorder Seen { get; }
 
-    public static async Task<CoordinateMediation20OnlyHost> StartAsync(MediatorTestServer network, int maxPageSize = 100)
+    /// <param name="network">The test network the host joins.</param>
+    /// <param name="maxPageSize">The 2.0 handler's page size.</param>
+    /// <param name="discovery">
+    /// A Discover Features responder of a third-party mediator to answer the client's question
+    /// instead of this library's (#99, owner decision O-1); <c>null</c> for the built-in protocols.
+    /// </param>
+    public static async Task<CoordinateMediation20OnlyHost> StartAsync(MediatorTestServer network, int maxPageSize = 100, IProtocolHandler? discovery = null)
     {
         var identity = await MediatorCast.MintAsync(new DidCommServiceSpec($"http://{HostName}{Path}", Accept: new[] { "didcomm/v2" }));
         var secrets = new InMemorySecretsResolver();
@@ -342,7 +349,10 @@ internal sealed class CoordinateMediation20OnlyHost : IAsyncDisposable
         {
             b.UseNetDidResolver();
             b.UseSecretsResolver(secrets);
-            b.AddBuiltInProtocols();
+            if (discovery is null)
+                b.AddBuiltInProtocols();
+            else
+                b.Services.AddSingleton(discovery);
             b.AddProtocol<CoordinateMediation20Handler>();
             b.Configure(o => o.Clock = () => network.Clock.Now);
         });

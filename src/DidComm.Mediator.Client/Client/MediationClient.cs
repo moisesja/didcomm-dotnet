@@ -39,14 +39,18 @@ namespace DidComm.Mediator.Client;
 /// addresses, for example its <c>wss</c> one when its DID document lists <c>https</c> first.
 /// </para>
 /// <para>
-/// <strong>Which version.</strong> Unless you pin one, the first call to a mediator sends a
-/// Discover Features query for <c>coordinate-mediation/*</c> on the same route and uses 3.0 when the
-/// mediator discloses it in the mediator role, else 2.0; the answer is remembered for an hour (for
-/// up to 64 mediators). A mediator that discloses neither fails the call with
-/// <see cref="MediationNotSupportedException"/>. A mediator that does not answer Discover Features
-/// at all (Identus, for example) fails it with <see cref="TimeoutException"/>: the client does not
-/// guess. For such a mediator set <see cref="MediatorClientOptions.CoordinateMediationVersion"/> to
-/// the version it speaks, and no query is sent.
+/// <strong>Which version.</strong> Unless you pin one, the first call to a mediator asks it, with
+/// Discover Features on the same route, which Coordinate Mediation versions it speaks (two queries,
+/// <c>coordinate-mediation/3.*</c> and <c>coordinate-mediation/2.*</c>, written so that mediators
+/// that read the question as a wildcard, a regular expression or a prefix all understand it), and
+/// uses 3.0 when the mediator discloses it, else 2.0. A disclosure counts unless its roles name
+/// <c>recipient</c> without <c>mediator</c>: roles that name neither, such as the Identus
+/// mediator's <c>responder</c> or an empty list, say nothing either way. The answer is remembered
+/// for an hour (for up to 64 mediators). A mediator that discloses neither version fails the call
+/// with <see cref="MediationNotSupportedException"/>. A mediator that does not answer Discover
+/// Features at all fails it with <see cref="TimeoutException"/>: the client does not guess. For
+/// such a mediator set <see cref="MediatorClientOptions.CoordinateMediationVersion"/> to the
+/// version it speaks, and no query is sent.
 /// </para>
 /// <para>
 /// <strong>Timeouts.</strong> A call has up to three steps, and each has its own
