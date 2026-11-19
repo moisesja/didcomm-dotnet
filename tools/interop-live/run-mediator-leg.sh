@@ -18,11 +18,14 @@
 #
 # Cells (gating unless noted; README.md "Mediator leg" has the full list): B-0 wallet boundary,
 # M-1 dotnet recipient via Identus, M-2 burst of 12, M-3 dotnet sender to a python recipient,
-# M-4 HTTP via TrustedProxy, M-5 WebSocket via TrustedProxy (transport level), M-6 process proxy
-# ignored, R-1 python recipient via the dotnet mediator, R-2 the wallet against the dotnet
-# mediator (attribution control). WebSocket exchanges against Identus are observations, never
-# gating (Identus ignores binary frames; owner decision O-98-1). Observations are recorded in a
-# separate table and in mediator-observations.json; they never fail the leg.
+# M-4 HTTP via TrustedProxy, M-5 WebSocket via TrustedProxy (the CONNECT tunnel and an answered
+# call), M-6 process proxy ignored, M-8 the wallet against Identus over WebSocket (a status and a
+# fetch; DIDComm messages go out as text frames, owner decision O-98-1 = 1a, and the wallet sets
+# RequireCreatedTime = false because Identus stamps no created_time), R-1 python recipient via the
+# dotnet mediator, R-2 the wallet against the dotnet mediator (attribution control, including a
+# WebSocket call). Live mode against Identus is an observation (O-1b): it delivers at the next
+# poll (issue #134). Observations are recorded in a separate table and in
+# mediator-observations.json; they never fail the leg.
 #
 # Usage: bash tools/interop-live/run-mediator-leg.sh [--negative-controls | --up]
 #   (default)            run every cell; exit 0 when all passed, 1 on any FAIL or set-up failure

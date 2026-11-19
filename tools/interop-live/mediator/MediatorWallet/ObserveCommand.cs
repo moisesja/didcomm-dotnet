@@ -388,7 +388,7 @@ internal static class ObserveCommand
             {
                 value["push"] = "no push within 20 s";
             }
-            value["taken_as_push_by_our_client"] = "not reachable: our WebSocket transport sends Binary frames, which this mediator ignores (O-1), so our client never holds a live session with it";
+            value["taken_as_push_by_our_client"] = "no: this mediator seals the push for the DID the forward named and sends it on the connection the main DID opened; our client keeps one DID per connection (FR-RR-07, LocalMismatch), so it fetches the message at its next poll instead (O-1b; issue #134)";
             value["live_delivery_change_false"] = await ExchangeAsync("O-2 ws live-delivery-change false",
                 probe.Request(RawProbe.Pickup3 + "/live-delivery-change", new JsonObject { ["live_delivery"] = false })).ConfigureAwait(false);
             try
