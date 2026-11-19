@@ -6,6 +6,44 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — `PickupClient.AckAsync` works with a mediator that sends no status after an acknowledgement, such as Identus (FR-PICK-11, #98, epic #88)
+
+Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD** send an updated
+`status`, not that it must. The Identus mediator v1.2.1 removes the messages and sends nothing back
+(over HTTP, a 202 with an empty body). `AckAsync` required that status, so against Identus it always
+threw `TimeoutException`, although the messages had been removed: the client had turned a SHOULD
+into a MUST. The client has not been released, so no released behaviour changes. No public API
+changes: same signature, same `Task<PickupStatus>`.
+
+- **No status is not an error any more.** When the last `messages-received` of a call gets no
+  status, the client asks for one with a `status-request` and returns that status. Its count is the
+  confirmation that the acknowledgement was applied. An earlier chunk (the call sends 100 ids per
+  message) that gets no status is not asked about: the next chunk goes out, and the status after the
+  last one covers them all. A mediator that does send its status, like this library's, gets exactly
+  the requests it got before: one per 100 ids. A problem report or a malformed status is still a
+  `MediationProtocolException`.
+- **The same time limit.** A `messages-received` and the `status-request` after it share one
+  `MediatorClientOptions.RequestTimeout`; the `status-request` gets what is left, never a second
+  full timeout. Over HTTP the empty response shows at once that no status came. On a WebSocket,
+  silence looks the same as a slow answer, so the client waits half of `RequestTimeout` for the
+  status and then asks, in the other half. If the `status-request` is not answered either, the call
+  fails with a `TimeoutException` (the messages may still have been removed; acknowledging again is
+  harmless).
+- **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
+  confirms an acknowledgement, and give the time rule.
+- **Not changed.** `FetchAsync`'s own acknowledgement and the live stream's still expect the
+  status. Against a mediator that sends none they treat the acknowledgement as failed: the fetch logs
+  it and returns its batch as before, and the live stream keeps the ids and sends them again after
+  its back-off. That is left for a separate decision.
+- **Tests.** `PickupClientAckWithoutStatusTests` in the interop tests runs the client against this
+  library's mediator with its answer to `messages-received` dropped (the Identus shape: a real HTTP
+  202 with an empty body), with one or both of two chunks unanswered, with the `status-request`
+  unanswered too, with a problem report, and unchanged (no extra request). Five of the seven fail on
+  the code before this fix with "got no answer in the HTTP response"; the two that pass there are the
+  unchanged mediator and the problem report, whose behaviour stays the same. The unit tests of the
+  same name pin the time rule on the test clock: half of `RequestTimeout` on a WebSocket, the rest of
+  it over HTTP, the call ending at exactly one `RequestTimeout`.
+
 ### Added — Coordinate Mediation 2.0, mediator role: wallets built for the Identus and Blocktrust mediators can enroll; the client's version question works with the Identus mediator (FR-MED-10, #99, epic #88)
 
 **Behaviour change for mediator hosts.** `AddCoordinateMediation()`, and so `AddMediator()`, now also
