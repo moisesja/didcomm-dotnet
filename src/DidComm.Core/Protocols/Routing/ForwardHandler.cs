@@ -21,11 +21,12 @@ namespace DidComm.Protocols.Routing;
 /// with a held key — <see cref="Facade.UnpackResult.Encrypted"/> and a non-empty
 /// <see cref="Facade.UnpackResult.RecipientKid"/>), refuse a forward whose own
 /// <c>expires_time</c> has passed (FR-ROUTE-09, judged on <c>DidCommOptions.Clock</c> with the
-/// FR-API-05 skew), reduce <c>body.next</c> to its DID subject and ask the
-/// <see cref="IForwardRecipientRegistry"/>. A forward addressed to this mediator itself is opened
-/// here too, layer by layer, and the forward found inside is what is screened and looked up (see
-/// below). Any failure drops the forward with a log line that
-/// carries the message id only — no DID, no kid, no payload — and the handler returns
+/// FR-API-05 skew), reduce <c>body.next</c> to its DID subject, require that what the forward
+/// carries is a DIDComm message (UTF-8 JSON with an object at the top level, checked as the
+/// processor will relay it, #98) and ask the <see cref="IForwardRecipientRegistry"/>. A forward
+/// addressed to this mediator itself is opened here too, layer by layer, and the forward found
+/// inside is what is screened and looked up (see below). Any failure drops the forward with a log
+/// line that carries the message id only — no DID, no kid, no payload — and the handler returns
 /// <c>null</c>: a mediator sends nothing back toward the sender, no problem report, and
 /// <c>please_ack</c> is never read (FR-ROUTE-07). The method never throws, except
 /// <see cref="OperationCanceledException"/> when the caller's token is cancelled.
@@ -110,9 +111,9 @@ namespace DidComm.Protocols.Routing;
 /// <para>
 /// <strong>Outcome metric.</strong> Each forward this handler ends is counted once on the
 /// <c>didcomm.forward.outcomes</c> counter of the <see cref="Diagnostics.DidCommDiagnostics.MeterName"/>
-/// meter: <c>Dropped-Malformed</c> (not a forward, malformed, or refused by the processor as
-/// inconsistent or malformed), <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or
-/// while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered; or, when the
+/// meter: <c>Dropped-Malformed</c> (not a forward, malformed, carrying something that is not a
+/// DIDComm message, or refused by the processor as inconsistent or malformed),
+/// <c>Dropped-NotEncrypted</c>, <c>Dropped-Expired</c> (on arrival or while queued), <c>Dropped-Unknown</c> (<c>next</c> not a DID, or not registered; or, when the
 /// processor rewraps, <c>next</c> cannot be reached: its DID resolves to no usable
 /// <c>keyAgreement</c> key, or its method is refused — <see cref="DidResolutionException"/> or
 /// <see cref="UnsupportedDidMethodException"/>), <c>Dropped-Saturated</c>,
@@ -247,6 +248,7 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         InnerNextNotDid,
         InnerNotRegistered,
         NextUnreachable,
+        PayloadNotDidComm,
         Count,
     }
 
@@ -459,15 +461,35 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             //     paid for the outer unpack — and the forward found inside is screened like this
             //     one. The mediator's own DID is never looked up (it is public and never registered,
             //     FR-MED-05); the forward that is finally relayed is.
+            var relayed = message;
             if (IsSelfAddressed(subject, context.Received.RecipientKid))
             {
                 if (await OpenSelfAddressedAsync(context.Received, receivedAt, context.Options.ExpiresClockSkew, logId, ct).ConfigureAwait(false) is not { } inside)
                     return null; // dropped and counted
+                relayed = inside.Forward.Message;
                 opened = HeldForward.Unpacked.Of(inside.Forward);
                 openedExpiresTime = inside.ExpiresTime;
                 subject = inside.Subject;
                 if (inside.NotBefore is { } later && (notBefore is not { } earlier || later > earlier))
                     (delay, notBefore) = (inside.Delay, inside.NotBefore); // a hold an outer layer asked for is kept
+            }
+
+            // (f2) What the forward to relay carries must be a DIDComm message: UTF-8 JSON with an
+            //      object at the top level (#98; ForwardProcessor.ExtractAttachmentBytes, the rule the
+            //      processor relays by). Checked here, before the registration lookup (so the work is
+            //      the same whether or not `next` is registered) and before anything is reserved or
+            //      stored, so a payload that is not one never holds a place in the queue or the budget.
+            //      The answer is the one every malformed forward gets: the transport's 202, nothing
+            //      stored or relayed, Dropped-Malformed, one log line with the bounded id only. The
+            //      spec does not settle how a mediator answers an invalid forward: Routing's MAY to
+            //      ignore unsupported headers is about headers, it discourages sending anything back
+            //      toward the sender of a forward, Problem Reports are general, and Transports only
+            //      requires a 2xx for a successful receipt and leaves failures open. Answering like
+            //      this is the owner's choice within that gap (2026-11-19), not a spec rule.
+            if (CarriesNonDidCommPayload(relayed))
+            {
+                Dropped(DropReason.PayloadNotDidComm, "Forward {MessageId} dropped: what it carries is not a DIDComm message (UTF-8 JSON with an object at the top level); nothing is stored or relayed (FR-ROUTE-01).", logId);
+                return null;
             }
 
             // The byte budget charges exactly what the work item will hold of what the wire sized
@@ -544,6 +566,33 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Whether the single attachment of <paramref name="forward"/> fails the rule the processor relays
+    /// by (<see cref="ForwardProcessor.ExtractAttachmentBytes"/>): not base64url, empty, or not a
+    /// DIDComm message (UTF-8 JSON with an object at the top level). A forward without exactly one
+    /// attachment, or whose attachment has no data, is left to the processor's own checks on the pump,
+    /// as before. Decodes and discards: the work item keeps the plaintext, not a second copy.
+    /// </summary>
+    /// <param name="forward">The forward to relay (already parsed once, so it parses).</param>
+    private static bool CarriesNonDidCommPayload(Message forward)
+    {
+        if (!ForwardMessage.TryParse(forward, out _, out var attachments) || attachments.Count != 1)
+            return false;
+        try
+        {
+            ForwardProcessor.ExtractAttachmentBytes(attachments[0]);
+            return false;
+        }
+        catch (MalformedMessageException)
+        {
+            return true;
+        }
+        catch (ConsistencyException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Write an admitted item to the pump. Called under <see cref="_gate"/>; the slot is already reserved.</summary>
@@ -1052,7 +1101,8 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
     private static string OutcomeOf(DropReason reason) => reason switch
     {
         DropReason.NotAForward or DropReason.Malformed or DropReason.ProcessorMalformed
-            or DropReason.SelfLayersTooDeep or DropReason.PeelMalformed or DropReason.InnerNotAForward => ForwardOutcomes.DroppedMalformed,
+            or DropReason.SelfLayersTooDeep or DropReason.PeelMalformed or DropReason.InnerNotAForward
+            or DropReason.PayloadNotDidComm => ForwardOutcomes.DroppedMalformed,
         DropReason.Posture or DropReason.InnerPosture => ForwardOutcomes.DroppedNotEncrypted,
         DropReason.ExpiredInline or DropReason.ExpiredWhileQueued or DropReason.InnerExpired => ForwardOutcomes.DroppedExpired,
         DropReason.NextNotDid or DropReason.NotRegistered or DropReason.InnerNextNotDid or DropReason.InnerNotRegistered

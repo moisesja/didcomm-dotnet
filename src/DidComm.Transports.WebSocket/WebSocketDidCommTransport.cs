@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Text.Unicode;
 using DidComm.Exceptions;
 using DidComm.Transports;
 using DidComm.Transports.ReturnRoute;
@@ -18,7 +19,8 @@ namespace DidComm.Transports.WebSocket;
 /// <summary>
 /// WebSocket-flavored <see cref="IDidCommTransport"/> (PRD §9.3 / FR-TRN-09..11). Sends each
 /// packed DIDComm envelope as exactly one WebSocket text message (FR-TRN-09; STOMP frames are
-/// binary); the receiver MUST reassemble fragmented frames before processing. Connections are
+/// binary), and refuses a payload that is not valid UTF-8 before writing anything; the receiver
+/// MUST reassemble fragmented frames before processing. Connections are
 /// pooled by endpoint and reconnect with exponential backoff (1s / 30s / 0.5 jitter — DD-05) on
 /// send failures. Optionally wraps each envelope in minimal STOMP 1.2 framing when
 /// <see cref="WebSocketTransportOptions.UseStomp"/> is enabled (FR-TRN-12); plain framing is
@@ -372,6 +374,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// value is not repeated in the message. Any other request treats such identities as absent and
     /// uses the pooled socket: no session socket can exist under them.
     /// </exception>
+    /// <exception cref="TransportException">
+    /// The endpoint's scheme is not allowed; the destination is refused (SSRF guard); the payload is
+    /// not valid UTF-8 (#98), refused before any socket is touched or anything is written, so a
+    /// connection already open stays usable; or the send failed (see the class remarks).
+    /// </exception>
     public async Task<TransportResult> SendAsync(TransportRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -399,6 +406,18 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         {
             throw new TransportException(
                 $"WebSocketDidCommTransport refuses scheme '{request.Endpoint.Scheme}'. Allowed schemes: [{string.Join(", ", _options.AllowedSchemes)}].",
+                httpStatusCode: null,
+                scheme: request.Endpoint.Scheme);
+        }
+
+        // FR-TRN-09 (#98): a DIDComm message goes out as a text frame, and a text frame must be UTF-8
+        // (RFC 6455 §5.6): a receiver fails the whole connection on one that is not (§8.1), losing
+        // what follows it. A DIDComm message is UTF-8 JSON, so bytes that are not UTF-8 are not one;
+        // refused here, before any socket is used. Under STOMP too: the SEND body is the message.
+        if (!Utf8.IsValid(request.Payload.Span))
+        {
+            throw new TransportException(
+                "WebSocketDidCommTransport refuses a payload that is not valid UTF-8: a DIDComm message is UTF-8 JSON, and a WebSocket text frame must be UTF-8 (FR-TRN-09, RFC 6455 §5.6).",
                 httpStatusCode: null,
                 scheme: request.Endpoint.Scheme);
         }
