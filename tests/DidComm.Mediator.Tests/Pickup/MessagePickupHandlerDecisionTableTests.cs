@@ -690,7 +690,9 @@ public sealed class MessagePickupHandlerDecisionTableTests
     [InlineData("https://didcomm.org/messagepickup/2.0/status-request")]
     public async Task A_type_of_another_major_version_is_not_answered_by_the_3_0_role(string type)
     {
-        await using var h = await MessagePickupHandlerHarness.CreateAsync();
+        // With 4.0 switched off (since #100 it is on by default and answers the 4.x rows itself:
+        // MessagePickup40HandlerTests), nothing serves another major version: the 3.0 role does not claim it.
+        await using var h = await MessagePickupHandlerHarness.CreateAsync(pickup: o => o.EnableV4 = false);
         await h.EnrolAsync(h.Alice, h.Alice);
         var id = await h.QueueAsync(h.Alice, 10);
         var socket = h.Live(h.Alice);
@@ -700,7 +702,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var outcome = await h.SendAsync(PickupMessages.Raw(type, h.Alice, h.Mediator, body), socket);
 
         outcome.Reply.Should().BeNull();
-        outcome.Result.Should().Be(DispatchResult.NoHandler, "Message Pickup 4.0 is another protocol (FR-PICK-12); nothing here serves it");
+        outcome.Result.Should().Be(DispatchResult.NoHandler, "Message Pickup 4.0 is another protocol (FR-PICK-12); with it switched off nothing here serves it");
         h.StoreTrace.Should().BeEmpty();
         h.MediationTrace.Should().BeEmpty();
         socket.Attempts.Should().BeEmpty();

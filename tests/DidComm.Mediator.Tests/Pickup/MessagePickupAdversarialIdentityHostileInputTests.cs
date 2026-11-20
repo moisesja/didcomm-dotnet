@@ -186,8 +186,9 @@ public sealed class MessagePickupAdversarialIdentityHostileInputTests
         ["version 3.00"] = ("https://didcomm.org/messagepickup/3.00/status-request", "unpack"),
         ["a minor version beyond 32 bits"] = ("https://didcomm.org/messagepickup/3.99999999999999999999/status-request", "unpack"),
         ["an Arabic-Indic three"] = ("https://didcomm.org/messagepickup/" + (char)0x0663 + ".0/status-request", "unpack"),
-        ["major version 4"] = ("https://didcomm.org/messagepickup/4.0/status-request", "no-handler"),
-        ["the 4.0 name"] = ("https://didcomm.org/message-pickup/4.0/status-request", "no-handler"),
+        // Another major version is another protocol: since #100 the 4.0 role answers it, never the 3.0 one.
+        ["major version 4"] = ("https://didcomm.org/messagepickup/4.0/status-request", "4.0 role"),
+        ["the 4.0 name"] = ("https://didcomm.org/message-pickup/4.0/status-request", "4.0 role"),
         ["plain http"] = ("http://didcomm.org/messagepickup/3.0/status-request", "no-handler"),
         ["a trailing dot on the host"] = ("https://didcomm.org./messagepickup/3.0/status-request", "no-handler"),
         ["a doubled slash"] = ("https://didcomm.org//messagepickup/3.0/status-request", "no-handler"),
@@ -231,11 +232,17 @@ public sealed class MessagePickupAdversarialIdentityHostileInputTests
 
         var delivery = await Wire.DeliverAsync(fx, Wire.Plaintext(type, bob.Did, mediator.Did, "{}"), bob, mediator, session);
 
-        delivery.Verdict.Should().Be(expected, what);
+        delivery.Verdict.Should().Be(expected == "4.0 role" ? "reply" : expected, what);
         if (expected == "reply")
         {
-            delivery.Outcome!.Reply!.Type.Should().Be(MessagePickup.StatusType, "the answer carries the 3.0 type, whatever spelling asked");
+            delivery.Outcome!.Handler.Should().BeOfType<MessagePickupHandler>(what);
+            delivery.Outcome.Reply!.Type.Should().Be(MessagePickup.StatusType, "the answer carries the 3.0 type, whatever spelling asked");
             delivery.Outcome.Status().MessageCount.Should().Be(1);
+        }
+        else if (expected == "4.0 role")
+        {
+            delivery.Outcome!.Handler.Should().BeOfType<MessagePickup40Handler>("a 4.x type never reaches the 3.0 role ({0})", what);
+            delivery.Outcome.Reply!.Type.Should().Be(MessagePickup40.StatusType);
         }
         else
         {

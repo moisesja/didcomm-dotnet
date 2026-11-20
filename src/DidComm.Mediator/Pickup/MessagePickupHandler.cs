@@ -10,8 +10,10 @@ namespace DidComm.Mediator.Pickup;
 /// The mediator role of Message Pickup 3.0 (FR-PICK-01..10). Answers <c>status-request</c> with
 /// <c>status</c>, <c>delivery-request</c> with a <c>delivery</c> (or <c>status</c> when nothing is
 /// waiting), <c>messages-received</c> with <c>status</c>, and <c>live-delivery-change</c> with
-/// <c>status</c> or a problem report. Registered by <c>AddMessagePickup()</c>; Discover Features
-/// then discloses the protocol with <c>roles: ["mediator"]</c>.
+/// <c>status</c> or a problem report. Registered by <c>AddMessagePickup()</c>, next to
+/// <see cref="MessagePickup40Handler"/> (4.0) over the same queue unless
+/// <see cref="MessagePickupOptions.EnableV4"/> is <c>false</c>; Discover Features then discloses
+/// the protocol with <c>roles: ["mediator"]</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -116,7 +118,7 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
         // (b) status-request → status.
         if (MessagePickup.TryParseStatusRequest(message, out var statusFilter))
         {
-            var thid = ThreadOf(message);
+            var thid = PickupReplies.ThreadOf(message);
             var view = await _pickup.StatusAsync(peerDid, statusFilter, session, message.Id, ct).ConfigureAwait(false);
             return Status(message, localDid, peerDid, view, thid);
         }
@@ -124,7 +126,7 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
         // (c) delivery-request → delivery (pushed through the session, size-bounded) | status.
         if (MessagePickup.TryParseDeliveryRequest(message, out var limit, out var deliveryFilter))
         {
-            var thid = ThreadOf(message);
+            var thid = PickupReplies.ThreadOf(message);
             var outcome = await _pickup.DeliverRequestedAsync(
                 peerDid, limit, deliveryFilter, session,
                 messages => MessagePickup.CreateDelivery(localDid, peerDid, messages, thid, deliveryFilter),
@@ -136,7 +138,7 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
         //     refused from its length, before any entry is read.
         if (MessagePickup.TryParseMessagesReceived(message, _pickup.MaxAckIds, out var messageIds))
         {
-            var thid = ThreadOf(message);
+            var thid = PickupReplies.ThreadOf(message);
             var view = await _pickup.AcknowledgeAsync(peerDid, messageIds, session, answerWithStatus: true, message.Id, ct).ConfigureAwait(false);
             return Status(message, localDid, peerDid, view, thid);
         }
@@ -144,7 +146,7 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
         // (e) live-delivery-change → status | problem report.
         if (MessagePickup.TryParseLiveDeliveryChange(message, out var liveDelivery))
         {
-            var thid = ThreadOf(message);
+            var thid = PickupReplies.ThreadOf(message);
             var outcome = await _pickup.SetLiveDeliveryAsync(
                 peerDid, liveDelivery, session,
                 static (from, to, delivered) => MessagePickup.CreateDelivery(from, to, new[] { delivered }),
@@ -160,15 +162,6 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
         // (f) status, delivery, or a name this version does not define: not for the mediator role.
         MediatorLog.Write(_logger, LogLevel.Debug, "Message-pickup message {MessageId} ignored: not a request the mediator role answers.", MediatorLog.LogId(message.Id));
         return null;
-    }
-
-    // The thread a reply is put on (DD-11). Echoed, so bounded: a longer one makes the request malformed.
-    private static string ThreadOf(Message request)
-    {
-        var thid = MessagePickup.ResponseThreadId(request);
-        if (thid.Length > PickupSizing.MaxThreadIdLength)
-            throw new MalformedMessageException($"A message-pickup request's thread id exceeds the maximum length of {PickupSizing.MaxThreadIdLength} characters.");
-        return thid;
     }
 
     private Message? Status(Message request, string localDid, string peerDid, PickupStatusView? view, string thid)
@@ -189,19 +182,6 @@ public sealed class MessagePickupHandler : IProtocolHandler, IProtocolHandlerRol
         return new PickupStatus(queue.MessageCount, view.RecipientDid, waited, newest, oldest, queue.TotalBytes, view.LiveDelivery);
     }
 
-    // Building a reply validates what goes on the wire. Values that fail came from a host store,
-    // not from the peer, so any failure here is a server fault: logged by type, no reply, never
-    // thrown through dispatch.
-    private Message? Reply(Message request, Func<Message> build)
-    {
-        try
-        {
-            return build();
-        }
-        catch (Exception ex)
-        {
-            MediatorLog.Write(_logger, LogLevel.Error, "Message-pickup message {MessageId} not answered: the reply could not be built ({ExceptionType}).", MediatorLog.LogId(request.Id), ex.GetType().Name);
-            return null;
-        }
-    }
+    // The fault boundary of building a reply, shared with the 4.0 handler; lines go to this handler's logger.
+    private Message? Reply(Message request, Func<Message> build) => PickupReplies.Build(_logger, request, build);
 }
