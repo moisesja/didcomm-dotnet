@@ -276,7 +276,8 @@ public sealed class MessagePickup40WireFixtureTests
         message.Thid.Should().BeNull();
         message.Body![ProblemReports.CodeField]!.GetValue<string>().Should().Be(MessagePickup.LiveModeNotSupportedCode);
         message.Body![ProblemReports.CommentField]!.GetValue<string>().Should().Be(MessagePickup.LiveModeNotSupportedComment);
-        MessageNames40.Count(n => Parse40(n, message)).Should().Be(0, "no message parser claims the problem report");
+        MessageNames40.Count(n => Parse40(n, message)).Should().Be(0, "no 4.0 message parser claims the problem report");
+        MessageNames.Count(n => Parse(n, message)).Should().Be(0, "nor does a 3.0 one");
     }
 
     // ---- which parser claims which fixture --------------------------------------------------
@@ -297,10 +298,6 @@ public sealed class MessagePickup40WireFixtureTests
         MessageNames.Where(n => Parse(n, message)).Should().BeEmpty("a 3.0 parser never reads a 4.0 message (another major version)");
         MessagePickup40.IsProblemReport(message).Should().BeFalse();
     }
-
-    [Fact]
-    public void The_4_0_problem_report_is_claimed_by_no_3_0_parser()
-        => MessageNames.Count(n => Parse(n, Read(ProblemReport))).Should().Be(0);
 
     [Theory]
     [MemberData(nameof(Fixtures30))]
