@@ -19,8 +19,11 @@ namespace DidComm.Mediator.Pipeline;
 /// It runs on <see cref="ForwardHandler"/>'s background pump, after the sender already holds its
 /// 202, so nothing here can change the transport answer or travel back toward the sender: every
 /// outcome other than <c>Queued</c> is a logged drop, counted once on
-/// <c>didcomm.forward.outcomes</c>. The queue looks the recipient up again when the message
-/// arrives (a recipient removed or a grant revoked since the forward was admitted is a drop), stores
+/// <c>didcomm.forward.outcomes</c>. The queue refuses a message that is not in encrypted form
+/// (<c>Dropped-PayloadNotEncrypted</c>: in pass-through mode an attachment its sender did not
+/// encrypt; in rewrap mode the payload is the mediator's own anoncrypted <c>forward</c>, so it
+/// passes), looks the recipient up again when the message arrives (a recipient removed or a grant
+/// revoked since the forward was admitted is a drop), stores
 /// it under the grant's quota with the forward's own schedule (<c>delay_milli</c> as a not-before,
 /// <c>expires_time</c> judged with <c>DidCommOptions.ExpiresClockSkew</c>), and never pushes a
 /// message before it is due.
@@ -58,6 +61,7 @@ internal sealed class MediatorForwardSink : IForwardSink
     private long _expired;
     private long _tooLarge;
     private long _quota;
+    private long _payloadNotEncrypted;
     private long _faulted;
 
     /// <summary>Create the sink.</summary>
@@ -124,6 +128,13 @@ internal sealed class MediatorForwardSink : IForwardSink
                     return;
                 case PickupDeliveryOutcome.QueueFull:
                     Drop(ForwardOutcomes.DroppedQuota, ref _quota, forwardId, "the recipient's quota, or the store's, is used up (FR-PICK-10)");
+                    return;
+                case PickupDeliveryOutcome.NotEncrypted:
+                    // Pass-through mode relays the attachment as the sender wrapped it, and a pickup
+                    // delivery carries only messages in encrypted form (Message Pickup 3.0 L172,
+                    // 4.0 L261). In rewrap mode this cannot happen by design: the payload is the
+                    // mediator's own anoncrypted forward (OnwardPacked, a JWE) whatever it wraps.
+                    Drop(ForwardOutcomes.DroppedPayloadNotEncrypted, ref _payloadNotEncrypted, forwardId, "the message it carries for the recipient is not in encrypted form (Message Pickup)");
                     return;
                 default:
                     // Faulted; PushedLive cannot happen, as no live push was allowed.

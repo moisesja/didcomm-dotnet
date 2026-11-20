@@ -84,6 +84,8 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("IsQueueTransport(Uri) = True");                        // CC: queue URI
         transcript.Should().Contain("mediate-deny → TryParseDeny = True (and TryParseGrant: False)"); // CC: wire table
         transcript.Should().Contain("[mediator] a DID nobody registered = NotRegistered");   // DD: DeliverAsync refuses
+        transcript.Should().Contain("[mediator] Alice's note, not encrypted = NotEncrypted, id none"); // DD: the mailbox stores only encrypted messages
+        transcript.Should().Contain("[mediator] an envelope Bob cannot open = Queued");    // DD: encrypted for someone else is still stored
         transcript.Should().Contain("[bob] status = 2 message(s)");                         // DD: status
         transcript.Should().Contain("[bob] opened = \"Hello Bob, from your mailbox.\" (authenticated sender: True)"); // DD: fetch
         transcript.Should().Contain("[bob] could not open = ");                             // DD: failure reported

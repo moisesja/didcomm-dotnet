@@ -112,6 +112,7 @@ internal sealed class PickupCoordinator
     private readonly ILogger? _logger;
     private long _unauthenticated;
     private long _tooLarge;
+    private long _notEncrypted;
     private long _queueFull;
     private long _undeliverable;
 
@@ -355,6 +356,18 @@ internal sealed class PickupCoordinator
             var level = MediatorLog.RateLimited(ref _tooLarge, out var n);
             Log(level, "Message pickup: a message of {Bytes} bytes was not queued: the largest admissible message is {MaxAdmissiblePayloadBytes} bytes (FR-PICK-03). {Count} such refusals.", payload.Length, _sizing.MaxAdmissiblePayloadBytes, n);
             return new PickupDeliveryResult(PickupDeliveryOutcome.PayloadTooLarge, null, null);
+        }
+
+        // The form, after the size bound (so the parse is bounded, L-055) and before any lookup,
+        // lease or store call: the only valid attachment of a pickup delivery is a DIDComm message
+        // in encrypted form (Message Pickup 3.0 L172, 4.0 L261), and the mailbox holds nothing else,
+        // whoever supplies it (#100 OD-1). Structural, as the unpack classifies a JWE; nothing of
+        // the payload is logged.
+        if (!EncryptedForm.IsEncrypted(payload))
+        {
+            var level = MediatorLog.RateLimited(ref _notEncrypted, out var n);
+            Log(level, "Message pickup: a message was not queued: it is not a DIDComm message in encrypted form (its outermost layer is not a JWE), the only kind a pickup delivery may carry. {Count} such refusals.", n);
+            return new PickupDeliveryResult(PickupDeliveryOutcome.NotEncrypted, null, null);
         }
 
         string? peerDid = null;

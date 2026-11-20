@@ -109,11 +109,11 @@ public sealed class PickupClientStrictnessTests
     [Theory]
     [MemberData(nameof(Forms))]
     public void F2_only_a_JSON_object_the_envelope_detector_calls_a_JWE_is_in_encrypted_form(string because, string payload, bool encrypted)
-        => DeliveryReader.IsEncryptedForm(Encoding.UTF8.GetBytes(payload)).Should().Be(encrypted, because);
+        => EncryptedForm.IsEncrypted(Encoding.UTF8.GetBytes(payload)).Should().Be(encrypted, because);
 
     [Fact]
     public void F2_bytes_that_are_not_UTF_8_are_not_in_encrypted_form()
-        => DeliveryReader.IsEncryptedForm(new byte[] { (byte)'{', 0xC3, 0x28, (byte)'}' }).Should().BeFalse();
+        => EncryptedForm.IsEncrypted(new byte[] { (byte)'{', 0xC3, 0x28, (byte)'}' }).Should().BeFalse();
 
     [Fact]
     public void F2_a_reading_that_is_not_a_JWE_is_an_entry_without_a_payload_whose_error_quotes_nothing()

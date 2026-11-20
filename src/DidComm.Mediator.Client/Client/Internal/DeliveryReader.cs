@@ -1,8 +1,6 @@
 using System.Text.Json;
 using DidComm.Consistency;
 using DidComm.Exceptions;
-using DidComm.Jose;
-using DidComm.Json;
 using DidComm.Mediator.Internal;
 using DidComm.Mediator.Pickup;
 using DidComm.Messages;
@@ -143,7 +141,7 @@ internal static class DeliveryReader
     /// The messages of a delivery that can be handed out: of the first <paramref name="max"/>
     /// attachments (the rest are not read, L-055), those whose id is usable, each id once (the first
     /// wins). An entry carries the decoded bytes, or why it cannot be unpacked: its data did not
-    /// decode, or it is not a DIDComm message in encrypted form (<see cref="IsEncryptedForm"/>).
+    /// decode, or it is not a DIDComm message in encrypted form (<see cref="EncryptedForm.IsEncrypted"/>).
     /// </summary>
     /// <param name="attachments">The delivery's attachments.</param>
     /// <param name="max">How many attachments to read, from the first.</param>
@@ -171,7 +169,7 @@ internal static class DeliveryReader
             // #100 F-2 (3.0 L172, 4.0 L261): the only valid attachment is a DIDComm message in
             // encrypted form. Judged on the attachment as delivered, before anything unpacks it: one
             // that is not a JWE is a failed item, never handed to the unpack, never acknowledged.
-            if (reading.Payload is { } payload && !IsEncryptedForm(payload))
+            if (reading.Payload is { } payload && !EncryptedForm.IsEncrypted(payload))
             {
                 entries.Add(new DeliveryEntry(reading.Id, Payload: null, NotEncrypted()));
                 continue;
@@ -198,28 +196,6 @@ internal static class DeliveryReader
     /// <param name="spec">The request's spec.</param>
     internal static MediationProtocolException NoUsableIds(string requestId, MediatorExchangeSpec spec)
         => new($"The mediator answered request '{requestId}' ({spec.Name}) with a delivery in which no message has a usable id; nothing in it could be acknowledged.", requestId);
-
-    /// <summary>
-    /// Whether <paramref name="payload"/>, a delivered attachment's bytes, is a DIDComm message in
-    /// encrypted form: a JSON object the envelope detector the unpack itself uses classifies as a JWE
-    /// (it has a <c>ciphertext</c> member). Only the outermost form is judged, as delivered: a
-    /// message a mediator re-wrapped for this agent is an anoncrypted <c>forward</c>, a JWE too,
-    /// whatever it carries inside. Bytes that are not UTF-8 JSON, a JSON value that is not an
-    /// object, a plaintext message and a JWS are not. The parse is bounded by the delivery's own size.
-    /// </summary>
-    /// <param name="payload">The decoded attachment data.</param>
-    internal static bool IsEncryptedForm(ReadOnlyMemory<byte> payload)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(payload, DidCommJson.StrictDocument);
-            return EnvelopeDetector.Detect(document.RootElement) == EnvelopeKind.Encrypted;
-        }
-        catch (Exception ex) when (ex is JsonException or MalformedMessageException or ArgumentException or InvalidOperationException)
-        {
-            return false;
-        }
-    }
 
     // A delivered attachment that is not a DIDComm message in encrypted form (F-2): the text quotes
     // no wire value.

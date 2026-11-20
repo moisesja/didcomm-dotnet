@@ -43,6 +43,13 @@ internal static class ForwardOutcomes
     /// <summary>The recipient's quota, or the store's, was used up (sink).</summary>
     internal const string DroppedQuota = "Dropped-Quota";
 
+    /// <summary>
+    /// What the forward carries for the recipient's mailbox is not encrypted (sink): its outermost
+    /// layer is not a JWE, and a pickup delivery carries only messages in encrypted form. Distinct
+    /// from <see cref="DroppedNotEncrypted"/>, which is about the forward's own envelope.
+    /// </summary>
+    internal const string DroppedPayloadNotEncrypted = "Dropped-PayloadNotEncrypted";
+
     /// <summary>A fault in screening, processing or storing (handler or sink).</summary>
     internal const string Faulted = "Faulted";
 }

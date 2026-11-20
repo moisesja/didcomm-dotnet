@@ -150,9 +150,24 @@ public static class Section_DD_PickUpQueuedMessages
         var delayed = await queue.DeliverAsync(bobPublicDid, Payload(), new PickupDeliveryOptions(NotBefore: DateTimeOffset.UtcNow.AddHours(1)));
         ctx.Narrator.Value("[mediator] the same note, not before an hour from now", delayed.Outcome);
 
-        // Bytes Bob cannot open: queued like anything else (the mediator never looks inside).
-        var junk = await queue.DeliverAsync(bobPublicDid, "this is not a DIDComm message"u8.ToArray(), options);
-        ctx.Narrator.Value("[mediator] something Bob cannot open", junk.Outcome);
+        // The mailbox holds only messages in encrypted form (an anoncrypt or authcrypt envelope),
+        // the only kind a pickup delivery may carry. Anything else is refused, whoever hands it in,
+        // and nothing is stored: here Alice's note before it was encrypted. The mediator only checks
+        // the envelope's shape; it never opens it (Message Pickup 3.0 and 4.0).
+        var plaintext = await ctx.Client.PackPlaintextAsync(note);
+        var refused = await queue.DeliverAsync(bobPublicDid, Encoding.UTF8.GetBytes(plaintext), options);
+        ctx.Narrator.Value("[mediator] Alice's note, not encrypted", $"{refused.Outcome}, id {refused.MessageId ?? "none"}");
+
+        // Encrypted, but for someone else: queued like any other envelope (the mediator never looks
+        // inside one), and Bob will not be able to open it.
+        var forSomeoneElse = new MessageBuilder()
+            .WithType("https://didcomm.org/basicmessage/2.0/message")
+            .WithTo(ctx.Alice2.Did)
+            .WithBody(new JsonObject { ["content"] = "Not for Bob." })
+            .Build();
+        var notForBob = await ctx.Client.PackEncryptedAsync(forSomeoneElse, new PackEncryptedOptions(Recipients: [ctx.Alice2.Did]));
+        var unopenable = await queue.DeliverAsync(bobPublicDid, Encoding.UTF8.GetBytes(notForBob.Message), options);
+        ctx.Narrator.Value("[mediator] an envelope Bob cannot open", unopenable.Outcome);
 
         // A DID nobody registered: refused, nothing stored.
         var stranger = await queue.DeliverAsync(ctx.Alice.Did, Payload(), options);
