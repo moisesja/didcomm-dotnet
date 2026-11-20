@@ -4,11 +4,11 @@ The owner delegated this run to proceed without a plan-approval stop; the PR rev
 
 Branch `fix/message-id-length` from `origin/main` (`9e14b71`). Impact and history: see the private advisory.
 
-## Owner decisions (2026-11-20, quoted)
+## Owner decisions (2026-11-20, quoted; the impact figures they carried are in the private advisory)
 
 - **"Private fix: length limit"**: "Unpack refuses a message whose id, thid or pthid is longer than a fixed limit (no new setting). Private advisory and a separate small fix right after #138, before #100; #88 gains one terse line. A peer sending longer ids is refused (none known)."
-- **"512 characters"**: "Same as the replay guard's existing id cap. Every id we know of fits. Worst case about 10 MB per store instead of ~20 GB."
-- **"As suggested"**: "#138 goes ahead now, and the private fix closes A2 before 1.6.0 (no release in between). A3 rides in the same private fix, logging only a bounded form of the id."
+- **"512 characters"**: "Same as the replay guard's existing id cap. Every id we know of fits. Worst case about 10 MB per store […]."
+- **"As suggested"**: "#138 goes ahead now, and the private fix closes [the ping-response size item] before 1.6.0 (no release in between). [The problem-report log item] rides in the same private fix, logging only a bounded form of the id."
 
 Everything below marked **(ours)** is our implementation choice, not the owner's.
 
@@ -20,7 +20,7 @@ Everything below marked **(ours)** is our implementation choice, not the owner's
 
 Anything of at most 32 bytes stays accepted. The owner accepted 33–512 characters, because a UUID is 36 characters as written. So everything the limit refuses is already invalid under the spec. No stop.
 
-`problems.md` L99 (for the A3 log helper only): "Problem codes are lower kebab-case. They are structured as a sequence of tokens delimited by the dot character `.`".
+`problems.md` L99 (for the problem-report log helper only): "Problem codes are lower kebab-case. They are structured as a sequence of tokens delimited by the dot character `.`".
 
 ## Design calls (ours, with reasons)
 
@@ -29,10 +29,10 @@ Anything of at most 32 bytes stays accepted. The owner accepted 33–512 charact
 3. **`ThreadIds.ResponseThreadId` also refuses a declared `thid` over 512**, with the same text as today. This keeps #138's rule ("a declared invalid `thid` is refused, not ignored") whole for hand-built requests.
 4. **`please_ack` / `ack` entries get no limit.** No store or log keeps them (`AckLoopGuard` checks only whether they are present), and the owner's decision names `id`, `thid` and `pthid` only.
 5. **No check inside the stores.** Adding a throw to the public `IThreadStateStore` / `CascadeBudgetStore` methods would change public behaviour. Their docs state the bound for keys that came through unpack.
-6. **A3**:
+6. **Problem-report log lines**:
    - The three `ProblemReportHandler` lines write `LogValues.Id(pthid)`. The code is written through a new internal `LogValues.ProblemCode` (as received when it is at most 128 characters of lower kebab-case and dots, else a placeholder).
    - Each line is rate-limited with `RateLimitedLog` (first and every 1000th at its own level, the rest at Debug), the repo's rule for a line any stranger can cause once per message.
-7. **The ping-response size (A2)** needs no change of its own. Its only request-controlled field is `thid`, now at most 512.
+7. **The ping-response size** needs no change of its own. Its only request-controlled field is `thid`, now at most 512.
 
 ## Sweep (src/, wire strings a stranger controls)
 
@@ -42,11 +42,11 @@ Verdicts: **(a)** closed by the 512 limit; **(b)** already bounded; **(c)** fold
 |---|---|---|---|---|---|
 | 1 | `Threading/InMemoryThreadStateStore` (filled at `ProtocolDispatcher` for pure ACKs and before a handler) | `thid ?? id` | 10,000 entries, no key length | yes | (a), test |
 | 2 | `ProblemReport/CascadeBudgetStore` (filled by `ProblemReportHandler`) | `pthid` | 10,000 entries, no key length | yes | (a), test |
-| 3 | `ProblemReportHandler` Information ×2, Warning ×1 | raw `pthid`, raw `code` | none; not rate-limited | yes | (c), A3 |
+| 3 | `ProblemReportHandler` Information ×2, Warning ×1 | raw `pthid`, raw `code` | none; not rate-limited | yes | (c), see call 6 |
 | 4 | `ProblemReportHandler` cascade stop | echoes `pthid` | none | yes | (a) |
-| 5 | `TrustPing.CreateResponse`, `DiscoverFeaturesHandler`, the mediation handlers via `ResponseThreadId` | echoes `thid` | none | Trust Ping / Discover Features yes | (a), covers A2 |
+| 5 | `TrustPing.CreateResponse`, `DiscoverFeaturesHandler`, the mediation handlers via `ResponseThreadId` | echoes `thid` | none | Trust Ping / Discover Features yes | (a), covers the ping-response size |
 | 6 | `MessagePickupHandler.ThreadOf` | echoes `thid` | 512 (`PickupSizing`) | authcrypt | (b), now (a) too |
-| 7 | AspNetCore return-route push queue | packed replies | 16 frames | authenticated session | (a) for frame size (A2) |
+| 7 | AspNetCore return-route push queue | packed replies | 16 frames | authenticated session | (a) for frame size |
 | 8 | `InMemoryReplayGuard` | sender subject + id | id ≤ `MaxMessageIdLength` (512), DID ≤ 2048 | in-scope messages | (b); unpack now refuses > 512 first |
 | 9 | `InMemoryReturnRouteSessionRegistry`, `IReturnRouteSession.Thread` | peer DID, `return_route` thread | 4096 sessions / 8 per peer; thread ≤ 2048 (FR-RR-01) | authcrypt | (b); a thread of 513–2048 now matches no `thid` and is inert. The public 2048 const stays. |
 | 10 | `ObserverDelivery` | snapshots | 64 per observer | yes | (b) |
@@ -85,7 +85,7 @@ With 512-character keys and the default 10,000 entries, measured as heap size mi
 - [x] Advisory drafted (private; id kept out of public text)
 - [x] Spec quoted; architect pass reconciled; sweep table
 - [x] `IdentifierLimits.MaxMessageIdLength`; `Message.Validate` length checks first; `ThreadIds.ResponseThreadId`; `ReplayProtectionOptions` / `PickupSizing` refer to the constant (`7b0cb76`)
-- [x] A3: `LogValues.ProblemCode`; `ProblemReportHandler` lines bounded and rate-limited (`7b0cb76`)
+- [x] Problem-report log lines: `LogValues.ProblemCode`; `ProblemReportHandler` lines bounded and rate-limited (`7b0cb76`)
 - [x] Sweep folds: `InboundDispatchConsumer` ids via `LogValues.Id`; STOMP command not written; `HeldForward` comment (`7b0cb76`)
 - [x] Regression tests (unit, facade, end to end); existing tests that used ids over 512 now use 512, or set the long value after unpack where they test a handler's own bound (`7b0cb76`)
 - [x] QA pass: no product defect. Tests in `91f8880`, `996b53b`. One low doubt fixed: the pack-signed warning's id (`9377736`)
@@ -101,7 +101,7 @@ With 512-character keys and the default 10,000 entries, measured as heap size mi
 
 - 46 end-to-end tests (`MessageIdLengthEndpointTests`): each field × 4 envelopes × HTTP and WebSocket at 512 and 513; refusal before the thread store (spy), the cascade budget, the replay guard and the `RecordingHandler`; L-055 poison (512 valid characters + `/`) refused for its length in all 4 envelopes.
 - Flood (`MessageIdLengthFloodTests`): 12,000 pings at 512 → 9,977 entries, 11.7 MB (run alone); at 513 → 0 entries. At the gate, its heap measurement failed in the full Interop run (13.2 MB against 12.98 MB), from other tests' memory being freed during the measurement, not from the store; diagnosed with repeated readings and changed to a contents check (see "Stores' bound").
-- Ping-response size (A2): 1,648 B on a UUID thread, 2,288 B on a 512-character thread, socket and HTTP alike; at 513 nothing is pushed.
+- Ping-response size: 1,648 B on a UUID thread, 2,288 B on a 512-character thread, socket and HTTP alike; at 513 nothing is pushed.
 - Real console (`ProblemReportRealConsoleTests`, JSON and plain console): no marker, injected line or ESC reaches the console.
 - Pack paths and Out-of-Band (`MessageIdLengthPackPathTests`).
 - Mutations M0–M10 (the fix removed whole; each field's check; order; `ResponseThreadId`; each log line raw; rate limit off; consumer id; STOMP command; off by one): each red, then green after revert and rebuild. Tests that cannot fail under any mutation, by design: the three store-retention tests (they set keys directly; their negative control shows sensitivity) and three controls.
