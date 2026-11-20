@@ -93,7 +93,7 @@ affected only if it needs longer than the limit for one message (60 s is about 1
 | Core unpack's in-memory form can be many times the envelope's size for some shapes | **Docs only** (ours): a bound would be a new option (stop) or a refusal of spec-valid JSON; a lazy body is a public API and perf change. The cost is per request and transient. `MaxReceiveBytes` docs and the architecture doc say it. |
 | A front-loaded HTTP body is held under Kestrel's cumulative minimum body rate | **Docs**: raise `MinRequestBodyDataRate` for public endpoints; request-timeouts middleware only on the HTTP endpoint (it would also cut WebSocket sessions, including `MapDidCommMediator`'s). No new option. |
 | No doc names Kestrel connection limits, data rates or the new deadlines | **Docs**: "Operating a mediator", `SECURITY.md`, the README package rows, the endpoint XML docs. |
-| An `Expect: 100-continue` request aborted mid-body can surface as an Error "unhandled exception" | **Fix**: the three HTTP overloads catch a body-read failure (`IOException`, `BadHttpRequestException`, a cancellation that is not the request's abort) and answer without processing (400, or the exception's status code), logged at Debug by type name; a genuine abort still propagates. |
+| An `Expect: 100-continue` request aborted mid-body can surface as an Error "unhandled exception" | **Fix**: the three HTTP overloads catch a body-read failure and answer without processing, logged at Debug by type name: `BadHttpRequestException` → its own status code; a cancellation that is not the request's abort → 400; `IOException` → the connection is aborted (ours: a 400 let Kestrel log an Error while draining the broken body, 3 of 300 resets in a probe; with the abort 0 of 300; cost: one Kestrel Information line per such request). A genuine abort still propagates. |
 | `NetDidServiceEndpointResolver` attributes another subject's document to the requested DID | **Fix**: one internal helper shared with `NetDidKeyService` (same refusal, same text), so the two adapters cannot drift. |
 | 1.5.1 logged a stranger's type and `Message.Validate`'s quoted wire values at default config | **Release note only** (fixed on main by #95). |
 
@@ -118,11 +118,14 @@ No other place has the same shape, so the sweep raises no stop.
 ## Documented limits (not stops)
 
 - A connection that has finished one message (even an invalid one, or a plaintext) is then untimed,
-  by design: that is what keeps idle sessions open. It costs a connection and its fixed buffers, not
-  a growing message. Bound the count with Kestrel's `MaxConcurrentUpgradedConnections` /
-  `MaxConcurrentConnections` and a concurrency limiter partitioned by client.
+  by design: that is what keeps idle sessions open. What it holds is then bounded by the server's
+  buffers: a peer that stops reading (for example pings without reading the pongs, ADV-1 below) can
+  leave up to Kestrel's `MaxRequestBufferSize` (1 MiB by default) of its input buffered per
+  connection. Lower `MaxRequestBufferSize` and bound the count with Kestrel's
+  `MaxConcurrentUpgradedConnections` / `MaxConcurrentConnections` and a concurrency limiter
+  partitioned by client. A code bound (server pings with a pong timeout) is an owner decision (ADV-1).
 - Before a message's first part is returned (up to one 8 KiB read of a large frame), a later message
-  is not yet "started"; what the peer holds then is the connection's fixed buffer, nothing more.
+  is not yet "started"; what the peer holds then is that one read, in the connection's own buffer.
 - Nothing remembers a slow peer across connections.
 
 ## Checklist
@@ -130,13 +133,13 @@ No other place has the same shape, so the sweep raises no stop.
 - [x] Worktree `orch-ws`, branch `fix/websocket-receive-deadlines`, submodules initialised
 - [x] Private advisory drafted (draft only; never published, no CVE requested)
 - [x] Architect pass; design reconciled above
-- [ ] Core: `ReceiveDeadline`, `LogValues.MessageType`, span sites, resolver binding helper
-- [ ] Server: the setting, both loops, close helper, STOMP closes, `ForMediatorEndpoint` copy, XML docs
-- [ ] Server: HTTP body-read failures
-- [ ] Client: the setting, internal clock ctor, DI factory, loop, close-and-discard, XML docs
-- [ ] QA permutations below; each new test fails on `origin/main` or with the fix mutated out (rebuild after revert, L-071)
-- [ ] Adversarial pass (~30 min), findings with severity and disposition
-- [ ] Cookbook section HH (both setters executed); DX gate negative control
+- [x] Core: `ReceiveDeadline`, `LogValues.MessageType`, span sites, resolver binding helper
+- [x] Server: the setting, both loops, close helper, STOMP closes, `ForMediatorEndpoint` copy, XML docs
+- [x] Server: HTTP body-read failures
+- [x] Client: the setting, internal clock ctor, DI factory, loop, close-and-discard, XML docs
+- [x] QA permutations below; each new test fails on `origin/main` or with the fix mutated out (rebuild after revert, L-071)
+- [x] Adversarial pass (~30 min), findings with severity and disposition
+- [x] Cookbook section HH (both setters executed); DX gate negative control
 - [ ] Docs: CHANGELOG (behaviour change first; 1.5.1 logging note), PRD, architecture doc, SECURITY.md, README package rows
 - [ ] Package validation: additive; negative control
 - [ ] Gate: build `/warnaserror`, test, pack; Live interop (normal + negative controls)
@@ -164,3 +167,47 @@ a manual one, moved only after the specific timer is armed (L-065 rule 3).
 - Folded: the type tag (control characters, over-long, a clean type), the resolver binding (a
   tampered and a self-consistent forged document), the body-read failures (each exception kind, and
   a genuine abort still propagating).
+
+## Built (engineers in child worktrees, merged)
+
+- Server (`fix/ws-server`): `WebSocketMessageDeadline` (per-connection timing both loops share),
+  `MessageReceiveTimeoutLog` (per endpoint, first and every 1000th at Information), and
+  `WebSocketClosing.EndAsync` (the one close step: `CloseOutputAsync`, await the outstanding receive,
+  drain until the peer's close or the 5 s grace, abort; it returns the buffer to the pool only when
+  no receive can still write into it). 17 mutations killed; slow-but-correct run passes.
+- Client (`fix/ws-client`): `CloseAndDiscardAsync` (1009 unchanged, 1008 added), internal clock
+  constructor, DI passes the container's clock. 19 mutations killed (M1–M19), two slow-but-correct
+  runs pass, post-revert green.
+- Folded (`fix/ws-folded`): `LogValues.MessageType` at all six type-tag sites; `ResolvedDidDocument`
+  shared by both resolver adapters; `ReadBodyAsync` for the three HTTP overloads. Each mutation killed.
+- Docs (`fix/ws-docs`): cookbook HH, PRD FR-TRN-14 / FR-API-06 / §14.2 HH / §14.3 / §14.4 / DD-15,
+  architecture, SECURITY.md "Public endpoints", README rows, `MaxReceiveBytes` XML. DX gates pass
+  with no allowlist change; negative control (HH without the client setter) fails.
+
+## QA (independent, `fix/ws-qa`)
+
+No product defect. 25 cases added: configuration binding (`"00:00:37"`, infinite, refused values) on
+all three server endpoints and the client; a close mid-message; a later message finished just
+inside; an idle `PickupClient` live stream outlasting many limits on the client's clock; a correct
+`Expect: 100-continue` client. Four clock moves gained a `TimersFired` assertion (L-065). Flakiness:
+5 runs and 3 loaded runs, 0 failures. New tests fail on `origin/main` (14) or under a named
+mutation (M1–M7), post-revert green.
+
+## Adversarial pass (one pass, ~30 min, `fix/ws-adv`)
+
+| Id | Severity | Finding | Disposition |
+|---|---|---|---|
+| ADV-1 | Medium (pre-existing on main) | After one complete message, a peer that floods pings and never reads parks the socket's reader on a pong send; its input then sits in Kestrel's request buffer (1 MiB by default) for as long as the connection lives. No message is "started", so nothing is timed. | **Docs** (the "fixed buffers" claim corrected; lower `MaxRequestBufferSize`, bound connections). **Code: owner decision** (server pings with a pong timeout would also close peers that never read, our own pooled client sockets included). Test `After_one_message_a_peer_that_floods_pings_and_never_reads_keeps_its_connection_with_no_timer_running` shows the hold. |
+| ADV-2 | Low (pre-existing on main) | An invalid frame (reserved opcode), or a drop without a close, made `ReceiveAsync` throw `WebSocketException` out of both server loops: an Error-level "unhandled exception" line any peer can cause. | **Fixed** (ours): both loops catch `WebSocketException`, end the connection, one Debug line by type and error code. `WebSocketPeerFailureLogTests` (the reserved-opcode rows fail on main every run; the drop-without-close rows are a smoke test of a race; repeated 12×, green). |
+| ADV-3 | Info | A host timer whose `Dispose` throws would skip the server loop's cleanup. | **Fixed**: `ReceiveDeadline.Dispose` never throws (`ReceiveDeadlineTests`). |
+| ADV-4 | Info | The type placeholder `(none)` could equal a real type. | **Fixed**: `(no type)` (a space is not a URI character). URI-legal text that looks like another field is accepted: it carries no control character and is bounded. |
+| ADV-5 | Info | The `IOException` abort makes Kestrel write one Information line per such request. | Accepted (see the folded table). |
+
+Held: pings/trickles/zero-length continuations inside a message; a peer answering 1008 with data
+forever (drain stops at the grace); a ping flood during the first message (aborted at the grace);
+close mid-message; STOMP split frames and stalled `SEND`; N connections renewing near-cap partials
+(each ≤ 1 MiB for ≤ 60 s, buffers and timers released); expiry in CloseSent after an eviction; a
+writer stuck mid-send; host stop racing an expiry; buffer return on every path; throwing or inline
+host clocks; client gate contention, retire and dispose races; the HTTP front-loaded body
+(unchanged, docs only); all six type-tag sites; the resolver binding against case, trailing
+characters, DID URLs and look-alikes, on every resolution path.

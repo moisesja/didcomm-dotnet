@@ -83,7 +83,10 @@ needs these limits on top of the library's own:
   `Limits.MaxConcurrentConnections` (an upgraded connection no longer counts against the second),
   and put a concurrency limiter partitioned by client in front of the WebSocket endpoint: a
   WebSocket holds its permit for its whole life, while a fixed-window limiter counts connection
-  attempts, not open sockets.
+  attempts, not open sockets. Lower `Limits.MaxRequestBufferSize` (for example to 64 KiB): after a
+  connection's first message the library no longer times it, so a peer that stops reading what the
+  server sends can leave up to that much of its input buffered per connection, for as long as the
+  connection lives.
 - **WebSocket messages.** Each must arrive whole within `DidCommReceiveOptions.MessageReceiveTimeout`
   (60 s by default; a new connection's first message is counted from the accept), or the connection
   is closed with 1008. Raise it for peers on slow links rather than turning it off

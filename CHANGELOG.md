@@ -6,6 +6,93 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — WebSocket endpoints and the WebSocket transport close a peer that takes too long to deliver a message (security hardening, tracked privately; epic #88)
+
+**Behaviour change for WebSocket peers that stay silent or stall in the middle of a message.** Each
+WebSocket message must now arrive whole within `MessageReceiveTimeout` (60 seconds by default),
+counted from when its first part is read to its last frame. On a connection your endpoint accepts,
+the first message is counted from the moment the connection opens, so a connection that never sends
+anything is closed too. When the time runs out, the connection is closed with status 1008 (policy
+violation) and what had arrived of the message is dropped. A connection that has delivered a message
+may then stay idle for as long as it likes, so return-route sessions and Message Pickup live delivery
+keep working, on both sides.
+
+Who notices: a peer on a very slow link (a full 1 MiB message in 60 s needs about 17 KB/s), or one
+that opens a connection and waits more than the limit before its first message. To tune it:
+
+```csharp
+// The ASP.NET Core endpoints: MapDidCommWebSocket (both overloads) and MapDidCommMediator's WebSocket endpoint.
+builder.Services.AddOptions<DidCommReceiveOptions>().Configure(o => o.MessageReceiveTimeout = TimeSpan.FromMinutes(2));
+
+// The client transport: messages a peer pushes on a return-route session socket.
+services.AddDidComm(b => b.UseWebSocketTransport(o => o.MessageReceiveTimeout = TimeSpan.FromMinutes(2)));
+```
+
+`Timeout.InfiniteTimeSpan` turns the limit off (not advisable on a public endpoint). Any other value
+must be greater than zero and at most `Int32.MaxValue` milliseconds; the setter throws
+`ArgumentOutOfRangeException` otherwise, so a bad value fails where it is configured.
+
+- **The endpoints** (`MapDidCommWebSocket`, both overloads, STOMP mode included; `MapDidCommMediator`,
+  which copies the setting to its own endpoint). Timed on the container's `TimeProvider`. A peer that
+  does not answer the 1008 close within 5 seconds is disconnected. The first expiry on an endpoint and
+  every 1000th are logged at Information (the rest at Debug), with no wire values.
+- **The client transport** (`WebSocketDidCommTransport`, return-route session sockets; pooled sockets
+  are never read). Only a message the peer has started is timed; the wait for the next push never is.
+  On expiry the session socket is closed with 1008 and the rest of its messages are discarded, as
+  after an oversized message. The value is read once, when the transport is created, and timed on the
+  container's `TimeProvider` when the transport is built by `UseWebSocketTransport`.
+- **Close handshakes are bounded.** The callback overload's 1009 close and its answer to a peer's
+  close, and the STOMP closes, waited for the peer with no end. They now give up after 5 seconds and
+  abort, as the registry-aware endpoint's 1009 close already did.
+- **A peer that breaks the WebSocket protocol** (an invalid frame) or drops the connection without a
+  close frame is now one Debug line, not an Error-level "unhandled exception" from the server.
+- **On a public endpoint, set the server's limits too** (`SECURITY.md` "Public endpoints", the
+  architecture doc's "Operating a mediator"): Kestrel's `MaxConcurrentUpgradedConnections` and
+  `MaxConcurrentConnections`, a lower `MaxRequestBufferSize`, a concurrency limiter per client on the
+  WebSocket endpoint, and a raised `MinRequestBodyDataRate` for the HTTP endpoint. A connection that
+  has delivered its first message is not timed again, by design, so these are what bound the number
+  of idle connections and what each one can keep buffered.
+
+**Also hardened in the same change:**
+
+- **Message types in span tags.** The `didcomm.message.type` tag of the dispatch, unpack, pack and
+  send spans carries a type only when it is at most 256 URI characters, and a placeholder otherwise.
+  A host that copies activity tags into its log scopes could otherwise get a stranger's line breaks
+  or terminal escapes into its log lines.
+- **The service-endpoint lookup checks the document's subject.** `NetDidServiceEndpointResolver` now
+  refuses a resolver answer whose document `id` is another DID, with `DidResolutionException`, as
+  `NetDidKeyService` already did; both use one shared check.
+- **An HTTP request body that cannot be read** (a client that drops mid-body, a body that ends early
+  or arrives too slowly) is no longer reported by the server as an unhandled application error.
+  Nothing is processed: a body the server refused gets its status code (400, 408, 413), a broken
+  connection is aborted, and one Debug line names the exception type.
+- **Docs:** a message's in-memory form can be several times its size on the wire
+  (`DidCommOptions.MaxReceiveBytes`).
+
+**Release note for 1.5.1 users (log content).** In 1.5.1, a stranger's message type, and the wire
+values `Message.Validate` quotes in its errors (such as a `thid`), were written into Warning and
+Information log lines at the default configuration, unbounded and with their line breaks. 1.6.0
+writes neither (#95).
+
+**API.** Additive only: `DidCommReceiveOptions.MessageReceiveTimeout` and
+`WebSocketTransportOptions.MessageReceiveTimeout`. Package validation passes against 1.5.0, and its
+negative control (a removed member) fails.
+
+**Tests.** Real Kestrel on loopback with a manual clock and raw-frame peers
+(`WebSocketReceiveDeadline*Tests`, `WebSocketSessionReceiveDeadline*Tests`,
+`WebSocketPeerFailureLogTests`, `PickupClientLiveIdleReceiveDeadlineTests`): silent connections,
+stalled and trickled messages, pings, STOMP, idle sessions and live delivery past many limits,
+close handshakes against peers that never answer, settings through code, `Configure` and
+configuration binding; plus `MessageTypeSpanTagTests`, `MessageTypeConsoleScopeTests`,
+`ResolvedDocumentIdentityTests` (a tampered and a self-consistent forged document) and
+`HttpRequestBodyReadFailureTests`. Every new test fails on the code before this change or under a
+named mutation of the fix.
+
+**Docs.** PRD FR-TRN-14 (new), FR-API-06, §14.2 task HH, §14.3, §14.4, DD-15; the architecture doc
+("WebSocket receive time limits", "Operating a mediator", "Documented limits"); `SECURITY.md`
+"Public endpoints"; the README's package rows. Cookbook section **HH** shows a silent connection and
+an unfinished message closed with 1008 and an idle connection kept.
+
 ### Changed — the mediator client: a reply without `thid` no longer completes a pending request on any path, the HTTP response to that request included (#98, the owner's answer "2", epic #88)
 
 **Behaviour change in `DidComm.Mediator.Client` (not yet published); no published package

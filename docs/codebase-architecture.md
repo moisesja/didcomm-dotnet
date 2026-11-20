@@ -2248,12 +2248,17 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
 - **A WebSocket connection that finished one message is untimed** (FR-TRN-14), on every
   `MapDidCommWebSocket` endpoint, the mediator's included: once a message is in, even an invalid one,
   the wait for the next is never timed. That is by design, as it keeps idle sessions and live
-  delivery open; it costs a connection and its fixed buffers, never a growing message. Bound the
-  number with Kestrel's `MaxConcurrentUpgradedConnections` and `MaxConcurrentConnections` and a
+  delivery open. What such a connection holds is then bounded by the server's buffers, not by this
+  library: a peer that stops reading what the server sends it (for example one that keeps sending
+  WebSocket pings and never reads the pongs, so the socket's reader waits on a pong it cannot send)
+  can leave up to Kestrel's `Limits.MaxRequestBufferSize` (1 MiB by default) of its own input
+  buffered, plus the operating system's socket buffers, for as long as the connection lives. For a
+  public endpoint, lower `MaxRequestBufferSize` (for example to 64 KiB) and bound the number of
+  connections with Kestrel's `MaxConcurrentUpgradedConnections` and `MaxConcurrentConnections` and a
   concurrency limiter per client ("Operating a mediator" above).
 - **A later message starts when its first read returns.** Until a receive returns the message's
   first part (for a large frame, after one 8 KiB read), that message has not started and is not
-  timed; what the peer holds then is the connection's fixed buffers.
+  timed; what the peer holds then is at most that one read, in the connection's own 8 KiB buffer.
 - **Nothing remembers a slow peer across connections.** A peer whose connection was closed for a
   message that ran out of time can connect again and gets a fresh limit; a limiter per client in
   front of the endpoint is what bounds repeats.
