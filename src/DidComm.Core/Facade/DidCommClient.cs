@@ -200,7 +200,7 @@ public sealed partial class DidCommClient
         // NFR-05: zero-cost when unobserved — StartActivity returns null with no listener and
         // every tag write below is null-guarded.
         using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.PackPlaintextActivity);
-        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, LogValues.MessageType(message.Type));
         try
         {
             RejectFromPriorOnUnprotectedEnvelope(message, "PackPlaintextAsync");
@@ -238,7 +238,7 @@ public sealed partial class DidCommClient
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrEmpty(signFrom);
         using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.PackSignedActivity);
-        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, LogValues.MessageType(message.Type));
         try
         {
             RejectFromPriorOnUnprotectedEnvelope(message, "PackSignedAsync");
@@ -328,7 +328,7 @@ public sealed partial class DidCommClient
         {
             // NFR-04: header-level metadata only — type URI, JOSE identifiers, a count. Never
             // the recipient DIDs, the body, or key material.
-            activity.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+            activity.SetTag(DidCommDiagnostics.MessageTypeTag, LogValues.MessageType(message.Type));
             activity.SetTag(DidCommDiagnostics.AlgTag, options.From is not null ? JoseAlgorithms.Ecdh1PuA256Kw : JoseAlgorithms.EcdhEsA256Kw);
             activity.SetTag(DidCommDiagnostics.EncTag, EncTagValue(options.Enc));
             activity.SetTag(DidCommDiagnostics.RecipientsTag, options.Recipients?.Count ?? 0);
@@ -577,7 +577,7 @@ public sealed partial class DidCommClient
         using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.SendActivity);
         if (activity is not null)
         {
-            activity.SetTag(DidCommDiagnostics.MessageTypeTag, message.Type);
+            activity.SetTag(DidCommDiagnostics.MessageTypeTag, LogValues.MessageType(message.Type));
             activity.SetTag(DidCommDiagnostics.RecipientsTag, options.Recipients?.Count ?? 0);
         }
         try
@@ -953,7 +953,7 @@ public sealed partial class DidCommClient
             if (activity is not null)
             {
                 // Tags are only knowable after the envelope is opened; all header-level (NFR-04).
-                activity.SetTag(DidCommDiagnostics.MessageTypeTag, result.Message.Type);
+                activity.SetTag(DidCommDiagnostics.MessageTypeTag, LogValues.MessageType(result.Message.Type));
                 if (result.KeyWrap is not null)
                     activity.SetTag(DidCommDiagnostics.AlgTag, result.KeyWrap);
                 if (result.ContentEncryption is not null)
