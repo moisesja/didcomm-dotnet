@@ -101,11 +101,18 @@ public sealed class WebSocketReceiveDeadlineAdversarialTests
             }
         });
 
-        var ended = peer.ReadToEndAsync(EndGuard);
-        var first = await Task.WhenAny(ended, Task.Delay(EndGuard));
-        stop.Cancel();
-        await chatter;
-        first.Should().BeSameAs(ended, "the drain after the close stops at the grace, however much the peer keeps sending");
+        try
+        {
+            // The drain after the close stops at the grace, however much the peer keeps sending: the
+            // server ends the connection. Awaited, so the read's hang guard (EndGuard, far beyond the
+            // grace) fails the test instead of passing for a connection that stays open.
+            await peer.ReadToEndAsync(EndGuard);
+        }
+        finally
+        {
+            stop.Cancel();
+            await chatter;
+        }
         host.DispatchedCount(endpoint).Should().Be(0, "nothing read after the close is processed");
     }
 
@@ -207,26 +214,8 @@ public sealed class WebSocketReceiveDeadlineAdversarialTests
             return false;
         }
 
-        /// <summary>Read and drop everything until the server ends the TCP connection.</summary>
-        public async Task ReadToEndAsync(TimeSpan guard)
-        {
-            using var cts = new CancellationTokenSource(guard);
-            var buffer = new byte[64 * 1024];
-            while (true)
-            {
-                int read;
-                try
-                {
-                    read = await _stream.ReadAsync(buffer, cts.Token);
-                }
-                catch (IOException)
-                {
-                    return;
-                }
-                if (read == 0)
-                    return;
-            }
-        }
+        /// <summary>Read and drop everything until the server ends the TCP connection; throws when the hang guard runs out first.</summary>
+        public Task ReadToEndAsync(TimeSpan guard) => ConnectionEnd.ReadUntilServerEndsAsync(_stream, guard, 64 * 1024);
 
         private static byte[] Frame(int opcode, byte[] payload)
         {

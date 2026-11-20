@@ -55,7 +55,7 @@ public sealed class WebSocketPeerFailureLogTests
     public async Task A_peer_that_drops_the_connection_without_a_close_is_not_logged_as_an_unhandled_application_error(string path)
     {
         await using var host = await PeerFailureHost.StartAsync();
-        var tcp = await host.UpgradeAsync(path);
+        using var tcp = await host.UpgradeAsync(path);
         await tcp.GetStream().WriteAsync(Frame(0x1, fin: false, Encoding.ASCII.GetBytes("{\"partial\":")));
         tcp.LingerState = new LingerOption(true, 0);
         tcp.Close(); // reset, no close frame
@@ -79,23 +79,8 @@ public sealed class WebSocketPeerFailureLogTests
         return frame;
     }
 
-    private static async Task ReadToEndAsync(NetworkStream stream)
-    {
-        using var cts = new CancellationTokenSource(Guard);
-        var buffer = new byte[4096];
-        while (true)
-        {
-            try
-            {
-                if (await stream.ReadAsync(buffer, cts.Token) == 0)
-                    return;
-            }
-            catch (IOException)
-            {
-                return;
-            }
-        }
-    }
+    // The server must end the connection; the hang guard running out fails the test (ConnectionEnd).
+    private static Task ReadToEndAsync(NetworkStream stream) => ConnectionEnd.ReadUntilServerEndsAsync(stream, Guard);
 
     private sealed class PeerFailureHost : IAsyncDisposable
     {

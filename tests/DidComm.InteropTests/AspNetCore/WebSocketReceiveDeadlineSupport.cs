@@ -308,6 +308,43 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
     }
 }
 
+/// <summary>How the raw peers of these tests wait for the server to end their TCP connection.</summary>
+internal static class ConnectionEnd
+{
+    /// <summary>
+    /// Read and drop everything until the server ends the TCP connection: a FIN (a read of 0 bytes)
+    /// or a reset. <paramref name="guard"/> is a hang guard only: when it runs out the connection has
+    /// NOT ended, so this throws <see cref="TimeoutException"/> — whatever the read threw — and the
+    /// guard can never count as the end the caller is waiting for.
+    /// </summary>
+    /// <param name="stream">The peer's network stream.</param>
+    /// <param name="guard">Real-time hang guard.</param>
+    /// <param name="bufferSize">Read buffer size.</param>
+    public static async Task ReadUntilServerEndsAsync(Stream stream, TimeSpan guard, int bufferSize = 4096)
+    {
+        using var cts = new CancellationTokenSource(guard);
+        var buffer = new byte[bufferSize];
+        while (true)
+        {
+            int read;
+            try
+            {
+                read = await stream.ReadAsync(buffer, cts.Token);
+            }
+            catch (Exception) when (cts.IsCancellationRequested)
+            {
+                throw new TimeoutException($"The server did not end the connection within the {guard} hang guard.");
+            }
+            catch (IOException)
+            {
+                return; // a reset: the server aborted the connection
+            }
+            if (read == 0)
+                return;
+        }
+    }
+}
+
 /// <summary>Helpers for a <see cref="ClientWebSocket"/> peer of the deadline tests.</summary>
 internal static class DeadlinePeer
 {
@@ -451,26 +488,11 @@ internal sealed class RawWebSocketPeer : IAsyncDisposable
         }
     }
 
-    /// <summary>Read and drop everything until the server ends the TCP connection (FIN or reset); <paramref name="guard"/> is a hang guard.</summary>
-    public async Task ReadToEndAsync(TimeSpan guard)
-    {
-        using var cts = new CancellationTokenSource(guard);
-        var buffer = new byte[4096];
-        while (true)
-        {
-            int read;
-            try
-            {
-                read = await _stream.ReadAsync(buffer, cts.Token);
-            }
-            catch (IOException)
-            {
-                return; // reset: the server aborted the connection
-            }
-            if (read == 0)
-                return;
-        }
-    }
+    /// <summary>
+    /// Read and drop everything until the server ends the TCP connection (FIN or reset). Throws when
+    /// <paramref name="guard"/> (a hang guard) runs out first: see <see cref="ConnectionEnd.ReadUntilServerEndsAsync"/>.
+    /// </summary>
+    public Task ReadToEndAsync(TimeSpan guard) => ConnectionEnd.ReadUntilServerEndsAsync(_stream, guard);
 
     /// <summary>Read one frame; <c>null</c> when the connection ended first.</summary>
     public async Task<RawFrame?> ReadFrameAsync(CancellationToken ct)
@@ -519,9 +541,9 @@ internal sealed class RawWebSocketPeer : IAsyncDisposable
             {
                 n = await _stream.ReadAsync(buffer.AsMemory(read), ct);
             }
-            catch (IOException)
+            catch (IOException) when (!ct.IsCancellationRequested)
             {
-                return null;
+                return null; // a reset; a cancelled read (the caller's hang guard) propagates instead
             }
             if (n == 0)
                 return null;
