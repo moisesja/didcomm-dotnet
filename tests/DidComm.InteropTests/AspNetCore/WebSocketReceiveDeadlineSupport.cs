@@ -54,6 +54,9 @@ internal sealed class DeadlineKestrelHostOptions
     public const int DefaultMaxReceiveBytes = 64 * 1024;
 
     public int MaxReceiveBytes { get; set; } = DefaultMaxReceiveBytes;
+
+    /// <summary>Runs on the host's builder after its own services (for example to bind options from its configuration).</summary>
+    public Action<WebApplicationBuilder>? Builder { get; set; }
 }
 
 /// <summary>
@@ -153,6 +156,7 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         });
         if (options.Receive is { } receive)
             builder.Services.AddOptions<DidCommReceiveOptions>().Configure(receive);
+        options.Builder?.Invoke(builder);
 
         var app = builder.Build();
         app.UseWebSockets();

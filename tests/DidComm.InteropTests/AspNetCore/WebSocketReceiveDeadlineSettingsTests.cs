@@ -98,6 +98,7 @@ public sealed class WebSocketReceiveDeadlineSettingsTests
         host.Time.Advance(limit - DeadlineKestrelHost.Tick);
         host.Time.TimersFired.Should().Be(fired);
         host.Time.Advance(DeadlineKestrelHost.Tick);
+        host.Time.TimersFired.Should().Be(fired + 1, "the default deadline fired at 60 s");
         var (type, status, _) = await closing.WaitAsync(Guard);
 
         type.Should().Be(WebSocketMessageType.Close);

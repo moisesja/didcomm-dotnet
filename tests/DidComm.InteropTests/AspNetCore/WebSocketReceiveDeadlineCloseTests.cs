@@ -46,7 +46,9 @@ public sealed class WebSocketReceiveDeadlineCloseTests
         var mark = host.Time.Mark();
         await using var peer = await host.ConnectRawAsync(endpoint);
         await host.Time.WaitForTimerAsync(mark, DeadlineKestrelHost.Limit, DeadlineKestrelHost.Guard);
+        var fired = host.Time.TimersFired;
         host.Time.Advance(DeadlineKestrelHost.Limit);
+        host.Time.TimersFired.Should().Be(fired + 1, "the connection's deadline fired");
 
         var close = await peer.ReadCloseAsync(DeadlineKestrelHost.Guard);
         close.Should().NotBeNull("the server sends its close frame first");
