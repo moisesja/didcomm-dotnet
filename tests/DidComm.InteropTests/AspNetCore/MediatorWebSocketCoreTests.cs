@@ -51,10 +51,12 @@ public sealed class MediatorWebSocketCoreTests
     {
         IReadOnlyList<string> mediaTypes = new[] { "application/x-test+json" };
         var floor = TimeSpan.FromMilliseconds(37);
+        var receiveTimeout = TimeSpan.FromSeconds(41);
         var global = new DidCommReceiveOptions
         {
             AcceptedMediaTypes = mediaTypes,
             ReceiveRejectionFloor = floor,
+            MessageReceiveTimeout = receiveTimeout,
             AllowSameSocketReplies = false,
             UseStomp = true,
         };
@@ -66,12 +68,14 @@ public sealed class MediatorWebSocketCoreTests
         copy.UseStomp.Should().BeFalse("a STOMP session can never push");
         copy.AcceptedMediaTypes.Should().Equal(mediaTypes);
         copy.ReceiveRejectionFloor.Should().Be(floor);
+        copy.MessageReceiveTimeout.Should().Be(receiveTimeout, "the mediator's socket keeps the host's receive time limit");
 
         // The host's instance is never changed: its other endpoints keep FR-TRN-10 one-way and STOMP.
         global.AllowSameSocketReplies.Should().BeFalse();
         global.UseStomp.Should().BeTrue();
         global.AcceptedMediaTypes.Should().BeSameAs(mediaTypes);
         global.ReceiveRejectionFloor.Should().Be(floor);
+        global.MessageReceiveTimeout.Should().Be(receiveTimeout);
 
         // The other direction too: a host that already turned same-socket replies on and STOMP off.
         var open = new DidCommReceiveOptions { AllowSameSocketReplies = true, UseStomp = false };
@@ -80,6 +84,11 @@ public sealed class MediatorWebSocketCoreTests
         openCopy.UseStomp.Should().BeFalse();
         openCopy.AcceptedMediaTypes.Should().Equal(new DidCommReceiveOptions().AcceptedMediaTypes);
         openCopy.ReceiveRejectionFloor.Should().Be(new DidCommReceiveOptions().ReceiveRejectionFloor);
+        openCopy.MessageReceiveTimeout.Should().Be(new DidCommReceiveOptions().MessageReceiveTimeout);
+
+        // An infinite limit (turned off) is copied as such, not replaced by the default.
+        new DidCommReceiveOptions { MessageReceiveTimeout = System.Threading.Timeout.InfiniteTimeSpan }
+            .ForMediatorEndpoint().MessageReceiveTimeout.Should().Be(System.Threading.Timeout.InfiniteTimeSpan);
     }
 
     [Fact]
@@ -95,7 +104,8 @@ public sealed class MediatorWebSocketCoreTests
                 nameof(DidCommReceiveOptions.AcceptedMediaTypes),
                 nameof(DidCommReceiveOptions.AllowSameSocketReplies),
                 nameof(DidCommReceiveOptions.UseStomp),
-                nameof(DidCommReceiveOptions.ReceiveRejectionFloor));
+                nameof(DidCommReceiveOptions.ReceiveRejectionFloor),
+                nameof(DidCommReceiveOptions.MessageReceiveTimeout));
     }
 
     // ---- the two endpoints side by side ------------------------------------------------------
