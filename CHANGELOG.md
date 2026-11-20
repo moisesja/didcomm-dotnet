@@ -6,6 +6,34 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — Trust Ping and Discover Features replies stay in the thread the request declares (#138; epic #88)
+
+**Behaviour change for released `DidComm.Core`.** A DIDComm request may name its own thread
+(`thid`). The built-in Trust Ping responder (`TrustPingHandler`, `TrustPing.CreateResponse`) and the
+built-in Discover Features responder (`DiscoverFeaturesHandler`) ignored it and always answered on the
+request's `id`. Their reply now carries the request's `thid` when it declares one, and its `id` only
+when it declares none. This is the DIDComm v2.1 threading rule: if the first message of a thread
+declares no `thid`, "the `id` property of the message MUST be treated as the value of the `thid`"
+(threading.md L15), and "All subsequent messages in a thread MUST include a `thid` header that
+contains the same value as the `thid` set in the first message of the thread. Messages that do not
+share the same `thid` MUST NOT be considered a part of the same thread" (threading.md L17).
+
+- **Who is affected:** a peer whose `ping` or `queries` declares a `thid`. Before, it got a reply on
+  another thread, so a client that matched replies by thread, as the spec requires, never matched it
+  and timed out. It now gets the reply in its own thread.
+- **Who is not:** a request without `thid` (what this library's own clients and the spec's examples
+  send) gets exactly the same reply as before. The reply still carries no `pthid`.
+- **A request built by hand** (not unpacked) that declares a `thid` that is not a valid thread id
+  (empty, or not made of unreserved URI characters, as an `id` must be) and is passed straight to
+  `TrustPing.CreateResponse` or to either handler is now refused with `MalformedMessageException`,
+  whose message quotes no value. Before, its `thid` was ignored. Unpack already refused such a
+  message, so nothing received from a peer is affected.
+- No public API change. The samples' handlers (cookbook sections B, M, T and X, samples 03 and 07)
+  and the cookbook and sample-05 docs now show the same rule (`message.Thid ?? message.Id`).
+- Docs: PRD FR-PROTO-04, FR-PROTO-05, FR-THR-01, DD-11 (now covers Core's responders; its stale
+  "type + mediator-DID fallback" clause, gone since #98, is removed) and §14.2 M and S; the
+  architecture doc's inbound flow.
+
 ### Changed — WebSocket endpoints and the WebSocket transport close a peer that takes too long to deliver a message (security hardening, tracked privately; epic #88)
 
 **Behaviour change for WebSocket peers that stay silent or stall in the middle of a message.** Each

@@ -87,7 +87,7 @@ public static class Section_T_DiscoverFeatures
         var options2 = ctx.ServiceProvider.GetRequiredService<IOptions<DidCommOptions>>().Value;
         var threads = new InMemoryThreadStateStore();
         var context = new ProtocolContext(
-            bobReceives, threads.GetOrCreate(bobReceives.Message.Id), ctx.Client, options2, threads);
+            bobReceives, threads.GetOrCreate(bobReceives.Message.Thid ?? bobReceives.Message.Id), ctx.Client, options2, threads);
         ctx.Narrator.Value("Context.Received.Message.Type", context.Received.Message.Type);
         ctx.Narrator.Value("Context.Thread.Thid", context.Thread.Thid[..8] + "…");
         ctx.Narrator.Value("Context.Client/Options/Threads wired",
@@ -98,8 +98,9 @@ public static class Section_T_DiscoverFeatures
         var answered = DiscoverFeaturesApi.ReadDisclosures(disclose!);
         ctx.Narrator.Value("Handler disclosed", $"{answered.Count} feature ({answered[0].Id})");
 
-        // Or skip the handler and shape the disclose directly — same wire message.
-        var manual = DiscoverFeaturesApi.CreateDisclose(ctx.Bob.Did, ctx.Alice.Did, query.Id,
+        // Or skip the handler and shape the disclose directly — same wire message. The reply stays
+        // in the query's thread: its thid when it declares one, else its id.
+        var manual = DiscoverFeaturesApi.CreateDisclose(ctx.Bob.Did, ctx.Alice.Did, query.Thid ?? query.Id,
             new FeatureDisclosure { FeatureType = DiscoverFeaturesApi.FeatureTypeGoalCode, Id = "org.example.lunch" });
         ctx.Narrator.Value("CreateDisclose.Thid == query.Id", manual.Thid == query.Id);
 

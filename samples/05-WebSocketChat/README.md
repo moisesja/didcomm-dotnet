@@ -15,7 +15,8 @@ like in miniature: its own keys, its own `did:peer:2`, its own ASP.NET Core host
   and the SSRF outbound-endpoint guard's narrow loopback opt-in
   (`OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")`) that a local demo requires.
 - **Trust-ping liveness (FR-PROTO-04, task S)** — `TrustPing.CreatePing` from Alice; Bob's
-  registered `TrustPingHandler` auto-replies `ping-response` with `thid == ping.Id`.
+  registered `TrustPingHandler` auto-replies `ping-response` in the ping's thread (`thid` = the
+  ping's `thid` when it declares one, else its `id`; here `ping.Id`).
 - **Discover-features handshake (FR-PROTO-05)** — `DiscoverFeaturesClient.QueryFeaturesAsync`
   sends `queries` to Bob's endpoint and awaits his correlated `disclose`, which arrives at
   *Alice's* receive endpoint — a genuine two-endpoint round trip. Bob's disclosure includes

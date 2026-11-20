@@ -143,7 +143,8 @@ public static class Section_X_CustomHandler
                 .WithType(ResponseType)
                 .WithFrom(message.To[0])
                 .WithTo(message.From)
-                .WithThid(message.Id)
+                // Stay in the proposal's thread: its thid when it declares one, else its id.
+                .WithThid(message.Thid ?? message.Id)
                 .WithBody(new JsonObject { ["accepted"] = true })
                 .Build();
             return Task.FromResult<Message?>(reply);

@@ -76,7 +76,8 @@ public static class Program
             narrator.Section("2", "Trust ping — is anybody out there? (FR-PROTO-04)");
 
             // Alice probes liveness; Bob's registered TrustPingHandler auto-replies with a
-            // ping-response threaded to the ping's id, delivered back over Bob's own transport.
+            // ping-response in the ping's thread (the ping declares no thid, so its id is the
+            // thread id), delivered back over Bob's own transport.
             var ping = TrustPingApi.CreatePing(from: alice.Identity.Did, to: bob.Identity.Did);
             await alice.Client.SendAsync(ping, new SendOptions(
                 Recipients: new[] { bob.Identity.Did },

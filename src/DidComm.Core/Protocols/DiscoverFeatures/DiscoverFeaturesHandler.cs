@@ -1,5 +1,6 @@
 using DidComm.Consistency;
 using DidComm.Messages;
+using DidComm.Threading;
 
 namespace DidComm.Protocols.DiscoverFeatures;
 
@@ -7,7 +8,9 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// Handler for Discover Features 2.0 (FR-PROTO-05). On receipt of a <c>queries</c> message,
 /// routes each <see cref="FeatureQuery"/> to the <see cref="IFeatureProvider"/> whose
 /// <see cref="IFeatureProvider.FeatureType"/> matches (case-insensitive), concatenates the
-/// disclosures, and replies with a single <c>disclose</c> message threaded to the query.
+/// disclosures, and replies with a single <c>disclose</c> message in the query's thread: its
+/// <c>thid</c> is the query's <c>thid</c> when the query declares one, else the query's <c>id</c>
+/// (DIDComm v2.1 threading).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,6 +24,9 @@ namespace DidComm.Protocols.DiscoverFeatures;
 ///     subject of the recipient key that actually decrypted the query. This prevents a different
 ///     tenant placed first in a multi-recipient <c>to</c> array from selecting the responder.
 ///     Plaintext/direct handler calls retain the construction-time first-recipient fallback.</description></item>
+///   <item><description>A query passed in directly (not through unpack) that declares a <c>thid</c>
+///     that is not a valid thread id is refused with <see cref="Exceptions.MalformedMessageException"/>,
+///     never answered on another thread.</description></item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -81,7 +87,7 @@ public sealed class DiscoverFeaturesHandler : IProtocolHandler
         var reply = DiscoverFeatures.CreateDisclose(
             from: decryptingDid ?? message.To[0],
             to: message.From,
-            thid: message.Id,
+            thid: ThreadIds.ResponseThreadId(message),
             disclosures: disclosures.ToArray());
 
         return Task.FromResult<Message?>(reply);

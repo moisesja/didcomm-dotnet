@@ -62,7 +62,7 @@ public static class DiscoverFeatures
     /// </summary>
     /// <param name="from">Responder DID (the disclosure source).</param>
     /// <param name="to">Original querier DID.</param>
-    /// <param name="thid">Thread id — the queries message's <c>id</c>.</param>
+    /// <param name="thid">The thread the reply joins: the <c>queries</c> message's <c>thid</c> when it declares one, else its <c>id</c> (DIDComm v2.1 threading).</param>
     /// <param name="disclosures">Zero or more <see cref="FeatureDisclosure"/> rows. Per FR-PROTO-05, an empty array is meaningful: it asserts "no matches for any query" but is NOT equivalent to "the responder does not support Discover Features".</param>
     public static Message CreateDisclose(string from, string to, string thid, params FeatureDisclosure[] disclosures)
     {

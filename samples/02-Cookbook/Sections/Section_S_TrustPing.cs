@@ -13,13 +13,14 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// Sends a Trust Ping 2.0 liveness probe from Alice to Bob and lets the registered Trust
 /// Ping handler craft the response. Walks the four pieces a handler-driven protocol needs:
 /// a built message, a packed envelope, the dispatcher resolving the right handler, and the
-/// response that comes back threaded to the ping's id.
+/// response that comes back in the ping's thread.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Trust Ping is the simplest spec protocol — its body carries only <c>response_requested</c>
-/// (default <c>true</c>) and the recipient's handler auto-replies with <c>ping-response</c>
-/// whose <c>thid</c> equals the ping's <c>id</c>. Showing it as the first dispatcher section
+/// (default <c>true</c>) and the recipient's handler auto-replies with a <c>ping-response</c> in
+/// the ping's thread: its <c>thid</c> is the ping's <c>thid</c> when the ping declares one, else the
+/// ping's <c>id</c> (here the ping declares none, so it is the id). Showing it as the first dispatcher section
 /// makes the FR-PROTO-03 wiring concrete: register handlers → call the dispatcher → observe
 /// the outcome.
 /// </para>

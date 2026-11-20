@@ -5,9 +5,12 @@ namespace DidComm.Protocols.TrustPing;
 
 /// <summary>
 /// Handler for Trust Ping 2.0 (FR-PROTO-04). Replies to a <c>ping</c> with a
-/// <c>ping-response</c> whose <c>thid</c> equals the ping's <c>id</c> when the ping's
-/// <c>response_requested</c> body member is <c>true</c> (the default); replies with
-/// <c>null</c> when the sender explicitly opted out.
+/// <c>ping-response</c> in the ping's thread (its <c>thid</c> is the ping's <c>thid</c> when the
+/// ping declares one, else the ping's <c>id</c>) when the ping's <c>response_requested</c> body
+/// member is <c>true</c> (the default); replies with <c>null</c> when the sender explicitly opted out.
+/// A ping passed in directly (not through unpack) that declares a <c>thid</c> that is not a valid
+/// thread id is refused with <see cref="Exceptions.MalformedMessageException"/>, never answered on
+/// another thread.
 /// </summary>
 /// <example>
 /// Registered in <c>samples/02-Cookbook</c> (section S) and <c>samples/05-WebSocketChat</c>.

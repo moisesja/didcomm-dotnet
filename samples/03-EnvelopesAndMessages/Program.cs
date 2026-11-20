@@ -507,13 +507,13 @@ public static class Program
         // readable check is the predicate, not the raw list.
         n.Value("Bob sees a please_ack request", AckLoopGuard.RequestsAck(bobReceives.Message));
 
-        // Bob's substantive reply continues the thread: thid = the opener's id, and the ack
-        // header confirms receipt in the same message.
+        // Bob's substantive reply continues the thread: thid = the opener's thid, or its id when
+        // it declares none (as here), and the ack header confirms receipt in the same message.
         var reply = new MessageBuilder()
             .WithType("https://didcomm.org/basicmessage/2.0/message")
             .WithFrom(bob.Did)
             .WithTo(alice.Did)
-            .WithThid(bobReceives.Message.Id)
+            .WithThid(bobReceives.Message.Thid ?? bobReceives.Message.Id)
             .WithAck(bobReceives.Message.Id)
             .WithBody(new JsonObject { ["content"] = "Got it." })
             .Build();
