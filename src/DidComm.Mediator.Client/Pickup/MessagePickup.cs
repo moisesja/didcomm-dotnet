@@ -3,6 +3,7 @@ using DidComm.Exceptions;
 using DidComm.Mediator.Internal;
 using DidComm.Messages;
 using DidComm.Protocols;
+using DidComm.Threading;
 using ProblemReports = DidComm.Protocols.ProblemReport.ProblemReport;
 
 namespace DidComm.Mediator.Pickup;
@@ -203,15 +204,12 @@ public static class MessagePickup
 
     /// <summary>
     /// The thread a response to <paramref name="request"/> belongs to (DD-11): the request's
-    /// <c>thid</c> when it has one, else its <c>id</c>. A <c>status</c> and a <c>delivery</c> carry
-    /// it as <c>thid</c>, a problem report as <c>pthid</c>.
+    /// <c>thid</c> when it declares one, else its <c>id</c> (DIDComm v2.1 threading). A <c>status</c>
+    /// and a <c>delivery</c> carry it as <c>thid</c>, a problem report as <c>pthid</c>.
     /// </summary>
     /// <param name="request">The request being answered.</param>
-    public static string ResponseThreadId(Message request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        return string.IsNullOrEmpty(request.Thid) ? request.Id : request.Thid;
-    }
+    /// <exception cref="MalformedMessageException">The request declares a <c>thid</c> that is not a valid thread id (empty, or not entirely unreserved URI characters). Only a message built by hand can: unpack refuses one. The message quotes no value.</exception>
+    public static string ResponseThreadId(Message request) => ThreadIds.ResponseThreadId(request);
 
     // ---- parsers --------------------------------------------------------------------------
 

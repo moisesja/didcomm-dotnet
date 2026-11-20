@@ -1,5 +1,6 @@
 using System.Text.Json;
 using AwesomeAssertions;
+using DidComm.Exceptions;
 using DidComm.Json;
 using DidComm.Mediator.Coordination;
 using DidComm.Messages;
@@ -196,11 +197,40 @@ public sealed class CoordinateMediationBuilderTests
         var threaded = new MessageBuilder().WithId("request-id").WithThid("existing-thread").WithType(CoordinateMediation.MediateRequestType).Build();
         CoordinateMediation.ResponseThreadId(threaded).Should().Be("existing-thread");
 
-        plain.Thid = string.Empty;
-        CoordinateMediation.ResponseThreadId(plain).Should().Be("request-id", "an empty thid is no thid");
-
         var act = () => CoordinateMediation.ResponseThreadId(null!);
         act.Should().Throw<ArgumentNullException>();
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("zz9 zz9")]
+    [InlineData("zz9/zz9")]
+    public void ResponseThreadId_refuses_a_declared_thid_that_is_not_a_valid_thread_id_without_quoting_it(string thid)
+    {
+        // DIDComm v2.1 threading.md L15: a thid MUST meet the constraints of an id. An invalid one is
+        // refused, never replaced by the id (the reply would join a thread nobody named). Unpack
+        // already refuses it; only a message built by hand reaches this.
+        var request = new MessageBuilder().WithId("request-id").WithType(CoordinateMediation.MediateRequestType).Build();
+        request.Thid = thid;
+
+        var ex = Record.Exception(() => CoordinateMediation.ResponseThreadId(request));
+
+        ex.Should().BeOfType<MalformedMessageException>();
+        ex!.Message.Should().NotContain("zz9");
+        ex.Message.Should().NotContain("request-id");
+    }
+
+    [Fact]
+    public void ResponseThreadId_refuses_a_thid_with_a_control_character_without_quoting_it()
+    {
+        var request = new MessageBuilder().WithId("request-id").WithType(CoordinateMediation.MediateRequestType).Build();
+        request.Thid = "zz9" + (char)0x1B + "[31m";
+
+        var ex = Record.Exception(() => CoordinateMediation.ResponseThreadId(request));
+
+        ex.Should().BeOfType<MalformedMessageException>();
+        ex!.Message.Should().NotContain("zz9");
     }
 
     [Fact]
