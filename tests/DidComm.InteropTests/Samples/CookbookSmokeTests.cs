@@ -8,7 +8,7 @@ namespace DidComm.InteropTests.Samples;
 /// <summary>
 /// FR-DX-02/04 build+run gate for the <c>02-Cookbook</c> sample. Invokes
 /// <see cref="Program.RunAsync"/> directly (no process spawn), capturing console output, and
-/// asserts every §14.2 task letter (A–GG) produced its section banner — the cookbook is the
+/// asserts every §14.2 task letter (A–HH) produced its section banner — the cookbook is the
 /// backbone of API coverage, so a section silently dropping out must fail CI.
 /// </summary>
 public sealed class CookbookSmokeTests
@@ -56,6 +56,7 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("Section EE — Live delivery over WebSocket");
         transcript.Should().Contain("Section FF — Run a minimal mediator in 20 lines");
         transcript.Should().Contain("Section GG — Send through a proxy you trust");
+        transcript.Should().Contain("Section HH — Limit how long a WebSocket message may take");
 
         // Distinctive per-section outcomes, so a section that banners but silently degrades
         // still fails the gate.
@@ -111,5 +112,9 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("The proxy received = CONNECT 198.51.100.7:80 HTTP/1.1");  // GG: WebSocket tunnelled through it
         transcript.Should().Contain("Refused = by the library, before the proxy was asked");   // GG: checks that need no socket
         transcript.Should().Contain("Refused = by the proxy");                                 // GG: past the proxy, its rules decide
+        transcript.Should().Contain("TimeSpan.Zero = refused (ArgumentOutOfRangeException)"); // HH: the setter's rule
+        transcript.Should().Contain("CloseStatus = 1008 (PolicyViolation)");                   // HH: silent and unfinished closed
+        transcript.Should().Contain("Bob received = Section HH: the next message, after an idle wait longer than the limit."); // HH: idle is untimed
+        transcript.Should().Contain("The unfinished message reached Bob = False");            // HH: the partial message is dropped
     }
 }

@@ -60,7 +60,8 @@ This is what the library protects, and what it leaves to the host:
   that serve known wallets only should use an allow-list `IMediationPolicy`.
 - **What a stranger can reach without enrolling:** the forward endpoint (always `202`, whether or
   not the recipient is registered), the WebSocket endpoint and the out-of-band invitation.
-- **What the library bounds:** message size (`MaxReceiveBytes`), queued messages and bytes per
+- **What the library bounds:** message size (`MaxReceiveBytes`), how long a peer has to deliver
+  each WebSocket message (`MessageReceiveTimeout`), queued messages and bytes per
   recipient and per store, grants and registrations, sessions, forwards waiting for their `202` (a
   `202` that is not taken within its deadline is withdrawn and the forward is not relayed), and an
   HTTP delivery that is not read within the pickup lease.
@@ -72,6 +73,30 @@ This is what the library protects, and what it leaves to the host:
   stranger with many self-made DIDs can occupy under open enrolment.
 
 Report a weakness in any of this privately, as described above.
+
+## Public endpoints
+
+An endpoint anyone can reach (`MapDidCommEndpoint`, `MapDidCommWebSocket`, `MapDidCommMediator`)
+needs these limits on top of the library's own:
+
+- **WebSocket connections.** Set Kestrel's `Limits.MaxConcurrentUpgradedConnections` and
+  `Limits.MaxConcurrentConnections` (an upgraded connection no longer counts against the second),
+  and put a concurrency limiter partitioned by client in front of the WebSocket endpoint: a
+  WebSocket holds its permit for its whole life, while a fixed-window limiter counts connection
+  attempts, not open sockets.
+- **WebSocket messages.** Each must arrive whole within `DidCommReceiveOptions.MessageReceiveTimeout`
+  (60 s by default; a new connection's first message is counted from the accept), or the connection
+  is closed with 1008. Raise it for peers on slow links rather than turning it off
+  (`Timeout.InfiniteTimeSpan`). The client transport has the same setting on
+  `WebSocketTransportOptions`.
+- **HTTP request bodies.** Raise Kestrel's `Limits.MinRequestBodyDataRate`, for example
+  `new MinDataRate(bytesPerSecond: 16 * 1024, gracePeriod: TimeSpan.FromSeconds(5))`; the default
+  (240 bytes a second) lets a 1 MiB body take over an hour.
+- **Request timeouts.** If you use the request-timeouts middleware, apply it to HTTP endpoints only,
+  never through `MapDidCommMediator`'s builder or as the default policy: it replaces
+  `HttpContext.RequestAborted`, and cancelling that token ends live WebSocket sessions.
+- **Memory.** An unpacked message can take several times its size on the wire: budget memory per
+  message being handled at once, not per byte received.
 
 ## Out of scope
 
