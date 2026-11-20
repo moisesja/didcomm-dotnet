@@ -42,14 +42,23 @@ public static class DiscoverFeatures
     /// <param name="to">Recipient DID.</param>
     /// <param name="queries">One or more <see cref="FeatureQuery"/> rows.</param>
     public static Message CreateQuery(string from, string to, params FeatureQuery[] queries)
+        => CreateQuery(from, to, UuidV4MessageIdGenerator.Instance, queries);
+
+    /// <summary>
+    /// <see cref="CreateQuery(string, string, FeatureQuery[])"/> with the query's id taken from
+    /// <paramref name="idGenerator"/>: the seam <see cref="DiscoverFeaturesClient"/>'s tests use to
+    /// pin the id a reply must name.
+    /// </summary>
+    internal static Message CreateQuery(string from, string to, IMessageIdGenerator idGenerator, FeatureQuery[] queries)
     {
+        ArgumentNullException.ThrowIfNull(idGenerator);
         ArgumentException.ThrowIfNullOrEmpty(from);
         ArgumentException.ThrowIfNullOrEmpty(to);
         ArgumentNullException.ThrowIfNull(queries);
         if (queries.Length == 0)
             throw new ArgumentException("At least one FeatureQuery is required.", nameof(queries));
 
-        return new MessageBuilder()
+        return new MessageBuilder(idGenerator)
             .WithType(QueriesType)
             .WithFrom(from)
             .WithTo(to)
@@ -62,7 +71,7 @@ public static class DiscoverFeatures
     /// </summary>
     /// <param name="from">Responder DID (the disclosure source).</param>
     /// <param name="to">Original querier DID.</param>
-    /// <param name="thid">Thread id — the queries message's <c>id</c>.</param>
+    /// <param name="thid">The thread the reply joins: the <c>queries</c> message's <c>thid</c> when it declares one, else its <c>id</c> (DIDComm v2.1 threading).</param>
     /// <param name="disclosures">Zero or more <see cref="FeatureDisclosure"/> rows. Per FR-PROTO-05, an empty array is meaningful: it asserts "no matches for any query" but is NOT equivalent to "the responder does not support Discover Features".</param>
     public static Message CreateDisclose(string from, string to, string thid, params FeatureDisclosure[] disclosures)
     {

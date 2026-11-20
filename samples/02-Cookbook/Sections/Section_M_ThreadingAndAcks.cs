@@ -47,12 +47,13 @@ public static class Section_M_ThreadingAndAcks
         ctx.Narrator.Value("Bob sees RequestsAck", AckLoopGuard.RequestsAck(bobReceives.Message));
 
         // Bob replies with a pure ACK (Empty 1.0 envelope carrying just the ack header).
-        // The reply continues the thread by carrying the opener's id as thid.
+        // The reply continues the thread by carrying the opener's thid: the one the opener
+        // declares, or its id when it declares none (as here).
         var bobReply = new MessageBuilder()
             .WithType("https://didcomm.org/empty/1.0/empty")
             .WithFrom(ctx.Bob.Did)
             .WithTo(ctx.Alice.Did)
-            .WithThid(bobReceives.Message.Id)
+            .WithThid(bobReceives.Message.Thid ?? bobReceives.Message.Id)
             .WithAck(bobReceives.Message.Id)
             .Build();
 
@@ -86,7 +87,7 @@ public static class Section_M_ThreadingAndAcks
         // handlers maintain. Remove forgets a thread once the interaction is over.
         ctx.Narrator.Step("Track the thread server-side: a bounded store and its per-thread state.");
         IThreadStateStore store = new InMemoryThreadStateStore(maxEntries: 1024);
-        var state = store.GetOrCreate(bobReceives.Message.Id);              // keyed by thid
+        var state = store.GetOrCreate(bobReceives.Message.Thid ?? bobReceives.Message.Id); // keyed by thid (the id when none is declared)
         state.AckRequested = AckLoopGuard.RequestsAck(bobReceives.Message); // remember Alice asked
         ctx.Narrator.Value("ThreadState.AckRequested", state.AckRequested);
         ctx.Narrator.Value("ThreadState.ErrorCount (no problem reports yet)", state.ErrorCount);

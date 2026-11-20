@@ -305,7 +305,7 @@ public static class Section_CC_EnrollWithAMediator
         {
             // MediationClient returns this record; code of your own builds it from the parsed grant.
             var parsed = new MediationGrant(PeerDid: wallet, RoutingDids: routingDids);
-            ctx.Narrator.Value("mediate-grant → TryParseGrant", $"routing_did [{string.Join(", ", parsed.RoutingDids)}], thid is the request's id: {grantMessage.Thid == request.Id}");
+            ctx.Narrator.Value("mediate-grant → TryParseGrant", $"routing_did [{string.Join(", ", parsed.RoutingDids)}], thid is the request's id: {string.Equals(grantMessage.Thid, request.Id, StringComparison.OrdinalIgnoreCase)}");
         }
 
         var deny = await OverTheWireAsync(ctx, CoordinateMediation.CreateDeny(mediatorDid, wallet, thid));

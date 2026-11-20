@@ -1357,3 +1357,20 @@ Format per entry:
 - **How to apply:** When a fix starts with "if the input is X, do Y instead", ask whether the spec
   makes X invalid. If it does, the fix is a refusal at the boundary, with a test that the invalid input
   is refused. Extends [[L-050]] and the "spec over local rules" memory.
+
+## L-075 — A defect found while working an issue is fixed in that PR, not filed as a new issue.
+
+- **Lesson:** When a pass finds a defect that has no issue yet, fix it in the PR of the issue being
+  worked, with its own tests and CHANGELOG line, and never file a new issue for it. A finding that
+  overlaps an existing open issue is left to that issue and fixed in its own PR; name it in the
+  hand-back. The exceptions are owner-decision stops (a public API change, a spec gap that needs a
+  choice) and private security items, which go to the owner privately.
+- **Why:** On 2026-11-20, after #138's hand-back listed five "different defect class" items for
+  filing, the owner said: "fix all these error on this PR. I cannot go on perpetually opening new
+  issues. Fix them now", then narrowed it: "the ones that have existing open issues should be fixed
+  on their own. I just don't want you to continue opening new ones. Those, fix in this PR". PR #141
+  took the three new items (ids compared ignoring case, the cascade stop's sender, the mediator's
+  `ResponseThreadId`); #116 and #139 stayed with their own issues.
+- **How to apply:** Before a hand-back lists a finding as "out of scope", search the open issues. No
+  issue → fix it here (size is not a stop). An open issue → leave it there and name it. A stop or a
+  private item → raise it, don't fix or file it. See [[L-046]] and [[L-073]].

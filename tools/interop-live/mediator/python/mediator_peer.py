@@ -110,6 +110,12 @@ def did_of(entry: str) -> str:
     return ip.load_did(read_text(entry))
 
 
+def same_id(a, b) -> bool:
+    """Whether two message ids / thids / pthids name the same thing: DIDComm v2.1 threading
+    compares them ignoring letter case. A missing value matches nothing."""
+    return isinstance(a, str) and isinstance(b, str) and a.lower() == b.lower()
+
+
 # --- HTTP ----------------------------------------------------------------------------------
 
 
@@ -474,7 +480,7 @@ class Exchange:
         step["reply_shape"] = {
             "type": reply.get("type"),
             "thid": reply.get("thid"),
-            "thid_is_request_id": reply.get("thid") == message["id"],
+            "thid_is_request_id": same_id(reply.get("thid"), message["id"]),
             "from": reply.get("from"),
             "to": reply.get("to"),
             "created_time_present": "created_time" in reply,
@@ -497,7 +503,7 @@ class Exchange:
             self.expect(step, reply.get("type") == expected_type,
                         f"reply type {reply.get('type')!r}, expected {expected_type!r}"
                         + problem_text(reply))
-            and self.expect(step, reply.get("thid") == step["request_id"],
+            and self.expect(step, same_id(reply.get("thid"), step["request_id"]),
                             f"reply thid {reply.get('thid')!r} is not the request id {step['request_id']!r}")
             and self.expect(step, reply.get("from") == self.mediator,
                             f"reply from {reply.get('from')!r} is not the mediator")

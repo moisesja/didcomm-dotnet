@@ -72,7 +72,7 @@ public static class Section_V_OutOfBandInvitation
             .Build();
         OutOfBandApi.AddWebRedirect(response, new WebRedirect("OK", "https://faber.example/welcome"));
 
-        ctx.Narrator.Value("Response.pthid == invitation.id", response.Pthid == invitation.Id);
+        ctx.Narrator.Value("Response.pthid == invitation.id", string.Equals(response.Pthid, invitation.Id, StringComparison.OrdinalIgnoreCase));
         ctx.Narrator.Value("web_redirect parses back", OutOfBandApi.ReadWebRedirect(response)?.RedirectUrl);
         ctx.Narrator.Note("The invitation is plaintext by design — never put private data in a QR code (FR-OOB privacy).");
     }

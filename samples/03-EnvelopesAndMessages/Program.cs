@@ -507,20 +507,20 @@ public static class Program
         // readable check is the predicate, not the raw list.
         n.Value("Bob sees a please_ack request", AckLoopGuard.RequestsAck(bobReceives.Message));
 
-        // Bob's substantive reply continues the thread: thid = the opener's id, and the ack
-        // header confirms receipt in the same message.
+        // Bob's substantive reply continues the thread: thid = the opener's thid, or its id when
+        // it declares none (as here), and the ack header confirms receipt in the same message.
         var reply = new MessageBuilder()
             .WithType("https://didcomm.org/basicmessage/2.0/message")
             .WithFrom(bob.Did)
             .WithTo(alice.Did)
-            .WithThid(bobReceives.Message.Id)
+            .WithThid(bobReceives.Message.Thid ?? bobReceives.Message.Id)
             .WithAck(bobReceives.Message.Id)
             .WithBody(new JsonObject { ["content"] = "Got it." })
             .Build();
         var packedReply = (await client.PackEncryptedAsync(reply, new PackEncryptedOptions(
             Recipients: new[] { alice.Did }, From: bob.Did))).Message;
         var aliceReceives = await client.UnpackAsync(packedReply);
-        n.Value("Reply thid == opening id", aliceReceives.Message.Thid == opening.Id);
+        n.Value("Reply thid == opening id", string.Equals(aliceReceives.Message.Thid, opening.Id, StringComparison.OrdinalIgnoreCase));
         n.Value("Alice sees ack[]", string.Join(",", aliceReceives.Message.Ack ?? new List<string>()));
 
         // pthid links a NEW thread to the one it grew out of — the child cites the parent
@@ -532,7 +532,7 @@ public static class Program
             .WithPthid(opening.Id)
             .WithBody(new JsonObject { ["content"] = "Spinning off a related conversation." })
             .Build();
-        n.Value("Side-thread pthid == parent id", sideThread.Pthid == opening.Id);
+        n.Value("Side-thread pthid == parent id", string.Equals(sideThread.Pthid, opening.Id, StringComparison.OrdinalIgnoreCase));
 
         // When only an ACK is needed (no content), Empty 1.0 is the canonical wire shape:
         // Message.Empty() pre-seeds the builder with the Empty 1.0 type (FR-PROTO-06).

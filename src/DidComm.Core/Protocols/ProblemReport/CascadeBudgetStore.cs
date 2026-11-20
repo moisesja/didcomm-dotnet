@@ -12,7 +12,9 @@ namespace DidComm.Protocols.ProblemReport;
 /// the cascade budget through that same store let a flood of cheap fresh <c>thid</c>s evict — and
 /// reset to zero — a victim <c>pthid</c>'s error budget, defeating the cascade guard (#36). This
 /// tracker holds the budget separately, keyed only by the failing thread's <c>pthid</c> (so only
-/// error reports create entries).
+/// error reports create entries). The <c>pthid</c> is compared ignoring letter case, as DIDComm v2.1
+/// threading compares thread ids, so reports whose <c>pthid</c>s differ only in case count against
+/// one thread's budget.
 /// </para>
 /// <para>
 /// It <strong>owns its concurrency</strong>: <see cref="RecordErrorReport"/> does the whole
@@ -47,7 +49,7 @@ public sealed class CascadeBudgetStore
     }
 
     private readonly object _gate = new();
-    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
     private readonly int _maxEntries;
     private readonly int _lowWaterMark;
     private long _tick;

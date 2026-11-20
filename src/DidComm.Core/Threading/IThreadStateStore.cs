@@ -7,6 +7,12 @@ namespace DidComm.Threading;
 /// from multiple threads, since the same store is shared across pack/unpack on a singleton
 /// facade (NFR-03).
 /// </summary>
+/// <remarks>
+/// Implementations MUST key threads ignoring letter case (ordinal, case-insensitive): DIDComm v2.1
+/// threading says a message <c>id</c> "MUST be compared case-insensitively", and <c>thid</c> and
+/// <c>pthid</c> obey the same constraints, so two thread ids that differ only in letter case name
+/// the same thread and every method here treats them as one.
+/// </remarks>
 public interface IThreadStateStore
 {
     /// <summary>

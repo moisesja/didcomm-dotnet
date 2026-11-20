@@ -82,8 +82,9 @@ public static class Program
 
         // Alice remembers which invitation ids she has issued. This — plain application
         // state — is the correlation surface for replies; the IOobInvitationStore further
-        // down has a different job (hosting the short-URL form).
-        var pendingInvitations = new Dictionary<string, OutOfBandInvitation>(StringComparer.Ordinal)
+        // down has a different job (hosting the short-URL form). DIDComm compares message ids
+        // ignoring letter case, so the lookup by a reply's pthid does too.
+        var pendingInvitations = new Dictionary<string, OutOfBandInvitation>(StringComparer.OrdinalIgnoreCase)
         {
             [invitation.Id] = invitation,
         };
@@ -185,7 +186,7 @@ public static class Program
 
         var received = await aliceClient.UnpackAsync(packedResponse);
         narrator.Value("Alice sees pthid", received.Message.Pthid);
-        narrator.Value("pthid == invitation.id", received.Message.Pthid == invitation.Id);
+        narrator.Value("pthid == invitation.id", string.Equals(received.Message.Pthid, invitation.Id, StringComparison.OrdinalIgnoreCase));
 
         var correlated = received.Message.Pthid is { } pthid && pendingInvitations.TryGetValue(pthid, out _);
         narrator.Value("Correlated to a pending invitation", correlated);

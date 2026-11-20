@@ -10,7 +10,7 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 
 | Package (`src/`) | What it holds |
 | --- | --- |
-| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, and bounded message types for span tags, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
+| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading` (internal `ThreadIds.ResponseThreadId`: the thread a reply joins, the request's `thid`, else its `id`; #138), `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, and bounded message types for span tags, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
 | `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96, and `Detach` / `Detached` since #98); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter), `RateLimitedLog` and `HeldForward` (what a waiting forward keeps, #98)), `Trace`, `TrustPing`. |
 | `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), `TransportRouter.Select` (the one transport selection for a send and for questions about it), and `ReceiveDeadline` (the per-message receive timer both WebSocket sides use, and the setter rule of their `MessageReceiveTimeout`; FR-TRN-14). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
@@ -212,7 +212,22 @@ that every grantee references its granter directly (pack pins direct references 
 5. With the dispatcher overloads, `ProtocolDispatcher.DispatchAsync` routes the `UnpackResult` by
    message type to the `IProtocolHandler` registered for it, with `ProtocolContext.Session` (the
    session, or `null`) and `ProtocolContext.ReturnRoute` (this message's parsed header); a handler
-   may return a reply or push through the session.
+   may return a reply or push through the session. A built-in responder's answer is in the
+   request's thread: its `thid` is the request's `thid` when it declares one, else its `id` (DIDComm
+   v2.1 threading.md L15/L17; DD-11). Core's Trust Ping `ping-response` and Discover Features
+   `disclose` do this through `ThreadIds.ResponseThreadId` since #138 (before, they always used the
+   request's `id`); for a request built by hand (not unpacked) that declares an invalid `thid`, these
+   two refuse it with `MalformedMessageException`, quoting no value. The mediator's answers use
+   `CoordinateMediation.ResponseThreadId` and `MessagePickup.ResponseThreadId`, which apply the same
+   rule since #141. A problem report is not in the request's thread: it starts a child thread whose
+   `pthid` names it (problems.md L83). The built-in responders (Trust Ping, Discover Features, the
+   problem-report cascade stop) answer as the DID whose key decrypted the request, else (plaintext,
+   a direct call) its first `to` entry; a decrypted request without `to` is answered
+   (message_structure.md `to`: without it "each recipient SHOULD assume they are the only
+   recipient"), and one without `from`, or a plaintext one without `to`, gets no reply (#141). The
+   dispatcher's thread state, the cascade budget (by `pthid`) and every client that matches answers
+   to requests compare message ids, `thid`s and `pthid`s ignoring case (FR-MSG-04, since #141);
+   `ThreadState.Thid` keeps the casing that created the state.
 6. A reply with a session becomes the HTTP `200` body or a WebSocket push; without one it is
    logged, not sent (a reply to anyone else travels out of band, FR-TRN-10).
 7. `IProtocolObserver` instances get a read-only, best-effort copy off the reply path for every
@@ -222,7 +237,7 @@ that every grantee references its granter directly (pack pins direct references 
 
 In-process correlators (`IInboundCorrelator`) see each verified inbound before the handlers: the
 Discover Features client (`DiscoverFeaturesClient`) completes a pending query with a `disclose`
-whose `thid` is the query's id, whose envelope authenticates its sender (authcrypt or a verified
+whose `thid` is the query's id (compared ignoring case, FR-MSG-04, since #141), whose envelope authenticates its sender (authcrypt or a verified
 signature), whose every sender and signer key id has the DID subject of `from`, whose `from` is the
 queried responder, and, when encrypted, whose decrypting key is the requester's. Its `to` header is
 advisory since #98 (owner decision C2; DIDComm v2.1 message_structure: without a `to` a recipient
@@ -875,7 +890,8 @@ Replay guard (`InMemoryReplayGuard`):
   reading; the only removal path, so heap and buckets never diverge) and advance `purgedAt`, the
   latest instant purged at, if the reading is later. Then `TooOld` if the message's
   expiry is earlier than `purgedAt` (its entry may have been purged — reachable only with a reading
-  behind `purgedAt`), `Duplicate` if the sender's bucket holds the id (no refresh), `Saturated` at
+  behind `purgedAt`), `Duplicate` if the sender's bucket holds the id (the sender subject compared exactly, the id
+  ignoring case per FR-MSG-04, since #141; no refresh), `Saturated` at
   `MaxEntries` (default 32 768) or at the bucket's `MaxEntriesPerPeer` (default 1024) — nothing
   evicted, `SaturationCount` incremented — else insert. A bucket keeps one copy of its sender
   subject, shared by its heap entries.
@@ -2463,7 +2479,8 @@ request.
    fire; only a crafted verified snapshot reaches it (`MediatorClientChannelAddressingTests`). Before
    C2 such an answer was dropped here.
 4. **Thread.** `pthid`, else `thid`, for a problem report; `thid` otherwise. A thread longer than
-   64 characters is never looked up.
+   64 characters is never looked up. The pending map compares it with request ids ignoring case
+   (FR-MSG-04, since #141).
 
 | The snapshot (identity passed) | Unbound: through the dispatcher (WebSocket) | Bound: in the HTTP response to request R |
 | --- | --- | --- |
@@ -2857,7 +2874,8 @@ The released `UnpackAsync` is unchanged.
   acknowledgement, a dropped connection or a lease that ran out. A message's key (`KeyOf`) is
   SHA-256, truncated to 128 bits, over length-prefixed fields. An authenticated or signed message is
   keyed by the sender's DID subject (the authcrypt sender key's, else the verified signer's), the
-  decrypting DID subject and the inner message id: message ids are unique per sender, so a stranger
+  decrypting DID subject and the inner message id (folded to upper case, so ids that differ only
+  in case match, FR-MSG-04, since #141): message ids are unique per sender, so a stranger
   who reuses an id produces another key and cannot suppress the message. An anonymous message is
   keyed by its innermost packed text, so only a byte-identical copy matches. What the filter
   remembers is that key scoped to the mailbox it came from (`InMailbox`: SHA-256/128 over the DID

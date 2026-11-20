@@ -60,13 +60,16 @@ internal sealed class FakeCoordinateMediation20Mediator : IAsyncDisposable
     /// <param name="speaks20">Register the 2.0 handler.</param>
     /// <param name="omitThid">The handler answers without <c>thid</c>, as the 2.0 page's examples do; our client takes no such answer (DIDComm v2.1 threading).</param>
     /// <param name="paging">How the handler answers a <c>keylist-query</c>'s <c>paginate</c>.</param>
-    public static async Task<FakeCoordinateMediation20Mediator> StartAsync(MediatorTestServer mediator, bool speaks20 = true, bool omitThid = false, KeylistPaging paging = KeylistPaging.Honoured)
+    /// <param name="threadOf">How the handler writes the thread it answers on, from the request id (default: the id as sent); a peer that re-cases ids writes it its own way.</param>
+    /// <param name="problemCode">When set, every request is answered with a problem report of this code whose <c>pthid</c> is that thread.</param>
+    public static async Task<FakeCoordinateMediation20Mediator> StartAsync(MediatorTestServer mediator, bool speaks20 = true, bool omitThid = false, KeylistPaging paging = KeylistPaging.Honoured,
+        Func<string, string>? threadOf = null, string? problemCode = null)
     {
         var identity = await MediatorCast.MintAsync(new DidCommServiceSpec($"http://{Host}{Path}", Accept: new[] { "didcomm/v2" }));
         var secrets = new InMemorySecretsResolver();
         foreach (var jwk in identity.Privates)
             secrets.Add(jwk);
-        var handler = speaks20 ? new FakeCoordinateMediation20Handler(identity.Did, omitThid, paging) : null;
+        var handler = speaks20 ? new FakeCoordinateMediation20Handler(identity.Did, omitThid, paging) { ThreadOf = threadOf, ProblemCode = problemCode } : null;
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer(o => o.BaseAddress = new Uri($"http://{Host}/"));
@@ -147,6 +150,12 @@ internal sealed class FakeCoordinateMediation20Handler : IProtocolHandler, IProt
 
     public KeylistPaging Paging { get; }
 
+    /// <summary>How the thread answered on is written from the request id; <c>null</c>: the id as sent.</summary>
+    public Func<string, string>? ThreadOf { get; init; }
+
+    /// <summary>When set, every request is answered with a problem report of this code on that thread.</summary>
+    public string? ProblemCode { get; init; }
+
     /// <summary>The 2.0 messages handled, in order.</summary>
     public IReadOnlyList<Message> Handled => _handled.ToArray();
 
@@ -164,6 +173,10 @@ internal sealed class FakeCoordinateMediation20Handler : IProtocolHandler, IProt
         _handled.Enqueue(message);
         if (!MediatorPeer.TryGet(context.Received, out var peer, out var local))
             return Task.FromResult<Message?>(null);
+
+        var thread = ThreadOf?.Invoke(message.Id) ?? message.Id;
+        if (ProblemCode is { } code)
+            return Task.FromResult<Message?>(DidComm.Protocols.ProblemReport.ProblemReport.Create(local, peer, code, pthid: thread));
 
         var name = message.Type[(CoordinateMediation20.ProtocolUri.Length + 1)..];
         JsonObject? body;
@@ -215,7 +228,7 @@ internal sealed class FakeCoordinateMediation20Handler : IProtocolHandler, IProt
 
         var reply = new MessageBuilder().WithType(type).WithFrom(local).WithTo(peer).WithBody(body);
         if (!OmitThid)
-            reply.WithThid(message.Id);
+            reply.WithThid(thread);
         return Task.FromResult<Message?>(reply.Build());
     }
 

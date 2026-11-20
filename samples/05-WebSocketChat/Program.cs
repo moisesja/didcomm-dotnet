@@ -76,7 +76,8 @@ public static class Program
             narrator.Section("2", "Trust ping — is anybody out there? (FR-PROTO-04)");
 
             // Alice probes liveness; Bob's registered TrustPingHandler auto-replies with a
-            // ping-response threaded to the ping's id, delivered back over Bob's own transport.
+            // ping-response in the ping's thread (the ping declares no thid, so its id is the
+            // thread id), delivered back over Bob's own transport.
             var ping = TrustPingApi.CreatePing(from: alice.Identity.Did, to: bob.Identity.Did);
             await alice.Client.SendAsync(ping, new SendOptions(
                 Recipients: new[] { bob.Identity.Did },
@@ -84,11 +85,13 @@ public static class Program
                 ServiceEndpointOverride: bob.Endpoint));
             narrator.Step($"[alice] sent ping (id = {ping.Id[..8]}…) as one text WebSocket message (FR-TRN-09).");
 
+            // DIDComm compares message ids and thread ids ignoring letter case, so the reply's
+            // thid is matched to the ping's id that way.
             var pong = await alice.WaitForInboundAsync(
                 r => string.Equals(r.Message.Type, TrustPingApi.ResponseType, StringComparison.Ordinal)
-                     && string.Equals(r.Message.Thid, ping.Id, StringComparison.Ordinal),
+                     && string.Equals(r.Message.Thid, ping.Id, StringComparison.OrdinalIgnoreCase),
                 "Bob's ping-response");
-            narrator.Value("ping-response thid == ping.id", pong.Message.Thid == ping.Id);
+            narrator.Value("ping-response thid == ping.id", string.Equals(pong.Message.Thid, ping.Id, StringComparison.OrdinalIgnoreCase));
             narrator.Value("ping-response authenticated", pong.Authenticated);
 
             // ── 3. Discover features ─────────────────────────────────────────────────────

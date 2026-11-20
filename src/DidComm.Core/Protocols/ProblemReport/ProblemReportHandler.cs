@@ -1,3 +1,4 @@
+using DidComm.Consistency;
 using DidComm.Messages;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,12 @@ namespace DidComm.Protocols.ProblemReport;
 /// emits exactly ONE <see cref="ProblemReport.MaxErrorsExceededCode"/>
 /// (<c>e.p.req.max-errors-exceeded</c>) to halt the cascade, then returns <c>null</c> for
 /// every subsequent report on the same <c>thid</c>.
+/// </para>
+/// <para>
+/// The cascade stop is sent from the DID whose key decrypted the inbound report (its DID subject),
+/// so a different tenant placed first in a multi-recipient <c>to</c> array cannot be made the
+/// sender; a plaintext report or a direct call falls back to the first <c>to</c> entry, as the Trust
+/// Ping and Discover Features responders do.
 /// </para>
 /// </remarks>
 public sealed class ProblemReportHandler : IProtocolHandler
@@ -86,8 +93,13 @@ public sealed class ProblemReportHandler : IProtocolHandler
         // dispatcher's general thread store (which a cheap-thid flood evicts) and self-synchronizing on
         // a stable pthid-keyed lock (so concurrent reports on the same pthid can't double-emit, even
         // under the store's LRU eviction). A report is repliable iff it has a usable reply target.
-        bool repliable = !string.IsNullOrEmpty(message.From)
-            && message.To is { Count: > 0 } && !string.IsNullOrEmpty(message.To[0]);
+        // Our end is the DID whose key decrypted the report, else (plaintext, a direct call) the
+        // first `to` entry. A decrypted report without `to` is still ours (DIDComm v2.1
+        // message_structure.md, `to`: "If the header is omitted, each recipient SHOULD assume they
+        // are the only recipient").
+        var responder = DidSubject.DidSubjectOf(context.Received.RecipientKid)
+            ?? (message.To is { Count: > 0 } && !string.IsNullOrEmpty(message.To[0]) ? message.To[0] : null);
+        bool repliable = !string.IsNullOrEmpty(message.From) && responder is not null;
         var step = _cascadeBudget.RecordErrorReport(message.Pthid, _options.CascadeThreshold, repliable);
 
         if (step.Log)
@@ -104,8 +116,11 @@ public sealed class ProblemReportHandler : IProtocolHandler
 
         // Build + log the cascade-stop OUTSIDE the per-thread lock — MessageBuilder allocations
         // and logging shouldn't contend on the lock.
+        // The stop is sent by `responder` (above), as the other built-in responders do: `to` only
+        // names the intended audience, and a recipient cannot tell whether the first entry is
+        // itself (message_structure.md `to`).
         var stop = ProblemReport.Create(
-            from: message.To![0],
+            from: responder!,
             to: message.From!,
             code: ProblemReport.MaxErrorsExceededCode,
             pthid: message.Pthid,

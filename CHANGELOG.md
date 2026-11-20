@@ -6,6 +6,102 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — Trust Ping and Discover Features replies stay in the thread the request declares (#138; epic #88)
+
+**Behaviour change for released `DidComm.Core`.** A DIDComm request may name its own thread
+(`thid`). The built-in Trust Ping responder (`TrustPingHandler`, `TrustPing.CreateResponse`) and the
+built-in Discover Features responder (`DiscoverFeaturesHandler`) ignored it and always answered on the
+request's `id`. Their reply now carries the request's `thid` when it declares one, and its `id` only
+when it declares none. This is the DIDComm v2.1 threading rule: if the first message of a thread
+declares no `thid`, "the `id` property of the message MUST be treated as the value of the `thid`"
+(threading.md L15), and "All subsequent messages in a thread MUST include a `thid` header that
+contains the same value as the `thid` set in the first message of the thread. Messages that do not
+share the same `thid` MUST NOT be considered a part of the same thread" (threading.md L17).
+
+- **Who is affected:** a peer whose `ping` or `queries` declares a `thid`. Before, it got a reply on
+  another thread, so a client that matched replies by thread, as the spec requires, never matched it
+  and timed out. It now gets the reply in its own thread.
+- **Who is not:** a request without `thid` (what this library's own clients and the spec's examples
+  send) gets exactly the same reply as before. The reply still carries no `pthid`.
+- **A request built by hand** (not unpacked) that declares a `thid` that is not a valid thread id
+  (empty, or not made of unreserved URI characters, as an `id` must be) and is passed straight to
+  `TrustPing.CreateResponse` or to either handler is now refused with `MalformedMessageException`,
+  whose message quotes no value. Before, its `thid` was ignored. Unpack already refused such a
+  message, so nothing received from a peer is affected.
+- No public API change. The samples' handlers (cookbook sections B, M, T and X, samples 03 and 07)
+  and the cookbook and sample-05 docs now show the same rule (`message.Thid ?? message.Id`).
+- Docs: PRD FR-PROTO-04, FR-PROTO-05, FR-THR-01, DD-11 (now covers Core's responders; its stale
+  "type + mediator-DID fallback" clause, gone since #98, is removed) and §14.2 M and S; the
+  architecture doc's inbound flow.
+- Tests: both responders, for a request with no `thid`, a declared `thid` different from its `id`,
+  one equal to it, and one with a `pthid`, through the handler, `TrustPing.CreateResponse`, the
+  dispatcher, a real authcrypt pack and unpack, the HTTP return route (server and client), a
+  WebSocket session and an out-of-band reply; a hand-built request with an invalid `thid` is refused;
+  `DiscoverFeaturesClient` does not take a `disclose` on another `thid` (`ThreadIdsTests`,
+  `ResponderReplyThreadTests`, `ResponderReplyThreadEnvelopeTests`, `ReturnRouteReplyThreadTests`,
+  `DiscoverFeaturesRoundTripTests`, `DiscoverFeaturesClientTests`). Each declared-`thid` test fails
+  with the fix reverted.
+
+### Fixed — message ids are compared ignoring letter case, and the built-in responders answer as the DID that decrypted the request (found while fixing #138, PR #141; epic #88)
+
+Behaviour changes for released `DidComm.Core` (and the unreleased mediator packages), each found while
+fixing #138 and fixed in the same PR.
+
+**Message ids, `thid`s and `pthid`s are compared ignoring letter case.** DIDComm v2.1 threading.md
+L9: an id "SHOULD be written in lower case but MUST be compared case-insensitively", and `thid`
+and `pthid` follow the same rules (L15, L21). The library compared them exactly. Now every place it
+matches or keys them ignores case. Values are still sent exactly as received or generated (ours
+are lowercase).
+
+- **Who is affected:** a peer that writes an id in another letter case than the one it was given,
+  or than its first message used. Before, its answers did not match our pending requests, its
+  messages started a new thread, and a re-cased replay was not recognised.
+- **Who is not:** everyone else, including every peer that echoes ids exactly.
+- **Thread state.** `InMemoryThreadStateStore` (the dispatcher's thread state, which holds
+  accept-lang and the ACK-loop flag) keys threads ignoring case. `ThreadState.Thid` keeps the casing
+  that created the state. **A custom `IThreadStateStore` must now do the same**; its contract says so.
+- **The problem-report cascade budget** (FR-PROTO-10) counts reports whose `pthid`s differ only in
+  case against one thread.
+- **Replay admission** (`InMemoryReplayGuard`, FR-RR-08) refuses as `Duplicate` a second message from
+  the same sender whose id differs only in case. The sender is still compared exactly. **A custom
+  `IInboundReplayGuard` must compare ids the same way**; its contract says so.
+- **`DiscoverFeaturesClient`** completes a query with a `disclose` whose `thid` is the query id in
+  any letter case. The mediator client does the same for answers (`thid`) and problem reports
+  (`pthid`). The pickup client's duplicate filter treats a re-delivered message whose id differs
+  only in case as already seen.
+- Samples 02, 03, 05, 06, 07 and 10 and the interop-live probes compare the same way.
+
+**The built-in responders answer as the DID whose key decrypted the request.** If there is no such
+key (plaintext, or a direct call), they answer as the first `to` entry, as before. `to` only names
+the intended audience, so on a host with several DIDs its first entry may be someone else.
+
+- **The problem-report cascade stop** (`e.p.req.max-errors-exceeded`) took its sender from the first
+  `to` entry. It is now sent from the decrypting DID, like the Trust Ping and Discover Features
+  replies.
+- **A decrypted request without `to` is answered.** message_structure.md says "If the header is
+  omitted, each recipient SHOULD assume they are the only recipient". Before, the Discover Features
+  handler and the cascade stop required `to`, so such a query or report got no answer.
+- **A ping without `from`, or a plaintext ping without `to`, gets no reply.** Before, the Trust Ping
+  handler threw `ArgumentException`, and the HTTP endpoint answered 400. The Discover Features and
+  problem-report handlers already gave no reply in this case.
+
+**`CoordinateMediation.ResponseThreadId` and `MessagePickup.ResponseThreadId`** (mediator packages,
+not yet released) now follow Core's rule. A request with no `thid` is answered on its `id`. A request
+that declares a `thid` that is not a valid thread id, an empty one included, is refused with a
+`MalformedMessageException` that quotes no value. Before, an empty `thid` fell back to the `id`.
+Unpack already refuses such a request, so only a hand-built message is affected. For the same
+reason the pickup handler now refuses a request whose thread id was made invalid after unpack before
+it does any store work, as it already did for a thread id over its bound.
+
+No public API change.
+
+- Docs: PRD FR-MSG-04 (which also corrects "emitting lowercase": echoed values go back as received),
+  FR-RR-08, FR-PROTO-04, FR-PROTO-05, FR-PROTO-05a, FR-PROTO-10 and FR-MED-04; the architecture doc.
+- Tests: id-case tests for every site above, with controls where ids differ in more than case; the
+  cascade-stop sender through the real dispatcher for each envelope shape; the responders with and
+  without `to` and `from`; the mediator helpers and handlers with invalid declared `thid`s. Every
+  new test fails with its fix reverted.
+
 ### Changed — WebSocket endpoints and the WebSocket transport close a peer that takes too long to deliver a message (security hardening, tracked privately; epic #88)
 
 **Behaviour change for WebSocket peers that stay silent or stall in the middle of a message.** Each

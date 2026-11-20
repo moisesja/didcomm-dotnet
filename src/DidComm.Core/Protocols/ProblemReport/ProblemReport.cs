@@ -219,7 +219,7 @@ public static class ProblemReport
     /// </remarks>
     /// <param name="from">Sender DID.</param>
     /// <param name="to">Recipient DID — the peer that declared the unsatisfiable preference.</param>
-    /// <param name="thread">The thread whose <c>accept-lang</c> state to check (FR-I18N-02).</param>
+    /// <param name="thread">The thread whose <c>accept-lang</c> state to check (FR-I18N-02). Its <see cref="ThreadState.Thid"/>, as the thread was first seen, becomes the report's <c>pthid</c>; thread ids compare ignoring case (FR-MSG-04), so a peer that wrote the thread id in another case gets the same thread back.</param>
     /// <param name="availableLangs">The IANA language codes this agent CAN produce.</param>
     /// <param name="fatal"><c>false</c> for <c>w.msg.bad-lang</c>; <c>true</c> for <c>e.msg.bad-lang</c>.</param>
     public static Message? CreateBadLangForThread(

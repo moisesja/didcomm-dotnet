@@ -10,7 +10,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// The bounded memory of delivered messages already returned to the application, so a redelivery
 /// is acknowledged but not returned twice (design D-15, §4.9). A message's key
 /// (<see cref="KeyOf"/>) is SHA-256 truncated to 128 bits: over (authenticated sender DID subject,
-/// decrypting DID subject, inner message id) for an authenticated message — a stranger reusing
+/// decrypting DID subject, inner message id ignoring letter case, as DIDComm v2.1 threading compares
+/// ids) for an authenticated message — a stranger reusing
 /// someone's message id cannot suppress it — and over the innermost packed bytes for an anonymous
 /// one. What the filter remembers is that key scoped to the mailbox it was fetched from (the DID
 /// subject of the <c>from</c> of the fetch or live stream; ADV1-1): a copy of one DID's message that
@@ -74,7 +75,9 @@ internal sealed class DuplicateFilter
             hash.AppendData("didcomm-dotnet/pickup-dedupe/authenticated\n"u8);
             AppendField(hash, sender);
             AppendField(hash, DidSubject.DidSubjectOf(unpacked.RecipientKid) ?? string.Empty);
-            AppendField(hash, unpacked.Message.Id ?? string.Empty);
+            // The id is folded the way OrdinalIgnoreCase compares (DIDComm v2.1: ids compare
+            // case-insensitively); after unpack it is unreserved ASCII, so the fold is exact.
+            AppendField(hash, (unpacked.Message.Id ?? string.Empty).ToUpperInvariant());
         }
         else
         {

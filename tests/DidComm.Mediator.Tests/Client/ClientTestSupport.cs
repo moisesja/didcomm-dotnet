@@ -181,8 +181,12 @@ internal sealed class ClientWorld : IAsyncDisposable
     }
 
     /// <summary>A request the client sends (any request type; the channel never reads its body).</summary>
-    public Message Request(string type = MessagePickup.StatusRequestType, string? from = null, string? to = null)
-        => new MessageBuilder(UuidV4MessageIdGenerator.Instance).WithType(type).WithFrom(from ?? Local.Did).WithTo(to ?? Mediator.Did).WithBody(new JsonObject()).Build();
+    /// <param name="type">The request type.</param>
+    /// <param name="from">The sender; the local DID by default.</param>
+    /// <param name="to">The recipient; the mediator's DID by default.</param>
+    /// <param name="ids">Where the id comes from; a UUID v4 by default. Letter-case tests pass <see cref="DidComm.TestSupport.LetterIds"/>.</param>
+    public Message Request(string type = MessagePickup.StatusRequestType, string? from = null, string? to = null, IMessageIdGenerator? ids = null)
+        => new MessageBuilder(ids ?? UuidV4MessageIdGenerator.Instance).WithType(type).WithFrom(from ?? Local.Did).WithTo(to ?? Mediator.Did).WithBody(new JsonObject()).Build();
 
     public ValueTask DisposeAsync() => _provider.DisposeAsync();
 }

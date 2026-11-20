@@ -313,7 +313,7 @@ public static class Program
             from: bobDid, to: aliceDid, thread: demandingThread, availableLangs: new[] { "en", "es" });
         narrator.Step("Thread-aware form — accept-lang [ja] vs available [en, es].");
         narrator.Value("Report produced", fromThread is not null);
-        narrator.Value("Report pthid == thread.Thid", fromThread?.Pthid == demandingThread.Thid);
+        narrator.Value("Report pthid == thread.Thid", string.Equals(fromThread?.Pthid, demandingThread.Thid, StringComparison.OrdinalIgnoreCase));
 
         // A satisfiable preference produces NO report (en-US is satisfied by en).
         var happyThread = new ThreadState("chess-thread-2") { AcceptLang = new[] { "en-US" } };
@@ -352,7 +352,7 @@ public static class Program
         narrator.Step("Bob replies with a header-only Empty 1.0 carrying ack[].");
         narrator.Value("Empty type", ack.Type == EmptyProtocol.MessageType);
         narrator.Value("Body", ack.Body);
-        narrator.Value("ack[] names the request", ack.Ack?.Contains(request.Id));
+        narrator.Value("ack[] names the request", ack.Ack?.Contains(request.Id, StringComparer.OrdinalIgnoreCase));
 
         // Round-trip it and hand it to the dispatcher: the built-in EmptyHandler consumes it
         // (an ACK needs no answer — answering ACKs is how loops start).
@@ -392,7 +392,7 @@ public static class Program
         var outcome = await dispatcher.DispatchAsync(received, client, options);
         narrator.Value("Dispatched to", outcome.Handler?.ProtocolUri);
         narrator.Value("Reply type", outcome.Reply?.Type);
-        narrator.Value("Reply thid == proposal.id", outcome.Reply?.Thid == proposal.Id);
+        narrator.Value("Reply thid == proposal.id", string.Equals(outcome.Reply?.Thid, proposal.Id, StringComparison.OrdinalIgnoreCase));
         narrator.Value("Bob accepted", outcome.Reply?.Body?["accepted"]?.GetValue<bool>());
     }
 
@@ -574,7 +574,8 @@ public sealed class LunchHandler : IProtocolHandler
             .WithType(ResponseType)
             .WithFrom(message.To[0])
             .WithTo(message.From)
-            .WithThid(message.Id)
+            // Stay in the proposal's thread: its thid when it declares one, else its id.
+            .WithThid(message.Thid ?? message.Id)
             .WithBody(new JsonObject { ["accepted"] = true })
             .Build();
         return Task.FromResult<Message?>(reply);

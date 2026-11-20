@@ -35,8 +35,8 @@ public interface IInboundReplayGuard
     /// (<see cref="InMemoryReplayGuard"/> refuses anything whose entry would already have been
     /// purged).
     /// </summary>
-    /// <param name="peerDidSubject">The bare DID subject of the authenticated sender (the sender key id's DID subject).</param>
-    /// <param name="messageId">The message <c>id</c>.</param>
+    /// <param name="peerDidSubject">The bare DID subject of the authenticated sender (the sender key id's DID subject), compared exactly.</param>
+    /// <param name="messageId">The message <c>id</c>, compared ignoring letter case: DIDComm v2.1 threading says an <c>id</c> "MUST be compared case-insensitively", so an id that differs from an admitted one only in case is the same id.</param>
     /// <param name="createdTimeEpochSeconds">The message <c>created_time</c>, or <c>null</c> when absent.</param>
     /// <param name="now">The current time as the transport observed it for this inbound.</param>
     ReplayAdmission TryAdmit(string peerDidSubject, string messageId, long? createdTimeEpochSeconds, DateTimeOffset now);

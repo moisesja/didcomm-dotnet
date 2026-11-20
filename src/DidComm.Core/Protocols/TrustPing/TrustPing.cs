@@ -1,13 +1,16 @@
 using System.Text.Json.Nodes;
+using DidComm.Exceptions;
 using DidComm.Messages;
+using DidComm.Threading;
 
 namespace DidComm.Protocols.TrustPing;
 
 /// <summary>
 /// Trust Ping 2.0 helpers (FR-PROTO-04). Construction-side mirrors of what
 /// <see cref="TrustPingHandler"/> consumes on receive. Defaults track
-/// <c>sicpa-dlab/didcomm-python</c>: <c>response_requested</c> default <c>true</c>; the
-/// reply's <c>thid</c> = the ping's <c>id</c>.
+/// <c>sicpa-dlab/didcomm-python</c>: <c>response_requested</c> default <c>true</c>. The reply
+/// joins the ping's thread: its <c>thid</c> is the ping's <c>thid</c> when the ping declares one,
+/// else the ping's <c>id</c> (DIDComm v2.1 threading).
 /// </summary>
 /// <example>
 /// Ping/response liveness runs in <c>samples/02-Cookbook</c> (section S) and <c>samples/05-WebSocketChat</c>.
@@ -47,10 +50,13 @@ public static class TrustPing
 
     /// <summary>
     /// Build the canonical <c>ping-response</c> for a received <paramref name="ping"/>. The
-    /// reply <c>thid</c> = ping <c>id</c>; <c>from</c>/<c>to</c> are flipped from the ping.
+    /// reply's <c>thid</c> is the ping's <c>thid</c> when the ping declares one, else the ping's
+    /// <c>id</c> (DIDComm v2.1 threading: a reply stays in the thread the ping started);
+    /// <c>from</c>/<c>to</c> are flipped from the ping.
     /// </summary>
     /// <param name="ping">The received ping message. Must carry both <c>from</c> and at least one <c>to</c> entry.</param>
     /// <exception cref="ArgumentException">When <paramref name="ping"/> lacks a sender or recipient.</exception>
+    /// <exception cref="MalformedMessageException">When <paramref name="ping"/> declares a <c>thid</c> that is not a valid thread id (a ping that came through unpack never does).</exception>
     public static Message CreateResponse(Message ping)
     {
         ArgumentNullException.ThrowIfNull(ping);
@@ -78,7 +84,7 @@ public static class TrustPing
             .WithType(ResponseType)
             .WithFrom(responderDid)
             .WithTo(ping.From)
-            .WithThid(ping.Id)
+            .WithThid(ThreadIds.ResponseThreadId(ping))
             .Build();
     }
 

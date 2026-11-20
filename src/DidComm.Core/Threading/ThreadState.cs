@@ -13,7 +13,11 @@ namespace DidComm.Threading;
 /// </remarks>
 public sealed class ThreadState
 {
-    /// <summary>The thread id this state belongs to.</summary>
+    /// <summary>
+    /// The thread id this state belongs to, as given when the state was created. Thread ids compare
+    /// ignoring letter case (DIDComm v2.1), so compare this value with
+    /// <see cref="StringComparison.OrdinalIgnoreCase"/>.
+    /// </summary>
     public string Thid { get; }
 
     /// <summary>

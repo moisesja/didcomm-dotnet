@@ -16,8 +16,8 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// The section builds two messages. The first shows the auto-populated members and a custom
 /// extension header (unknown headers ride in <c>AdditionalHeaders</c> and survive an
 /// unpack→repack round-trip untouched). The second is a reply that continues the first one's
-/// thread by setting <c>thid</c> to the original message id — the pattern every
-/// request/response protocol uses. The full JSON of the first message is printed so you can
+/// thread by setting <c>thid</c> to the first message's thread id — its <c>thid</c> when it
+/// declares one, else its <c>id</c> — the pattern every request/response protocol uses. The full JSON of the first message is printed so you can
 /// see exactly what goes on the wire before any envelope is applied.
 /// </para>
 /// <para>
@@ -62,17 +62,19 @@ public static class Section_B_BuildAMessage
         ctx.Narrator.Value("Custom header x-cookbook-trace", message.AdditionalHeaders["x-cookbook-trace"]);
         ctx.Narrator.Value("JSON", JsonSerializer.Serialize(message, DisplayOptions));
 
-        // A reply continues the conversation by pointing 'thid' at the first message's id —
-        // that is all DIDComm threading needs (section M goes deeper).
-        ctx.Narrator.Step("Build a reply on the same thread: thid = the first message's id.");
+        // A reply continues the conversation by carrying the first message's thread id: the
+        // 'thid' it declares, or its 'id' when it declares none (as here). That is all DIDComm
+        // threading needs (section M goes deeper).
+        ctx.Narrator.Step("Build a reply on the same thread: thid = the first message's thid, else its id.");
         var reply = new MessageBuilder()
             .WithType("https://didcomm.org/basicmessage/2.0/message")
             .WithFrom(ctx.Bob.Did)
             .WithTo(ctx.Alice.Did)
-            .WithThid(message.Id)
+            .WithThid(message.Thid ?? message.Id)
             .WithBody(JsonNode.Parse("""{"content":"Hello back, Alice."}""")!.AsObject())
             .Build();
-        ctx.Narrator.Value("Reply.Thid == first.Id", string.Equals(reply.Thid, message.Id, StringComparison.Ordinal));
+        // Message ids and thread ids compare ignoring letter case (DIDComm threading rules).
+        ctx.Narrator.Value("Reply.Thid == first.Id", string.Equals(reply.Thid, message.Id, StringComparison.OrdinalIgnoreCase));
 
         // The id comes from a pluggable generator. The default is UUID v4 (the spec's
         // recommendation); pass your own IMessageIdGenerator when ids must come from elsewhere —

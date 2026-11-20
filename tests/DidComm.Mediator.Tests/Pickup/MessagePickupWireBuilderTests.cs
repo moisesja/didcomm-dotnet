@@ -1,5 +1,6 @@
 using System.Text;
 using AwesomeAssertions;
+using DidComm.Exceptions;
 using DidComm.Mediator.Pickup;
 using DidComm.Messages;
 using Xunit;
@@ -319,8 +320,6 @@ public sealed class MessagePickupWireBuilderTests
         var threaded = new MessageBuilder().WithId("request-id").WithThid("existing-thread").WithType(MessagePickup.DeliveryRequestType).Build();
         MessagePickup.ResponseThreadId(threaded).Should().Be("existing-thread");
 
-        plain.Thid = string.Empty;
-        MessagePickup.ResponseThreadId(plain).Should().Be("request-id", "an empty thid is no thid");
 
         // It reads the two headers and nothing else: the message need not be a pickup message.
         var other = new MessageBuilder().WithId("ping-id").WithType("https://didcomm.org/trust-ping/2.0/ping").Build();
@@ -328,6 +327,25 @@ public sealed class MessagePickupWireBuilderTests
 
         var act = () => MessagePickup.ResponseThreadId(null!);
         act.Should().Throw<ArgumentNullException>();
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("zz9 zz9")]
+    [InlineData("zz9#zz9")]
+    public void ResponseThreadId_refuses_a_declared_thid_that_is_not_a_valid_thread_id_without_quoting_it(string thid)
+    {
+        // DIDComm v2.1 threading.md L15: a thid MUST meet the constraints of an id. An invalid one is
+        // refused, never replaced by the id. Unpack already refuses it; only a hand-built message reaches this.
+        var request = new MessageBuilder().WithId("request-id").WithType(MessagePickup.StatusRequestType).Build();
+        request.Thid = thid;
+
+        var ex = Record.Exception(() => MessagePickup.ResponseThreadId(request));
+
+        ex.Should().BeOfType<MalformedMessageException>();
+        ex!.Message.Should().NotContain("zz9");
+        ex.Message.Should().NotContain("request-id");
     }
 
     [Fact]

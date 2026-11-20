@@ -159,6 +159,160 @@ public sealed class DiscoverFeaturesRoundTripTests
         }
     }
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task Out_of_band_reply_from_Bobs_endpoint_reaches_Alice_on_the_thid_her_request_declared(bool trustPing, bool declaresThid)
+    {
+        // #138, the plain outbound path (no return route): Bob's app sends the built-in responder's
+        // reply back over HTTP. threading.md L15: a request without a thid has its id as its thid;
+        // L17: the reply MUST carry the request's thid, so it is never answered on the id instead.
+        var aliceSecrets = new InMemorySecretsResolver();
+        var bobSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid) = await CreateTwoPeersAsync(aliceSecrets, bobSecrets);
+        var aliceInbox = new LateBoundHandler();
+        var bobInbox = new LateBoundHandler();
+        var receivedReply = new TaskCompletionSource<UnpackResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, isResponder: true,
+            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"),
+            localDid: bobDid, expectedPeerDid: aliceDid);
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
+            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
+            localDid: aliceDid, expectedPeerDid: bobDid, captureInbound: receivedReply);
+        aliceInbox.Target = alice.Server.CreateHandler();
+        bobInbox.Target = bob.Server.CreateHandler();
+
+        try
+        {
+            var declared = declaresThid ? "thr-" + Guid.NewGuid().ToString("N") : null;
+            var request = trustPing
+                ? TrustPingApi.CreatePing(aliceDid, bobDid)
+                : DiscoverFeaturesApi.CreateQuery(aliceDid, bobDid, new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" });
+            request.Thid = declared;
+
+            var client = alice.Services.GetRequiredService<DidCommClient>();
+            await client.SendAsync(request, new SendOptions(
+                Recipients: new[] { bobDid },
+                From: aliceDid,
+                ServiceEndpointOverride: new Uri("http://localhost/didcomm")));
+
+            // Hang guard only: Bob's reply is certain with a correct product.
+            var reply = await receivedReply.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            reply.Authenticated.Should().BeTrue();
+            reply.Message.Type.Should().Be(trustPing ? TrustPingApi.ResponseType : DiscoverFeaturesApi.DiscloseType);
+            reply.Message.From.Should().Be(bobDid);
+            reply.Message.Thid.Should().Be(declared ?? request.Id);
+            if (declared is not null)
+                reply.Message.Thid.Should().NotBe(request.Id, "a reply on the request's id is not in the thread the request declared (threading.md L17)");
+            reply.Message.Pthid.Should().BeNull();
+        }
+        finally
+        {
+            await alice.App.DisposeAsync();
+            await bob.App.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task QueryFeaturesAsync_completes_over_HTTP_when_the_responder_answers_on_the_query_id_in_upper_case()
+    {
+        // DIDComm v2.1 threading.md L9/L15: ids, and so thids, compare ignoring letter case. Bob is a
+        // peer that writes the thread in upper case: his app answers with a disclose it builds by hand
+        // whose thid is Alice's query id upper-cased. Her real QueryFeaturesAsync completes with it.
+        var aliceSecrets = new InMemorySecretsResolver();
+        var bobSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid) = await CreateTwoPeersAsync(aliceSecrets, bobSecrets);
+        var aliceInbox = new LateBoundHandler();
+        var bobInbox = new LateBoundHandler();
+        string? queryId = null;
+        string? answeredOn = null;
+
+        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, isResponder: true,
+            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"),
+            localDid: bobDid, expectedPeerDid: aliceDid,
+            replyByHand: builtIn =>
+            {
+                queryId = builtIn.Thid;
+                answeredOn = builtIn.Thid!.ToUpperInvariant();
+                return DiscoverFeaturesApi.CreateDisclose(from: builtIn.From!, to: builtIn.To![0], thid: answeredOn,
+                    disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "https://example.org/hand-built/1.0" });
+            });
+        // Alice's query ids hold letters (LetterIds), so the upper-cased answer is certain to differ.
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
+            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
+            localDid: aliceDid, expectedPeerDid: bobDid, queryIds: new LetterIds("query"));
+        aliceInbox.Target = alice.Server.CreateHandler();
+        bobInbox.Target = bob.Server.CreateHandler();
+
+        try
+        {
+            var disclosures = await alice.Services.GetRequiredService<DiscoverFeaturesClient>().QueryFeaturesAsync(
+                from: aliceDid,
+                to: bobDid,
+                queries: new[] { new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" } },
+                timeout: TimeSpan.FromSeconds(30),
+                serviceEndpointOverride: new Uri("http://localhost/didcomm"));
+
+            queryId.Should().Be(LetterIds.Id("query"), "precondition: Alice's query id is the pinned one");
+            answeredOn.Should().NotBe(queryId, "precondition: the answer names the query id in other letter case");
+            disclosures.Select(d => d.Id).Should().Equal("https://example.org/hand-built/1.0");
+        }
+        finally
+        {
+            await alice.App.DisposeAsync();
+            await bob.App.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task QueryFeaturesAsync_is_not_completed_over_HTTP_by_a_disclose_on_a_thread_that_differs_in_more_than_case()
+    {
+        // Control for the test above: the upper-cased query id with one more character is another
+        // thread. The disclose is delivered (Bob's send to Alice's endpoint returned, so her dispatcher
+        // ran it), and the query ends by its own short deadline.
+        var aliceSecrets = new InMemorySecretsResolver();
+        var bobSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid) = await CreateTwoPeersAsync(aliceSecrets, bobSecrets);
+        var aliceInbox = new LateBoundHandler();
+        var bobInbox = new LateBoundHandler();
+        var delivered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, isResponder: true,
+            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"),
+            localDid: bobDid, expectedPeerDid: aliceDid,
+            replyByHand: builtIn => DiscoverFeaturesApi.CreateDisclose(from: builtIn.From!, to: builtIn.To![0], thid: builtIn.Thid!.ToUpperInvariant() + "0",
+                disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "https://example.org/other-thread/1.0" }),
+            replySent: delivered);
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
+            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
+            localDid: aliceDid, expectedPeerDid: bobDid, queryIds: new LetterIds("query"));
+        aliceInbox.Target = alice.Server.CreateHandler();
+        bobInbox.Target = bob.Server.CreateHandler();
+
+        try
+        {
+            var query = alice.Services.GetRequiredService<DiscoverFeaturesClient>().QueryFeaturesAsync(
+                from: aliceDid,
+                to: bobDid,
+                queries: new[] { new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" } },
+                timeout: TimeSpan.FromSeconds(5),
+                serviceEndpointOverride: new Uri("http://localhost/didcomm"));
+            await delivered.Task.WaitAsync(TimeSpan.FromSeconds(30)); // hang guard only
+
+            var ex = await Record.ExceptionAsync(() => query);
+
+            ex.Should().BeOfType<TimeoutException>("a disclose on another thread answers nothing; the query's own deadline ends it");
+        }
+        finally
+        {
+            await alice.App.DisposeAsync();
+            await bob.App.DisposeAsync();
+        }
+    }
+
     private static async Task<(string AliceDid, string BobDid)> CreateTwoPeersAsync(
         InMemorySecretsResolver aliceSecrets, InMemorySecretsResolver bobSecrets)
     {
@@ -209,7 +363,10 @@ public sealed class DiscoverFeaturesRoundTripTests
     private static async Task<Agent> BuildAgentAsync(
         string tag, InMemorySecretsResolver secrets, LateBoundHandler outboundTo, bool isResponder,
         IServiceEndpointResolver serviceResolver, string localDid, string expectedPeerDid,
-        TaskCompletionSource<UnpackResult>? captureInbound = null)
+        TaskCompletionSource<UnpackResult>? captureInbound = null,
+        Func<DidComm.Messages.Message, DidComm.Messages.Message>? replyByHand = null,
+        TaskCompletionSource? replySent = null,
+        DidComm.Messages.IMessageIdGenerator? queryIds = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -233,6 +390,15 @@ public sealed class DiscoverFeaturesRoundTripTests
         }));
         // Override the resolver UseNetDidResolver would register (TryAdd) with our fixed one.
         builder.Services.AddSingleton(serviceResolver);
+        if (queryIds is not null)
+        {
+            // The same client AddDidComm would register (TryAdd), over the same facade, with its query
+            // ids pinned through the internal test seam; AddDidComm's correlator registration resolves it.
+            builder.Services.AddSingleton(sp => new DiscoverFeaturesClient(
+                (message, options, ct) => sp.GetRequiredService<DidCommClient>().SendAsync(message, options, ct),
+                sp.GetService<ILogger<DiscoverFeaturesClient>>(),
+                queryIds));
+        }
 
         builder.Services.AddDidComm(b =>
         {
@@ -264,6 +430,10 @@ public sealed class DiscoverFeaturesRoundTripTests
                     // relationship, and snapshot the mutable handler reply before validating/sending.
                     var replyJson = System.Text.Json.JsonSerializer.Serialize(outcome.Reply, DidCommJson.Default);
                     var reply = System.Text.Json.JsonSerializer.Deserialize<DidComm.Messages.Message>(replyJson, DidCommJson.Default)!;
+                    // A test may answer with a message it builds by hand from the built-in reply, as a
+                    // peer that writes the thread its own way would.
+                    if (replyByHand is not null)
+                        reply = replyByHand(reply);
                     var authenticatedPeerDid = DidSubject.DidSubjectOf(unpacked.SenderKid ?? unpacked.SignerKid);
                     var decryptingDid = DidSubject.DidSubjectOf(unpacked.RecipientKid);
 
@@ -278,6 +448,7 @@ public sealed class DiscoverFeaturesRoundTripTests
                         await client.SendAsync(reply, new SendOptions(
                             Recipients: new[] { authenticatedPeerDid! },
                             From: decryptingDid!), ct);
+                        replySent?.TrySetResult();
                     }
                 }
             });

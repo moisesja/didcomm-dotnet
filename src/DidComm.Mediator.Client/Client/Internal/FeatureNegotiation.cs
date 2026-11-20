@@ -82,7 +82,7 @@ internal static class FeatureNegotiation
     /// The Discover Features question for the two Coordinate Mediation versions, from
     /// <paramref name="from"/> to <paramref name="mediatorDid"/>: one message with two queries,
     /// <see cref="QueryMatch3"/> then <see cref="QueryMatch2"/>. Its id is a fresh UUID v4
-    /// (<see cref="DiscoverFeatures.CreateQuery"/> builds with <see cref="UuidV4MessageIdGenerator.Instance"/>).
+    /// (<see cref="DiscoverFeatures.CreateQuery(string, string, FeatureQuery[])"/> builds with <see cref="UuidV4MessageIdGenerator.Instance"/>).
     /// </summary>
     /// <param name="from">Our DID.</param>
     /// <param name="mediatorDid">The mediator's DID.</param>
