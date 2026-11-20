@@ -196,14 +196,17 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(acknowledged);
 
         // NFR-05 handle span: message type URI + dispatch outcome only (NFR-04) — never the
-        // body or a reply's contents. Zero-cost when nothing listens.
+        // body or a reply's contents. Zero-cost when nothing listens. The type is the sender's
+        // text and a host may copy this tag into the scope of every line logged during dispatch,
+        // so it is written bounded (LogValues.MessageType: at most 256 URI characters, else a
+        // placeholder).
         using var activity = DidCommDiagnostics.Source.StartActivity(DidCommDiagnostics.HandleActivity);
         // Tag via a nullable local: a synthetic UnpackResult can carry a runtime-null Message
         // (a fault the snapshot paths below null-check and handle), and touching
         // received.Message with '?.' here would flip its flow state to maybe-null for the
         // rest of the method without changing the runtime contract.
         var messageForTag = (Message?)received.Message;
-        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, messageForTag?.Type);
+        activity?.SetTag(DidCommDiagnostics.MessageTypeTag, LogValues.MessageType(messageForTag?.Type));
 
         InboundMessageSnapshot? snapshot = null;
         if (_correlators.Length > 0 || _observers is not null)
@@ -373,7 +376,8 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
         if (!_registry.TryResolve(received.Message.Type, out var handler))
         {
             // The type is not written: it is the sender's text (a valid type URI can carry line breaks
-            // and terminal escapes in its protocol name). It is on the handle span's message-type tag.
+            // and terminal escapes in its protocol name). The handle span's message-type tag carries
+            // it only when it is at most 256 URI characters, a placeholder otherwise.
             // Debug when a correlator claimed the message: on a host that only runs a client (the
             // mediator client, the Discover Features initiator) every answer to its own requests lands
             // here, and one Information line per answer would be noise this library caused.

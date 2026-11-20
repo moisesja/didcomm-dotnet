@@ -13,6 +13,14 @@ namespace DidComm.Resolution;
 /// </summary>
 /// <remarks>
 /// <para>
+/// The services returned are those of the DID that was asked for, and of no other: a resolver
+/// answer whose document's <c>id</c> is not that DID (a cross-wired composite resolver, a cache
+/// keyed wrongly, a hostile implementation) throws <see cref="DidResolutionException"/> before any
+/// service is read, with the same check and text as <see cref="NetDidKeyService"/>
+/// (FR-CONSIST-09). So a sender never posts to, or wraps forwards for, another subject's endpoint
+/// in the name of the DID it addressed.
+/// </para>
+/// <para>
 /// The adapter delegates DID-method support and resolution caching to net-did (FR-DID-01,
 /// FR-DID-04 — no double-caching). The DD-10 bare-string tolerance is consulted from
 /// <see cref="DidCommOptions.AllowBareStringServiceEndpoint"/>, so a single options instance
@@ -57,14 +65,11 @@ public sealed class NetDidServiceEndpointResolver : IServiceEndpointResolver
         _keyService.RejectUnsupportedMethod(did);
 
         var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
-        if (result.DidDocument is null)
-        {
-            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
-            throw new DidResolutionException(did, error);
-        }
+        // Before any service is read: the document must be the one of the DID asked for.
+        var document = ResolvedDidDocument.Require(did, result);
 
         return ServiceEndpointParser.Parse(
-            result.DidDocument.Service,
+            document.Service,
             _options.AllowBareStringServiceEndpoint);
     }
 }

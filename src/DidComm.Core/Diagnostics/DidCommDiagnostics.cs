@@ -103,7 +103,11 @@ public static class DidCommDiagnostics
 
     // --- Attribute keys (values are header-level metadata only — NFR-04) ---
 
-    /// <summary>The plaintext message's <c>type</c> URI — a header, never body content.</summary>
+    /// <summary>
+    /// The plaintext message's <c>type</c> URI — a header, never body content — written through
+    /// <see cref="LogValues.MessageType"/>: as it is when it is at most 256 URI characters, a
+    /// placeholder otherwise (a host may copy span tags into its log scopes).
+    /// </summary>
     internal const string MessageTypeTag = "didcomm.message.type";
 
     /// <summary>JOSE key-management / signature algorithm identifier (e.g. <c>ECDH-1PU+A256KW</c>, <c>EdDSA</c>).</summary>

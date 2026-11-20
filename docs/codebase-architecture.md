@@ -10,7 +10,7 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 
 | Package (`src/`) | What it holds |
 | --- | --- |
-| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
+| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, and bounded message types for span tags, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
 | `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96, and `Detach` / `Detached` since #98); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter), `RateLimitedLog` and `HeldForward` (what a waiting forward keeps, #98)), `Trace`, `TrustPing`. |
 | `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), and `TransportRouter.Select` (the one transport selection for a send and for questions about it). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
@@ -57,7 +57,10 @@ that every grantee references its granter directly (pack pins direct references 
   deliveries) and `Facade/ResolveDirectEndpointTests` (parity with `SendAsync`'s endpoint selection),
   both over `Facade/MediatedClientTestWorld`, `Transports/ReturnRouteEligibilitySnapshotParityTests`
   and `Protocols/Dispatch/ProtocolDispatcherClaimedLogLevelTests` (the no-handler line at Debug for a
-  claimed message).
+  claimed message). `Observability/MessageTypeSpanTagTests` pins the bounded message-type tag of
+  every span that carries one, and `Resolution/ResolvedDocumentIdentityTests` the refusal of a
+  resolver answer for another subject by both net-did adapters (a tampered and a self-consistent
+  forged document).
 - `tests/DidComm.InteropTests`: fixture-driven conformance (`fixtures/` with `manifest`, `packed`,
   `payloads`, `diddocs`, `secrets`, `schema`, `spec`; `FixtureCatalog`, `Runner/FixtureDispatcher`),
   plus the `AspNetCore`, `Routing`, `Transports`, `Protocols` and `Facade` suites, `Mediator` (the
@@ -78,7 +81,12 @@ that every grantee references its granter directly (pack pins direct references 
   (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
   `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`, `MediatorLivePushAdv4Tests`); the
   timing measurements run in the `QaSerialTiming` collection, alone and after the parallel tests;
-  `Transports/HttpTransportAcceptedLogTests` pins the HTTP transport's guarded 2xx line),
+  `Transports/HttpTransportAcceptedLogTests` pins the HTTP transport's guarded 2xx line,
+  `Transports/HttpRequestBodyReadFailureTests` the HTTP endpoints' answer to a body that stops
+  arriving (TestServer, and Kestrel loopback for a stalled and a reset `Expect: 100-continue` body
+  and one over `MaxRequestBodySize`),
+  and `Protocols/MessageTypeConsoleScopeTests` what a stranger's type puts on a real console that
+  copies activity tags into its scopes),
   `Transports/Proxy` (FR-TRN-13, both transports against `StandInProxy`, a loopback stand-in forward
   proxy that records request lines: `HttpTransportProcessProxyTests` and
   `WebSocketDirectByDefaultTests` set a process proxy through `ProcessProxyScope`, from
@@ -173,7 +181,18 @@ that every grantee references its granter directly (pack pins direct references 
    `StompServerSession`). A mediator maps both
    with `MapDidCommMediator` (see "Mediator service" below).
 2. The endpoint checks the content type (415 on mismatch) and caps the body at
-   `DidCommOptions.MaxReceiveBytes` (413 on HTTP, close code 1009 on WebSocket).
+   `DidCommOptions.MaxReceiveBytes` (413 on HTTP, close code 1009 on WebSocket). An HTTP body that
+   stops arriving before its end (the client went away mid-body, for example after
+   `Expect: 100-continue`; a reset; Kestrel's own body limits) is never unpacked or dispatched, and
+   one Debug line names the exception type: a body Kestrel refused (`BadHttpRequestException`) is
+   answered with Kestrel's status for it (400 for a body that ended early, 408 under the minimum
+   data rate, 413 over `MaxRequestBodySize`); a body whose stream failed (an `IOException`, such as
+   a reset) ends the request with `HttpContext.Abort()`, because nothing can be answered on that
+   connection and Kestrel, left to drain a body whose read failed, logs that at Error (Kestrel then
+   writes its own Information line, "the application aborted the connection"); a cancellation that
+   is not the request's abort is answered 400; a cancellation while the request is aborted
+   propagates as before. None of these escapes to Kestrel, which logs an escaped exception at Error
+   as an unhandled application exception.
 3. `DidCommClient.UnpackAsync` opens the envelope; every unpack failure collapses to one opaque
    rejection so a peer cannot distinguish the cause.
 4. Return-route admission (the registry-aware endpoints and the session-aware HTTP callback):
@@ -226,7 +245,9 @@ below).
    is sent; with `all` / `thread`, recipients naming more than one DID are refused.
 4. The facade packs (the instrumented `PackEncryptedAsync` path). Unless the caller overrides the
    service endpoint it packs with `Forward = true`: right after the recipient's keys,
-   `IServiceEndpointResolver` reads its DIDCommMessaging service entry once; a return-route send
+   `IServiceEndpointResolver` reads its DIDCommMessaging service entry once (`NetDidServiceEndpointResolver`,
+   like `NetDidKeyService`, first refuses a resolver answer whose document's `id` is not the DID asked
+   for, through the shared `ResolvedDidDocument.Require`, FR-CONSIST-09); a return-route send
    whose selected entry needs a forward layer is refused there, before packing; after the pack,
    `MediatorEndpointExpander` expands that same entry and `ForwardWrapper` applies the Routing 2.0
    forward layers.
@@ -496,12 +517,19 @@ never delivered; the first #95 version opened the layers on the pump, which let 
 DID stall every relay (adversarial finding AD-1), and the next opened any envelope shape, resolving
 the sender DIDs an inner authcrypt or signed layer named (ADV-3).
 
-**Bounded ids, no message type, and the pump's context (#95).** Every message id on the receive
+**Bounded ids and message types, and the pump's context (#95).** Every message id on the receive
 path — `ForwardHandler`, `ProtocolDispatcher`, `InboundAdmission`, the return-route sessions, the
 endpoints, the mediator — goes through `LogValues.Id`: up to 128 characters as it is, a longer one
-as "(id of N characters)" (on `main` the handler and the dispatcher wrote ids raw). A stranger's
-message type is never written to a log line: the dispatcher's no-handler line names the bounded id
-only (the type stays on the `didcomm.handle` span's `didcomm.message.type` tag). Lines a stranger can repeat
+as "(id of N characters)" (on `main` the handler and the dispatcher wrote ids raw). No log message
+the library writes carries a stranger's message type: the dispatcher's no-handler line names the
+bounded id only. The type is the `didcomm.message.type` tag of the `didcomm.handle`, unpack, pack
+and send spans, written through `LogValues.MessageType`: as it is only when it is at most 256
+characters, all of them URI characters (RFC 3986), and otherwise a placeholder that does not echo it
+("(type of N characters)", "(type with characters outside a URI)"); a type URI's protocol name may
+hold line breaks and terminal escapes, and only the receive limit bounds its length. A host that
+copies activity tags into its log scopes (`ActivityTrackingOptions.Tags` with `IncludeScopes`, and a
+listener on the `didcomm-dotnet` source) sees that tag value on every line written inside the span,
+the no-handler line included. Lines a stranger can repeat
 are rate-limited — the first and every 1000th at their level, Debug otherwise — where listed here:
 the handler's drop lines per reason, the mediator sink's drops, `InboundAdmission`'s malformed
 `return_route` and replay-refusal lines, and the dispatcher's FR-THR-04 rule-2 drop. Others are one

@@ -1615,7 +1615,7 @@ arrival sequence (ADV-6) added `PushDispatcherAdv6Tests` and `MessagePickupStore
   line logged the whole exception, whose message can quote the sender's values (an id, a DID, a
   line break), so a stranger could put text of its choosing into a Warning. They now log exception
   type names, and the message id bounded to 128 characters where there is one.
-- **Message ids are written bounded on the whole receive path, and a message type never** (in
+- **Message ids are written bounded on the whole receive path, and a message type in no log message** (in
   1.5.1 for the dispatcher; on `main` since #90 / #91 for `ForwardHandler`, `InboundAdmission`, the
   return-route sessions and the endpoints' return-route lines).
   `ForwardHandler`, `ProtocolDispatcher`, `InboundAdmission` and the return-route sessions wrote
@@ -1624,7 +1624,8 @@ arrival sequence (ADV-6) added `PushDispatcherAdv6Tests` and `MessagePickupStore
   one as "(id of N characters)". The dispatcher's no-handler Information line wrote the message
   type as it arrived — a valid type URI can carry line breaks and terminal escapes in its protocol
   name, so any stranger could forge a log line with one plaintext POST; it now names the bounded id
-  only (the type stays on the `didcomm.handle` span's tag). The dispatcher's Warning for a pure ACK
+  only (the type stays on the `didcomm.handle` span's tag, which holds it only when it is at most 256
+  URI characters and a placeholder otherwise). The dispatcher's Warning for a pure ACK
   that also requests an ACK (a peer's FR-THR-04 rule-2 violation) is now rate-limited: the first and
   every 1000th at Warning, the rest at Debug.
 - **The forward pump starts without the caller's execution context** (on `main` since #90), so it
