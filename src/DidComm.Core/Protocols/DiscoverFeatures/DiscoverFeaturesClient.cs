@@ -21,9 +21,10 @@ namespace DidComm.Protocols.DiscoverFeatures;
 /// Correlation runs as a small synchronous inbound correlator
 /// (<see cref="IInboundCorrelator"/>), NOT through the best-effort <see cref="IProtocolObserver"/>
 /// queue. The dispatcher hands each dispatched inbound message to this correlator inline; it matches
-/// a <c>disclose</c> to a pending query by <c>thid</c> == the query's <c>id</c> and completes the
-/// awaiting caller. The inline phase performs only bounded header/trust checks and an atomic claim;
-/// typed body deserialization runs later on the requester's continuation. It is not subject to
+/// a <c>disclose</c> to a pending query by <c>thid</c> == the query's <c>id</c>, ignoring letter case
+/// as DIDComm v2.1 threading compares ids, and completes the awaiting caller. The inline phase
+/// performs only bounded header/trust checks and an atomic claim; typed body deserialization runs
+/// later on the requester's continuation. It is not subject to
 /// observer-queue drops, while an inbound <c>disclose</c> remains a terminal leaf in dispatch whether
 /// or not anyone is awaiting it.
 /// </para>
@@ -57,7 +58,8 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
     private readonly Func<Message, SendOptions, CancellationToken, Task> _send;
     private readonly Func<InboundMessageSnapshot, IReadOnlyList<FeatureDisclosure>> _parseDisclosures;
     private readonly ILogger<DiscoverFeaturesClient>? _logger;
-    private readonly ConcurrentDictionary<string, PendingQuery> _pending = new(StringComparer.Ordinal);
+    // Keyed by query id; a reply's thid matches it ignoring letter case (DIDComm v2.1 threading).
+    private readonly ConcurrentDictionary<string, PendingQuery> _pending = new(StringComparer.OrdinalIgnoreCase);
 
     private sealed class PendingQuery
     {

@@ -34,8 +34,10 @@ namespace DidComm.Transports.ReturnRoute;
 /// </para>
 /// <para>
 /// <strong>Data structure.</strong> One lock over a per-sender dictionary of <c>id → expiry</c>
-/// and a min-heap of <c>(sender, id)</c> by expiry. Every call that takes the lock (one not refused
-/// before it on the id length, a missing timestamp or its own age check) first pops the heap entries
+/// and a min-heap of <c>(sender, id)</c> by expiry. The sender subject is compared exactly; the id
+/// ignoring letter case, as DIDComm v2.1 threading compares message ids, so an id that differs from a
+/// remembered one only in case is a <see cref="ReplayAdmission.Duplicate"/>. Every call that takes
+/// the lock (one not refused before it on the id length, a missing timestamp or its own age check) first pops the heap entries
 /// that expired before its reading and removes them from their bucket — the only removal path, so
 /// heap and buckets never diverge and each entry is popped once (amortized O(log n) per insert,
 /// serialized by the lock). A duplicate is neither inserted nor refreshed. At <see cref="ReplayProtectionOptions.MaxEntries"/>,
@@ -278,7 +280,8 @@ public sealed class InMemoryReplayGuard : IInboundReplayGuard
 
         internal string Peer { get; }
 
-        internal Dictionary<string, long> Ids { get; } = new(StringComparer.Ordinal);
+        // Message ids compare ignoring letter case (DIDComm v2.1 threading); the peer key above stays exact.
+        internal Dictionary<string, long> Ids { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     private void RateLimited(ref long counter, string message, params object?[] args)

@@ -17,6 +17,12 @@ namespace DidComm.Threading;
 /// touched on every access, so one that is actively receiving is not evicted; note this holds only
 /// within the eviction window — a thread left idle while a peer floods more than (cap − low-water)
 /// fresh ids can still age out (the approximate-LRU tradeoff).
+/// <para>
+/// Thread ids are compared ignoring letter case (ordinal, case-insensitive), as DIDComm v2.1
+/// threading requires for <c>id</c>, <c>thid</c> and <c>pthid</c>: <c>"ABC-1"</c> and
+/// <c>"abc-1"</c> name the same thread and share one <see cref="ThreadState"/>. Its
+/// <see cref="ThreadState.Thid"/> keeps the casing of the call that created it.
+/// </para>
 /// </remarks>
 public sealed class InMemoryThreadStateStore : IThreadStateStore
 {
@@ -27,7 +33,8 @@ public sealed class InMemoryThreadStateStore : IThreadStateStore
     /// </summary>
     public const int DefaultMaxEntries = 10_000;
 
-    private readonly ConcurrentDictionary<string, ThreadState> _states = new(StringComparer.Ordinal);
+    // Case-insensitive: DIDComm v2.1 threading compares thread ids that way (see the remarks).
+    private readonly ConcurrentDictionary<string, ThreadState> _states = new(StringComparer.OrdinalIgnoreCase);
     private readonly int _maxEntries;
     private readonly int _lowWaterMark;
     private long _tick;     // Interlocked monotonic clock for approximate-LRU stamping.
