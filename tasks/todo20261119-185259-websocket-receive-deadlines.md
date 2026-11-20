@@ -139,9 +139,10 @@ No other place has the same shape, so the sweep raises no stop.
 - [x] QA permutations below; each new test fails on `origin/main` or with the fix mutated out (rebuild after revert, L-071)
 - [x] Adversarial pass (~30 min), findings with severity and disposition
 - [x] Cookbook section HH (both setters executed); DX gate negative control
-- [ ] Docs: CHANGELOG (behaviour change first; 1.5.1 logging note), PRD, architecture doc, SECURITY.md, README package rows
-- [ ] Package validation: additive; negative control
-- [ ] Gate: build `/warnaserror`, test, pack; Live interop (normal + negative controls)
+- [x] Docs: CHANGELOG (behaviour change first; 1.5.1 logging note), PRD, architecture doc, SECURITY.md, README package rows
+- [x] Package validation: additive change passes against 1.5.0; negative control (`DidCommReceiveOptions.UseStomp` made internal) fails with CP0002; restored, rebuilt, passes
+- [x] Gate: `dotnet build DidComm.sln -c Release /warnaserror` (0 warnings), `dotnet test … --no-build` (Core 2629 + 1 skipped, Mediator 4652 + 8 skipped, Interop 2028 + 5 skipped; 0 failed), `dotnet pack … --no-build` (9 packages)
+- [ ] Live interop on the branch (normal + negative controls)
 - [ ] PR opened, CI green
 
 ## QA permutations
