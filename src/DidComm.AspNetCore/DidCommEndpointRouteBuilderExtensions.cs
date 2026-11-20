@@ -40,6 +40,10 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <see cref="DidCommClient.UnpackAsync"/>, and dispatches to <paramref name="onReceive"/>
     /// (FR-TRN-07). Returns <c>202 Accepted</c> on success, <c>415</c> for an unknown content type,
     /// and <c>413</c> when the body exceeds <see cref="DidCommOptions.MaxReceiveBytes"/> (FR-API-06).
+    /// A body that stops arriving before its end is never processed: one the server refused is
+    /// answered with the server's status for it (400 for a body that ended early, 408 for one sent
+    /// too slowly), one whose stream failed (a reset connection) ends the request, and either writes
+    /// one Debug line naming the exception type.
     /// ANY envelope/processing failure — crypto, malformed structure, consistency, or DID resolution —
     /// returns a uniform <c>400 Bad Request</c> with an empty body and the reason logged server-side
     /// only, so the response cannot be used as a decryption / recipient-kid / resolution oracle
@@ -89,17 +93,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             }
 
-            string body;
-            try
-            {
-                body = await ReadCappedAsync(httpContext.Request.Body, maxBytes, httpContext.RequestAborted).ConfigureAwait(false);
-            }
-            catch (PayloadTooLargeException)
-            {
-                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
-            }
-
             var logger = httpContext.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
+
+            var (body, refusal) = await ReadBodyAsync(httpContext, maxBytes, logger).ConfigureAwait(false);
+            if (refusal is not null)
+                return refusal;
 
             // #35: start the constant-time clock HERE — after the body has been read — so the floor
             // budgets only the unpack window where the recipient-kid-dependent timing lives. The body
@@ -265,15 +263,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             if (httpContext.Request.ContentLength is long declared && declared > maxBytes)
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
 
-            string body;
-            try
-            {
-                body = await ReadCappedAsync(httpContext.Request.Body, maxBytes, httpContext.RequestAborted).ConfigureAwait(false);
-            }
-            catch (PayloadTooLargeException)
-            {
-                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
-            }
+            var (body, refusal) = await ReadBodyAsync(httpContext, maxBytes, logger).ConfigureAwait(false);
+            if (refusal is not null)
+                return refusal;
 
             // #35: start the constant-time clock after the (kid-independent) body read, covering only
             // the unpack+dispatch window where the recipient-kid-dependent timing lives — see the
@@ -380,8 +372,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// hands each admitted message to <paramref name="onReceive"/> together with its return-route
     /// session (FR-RR-04) — the callback counterpart of the registry-aware
     /// <c>MapDidCommEndpoint(pattern)</c>. Same envelope handling as the other overloads: 415 for an
-    /// unknown content type, 413 above <see cref="DidCommOptions.MaxReceiveBytes"/>, and one opaque,
-    /// time-floored <c>400</c> for any unpack failure (FR-API-07).
+    /// unknown content type, 413 above <see cref="DidCommOptions.MaxReceiveBytes"/>, the same handling
+    /// of a body that stops arriving before its end (never processed), and one opaque, time-floored
+    /// <c>400</c> for any unpack failure (FR-API-07).
     /// <para>
     /// The session argument is non-null only when the inbound was authcrypted, carries
     /// <c>return_route: all</c>, is not a <c>forward</c> and passed FR-RR-08 replay admission; a
@@ -430,15 +423,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             if (httpContext.Request.ContentLength is long declared && declared > maxBytes)
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
 
-            string body;
-            try
-            {
-                body = await ReadCappedAsync(httpContext.Request.Body, maxBytes, httpContext.RequestAborted).ConfigureAwait(false);
-            }
-            catch (PayloadTooLargeException)
-            {
-                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
-            }
+            var (body, refusal) = await ReadBodyAsync(httpContext, maxBytes, logger).ConfigureAwait(false);
+            if (refusal is not null)
+                return refusal;
 
             // #35: the floor budgets only the unpack window (see the first callback overload).
             var startTimestamp = Stopwatch.GetTimestamp();
@@ -1196,6 +1183,64 @@ public static class DidCommEndpointRouteBuilderExtensions
         }
         return false;
     }
+
+    /// <summary>
+    /// Read the request body of one of the HTTP receive endpoints. Returns the body, or what to answer
+    /// instead when it cannot be read; in every such case nothing has been unpacked or dispatched:
+    /// <list type="bullet">
+    /// <item><c>413</c> when the body exceeds <paramref name="maxBytes"/>.</item>
+    /// <item>When the server refused the body (a <see cref="BadHttpRequestException"/>: it ended before
+    /// its declared length, arrived too slowly, or exceeded the server's own limit), the status the
+    /// server gives it.</item>
+    /// <item>When the body stream failed under the read (an <see cref="IOException"/>, such as a reset
+    /// connection), the request is aborted: nothing can be answered on that connection, and a server
+    /// left to read the rest of a body whose read failed logs that at Error.</item>
+    /// <item><c>400</c> for a cancellation that is not the request's abort.</item>
+    /// </list>
+    /// Each of the last three writes one Debug line naming the exception type only, and none escapes
+    /// to the server (which would log an unhandled exception at Error). A cancellation while the
+    /// request is aborted propagates, as from every other step of these endpoints.
+    /// </summary>
+    /// <param name="httpContext">The request.</param>
+    /// <param name="maxBytes">The body cap (<see cref="DidCommOptions.MaxReceiveBytes"/>).</param>
+    /// <param name="logger">The endpoint's logger, or <c>null</c>.</param>
+    private static async Task<(string Body, IResult? Refusal)> ReadBodyAsync(HttpContext httpContext, long maxBytes, ILogger? logger)
+    {
+        // A body that never arrived is not a message: the spec's HTTPS rules (a successful receipt is
+        // answered 2xx) say nothing about it.
+        try
+        {
+            return (await ReadCappedAsync(httpContext.Request.Body, maxBytes, httpContext.RequestAborted).ConfigureAwait(false), null);
+        }
+        catch (PayloadTooLargeException)
+        {
+            return (string.Empty, Results.StatusCode(StatusCodes.Status413PayloadTooLarge));
+        }
+        catch (BadHttpRequestException ex)
+        {
+            // Before IOException, which it derives from: answered as the server answers it (400 for a
+            // body that ended early, 408 for one that arrived too slowly, 413 over its own limit).
+            LogUnreadBody(logger, ex);
+            return (string.Empty, Results.StatusCode(ex.StatusCode));
+        }
+        catch (IOException ex)
+        {
+            LogUnreadBody(logger, ex);
+            httpContext.Abort();
+            return (string.Empty, Results.Empty);
+        }
+        catch (OperationCanceledException ex) when (!httpContext.RequestAborted.IsCancellationRequested)
+        {
+            LogUnreadBody(logger, ex);
+            return (string.Empty, Results.StatusCode(StatusCodes.Status400BadRequest));
+        }
+    }
+
+    /// <summary>The one line for a request body that could not be read: its exception's type, never its text.</summary>
+    /// <param name="logger">The endpoint's logger, or <c>null</c>.</param>
+    /// <param name="failure">What the read threw.</param>
+    private static void LogUnreadBody(ILogger? logger, Exception failure)
+        => SafeLog.Write(logger, LogLevel.Debug, "DidComm receive: the request body could not be read ({ExceptionType}); nothing was processed.", failure.GetType().Name);
 
     /// <summary>
     /// Read the request body into a UTF-8 string but throw <see cref="PayloadTooLargeException"/>
