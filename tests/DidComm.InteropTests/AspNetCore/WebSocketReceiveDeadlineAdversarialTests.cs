@@ -109,12 +109,52 @@ public sealed class WebSocketReceiveDeadlineAdversarialTests
         host.DispatchedCount(endpoint).Should().Be(0, "nothing read after the close is processed");
     }
 
+    /// <summary>
+    /// After one complete message the wait for the next is not timed, by design (idle sessions stay
+    /// open). A peer that then floods pings and never reads parks the server's receive inside a pong
+    /// it cannot send, so no later message ever starts and no timer ever runs; from then on what the
+    /// peer sent sits in the server's connection buffers (Kestrel's request buffer, the OS socket
+    /// buffers), not in the endpoint's fixed receive buffer, for as long as the peer keeps the
+    /// connection. This test shows that hold: it passes today.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Endpoints))]
+    public async Task After_one_message_a_peer_that_floods_pings_and_never_reads_keeps_its_connection_with_no_timer_running(DeadlineEndpoint endpoint)
+    {
+        await using var host = await DeadlineKestrelHost.StartAsync();
+        var mark = host.Time.Mark();
+        await using var peer = await NonReadingPeer.ConnectAsync(host.Port, DeadlineKestrelHost.PathOf(endpoint));
+        await host.Time.WaitForTimerAsync(mark, DeadlineKestrelHost.Limit, DeadlineKestrelHost.Guard);
+        await peer.SendFrameAsync(0x1, Array.Empty<byte>()); // one complete (empty) message
+        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Time.ScheduledTimersSince(mark) == 0, DeadlineKestrelHost.Guard))
+            .Should().BeTrue("the first message stopped its timer");
+
+        (await peer.FloodPingsUntilBlockedAsync(TimeSpan.FromSeconds(2), EndGuard)).Should().BeTrue("precondition: the connection fills up");
+        var idle = host.Time.Mark();
+        var fired = host.Time.TimersFired;
+        host.Time.Advance(10 * DeadlineKestrelHost.Limit);
+        await Task.Delay(TimeSpan.FromSeconds(2)); // observation window (real time): nothing is due
+
+        host.TimersCreatedSince(idle).Should().Be(0, "no later message ever starts, so no timer runs");
+        host.Time.TimersFired.Should().Be(fired);
+        host.TimeoutLines().Should().BeEmpty();
+        peer.PendingFaulted.Should().BeFalse("the server still holds the connection and what the peer sent on it");
+    }
+
     /// <summary>A raw WebSocket client that writes masked frames and never reads what the server sends.</summary>
     private sealed class NonReadingPeer : IAsyncDisposable
     {
         private readonly TcpClient _tcp;
         private readonly NetworkStream _stream;
         private Task? _pending;
+
+        public bool PendingFaulted => _pending is { IsFaulted: true };
+
+        public async Task SendFrameAsync(int opcode, byte[] payload)
+        {
+            var frame = Frame(opcode, payload);
+            await _stream.WriteAsync(frame);
+        }
 
         private NonReadingPeer(TcpClient tcp)
         {
