@@ -1,12 +1,40 @@
 namespace DidComm.Mediator.Pickup;
 
 /// <summary>
-/// Settings of the Message Pickup mediator role: how much one <c>delivery</c> may carry, how long a
-/// delivered message waits for its acknowledgement, and the bounds of the in-memory store
-/// (FR-PICK-03, -04, -10).
+/// Settings of the Message Pickup mediator role, 3.0 and 4.0 alike: whether 4.0 is served too, how
+/// much one <c>delivery</c> may carry, how long a delivered message waits for its acknowledgement,
+/// and the bounds of the in-memory store (FR-PICK-03, -04, -10, -12).
 /// </summary>
 public sealed class MessagePickupOptions
 {
+    /// <summary>
+    /// Whether <c>AddMessagePickup()</c> also serves Message Pickup 4.0
+    /// (<see cref="MessagePickup40Handler"/>, <c>https://didcomm.org/message-pickup/4.0</c>) next to
+    /// 3.0. Default <c>true</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// When <c>true</c>, 4.0 is answered and disclosed by Discover Features (roles
+    /// <c>mediator</c>) next to 3.0, over the same queue, so a recipient's messages wait in one
+    /// mailbox whichever version it picks them up with. When <c>false</c>, no 4.0 handler is
+    /// registered and nothing discloses it: a 4.0 request is not answered (no handler serves its
+    /// type). There is no switch for 3.0; a host that wants 4.0 only does not call
+    /// <c>AddMessagePickup()</c>, and registers its <see cref="IMessageStore"/>,
+    /// <see cref="MessagePickupQueue"/> and <c>AddProtocol&lt;MessagePickup40Handler&gt;()</c>
+    /// itself.
+    /// </para>
+    /// <para>
+    /// Read when <c>AddMessagePickup()</c> (or <c>AddMediator()</c>, which calls it) runs, because
+    /// it decides what is registered; set it in that call's delegate. To serve 3.0 only, set it to
+    /// <c>false</c> on every such call. A value set any other way that disagrees with what was
+    /// registered (<c>services.Configure&lt;MessagePickupOptions&gt;</c>, configuration binding, or
+    /// two calls that disagree) fails with <see cref="InvalidOperationException"/> when the Message
+    /// Pickup handlers are first built: at start-up in a generic host with <c>AddMediator()</c>,
+    /// otherwise on the first resolution of the protocol dispatcher.
+    /// </para>
+    /// </remarks>
+    public bool EnableV4 { get; set; } = true;
+
     /// <summary>
     /// The largest number of messages one <c>delivery</c> carries (FR-PICK-03). A
     /// <c>delivery-request</c> asking for more gets this many. Default 10.

@@ -78,9 +78,9 @@ internal readonly record struct PickupOutcome(PickupReply Reply, PickupStatusVie
 /// The mediator role of Message Pickup without the wire format: who may see which queue, what a
 /// status request, a delivery request, an acknowledgement and a live-mode change do to the store
 /// and to the session, and how a newly arrived message reaches a recipient (live session, else the
-/// queue). <see cref="MessagePickupHandler"/> (3.0) puts message names and bodies around it; a 4.0
-/// handler can do the same over the same instance (FR-PICK-12), sharing leases, live flags and
-/// counters.
+/// queue). <see cref="MessagePickupHandler"/> (3.0) and <see cref="MessagePickup40Handler"/> (4.0,
+/// FR-PICK-12) put message names and bodies around it over the same instance, sharing leases,
+/// live flags and counters.
 /// </summary>
 /// <remarks>
 /// <para>

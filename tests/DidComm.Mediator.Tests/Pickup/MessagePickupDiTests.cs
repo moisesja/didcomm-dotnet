@@ -87,7 +87,8 @@ public sealed class MessagePickupDiTests
             registry.TryResolve(type, out var resolved).Should().BeTrue(type);
             resolved.Should().BeSameAs(handler, "the registry entry and the typed singleton are one instance");
         }
-        registry.TryResolve("https://didcomm.org/messagepickup/4.0/status-request", out _).Should().BeFalse("4.0 is a separate handler (#100)");
+        registry.TryResolve("https://didcomm.org/messagepickup/4.0/status-request", out var v4).Should().BeTrue("4.0 is on by default (#100)");
+        v4.Should().BeOfType<MessagePickup40Handler>("4.0 is a separate handler (#100): the 3.0 one never serves it");
 
         handler.ProtocolUri.Should().Be("https://didcomm.org/messagepickup/3.0");
         handler.Roles.Should().Equal("mediator");
