@@ -179,7 +179,8 @@ internal static class FetchCommand
 
         result.Check("no-item-failed-to-open", failed.Count == 0, failed.Count);
         result.Check("exactly-the-expected-count", opened.Count == expectCount, opened.Count);
-        result.Check("no-message-id-twice", opened.Select(i => i.Unpacked!.Message.Id).Distinct(StringComparer.Ordinal).Count() == opened.Count);
+        // Ids that differ only in letter case are one id (DIDComm v2.1 threading).
+        result.Check("no-message-id-twice", opened.Select(i => i.Unpacked!.Message.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == opened.Count);
         result.Check("drained-status-counts-zero", finalStatus?.MessageCount == 0, finalStatus?.MessageCount);
         result.Check("separate-status-counts-zero", separate.MessageCount == 0, separate.MessageCount);
         return 0;

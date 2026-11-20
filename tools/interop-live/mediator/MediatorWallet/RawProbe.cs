@@ -142,9 +142,10 @@ internal sealed class RawProbe : IDisposable
             ["type"] = message.Type,
             ["id"] = message.Id,
             ["thid"] = message.Thid,
-            ["thid_is_request_id"] = request is not null && message.Thid == request.Id,
+            // DIDComm v2.1 threading compares ids, thids and pthids ignoring letter case.
+            ["thid_is_request_id"] = request is not null && string.Equals(message.Thid, request.Id, StringComparison.OrdinalIgnoreCase),
             ["pthid"] = message.Pthid,
-            ["pthid_is_request_id"] = request is not null && message.Pthid == request.Id,
+            ["pthid_is_request_id"] = request is not null && string.Equals(message.Pthid, request.Id, StringComparison.OrdinalIgnoreCase),
             ["created_time_present"] = message.CreatedTime is not null,
             ["created_time_minus_our_clock_s"] = message.CreatedTime is { } t ? t - now : null,
             ["expires_time_present"] = message.ExpiresTime is not null,

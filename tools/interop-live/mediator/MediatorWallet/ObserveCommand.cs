@@ -381,7 +381,7 @@ internal static class ObserveCommand
                 var push = await receive.ConfigureAwait(false);
                 var described = await DescribeFrameAsync("O-2 ws live push", push, request: null, answers, ct).ConfigureAwait(false);
                 if (described["answer"] is JsonObject pushed)
-                    pushed["thid_is_forward_id"] = pushed["thid"]?.GetValue<string>() == forwardId;
+                    pushed["thid_is_forward_id"] = string.Equals(pushed["thid"]?.GetValue<string>(), forwardId, StringComparison.OrdinalIgnoreCase);
                 value["push"] = described;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
