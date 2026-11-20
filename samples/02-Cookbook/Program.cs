@@ -71,6 +71,7 @@ public static class Program
         await Section_EE_LiveDeliveryOverWebSocket.RunAsync(ctx);
         await Section_FF_MinimalMediator.RunAsync(ctx);
         await Section_GG_SendThroughATrustedProxy.RunAsync(ctx);
+        await Section_HH_LimitHowLongAWebSocketMessageMayTake.RunAsync(ctx);
     }
 
     private static string Truncate(string did)
