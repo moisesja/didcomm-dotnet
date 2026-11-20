@@ -54,6 +54,8 @@ namespace DidComm.Transports.WebSocket;
 /// reassembled, FR-TRN-09), at most <c>DidCommOptions.MaxReceiveBytes</c> long, is handed to the
 /// <see cref="IInboundFrameConsumer"/>, one at a time: the next message is read only after the
 /// consumer returned. A bigger message closes S with status 1009 and nothing past the limit is kept.
+/// A message not finished within <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/> of its
+/// first part closes S with status 1008 and is dropped; the wait for the next message is never timed.
 /// The loop never sends anything but close frames. Pooled sockets are never read. Under
 /// <see cref="WebSocketTransportOptions.UseStomp"/> no session socket is opened.
 /// </para>
@@ -108,6 +110,11 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private readonly bool _receiveInbound;
     // DidCommOptions.MaxReceiveBytes: the largest pushed message a session loop keeps (JC-11, JC-16).
     private readonly int _inboundCap;
+    // WebSocketTransportOptions.MessageReceiveTimeout, read once at construction: how long a pushed message
+    // may take from its first part to its last frame (Timeout.InfiniteTimeSpan: no limit).
+    private readonly TimeSpan _messageReceiveTimeout;
+    // The clock that limit is timed on: the container's TimeProvider under UseWebSocketTransport, else the system's.
+    private readonly TimeProvider _time;
     // The ACTIVE session socket of each session key (PoolKey + "\n" + L + "\n" + P, see SendAsync).
     // Written only under that key's send gate; removed conditionally (by instance) by the socket's
     // own receive loop and by dispose. A key lives in exactly one of _pool and _sessions: a session
@@ -122,8 +129,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     // Rate-limiter counters for the flood-shaped session log lines (first and every 1000th at Warning).
     private long _consumerFaults;
     private long _oversizedPushes;
+    private long _timedOutPushes;
     // Whole pushed messages read and dropped without reaching the consumer (ReceiveInbound off, or
-    // the socket is discarding after a 1009). Diagnostics for tests only; never logged per message.
+    // the socket is discarding after a 1009 or a 1008). Diagnostics for tests only; never logged per message.
     private long _inboundMessagesDropped;
     private const long WarnEvery = 1000;
     // FR-API-09: the longest LocalDid / PeerDid a session key accepts.
@@ -189,9 +197,38 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         ILogger<WebSocketDidCommTransport>? logger,
         IOptions<DidComm.Facade.DidCommOptions>? coreOptions,
         IInboundFrameConsumer? inboundConsumer)
+        : this(options, logger, coreOptions, inboundConsumer, TimeProvider.System)
+    {
+    }
+
+    /// <summary>
+    /// The four-parameter constructor with the clock that
+    /// <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/> is timed on:
+    /// <c>UseWebSocketTransport</c> passes the container's <see cref="TimeProvider"/>, the public
+    /// constructors the system clock.
+    /// </summary>
+    /// <param name="options">Bound <see cref="WebSocketTransportOptions"/>.</param>
+    /// <param name="logger">Optional logger; <c>null</c> logs nothing.</param>
+    /// <param name="coreOptions">Optional core <see cref="DidComm.Facade.DidCommOptions"/>; <c>null</c> uses the defaults.</param>
+    /// <param name="inboundConsumer">The consumer of pushed messages; <c>null</c> for none.</param>
+    /// <param name="time">The clock of the per-message receive limit.</param>
+    /// <exception cref="InvalidOperationException">
+    /// When <see cref="WebSocketTransportOptions.ReceiveInbound"/> is set and
+    /// <paramref name="inboundConsumer"/> is <c>null</c>.
+    /// </exception>
+    internal WebSocketDidCommTransport(
+        IOptions<WebSocketTransportOptions> options,
+        ILogger<WebSocketDidCommTransport>? logger,
+        IOptions<DidComm.Facade.DidCommOptions>? coreOptions,
+        IInboundFrameConsumer? inboundConsumer,
+        TimeProvider time)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(time);
         _options = options.Value;
+        _time = time;
+        // Read once, like ReceiveInbound: the session loops must time every message with the same limit.
+        _messageReceiveTimeout = _options.MessageReceiveTimeout;
         // Read once: the options object stays mutable after construction, and the receive loops must
         // never see the flag turn on without the consumer it requires.
         _receiveInbound = _options.ReceiveInbound;
@@ -293,8 +330,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
     /// <summary>
     /// How long a session socket that is closing outside dispose may take: the close frame sent on a
-    /// retire (<c>return_route: none</c>), on an oversized message (1009) or in answer to the peer's
-    /// close, and the backstop after which a retiring socket stops being read. One
+    /// retire (<c>return_route: none</c>), on an oversized message (1009), on a message not finished in
+    /// time (1008) or in answer to the peer's close, and the backstop after which a retiring or
+    /// discarding socket stops being read. One
     /// <see cref="WebSocketTransportOptions.SendTimeout"/> when it is finite and positive (clamped to
     /// the largest legal wait), else <see cref="DefaultCloseGrace"/>: unlike dispose, these paths must
     /// leave the messages already on their way time to arrive, so an infinite <c>SendTimeout</c> must
@@ -798,15 +836,29 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
     /// <summary>
     /// Read <paramref name="session"/> until it closes (E7): reassemble each message (FR-TRN-09),
-    /// close the socket with 1009 when one exceeds the receive cap (JC-11), and hand each whole
-    /// message to the inbound consumer, one at a time (JC-8), when <c>ReceiveInbound</c> is on. Never
-    /// sends anything but close frames, never throws (L-043), and always ends through
-    /// <see cref="EndReceiveLoopAsync"/>.
+    /// close the socket with 1009 when one exceeds the receive cap (JC-11) and with 1008 when one is
+    /// not finished within <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/> of its first
+    /// part, and hand each whole message to the inbound consumer, one at a time (JC-8), when
+    /// <c>ReceiveInbound</c> is on. Never sends anything but close frames, never throws (L-043), and
+    /// always ends through <see cref="EndReceiveLoopAsync"/>.
     /// </summary>
+    /// <remarks>
+    /// The time limit never cancels the loop's token: cancelling an outstanding receive aborts the
+    /// socket, so no close frame could follow. On expiry the close frame goes out while the receive is
+    /// still outstanding, and the loop keeps awaiting that same receive, discarding, until the peer's
+    /// close or the backstop. Every exit awaits the receive it started before the buffer goes back to
+    /// the pool.
+    /// </remarks>
     /// <param name="session">The session socket to read.</param>
     private async Task ReceiveLoopAsync(SessionSocket session)
     {
         byte[]? buffer = null;
+        // The receive last started on the buffer: the buffer is returned to the pool only once it completed.
+        Task<WebSocketReceiveResult>? receive = null;
+        // The time limit of the message being read: started at its first part and stopped at its last,
+        // so the wait for the next message is never timed; none while S is discarding (its backstop
+        // bounds it then) or when MessageReceiveTimeout is infinite.
+        ReceiveDeadline? deadline = null;
         var token = session.LoopToken;
         try
         {
@@ -817,11 +869,21 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 // Buffer only what may be surfaced: with ReceiveInbound off, or once S is discarding,
                 // frames are read and dropped without being kept.
                 var surface = _receiveInbound && !session.DiscardInbound;
+                var firstPart = true;
                 long total = 0;
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await session.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+                    receive = session.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    if (!await ReceiveDeadline.WaitAsync(receive, deadline).ConfigureAwait(false))
+                    {
+                        // The peer stalled mid-message past the limit: close with 1008 now, while this
+                        // receive is still outstanding, then go on awaiting it, discarding.
+                        surface = false;
+                        await CloseTimedOutAsync(session, message, deadline!).ConfigureAwait(false);
+                        deadline = null;
+                    }
+                    result = await receive.ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                         return;
                     total += result.Count;
@@ -831,12 +893,30 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                         surface = false;
                         message.SetLength(0);
                         message.Capacity = 0;
-                        await CloseOversizedAsync(session).ConfigureAwait(false);
+                        StopDeadline(deadline);
+                        deadline = null;
+                        await CloseAndDiscardAsync(session, WebSocketCloseStatus.MessageTooBig, "payload too large", DiscardLine.Oversized).ConfigureAwait(false);
+                    }
+                    else if (!result.EndOfMessage && deadline is { HasExpired: true })
+                    {
+                        // A part that completed after the limit, with more of the message to come: late
+                        // all the same (a peer whose parts are always waiting never leaves a receive outstanding).
+                        surface = false;
+                        await CloseTimedOutAsync(session, message, deadline).ConfigureAwait(false);
+                        deadline = null;
                     }
                     if (surface)
                         message.Write(buffer, 0, result.Count);
+                    // The message's time starts when its first part is read, unless S is discarding.
+                    if (firstPart && !result.EndOfMessage && !session.DiscardInbound)
+                        deadline = ReceiveDeadline.Start(_time, _messageReceiveTimeout);
+                    firstPart = false;
                 }
                 while (!result.EndOfMessage);
+
+                // Stopped before the consumer runs: the limit is on the peer's delivery, not on our handling.
+                StopDeadline(deadline);
+                deadline = null;
 
                 if (!surface || session.DiscardInbound)
                 {
@@ -870,24 +950,76 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
         catch (Exception ex)
         {
-            // The socket ended: a fault, a dispose, a retire backstop or a send-failure stop.
+            // The socket ended: a fault, a dispose, a retire or discard backstop, a send-failure stop,
+            // or a clock that could not time the message (the socket ends rather than go unlimited).
             Log(LogLevel.Debug, "WebSocketDidCommTransport: a return-route session socket stopped reading ({ExceptionType}).", ex.GetType().Name);
         }
         finally
         {
-            if (buffer is not null)
+            // A message cut short by the socket's end stops its timer here.
+            StopDeadline(deadline);
+            // Never returned while a receive may still write into the buffer: every exit above awaits
+            // the receive it started, and should one not, the buffer is left to the GC instead.
+            if (buffer is not null && receive is not { IsCompleted: false })
                 ArrayPool<byte>.Shared.Return(buffer);
             await EndReceiveLoopAsync(session).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// JC-11: a pushed message exceeded the receive cap. Stop routing to <paramref name="session"/>,
-    /// switch it to discarding, send a 1009 close frame under its send gate (so the close never
-    /// overlaps a send), arm the backstop and log once (rate-limited). Never throws.
+    /// The message being read on <paramref name="session"/> was not finished within
+    /// <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/> of its first part: drop what was
+    /// kept of it, stop its timer, and close and discard the socket with 1008 (policy violation).
+    /// Never throws.
     /// </summary>
-    /// <param name="session">The session socket that received the oversized message.</param>
-    private async Task CloseOversizedAsync(SessionSocket session)
+    /// <param name="session">The session socket.</param>
+    /// <param name="message">What was kept of the message.</param>
+    /// <param name="deadline">The message's expired time limit.</param>
+    private Task CloseTimedOutAsync(SessionSocket session, MemoryStream message, ReceiveDeadline deadline)
+    {
+        message.SetLength(0);
+        message.Capacity = 0;
+        StopDeadline(deadline);
+        return CloseAndDiscardAsync(session, WebSocketCloseStatus.PolicyViolation, "message receive timeout", DiscardLine.ReceiveTimeout);
+    }
+
+    /// <summary>Stop a message's timer, if any. Never throws: the timer comes from the host's clock, and a timer left running only completes a task nothing waits on.</summary>
+    /// <param name="deadline">The time limit, or <c>null</c>.</param>
+    private static void StopDeadline(ReceiveDeadline? deadline)
+    {
+        try
+        {
+            deadline?.Dispose();
+        }
+        catch
+        {
+            // See the summary.
+        }
+    }
+
+    /// <summary>Which log lines a close-and-discard writes (see <see cref="CloseAndDiscardAsync"/>).</summary>
+    private enum DiscardLine
+    {
+        /// <summary>A pushed message exceeded the receive cap (JC-11).</summary>
+        Oversized,
+
+        /// <summary>A pushed message was not finished within <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/>.</summary>
+        ReceiveTimeout,
+    }
+
+    /// <summary>
+    /// The session loop ends <paramref name="session"/>'s service after a message it will not take
+    /// (one over the receive cap, JC-11, or one not finished in time). Stop routing to the socket,
+    /// switch it to discarding, send a close frame with <paramref name="status"/> under its send gate
+    /// (so the close never overlaps a send), arm the backstop and write <paramref name="line"/>'s
+    /// rate-limited line. The loop keeps reading, and dropping, until the peer's close or the
+    /// backstop. Never throws.
+    /// </summary>
+    /// <param name="session">The session socket.</param>
+    /// <param name="status">The close status: 1009 for size, 1008 for time.</param>
+    /// <param name="description">The close frame's reason text.</param>
+    /// <param name="line">Which log lines (and counter) to write.</param>
+    private async Task CloseAndDiscardAsync(SessionSocket session, WebSocketCloseStatus status, string description, DiscardLine line)
     {
         session.DiscardInbound = true;
         _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(session.Key, session));
@@ -900,16 +1032,21 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             if (!_disposed && _sendLocks.TryGetValue(session.Key, out gate))
             {
                 held = await gate.WaitAsync(DrainBudget, session.LoopToken).ConfigureAwait(false);
+                // Skipped in CloseSent: a retire already sent its close and armed the backstop.
                 if (held && !_disposed && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
                 {
                     using var closeCts = new CancellationTokenSource(CloseGrace);
-                    await session.Socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", closeCts.Token).ConfigureAwait(false);
+                    await session.Socket.CloseOutputAsync(status, description, closeCts.Token).ConfigureAwait(false);
                 }
             }
         }
         catch (Exception ex)
         {
-            Log(LogLevel.Debug, "WebSocketDidCommTransport: closing an oversized return-route session socket failed ({ExceptionType}).", ex.GetType().Name);
+            Log(LogLevel.Debug,
+                line == DiscardLine.Oversized
+                    ? "WebSocketDidCommTransport: closing an oversized return-route session socket failed ({ExceptionType})."
+                    : "WebSocketDidCommTransport: closing a timed-out return-route session socket failed ({ExceptionType}).",
+                ex.GetType().Name);
         }
         finally
         {
@@ -917,10 +1054,20 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 gate!.Release();
         }
         session.ArmBackstop(CloseGrace);
-        LogRateLimited(ref _oversizedPushes,
-            "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07). {Count} such messages.",
-            "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07).",
-            _inboundCap);
+        if (line == DiscardLine.Oversized)
+        {
+            LogRateLimited(ref _oversizedPushes,
+                "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07). {Count} such messages.",
+                "WebSocketDidCommTransport: a message pushed on a return-route session socket exceeded {MaxBytes} bytes; the socket was closed with 1009 and the rest of its messages are discarded (FR-RR-07).",
+                _inboundCap);
+        }
+        else
+        {
+            LogRateLimited(ref _timedOutPushes,
+                "WebSocketDidCommTransport: a message pushed on a return-route session socket was not finished within {Timeout} of its first part; the socket was closed with 1008 and the rest of its messages are discarded (FR-RR-07). {Count} such messages.",
+                "WebSocketDidCommTransport: a message pushed on a return-route session socket was not finished within {Timeout} of its first part; the socket was closed with 1008 and the rest of its messages are discarded (FR-RR-07).",
+                _messageReceiveTimeout);
+        }
     }
 
     /// <summary>
@@ -1636,7 +1783,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         /// <summary>Completes when the receive loop has fully ended (or never started).</summary>
         public Task LoopDone => _loopDone.Task;
 
-        /// <summary>Set once an oversized message closed the socket with 1009: every later message is dropped.</summary>
+        /// <summary>Set once an oversized message (1009) or a message not finished in time (1008) closed the socket: every later message is dropped.</summary>
         public bool DiscardInbound
         {
             get => _discardInbound;

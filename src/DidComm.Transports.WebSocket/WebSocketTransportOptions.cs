@@ -8,6 +8,8 @@ namespace DidComm.Transports.WebSocket;
 /// </summary>
 public sealed class WebSocketTransportOptions
 {
+    private TimeSpan _messageReceiveTimeout = ReceiveDeadline.DefaultTimeout;
+
     /// <summary>How long the initial connect handshake is allowed to take. Defaults to 10 s.</summary>
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
@@ -164,6 +166,8 @@ public sealed class WebSocketTransportOptions
     /// notices a close or an eviction and completes the close handshake, but every pushed message is
     /// discarded (logged once). Pooled sockets, used by sends without a return route, are never read.
     /// Under <see cref="UseStomp"/> no session socket is ever opened, so nothing is received.
+    /// On or off, a session socket on which a pushed message does not arrive whole within
+    /// <see cref="MessageReceiveTimeout"/> of its first part is closed with status 1008.
     /// </para>
     /// </remarks>
     /// <example>
@@ -175,4 +179,45 @@ public sealed class WebSocketTransportOptions
     /// </code>
     /// </example>
     public bool ReceiveInbound { get; set; }
+
+    /// <summary>
+    /// How long a peer has to deliver each whole message it pushes on a return-route session socket,
+    /// counted from the moment the message's first part is read to its last frame. Defaults to 60
+    /// seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The wait for the next message has no limit: a session socket (or a live-delivery socket) may
+    /// stay idle as long as it likes. The client accepts no connections, so there is no limit here on
+    /// how long a new connection may stay silent before its first message.
+    /// </para>
+    /// <para>
+    /// When the time runs out, the transport closes that session socket with status 1008 (policy
+    /// violation), drops what it had read of the message, and discards the rest of the socket's
+    /// messages, as after a message over <c>DidCommOptions.MaxReceiveBytes</c>: the socket takes no
+    /// more sends, so a later send to the same endpoint and DIDs opens a fresh session socket when it
+    /// asks for a return route, and uses the pooled socket otherwise. Only the peer's delivery is
+    /// timed: the inbound consumer's handling of a message is not.
+    /// </para>
+    /// <para>
+    /// <see cref="Timeout.InfiniteTimeSpan"/> turns the limit off. Any other value must be greater
+    /// than zero and at most <see cref="int.MaxValue"/> milliseconds. The value is read once, when the
+    /// transport is created. Pooled sockets, used by sends without a return route, are never read, so
+    /// it does not apply to them.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value is zero, negative (other than <see cref="Timeout.InfiniteTimeSpan"/>) or above
+    /// <see cref="int.MaxValue"/> milliseconds.
+    /// </exception>
+    /// <example>
+    /// <code>
+    /// builder.UseWebSocketTransport(o => o.MessageReceiveTimeout = TimeSpan.FromSeconds(30));
+    /// </code>
+    /// </example>
+    public TimeSpan MessageReceiveTimeout
+    {
+        get => _messageReceiveTimeout;
+        set => _messageReceiveTimeout = ReceiveDeadline.Validate(value, nameof(MessageReceiveTimeout));
+    }
 }
