@@ -54,7 +54,7 @@ public static class Section_X_CustomHandler
         var outcome = await dispatcher.DispatchAsync(unpacked, ctx.Client, options);
         ctx.Narrator.Value("Dispatched to handler", outcome.Handler?.ProtocolUri);
         ctx.Narrator.Value("Reply.Type", outcome.Reply?.Type);
-        ctx.Narrator.Value("Reply.Thid == proposal.Id", outcome.Reply?.Thid == proposal.Id);
+        ctx.Narrator.Value("Reply.Thid == proposal.Id", string.Equals(outcome.Reply?.Thid, proposal.Id, StringComparison.OrdinalIgnoreCase));
         ctx.Narrator.Value("Reply.Body[\"accepted\"]", outcome.Reply?.Body?["accepted"]?.GetValue<bool>());
 
         // Routing runs on the type URI, and the URI decomposes: doc-uri / protocol-name /

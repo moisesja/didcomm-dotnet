@@ -85,11 +85,13 @@ public static class Program
                 ServiceEndpointOverride: bob.Endpoint));
             narrator.Step($"[alice] sent ping (id = {ping.Id[..8]}…) as one text WebSocket message (FR-TRN-09).");
 
+            // DIDComm compares message ids and thread ids ignoring letter case, so the reply's
+            // thid is matched to the ping's id that way.
             var pong = await alice.WaitForInboundAsync(
                 r => string.Equals(r.Message.Type, TrustPingApi.ResponseType, StringComparison.Ordinal)
-                     && string.Equals(r.Message.Thid, ping.Id, StringComparison.Ordinal),
+                     && string.Equals(r.Message.Thid, ping.Id, StringComparison.OrdinalIgnoreCase),
                 "Bob's ping-response");
-            narrator.Value("ping-response thid == ping.id", pong.Message.Thid == ping.Id);
+            narrator.Value("ping-response thid == ping.id", string.Equals(pong.Message.Thid, ping.Id, StringComparison.OrdinalIgnoreCase));
             narrator.Value("ping-response authenticated", pong.Authenticated);
 
             // ── 3. Discover features ─────────────────────────────────────────────────────

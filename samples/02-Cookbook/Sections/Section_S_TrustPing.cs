@@ -53,7 +53,7 @@ public static class Section_S_TrustPing
         ctx.Narrator.Value("DispatchResult", outcome.Result);
         ctx.Narrator.Value("Handler", outcome.Handler?.ProtocolUri);
         ctx.Narrator.Value("Reply.Type", outcome.Reply?.Type);
-        ctx.Narrator.Value("Reply.Thid == ping.Id", outcome.Reply?.Thid == ping.Id);
+        ctx.Narrator.Value("Reply.Thid == ping.Id", string.Equals(outcome.Reply?.Thid, ping.Id, StringComparison.OrdinalIgnoreCase));
         ctx.Narrator.Value("Reply.From / To", $"{outcome.Reply?.From} → {string.Join(",", outcome.Reply?.To ?? new List<string>())}");
 
         // The handler is a plain class, not dispatcher magic. Construct one directly when you
@@ -63,7 +63,7 @@ public static class Section_S_TrustPing
         var standalone = new DidComm.Protocols.TrustPing.TrustPingHandler();
         ctx.Narrator.Value("Standalone handler serves", standalone.ProtocolUri);
         var manualReply = TrustPingApi.CreateResponse(unpacked.Message);
-        ctx.Narrator.Value("Manual CreateResponse.Thid == ping.Id", manualReply.Thid == ping.Id);
+        ctx.Narrator.Value("Manual CreateResponse.Thid == ping.Id", string.Equals(manualReply.Thid, ping.Id, StringComparison.OrdinalIgnoreCase));
 
         // Round-trip the reply back to Alice so the section ends with a fully closed loop.
         var packedReply = (await ctx.Client.PackEncryptedAsync(outcome.Reply!, new PackEncryptedOptions(

@@ -209,7 +209,7 @@ public static class Section_DD_PickUpQueuedMessages
             ctx.Narrator.Value("live-delivery-change → TryParseLiveDeliveryChange", $"live_delivery {live}");
 
         var problem = await OverTheWireAsync(ctx, MessagePickup.CreateLiveModeNotSupported(mediatorDid, wallet, MessagePickup.ResponseThreadId(change)));
-        ctx.Narrator.Value("its problem report (CreateLiveModeNotSupported)", $"code {ProblemReportApi.ReadCode(problem)}, pthid is the change's id: {problem.Pthid == change.Id}");
+        ctx.Narrator.Value("its problem report (CreateLiveModeNotSupported)", $"code {ProblemReportApi.ReadCode(problem)}, pthid is the change's id: {string.Equals(problem.Pthid, change.Id, StringComparison.OrdinalIgnoreCase)}");
     }
 
     /// <summary>

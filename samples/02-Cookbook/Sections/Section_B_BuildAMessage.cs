@@ -73,7 +73,8 @@ public static class Section_B_BuildAMessage
             .WithThid(message.Thid ?? message.Id)
             .WithBody(JsonNode.Parse("""{"content":"Hello back, Alice."}""")!.AsObject())
             .Build();
-        ctx.Narrator.Value("Reply.Thid == first.Id", string.Equals(reply.Thid, message.Id, StringComparison.Ordinal));
+        // Message ids and thread ids compare ignoring letter case (DIDComm threading rules).
+        ctx.Narrator.Value("Reply.Thid == first.Id", string.Equals(reply.Thid, message.Id, StringComparison.OrdinalIgnoreCase));
 
         // The id comes from a pluggable generator. The default is UUID v4 (the spec's
         // recommendation); pass your own IMessageIdGenerator when ids must come from elsewhere —

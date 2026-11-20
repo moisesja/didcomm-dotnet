@@ -520,7 +520,7 @@ public static class Program
         var packedReply = (await client.PackEncryptedAsync(reply, new PackEncryptedOptions(
             Recipients: new[] { alice.Did }, From: bob.Did))).Message;
         var aliceReceives = await client.UnpackAsync(packedReply);
-        n.Value("Reply thid == opening id", aliceReceives.Message.Thid == opening.Id);
+        n.Value("Reply thid == opening id", string.Equals(aliceReceives.Message.Thid, opening.Id, StringComparison.OrdinalIgnoreCase));
         n.Value("Alice sees ack[]", string.Join(",", aliceReceives.Message.Ack ?? new List<string>()));
 
         // pthid links a NEW thread to the one it grew out of — the child cites the parent
@@ -532,7 +532,7 @@ public static class Program
             .WithPthid(opening.Id)
             .WithBody(new JsonObject { ["content"] = "Spinning off a related conversation." })
             .Build();
-        n.Value("Side-thread pthid == parent id", sideThread.Pthid == opening.Id);
+        n.Value("Side-thread pthid == parent id", string.Equals(sideThread.Pthid, opening.Id, StringComparison.OrdinalIgnoreCase));
 
         // When only an ACK is needed (no content), Empty 1.0 is the canonical wire shape:
         // Message.Empty() pre-seeds the builder with the Empty 1.0 type (FR-PROTO-06).

@@ -102,7 +102,7 @@ public static class Section_T_DiscoverFeatures
         // in the query's thread: its thid when it declares one, else its id.
         var manual = DiscoverFeaturesApi.CreateDisclose(ctx.Bob.Did, ctx.Alice.Did, query.Thid ?? query.Id,
             new FeatureDisclosure { FeatureType = DiscoverFeaturesApi.FeatureTypeGoalCode, Id = "org.example.lunch" });
-        ctx.Narrator.Value("CreateDisclose.Thid == query.Id", manual.Thid == query.Id);
+        ctx.Narrator.Value("CreateDisclose.Thid == query.Id", string.Equals(manual.Thid, query.Id, StringComparison.OrdinalIgnoreCase));
 
         // The initiator client is likewise just a class: DI does exactly this construction. (It
         // answers QueryFeaturesAsync by watching inbound disclosures, so a hand-built one must be

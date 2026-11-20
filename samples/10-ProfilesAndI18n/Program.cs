@@ -340,7 +340,7 @@ public static class Program
         var aliceView = await aliceClient.UnpackAsync((await bobClient.PackEncryptedAsync(report!,
             new PackEncryptedOptions(Recipients: new[] { alice.Did }, From: bob.Did))).Message);
         narrator.Value("Report code", ProblemReportApi.ReadCode(aliceView.Message));
-        narrator.Value("Report pthid == failing thid", aliceView.Message.Pthid == thid);
+        narrator.Value("Report pthid == failing thid", string.Equals(aliceView.Message.Pthid, thid, StringComparison.OrdinalIgnoreCase));
         narrator.Value("Report comment", ProblemReportApi.RenderComment(aliceView.Message));
         narrator.Note("The warning form (w.) says the thread MAY continue in a fallback language; the fatal form (e.msg.bad-lang) ends it.");
     }
