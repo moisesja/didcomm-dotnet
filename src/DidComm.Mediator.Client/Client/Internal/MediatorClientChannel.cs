@@ -47,7 +47,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// says (a recipient SHOULD check it, MUST NOT refuse a message over it, SHOULD warn): one that does
 /// not name the decrypting DID is logged (rate-limited, no DID) and the answer is matched as any
 /// other; an absent one is the normal case (it is optional). Only then is its thread (<c>pthid</c>, else <c>thid</c>, for a problem report) looked
-/// up — never when it is longer than <see cref="MaxThreadIdLength"/> — and the request completes
+/// up, ignoring letter case as DIDComm v2.1 threading compares ids — never when it is longer than
+/// <see cref="MaxThreadIdLength"/> — and the request completes
 /// only when its (mediator, local DID) pair and expected types agree. A message without a thread
 /// completes no request, on any path: DIDComm v2.1 threading makes a reply carry the <c>thid</c>
 /// of the message it answers ("Messages that do not share the same <c>thid</c> MUST NOT be
@@ -98,7 +99,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         "Live delivery needs a WebSocket route to the mediator (ws or wss): the mediator pushes messages on that connection. " +
         "Pass a ws:// or wss:// serviceEndpointOverride, or poll with FetchAsync. Nothing was sent.";
 
-    private readonly ConcurrentDictionary<string, PendingRequest> _pending = new(StringComparer.Ordinal);
+    // Keyed by request id; an answer's thread matches it ignoring letter case (DIDComm v2.1 threading).
+    private readonly ConcurrentDictionary<string, PendingRequest> _pending = new(StringComparer.OrdinalIgnoreCase);
+    // Keyed by the (mediator, local DID) pair, compared exactly.
     private readonly ConcurrentDictionary<string, LiveRegistration> _live = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Func<Message, SendOptions, CancellationToken, Task<SendResult>> _send;
