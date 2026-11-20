@@ -33,6 +33,14 @@ share the same `thid` MUST NOT be considered a part of the same thread" (threadi
 - Docs: PRD FR-PROTO-04, FR-PROTO-05, FR-THR-01, DD-11 (now covers Core's responders; its stale
   "type + mediator-DID fallback" clause, gone since #98, is removed) and §14.2 M and S; the
   architecture doc's inbound flow.
+- Tests: both responders, for a request with no `thid`, a declared `thid` different from its `id`,
+  one equal to it, and one with a `pthid`, through the handler, `TrustPing.CreateResponse`, the
+  dispatcher, a real authcrypt pack and unpack, the HTTP return route (server and client), a
+  WebSocket session and an out-of-band reply; a hand-built request with an invalid `thid` is refused;
+  `DiscoverFeaturesClient` does not take a `disclose` on another `thid` (`ThreadIdsTests`,
+  `ResponderReplyThreadTests`, `ResponderReplyThreadEnvelopeTests`, `ReturnRouteReplyThreadTests`,
+  `DiscoverFeaturesRoundTripTests`, `DiscoverFeaturesClientTests`). Each declared-`thid` test fails
+  with the fix reverted.
 
 ### Changed — WebSocket endpoints and the WebSocket transport close a peer that takes too long to deliver a message (security hardening, tracked privately; epic #88)
 
