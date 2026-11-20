@@ -24,6 +24,7 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
     private int _currentOffset;
     private long _bytesDelivered;
     private int _largestRead;
+    private int _receives;
     private int _sendsInFlight;
     private int _maxSendsInFlight;
     private TaskCompletionSource? _sendGate;
@@ -117,6 +118,15 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
         }
     }
 
+    /// <summary>The peer sends one part of a message; with <paramref name="endOfMessage"/> <c>false</c>, more of it is still to come.</summary>
+    public void PushPart(byte[] bytes, bool endOfMessage) => _inbound.Writer.TryWrite(new Inbound(bytes, endOfMessage, Close: null));
+
+    /// <summary>
+    /// Runs at the start of each <see cref="ReceiveAsync"/>, on the caller's thread, with the 1-based
+    /// number of that receive on this socket: a test can act at an exact point of the reader's loop.
+    /// </summary>
+    public Action<int>? BeforeReceive { get; set; }
+
     /// <summary>The peer sends its close frame.</summary>
     public void PushClose(WebSocketCloseStatus status = WebSocketCloseStatus.NormalClosure, string? description = "peer closed")
         => _inbound.Writer.TryWrite(new Inbound(Array.Empty<byte>(), EndOfMessage: true, Close: (status, description)));
@@ -149,6 +159,8 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
     /// <inheritdoc />
     public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
     {
+        var receiveNumber = Interlocked.Increment(ref _receives);
+        BeforeReceive?.Invoke(receiveNumber);
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_state is WebSocketState.Closed or WebSocketState.Aborted, this);
