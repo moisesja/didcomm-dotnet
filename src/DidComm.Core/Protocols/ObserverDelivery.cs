@@ -160,8 +160,9 @@ internal sealed class ObserverDelivery : IDisposable, IAsyncDisposable
                 }
             }
 
+            // The id is the sender's text: written bounded (LogValues.Id), as on every receive path.
             if (!accepted && Volatile.Read(ref _shutdownStarted) == 0)
-                Drop(observerChannel, snapshot.Id);
+                Drop(observerChannel, Diagnostics.LogValues.Id(snapshot.Id));
         }
     }
 
