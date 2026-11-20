@@ -1,3 +1,4 @@
+using DidComm.Consistency;
 using DidComm.Messages;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,12 @@ namespace DidComm.Protocols.ProblemReport;
 /// emits exactly ONE <see cref="ProblemReport.MaxErrorsExceededCode"/>
 /// (<c>e.p.req.max-errors-exceeded</c>) to halt the cascade, then returns <c>null</c> for
 /// every subsequent report on the same <c>thid</c>.
+/// </para>
+/// <para>
+/// The cascade stop is sent from the DID whose key decrypted the inbound report (its DID subject),
+/// so a different tenant placed first in a multi-recipient <c>to</c> array cannot be made the
+/// sender; a plaintext report or a direct call falls back to the first <c>to</c> entry, as the Trust
+/// Ping and Discover Features responders do.
 /// </para>
 /// </remarks>
 public sealed class ProblemReportHandler : IProtocolHandler
@@ -104,8 +111,12 @@ public sealed class ProblemReportHandler : IProtocolHandler
 
         // Build + log the cascade-stop OUTSIDE the per-thread lock — MessageBuilder allocations
         // and logging shouldn't contend on the lock.
+        // The stop is sent by the DID whose key decrypted the report, as the other built-in
+        // responders do: `to` only names the intended audience, and a recipient cannot tell
+        // whether the first entry is itself (message_structure.md `to`). A plaintext report, or
+        // a direct call, has no decrypting key and falls back to the first `to` entry.
         var stop = ProblemReport.Create(
-            from: message.To![0],
+            from: DidSubject.DidSubjectOf(context.Received.RecipientKid) ?? message.To![0],
             to: message.From!,
             code: ProblemReport.MaxErrorsExceededCode,
             pthid: message.Pthid,
