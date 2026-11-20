@@ -142,8 +142,8 @@ No other place has the same shape, so the sweep raises no stop.
 - [x] Docs: CHANGELOG (behaviour change first; 1.5.1 logging note), PRD, architecture doc, SECURITY.md, README package rows
 - [x] Package validation: additive change passes against 1.5.0; negative control (`DidCommReceiveOptions.UseStomp` made internal) fails with CP0002; restored, rebuilt, passes
 - [x] Gate: `dotnet build DidComm.sln -c Release /warnaserror` (0 warnings), `dotnet test … --no-build` (Core 2629 + 1 skipped, Mediator 4652 + 8 skipped, Interop 2028 + 5 skipped; 0 failed), `dotnet pack … --no-build` (9 packages)
-- [ ] Live interop on the branch (normal + negative controls)
-- [ ] PR opened, CI green
+- [x] Live interop on the branch: normal run 44664795629 green (python, jvm; mediator leg 10/10), negative controls 44664805013 green (20 of 20 sabotaged runs failed as required)
+- [x] PR #140 opened; CI run 44664853345 green (ubuntu, windows)
 
 ## QA permutations
 
@@ -211,3 +211,47 @@ writer stuck mid-send; host stop racing an expiry; buffer return on every path; 
 host clocks; client gate contention, retire and dispose races; the HTTP front-loaded body
 (unchanged, docs only); all six type-tag sites; the resolver binding against case, trailing
 characters, DID URLs and look-alikes, on every resolution path.
+
+## Review
+
+### Round 1 (PR #140, head `3ad4094`, COMMENTED: one P2 in a test)
+
+Reviewer notes: `tasks/todo20261119-pr140-review.md` (main checkout). No production defect; ADV-1 confirmed as
+pre-existing, not introduced.
+
+- **P2: a test accepted its own hang guard as the end of the connection.** In
+  `A_peer_that_answers_the_1008_close_with_data_frames_forever_is_dropped_at_the_close_grace`, the read
+  that waits for the server to end the connection had its own 30 s guard and raced a separate 30 s
+  delay with `Task.WhenAny`; the winner was checked, never awaited. When the read's guard ran out
+  first, its cancellation "won" and the test passed for a connection that never closed.
+  - **Fix:** the read is awaited, so its guard fails the test; the peer's chatter is stopped and
+    awaited in `finally`. One shared helper, `ConnectionEnd.ReadUntilServerEndsAsync`, now does
+    every "wait until the server ends the TCP connection" read of these tests: a FIN or a reset
+    returns; the guard running out throws `TimeoutException`, whatever the read threw, so a guard
+    can never count as the end. The raw peer's frame read no longer reads a cancelled read as "the
+    connection ended" (its `IOException` catch is filtered on the token).
+  - **Sweep** (every test this PR adds or touches; `WhenAny`, hang guards that could count as
+    success, cleanup outside `finally`). Changed: the P2 test; `RawWebSocketPeer.ReadToEndAsync` and
+    `ReadExactAsync`, and `NonReadingPeer.ReadToEndAsync` (all now on the shared helper or filtered);
+    `WebSocketPeerFailureLogTests.ReadToEndAsync` (shared helper) and its reset test's client
+    (`using`). Already sound, unchanged: the awaited `ReadToEndAsync` calls in
+    `WebSocketReceiveDeadlineCloseTests` and the ping-flood test (a guard there already threw
+    `OperationCanceledException`, shown below); `ReadCloseAsync` (a guard throws; only a real end
+    returns `null`, and callers assert non-null); `FloodPingsUntilBlockedAsync` (its `WhenAny` is the
+    measurement, and a write that completed is awaited); `RawFrameConnection.Served` (a lifetime
+    wait, no assertion) and `NextFrameAsync` (a guard throws; `null` only when the reader ended);
+    `PickupClientLiveIdleReceiveDeadlineTests` (`PickupE2E.Within` awaits the move; pending moves are
+    observed and the harness is `await using`); every other guard is a `CancellationTokenSource`
+    passed to an awaited call, so it throws.
+  - **Negative control** (the server never ends the connection: the close step's grace removed, so
+    the drain runs for as long as the peer keeps sending):
+    - old test (`3ad4094`) with the read's guard forced to run out first: **passed, 3 of 3
+      endpoints**, for a connection that never closed (the false pass); unforced, the race went to
+      the delay in that run and it failed;
+    - fixed test: **fails, 3 of 3**, with `TimeoutException: The server did not end the connection
+      within the 00:00:30 hang guard`; the six close-grace tests and the ping-flood test fail too
+      (9 more), and the reserved-opcode tests, whose connection does end, pass (the helper still
+      returns on a real end);
+    - the old helper's awaited sites already failed under the same mutation, with
+      `OperationCanceledException` (a cancelled network read throws that, not `IOException`);
+    - mutation reverted, solution rebuilt (L-071), the affected classes re-run green.
