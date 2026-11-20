@@ -51,7 +51,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         await using var channel = Create(_w, _send, time: _time);
         var request = Ack();
 
-        await channel.SendOneWayAsync(WebSocketRoute, request, "messages-received", M, L, default);
+        await PickupTest.Within(channel.SendOneWayAsync(WebSocketRoute, request, "messages-received", M, L, default));
 
         var call = _send.Calls.Should().ContainSingle().Which;
         call.Message.Should().BeSameAs(request, "the channel never stamps or rewrites the message (SendAsync stamps a copy)");
@@ -74,7 +74,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
             new DidCommOptions { Clock = () => now });
         using var channel = new MediatorClientChannel(client, new MediatorClientOptions(), receivesInbound: false, _time, loggerFactory: null);
 
-        await channel.SendOneWayAsync(HttpRoute, MessagePickup40.CreateMessagesReceived(world.Local.Did, world.Mediator.Did, new[] { "q1" }), "messages-received", world.Mediator.Did, world.Local.Did, default);
+        await PickupTest.Within(channel.SendOneWayAsync(HttpRoute, MessagePickup40.CreateMessagesReceived(world.Local.Did, world.Mediator.Did, new[] { "q1" }), "messages-received", world.Mediator.Did, world.Local.Did, default));
 
         var request = router.Requests.Should().ContainSingle().Subject;
         request.ReturnRoute.Should().BeNull("the transport is not asked for a return route either");
@@ -119,16 +119,24 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
             return FakeSend.Accepted(options.ServiceEndpointOverride!);
         };
         var first = channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default);
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
         var refused = Ack();
 
-        var oneWay = await Record.ExceptionAsync(() => channel.SendOneWayAsync(WebSocketRoute, refused, "messages-received", M, L, default));
-        var exchange = await Record.ExceptionAsync(() => channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, M, L, default));
+        Exception? oneWay;
+        Exception? exchange;
+        try
+        {
+            oneWay = await Record.ExceptionAsync(() => PickupTest.Within(channel.SendOneWayAsync(WebSocketRoute, refused, "messages-received", M, L, default)));
+            exchange = await Record.ExceptionAsync(() => PickupTest.Within(channel.ExchangeAsync(WebSocketRoute, _w.Request(), ClientSpecs.StatusRequest, M, L, default)));
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
 
         oneWay.Should().BeOfType<MediatorBusyException>().Which.Message.Should().Contain("MaxPendingRequests").And.Contain(refused.Id);
         exchange.Should().BeOfType<MediatorBusyException>("a one-way send holds a slot like a request waiting for its answer");
         _send.Count.Should().Be(1, "neither refused message was sent");
-        release.SetResult();
         await PickupTest.Within(first);
         channel.PendingCount.Should().Be(0);
         await PickupTest.Within(channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default));
@@ -181,7 +189,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         var failure = new TransportException("the connection closed");
         _send.Respond = (_, _, _) => Task.FromException<SendResult>(failure);
 
-        var thrown = await Record.ExceptionAsync(() => channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default));
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default)));
 
         thrown.Should().BeSameAs(failure);
         channel.PendingCount.Should().Be(0);
@@ -198,7 +206,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         };
         using var cts = new CancellationTokenSource();
         var sending = channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, cts.Token);
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
 
         cts.Cancel();
         var thrown = await Record.ExceptionAsync(() => PickupTest.Within(sending));
@@ -216,11 +224,11 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
             throw new InvalidOperationException("unreachable");
         };
         var sending = channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default);
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
 
         await channel.DisposeAsync();
         var stalled = await Record.ExceptionAsync(() => PickupTest.Within(sending));
-        var after = await Record.ExceptionAsync(() => channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default));
+        var after = await Record.ExceptionAsync(() => PickupTest.Within(channel.SendOneWayAsync(WebSocketRoute, Ack(), "messages-received", M, L, default)));
 
         stalled.Should().BeOfType<ObjectDisposedException>();
         after.Should().BeOfType<ObjectDisposedException>();
@@ -236,7 +244,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         var request = Ack();
         request.Id = new string('a', length);
 
-        var thrown = await Record.ExceptionAsync(() => channel.SendOneWayAsync(WebSocketRoute, request, "messages-received", M, L, default));
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(channel.SendOneWayAsync(WebSocketRoute, request, "messages-received", M, L, default)));
 
         thrown.Should().BeOfType<ArgumentException>();
         _send.Count.Should().Be(0);
@@ -283,7 +291,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         await using var channel = Create(_w, _send, time: _time);
         var request = MessagePickup40.CreateStatusRequest(L, M, idGenerator: new LetterIds("request")); // an id certain to hold letters
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, PickupWire.StatusRequestSpec4, M, L, default).Observed();
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
         var upper = request.Id.ToUpperInvariant();
         upper.Should().NotBe(request.Id, "precondition: the id has letters to re-case");
 
@@ -300,7 +308,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         await using var channel = Create(_w, _send, time: _time);
         var request = MessagePickup40.CreateStatusRequest(L, M);
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, PickupWire.StatusRequestSpec4, M, L, default).Observed();
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
         var status = StatusFor(request.Id);
         status.Thid = null;
 
@@ -314,7 +322,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         await using var channel = Create(_w, _send, time: _time);
         var request = MessagePickup40.CreateLiveDeliveryChange(L, M, liveDelivery: true);
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, PickupWire.LiveDeliveryChangeSpec4, M, L, default).Observed();
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
 
         var claimed = channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(MessagePickup40.CreateLiveModeNotSupported(M, L, request.Id)));
         var thrown = await Record.ExceptionAsync(() => PickupTest.Within(exchange));
@@ -332,7 +340,7 @@ public sealed class MediatorClientChannelV4Tests : IAsyncLifetime
         using var stream = channel.RegisterLiveStream(M, L);
         var request = MessagePickup40.CreateDeliveryRequest(L, M, 10);
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, PickupWire.DeliveryRequestSpec4, M, L, default).Observed();
-        await _send.FirstCall;
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
         var push = MessagePickup40.CreateDelivery(M, L, new[] { new DeliveredMessage("q1", Encoding.UTF8.GetBytes(FakePickupExchange.Jwe("x"))) });
 
         channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(push)).Should().BeTrue();

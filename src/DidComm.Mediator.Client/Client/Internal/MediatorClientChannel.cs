@@ -434,7 +434,7 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             if (IsDisposed)
                 throw Disposed();
             using var deadline = new GuardedDeadline(Time, Options.RequestTimeout, ct, ShutdownToken);
-            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) sending; no answer is expected.", request.Id, name);
+            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) sending; no answer is expected.", MediatorLog.LogId(request.Id), name);
             // No return_route header: omitted, the extension's default is none (return_route
             // main.md L25), and Message Pickup 4.0 removed it from messages-received (L35). Nothing
             // is registered, so nothing can answer it; an HTTP response's message is not looked at.
@@ -464,12 +464,12 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 throw Disposed();
             }
             MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) sent after {ElapsedMs} ms; no answer is expected.",
-                request.Id, name, (long)Time.GetElapsedTime(startedAt).TotalMilliseconds);
+                MediatorLog.LogId(request.Id), name, (long)Time.GetElapsedTime(startedAt).TotalMilliseconds);
         }
         catch (Exception ex)
         {
             MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) was not sent after {ElapsedMs} ms: {ExceptionType}.",
-                request.Id, name, (long)Time.GetElapsedTime(startedAt).TotalMilliseconds, ex.GetType().Name);
+                MediatorLog.LogId(request.Id), name, (long)Time.GetElapsedTime(startedAt).TotalMilliseconds, ex.GetType().Name);
             throw;
         }
         finally

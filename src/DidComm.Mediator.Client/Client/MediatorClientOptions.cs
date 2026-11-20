@@ -29,7 +29,8 @@ public sealed class MediatorClientOptions
 
     /// <summary>
     /// The largest number of requests that may wait for an answer at the same time, for both
-    /// clients of one container together. A request beyond it is refused with
+    /// clients of one container together; a message that expects no answer (a Message Pickup 4.0
+    /// <c>messages-received</c>) counts while it is being sent. A request beyond it is refused with
     /// <see cref="InvalidOperationException"/> before anything is sent. Default 64; 1 to 4096.
     /// </summary>
     public int MaxPendingRequests { get; set; } = 64;
