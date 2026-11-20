@@ -102,6 +102,9 @@ public sealed class WebSocketClosingTests
 {
     private static readonly TimeSpan ShortGrace = TimeSpan.FromMilliseconds(50);
 
+    // Real-time hang guard: each call ends within its grace with a correct product.
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(15);
+
     [Fact]
     public async Task The_buffer_is_not_returned_to_its_pool_while_a_receive_into_it_never_completes()
     {
@@ -110,7 +113,7 @@ public sealed class WebSocketClosingTests
         var buffer = new byte[8192];
         var outstanding = socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
 
-        var returned = await WebSocketClosing.EndAsync(socket, WebSocketCloseStatus.PolicyViolation, "message receive timeout", outstanding, buffer, pool, ShortGrace, CancellationToken.None, logger: null);
+        var returned = await WebSocketClosing.EndAsync(socket, WebSocketCloseStatus.PolicyViolation, "message receive timeout", outstanding, buffer, pool, ShortGrace, CancellationToken.None, logger: null).WaitAsync(HangGuard);
 
         returned.Should().BeFalse();
         pool.Returned.Should().BeEmpty("the receive may still write into the buffer");
@@ -129,7 +132,7 @@ public sealed class WebSocketClosingTests
         var buffer = new byte[8192];
         var outstanding = socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
 
-        var returned = await WebSocketClosing.EndAsync(socket, WebSocketCloseStatus.PolicyViolation, "message receive timeout", outstanding, buffer, pool, ShortGrace, CancellationToken.None, logger: null);
+        var returned = await WebSocketClosing.EndAsync(socket, WebSocketCloseStatus.PolicyViolation, "message receive timeout", outstanding, buffer, pool, ShortGrace, CancellationToken.None, logger: null).WaitAsync(HangGuard);
 
         returned.Should().BeTrue();
         pool.Returned.Should().ContainSingle().Which.Should().BeSameAs(buffer);
@@ -143,7 +146,7 @@ public sealed class WebSocketClosingTests
         var pool = new RecordingPool();
         var buffer = new byte[8192];
 
-        var returned = await WebSocketClosing.EndAsync(socket, WebSocketCloseStatus.MessageTooBig, "payload too large", outstanding: null, buffer, pool, TimeSpan.FromSeconds(30), CancellationToken.None, logger: null);
+        var returned = await WebSocketClosing.EndAsync(socket, WebSocketCloseStatus.MessageTooBig, "payload too large", outstanding: null, buffer, pool, TimeSpan.FromSeconds(30), CancellationToken.None, logger: null).WaitAsync(HangGuard);
 
         returned.Should().BeTrue();
         socket.SentClose.Should().Be(WebSocketCloseStatus.MessageTooBig);
@@ -159,7 +162,7 @@ public sealed class WebSocketClosingTests
         var pool = new RecordingPool();
         var buffer = new byte[8192];
 
-        var returned = await WebSocketClosing.EndAsync(socket, status: null, description: null, outstanding: null, buffer, pool, ShortGrace, CancellationToken.None, logger: null);
+        var returned = await WebSocketClosing.EndAsync(socket, status: null, description: null, outstanding: null, buffer, pool, ShortGrace, CancellationToken.None, logger: null).WaitAsync(HangGuard);
 
         returned.Should().BeTrue();
         pool.Returned.Should().ContainSingle();

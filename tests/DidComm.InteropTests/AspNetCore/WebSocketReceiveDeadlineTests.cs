@@ -113,6 +113,51 @@ public sealed class WebSocketReceiveDeadlineTests
         await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
 
+    [Theory]
+    [MemberData(nameof(Endpoints))]
+    public async Task Connections_that_each_hold_an_almost_full_first_message_unfinished_are_all_closed_with_1008_at_the_limit_and_only_the_first_line_is_loud(DeadlineEndpoint endpoint)
+    {
+        const int connections = 4;
+        await using var host = await DeadlineKestrelHost.StartAsync();
+        var held = DeadlineKestrelHostOptions.DefaultMaxReceiveBytes - 1;
+        var fragment = new byte[16 * 1024];
+        Array.Fill(fragment, (byte)'a');
+        var mark = host.Time.Mark();
+        var peers = new List<RawWebSocketPeer>();
+        for (var i = 0; i < connections; i++)
+        {
+            var peer = host.Own(await host.ConnectRawAsync(endpoint));
+            peers.Add(peer);
+            // MaxReceiveBytes - 1 in 16 KiB fragments, none of them the last.
+            var opcode = RawFrame.Text;
+            for (var sent = 0; sent < held; opcode = RawFrame.Continuation)
+            {
+                var n = Math.Min(fragment.Length, held - sent);
+                await peer.SendFrameAsync(opcode, fin: false, fragment.AsMemory(0, n));
+                sent += n;
+            }
+            await peer.PingAsync($"held {i}"); // the server has read the whole partial message
+        }
+        host.Time.ScheduledTimersSince(mark).Should().Be(connections, "one deadline per connection, started at its accept, and none per fragment");
+        var fired = host.Time.TimersFired;
+
+        host.Time.Advance(Limit);
+        host.Time.TimersFired.Should().Be(fired + connections);
+        foreach (var peer in peers)
+        {
+            var close = await peer.ReadCloseAsync(Guard);
+            close.Should().NotBeNull();
+            close!.CloseCode.Should().Be((int)WebSocketCloseStatus.PolicyViolation, "a connection that holds an unfinished message is closed at the limit");
+            await peer.SendFrameAsync(RawFrame.Close, fin: true, close.Payload.AsMemory(0, 2));
+        }
+
+        host.DispatchedCount(endpoint).Should().Be(0, "nothing of a partial message is processed");
+        var lines = host.TimeoutLines();
+        lines.Should().HaveCount(connections, "each expiry is logged once");
+        lines.Count(l => l.Level == LogLevel.Information).Should().Be(1, "the first expiry on an endpoint is written at Information, the next ones at Debug until the 1000th");
+        lines.Count(l => l.Level == LogLevel.Debug).Should().Be(connections - 1);
+    }
+
     // ---- a later message -------------------------------------------------------------------
 
     [Theory]

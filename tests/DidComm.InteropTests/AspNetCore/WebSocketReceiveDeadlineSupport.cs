@@ -50,7 +50,10 @@ internal sealed class DeadlineKestrelHostOptions
     /// <summary>Register the manual clock as the container's <see cref="TimeProvider"/>.</summary>
     public bool RegisterClock { get; set; } = true;
 
-    public int MaxReceiveBytes { get; set; } = 64 * 1024;
+    /// <summary>The host's <c>DidCommOptions.MaxReceiveBytes</c> unless a test sets another.</summary>
+    public const int DefaultMaxReceiveBytes = 64 * 1024;
+
+    public int MaxReceiveBytes { get; set; } = DefaultMaxReceiveBytes;
 }
 
 /// <summary>
@@ -168,6 +171,13 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         var host = new DeadlineKestrelHost(app, new Uri(address).Port, identity.Did, time, logs, recorder, callbackSeen, alice);
         host._owned.Add(alice);
         return host;
+    }
+
+    /// <summary>Dispose <paramref name="owned"/> with the host.</summary>
+    public T Own<T>(T owned) where T : IAsyncDisposable
+    {
+        _owned.Add(owned);
+        return owned;
     }
 
     public static string PathOf(DeadlineEndpoint endpoint) => endpoint switch
