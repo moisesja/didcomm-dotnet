@@ -39,8 +39,9 @@ public sealed class PickupClientLiveIdleReceiveDeadlineTests
 
         // Wait for the client itself: no request waiting (no request deadline left on the clock) and
         // one timer, the stream's next cycle. So the move below can fire nothing but a receive limit.
-        await MediatorTestServer.WaitUntilAsync(() => harness.Channel.PendingCount == 0 && time.ScheduledTimers == 1, "the stream finished its first cycle and waits for a push");
-        time.HasOnlyTimerDueIn(TimeSpan.FromHours(24)).Should().BeTrue("the only timer is the stream's next cycle");
+        await MediatorTestServer.WaitUntilAsync(
+            () => harness.Channel.PendingCount == 0 && time.HasOnlyTimerDueIn(TimeSpan.FromHours(24)),
+            "the stream finished its first cycle, and the only timer left is its next cycle");
         var idle = time.Mark();
         var fired = time.TimersFired;
 
