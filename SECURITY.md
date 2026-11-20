@@ -60,7 +60,9 @@ This is what the library protects, and what it leaves to the host:
   that serve known wallets only should use an allow-list `IMediationPolicy`.
 - **What a stranger can reach without enrolling:** the forward endpoint (always `202`, whether or
   not the recipient is registered), the WebSocket endpoint and the out-of-band invitation.
-- **What the library bounds:** message size (`MaxReceiveBytes`), how long a peer has to deliver
+- **What the library bounds:** message size (`MaxReceiveBytes`), the length of a message's `id`,
+  `thid` and `pthid` (512 characters; a longer one is refused at unpack, so the thread state and
+  problem-report budgets keyed by them stay small), how long a peer has to deliver
   each WebSocket message (`MessageReceiveTimeout`), queued messages and bytes per
   recipient and per store, grants and registrations, sessions, forwards waiting for their `202` (a
   `202` that is not taken within its deadline is withdrawn and the forward is not relayed), and an

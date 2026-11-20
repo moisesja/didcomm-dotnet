@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Runtime.CompilerServices;
 using System.Text;
 using AwesomeAssertions;
 using DidComm.InteropTests.Mediator;
@@ -16,9 +15,11 @@ namespace DidComm.InteropTests.AspNetCore;
 /// <summary>
 /// A stranger floods the HTTP endpoint with plaintext Trust Pings, each on a fresh thread id. The
 /// dispatcher files every one in its thread store (10 000 entries) before the handler runs, so the
-/// store's size follows the thread ids' length: at 512 characters it stays within the bound its docs
-/// state (13 MB at 10 000 entries), and at 513 nothing reaches it. Runs in the serial collection, so
-/// no other test allocates while the heap is measured.
+/// store's size follows the thread ids' length. At 512 characters the flood fills the store to its
+/// cap with keys of exactly that length, and at 513 nothing reaches it. What one such entry holds is
+/// measured in <c>IdKeyedStoreRetentionTests</c> (Core), in a process quiet enough for a heap
+/// measurement: here, earlier tests' memory is still being released while this one runs, and a heap
+/// difference would count it as the store's.
 /// </summary>
 [Collection(QaSerialTiming.Name)]
 public sealed class MessageIdLengthFloodTests
@@ -27,15 +28,12 @@ public sealed class MessageIdLengthFloodTests
     private const int Posts = 12_000; // over the cap, so eviction runs during the flood
     private const int Workers = 32;
 
-    // The bound the stores' docs state at the default 10 000 entries.
-    private const long DocumentedBound = 13L * 1000 * 1000;
-
     private readonly ITestOutputHelper _out;
 
     public MessageIdLengthFloodTests(ITestOutputHelper output) => _out = output;
 
     [Fact]
-    public async Task A_flood_of_plaintext_pings_on_fresh_512_character_thread_ids_leaves_the_thread_store_within_its_documented_bound()
+    public async Task A_flood_of_plaintext_pings_on_fresh_512_character_thread_ids_fills_the_thread_store_to_its_cap_with_keys_of_that_length()
     {
         await using var host = await ReturnRouteTestHost.StartAsync();
         var store = (InMemoryThreadStateStore)host.App.Services.GetRequiredService<IThreadStateStore>();
@@ -44,24 +42,14 @@ public sealed class MessageIdLengthFloodTests
         var statuses = await FloodAsync(host, Max);
         var elapsed = Stopwatch.GetElapsedTime(started);
         var count = store.Count;
+        var floodKeys = FloodKeysHeld(store, Max);
 
-        // What the store holds: the live heap with it full, less the live heap once every entry the
-        // flood made is removed again (the thread ids are rebuilt, not kept, so the test holds none).
-        var full = LiveBytes();
-        EmptyStore(store, Max);
-        var emptied = LiveBytes();
-        var retained = full - emptied;
-        GC.KeepAlive(store);
-        GC.KeepAlive(host);
-
-        _out.WriteLine($"{Posts:N0} posts in {elapsed.TotalSeconds:N1} s; store holds {count:N0} entries of 512 characters retaining {retained:N0} B ({retained / Math.Max(1, count):N0} B each)");
+        _out.WriteLine($"{Posts:N0} posts in {elapsed.TotalSeconds:N1} s; store holds {count:N0} entries, {floodKeys:N0} of them flood keys of 512 characters");
         statuses.Should().OnlyContain(s => s == HttpStatusCode.Accepted);
         // Eviction trims to 90 % of the cap; inserts that land while a pass runs may leave it over the
         // cap by at most one per concurrent sender.
         count.Should().BeInRange(InMemoryThreadStateStore.DefaultMaxEntries * 9 / 10, InMemoryThreadStateStore.DefaultMaxEntries + Workers, "the flood filled the store to its cap");
-        store.Count.Should().Be(0, "every entry was removed for the second measurement");
-        retained.Should().BeLessThanOrEqualTo(DocumentedBound * count / InMemoryThreadStateStore.DefaultMaxEntries);
-        retained.Should().BeGreaterThan(count * 2L * Max, "the probe measures the thread ids the store keeps (L-070)");
+        floodKeys.Should().Be(count, "every entry the store holds is one of the flood's 512-character thread ids");
     }
 
     [Fact]
@@ -119,27 +107,18 @@ public sealed class MessageIdLengthFloodTests
         });
     }
 
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void EmptyStore(InMemoryThreadStateStore store, int length)
+    /// <summary>How many of the flood's thread ids the store holds, each checked to be <paramref name="length"/> characters.</summary>
+    private static int FloodKeysHeld(InMemoryThreadStateStore store, int length)
     {
+        var held = 0;
         for (var i = 0; i < Posts; i++)
-            store.Remove(Key(i, length));
-    }
-
-    /// <summary>
-    /// Live bytes after full, compacting collections (the LOH too): the heap size the last full
-    /// blocking GC left, less its free space. <see cref="GC.GetTotalMemory(bool)"/> is not used: with
-    /// the .NET 10 region allocator it reads about twice the live size.
-    /// </summary>
-    private static long LiveBytes()
-    {
-        for (var i = 0; i < 2; i++)
         {
-            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
-            GC.WaitForPendingFinalizers();
+            if (store.Get(Key(i, length)) is { } state)
+            {
+                state.Thid.Should().HaveLength(length);
+                held++;
+            }
         }
-        var info = GC.GetGCMemoryInfo(GCKind.FullBlocking);
-        return info.HeapSizeBytes - info.FragmentedBytes;
+        return held;
     }
 }

@@ -35,6 +35,12 @@ namespace DidComm.Protocols.ProblemReport;
 /// per-message work), but that is far more expensive than the original cheap-thid reset; a
 /// distributed/persistent budget is the path to a hard guarantee for horizontally-scaled hosts.
 /// </para>
+/// <para>
+/// The size of each entry is bounded too: the handler's keys come from unpacked reports, whose
+/// <c>pthid</c> is at most 512 characters (FR-MSG-11). Measured, an entry with a 512-character key
+/// holds about 1.1 KB, so the store at <see cref="DefaultMaxEntries"/> holds about 11 MB at most.
+/// Before the id limit a key could be as long as the whole message.
+/// </para>
 /// </remarks>
 public sealed class CascadeBudgetStore
 {

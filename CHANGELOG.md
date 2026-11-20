@@ -6,6 +6,62 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed — a message whose `id`, `thid` or `pthid` is longer than 512 characters is refused (security hardening, tracked privately; epic #88)
+
+**Behaviour change for released `DidComm.Core`.** A message's `id`, `thid` and `pthid` must now be at
+most 512 characters. A longer one is refused with `MalformedMessageException` at unpack (every
+envelope, every endpoint), at pack and by `MessageBuilder.Build()`, and the error text quotes no
+value. The limit is fixed; there is no setting. Why 512 and not the spec's 32: DIDComm v2.1 describes
+an id as "a short (<=32 bytes) string" but recommends UUIDs, which are 36 characters as written (the
+library's own ids are UUIDs), so 512 refuses nothing in use while it bounds what a peer can make the
+receiver keep.
+
+Who notices: a peer or an application that uses ids, `thid`s or `pthid`s longer than 512 characters.
+None is known; every id this library generates is 36 characters.
+
+- **Where.** `Message.Validate` checks the three lengths first, before the character checks and
+  before unpack hands the message to the replay guard, the dispatcher or any store. A reply builder
+  given a hand-built request whose declared `thid` is longer refuses it too
+  (`TrustPing.CreateResponse`, the Discover Features responder, `CoordinateMediation.ResponseThreadId`,
+  `MessagePickup.ResponseThreadId`).
+- **What it bounds.** The dispatcher's thread store and the problem-report cascade budget, each capped
+  at 10 000 entries, now hold at most about 12 MB each (measured with 512-character keys). A Trust
+  Ping response on a return route is bounded with them.
+- **`ReplayProtectionOptions.MaxMessageIdLength`** keeps its default of 512. Since unpack refuses a
+  longer id first, a value above 512 has no effect on the receive endpoints or the client's inbound
+  consumer; a lower value still applies.
+
+**Also hardened in the same change:**
+
+- **Problem-report log lines.** The three lines the problem-report handler writes (a malformed code, a
+  counted error report, a tripped cascade guard) write the report's `pthid` bounded (up to 128
+  characters, otherwise its length) and its `code` only when it is short lower kebab-case (otherwise
+  a placeholder). Each is rate-limited: the first and every 1000th at its own level, the rest at
+  Debug.
+- **Other ids in log lines.** The observer-drop warning, the client's consumer of pushed messages
+  and the pack-signed "no `to`" warning write the message id bounded, as every other receive path
+  does. The STOMP endpoint no longer writes an unsupported command it received.
+
+**API.** No public API change. Package validation passes against 1.5.0, and its negative control (a
+removed member) fails.
+
+**Tests.** `MessageIdLengthTests`, `MessageIdLengthPackPathTests`, `MessageIdLengthEndpointTests`
+(each field at 512 and 513, over HTTP and WebSocket, in plaintext, signed, anoncrypt and authcrypt
+envelopes; refused before the thread store, the cascade budget, the replay guard and any handler; an
+over-long value with an invalid last character refused for its length), `MessageIdLengthFloodTests`
+(a flood through the endpoint fills the thread store with 512-character keys only; at 513 nothing
+reaches it), `IdKeyedStoreRetentionTests` (measured retention), `ProblemReportLogLineTests` and
+`ProblemReportRealConsoleTests` (a real console provider), plus cases in `ObserverDeliveryTests` and
+`PackSignedMissingToWarningTests`. Tests that used longer ids now use 512, or set the long value
+after unpack where they test a handler's own bound. Every new test of the limit and of the log lines
+fails on the code before this change or under a named mutation of the fix. The retention
+measurement and three controls (an empty id, the default generator, the replay default) pass either
+way; the measurement's negative control shows it detects longer keys.
+
+**Docs.** PRD FR-MSG-02 (was "≤ 32 bytes"), FR-MSG-11, FR-API-09, FR-RR-01, FR-RR-08, FR-PICK-03,
+FR-PROTO-10; the architecture doc (inbound flow, held forwards, replay, pickup, bounded ids in log
+lines); `SECURITY.md` "What the library bounds"; the stores' XML docs.
+
 ### Fixed — Trust Ping and Discover Features replies stay in the thread the request declares (#138; epic #88)
 
 **Behaviour change for released `DidComm.Core`.** A DIDComm request may name its own thread

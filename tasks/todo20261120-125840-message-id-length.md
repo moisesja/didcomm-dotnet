@@ -66,33 +66,58 @@ Verdicts: **(a)** closed by the 512 limit; **(b)** already bounded; **(c)** fold
 | 24 | `Extensions.DependencyInjection/InboundDispatchConsumer` (4 lines) | **raw** message id | rate-limited | authenticated session peer | (c): `LogValues.Id` |
 | 25 | `AspNetCore/StompServerSession` unsupported-command Warning | **raw** STOMP command (≤ 32 bytes; ESC possible) | one per connection | yes (opt-in STOMP) | (c): drop the value from the line |
 | 26 | `WebSocketDidCommTransport` | our endpoints and DIDs | ours | no | (b); pushed frames go through unpack, so (a) |
-| 27 | `DidCommClient` pack-time log | our own id | ≤ 512 now | no | (b) |
+| 27 | `DidCommClient` pack-signed "no `to`" warning | the caller's own id, written before `Validate` runs | none (QA found it) | no | (c): `LogValues.Id` |
+| 27a | `ObserverDelivery` drop warning | raw message id (≤ 512 after unpack; unbounded from a host-built `UnpackResult`) | rate-limited | yes | (c): `LogValues.Id` (adversarial pass, Low) |
 | 28 | `please_ack`/`ack`, `accept-lang`, attachment ids, problem-report `comment`/`args`, Discover Features queries, DIDs/kids | — | not stored or logged; transient, or 2048/4096 | yes | (b) |
 | 29 | Exception texts that quote wire values (`Message.Validate` character checks, `ProblemCode.Parse`, ...) | — | — | — | (d) #116 |
 
 Nothing needs a new setting, a public API change or a limit the owner has not chosen.
 
-## Stores' bound (estimate; measured in QA)
+## Stores' bound (measured)
 
-With 512-character keys and the default 10,000 entries:
-- the thread store holds about 1.16 KB per entry, about 11–12 MB in all, plus a small overshoot while an eviction pass runs;
-- the cascade budget holds about 1.1 KB per entry, about 11 MB in all.
+With 512-character keys and the default 10,000 entries, measured as heap size minus fragmentation after full compacting GCs (`GC.GetTotalMemory` reads about 2x under .NET 10's region GC, so it is not used):
+- the thread store holds 11.8 MB (1,180 B per entry), plus about 1.2 KB per insert that completes during an eviction pass. An end-to-end flood of 12,000 pings, measured by QA with the Interop flood test run alone, left 9,977 entries and 11.7 MB. In the full Interop run the same heap difference read 13.2–13.9 MB, because earlier tests' memory is still being released while it runs (consecutive readings with nothing changed fell 1–3 MB each, and 28 MB over 3 s). So the end-to-end test now checks the store's contents (filled to its cap, every key one of the flood's 512-character ids), and the byte bound is asserted in Core, whose heap holds still (consecutive readings within 200 B);
+- the cascade budget holds 11.3 MB (1,129 B per entry);
+- the negative control, 2048-character keys set directly (no unpack), holds 42 MB.
 
 ## Items
 
 - [x] Advisory drafted (private; id kept out of public text)
 - [x] Spec quoted; architect pass reconciled; sweep table
-- [ ] `IdentifierLimits.MaxMessageIdLength`; `Message.Validate` length checks first; `ThreadIds.ResponseThreadId`; `ReplayProtectionOptions` / `PickupSizing` refer to the constant
-- [ ] A3: `LogValues.ProblemCode`; `ProblemReportHandler` lines bounded and rate-limited
-- [ ] Sweep folds: `InboundDispatchConsumer` ids via `LogValues.Id`; STOMP command not written; `ForwardHandler`/`HeldForward` comment
-- [ ] Regression tests (unit, facade, end to end); fix existing tests that used ids over 512
-- [ ] QA pass (permutations, memory measured, mutations, interop vectors)
-- [ ] Adversarial pass (~20 min)
-- [ ] Docs: CHANGELOG (leads with the behaviour change), PRD FR-MSG-02/04/11, FR-API-09, FR-RR-01/08, FR-PROTO-10, architecture doc, SECURITY.md, XML docs with the measured bound
+- [x] `IdentifierLimits.MaxMessageIdLength`; `Message.Validate` length checks first; `ThreadIds.ResponseThreadId`; `ReplayProtectionOptions` / `PickupSizing` refer to the constant (`7b0cb76`)
+- [x] A3: `LogValues.ProblemCode`; `ProblemReportHandler` lines bounded and rate-limited (`7b0cb76`)
+- [x] Sweep folds: `InboundDispatchConsumer` ids via `LogValues.Id`; STOMP command not written; `HeldForward` comment (`7b0cb76`)
+- [x] Regression tests (unit, facade, end to end); existing tests that used ids over 512 now use 512, or set the long value after unpack where they test a handler's own bound (`7b0cb76`)
+- [x] QA pass: no product defect. Tests in `91f8880`, `996b53b`. One low doubt fixed: the pack-signed warning's id (`9377736`)
+- [x] Adversarial pass (~24 min): no way around the limit. One Low fixed: the observer-drop id (`58cc68d`); the rest overlap #115 / #116 (see Review)
+- [x] Docs: CHANGELOG (leads with the behaviour change), PRD FR-MSG-02/11, FR-API-09, FR-RR-01/08, FR-PICK-03, FR-PROTO-10, architecture doc, SECURITY.md, XML docs with the measured bound
 - [ ] Build/test/pack gate; package validation negative control; DX gate (no new public members)
 - [ ] Live interop run (normal)
 - [ ] PR; CI green
 
 ## Review
 
-(filled in at hand-back and after each review round)
+### QA (sub-agent, branch `qa/message-id-length`, merged fast-forward)
+
+- 46 end-to-end tests (`MessageIdLengthEndpointTests`): each field × 4 envelopes × HTTP and WebSocket at 512 and 513; refusal before the thread store (spy), the cascade budget, the replay guard and the `RecordingHandler`; L-055 poison (512 valid characters + `/`) refused for its length in all 4 envelopes.
+- Flood (`MessageIdLengthFloodTests`): 12,000 pings at 512 → 9,977 entries, 11.7 MB (run alone); at 513 → 0 entries. At the gate, its heap measurement failed in the full Interop run (13.2 MB against 12.98 MB), from other tests' memory being freed during the measurement, not from the store; diagnosed with repeated readings and changed to a contents check (see "Stores' bound").
+- Ping-response size (A2): 1,648 B on a UUID thread, 2,288 B on a 512-character thread, socket and HTTP alike; at 513 nothing is pushed.
+- Real console (`ProblemReportRealConsoleTests`, JSON and plain console): no marker, injected line or ESC reaches the console.
+- Pack paths and Out-of-Band (`MessageIdLengthPackPathTests`).
+- Mutations M0–M10 (the fix removed whole; each field's check; order; `ResponseThreadId`; each log line raw; rate limit off; consumer id; STOMP command; off by one): each red, then green after revert and rebuild. Tests that cannot fail under any mutation, by design: the three store-retention tests (they set keys directly; their negative control shows sensitivity) and three controls.
+- Low doubt, fixed in `9377736`: `DidCommClient.PackSignedAsync`'s "no `to`" warning wrote the caller's raw id before `Validate`. Now through `LogValues.Id`, with a mutation-proven test.
+
+### Adversarial (sub-agent, ~24 min, probes not merged)
+
+| Severity | Finding | Decision |
+|---|---|---|
+| Low | Observer-drop warning wrote the inbound id raw (`ObserverDelivery`) | Fixed (`58cc68d`), mutation-proven test |
+| Info | `please_ack` / `ack` entries and attachment ids have no length bound, and their character-check errors quote them | Left to open issue #116 (exception texts quoting wire values). Nothing stores them. A 512 limit on them is not part of the owner's decision |
+| Info | `DiscoverFeaturesClient.LogRejected` writes the received id raw (now ≤ 512) | Left to open issue #115 |
+| Info | The WebSocket endpoint's per-frame unpack-rejection Warning is not rate-limited | Pre-existing and documented as one line per message (architecture doc); not changed |
+
+Held: JSON escapes in values and member names; near-miss names (`THID`, `~thread`) do not bind and nothing reads them as thread ids; duplicate keys refused; surrogate pairs; nothing touches the id between deserialization and `Validate`; every receive path goes through `UnpackAsync` → `Validate`; other wire-keyed stores bounded; no new timing or log oracle. A host-built `UnpackResult` passed to `ProtocolDispatcher.DispatchAsync` skips `Validate` (host code; the store docs say so).
+
+### Seen locally, not this change
+
+`ObserverDeliveryTests.Enqueue_flush_and_shutdown_races_finish_without_leaking_reservations` failed 4 of 15 local runs (`InvalidOperationException`, "flush barrier could not be admitted"). That is open issue #136, unchanged by this PR.
