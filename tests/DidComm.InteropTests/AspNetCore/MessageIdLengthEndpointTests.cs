@@ -132,7 +132,7 @@ public sealed class MessageIdLengthEndpointTests
         var over = PureAck(Value("zqxackover", Max + 1));
         var at = PureAck(Value("zqxackat", Max));
 
-        var statuses = await DeliverAsync(host, transport, over, at, until: () => store.Keys.Count > 0);
+        var statuses = await DeliverAsync(host, transport, over, at, until: () => store.Keys.Contains(at.Thid!));
 
         if (transport == Transport.Http)
             statuses.Should().Equal(HttpStatusCode.BadRequest, HttpStatusCode.Accepted);
@@ -150,7 +150,7 @@ public sealed class MessageIdLengthEndpointTests
         var over = ErrorReport(host, Value("zqxbudgetover", Max + 1));
         var at = ErrorReport(host, Value("zqxbudgetat", Max));
 
-        var statuses = await DeliverAsync(host, transport, over, at, until: () => budget.Count > 0);
+        var statuses = await DeliverAsync(host, transport, over, at, until: () => budget.Peek(at.Pthid!).ErrorCount > 0);
 
         if (transport == Transport.Http)
             statuses.Should().Equal(HttpStatusCode.BadRequest, HttpStatusCode.Accepted);
@@ -176,7 +176,7 @@ public sealed class MessageIdLengthEndpointTests
         var over = InScope(host, Value("zqxreplayover", 600));
         var at = InScope(host, Value("zqxreplayat", Max));
 
-        var statuses = await DeliverAsync(host, transport, over, at, until: () => host.Recorder.Count > 0, shape: EnvelopeShape.Authcrypt);
+        var statuses = await DeliverAsync(host, transport, over, at, until: () => host.Recorder.Seen.Any(r => r.Message.Id == at.Id), shape: EnvelopeShape.Authcrypt);
 
         if (transport == Transport.Http)
             statuses.Should().Equal(HttpStatusCode.BadRequest, HttpStatusCode.OK);
@@ -369,7 +369,7 @@ public sealed class MessageIdLengthEndpointTests
     /// <summary>
     /// Deliver <paramref name="over"/> then <paramref name="at"/> in <paramref name="shape"/>: as two
     /// HTTP posts (their statuses returned), or on one socket, waiting until <paramref name="until"/>
-    /// holds (the second message was processed, so the first was too), then closing it.
+    /// holds (the second message was processed, so the first, on the same socket, was too), then closing it.
     /// </summary>
     private static async Task<IReadOnlyList<HttpStatusCode>> DeliverAsync(
         ReturnRouteTestHost host, Transport transport, Message over, Message at, Func<bool> until, EnvelopeShape shape = EnvelopeShape.Plaintext)
