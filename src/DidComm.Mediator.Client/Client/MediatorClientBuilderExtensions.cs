@@ -24,8 +24,11 @@ public static class MediatorClientBuilderExtensions
     /// <c>UseHttpTransport()</c>: the answer comes back in the response. Over a WebSocket register
     /// <c>UseWebSocketTransport(o =&gt; o.ReceiveInbound = true)</c> and <c>UseInboundDispatch()</c>:
     /// the answers and live pushes arrive on the connection, and the inbound dispatcher hands them to
-    /// the clients. Without both, a WebSocket route is refused before anything is sent (so is one
-    /// under <c>UseStomp</c>, which reads nothing back). With a transport or
+    /// the clients. Each message the mediator pushes there must arrive whole within the transport's
+    /// <c>MessageReceiveTimeout</c> of its first part (60 seconds by default), or the transport closes
+    /// that connection with status 1008; a connection waiting for the next message, such as an idle
+    /// live stream, is never timed. Without both, a WebSocket route is refused before anything is
+    /// sent (so is one under <c>UseStomp</c>, which reads nothing back). With a transport or
     /// <c>ITransportRouter</c> of your own the clients cannot tell whether answers come back, and
     /// they send.
     /// </para>

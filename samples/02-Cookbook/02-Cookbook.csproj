@@ -5,7 +5,7 @@
     <RootNamespace>DidComm.Samples.Cookbook</RootNamespace>
     <AssemblyName>DidComm.Samples.Cookbook</AssemblyName>
     <IsPackable>false</IsPackable>
-    <Description>didcomm-dotnet Cookbook — runnable, narrated demonstrations of the §14.2 API tasks (FR-DX-04). One section per task letter, A through BB, plus the Phase 7 mediator tasks CC through FF and the trusted-proxy task GG.</Description>
+    <Description>didcomm-dotnet Cookbook — runnable, narrated demonstrations of the §14.2 API tasks (FR-DX-04). One section per task letter, A through BB, plus the Phase 7 mediator tasks CC through FF, the trusted-proxy task GG and the WebSocket receive time limit task HH.</Description>
   </PropertyGroup>
 
   <ItemGroup>

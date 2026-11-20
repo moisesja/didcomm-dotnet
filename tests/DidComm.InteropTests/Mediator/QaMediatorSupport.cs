@@ -149,6 +149,7 @@ internal sealed class QaManualTimeProvider : TimeProvider
     private TaskCompletionSource _timerChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DateTimeOffset _now;
     private int _timersFired;
+    private long _timersCreated;
 
     public QaManualTimeProvider(DateTimeOffset? start = null)
         => _now = start ?? new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero);
@@ -211,9 +212,52 @@ internal sealed class QaManualTimeProvider : TimeProvider
 
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
-        var timer = new ManualTimer(this, callback, state);
+        long sequence;
+        lock (_gate)
+            sequence = ++_timersCreated;
+        var timer = new ManualTimer(this, callback, state, sequence);
         timer.Change(dueTime, period);
         return timer;
+    }
+
+    /// <summary>A mark for <see cref="WaitForTimerAsync"/>: timers created after this call have a higher sequence.</summary>
+    public long Mark()
+    {
+        lock (_gate)
+            return _timersCreated;
+    }
+
+    /// <summary>
+    /// Wait until a timer created after <paramref name="mark"/> is scheduled to fire exactly
+    /// <paramref name="dueIn"/> from now (L-065 rule 3: wait for the specific timer the next
+    /// <see cref="Advance"/> is about, not for "some timer"). <paramref name="timeout"/> is a hang guard.
+    /// </summary>
+    /// <param name="mark">A value <see cref="Mark"/> returned before the action that creates the timer.</param>
+    /// <param name="dueIn">How long from now the timer must be due.</param>
+    /// <param name="timeout">Real-time hang guard.</param>
+    public async Task WaitForTimerAsync(long mark, TimeSpan dueIn, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            Task changed;
+            lock (_gate)
+            {
+                var due = _now + dueIn;
+                if (_timers.Any(t => t.Sequence > mark && t.DueAt == due))
+                    return;
+                changed = _timerChanged.Task;
+            }
+            await changed.WaitAsync(cts.Token);
+        }
+    }
+
+    /// <summary>How many timers created after <paramref name="mark"/> are scheduled now.</summary>
+    /// <param name="mark">A value <see cref="Mark"/> returned earlier.</param>
+    public int ScheduledTimersSince(long mark)
+    {
+        lock (_gate)
+            return _timers.Count(t => t.Sequence > mark && t.DueAt is not null);
     }
 
     public async Task WaitForScheduledTimersAsync(int count, TimeSpan timeout)
@@ -283,8 +327,9 @@ internal sealed class QaManualTimeProvider : TimeProvider
         signal.TrySetResult();
     }
 
-    private sealed class ManualTimer(QaManualTimeProvider owner, TimerCallback callback, object? state) : ITimer
+    private sealed class ManualTimer(QaManualTimeProvider owner, TimerCallback callback, object? state, long sequence) : ITimer
     {
+        public long Sequence { get; } = sequence;
         public DateTimeOffset? DueAt { get; set; }
         public TimeSpan? Period { get; set; }
 

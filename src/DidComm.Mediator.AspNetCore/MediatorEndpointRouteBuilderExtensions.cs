@@ -105,7 +105,12 @@ public static class MediatorEndpointRouteBuilderExtensions
     /// A host that wants STOMP maps <c>MapDidCommWebSocket</c> on another pattern. The rules for
     /// replies are those of every registry-aware endpoint: a connection becomes a session only at an
     /// authcrypted message with <c>return_route: all</c> that passed replay admission, and its
-    /// replies go only to the DID that opened it.
+    /// replies go only to the DID that opened it. It applies the host's
+    /// <c>DidCommReceiveOptions.MessageReceiveTimeout</c> (60 s by default) like every
+    /// <c>MapDidCommWebSocket</c> endpoint: each message must arrive in full within that time of its
+    /// first part, and a new connection must finish its first message within that time of being
+    /// accepted, or the connection is closed with 1008 (policy violation); an idle live-delivery
+    /// socket is not timed.
     /// </para>
     /// <para>
     /// <b>The invitation URL.</b> Publish

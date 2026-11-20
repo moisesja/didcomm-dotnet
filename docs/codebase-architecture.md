@@ -10,11 +10,11 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 
 | Package (`src/`) | What it holds |
 | --- | --- |
-| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
+| `DidComm.Core` | The library proper. Folders: `Messages` (plaintext model), `Jose` and `Crypto` (JWS/JWE primitives), `Composition` (envelope reader/writer, `ForwardWrapper`), `Consistency`, `Facade` (`DidCommClient`, `DidCommOptions`, `PackEncryptedOptions`, `UnpackResult`), `Resolution` (`IServiceEndpointResolver`, DID key services, and `DidCommServiceBuilder`, which builds the `DIDCommMessaging` service entry a DID publishes), `Secrets`, `Threading`, `Profiles`, `Diagnostics` (`DidCommDiagnostics`: the `ActivitySource` name and the meter name, `didcomm-dotnet`; internal `LogValues`: bounded message ids and exception type names for log lines, and bounded message types for span tags, shared with `DidComm.AspNetCore` and `DidComm.Mediator.Client`, whose `MediatorLog` the mediator roles use too), `Exceptions`, `Json`, `Protocols`, `Transports`. Internal, for the recipient-side mediator client (#96; package `DidComm.Mediator.Client` since #113), in `Facade/DidCommClient.Mediated.cs`: `DidCommClient.ResolveDirectEndpointAsync` (the direct endpoint `SendAsync` would select), `ReceivesPushesOn` (whether the transport hands pushes to the inbound consumer) and `UnpackDeliveredAsync` with `DeliveredUnpack` (opens re-wrapped deliveries). |
 | `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96, and `Detach` / `Detached` since #98); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter), `RateLimitedLog` and `HeldForward` (what a waiting forward keeps, #98)), `Trace`, `TrustPing`. |
-| `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), and `TransportRouter.Select` (the one transport selection for a send and for questions about it). |
+| `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), `TransportRouter.Select` (the one transport selection for a send and for questions about it), and `ReceiveDeadline` (the per-message receive timer both WebSocket sides use, and the setter rule of their `MessageReceiveTimeout`; FR-TRN-14). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
-| `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options), `MapDidCommEndpointCore` (the registry-aware HTTP endpoint, optionally with a deadline for a returned `200`) and `DidCommReceiveOptions.ForMediatorEndpoint()`; internal response deadlines: `HttpResponseAcknowledgement`, `ResponseDeadlineLog`. |
+| `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options), `MapDidCommEndpointCore` (the registry-aware HTTP endpoint, optionally with a deadline for a returned `200`) and `DidCommReceiveOptions.ForMediatorEndpoint()`; internal response deadlines: `HttpResponseAcknowledgement`, `ResponseDeadlineLog`; internal WebSocket receive time limit (FR-TRN-14): `WebSocketMessageDeadline`, `MessageReceiveTimeoutLog` and `WebSocketClosing` (the close step of both receive loops). |
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator` — which also registers the shared `ForwardMetrics` and a cycle-guarded `ForwardHandler` factory — `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions` (including `TrustedProxy`), `HttpResiliencePipelineFactory`, `UseHttpTransport()`; internal `TrustedProxyRoute` (the checked copy of the named proxy and the test that recognises its socket) and `TrustedProxySnapshot` (one reading per container). |
 | `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound` and `TrustedProxy`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
@@ -57,7 +57,10 @@ that every grantee references its granter directly (pack pins direct references 
   deliveries) and `Facade/ResolveDirectEndpointTests` (parity with `SendAsync`'s endpoint selection),
   both over `Facade/MediatedClientTestWorld`, `Transports/ReturnRouteEligibilitySnapshotParityTests`
   and `Protocols/Dispatch/ProtocolDispatcherClaimedLogLevelTests` (the no-handler line at Debug for a
-  claimed message).
+  claimed message). `Observability/MessageTypeSpanTagTests` pins the bounded message-type tag of
+  every span that carries one, and `Resolution/ResolvedDocumentIdentityTests` the refusal of a
+  resolver answer for another subject by both net-did adapters (a tampered and a self-consistent
+  forged document).
 - `tests/DidComm.InteropTests`: fixture-driven conformance (`fixtures/` with `manifest`, `packed`,
   `payloads`, `diddocs`, `secrets`, `schema`, `spec`; `FixtureCatalog`, `Runner/FixtureDispatcher`),
   plus the `AspNetCore`, `Routing`, `Transports`, `Protocols` and `Facade` suites, `Mediator` (the
@@ -78,7 +81,12 @@ that every grantee references its granter directly (pack pins direct references 
   (`MediatorPeelEndpointAdvTests`, `MediatorEgressAdvTests`, `MediatorIdentityAndLogsAdvTests`,
   `MediatorReceiveLogsAdv3Tests`, `MediatorFaultedAdv3Tests`, `MediatorLivePushAdv4Tests`); the
   timing measurements run in the `QaSerialTiming` collection, alone and after the parallel tests;
-  `Transports/HttpTransportAcceptedLogTests` pins the HTTP transport's guarded 2xx line),
+  `Transports/HttpTransportAcceptedLogTests` pins the HTTP transport's guarded 2xx line,
+  `Transports/HttpRequestBodyReadFailureTests` the HTTP endpoints' answer to a body that stops
+  arriving (TestServer, and Kestrel loopback for a stalled and a reset `Expect: 100-continue` body
+  and one over `MaxRequestBodySize`),
+  and `Protocols/MessageTypeConsoleScopeTests` what a stranger's type puts on a real console that
+  copies activity tags into its scopes),
   `Transports/Proxy` (FR-TRN-13, both transports against `StandInProxy`, a loopback stand-in forward
   proxy that records request lines: `HttpTransportProcessProxyTests` and
   `WebSocketDirectByDefaultTests` set a process proxy through `ProcessProxyScope`, from
@@ -111,7 +119,14 @@ that every grantee references its granter directly (pack pins direct references 
   timeout surfaces or the stream is disposed; `InboxRelaySinkTests` pins sample 04's relay bound and
   failure records). `AspNetCore/MediatorWebSocketCoreTests.cs` pins the
   same-socket / STOMP scoping of the mediator WebSocket endpoint against the public
-  `MapDidCommWebSocket`.
+  `MapDidCommWebSocket`, and that `ForMediatorEndpoint()` copies `MessageReceiveTimeout`. The
+  WebSocket receive time limit (FR-TRN-14): `AspNetCore/WebSocketReceiveDeadlineTests`,
+  `WebSocketReceiveDeadlineCloseTests` and `WebSocketReceiveDeadlineSettingsTests` run the three
+  server endpoints on real Kestrel loopback (`WebSocketReceiveDeadlineSupport`: `DeadlineKestrelHost`
+  with a manual clock, and a raw-frame peer for fragments and pings), and
+  `Transports/WebSocketSessionReceiveDeadlineTests` the client's session sockets against
+  `RawFrameWebSocketPeer` (a raw-frame Kestrel peer) and `ScriptedSessionWebSocket`; the manual clock
+  (`QaManualTimeProvider`) waits for a timer created after a mark before a test moves it.
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
   builders, store, handler, DI, adversarial, and for 2.0 (#99) `CoordinateMediation20HandlerTests`,
   `CoordinateMediationCrossVersionTests`, `CoordinateMediation20InteropVectorTests` (request
@@ -173,7 +188,19 @@ that every grantee references its granter directly (pack pins direct references 
    `StompServerSession`). A mediator maps both
    with `MapDidCommMediator` (see "Mediator service" below).
 2. The endpoint checks the content type (415 on mismatch) and caps the body at
-   `DidCommOptions.MaxReceiveBytes` (413 on HTTP, close code 1009 on WebSocket).
+   `DidCommOptions.MaxReceiveBytes` (413 on HTTP, close code 1009 on WebSocket). On WebSocket each
+   message must also arrive whole in time (close code 1008; "WebSocket receive time limits" below). An HTTP body that
+   stops arriving before its end (the client went away mid-body, for example after
+   `Expect: 100-continue`; a reset; Kestrel's own body limits) is never unpacked or dispatched, and
+   one Debug line names the exception type: a body Kestrel refused (`BadHttpRequestException`) is
+   answered with Kestrel's status for it (400 for a body that ended early, 408 under the minimum
+   data rate, 413 over `MaxRequestBodySize`); a body whose stream failed (an `IOException`, such as
+   a reset) ends the request with `HttpContext.Abort()`, because nothing can be answered on that
+   connection and Kestrel, left to drain a body whose read failed, logs that at Error (Kestrel then
+   writes its own Information line, "the application aborted the connection"); a cancellation that
+   is not the request's abort is answered 400; a cancellation while the request is aborted
+   propagates as before. None of these escapes to Kestrel, which logs an escaped exception at Error
+   as an unhandled application exception.
 3. `DidCommClient.UnpackAsync` opens the envelope; every unpack failure collapses to one opaque
    rejection so a peer cannot distinguish the cause.
 4. Return-route admission (the registry-aware endpoints and the session-aware HTTP callback):
@@ -214,6 +241,68 @@ come through these endpoints: the WebSocket transport's receive loop hands them 
 takes its answers and live pushes from there, through its correlator (see "Recipient-side client"
 below).
 
+### WebSocket receive time limits (FR-TRN-14)
+
+Both receive loops behind `MapDidCommWebSocket` time each message with
+`DidCommReceiveOptions.MessageReceiveTimeout`: `ReceiveLoopWithDispatchAsync`, behind
+`MapDidCommWebSocketCore` (the registry-aware overload, and `MapDidCommMediator`'s WebSocket
+endpoint, whose `ForMediatorEndpoint()` copy keeps the host's value), and `ReceiveLoopAsync` (the
+callback overload).
+The setting defaults to 60 s; `Timeout.InfiniteTimeSpan` turns it off and no timer is created. Its
+setter applies Core's `ReceiveDeadline.Validate` (greater than zero and at most `int.MaxValue` ms,
+or infinite; otherwise `ArgumentOutOfRangeException`), the same rule as
+`WebSocketTransportOptions.MessageReceiveTimeout` on the client ("Return-route client side" below).
+The HTTP endpoints are not timed by it.
+
+- **Where the time starts and stops.** Right after `AcceptWebSocketAsync` the endpoint creates the
+  connection's `WebSocketMessageDeadline` (`StartAtAccept`) on the container's `TimeProvider` (the
+  `Clock` the HTTP response deadlines use; `TimeProvider.System` when none is registered), so the
+  first message's time runs from the accept and a connection that sends nothing is closed too. Each
+  receive is awaited through `WebSocketMessageDeadline.WaitAsync`: while a timer runs it waits for
+  the receive or the timer (`ReceiveDeadline.WaitAsync`, a `Task.WhenAny` that the receive wins on a
+  tie); with none running it returns at once and the loop awaits the receive untimed. A part that is
+  not the last starts the message's timer when none runs (`PartReceived`), or reports that the
+  running one has expired, so a part read after the time ran out does not save the message. The
+  last frame stops the timer (`MessageReceived`) before the message is decoded, unpacked or
+  dispatched, so the wait for the next message is untimed and idle return-route sessions and
+  live-delivery sockets stay open; a later message that arrives in one read starts no timer. One
+  timer per message, never per read (`ReceiveDeadline`, internal in Core: one `ITimer` that
+  completes a task whose continuations never run on the timer's thread; it never cancels a token).
+  Pings and pongs never return from a receive, so they neither start nor extend a message's time.
+  A clock whose `CreateTimer` throws ends the connection instead of leaving it untimed.
+- **Expiry.** The loop never cancels the receive's token: in .NET's managed WebSocket a cancelled
+  receive aborts the socket, and no close frame could follow. It leaves the receive outstanding,
+  drops what it read (the message's `MemoryStream`, of which nothing is processed), writes the mapped
+  endpoint's `MessageReceiveTimeoutLog` line (the timeout in seconds and a count, no wire value; the
+  first and every 1000th at Information, the rest at Debug) and asks for close status 1008
+  (`PolicyViolation`), reason `message receive timeout`.
+- **The close step, `WebSocketClosing.EndAsync`**, in both loops' `finally`, after
+  `deadline.Dispose()`. On the registry-aware loop the session, if any, is unregistered and its
+  writer stopped first (`StopAsync`), so the close never overlaps a send; a writer that does not stop
+  gets the socket aborted and no close is sent. `EndAsync` then sends the requested close with
+  `CloseOutputAsync`, in `Open` or `CloseReceived` only (it only sends, so it may run while the
+  loop's receive is outstanding), awaits that outstanding receive and keeps reading, and dropping,
+  into the same buffer until the peer's close frame, all within the close grace
+  (`WebSocketReturnRouteSession.DefaultCloseGrace`, 5 s, linked to the request's abort token). The
+  grace running out, the request's abort or a socket fault aborts the socket (one Debug line, type
+  name only). It never calls `CloseAsync`, which waits for the receive lock and then starts a second
+  receive, and it passes no token to the receives it starts (the grace bounds them instead). The same
+  step sends the 1009 close and the answer to a peer's close (`client closed`) on both loops, so the
+  callback overload's closes, which had no bound before, are bounded too.
+- **The buffer.** The loop's 8 KiB `ArrayPool` buffer goes back to the pool only when no receive
+  into it can still be running; a receive still outstanding after the abort leaves the buffer to the
+  garbage collector, and its fault is observed so it never surfaces as an unobserved task exception.
+- **STOMP.** `StompServerSession`'s closes (protocol errors, `DISCONNECT`) run between messages, with
+  no receive of the loop outstanding, so they use `CloseAsync` under the same 5 s grace and abort the
+  socket when it runs out. A connection that never sends `CONNECT` is closed with 1008 like any
+  silent connection; one idle after `CONNECT` is untimed.
+
+What this does not bound (the connection count, a message that has not started, memory per message)
+is under "Documented limits" in the mediator service section below. Cookbook HH
+(`Section_HH_LimitHowLongAWebSocketMessageMayTake`) runs the callback endpoint on a TestServer with
+a 1 s limit (a silent connection and an unfinished message closed with 1008, an idle connection
+still served) and sets the client's value through `UseWebSocketTransport`.
+
 ## Outbound flow
 
 1. The application calls `DidCommClient.SendAsync(message, SendOptions)`.
@@ -226,7 +315,9 @@ below).
    is sent; with `all` / `thread`, recipients naming more than one DID are refused.
 4. The facade packs (the instrumented `PackEncryptedAsync` path). Unless the caller overrides the
    service endpoint it packs with `Forward = true`: right after the recipient's keys,
-   `IServiceEndpointResolver` reads its DIDCommMessaging service entry once; a return-route send
+   `IServiceEndpointResolver` reads its DIDCommMessaging service entry once (`NetDidServiceEndpointResolver`,
+   like `NetDidKeyService`, first refuses a resolver answer whose document's `id` is not the DID asked
+   for, through the shared `ResolvedDidDocument.Require`, FR-CONSIST-09); a return-route send
    whose selected entry needs a forward layer is refused there, before packing; after the pack,
    `MediatorEndpointExpander` expands that same entry and `ForwardWrapper` applies the Routing 2.0
    forward layers.
@@ -496,12 +587,19 @@ never delivered; the first #95 version opened the layers on the pump, which let 
 DID stall every relay (adversarial finding AD-1), and the next opened any envelope shape, resolving
 the sender DIDs an inner authcrypt or signed layer named (ADV-3).
 
-**Bounded ids, no message type, and the pump's context (#95).** Every message id on the receive
+**Bounded ids and message types, and the pump's context (#95).** Every message id on the receive
 path — `ForwardHandler`, `ProtocolDispatcher`, `InboundAdmission`, the return-route sessions, the
 endpoints, the mediator — goes through `LogValues.Id`: up to 128 characters as it is, a longer one
-as "(id of N characters)" (on `main` the handler and the dispatcher wrote ids raw). A stranger's
-message type is never written to a log line: the dispatcher's no-handler line names the bounded id
-only (the type stays on the `didcomm.handle` span's `didcomm.message.type` tag). Lines a stranger can repeat
+as "(id of N characters)" (on `main` the handler and the dispatcher wrote ids raw). No log message
+the library writes carries a stranger's message type: the dispatcher's no-handler line names the
+bounded id only. The type is the `didcomm.message.type` tag of the `didcomm.handle`, unpack, pack
+and send spans, written through `LogValues.MessageType`: as it is only when it is at most 256
+characters, all of them URI characters (RFC 3986), and otherwise a placeholder that does not echo it
+("(type of N characters)", "(type with characters outside a URI)"); a type URI's protocol name may
+hold line breaks and terminal escapes, and only the receive limit bounds its length. A host that
+copies activity tags into its log scopes (`ActivityTrackingOptions.Tags` with `IncludeScopes`, and a
+listener on the `didcomm-dotnet` source) sees that tag value on every line written inside the span,
+the no-handler line included. Lines a stranger can repeat
 are rate-limited — the first and every 1000th at their level, Debug otherwise — where listed here:
 the handler's drop lines per reason, the mediator sink's drops, `InboundAdmission`'s malformed
 `return_route` and replay-refusal lines, and the dispatcher's FR-THR-04 rule-2 drop. Others are one
@@ -722,8 +820,9 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
   no-op after an eviction), then `StopAsync` — waits up
   to the grace for the writer, then cancels a send stuck on a peer that stopped reading and waits
   once more; a writer that still has not stopped means the socket is aborted rather than closed —
-  then the deferred close (`client closed`, or `1009` after an oversized message), itself bounded
-  by the grace and aborted on timeout. A close never overlaps a send.
+  then the deferred close (`client closed`, `1009` after an oversized message, or `1008` after a
+  message that did not arrive in time), itself bounded by the grace and aborted on timeout (see
+  "WebSocket receive time limits" above). A close never overlaps a send.
 
 Registry (`InMemoryReturnRouteSessionRegistry`):
 
@@ -1001,10 +1100,21 @@ Session sockets (`WebSocketDidCommTransport`):
   already on its way until the peer's close frame. An `all` queued behind it opens a fresh S.
 - Receive loop (`ReceiveLoopAsync`, one per socket, an 8 KiB pooled read buffer): reassemble one
   message (FR-TRN-09); a close frame ends the loop. A total over `MaxReceiveBytes` stops buffering
-  at once and runs `CloseOversizedAsync`: discard mode, removal from `_sessions`, the key's gate
-  (bounded by `DrainBudget` and the loop token, skipped once dispose began),
-  `CloseOutputAsync(MessageTooBig, "payload too large")` bounded by the close grace, the backstop,
-  one rate-limited Warning. With `ReceiveInbound` off, or in discard mode, a message is dropped
+  at once and runs `CloseAndDiscardAsync(MessageTooBig, "payload too large")`: discard mode,
+  removal from `_sessions`, the key's gate (bounded by `DrainBudget` and the loop token, skipped
+  once dispose began), `CloseOutputAsync` with that status bounded by the close grace (skipped in
+  `CloseSent`, after a retire), the backstop, one rate-limited Warning. Each message is timed by
+  `MessageReceiveTimeout` (read once; Core's internal `ReceiveDeadline`, on the clock the transport
+  was built with: the container's `TimeProvider` under `UseWebSocketTransport`): one timer from the
+  first part that did not end the message to its last frame, stopped before the consumer runs;
+  none for the wait between messages, in discard mode, or when the limit is infinite. On expiry the
+  loop never cancels its token (that would abort the socket before a close frame): it drops what it
+  kept and runs the same step with `PolicyViolation, "message receive timeout"` and its own
+  rate-limited Warning while the receive is still outstanding, then goes on awaiting that receive
+  in discard mode. A part that completes after the limit with more to come is cut the same way; a
+  last part that completes with it is kept. A clock that cannot create the timer ends the loop. The
+  buffer goes back to the pool only once its receive completed. With `ReceiveInbound` off (frames
+  are still read, and timed), or in discard mode, a message is dropped
   (counted, not logged). Otherwise `ConsumeAsync(new InboundFrame(E, L, P, bytes), loopToken)` is
   awaited inline (JC-8); cancellation by the loop token ends the loop; any other exception is a
   rate-limited Warning by type name and the loop goes on. Socket faults end the loop (Debug, type
@@ -1015,8 +1125,8 @@ Session sockets (`WebSocketDidCommTransport`):
   once (`SessionSocket.TryEnd`), naming the endpoint; remove from `_liveSessionSockets`;
   `MarkLoopDone`, which also disposes the backstop timer.
 - Close grace versus dispose budget: `CloseGrace` is `SendTimeout` when finite and positive
-  (clamped), else 30 seconds, and bounds the retire close, the `1009` close, the close answer and
-  the backstop — an infinite `SendTimeout` must not stop a retiring loop at once (QA-F01).
+  (clamped), else 30 seconds, and bounds the retire close, the `1009` and `1008` closes, the close
+  answer and the backstop — an infinite `SendTimeout` must not stop a retiring loop at once (QA-F01).
   `CloseBudget` (`SendTimeout`, infinite or negative → 0) is for dispose only.
 - Backstop: `SessionSocket.ArmBackstop` starts a `Timer` of its own (no flowed `ExecutionContext`)
   whose callback calls `StopLoop`, never `CancellationTokenSource.CancelAfter`: the loop token is the
@@ -1083,8 +1193,9 @@ Threat model (the CHANGELOG's #92 Security entry is the full list):
   plaintext `from` / `to`; everything else is dropped before admission and consumes no replay
   budget. A push is dispatched with no session and its handler reply is never sent (no reflector).
 - Bodies are read only when asked, never buffered past the cap and time-bounded; pushes are capped
-  (`1009`); each session socket backpressures only itself, so a flood on one session neither drops
-  nor delays another.
+  (`1009`) and must arrive whole within `MessageReceiveTimeout` of their first part (`1008`; the
+  wait between pushes is never timed); each session socket backpressures only itself, so a flood
+  on one session neither drops nor delays another.
 - `SendPackedAsync` always applies the SSRF guard; the routed-recipient refusal precedes any
   mediator or routing-key resolution.
 - The new lines log message ids (inbound: only after the identity rule) and enum or exception type
@@ -2031,6 +2142,35 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   request metadata, keep the `Microsoft.AspNetCore.Hosting` and `Microsoft.AspNetCore.Server.Kestrel`
   categories at Warning or above, and leave `Baggage` off.
 
+For a public endpoint the host also bounds the connections (`SECURITY.md`, "Public endpoints", says
+the same; the `MessageReceiveTimeout` XML docs name the connection limits):
+
+- **Connections and request bodies.** The library bounds each connection; how many connections there are, and
+  how slowly an HTTP body may arrive, are Kestrel's and the host's to bound. Set
+  `KestrelServerLimits.MaxConcurrentUpgradedConnections` (open WebSocket connections) and
+  `MaxConcurrentConnections` (an upgraded connection stops counting against the second). Put a
+  concurrency limiter partitioned by client in front of the WebSocket endpoint: a WebSocket holds
+  its permit for its whole life, while a fixed-window limiter counts connection attempts, not open
+  sockets. Raise Kestrel's `Limits.MinRequestBodyDataRate`, which bounds how slowly the HTTP
+  endpoint's request bodies may arrive, for example
+  `new MinDataRate(bytesPerSecond: 16 * 1024, gracePeriod: TimeSpan.FromSeconds(5))`, about the floor
+  the 60 s WebSocket limit sets for a full 1 MiB message (about 17 KB/s); Kestrel's default of 240
+  bytes a second lets a 1 MiB body take over an hour. If the host uses the request-timeouts
+  middleware (`UseRequestTimeouts`), it must apply a timeout to HTTP endpoints only, never through
+  `MapDidCommMediator`'s builder (whose conventions reach the WebSocket endpoint too) or as the
+  default policy: the middleware replaces `HttpContext.RequestAborted` with a token it cancels at
+  the timeout, and a WebSocket endpoint ends its connection when that token is cancelled, so it
+  would end live WebSocket sessions.
+- **The WebSocket receive time limit** (FR-TRN-14) is the host's `DidCommReceiveOptions.MessageReceiveTimeout`,
+  which the mediator's WebSocket endpoint copies: set it with
+  `builder.Services.AddOptions<DidCommReceiveOptions>().Configure(o => o.MessageReceiveTimeout = ...)`.
+  The default, 60 s, cuts off a wallet that needs longer to send one message (about 17 KB/s for a
+  1 MiB message) or that connects and waits longer than that before its first message; raise it for
+  wallets on slow links. An idle live-delivery socket is never timed. `Timeout.InfiniteTimeSpan`
+  turns it off, and a peer can then hold a connection open with a message it never finishes. A
+  wallet times what the mediator pushes to it with its own transport's
+  `WebSocketTransportOptions.MessageReceiveTimeout`.
+
 ### Documented limits
 
 - **Live pushes are tried again only at the next wake-up.** A message whose live push failed, or
@@ -2105,6 +2245,26 @@ The `AddMediator()` and `MediatorOptions` remarks carry this guidance:
   a leased record is in at most one held response at a time. All held deliveries together therefore
   carry at most what the store holds (`MaxStoreBytes`, 128 MiB, times the delivery's encoding
   overhead), and self-made grants under open enrolment can use that up.
+- **A WebSocket connection that finished one message is untimed** (FR-TRN-14), on every
+  `MapDidCommWebSocket` endpoint, the mediator's included: once a message is in, even an invalid one,
+  the wait for the next is never timed. That is by design, as it keeps idle sessions and live
+  delivery open. What such a connection holds is then bounded by the server's buffers, not by this
+  library: a peer that stops reading what the server sends it can leave up to Kestrel's
+  `Limits.MaxRequestBufferSize` (1 MiB by default) of its own input
+  buffered, plus the operating system's socket buffers, for as long as the connection lives. For a
+  public endpoint, lower `MaxRequestBufferSize` (for example to 64 KiB) and bound the number of
+  connections with Kestrel's `MaxConcurrentUpgradedConnections` and `MaxConcurrentConnections` and a
+  concurrency limiter per client ("Operating a mediator" above).
+- **A later message starts when its first read returns.** Until a receive returns the message's
+  first part (for a large frame, after one 8 KiB read), that message has not started and is not
+  timed; what the peer holds then is at most that one read, in the connection's own 8 KiB buffer.
+- **Nothing remembers a slow peer across connections.** A peer whose connection was closed for a
+  message that ran out of time can connect again and gets a fresh limit; a limiter per client in
+  front of the endpoint is what bounds repeats.
+- **A message's in-memory form can be several times its size on the wire**, depending on its shape
+  (many small JSON values cost the most), for as long as the host keeps the unpacked message.
+  `MaxReceiveBytes` counts wire bytes, so budget memory as the messages handled at once ×
+  `MaxReceiveBytes` × that factor.
 
 ### Demonstrated by (#97)
 
