@@ -564,6 +564,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// unpacked message as before. Use the registry-aware overload
     /// (<c>MapDidCommWebSocket(pattern)</c>) for FR-RR-* behaviour.
     /// </para>
+    /// <para>
+    /// <b>Time limit.</b> Each message must arrive in full within
+    /// <see cref="DidCommReceiveOptions.MessageReceiveTimeout"/> (60 s by default) of its first part,
+    /// and a new connection must finish its first message within that time of being accepted;
+    /// otherwise the connection is closed with 1008 (policy violation). The wait between messages is
+    /// not timed. A close this endpoint starts (1008, 1009, or a STOMP close) waits at most 5 s for
+    /// the peer's answer, then the connection is aborted.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -577,6 +585,9 @@ public static class DidCommEndpointRouteBuilderExtensions
         ArgumentException.ThrowIfNullOrEmpty(pattern);
         ArgumentNullException.ThrowIfNull(onReceive);
 
+        // Per mapped endpoint: the receive-timeout line's rate limiter.
+        var timeoutLog = new MessageReceiveTimeoutLog();
+
         return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
         {
             if (!httpContext.WebSockets.IsWebSocketRequest)
@@ -585,15 +596,17 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return;
             }
 
-            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-            var client = httpContext.RequestServices.GetRequiredService<DidCommClient>();
-            var coreOptions = httpContext.RequestServices.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var receiveOptions = httpContext.RequestServices.GetService<IOptions<DidCommReceiveOptions>>()?.Value
                                  ?? new DidCommReceiveOptions();
+            var time = Clock(httpContext.RequestServices);
+            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            using var deadline = WebSocketMessageDeadline.StartAtAccept(time, receiveOptions.MessageReceiveTimeout, timeoutLog);
+            var client = httpContext.RequestServices.GetRequiredService<DidCommClient>();
+            var coreOptions = httpContext.RequestServices.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var loggerFactory = httpContext.RequestServices.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket");
 
-            await ReceiveLoopAsync(socket, client, coreOptions, receiveOptions, onReceive, logger, httpContext.RequestAborted).ConfigureAwait(false);
+            await ReceiveLoopAsync(socket, client, coreOptions, receiveOptions, onReceive, deadline, logger, httpContext.RequestAborted).ConfigureAwait(false);
         });
     }
 
@@ -628,6 +641,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// aborted.
     /// </para>
     /// <para>
+    /// <b>Time limit.</b> Each message must arrive in full within
+    /// <see cref="DidCommReceiveOptions.MessageReceiveTimeout"/> (60 s by default) of its first part,
+    /// and a new connection must finish its first message within that time of being accepted;
+    /// otherwise the connection is closed with 1008 (policy violation), bounded by the same grace, and
+    /// its session (if any) ends. The wait between messages is not timed, so an idle session stays
+    /// open.
+    /// </para>
+    /// <para>
     /// There is no per-message wire acknowledgement on a WebSocket (nothing is written back for an
     /// accepted envelope), so the dispatch carries none: <see cref="ProtocolContext.Acknowledged"/>
     /// is already complete and a handler that defers past the acknowledgement — the mediator's
@@ -646,7 +667,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// With <paramref name="mediatorEndpoint"/> <c>true</c> (the mediator package's endpoint) each
     /// connection uses <see cref="DidCommReceiveOptions.ForMediatorEndpoint"/> — same-socket replies
     /// on, STOMP off — for this endpoint only; the host's other WebSocket endpoints keep the
-    /// configured options.
+    /// configured options. Both apply <see cref="DidCommReceiveOptions.MessageReceiveTimeout"/>
+    /// (the mediator endpoint through the copy): the first message is timed from the accept, every
+    /// later one from its first part, and the wait between messages is not timed.
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern.</param>
@@ -661,6 +684,7 @@ public static class DidCommEndpointRouteBuilderExtensions
 
         // Per mapped endpoint: the log rate limiters (JC-22); the JC-17 defaults are per application.
         var admissionEndpoint = new InboundAdmissionEndpoint(endpoints.ServiceProvider);
+        var timeoutLog = new MessageReceiveTimeoutLog();
 
         return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
         {
@@ -670,13 +694,15 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return;
             }
 
-            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
             var sp = httpContext.RequestServices;
-            var client = sp.GetRequiredService<DidCommClient>();
-            var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var receiveOptions = sp.GetService<IOptions<DidCommReceiveOptions>>()?.Value ?? new DidCommReceiveOptions();
             if (mediatorEndpoint)
                 receiveOptions = receiveOptions.ForMediatorEndpoint();
+            var time = Clock(sp);
+            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            using var deadline = WebSocketMessageDeadline.StartAtAccept(time, receiveOptions.MessageReceiveTimeout, timeoutLog);
+            var client = sp.GetRequiredService<DidCommClient>();
+            var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
             var loggerFactory = sp.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
@@ -687,7 +713,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? admissionEndpoint.ResolveRegistry(sp, logger) : null,
                 receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? InboundAdmissionEndpoint.ResolveSessionOptions(sp).MaxPendingPushes : 0);
 
-            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, returnRoute, logger, httpContext.RequestAborted)
+            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, returnRoute, deadline, logger, httpContext.RequestAborted)
                 .ConfigureAwait(false);
         });
     }
@@ -710,6 +736,7 @@ public static class DidCommEndpointRouteBuilderExtensions
         DidCommReceiveOptions receiveOptions,
         ProtocolDispatcher dispatcher,
         WebSocketReturnRoute returnRoute,
+        WebSocketMessageDeadline deadline,
         ILogger? logger,
         CancellationToken requestAborted)
     {
@@ -735,6 +762,8 @@ public static class DidCommEndpointRouteBuilderExtensions
         // stopped, so a close never overlaps a send (the writer is the only other sender).
         WebSocketCloseStatus? pendingClose = null;
         string? pendingCloseReason = null;
+        // A receive left running when a message's time ran out: the close step in `finally` awaits it.
+        Task<WebSocketReceiveResult>? outstanding = null;
         try
         {
             // CloseSent too: only the session writer's eviction close puts the socket there, and the
@@ -747,10 +776,21 @@ public static class DidCommEndpointRouteBuilderExtensions
                 using var ms = new MemoryStream();
                 long total = 0;
                 WebSocketReceiveResult result;
+                var timedOut = false;
 
                 do
                 {
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+                    // MessageReceiveTimeout never cancels the receive (a cancelled receive aborts the
+                    // socket, and the 1008 close must still go out): on expiry the receive is left
+                    // outstanding and the loop ends.
+                    var receive = socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    if (!await deadline.WaitAsync(receive).ConfigureAwait(false))
+                    {
+                        outstanding = receive;
+                        timedOut = true;
+                        break;
+                    }
+                    result = await receive.ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         pendingClose = WebSocketCloseStatus.NormalClosure;
@@ -765,10 +805,26 @@ public static class DidCommEndpointRouteBuilderExtensions
                         break;
                     }
                     ms.Write(buffer, 0, result.Count);
+                    // A part before the last: the message has started (its time runs from here), or its time is up.
+                    if (!result.EndOfMessage && !deadline.PartReceived())
+                    {
+                        timedOut = true;
+                        break;
+                    }
                 }
                 while (!result.EndOfMessage);
+                if (timedOut)
+                {
+                    // What was read of the message is dropped with `ms`; nothing of it is processed.
+                    deadline.LogExpired(logger);
+                    pendingClose = WebSocketMessageDeadline.CloseStatus;
+                    pendingCloseReason = WebSocketMessageDeadline.CloseDescription;
+                }
                 if (pendingClose is not null)
                     break;
+                // The whole message is in: its time stops here, before it is processed, and the wait
+                // for the next one is untimed (an idle session stays open).
+                deadline.MessageReceived();
 
                 string packed;
                 if (stomp is not null)
@@ -915,6 +971,7 @@ public static class DidCommEndpointRouteBuilderExtensions
         }
         finally
         {
+            deadline.Dispose();
             var mayClose = true;
             if (session is not null)
             {
@@ -934,29 +991,15 @@ public static class DidCommEndpointRouteBuilderExtensions
             }
 
             if (!mayClose)
-            {
                 socket.Abort();
-            }
-            else if (pendingClose is { } closeStatus && socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
-            {
-                // CloseAsync waits for the peer's close frame when we initiate the close (the 1009
-                // path). Bound the handshake by the close grace: a peer that sends one oversize
-                // message and then never reads nor answers must not hold this request — and its
-                // buffers — for the life of the TCP connection. On timeout the socket is aborted.
-                using var closeCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
-                closeCts.CancelAfter(WebSocketReturnRouteSession.DefaultCloseGrace);
-                try
-                {
-                    await socket.CloseAsync(closeStatus, pendingCloseReason, closeCts.Token).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
-                {
-                    SafeLog.Write(logger, LogLevel.Debug, "MapDidCommWebSocket: close failed with {ExceptionType}.", ex.GetType().Name);
-                    if (closeCts.IsCancellationRequested)
-                        socket.Abort();
-                }
-            }
-            ArrayPool<byte>.Shared.Return(buffer);
+
+            // The close the loop asked for (1008, 1009, or the answer to the peer's close), bounded by
+            // the close grace: a peer that never reads nor answers must not hold this request — and
+            // its buffers — for the life of the TCP connection; on timeout the socket is aborted. The
+            // buffer goes back to the pool only once no receive into it can still be running.
+            await WebSocketClosing.EndAsync(
+                socket, mayClose ? pendingClose : null, pendingCloseReason, outstanding, buffer, ArrayPool<byte>.Shared,
+                WebSocketReturnRouteSession.DefaultCloseGrace, requestAborted, logger).ConfigureAwait(false);
         }
     }
 
@@ -1069,6 +1112,7 @@ public static class DidCommEndpointRouteBuilderExtensions
         DidCommOptions coreOptions,
         DidCommReceiveOptions receiveOptions,
         Func<UnpackResult, CancellationToken, Task> onReceive,
+        WebSocketMessageDeadline deadline,
         ILogger? logger,
         CancellationToken ct)
     {
@@ -1077,6 +1121,11 @@ public static class DidCommEndpointRouteBuilderExtensions
         // both receive loops must speak the same framing).
         var stomp = receiveOptions.UseStomp ? new StompServerSession() : null;
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
+        // The close the loop asks for, sent in `finally` (same close step as the dispatcher-backed loop).
+        WebSocketCloseStatus? pendingClose = null;
+        string? pendingCloseReason = null;
+        // A receive left running when a message's time ran out: the close step awaits it.
+        Task<WebSocketReceiveResult>? outstanding = null;
         try
         {
             while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
@@ -1084,25 +1133,56 @@ public static class DidCommEndpointRouteBuilderExtensions
                 using var ms = new MemoryStream();
                 long total = 0;
                 WebSocketReceiveResult result;
+                var timedOut = false;
 
                 do
                 {
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+                    // MessageReceiveTimeout never cancels the receive (a cancelled receive aborts the
+                    // socket, and the 1008 close must still go out): on expiry the receive is left
+                    // outstanding and the loop ends.
+                    var receive = socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    if (!await deadline.WaitAsync(receive).ConfigureAwait(false))
+                    {
+                        outstanding = receive;
+                        timedOut = true;
+                        break;
+                    }
+                    result = await receive.ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "client closed", CancellationToken.None).ConfigureAwait(false);
-                        return;
+                        pendingClose = WebSocketCloseStatus.NormalClosure;
+                        pendingCloseReason = "client closed";
+                        break;
                     }
                     total += result.Count;
                     if (total > maxBytes)
                     {
                         // FR-API-06 + RFC 6455 §7.4.1 close code 1009 "Message Too Big".
-                        await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "payload too large", CancellationToken.None).ConfigureAwait(false);
-                        return;
+                        pendingClose = WebSocketCloseStatus.MessageTooBig;
+                        pendingCloseReason = "payload too large";
+                        break;
                     }
                     ms.Write(buffer, 0, result.Count);
+                    // A part before the last: the message has started (its time runs from here), or its time is up.
+                    if (!result.EndOfMessage && !deadline.PartReceived())
+                    {
+                        timedOut = true;
+                        break;
+                    }
                 }
                 while (!result.EndOfMessage);
+                if (timedOut)
+                {
+                    // What was read of the message is dropped with `ms`; nothing of it is processed.
+                    deadline.LogExpired(logger);
+                    pendingClose = WebSocketMessageDeadline.CloseStatus;
+                    pendingCloseReason = WebSocketMessageDeadline.CloseDescription;
+                }
+                if (pendingClose is not null)
+                    return;
+                // The whole message is in: its time stops here, before the callback runs, and the
+                // wait for the next one is untimed.
+                deadline.MessageReceived();
 
                 // FR-TRN-09: the reassembled bytes are exactly one packed envelope — or, in the
                 // opt-in STOMP mode (FR-TRN-12), exactly one STOMP frame whose SEND body is one
@@ -1168,7 +1248,13 @@ public static class DidCommEndpointRouteBuilderExtensions
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            deadline.Dispose();
+            // The close the loop asked for (1008, 1009, or the answer to the peer's close), bounded by
+            // the close grace; on timeout the socket is aborted. The buffer goes back to the pool only
+            // once no receive into it can still be running.
+            await WebSocketClosing.EndAsync(
+                socket, pendingClose, pendingCloseReason, outstanding, buffer, ArrayPool<byte>.Shared,
+                WebSocketReturnRouteSession.DefaultCloseGrace, ct, logger).ConfigureAwait(false);
         }
     }
 

@@ -143,15 +143,20 @@ internal sealed class StompServerSession
         return false;
     }
 
+    // CloseAsync waits for the peer's close frame. Bound the handshake by the close grace: a peer
+    // that never answers is aborted instead of holding the connection. The receive loop calls this
+    // between messages, so no receive of its own is outstanding next to CloseAsync's.
     private static async Task CloseAsync(WebSocket socket, WebSocketCloseStatus status, string description)
     {
+        using var grace = new CancellationTokenSource(WebSocketReturnRouteSession.DefaultCloseGrace);
         try
         {
-            await socket.CloseAsync(status, description, CancellationToken.None).ConfigureAwait(false);
+            await socket.CloseAsync(status, description, grace.Token).ConfigureAwait(false);
         }
-        catch (WebSocketException)
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
         {
-            // The peer may already be gone; the loop is ending either way.
+            // The peer is gone or did not answer in time; the loop is ending either way.
+            socket.Abort();
         }
     }
 }
