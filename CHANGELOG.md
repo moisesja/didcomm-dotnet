@@ -50,13 +50,14 @@ removed member) fails.
 envelopes; refused before the thread store, the cascade budget, the replay guard and any handler; an
 over-long value with an invalid last character refused for its length), `MessageIdLengthFloodTests`
 (a flood through the endpoint fills the thread store with 512-character keys only; at 513 nothing
-reaches it), `IdKeyedStoreRetentionTests` (measured retention), `ProblemReportLogLineTests` and
+reaches it), `IdKeyedStoreRetentionTests` (the measurement behind the stores' bound: an opt-in heap
+probe, `DIDCOMM_ADV98_PROBES=1`, like the forward retention probe), `ProblemReportLogLineTests` and
 `ProblemReportRealConsoleTests` (a real console provider), plus cases in `ObserverDeliveryTests` and
 `PackSignedMissingToWarningTests`. Tests that used longer ids now use 512, or set the long value
 after unpack where they test a handler's own bound. Every new test of the limit and of the log lines
 fails on the code before this change or under a named mutation of the fix. The retention
 measurement and three controls (an empty id, the default generator, the replay default) pass either
-way; the measurement's negative control shows it detects longer keys.
+way; the probe's negative control shows it detects longer keys.
 
 **Docs.** PRD FR-MSG-02 (was "≤ 32 bytes"), FR-MSG-11, FR-API-09, FR-RR-01, FR-RR-08, FR-PICK-03,
 FR-PROTO-10; the architecture doc (inbound flow, held forwards, replay, pickup, bounded ids in log

@@ -17,9 +17,8 @@ namespace DidComm.InteropTests.AspNetCore;
 /// dispatcher files every one in its thread store (10 000 entries) before the handler runs, so the
 /// store's size follows the thread ids' length. At 512 characters the flood fills the store to its
 /// cap with keys of exactly that length, and at 513 nothing reaches it. What one such entry holds is
-/// measured in <c>IdKeyedStoreRetentionTests</c> (Core), in a process quiet enough for a heap
-/// measurement: here, earlier tests' memory is still being released while this one runs, and a heap
-/// difference would count it as the store's.
+/// measured by the opt-in heap probe <c>IdKeyedStoreRetentionTests</c> (Core): a heap difference
+/// taken here would also count the memory earlier tests are still releasing while this one runs.
 /// </summary>
 [Collection(QaSerialTiming.Name)]
 public sealed class MessageIdLengthFloodTests

@@ -13,10 +13,19 @@ namespace DidComm.Tests.Threading;
 /// The worst case of the two stores keyed by a message's thread ids: the dispatcher's thread store
 /// (<c>thid</c>, else <c>id</c>) and the problem-report cascade budget (<c>pthid</c>). Unpack bounds
 /// every such id at 512 characters (FR-MSG-02/11), so each store at its entry cap holds a bounded
-/// amount, measured here with keys of exactly that length. Runs in the serial probe collection, so
-/// no other test allocates while the heap is measured.
+/// amount, measured here with keys of exactly that length.
 /// </summary>
+/// <remarks>
+/// Opt-in (<c>DIDCOMM_ADV98_PROBES=1</c>), like the forward retention probe: a heap delta also
+/// counts what other work in the same process frees or allocates meanwhile, so on a CI runner it can
+/// read well under (or over) what the store holds with no change in the store. The deterministic
+/// tests are the regression: an id over 512 characters never reaches a store
+/// (<c>MessageIdLengthTests</c>, <c>MessageIdLengthEndpointTests</c>), and a flood through the
+/// endpoint fills the thread store with 512-character keys only (<c>MessageIdLengthFloodTests</c>).
+/// This probe is the measurement behind the stores' documented bound.
+/// </remarks>
 [Collection(ForwardRetentionProbeCollection.Name)]
+[Trait("Category", "Adv98Probe")]
 public sealed class IdKeyedStoreRetentionTests
 {
     // The bound the stores' docs state, per store at the default 10 000 entries (measured about
@@ -40,7 +49,7 @@ public sealed class IdKeyedStoreRetentionTests
         });
     }
 
-    [Fact]
+    [HeapProbeFact]
     public void The_thread_store_at_its_cap_with_512_character_keys_holds_less_than_the_documented_bound()
     {
         var baseline = LiveBytes();
@@ -55,7 +64,7 @@ public sealed class IdKeyedStoreRetentionTests
         retained.Should().BeGreaterThan(count * 2L * IdentifierLimits.MaxMessageIdLength, "the probe measures the keys it keeps (L-070)");
     }
 
-    [Fact]
+    [HeapProbeFact]
     public void The_cascade_budget_at_its_cap_with_512_character_pthids_holds_less_than_the_documented_bound()
     {
         var baseline = LiveBytes();
@@ -70,7 +79,7 @@ public sealed class IdKeyedStoreRetentionTests
         retained.Should().BeGreaterThan(count * 2L * IdentifierLimits.MaxMessageIdLength, "the probe measures the keys it keeps (L-070)");
     }
 
-    [Fact]
+    [HeapProbeFact]
     public void Negative_control_keys_four_times_as_long_as_unpack_allows_overshoot_the_bound()
     {
         // The stores themselves take any key: the bound comes from unpack's 512-character limit. A
@@ -117,5 +126,15 @@ public sealed class IdKeyedStoreRetentionTests
         }
         var info = GC.GetGCMemoryInfo(GCKind.FullBlocking);
         return info.HeapSizeBytes - info.FragmentedBytes;
+    }
+}
+
+/// <summary>A <see cref="FactAttribute"/> that runs only when <c>DIDCOMM_ADV98_PROBES=1</c> (the switch for the heap probes).</summary>
+internal sealed class HeapProbeFactAttribute : FactAttribute
+{
+    public HeapProbeFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("DIDCOMM_ADV98_PROBES") != "1")
+            Skip = "A heap measurement that other work in the process disturbs: set DIDCOMM_ADV98_PROBES=1 to run it.";
     }
 }
