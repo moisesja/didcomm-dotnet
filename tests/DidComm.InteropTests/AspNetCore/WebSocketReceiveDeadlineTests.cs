@@ -194,6 +194,37 @@ public sealed class WebSocketReceiveDeadlineTests
 
     [Theory]
     [MemberData(nameof(Endpoints))]
+    public async Task A_later_message_whose_last_frame_arrives_just_inside_the_limit_from_its_first_part_is_dispatched_and_the_connection_stays_open(DeadlineEndpoint endpoint)
+    {
+        await using var host = await DeadlineKestrelHost.StartAsync();
+        var first = host.Probe();
+        using var ws = await host.ConnectAsync(endpoint);
+        await DeadlinePeer.SendAsync(ws, await host.PackAsync(first), endOfMessage: true);
+        await host.WaitDispatchedAsync(endpoint, first.Id);
+        host.Time.Advance(3 * Limit); // idle, untimed
+
+        var later = host.Probe();
+        var laterBytes = await host.PackAsync(later);
+        var mark = host.Time.Mark();
+        var fired = host.Time.TimersFired;
+        await DeadlinePeer.SendAsync(ws, laterBytes.AsMemory(0, 100), endOfMessage: false);
+        await host.Time.WaitForTimerAsync(mark, Limit, Guard); // the message's time started at its first part
+
+        host.Time.Advance(Limit - Tick);
+        host.Time.TimersFired.Should().Be(fired, "one tick before the limit nothing is due");
+        await DeadlinePeer.SendAsync(ws, laterBytes.AsMemory(100), endOfMessage: true);
+        await host.WaitDispatchedAsync(endpoint, later.Id);
+
+        host.Time.ScheduledTimersSince(mark).Should().Be(0, "the message's time stopped at its last frame");
+        host.Time.Advance(Limit);
+        host.Time.TimersFired.Should().Be(fired, "nothing is left to fire");
+        ws.State.Should().Be(WebSocketState.Open);
+        host.TimeoutLines().Should().BeEmpty();
+        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    [Theory]
+    [MemberData(nameof(Endpoints))]
     public async Task A_message_trickled_one_small_fragment_per_clock_step_with_pings_between_is_still_closed_at_the_limit_from_its_first_part(DeadlineEndpoint endpoint)
     {
         await using var host = await DeadlineKestrelHost.StartAsync();
