@@ -199,6 +199,32 @@ public sealed class HttpRequestBodyReadFailureTests
     }
 
     /// <summary>
+    /// The control on Kestrel: a client that uses <c>Expect: 100-continue</c> correctly (the head, the
+    /// server's 100, then the whole body) is processed and answered 202, as before the body-read change.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Endpoints))]
+    public async Task On_Kestrel_a_body_sent_in_full_after_100_continue_is_processed(string endpoint)
+    {
+        await using var host = await BodyFailureHost.StartAsync(kestrel: true);
+        var body = Probe("bodycontinue-" + Guid.NewGuid().ToString("N"));
+
+        using var tcp = await host.ConnectRawAsync();
+        var stream = tcp.GetStream();
+        await stream.WriteAsync(host.Head(endpoint, body.Length));
+        var interim = await ReadHeadAsync(stream);
+        await stream.WriteAsync(body);
+        var final = await ReadHeadAsync(stream);
+        await BodyFailureHost.WaitUntilAsync(() => host.RequestsFinished == 1, "the hosting layer finished the request");
+
+        interim.Should().StartWith("HTTP/1.1 100");
+        final.Should().StartWith("HTTP/1.1 202");
+        host.Processed.Should().Be(1);
+        host.Logs.Records.Should().NotContain(r => r.Level >= LogLevel.Warning);
+        host.Logs.Entries.Should().NotContain(e => e.Contains("could not be read", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// Smoke test on Kestrel: <c>Expect: 100-continue</c>, half the body, then a reset (RST). Whether
     /// the endpoint's read sees the reset as an I/O failure or as the request's abort is a race inside
     /// Kestrel; neither may be logged at Error, and nothing is dispatched.
