@@ -42,7 +42,8 @@ internal sealed class HeldForward
         _opened = opened;
         LogId = logId;
         // The thread state is the dispatcher's, shared with its thread store; holding it keeps its
-        // thread id alive (the message's thid, or its id), which no FR-API-09 bound caps: a string,
+        // thread id alive (the message's thid, or its id): at most 512 characters after unpack
+        // (FR-MSG-02/11), but a direct caller's may be longer, so it is charged as it is: a string,
         // 2 bytes a character.
         var threadBytes = 2L * (context.Thread?.Thid?.Length ?? 0);
         Bytes = (int)Math.Min(int.MaxValue, (long)received.Bytes + (opened?.Bytes ?? 0) + threadBytes);

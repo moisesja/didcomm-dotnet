@@ -102,6 +102,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
         var socket = h.Live(h.Alice);
         h.ResetTraces();
         var longValue = new string('x', 5000);
+        var longestId = new string('x', DidComm.Consistency.IdentifierLimits.MaxMessageIdLength); // the longest unpack accepts (FR-MSG-02/11)
         var tooMany = new JsonArray();
         for (var i = 0; i < 500; i++)
             tooMany.Add(i % 2 == 0 ? JsonValue.Create(i) : JsonValue.Create("id-" + i));
@@ -119,9 +120,9 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
             h.Raw("messages-received", h.Alice, new JsonObject { ["message_id_list"] = new JsonArray(longValue) }),
             h.Raw("live-delivery-change", h.Alice, new JsonObject { ["live_delivery"] = "yes" }),
             h.Raw("live-delivery-change", h.Alice, body: null),
-            // A thread id over the echo bound, on a request and on a name nobody defines.
-            h.Raw("status-request", h.Alice, new JsonObject(), thid: longValue),
-            h.Raw("delivery-request", h.Alice, new JsonObject { ["limit"] = 1 }, id: longValue),
+            // The longest thread id unpack accepts, on a request and on a name nobody defines.
+            h.Raw("status-request", h.Alice, new JsonObject(), thid: longestId),
+            h.Raw("delivery-request", h.Alice, new JsonObject { ["limit"] = 1 }, id: longestId),
             h.Raw("no-such-message", h.Alice, new JsonObject { ["limit"] = "ten" }),
         };
 
@@ -135,7 +136,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
         var lines = h.Fixture.PickupLogs.Where(e => e.Formatted.Contains("FR-PICK-01", StringComparison.Ordinal)).ToArray();
         lines.Should().HaveCount(malformed.Length, "each is dropped at the same place, whatever it carries");
         lines.Should().OnlyContain(e => !e.Everything.Contains("xxxxxxxx") && !e.Everything.Contains("did:"));
-        lines.Should().Contain(e => e.Formatted.Contains("(id of 5000 characters)"), "an over-long message id is replaced, not written");
+        lines.Should().Contain(e => e.Formatted.Contains($"(id of {longestId.Length} characters)"), "an over-long message id is replaced, not written");
     }
 
     [Theory]

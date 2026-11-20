@@ -800,7 +800,8 @@ public sealed class CoordinateMediationAdversarialTests
         var bob = await fx.NewPeerAsync();
         var mallory = await fx.NewPeerAsync();
 
-        var thid = new string('t', 5000) + ".-_~";
+        // The longest thid unpack accepts (FR-MSG-11, 512 characters), with every unreserved punctuation mark.
+        var thid = new string('t', 508) + ".-_~";
         var extra = "\"thid\":\"" + thid + "\",\"pthid\":\"parent-1\",\"reply_to\":\"" + bob.Did + "\",\"reply-to\":[\"" + bob.Did + "\"]," +
                     "\"return_route\":\"all\",\"please_ack\":[\"x\"],\"x-evil\":\"did:example:evil\",\"from_prior\":null";
         // Addressed to the mediator and, in the plaintext only, to Bob as well.

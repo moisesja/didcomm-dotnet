@@ -44,7 +44,7 @@ internal sealed class PickupSizing
     internal const int MaxMintedIdLength = 64;
 
     /// <summary>The longest request thread id a reply echoes; a longer one makes the request malformed.</summary>
-    internal const int MaxThreadIdLength = 512;
+    internal const int MaxThreadIdLength = Consistency.IdentifierLimits.MaxMessageIdLength;
 
     internal const string TooSmallMessage =
         "The delivery budget (MaxDeliveryBytes, or DidCommOptions.MaxReceiveBytes when it is not set) is too small to carry any message with this MaxDeliveryBatch: " +

@@ -251,6 +251,69 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
         return packed.Message;
     }
 
+    /// <summary>
+    /// Authcrypt (ECDH-1PU+A256KW, A256CBC-HS512) plaintext JSON written by hand, from
+    /// <paramref name="from"/> to the server. For messages the library's own packers refuse, such as
+    /// an id, <c>thid</c> or <c>pthid</c> longer than 512 characters (FR-MSG-02/11), so a test can show
+    /// that the receive side refuses them too.
+    /// </summary>
+    public async Task<string> RawAuthcryptAsync(TestPeer from, string plaintextJson)
+    {
+        var crypto = new DataProofsDotnet.Jose.JoseCryptoProvider();
+        var senderJwk = await KeyAgreementJwkAsync(from.Secrets, from.Kids);
+        var senderKey = await new DidComm.Secrets.KeyOperationResolver(from.Secrets, null, crypto).ResolveKeyAgreementAsync(senderJwk.Kid!)
+            ?? throw new InvalidOperationException("The peer holds no key-agreement key.");
+        return await DataProofsDotnet.Jose.Encryption.JweBuilder.BuildEcdh1PuA256KwAsync(
+            Encoding.UTF8.GetBytes(plaintextJson),
+            new[] { await ServerKeyAgreementPublicAsync() },
+            senderKey,
+            senderJwk.Kid!,
+            DidComm.Jose.JoseAlgorithms.A256CbcHs512,
+            crypto,
+            MediaTypes.Encrypted,
+            CancellationToken.None);
+    }
+
+    /// <summary>
+    /// <paramref name="message"/> as plaintext JSON without the packers' validation, for
+    /// <see cref="RawAuthcryptAsync"/> and <see cref="RawAnoncryptAsync"/>: what a peer that is not
+    /// this library can put on the wire.
+    /// </summary>
+    public static string UnvalidatedJson(Message message)
+    {
+        message.Typ ??= MediaTypes.Plaintext;
+        return System.Text.Json.JsonSerializer.Serialize(message, DidComm.Json.DidCommJson.Default);
+    }
+
+    /// <summary>Anoncrypt (ECDH-ES+A256KW, A256CBC-HS512) plaintext JSON written by hand to the server; see <see cref="RawAuthcryptAsync"/>.</summary>
+    public async Task<string> RawAnoncryptAsync(string plaintextJson)
+    {
+        var recipient = await ServerKeyAgreementPublicAsync();
+        return DataProofsDotnet.Jose.Encryption.JweBuilder.BuildEcdhEsA256Kw(
+            Encoding.UTF8.GetBytes(plaintextJson),
+            new[] { recipient },
+            DidComm.Jose.JoseAlgorithms.A256CbcHs512,
+            new DataProofsDotnet.Jose.JoseCryptoProvider(),
+            MediaTypes.Encrypted);
+    }
+
+    private async Task<Jwk> ServerKeyAgreementPublicAsync()
+    {
+        var secrets = App.Services.GetRequiredService<DidComm.Secrets.ISecretsResolver>();
+        var jwk = await KeyAgreementJwkAsync(secrets, ServerKids);
+        return new Jwk { Kty = jwk.Kty, Crv = jwk.Crv, X = jwk.X, Kid = jwk.Kid };
+    }
+
+    private static async Task<Jwk> KeyAgreementJwkAsync(DidComm.Secrets.ISecretsResolver secrets, IEnumerable<string> kids)
+    {
+        foreach (var kid in kids)
+        {
+            if (await secrets.FindAsync(kid) is { Crv: "X25519" } jwk)
+                return jwk;
+        }
+        throw new InvalidOperationException("No X25519 key-agreement key is held for these kids.");
+    }
+
     /// <summary>POST a packed envelope; returns status, the exact Content-Type header value and the body.</summary>
     public async Task<HttpPostResult> PostAsync(string packed, string path = "/didcomm", string contentType = "application/didcomm-encrypted+json")
     {

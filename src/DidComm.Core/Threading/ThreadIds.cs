@@ -1,3 +1,4 @@
+using DidComm.Consistency;
 using DidComm.Exceptions;
 using DidComm.Messages;
 
@@ -18,8 +19,9 @@ internal static class ThreadIds
     /// <remarks>
     /// A message that came through unpack was validated there, so its <c>thid</c> is either absent
     /// or valid. A message built by hand and passed straight to a reply builder was not: a
-    /// <c>thid</c> it declares that is not a valid thread id (empty, or not entirely unreserved URI
-    /// characters, as <c>id</c> must be) is refused rather than ignored, because falling back to the
+    /// <c>thid</c> it declares that is not a valid thread id (empty, longer than 512 characters, or
+    /// not entirely unreserved URI characters, as <c>id</c> must be) is refused rather than ignored,
+    /// because falling back to the
     /// <c>id</c> would put the reply on a thread the requester never named. The refusal quotes no
     /// value.
     /// </remarks>
@@ -30,7 +32,7 @@ internal static class ThreadIds
         ArgumentNullException.ThrowIfNull(request);
         if (request.Thid is null)
             return request.Id;
-        if (!UnreservedUriChars.IsUnreserved(request.Thid))
+        if (request.Thid.Length > IdentifierLimits.MaxMessageIdLength || !UnreservedUriChars.IsUnreserved(request.Thid))
             throw new MalformedMessageException("The request's 'thid' is not a valid thread id (FR-MSG-11).");
         return request.Thid;
     }

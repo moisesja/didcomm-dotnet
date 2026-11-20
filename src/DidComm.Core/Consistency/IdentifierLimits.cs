@@ -3,7 +3,8 @@ using System.Buffers;
 namespace DidComm.Consistency;
 
 /// <summary>
-/// Upper bounds on the length of the DIDs and key ids a peer puts on the wire (FR-API-09, #80).
+/// Upper bounds on the length of the DIDs and key ids a peer puts on the wire (FR-API-09, #80),
+/// and of message and thread ids (<see cref="MaxMessageIdLength"/>).
 /// The receive path checks each such value against its bound before didcomm hands it to a DID
 /// parser, a DID resolver or the consumer's <see cref="Secrets.ISecretsResolver"/>, and a refusal
 /// never quotes the value. A JWE recipient kid over the limits is the one exception to refusal: it is
@@ -47,6 +48,22 @@ internal static class IdentifierLimits
     /// also pass the DID-part rule in <see cref="IsWithinKeyIdLimits"/>.
     /// </remarks>
     public const int MaxKeyIdLength = 4096;
+
+    /// <summary>
+    /// Maximum length of a message <c>id</c>, <c>thid</c> or <c>pthid</c> (FR-MSG-02, FR-MSG-11).
+    /// <see cref="Messages.Message.Validate"/> refuses a longer one, so unpack, pack and
+    /// <see cref="Messages.MessageBuilder.Build"/> all refuse it, before anything is stored.
+    /// </summary>
+    /// <remarks>
+    /// DIDComm v2.1 threading describes an id as "a short (&lt;=32 bytes) string" of unreserved URI
+    /// characters and recommends UUIDs, which are 36 characters as written (the library's own
+    /// generator emits 36). So the bound is 512, the inbound replay guard's default id limit
+    /// (<c>ReplayProtectionOptions.MaxMessageIdLength</c>): it refuses nothing the spec makes valid,
+    /// and it bounds every store keyed by these values (the dispatcher's thread store, the
+    /// problem-report cascade budget, the replay guard). The unreserved set is ASCII, so for an
+    /// accepted value characters and bytes are the same.
+    /// </remarks>
+    public const int MaxMessageIdLength = 512;
 
     // DID syntax allows none of these inside a DID (W3C DID Core §3.1: the method-specific id is
     // idchar / ':' only), and each one starts the next DID URL component: path, the legacy ';'

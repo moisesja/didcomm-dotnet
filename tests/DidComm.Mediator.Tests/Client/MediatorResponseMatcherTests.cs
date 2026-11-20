@@ -300,7 +300,8 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         var (_, exchange) = Start(ClientSpecs.StatusRequest);
         var before = _channel.Lookups;
 
-        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(new string('a', 200_000)))).Should().BeFalse();
+        // The longest thid unpack accepts (FR-MSG-11, 512 characters), and the shortest one over the channel's bound.
+        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(new string('a', DidComm.Consistency.IdentifierLimits.MaxMessageIdLength)))).Should().BeFalse();
         _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(new string('b', MediatorClientChannel.MaxThreadIdLength + 1)))).Should().BeFalse();
 
         _channel.Lookups.Should().Be(before);

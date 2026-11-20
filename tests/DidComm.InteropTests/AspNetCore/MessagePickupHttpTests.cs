@@ -1290,7 +1290,6 @@ public sealed class MessagePickupHttpTests
             mediator.Raw(recipient, MessagePickup.MessagesReceivedType, new JsonObject { ["message_id_list"] = "SENTINEL-not-a-list" }, thread),
             mediator.Raw(recipient, MessagePickup.MessagesReceivedType, new JsonObject { ["message_id_list"] = new JsonArray(Enumerable.Range(0, 101).Select(i => (JsonNode)("SENTINEL-" + i)).ToArray()) }, thread),
             mediator.Raw(recipient, MessagePickup.LiveDeliveryChangeType, Body("""{"live_delivery": "SENTINEL-yes"}"""), thread),
-            mediator.Raw(recipient, MessagePickup.StatusRequestType, new JsonObject(), "SENTINEL-" + new string('t', 512)),
         };
         foreach (var request in malformed)
         {
@@ -1298,6 +1297,13 @@ public sealed class MessagePickupHttpTests
             response.Status.Should().Be(HttpStatusCode.BadRequest);
             response.Body.Should().BeEmpty();
         }
+        // A thread id over 512 characters: the packers refuse it, so it is sent unvalidated; unpack
+        // refuses it (FR-MSG-11).
+        var overLong = mediator.Raw(recipient, MessagePickup.StatusRequestType, new JsonObject());
+        overLong.Thid = "SENTINEL-" + new string('t', 512);
+        var overLongResponse = await mediator.Host.PostAsync(await mediator.AuthcryptUnvalidatedAsync(recipient, overLong));
+        overLongResponse.Status.Should().Be(HttpStatusCode.BadRequest);
+        overLongResponse.Body.Should().BeEmpty();
         mediator.Store.MessageCount.Should().Be(2, "none of this removed anything");
 
         var sensitive = mediator.Host.SensitiveValues
@@ -1316,7 +1322,7 @@ public sealed class MessagePickupHttpTests
         //     (#95 AD-5; it used to log the object, whose text a stranger can shape).
         mediator.Logs.Records.Where(r => r.Exception is not null).Should().BeEmpty("no line carries an exception object");
         mediator.Logs.Records.Count(r => r.Text.Contains("rejecting inbound envelope (MalformedMessageException", StringComparison.Ordinal))
-            .Should().BeGreaterThanOrEqualTo(malformed.Length, "each malformed request was logged by its type");
+            .Should().BeGreaterThanOrEqualTo(malformed.Length + 1, "each malformed request was logged by its type");
 
         // (3) The rest of the host (endpoint, dispatcher, client): pre-existing code, whose lines at
         //     Information or above are held to the same rule here. They are listed for the report.

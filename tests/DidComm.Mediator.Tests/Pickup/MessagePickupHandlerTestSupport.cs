@@ -256,6 +256,18 @@ internal sealed class MessagePickupHandlerHarness : IAsyncDisposable
         => Fixture.SendAsync(message, mediator ?? Mediator, session, shape, sender, ct);
 
     /// <summary>
+    /// What a direct caller of the dispatcher can hand the handler: <paramref name="message"/> is
+    /// packed and unpacked as usual, then <paramref name="handBuild"/> changes the unpacked message
+    /// (for example to an id or thid longer than unpack accepts, FR-MSG-02/11), then it is dispatched.
+    /// </summary>
+    public async Task<DispatchOutcome> SendHandBuiltAsync(Message message, Action<Message> handBuild, IReturnRouteSession? session = null)
+    {
+        var received = await Fixture.ReceiveAsync(message, Mediator);
+        handBuild(received.Message);
+        return await Fixture.Host.Dispatcher.DispatchAsync(received, Fixture.Host.Client, Fixture.Host.Options, Task.CompletedTask, session, CancellationToken.None);
+    }
+
+    /// <summary>
     /// The ids a delivery-request of <paramref name="grantPeerDid"/> could be handed right now, read
     /// straight from the real store without leaving a lease behind: what is stored, due and not
     /// under a lease.

@@ -37,7 +37,7 @@ public sealed class Message
     public static MessageBuilder Empty()
         => new MessageBuilder().WithType(Protocols.Empty.EmptyProtocol.MessageType);
 
-    /// <summary>Message identifier (REQUIRED, FR-MSG-02). Lowercase, unreserved URI characters.</summary>
+    /// <summary>Message identifier (REQUIRED, FR-MSG-02). Lowercase, unreserved URI characters, at most 512 of them (see <see cref="Validate"/>).</summary>
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;
 
@@ -141,19 +141,39 @@ public sealed class Message
     /// problem; callers receive one actionable failure per message.
     /// </summary>
     /// <remarks>
-    /// Enforces FR-MSG-02 (<c>id</c> required, unreserved chars), FR-MSG-05 (<c>type</c>
+    /// Enforces FR-MSG-02 (<c>id</c> required, at most 512 characters, unreserved chars), FR-MSG-05 (<c>type</c>
     /// required and a parseable MTURI), FR-MSG-06 (<c>typ</c> media-type acceptance is
     /// case-insensitive after FR-MSG-06 prefix normalization), FR-MSG-07/08
     /// (<c>to</c>/<c>from</c> entries MUST NOT carry a fragment, and are at most
     /// <c>IdentifierLimits.MaxDidLength</c> characters, FR-API-09), FR-MSG-11
     /// (<c>thid</c>/<c>pthid</c> same constraints as <c>id</c>), and FR-ATT-02/03/04
     /// (attachment validation, delegated to <see cref="Attachment.Validate"/>).
+    /// <para>
+    /// An <c>id</c>, <c>thid</c> or <c>pthid</c> longer than 512 characters is refused before any
+    /// other check on it, with a message that quotes no value. DIDComm v2.1 describes an id as
+    /// "a short (&lt;=32 bytes) string" but recommends UUIDs (36 characters as written), so the
+    /// library accepts up to 512, the inbound replay guard's default id limit.
+    /// </para>
     /// </remarks>
     /// <exception cref="MalformedMessageException">When the message violates a §4 / §4.2 structural rule.</exception>
     public void Validate()
     {
         if (string.IsNullOrEmpty(Id))
             throw new MalformedMessageException("Message 'id' is REQUIRED (FR-MSG-02).");
+
+        // Length first (FR-MSG-02/11): the character checks below quote the value, so an over-long
+        // id, thid or pthid is refused before it can be copied into an exception message, and before
+        // unpack hands the message to anything that keys a store by it.
+        if (Id.Length > IdentifierLimits.MaxMessageIdLength)
+            throw new MalformedMessageException(
+                $"Message 'id' exceeds the maximum length of {IdentifierLimits.MaxMessageIdLength} characters (FR-MSG-02).");
+        if (Thid is { Length: > IdentifierLimits.MaxMessageIdLength })
+            throw new MalformedMessageException(
+                $"Message 'thid' exceeds the maximum length of {IdentifierLimits.MaxMessageIdLength} characters (FR-MSG-11).");
+        if (Pthid is { Length: > IdentifierLimits.MaxMessageIdLength })
+            throw new MalformedMessageException(
+                $"Message 'pthid' exceeds the maximum length of {IdentifierLimits.MaxMessageIdLength} characters (FR-MSG-11).");
+
         if (!UnreservedUriChars.IsUnreserved(Id))
             throw new MalformedMessageException(
                 $"Message 'id' must consist entirely of unreserved URI characters (RFC 3986 §2.3) (FR-MSG-02). Got: '{Id}'.");

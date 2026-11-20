@@ -291,8 +291,8 @@ internal sealed class MediationCoordinator
         => MediatorLog.Write(_logger, level, message, args);
 
     /// <summary>
-    /// A message id for a log line. Ids are attacker-chosen and not length-bounded by the message
-    /// model, so a long one is replaced, not written.
+    /// A message id for a log line. Ids are attacker-chosen, and unpack's 512-character bound is
+    /// more than a log line should carry, so a long one is replaced, not written.
     /// </summary>
     public static string LogId(string? messageId) => MediatorLog.LogId(messageId);
 

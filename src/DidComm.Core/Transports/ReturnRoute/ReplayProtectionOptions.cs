@@ -91,10 +91,16 @@ public sealed class ReplayProtectionOptions
     /// <summary>
     /// Longest message id the guard stores; a longer id is refused as
     /// <see cref="ReplayAdmission.MessageIdTooLong"/> before anything is allocated. Default 512
-    /// (14× a UUID — FR-MSG-02 bounds the id's alphabet, not its length, and no compliant id needs
-    /// more), so an oversized id can never be stored <see cref="MaxEntries"/> times.
+    /// (14× a UUID), so an oversized id can never be stored <see cref="MaxEntries"/> times.
     /// </summary>
-    public int MaxMessageIdLength { get; set; } = 512;
+    /// <remarks>
+    /// Unpack itself refuses a message whose <c>id</c> is longer than 512 characters (FR-MSG-02), so
+    /// on the receive endpoints and in the client's inbound consumer, which admit only unpacked
+    /// messages, a value above 512 has no effect: a longer id never reaches the guard. A lower value
+    /// still applies. A host that calls <see cref="IInboundReplayGuard.TryAdmit"/> directly with ids
+    /// it did not unpack gets this setting's bound as written.
+    /// </remarks>
+    public int MaxMessageIdLength { get; set; } = Consistency.IdentifierLimits.MaxMessageIdLength;
 
     /// <summary>
     /// Check the settings: <see cref="Window"/> positive and at most <see cref="int.MaxValue"/>
