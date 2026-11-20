@@ -32,6 +32,8 @@ public static class WebSocketDidCommBuilderExtensions
     /// (<see cref="DidCommBuilder.UseInboundDispatch"/>). So the consumer is wired whatever else is
     /// registered, and <see cref="WebSocketTransportOptions.ReceiveInbound"/> without one fails on the
     /// first resolution with an <see cref="InvalidOperationException"/> that says what to register.
+    /// <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/> is timed on the container's
+    /// <see cref="TimeProvider"/> when one is registered, and on the system clock otherwise.
     /// </para>
     /// <para>
     /// The consumer is built while the transport is, and this factory is the only registration in the
@@ -58,7 +60,8 @@ public static class WebSocketDidCommBuilderExtensions
         // JC-19: an explicit factory, not type activation. With two public constructors, activation
         // would pick the four-parameter one only when everything it takes happened to be registered,
         // silently leaving the inbound consumer unwired otherwise. The values are the ones activation
-        // resolved before (options, optional logger, optional core options) plus the consumer.
+        // resolved before (options, optional logger, optional core options) plus the consumer and the
+        // container's clock (the mediator client's pattern), through the internal constructor.
         // Guarded (ADV-02): the consumer is resolved inside this factory, so a consumer that depends
         // back on the transport (directly, as IDidCommTransport, or through the router or the facade)
         // re-enters it. The container cannot see inside a factory, so without the guard that cycle
@@ -67,7 +70,8 @@ public static class WebSocketDidCommBuilderExtensions
             sp.GetRequiredService<IOptions<WebSocketTransportOptions>>(),
             sp.GetService<ILogger<WebSocketDidCommTransport>>(),
             sp.GetService<IOptions<DidCommOptions>>(),
-            sp.GetService<IInboundFrameConsumer>())));
+            sp.GetService<IInboundFrameConsumer>(),
+            sp.GetService<TimeProvider>() ?? TimeProvider.System)));
         builder.Services.AddSingleton<IDidCommTransport>(sp => sp.GetRequiredService<WebSocketDidCommTransport>());
         builder.Services.TryAddSingleton<ITransportRouter, TransportRouter>();
         return builder;

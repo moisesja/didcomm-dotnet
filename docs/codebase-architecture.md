@@ -1001,10 +1001,21 @@ Session sockets (`WebSocketDidCommTransport`):
   already on its way until the peer's close frame. An `all` queued behind it opens a fresh S.
 - Receive loop (`ReceiveLoopAsync`, one per socket, an 8 KiB pooled read buffer): reassemble one
   message (FR-TRN-09); a close frame ends the loop. A total over `MaxReceiveBytes` stops buffering
-  at once and runs `CloseOversizedAsync`: discard mode, removal from `_sessions`, the key's gate
-  (bounded by `DrainBudget` and the loop token, skipped once dispose began),
-  `CloseOutputAsync(MessageTooBig, "payload too large")` bounded by the close grace, the backstop,
-  one rate-limited Warning. With `ReceiveInbound` off, or in discard mode, a message is dropped
+  at once and runs `CloseAndDiscardAsync(MessageTooBig, "payload too large")`: discard mode,
+  removal from `_sessions`, the key's gate (bounded by `DrainBudget` and the loop token, skipped
+  once dispose began), `CloseOutputAsync` with that status bounded by the close grace (skipped in
+  `CloseSent`, after a retire), the backstop, one rate-limited Warning. Each message is timed by
+  `MessageReceiveTimeout` (read once; Core's internal `ReceiveDeadline`, on the clock the transport
+  was built with: the container's `TimeProvider` under `UseWebSocketTransport`): one timer from the
+  first part that did not end the message to its last frame, stopped before the consumer runs;
+  none for the wait between messages, in discard mode, or when the limit is infinite. On expiry the
+  loop never cancels its token (that would abort the socket before a close frame): it drops what it
+  kept and runs the same step with `PolicyViolation, "message receive timeout"` and its own
+  rate-limited Warning while the receive is still outstanding, then goes on awaiting that receive
+  in discard mode. A part that completes after the limit with more to come is cut the same way; a
+  last part that completes with it is kept. A clock that cannot create the timer ends the loop. The
+  buffer goes back to the pool only once its receive completed. With `ReceiveInbound` off (frames
+  are still read, and timed), or in discard mode, a message is dropped
   (counted, not logged). Otherwise `ConsumeAsync(new InboundFrame(E, L, P, bytes), loopToken)` is
   awaited inline (JC-8); cancellation by the loop token ends the loop; any other exception is a
   rate-limited Warning by type name and the loop goes on. Socket faults end the loop (Debug, type
@@ -1083,8 +1094,9 @@ Threat model (the CHANGELOG's #92 Security entry is the full list):
   plaintext `from` / `to`; everything else is dropped before admission and consumes no replay
   budget. A push is dispatched with no session and its handler reply is never sent (no reflector).
 - Bodies are read only when asked, never buffered past the cap and time-bounded; pushes are capped
-  (`1009`); each session socket backpressures only itself, so a flood on one session neither drops
-  nor delays another.
+  (`1009`) and must arrive whole within `MessageReceiveTimeout` of their first part (`1008`; the
+  wait between pushes is never timed); each session socket backpressures only itself, so a flood
+  on one session neither drops nor delays another.
 - `SendPackedAsync` always applies the SSRF guard; the routed-recipient refusal precedes any
   mediator or routing-key resolution.
 - The new lines log message ids (inbound: only after the identity rule) and enum or exception type
