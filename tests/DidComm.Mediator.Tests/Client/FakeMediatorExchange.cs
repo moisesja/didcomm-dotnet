@@ -37,7 +37,8 @@ internal sealed class FakeMediatorExchange : IMediatorExchange
         Options = (options ?? new MediatorClientOptions()).ValidatedCopy();
         Time = time ?? TimeProvider.System;
         Duplicates = new DuplicateFilter(0);
-        Versions = new NegotiatedVersionCache(Time);
+        Versions = new NegotiatedVersionCache<CoordinateMediationVersion>(Time);
+        PickupVersions = new NegotiatedVersionCache<MessagePickupVersion>(Time);
         Mediator = new ScriptedMediator();
         Respond = Mediator.Answer;
     }
@@ -48,7 +49,9 @@ internal sealed class FakeMediatorExchange : IMediatorExchange
 
     public DuplicateFilter Duplicates { get; }
 
-    public NegotiatedVersionCache Versions { get; set; }
+    public NegotiatedVersionCache<CoordinateMediationVersion> Versions { get; set; }
+
+    public NegotiatedVersionCache<MessagePickupVersion> PickupVersions { get; }
 
     /// <summary>The default answerer.</summary>
     public ScriptedMediator Mediator { get; }
@@ -105,6 +108,8 @@ internal sealed class FakeMediatorExchange : IMediatorExchange
     }
 
     public LiveRegistration RegisterLiveStream(string mediatorDid, string localDid) => throw new NotSupportedException("Not used by MediationClient.");
+
+    public Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
 
     public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
 

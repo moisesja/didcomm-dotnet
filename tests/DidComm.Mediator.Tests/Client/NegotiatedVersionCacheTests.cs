@@ -7,7 +7,7 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// <see cref="NegotiatedVersionCache"/> (#96 design D-10): keyed by DID subject, an hour on the
+/// <see cref="NegotiatedVersionCache{TVersion}"/> (#96 design D-10): keyed by DID subject, an hour on the
 /// injected clock's timestamps, at most its capacity with no insert when full (expired entries make
 /// room, a live one is never evicted), a clock that steps back expires an entry, only a negotiated
 /// version is stored.
@@ -20,7 +20,7 @@ public sealed class NegotiatedVersionCacheTests
     [Fact]
     public void A_remembered_version_is_found_by_did_subject()
     {
-        var cache = new NegotiatedVersionCache(new ManualTimeProvider());
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(new ManualTimeProvider());
 
         cache.TryGet(M1, out _).Should().BeFalse();
         cache.Set(M1, CoordinateMediationVersion.V2);
@@ -36,7 +36,7 @@ public sealed class NegotiatedVersionCacheTests
     public void An_entry_is_used_for_less_than_its_time_to_live()
     {
         var time = new ManualTimeProvider();
-        var cache = new NegotiatedVersionCache(time);
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(time);
         cache.Set(M1, CoordinateMediationVersion.V3);
 
         time.Advance(TimeSpan.FromHours(1) - TimeSpan.FromTicks(1));
@@ -50,7 +50,7 @@ public sealed class NegotiatedVersionCacheTests
     [Fact]
     public void A_full_cache_takes_no_new_entry_but_updates_a_held_one()
     {
-        var cache = new NegotiatedVersionCache(new ManualTimeProvider(), capacity: 2);
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(new ManualTimeProvider(), capacity: 2);
         cache.Set(M1, CoordinateMediationVersion.V3);
         cache.Set(M2, CoordinateMediationVersion.V3);
 
@@ -68,7 +68,7 @@ public sealed class NegotiatedVersionCacheTests
     public void Expired_entries_make_room_in_a_full_cache()
     {
         var time = new ManualTimeProvider();
-        var cache = new NegotiatedVersionCache(time, capacity: 2);
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(time, capacity: 2);
         cache.Set(M1, CoordinateMediationVersion.V3);
         time.Advance(TimeSpan.FromMinutes(30));
         cache.Set(M2, CoordinateMediationVersion.V3);
@@ -84,7 +84,7 @@ public sealed class NegotiatedVersionCacheTests
     [Fact]
     public void The_default_bound_is_64_mediators_for_an_hour()
     {
-        var cache = new NegotiatedVersionCache(new ManualTimeProvider());
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(new ManualTimeProvider());
         for (var i = 0; i < 70; i++)
             cache.Set($"did:example:m{i}", CoordinateMediationVersion.V3);
 
@@ -99,7 +99,7 @@ public sealed class NegotiatedVersionCacheTests
     public void A_clock_that_steps_back_expires_an_entry()
     {
         var time = new SteppingTime();
-        var cache = new NegotiatedVersionCache(time);
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(time);
         time.Ticks = 10_000_000;
         cache.Set(M1, CoordinateMediationVersion.V3);
 
@@ -113,16 +113,44 @@ public sealed class NegotiatedVersionCacheTests
     [InlineData((CoordinateMediationVersion)9)]
     public void Only_a_negotiated_version_is_stored(CoordinateMediationVersion version)
     {
-        var cache = new NegotiatedVersionCache(new ManualTimeProvider());
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(new ManualTimeProvider());
+
+        FluentActions.Invoking(() => cache.Set(M1, version)).Should().Throw<ArgumentOutOfRangeException>();
+        cache.Count.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(MessagePickupVersion.Negotiate)]
+    [InlineData((MessagePickupVersion)9)]
+    [InlineData((MessagePickupVersion)(-1))]
+    public void A_Message_Pickup_cache_stores_only_a_negotiated_version(MessagePickupVersion version)
+    {
+        var cache = new NegotiatedVersionCache<MessagePickupVersion>(new ManualTimeProvider());
 
         FluentActions.Invoking(() => cache.Set(M1, version)).Should().Throw<ArgumentOutOfRangeException>();
         cache.Count.Should().Be(0);
     }
 
     [Fact]
+    public void A_Message_Pickup_cache_remembers_V4_and_V3_by_did_subject_and_reports_Negotiate_when_it_has_nothing()
+    {
+        var cache = new NegotiatedVersionCache<MessagePickupVersion>(new ManualTimeProvider());
+
+        cache.TryGet(M1, out var none).Should().BeFalse();
+        none.Should().Be(MessagePickupVersion.Negotiate);
+        cache.Set(M1, MessagePickupVersion.V4);
+        cache.Set(M2, MessagePickupVersion.V3);
+
+        cache.TryGet(M1 + "#key-1", out var v4).Should().BeTrue();
+        v4.Should().Be(MessagePickupVersion.V4);
+        cache.TryGet(M2, out var v3).Should().BeTrue();
+        v3.Should().Be(MessagePickupVersion.V3);
+    }
+
+    [Fact]
     public void A_zero_capacity_cache_remembers_nothing()
     {
-        var cache = new NegotiatedVersionCache(new ManualTimeProvider(), capacity: 0);
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(new ManualTimeProvider(), capacity: 0);
 
         cache.Set(M1, CoordinateMediationVersion.V3);
 
@@ -132,7 +160,7 @@ public sealed class NegotiatedVersionCacheTests
     [Fact]
     public async Task Concurrent_use_keeps_the_bound()
     {
-        var cache = new NegotiatedVersionCache(TimeProvider.System, capacity: 8);
+        var cache = new NegotiatedVersionCache<CoordinateMediationVersion>(TimeProvider.System, capacity: 8);
 
         await Task.WhenAll(Enumerable.Range(0, 16).Select(t => Task.Run(() =>
         {

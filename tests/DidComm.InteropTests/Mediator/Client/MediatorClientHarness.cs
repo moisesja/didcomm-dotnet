@@ -34,7 +34,12 @@ internal sealed class MediatorClientHarnessOptions
     /// <summary>Register <c>AddMediatorClient(<see cref="Client"/>)</c>. Default on.</summary>
     public bool AddMediatorClient { get; set; } = true;
 
-    /// <summary>The clients' settings (<c>AddMediatorClient(configure)</c>).</summary>
+    /// <summary>
+    /// The clients' settings (<c>AddMediatorClient(configure)</c>), applied after the harness pins
+    /// <see cref="MediatorClientOptions.MessagePickupVersion"/> to <see cref="MessagePickupVersion.V3"/>
+    /// (#100 DC-9: the existing end-to-end suites test Message Pickup 3.0; a test of 4.0 or of the
+    /// negotiation sets it here).
+    /// </summary>
     public Action<MediatorClientOptions>? Client { get; set; }
 
     /// <summary>Extra WebSocket transport settings, applied after the harness's own.</summary>
@@ -171,7 +176,14 @@ internal sealed class MediatorClientHarness : IAsyncDisposable
                     b.UseInboundDispatch();
             }
             if (options.AddMediatorClient)
-                b.AddMediatorClient(options.Client);
+            {
+                var configure = options.Client;
+                b.AddMediatorClient(c =>
+                {
+                    c.MessagePickupVersion = MessagePickupVersion.V3;
+                    configure?.Invoke(c);
+                });
+            }
             options.DidComm?.Invoke(b);
             b.Configure(o =>
             {

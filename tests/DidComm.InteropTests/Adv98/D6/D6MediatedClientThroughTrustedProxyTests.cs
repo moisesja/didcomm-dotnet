@@ -150,7 +150,7 @@ public sealed class D6MediatedClientThroughTrustedProxyTests(ITestOutputHelper o
                     o.TrustedProxy = new WebProxy(proxy);
                 });
                 b.UseInboundDispatch();
-                b.AddMediatorClient();
+                b.AddMediatorClient(c => c.MessagePickupVersion = MessagePickupVersion.V3);
             }
             b.Configure(o =>
             {

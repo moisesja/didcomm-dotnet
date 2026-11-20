@@ -57,6 +57,13 @@ internal sealed class ManualTimeProvider : TimeProvider
         }
     }
 
+    /// <summary>How many timers created after <paramref name="mark"/> (a <see cref="Mark"/>) are scheduled to fire.</summary>
+    public int ScheduledTimersSince(long mark)
+    {
+        lock (_gate)
+            return _timers.Count(t => t.Sequence > mark && t.DueAt is not null);
+    }
+
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
         long sequence;

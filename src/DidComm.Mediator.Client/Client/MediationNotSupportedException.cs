@@ -1,10 +1,12 @@
 namespace DidComm.Mediator.Client;
 
 /// <summary>
-/// The mediator's Discover Features answer named neither Coordinate Mediation 3.0 nor 2.0 in the
-/// mediator role, so <see cref="MediationClient"/> has no version to speak to it (FR-MED-09,
-/// FR-MED-10). When you know which version a mediator speaks, pin it with
-/// <see cref="MediatorClientOptions.CoordinateMediationVersion"/> and no query is sent.
+/// The mediator's Discover Features answer named none of the versions a client can speak in the
+/// mediator role, so that client has no version to speak to it: neither Coordinate Mediation 3.0
+/// nor 2.0 for <see cref="MediationClient"/> (FR-MED-09, FR-MED-10), neither Message Pickup 4.0 nor
+/// 3.0 for <see cref="PickupClient"/> (FR-PICK-12). When you know which version a mediator speaks,
+/// pin it with <see cref="MediatorClientOptions.CoordinateMediationVersion"/> or
+/// <see cref="MediatorClientOptions.MessagePickupVersion"/> and no query is sent.
 /// </summary>
 /// <remarks>
 /// What the mediator did disclose is on <see cref="DisclosedProtocols"/>, cleaned; the message text
@@ -25,8 +27,8 @@ public sealed class MediationNotSupportedException : MediationProtocolException
     /// <summary>
     /// The protocols the mediator disclosed, cleaned: at most 32 distinct entries, each at most
     /// 256 printable ASCII characters and a valid protocol identifier URI, whatever role it was
-    /// disclosed in (so a Coordinate Mediation version disclosed only in another role than mediator
-    /// is listed). Anything else the mediator sent is left out.
+    /// disclosed in (so a version disclosed only in another role than mediator is listed). Anything
+    /// else the mediator sent is left out.
     /// </summary>
     public IReadOnlyList<string> DisclosedProtocols { get; }
 }

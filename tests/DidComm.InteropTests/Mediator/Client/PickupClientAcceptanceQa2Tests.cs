@@ -190,7 +190,7 @@ public sealed class PickupClientAcceptanceQa2Tests
         }
 
         // Without DI a WebSocket route cannot receive: refused before sending too.
-        var bare = new PickupClient(harness.Client);
+        var bare = new PickupClient(harness.Client, new MediatorClientOptions { MessagePickupVersion = MessagePickupVersion.V3 });
         await FluentActions.Awaiting(() => bare.SetLiveDeliveryAsync(mediator.Did, bob.Did, true, harness.WebSocketEndpoint)).Should().ThrowAsync<InvalidOperationException>();
         await FluentActions.Awaiting(() => bare.FetchAsync(mediator.Did, bob.Did, 1, serviceEndpointOverride: harness.WebSocketEndpoint)).Should().ThrowAsync<InvalidOperationException>();
         await using (var stream = bare.ReceiveLiveAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint).GetAsyncEnumerator())

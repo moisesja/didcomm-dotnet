@@ -25,6 +25,7 @@ public sealed class MediatorClientOptionsTests
         options.RequestTimeout.Should().Be(TimeSpan.FromSeconds(30));
         options.MaxPendingRequests.Should().Be(64);
         options.CoordinateMediationVersion.Should().Be(CoordinateMediationVersion.Negotiate);
+        options.MessagePickupVersion.Should().Be(MessagePickupVersion.Negotiate);
         options.DedupeCapacity.Should().Be(4096);
         options.LivePollInterval.Should().Be(TimeSpan.FromMinutes(1));
         options.UnpackTimeout.Should().Be(TimeSpan.FromSeconds(20));
@@ -50,6 +51,8 @@ public sealed class MediatorClientOptionsTests
         o => o.MaxPendingRequests = 4096,
         o => o.CoordinateMediationVersion = CoordinateMediationVersion.V3,
         o => o.CoordinateMediationVersion = CoordinateMediationVersion.V2,
+        o => o.MessagePickupVersion = MessagePickupVersion.V4,
+        o => o.MessagePickupVersion = MessagePickupVersion.V3,
         o => o.DedupeCapacity = 0,
         o => o.DedupeCapacity = 1_000_000,
         o => o.LivePollInterval = TimeSpan.FromSeconds(1),
@@ -78,6 +81,8 @@ public sealed class MediatorClientOptionsTests
         { o => o.MaxPendingRequests = 4097, nameof(MediatorClientOptions.MaxPendingRequests) },
         { o => o.CoordinateMediationVersion = (CoordinateMediationVersion)3, nameof(MediatorClientOptions.CoordinateMediationVersion) },
         { o => o.CoordinateMediationVersion = (CoordinateMediationVersion)(-1), nameof(MediatorClientOptions.CoordinateMediationVersion) },
+        { o => o.MessagePickupVersion = (MessagePickupVersion)3, nameof(MediatorClientOptions.MessagePickupVersion) },
+        { o => o.MessagePickupVersion = (MessagePickupVersion)(-1), nameof(MediatorClientOptions.MessagePickupVersion) },
         { o => o.DedupeCapacity = -1, nameof(MediatorClientOptions.DedupeCapacity) },
         { o => o.DedupeCapacity = 1_000_001, nameof(MediatorClientOptions.DedupeCapacity) },
         { o => o.LivePollInterval = TimeSpan.FromMilliseconds(999), nameof(MediatorClientOptions.LivePollInterval) },
@@ -94,6 +99,29 @@ public sealed class MediatorClientOptionsTests
         set(options);
 
         options.Invoking(o => o.Validate()).Should().Throw<ArgumentOutOfRangeException>().WithParameterName(setting);
+    }
+
+    [Fact]
+    public void An_undefined_Message_Pickup_version_is_refused_with_the_values_it_may_take()
+    {
+        var options = new MediatorClientOptions { MessagePickupVersion = (MessagePickupVersion)7 };
+
+        options.Invoking(o => o.Validate()).Should().Throw<ArgumentOutOfRangeException>()
+            .WithParameterName(nameof(MediatorClientOptions.MessagePickupVersion))
+            .Which.Message.Should().StartWith("The value must be Negotiate, V4 or V3.");
+    }
+
+    [Theory]
+    [InlineData(MessagePickupVersion.V4)]
+    [InlineData(MessagePickupVersion.V3)]
+    public void The_validated_copy_keeps_the_Message_Pickup_version(MessagePickupVersion version)
+    {
+        var options = new MediatorClientOptions { MessagePickupVersion = version };
+
+        var copy = options.ValidatedCopy();
+        options.MessagePickupVersion = MessagePickupVersion.Negotiate;
+
+        copy.MessagePickupVersion.Should().Be(version);
     }
 
     [Fact]

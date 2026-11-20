@@ -483,7 +483,7 @@ public sealed class MediationClientNegotiationTests
     public async Task A_full_cache_takes_no_new_mediator_so_it_is_asked_every_time()
     {
         var exchange = new FakeMediatorExchange();
-        exchange.Versions = new NegotiatedVersionCache(exchange.Time, capacity: 2);
+        exchange.Versions = new NegotiatedVersionCache<CoordinateMediationVersion>(exchange.Time, capacity: 2);
         var client = exchange.Client();
 
         await client.RequestMediationAsync("did:example:m1", Me);

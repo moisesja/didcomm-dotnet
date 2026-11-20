@@ -181,7 +181,8 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
             var answer = request.Type switch
             {
                 MessagePickup.DeliveryRequestType => MessagePickup.CreateDelivery(_w.Mediator.Did, _w.Local.Did,
-                    new[] { new DeliveredMessage("q1", Encoding.UTF8.GetBytes("packed")) }, thid: request.Id),
+                    // A delivered attachment is a JWE (#100 F-2); the unpack step under test never reads it.
+                    new[] { new DeliveredMessage("q1", Encoding.UTF8.GetBytes(FakePickupExchange.Jwe("packed"))) }, thid: request.Id),
                 _ => _w.Status(request.Id),
             };
             channel.AsCorrelator().OnInbound(CraftedSnapshot.Verified(answer, senderKid: _w.Mediator.Privates[0].Kid, recipientKid: _w.Local.Privates[0].Kid));
