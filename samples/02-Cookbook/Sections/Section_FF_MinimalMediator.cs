@@ -37,10 +37,12 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// live delivery — is <c>AddMediator()</c> plus <c>MapDidCommMediator(...)</c>. Then the same roles
 /// composed by hand: with a container, behind the library's endpoint, which runs replay protection
 /// for you; and without one, where your own receive path must run that check before it dispatches.
-/// Last, the replay protection itself and the clock rule it implies. The mediator references the <c>DidComm.Mediator</c> and
+/// Last, the replay protection itself and the clock rule it implies. The mediator serves both
+/// versions of Message Pickup, 3.0 and 4.0, over one mailbox per recipient (<c>Pickup.EnableV4</c>
+/// turns 4.0 off). The mediator references the <c>DidComm.Mediator</c> and
 /// <c>DidComm.Mediator.AspNetCore</c> packages; a wallet references <c>DidComm.Mediator.Client</c>
 /// and a transport.
-/// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-MED-10, FR-PICK-01..10, FR-ROUTE-09..11, FR-RR-08).
+/// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-MED-10, FR-PICK-01..10, FR-PICK-12, FR-ROUTE-09..11, FR-RR-08).
 /// </summary>
 public static class Section_FF_MinimalMediator
 {
@@ -100,6 +102,7 @@ public static class Section_FF_MinimalMediator
                 {
                     o.CoordinateMediation.RoutingDids.Add(did);
                     o.Replay.ClockSkew = TimeSpan.FromMinutes(1); // the default, shown: see FF.3
+                    o.Pickup.EnableV4 = true;                     // the default: Message Pickup 4.0 next to 3.0; false keeps 3.0 only
                 }));
             var mediator = builder.Build();
             mediator.UseWebSockets(); // before mapping, or the WebSocket endpoint answers 400
@@ -122,6 +125,9 @@ public static class Section_FF_MinimalMediator
         try
         {
             narrator.Value("[mediator] routing DID", Trunc(mediatorDid));
+            // Both Message Pickup versions serve one mailbox per recipient, and Discover Features
+            // offers both, so each wallet picks the newest it speaks.
+            narrator.Value("[mediator] Message Pickup versions served", PickupVersionsServed(app.Services));
 
             var mediation = wallet.GetRequiredService<MediationClient>();
             var bobGrant = await mediation.RequestMediationAsync(mediatorDid, ctx.Bob.Did);
@@ -155,7 +161,28 @@ public static class Section_FF_MinimalMediator
             narrator.Value("Refusal", ex.Message);
         }
         narrator.Note("AddMediator() refuses a host IForwardSink: use AddRoutingMediator() for that (FF.2 does).");
+
+        // Message Pickup 4.0 off: only 3.0 is registered and offered, and wallets that ask get 3.0.
+        // The switch is read when AddMediator() runs, so set it in that call.
+        var v3Only = new ServiceCollection();
+        v3Only.AddDidComm(b => b
+            .UseNetDidResolver()
+            .UseSecretsResolver(new InMemorySecretsResolver())
+            .AddMediator(o =>
+            {
+                o.CoordinateMediation.RoutingDids.Add(mediatorDid);
+                o.Pickup.EnableV4 = false;
+            }));
+        await using (var v3OnlyServices = v3Only.BuildServiceProvider())
+            narrator.Value("With Pickup.EnableV4 = false, Message Pickup versions served", PickupVersionsServed(v3OnlyServices));
     }
+
+    // The Message Pickup protocols a container's handlers serve, as Discover Features offers them.
+    private static string PickupVersionsServed(IServiceProvider services)
+        => string.Join(", ", services.GetServices<IProtocolHandler>()
+            .Select(h => h.ProtocolUri)
+            .Where(uri => uri.Contains("pickup", StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.Ordinal));
 
     // ── FF.2 Compose the roles yourself: (a) with a container ─────────────────────────────────────
     private static async Task RunWithContainerAsync(
@@ -301,6 +328,9 @@ public static class Section_FF_MinimalMediator
             Options.Create(pickupOptions), Options.Create(didCommOptions),
             NullLogger<MessagePickupQueue>.Instance);
         var pickupHandler = new MessagePickupHandler(queue, NullLogger<MessagePickupHandler>.Instance);
+        // Message Pickup 4.0 for wallets that speak it, built over the SAME queue: one mailbox per
+        // recipient, whichever version it picks up with (leave it out to serve 3.0 only).
+        var pickup40Handler = new MessagePickup40Handler(queue, NullLogger<MessagePickup40Handler>.Instance);
         var policy = new DefaultMediationPolicy();                         // grants everyone: fine in-process, not in public
         var identity = new MediatorIdentity(new List<string> { mediator.Did }); // the first routing DID is the primary one
         var mediationHandler = new CoordinateMediationHandler(
@@ -312,11 +342,13 @@ public static class Section_FF_MinimalMediator
         narrator.Value("CoordinateMediationHandler.Roles", string.Join(", ", mediationHandler.Roles));
         narrator.Value("CoordinateMediation20Handler", $"{mediation20Handler.ProtocolUri}, roles: {string.Join(", ", mediation20Handler.Roles)}");
         narrator.Value("MessagePickupHandler.Roles", string.Join(", ", pickupHandler.Roles));
+        narrator.Value("MessagePickup40Handler", $"{pickup40Handler.ProtocolUri}, roles: {string.Join(", ", pickup40Handler.Roles)}");
 
         var registry = new ProtocolHandlerRegistry();
         registry.Register(mediationHandler);
         registry.Register(mediation20Handler);
         registry.Register(pickupHandler);
+        registry.Register(pickup40Handler);
         await using var dispatcher = new ProtocolDispatcher(registry, new InMemoryThreadStateStore());
 
         // Replay protection (FR-RR-08). The library's endpoints run it for you, before dispatch:
@@ -396,6 +428,20 @@ public static class Section_FF_MinimalMediator
         var statusMessage = await AskAsync(statusRequest);
         narrator.Value("[bob] status-request answered: messages waiting",
             MessagePickup.TryParseStatus(statusMessage, out var status) ? status.MessageCount : -1);
+
+        // The same question in Message Pickup 4.0, from a wallet that speaks it. As with 2.0 above,
+        // the 4.0 messages are not public API (PickupClient speaks them for you), so this one is
+        // built by hand: the 4.0 type, an empty body (no recipient_did: about all of Bob's DIDs).
+        var statusRequest40 = new MessageBuilder()
+            .WithType(MediatorServiceProtocols.MessagePickup40 + "/status-request")
+            .WithFrom(ctx.Bob.Did)
+            .WithTo(mediator.Did)
+            .WithBody(new JsonObject())
+            .Build();
+        var status40 = await AskAsync(await PackFromBobAsync(statusRequest40));
+        narrator.Value("[bob] 4.0 status-request answered with", status40.Type);
+        narrator.Value("[bob] 4.0 status: messages waiting / on the request's thread",
+            $"{status40.Body?["message_count"]} / {string.Equals(status40.Thid, statusRequest40.Id, StringComparison.OrdinalIgnoreCase)}");
 
         // Someone who captured that envelope plays it again: same sender, same message id.
         var dispatchedBefore = dispatched;

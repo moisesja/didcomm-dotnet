@@ -75,6 +75,8 @@ public sealed class MediatedAgentSmokeTests
         transcript.Should().Contain("[bob] status is about the DID asked for = True");
         transcript.Should().Contain("[bob] fetched: Hello Bob");
         transcript.Should().Contain("[bob] sender authenticated = True");
+        transcript.Should().Contain("[bob] arrival times reported (oldest, newest) = True");
+        transcript.Should().Contain("[bob] Message Pickup version negotiated with the mediator = 4.0", "the wallet asks and the mediator serves 4.0 (#100)");
         transcript.Should().Contain("[bob] status after fetch: 0 message(s)");
 
         // 5. Live over the WebSocket: the switch, the message received, the last one acknowledged,

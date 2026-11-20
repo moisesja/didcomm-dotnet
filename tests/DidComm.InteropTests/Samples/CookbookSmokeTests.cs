@@ -90,6 +90,14 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("[bob] discarded the unopenable one; status = 0 message(s)"); // DD: AckAsync discards
         transcript.Should().Contain("EnqueueAsync m1 again = DuplicateId");                 // DD.3: store contract
         transcript.Should().Contain("Store bounded at 2 per grant: EnqueueAsync ×3 = Enqueued, Enqueued, GrantMessageLimitReached"); // DD.3
+        transcript.Should().Contain("[bob] fetch again = drained True, status carried False");     // DD: the wallet negotiated 4.0, whose drained fetch has no status
+        transcript.Should().Contain("[bob] status after the drain (GetStatusAsync) = 0 message(s)"); // DD: so it asks
+        transcript.Should().MatchRegex(@"\[bob, 4\.0\] status = 1 message\(s\), oldest arrived at \d+ s, longest waited not reported"); // DD: 4.0 has no longest_waited_seconds
+        transcript.Should().MatchRegex(@"\[bob, 3\.0\] status = 1 message\(s\), oldest arrived at \d+ s, longest waited reported");    // DD: a client pinned to 3.0
+        transcript.Should().Contain("[bob] both versions give the same arrival time, in whole seconds = True"); // DD: 4.0's milliseconds, rounded down
+        transcript.Should().Contain("[bob, 3.0] drained fetch = drained True, status 0");        // DD: 3.0 drains with a status
+        transcript.Should().Contain("[bob, 4.0] drained fetch = drained True, status none");     // DD: 4.0 with an empty delivery
+        transcript.Should().Contain("[bob, 4.0] GetStatusAsync after the drain = 0 message(s)"); // DD
         transcript.Should().Contain("memq:// is one-way and cannot carry back the answer this send asked for"); // Z: return route refused
         transcript.Should().Contain("[mediator] TrySendAsync(notice, 256 bytes) = TooLarge"); // EE: bounded session send
         transcript.Should().Contain("[mediator] TrySendAsync(notice, 64 KiB) = Sent");      // EE
@@ -102,6 +110,11 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("[bob] granted (on the allow-list) = True");            // FF: allow-list grants
         transcript.Should().Contain("[carol] granted = False");                             // FF: allow-list denies
         transcript.Should().Contain("AddMediator() with a host IForwardSink = refused");    // FF: refusal shown
+        transcript.Should().Contain("[mediator] Message Pickup versions served = https://didcomm.org/message-pickup/4.0, https://didcomm.org/messagepickup/3.0"); // FF.1: EnableV4 on
+        transcript.Should().Contain("With Pickup.EnableV4 = false, Message Pickup versions served = https://didcomm.org/messagepickup/3.0"); // FF.1: EnableV4 off
+        transcript.Should().Contain("MessagePickup40Handler = https://didcomm.org/message-pickup/4.0, roles: mediator"); // FF.2 (b): built by hand
+        transcript.Should().Contain("[bob] 4.0 status-request answered with = https://didcomm.org/message-pickup/4.0/status"); // FF.2 (b): answered through the hand-built path
+        transcript.Should().Contain("[bob] 4.0 status: messages waiting / on the request's thread = 0 / True"); // FF.2 (b)
         transcript.Should().Contain("[sink] MessagePickupQueue.DeliverAsync = Queued");      // FF.2: à la carte
         transcript.Should().Contain("[bob] mediate-request answered with a grant = True");  // FF.2: no container
         transcript.Should().Contain("[mediator] the same status-request again = Duplicate"); // FF.2 (b): own receive path runs replay admission

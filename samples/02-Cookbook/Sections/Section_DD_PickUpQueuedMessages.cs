@@ -35,11 +35,19 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// and nobody is told.
 /// </para>
 /// <para>
+/// <strong>Which version.</strong> Message Pickup has two versions in use, 3.0 and 4.0. The client
+/// asks the mediator which ones it speaks and picks 4.0 when it can; you can also pin one
+/// (<c>MediatorClientOptions.MessagePickupVersion</c>). The calls are the same in both. What you
+/// notice: a fetch that finds the mailbox empty carries the mediator's status under 3.0 and none
+/// under 4.0 (ask with <c>GetStatusAsync</c>), and only 3.0 reports how long the oldest message has
+/// waited. Times are whole seconds either way.
+/// </para>
+/// <para>
 /// The section then shows the mediator's side of the same mailbox: dropping a message straight into
 /// a recipient's queue (<c>MessagePickupQueue.DeliverAsync</c>), every Message Pickup message as it
 /// travels, and — for anyone writing a persistent store — what each <c>IMessageStore</c> call must do.
 /// </para>
-/// <para>Maps to PRD §14.2 task <strong>DD</strong> (FR-PICK-01..11).</para>
+/// <para>Maps to PRD §14.2 task <strong>DD</strong> (FR-PICK-01..12).</para>
 /// </remarks>
 public static class Section_DD_PickUpQueuedMessages
 {
@@ -107,11 +115,17 @@ public static class Section_DD_PickUpQueuedMessages
         var afterAck = await pickup.AckAsync(mediator.Did, ctx.Bob.Did, unopened);
         ctx.Narrator.Value("[bob] discarded the unopenable one; status", $"{afterAck.MessageCount} message(s)");
 
+        // This wallet did not pin a Message Pickup version, so the client asked the mediator which
+        // ones it speaks and chose 4.0. Under 4.0 a drained fetch carries no status (the mediator
+        // answers "nothing to deliver" with an empty delivery): ask for the status when you want it.
         var empty = await pickup.FetchAsync(mediator.Did, ctx.Bob.Did, limit: 10);
-        ctx.Narrator.Value("[bob] fetch again", $"drained {empty.Drained}, status {empty.Status?.MessageCount} message(s)");
+        ctx.Narrator.Value("[bob] fetch again", $"drained {empty.Drained}, status carried {empty.Status is not null}");
+        var afterDrain = empty.Status ?? await pickup.GetStatusAsync(mediator.Did, ctx.Bob.Did);
+        ctx.Narrator.Value("[bob] status after the drain (GetStatusAsync)", $"{afterDrain.MessageCount} message(s)");
         ctx.Narrator.Note("The delayed message is not counted or delivered until it is due. When it becomes due it is not pushed to a live connection either, so a wallet in live mode still checks its mailbox now and then (MediatorClientOptions.LivePollInterval).");
         ctx.Narrator.Note("The mediator keeps a message for a limited time (MessagePickupOptions.MaxMessageAge, 30 days by default): a recipient offline longer than that loses those messages without notice.");
 
+        await ChooseThePickupVersionAsync(ctx, mediator, walletSecrets, bobPublic.Did);
         await MessagesOnTheWireAsync(ctx);
         await StoreContractAsync(ctx);
     }
@@ -157,6 +171,68 @@ public static class Section_DD_PickUpQueuedMessages
         // A DID nobody registered: refused, nothing stored.
         var stranger = await queue.DeliverAsync(ctx.Alice.Did, Payload(), options);
         ctx.Narrator.Value("[mediator] a DID nobody registered", $"{stranger.Outcome}, id {stranger.MessageId ?? "none"}");
+    }
+
+    /// <summary>
+    /// Which version of Message Pickup the wallet speaks. Left alone, the client asks the mediator
+    /// (Discover Features) and speaks 4.0 when the mediator offers it, 3.0 otherwise; pin a version
+    /// with <see cref="MediatorClientOptions.MessagePickupVersion"/> for a mediator that does not
+    /// answer that question, or to stay on one version. Your code does not change with the version;
+    /// two results do, and this step shows both side by side on the same mailbox.
+    /// </summary>
+    private static async Task ChooseThePickupVersionAsync(CookbookContext ctx, CookbookMediatorHost mediator, InMemorySecretsResolver walletSecrets, string bobPublicDid)
+    {
+        ctx.Narrator.Step("Which Message Pickup version: let the client ask the mediator (the default), or pin one.");
+
+        // Bob's wallet again, over the same keys, in two containers: one that asks (Negotiate, the
+        // default, written out here) and one pinned to 3.0, which sends no question first.
+        ServiceProvider Wallet(MessagePickupVersion version)
+        {
+            var services = new ServiceCollection();
+            services.AddDidComm(b => b
+                .UseNetDidResolver()
+                .UseSecretsResolver(walletSecrets)
+                .UseHttpTransport(o => o.AllowedSchemes = ["http", "https"]) // loopback demo; production stays https
+                .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"))
+                .AddMediatorClient(o => o.MessagePickupVersion = version));
+            return services.BuildServiceProvider();
+        }
+        await using var asking = Wallet(MessagePickupVersion.Negotiate);
+        await using var pinned = Wallet(MessagePickupVersion.V3);
+        var pickup4 = asking.GetRequiredService<PickupClient>();
+        var pickup3 = pinned.GetRequiredService<PickupClient>();
+
+        // One message waits for Bob: Alice's note, encrypted to his public DID.
+        var note = new MessageBuilder()
+            .WithType("https://didcomm.org/basicmessage/2.0/message")
+            .WithFrom(ctx.Alice.Did)
+            .WithTo(bobPublicDid)
+            .WithBody(new JsonObject { ["content"] = "One more for Bob." })
+            .Build();
+        var packed = await ctx.Client.PackEncryptedAsync(note, new PackEncryptedOptions(Recipients: [bobPublicDid], From: ctx.Alice.Did));
+        await mediator.Services.GetRequiredService<MessagePickupQueue>()
+            .DeliverAsync(bobPublicDid, Encoding.UTF8.GetBytes(packed.Message), new PickupDeliveryOptions(AllowLive: false));
+
+        // The same mailbox through both versions. The times are UTC epoch seconds whatever the
+        // version (4.0 sends milliseconds; the client rounds them down). Only 3.0 reports how long
+        // the oldest message has waited.
+        var status4 = await pickup4.GetStatusAsync(mediator.Did, ctx.Bob.Did);
+        var status3 = await pickup3.GetStatusAsync(mediator.Did, ctx.Bob.Did);
+        ctx.Narrator.Value("[bob, 4.0] status", $"{status4.MessageCount} message(s), oldest arrived at {status4.OldestReceivedTime} s, longest waited {status4.LongestWaitedSeconds?.ToString() ?? "not reported"}");
+        ctx.Narrator.Value("[bob, 3.0] status", $"{status3.MessageCount} message(s), oldest arrived at {status3.OldestReceivedTime} s, longest waited {(status3.LongestWaitedSeconds is null ? "not reported" : "reported")}");
+        ctx.Narrator.Value("[bob] both versions give the same arrival time, in whole seconds", status4.OldestReceivedTime == status3.OldestReceivedTime);
+
+        // The pinned wallet takes the message; then both find the mailbox empty. A drained 3.0
+        // fetch carries the mediator's status, a drained 4.0 fetch none: ask with GetStatusAsync.
+        var taken = await pickup3.FetchAsync(mediator.Did, ctx.Bob.Did, limit: 10);
+        ctx.Narrator.Value("[bob, 3.0] fetched", taken.Items.Count);
+        var drained3 = await pickup3.FetchAsync(mediator.Did, ctx.Bob.Did, limit: 10);
+        var drained4 = await pickup4.FetchAsync(mediator.Did, ctx.Bob.Did, limit: 10);
+        ctx.Narrator.Value("[bob, 3.0] drained fetch", $"drained {drained3.Drained}, status {drained3.Status?.MessageCount.ToString() ?? "none"}");
+        ctx.Narrator.Value("[bob, 4.0] drained fetch", $"drained {drained4.Drained}, status {drained4.Status?.MessageCount.ToString() ?? "none"}");
+        var asked = await pickup4.GetStatusAsync(mediator.Did, ctx.Bob.Did);
+        ctx.Narrator.Value("[bob, 4.0] GetStatusAsync after the drain", $"{asked.MessageCount} message(s)");
+        ctx.Narrator.Note("Pin MessagePickupVersion.V4 or .V3 for a mediator that does not answer Discover Features: asking it would time out. Otherwise leave it to the client.");
     }
 
     /// <summary>
