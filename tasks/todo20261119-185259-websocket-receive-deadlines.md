@@ -119,8 +119,7 @@ No other place has the same shape, so the sweep raises no stop.
 
 - A connection that has finished one message (even an invalid one, or a plaintext) is then untimed,
   by design: that is what keeps idle sessions open. What it holds is then bounded by the server's
-  buffers: a peer that stops reading (for example pings without reading the pongs, ADV-1 below) can
-  leave up to Kestrel's `MaxRequestBufferSize` (1 MiB by default) of its input buffered per
+  buffers: a peer that stops reading (ADV-1 below) can leave up to Kestrel's `MaxRequestBufferSize` (1 MiB by default) of its input buffered per
   connection. Lower `MaxRequestBufferSize` and bound the count with Kestrel's
   `MaxConcurrentUpgradedConnections` / `MaxConcurrentConnections` and a concurrency limiter
   partitioned by client. A code bound (server pings with a pong timeout) is an owner decision (ADV-1).
@@ -197,7 +196,7 @@ mutation (M1–M7), post-revert green.
 
 | Id | Severity | Finding | Disposition |
 |---|---|---|---|
-| ADV-1 | Medium (pre-existing on main) | After one complete message, a peer that floods pings and never reads parks the socket's reader on a pong send; its input then sits in Kestrel's request buffer (1 MiB by default) for as long as the connection lives. No message is "started", so nothing is timed. | **Docs** (the "fixed buffers" claim corrected; lower `MaxRequestBufferSize`, bound connections). **Code: owner decision** (server pings with a pong timeout would also close peers that never read, our own pooled client sockets included). Test `After_one_message_a_peer_that_floods_pings_and_never_reads_keeps_its_connection_with_no_timer_running` shows the hold. |
+| ADV-1 | Medium (pre-existing on main) | After its first message, a connection whose peer stops reading what the server sends can keep up to Kestrel's request buffer (1 MiB by default) for as long as it lives; no later message has started, so nothing is timed. | **Docs** (the "fixed buffers" claim corrected; lower `MaxRequestBufferSize`, bound connections). **Code: owner decision, tracked privately** (a server-side liveness check would also close peers that never read, our own pooled client sockets included). Test `After_one_message_a_peer_that_floods_pings_and_never_reads_keeps_its_connection_with_no_timer_running` shows the hold. |
 | ADV-2 | Low (pre-existing on main) | An invalid frame (reserved opcode), or a drop without a close, made `ReceiveAsync` throw `WebSocketException` out of both server loops: an Error-level "unhandled exception" line any peer can cause. | **Fixed** (ours): both loops catch `WebSocketException`, end the connection, one Debug line by type and error code. `WebSocketPeerFailureLogTests` (the reserved-opcode rows fail on main every run; the drop-without-close rows are a smoke test of a race; repeated 12×, green). |
 | ADV-3 | Info | A host timer whose `Dispose` throws would skip the server loop's cleanup. | **Fixed**: `ReceiveDeadline.Dispose` never throws (`ReceiveDeadlineTests`). |
 | ADV-4 | Info | The type placeholder `(none)` could equal a real type. | **Fixed**: `(no type)` (a space is not a URI character). URI-legal text that looks like another field is accepted: it carries no control character and is bounded. |

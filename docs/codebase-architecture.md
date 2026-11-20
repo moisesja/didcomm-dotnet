@@ -2249,9 +2249,8 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
   `MapDidCommWebSocket` endpoint, the mediator's included: once a message is in, even an invalid one,
   the wait for the next is never timed. That is by design, as it keeps idle sessions and live
   delivery open. What such a connection holds is then bounded by the server's buffers, not by this
-  library: a peer that stops reading what the server sends it (for example one that keeps sending
-  WebSocket pings and never reads the pongs, so the socket's reader waits on a pong it cannot send)
-  can leave up to Kestrel's `Limits.MaxRequestBufferSize` (1 MiB by default) of its own input
+  library: a peer that stops reading what the server sends it can leave up to Kestrel's
+  `Limits.MaxRequestBufferSize` (1 MiB by default) of its own input
   buffered, plus the operating system's socket buffers, for as long as the connection lives. For a
   public endpoint, lower `MaxRequestBufferSize` (for example to 64 KiB) and bound the number of
   connections with Kestrel's `MaxConcurrentUpgradedConnections` and `MaxConcurrentConnections` and a
