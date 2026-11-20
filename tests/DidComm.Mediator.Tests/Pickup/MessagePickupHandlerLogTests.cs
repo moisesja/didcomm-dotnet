@@ -199,7 +199,9 @@ public sealed class MessagePickupHandlerLogTests
         await StepAsync("live change: the status cannot be read", h.LiveChange(alice, true), socket, arm: () => h.Store.OnGetStatus = (_, _, _, _) => throw Boom());
         await StepAsync("status after the failed live change", h.StatusRequest(alice), socket);
 
-        // -- a reply that cannot be built: a thread id no message may carry, slipped in after unpack
+        // -- a thread id no message may carry, slipped in after unpack: refused as malformed before
+        //    any store work (the reply's thread follows Core's rule, which refuses an invalid
+        //    declared thid; #141), as a thread id over the bound is below
         const string unusableThread = "thread secret with spaces";
         run.Secrets.Add(unusableThread);
         await StepAsync("status-request whose thread cannot be echoed", h.StatusRequest(alice), http, tamper: received => received.Message.Thid = unusableThread);
@@ -240,7 +242,9 @@ public sealed class MessagePickupHandlerLogTests
             "delivery request",
             "acknowledgement",
             "live-delivery change",
-            "the reply could not be built",
+            // "the reply could not be built" is no longer reachable from a request: its only
+            // trigger was an unusable thread id, now refused before the reply (#141). Every other
+            // value of a reply is validated before it is built.
             "the session did not take the delivery",
             "even alone; it stays queued and is passed over",     // too large for this request's delivery
             "could not be released",
@@ -285,7 +289,7 @@ public sealed class MessagePickupHandlerLogTests
 
         lines.Should().Contain(e => e.Formatted.Contains("(id of 300 characters)"), "an over-long request id is replaced, not written");
         lines.Where(e => e.Level == LogLevel.Error).Select(e => e.State["ExceptionType"]).Should()
-            .Contain(nameof(HandlerBoomException)).And.Contain(nameof(InvalidOperationException)).And.Contain("MalformedMessageException");
+            .Contain(nameof(HandlerBoomException)).And.Contain(nameof(InvalidOperationException));
         run.Transcript.Should().NotContain(step => step.Contains("unexpected"));
 
         // The line for a message that did not fit even alone and is passed over: the request id,
@@ -336,7 +340,7 @@ public sealed class MessagePickupHandlerLogTests
         expected.Should().Contain("messages-received: status count=4 bytes=103 live=True filtered=False times=True threaded=True; pushed=0; stored=5");
         expected.Should().Contain("acknowledgement: the status cannot be read: no reply (NoReply); pushed=0; stored=4", "the acknowledgement itself was applied");
         expected.Should().Contain("status after the failed live change: status count=3 bytes=81 live=False filtered=False times=True threaded=True; pushed=0; stored=4", "the two that do not fit are still there");
-        expected.Should().Contain("status-request whose thread cannot be echoed: no reply (NoReply); pushed=0; stored=4");
+        expected.Should().Contain("status-request whose thread cannot be echoed: threw MalformedMessageException; pushed=0; stored=4", "an invalid thread id is refused before any store work");
         expected.Should().Contain("malformed delivery-request: threw MalformedMessageException; pushed=0; stored=4");
         expected.Should().Contain("the other peer's delivery-request: no reply (NoReply); pushed=1; stored=4");
     }
