@@ -268,6 +268,7 @@ public sealed class WebSocketReceiveDeadlineTests
         await host.Time.WaitForTimerAsync(mark, Limit, Guard);
         var closing = DeadlinePeer.ReceiveCloseAsync(ws);
         host.Time.Advance(Limit);
+        host.Time.TimersFired.Should().Be(fired + 1, "the stalled message's deadline fired, and nothing else");
         var (type, status, reason) = await closing.WaitAsync(Guard);
 
         type.Should().Be(WebSocketMessageType.Close);
@@ -327,6 +328,7 @@ public sealed class WebSocketReceiveDeadlineTests
         host.Time.TimersFired.Should().Be(fired);
         closing.IsCompleted.Should().BeFalse();
         host.Time.Advance(Tick);
+        host.Time.TimersFired.Should().Be(fired + 1, "the deadline started at the accept fired at the limit");
         var (type, status, reason) = await closing.WaitAsync(Guard);
 
         type.Should().Be(WebSocketMessageType.Close);
