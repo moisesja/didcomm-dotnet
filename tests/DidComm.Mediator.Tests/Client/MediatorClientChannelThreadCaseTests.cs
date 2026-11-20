@@ -2,6 +2,7 @@ using AwesomeAssertions;
 using DidComm.Mediator.Client;
 using DidComm.Mediator.Client.Internal;
 using DidComm.Mediator.Tests.Pipeline;
+using DidComm.TestSupport;
 using Xunit;
 using static DidComm.Mediator.Tests.Client.ClientChannels;
 
@@ -31,6 +32,7 @@ public sealed class MediatorClientChannelThreadCaseTests : IAsyncLifetime
     private static string Upper(string requestId)
     {
         var upper = requestId.ToUpperInvariant();
+        requestId.Should().Be(LetterIds.Id("request"), "precondition: the request id is the pinned one");
         upper.Should().NotBe(requestId, "precondition: the request id has letters to re-case");
         return upper;
     }
@@ -39,7 +41,7 @@ public sealed class MediatorClientChannelThreadCaseTests : IAsyncLifetime
     public async Task An_answer_whose_thid_is_the_request_id_in_upper_case_completes_the_request()
     {
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.StatusRequest, M, L, default).Observed();
         await _send.FirstCall;
         var answerSnapshot = await _w.SnapshotAsync(_w.Status(Upper(request.Id), count: 3));
@@ -55,7 +57,7 @@ public sealed class MediatorClientChannelThreadCaseTests : IAsyncLifetime
     public async Task A_problem_report_whose_pthid_is_the_request_id_in_upper_case_fails_the_request_with_its_code()
     {
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.StatusRequest, M, L, default).Observed();
         await _send.FirstCall;
         var report = await _w.SnapshotAsync(_w.Problem(Upper(request.Id), code: "e.p.req.not-enrolled"));
@@ -71,7 +73,7 @@ public sealed class MediatorClientChannelThreadCaseTests : IAsyncLifetime
     public async Task In_the_HTTP_response_an_answer_whose_thid_is_the_request_id_in_upper_case_completes_the_request()
     {
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         var upper = Upper(request.Id);
         _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Status(upper, count: 2)));
 
@@ -86,7 +88,7 @@ public sealed class MediatorClientChannelThreadCaseTests : IAsyncLifetime
         // Control for the tests above: the upper-cased id with one more character, as thid and as a
         // problem report's pthid, is another thread; the genuine answer then completes the request.
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.StatusRequest, M, L, default).Observed();
         await _send.FirstCall;
         var other = Upper(request.Id) + "0";

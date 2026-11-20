@@ -58,6 +58,7 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
     private readonly Func<Message, SendOptions, CancellationToken, Task> _send;
     private readonly Func<InboundMessageSnapshot, IReadOnlyList<FeatureDisclosure>> _parseDisclosures;
     private readonly ILogger<DiscoverFeaturesClient>? _logger;
+    private readonly IMessageIdGenerator _queryIds;
     // Keyed by query id; a reply's thid matches it ignoring letter case (DIDComm v2.1 threading).
     private readonly ConcurrentDictionary<string, PendingQuery> _pending = new(StringComparer.OrdinalIgnoreCase);
 
@@ -118,13 +119,16 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
     /// <summary>Test seam: construct over a raw send step instead of the full facade.</summary>
     /// <param name="send">Delegate that delivers the packed <c>queries</c> message.</param>
     /// <param name="logger">Optional structured logger.</param>
+    /// <param name="queryIds">Where query ids come from; the default is a UUID v4 (tests pin it).</param>
     internal DiscoverFeaturesClient(
         Func<Message, SendOptions, CancellationToken, Task> send,
-        ILogger<DiscoverFeaturesClient>? logger = null)
+        ILogger<DiscoverFeaturesClient>? logger = null,
+        IMessageIdGenerator? queryIds = null)
         : this(
             send,
             static snapshot => DiscoverFeatures.ReadDisclosures(snapshot.DeserializeMessage()),
-            logger)
+            logger,
+            queryIds)
     {
     }
 
@@ -132,13 +136,15 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
     internal DiscoverFeaturesClient(
         Func<Message, SendOptions, CancellationToken, Task> send,
         Func<InboundMessageSnapshot, IReadOnlyList<FeatureDisclosure>> parseDisclosures,
-        ILogger<DiscoverFeaturesClient>? logger = null)
+        ILogger<DiscoverFeaturesClient>? logger = null,
+        IMessageIdGenerator? queryIds = null)
     {
         ArgumentNullException.ThrowIfNull(send);
         ArgumentNullException.ThrowIfNull(parseDisclosures);
         _send = send;
         _parseDisclosures = parseDisclosures;
         _logger = logger;
+        _queryIds = queryIds ?? UuidV4MessageIdGenerator.Instance;
     }
 
     private static Func<Message, SendOptions, CancellationToken, Task> SendVia(DidCommClient client)
@@ -173,7 +179,7 @@ public sealed class DiscoverFeaturesClient : IInboundCorrelator
         if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(timeout), timeout, "Timeout must be positive (or Timeout.InfiniteTimeSpan).");
 
-        var message = DiscoverFeatures.CreateQuery(from, to, queries.ToArray());
+        var message = DiscoverFeatures.CreateQuery(from, to, _queryIds, queries.ToArray());
         var pending = new PendingQuery(from, to);
 
         // Register BEFORE sending: on a fast same-socket transport the disclose can arrive

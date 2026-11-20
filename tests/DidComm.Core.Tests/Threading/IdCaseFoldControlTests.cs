@@ -5,6 +5,7 @@ using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Protocols.ProblemReport;
 using DidComm.Threading;
 using DidComm.Transports.ReturnRoute;
+using DidComm.TestSupport;
 using AwesomeAssertions;
 using Xunit;
 
@@ -91,7 +92,7 @@ public sealed class IdCaseFoldControlTests
         {
             sent.TrySetResult(message);
             return Task.CompletedTask;
-        });
+        }, queryIds: new LetterIds("query")); // an id certain to hold letters (LetterIds)
         var task = client.QueryFeaturesAsync(alice, bob, new[] { new FeatureQuery { FeatureType = "protocol", Match = "*" } }, TimeSpan.FromSeconds(30));
         var query = await sent.Task.WaitAsync(TimeSpan.FromSeconds(30)); // rendezvous only
         var other = ThreadIdCaseEndToEndTests.Variant(query.Id, variant).ToUpperInvariant();

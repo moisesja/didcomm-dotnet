@@ -2,6 +2,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Tests.Protocols;
 using DidComm.Threading;
+using DidComm.TestSupport;
 using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -72,7 +73,7 @@ public sealed class ThreadIdCaseEndToEndTests
     }
 
     private static Message First(HostedAgents a)
-        => new MessageBuilder().WithType(Piuri + "/first").WithFrom(a.Alice).WithTo(a.Bob).WithAcceptLang("fr").Build();
+        => new MessageBuilder(new LetterIds("first")).WithType(Piuri + "/first").WithFrom(a.Alice).WithTo(a.Bob).WithAcceptLang("fr").Build(); // an id certain to hold letters
 
     private static Message Second(HostedAgents a, string thid)
         => new MessageBuilder().WithType(Piuri + "/second").WithFrom(a.Alice).WithTo(a.Bob).WithThid(thid).Build();
@@ -80,7 +81,7 @@ public sealed class ThreadIdCaseEndToEndTests
     private static string Upper(string id)
     {
         var upper = id.ToUpperInvariant();
-        upper.Should().NotBe(id, "precondition: the generated id has letters to re-case");
+        upper.Should().NotBe(id, "precondition: the id has letters to re-case (it comes from LetterIds)");
         return upper;
     }
 

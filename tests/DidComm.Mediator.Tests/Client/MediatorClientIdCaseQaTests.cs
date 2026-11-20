@@ -5,6 +5,7 @@ using DidComm.Mediator.Client;
 using DidComm.Mediator.Client.Internal;
 using DidComm.Mediator.Tests.Pipeline;
 using DidComm.Messages;
+using DidComm.TestSupport;
 using Xunit;
 using static DidComm.Mediator.Tests.Client.ClientChannels;
 
@@ -35,6 +36,7 @@ public sealed class MediatorClientIdCaseQaTests : IAsyncLifetime
     private static string Upper(string id)
     {
         var upper = id.ToUpperInvariant();
+        id.Should().Be(LetterIds.Id("request"), "precondition: the request id is the pinned one");
         upper.Should().NotBe(id, "precondition: the request id has letters to re-case");
         return upper;
     }
@@ -45,7 +47,7 @@ public sealed class MediatorClientIdCaseQaTests : IAsyncLifetime
     public async Task In_the_HTTP_response_a_problem_report_naming_the_request_id_in_upper_case_fails_the_request_with_its_code(bool inThid)
     {
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Problem(Upper(request.Id), code: "e.p.req.not-enrolled", inThid: inThid)));
 
         var thrown = await Record.ExceptionAsync(() => channel.ExchangeAsync(HttpRoute, request, ClientSpecs.StatusRequest, M, L, default));
@@ -70,7 +72,7 @@ public sealed class MediatorClientIdCaseQaTests : IAsyncLifetime
     public async Task Through_the_correlator_an_answer_on_a_thread_that_differs_in_more_than_case_completes_nothing(string variant)
     {
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         var exchange = channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.StatusRequest, M, L, default).Observed();
         await _send.FirstCall;
         var other = Variant(request.Id, variant).ToUpperInvariant();
@@ -96,7 +98,7 @@ public sealed class MediatorClientIdCaseQaTests : IAsyncLifetime
     public async Task In_the_HTTP_response_an_answer_on_a_thread_that_differs_in_more_than_case_is_no_answer(string variant)
     {
         await using var channel = Create(_w, _send, time: _time);
-        var request = _w.Request();
+        var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
         _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Status(Variant(request.Id, variant).ToUpperInvariant(), count: 2)));
 
         var thrown = await Record.ExceptionAsync(() => channel.ExchangeAsync(HttpRoute, request, ClientSpecs.StatusRequest, M, L, default));

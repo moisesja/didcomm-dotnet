@@ -240,9 +240,10 @@ public sealed class DiscoverFeaturesRoundTripTests
                 return DiscoverFeaturesApi.CreateDisclose(from: builtIn.From!, to: builtIn.To![0], thid: answeredOn,
                     disclosures: new FeatureDisclosure { FeatureType = "protocol", Id = "https://example.org/hand-built/1.0" });
             });
+        // Alice's query ids hold letters (LetterIds), so the upper-cased answer is certain to differ.
         var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
             serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
-            localDid: aliceDid, expectedPeerDid: bobDid);
+            localDid: aliceDid, expectedPeerDid: bobDid, queryIds: new LetterIds("query"));
         aliceInbox.Target = alice.Server.CreateHandler();
         bobInbox.Target = bob.Server.CreateHandler();
 
@@ -255,6 +256,7 @@ public sealed class DiscoverFeaturesRoundTripTests
                 timeout: TimeSpan.FromSeconds(30),
                 serviceEndpointOverride: new Uri("http://localhost/didcomm"));
 
+            queryId.Should().Be(LetterIds.Id("query"), "precondition: Alice's query id is the pinned one");
             answeredOn.Should().NotBe(queryId, "precondition: the answer names the query id in other letter case");
             disclosures.Select(d => d.Id).Should().Equal("https://example.org/hand-built/1.0");
         }
@@ -286,7 +288,7 @@ public sealed class DiscoverFeaturesRoundTripTests
             replySent: delivered);
         var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
             serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
-            localDid: aliceDid, expectedPeerDid: bobDid);
+            localDid: aliceDid, expectedPeerDid: bobDid, queryIds: new LetterIds("query"));
         aliceInbox.Target = alice.Server.CreateHandler();
         bobInbox.Target = bob.Server.CreateHandler();
 
@@ -363,7 +365,8 @@ public sealed class DiscoverFeaturesRoundTripTests
         IServiceEndpointResolver serviceResolver, string localDid, string expectedPeerDid,
         TaskCompletionSource<UnpackResult>? captureInbound = null,
         Func<DidComm.Messages.Message, DidComm.Messages.Message>? replyByHand = null,
-        TaskCompletionSource? replySent = null)
+        TaskCompletionSource? replySent = null,
+        DidComm.Messages.IMessageIdGenerator? queryIds = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -387,6 +390,15 @@ public sealed class DiscoverFeaturesRoundTripTests
         }));
         // Override the resolver UseNetDidResolver would register (TryAdd) with our fixed one.
         builder.Services.AddSingleton(serviceResolver);
+        if (queryIds is not null)
+        {
+            // The same client AddDidComm would register (TryAdd), over the same facade, with its query
+            // ids pinned through the internal test seam; AddDidComm's correlator registration resolves it.
+            builder.Services.AddSingleton(sp => new DiscoverFeaturesClient(
+                (message, options, ct) => sp.GetRequiredService<DidCommClient>().SendAsync(message, options, ct),
+                sp.GetService<ILogger<DiscoverFeaturesClient>>(),
+                queryIds));
+        }
 
         builder.Services.AddDidComm(b =>
         {

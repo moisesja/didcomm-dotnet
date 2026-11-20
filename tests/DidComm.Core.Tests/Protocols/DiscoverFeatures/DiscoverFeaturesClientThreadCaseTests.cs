@@ -3,6 +3,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
 using DidComm.Threading;
+using DidComm.TestSupport;
 using AwesomeAssertions;
 using Xunit;
 
@@ -31,11 +32,12 @@ public sealed class DiscoverFeaturesClientThreadCaseTests
     {
         var captured = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
         sent = captured;
+        // Query ids that hold letters, so the upper-cased id below is certain to differ (LetterIds).
         return new DiscoverFeaturesClient((message, _, _) =>
         {
             captured.TrySetResult(message);
             return Task.CompletedTask;
-        });
+        }, queryIds: new LetterIds("query"));
     }
 
     private static Message Disclose(string thid, string id) => DiscoverFeaturesApi.CreateDisclose(
@@ -65,7 +67,8 @@ public sealed class DiscoverFeaturesClientThreadCaseTests
         var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(30));
         var query = await sent.Task.WaitAsync(SyncTimeout);
         var upper = query.Id.ToUpperInvariant();
-        upper.Should().NotBe(query.Id, "precondition: the generated query id has letters to re-case");
+        query.Id.Should().Be(LetterIds.Id("query"), "precondition: the query id is the pinned one");
+        upper.Should().NotBe(query.Id, "precondition: the query id has letters to re-case");
 
         var claimed = ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(Authcrypt(Disclose(upper, "legit"))));
         var disclosures = await task;
