@@ -18,6 +18,9 @@ public sealed class DidCommOptions
     /// transport layer in Phase 5). Defaults to 1 MiB. The return-route client side applies the same
     /// ceiling to an in-band HTTP response it reads (FR-RR-07; a larger body is never buffered) and to
     /// each message pushed on a WebSocket session socket (a larger one closes the socket with 1009).
+    /// The limit counts bytes on the wire. Once unpacked, a message can take several times its wire
+    /// size in memory, depending on its shape (many small JSON values cost the most), for as long as
+    /// the host keeps it, so budget memory per message being handled at once, not per byte received.
     /// </summary>
     public int MaxReceiveBytes { get; set; } = 1 * 1024 * 1024;
 
