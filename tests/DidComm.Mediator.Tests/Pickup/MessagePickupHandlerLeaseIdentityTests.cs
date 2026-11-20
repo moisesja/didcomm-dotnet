@@ -25,7 +25,7 @@ public sealed class MessagePickupHandlerLeaseIdentityTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var http = h.Http(h.Alice);
         var socket = h.Live(h.Alice);
         h.ResetTraces();
@@ -78,7 +78,7 @@ public sealed class MessagePickupHandlerLeaseIdentityTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var first = h.Http(h.Alice);
         var second = h.Http(h.Alice);
         first.OnSend = firstRequestEndsBecause switch
@@ -141,7 +141,7 @@ public sealed class MessagePickupHandlerLeaseIdentityTests
         // message"), and it stays under the later request's lease, for that lease's whole time.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var first = h.Http(h.Alice);
         var second = h.Http(h.Alice);
         first.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
@@ -198,7 +198,7 @@ public sealed class MessagePickupHandlerLeaseIdentityTests
         // late release is still this request's to make and changes nothing that matters.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var session = h.Http(h.Alice);
         session.OnSend = (_, _) =>
         {

@@ -4,6 +4,7 @@ using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Tests.Coordination;
 using DidComm.Messages;
+using DidComm.TestSupport;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -159,7 +160,7 @@ public sealed class MessagePickupLiveDeliverTests
             _ => DateTimeOffset.MinValue,
         };
 
-        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(12), new PickupDeliveryOptions(NotBefore: notBefore));
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(120), new PickupDeliveryOptions(NotBefore: notBefore));
 
         result.Outcome.Should().Be(PushedLive);
         socket.Sent.Should().ContainSingle();
@@ -171,7 +172,7 @@ public sealed class MessagePickupLiveDeliverTests
         await using var fixture = PickupFixture.Create();
         var (mediator, peer) = await fixture.EnrolledAsync();
 
-        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(12), new PickupDeliveryOptions(NotBefore: DateTimeOffset.MaxValue));
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(120), new PickupDeliveryOptions(NotBefore: DateTimeOffset.MaxValue));
 
         result.Outcome.Should().Be(Queued);
         (await MessagePickupLive.StatusAsync(fixture, peer, mediator)).MessageCount.Should().Be(0);
@@ -263,16 +264,16 @@ public sealed class MessagePickupLiveDeliverTests
         const string second = "did:example:second";
         var (_, peer) = await fixture.EnrolledAsync(first, second);
 
-        (await fixture.Queue.DeliverAsync(first, PickupFixture.Payload(10))).Outcome.Should().Be(Queued);
-        (await fixture.Queue.DeliverAsync(second, PickupFixture.Payload(10))).Outcome.Should().Be(Queued);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered, "enrolled is not registered: the peer never added its own DID");
+        (await fixture.Queue.DeliverAsync(first, PickupFixture.Payload(100))).Outcome.Should().Be(Queued);
+        (await fixture.Queue.DeliverAsync(second, PickupFixture.Payload(100))).Outcome.Should().Be(Queued);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered, "enrolled is not registered: the peer never added its own DID");
 
         await fixture.Host.Store.UpdateRecipientsAsync(peer, new[] { new RecipientUpdate(first, RecipientUpdateAction.Remove) }, CancellationToken.None);
-        (await fixture.Queue.DeliverAsync(first, PickupFixture.Payload(10))).Should().Be(new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null));
-        (await fixture.Queue.DeliverAsync(second, PickupFixture.Payload(10))).Outcome.Should().Be(Queued, "the other DID of the grant is untouched");
+        (await fixture.Queue.DeliverAsync(first, PickupFixture.Payload(100))).Should().Be(new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null));
+        (await fixture.Queue.DeliverAsync(second, PickupFixture.Payload(100))).Outcome.Should().Be(Queued, "the other DID of the grant is untouched");
 
         (await fixture.Host.Store.RevokeAsync(peer, CancellationToken.None)).Should().BeTrue();
-        (await fixture.Queue.DeliverAsync(second, PickupFixture.Payload(10))).Should().Be(new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null));
+        (await fixture.Queue.DeliverAsync(second, PickupFixture.Payload(100))).Should().Be(new PickupDeliveryResult(PickupDeliveryOutcome.NotRegistered, null, null));
         fixture.Memory.MessageCount.Should().Be(3, "what was accepted before stays until it is purged; nothing new is accepted");
     }
 
@@ -399,7 +400,7 @@ public sealed class MessagePickupLiveDeliverTests
         {
             var expected = nowSeconds - skewSeconds > expires ? Expired : Queued;
 
-            var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(8), new PickupDeliveryOptions(ExpiresTime: expires));
+            var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(80), new PickupDeliveryOptions(ExpiresTime: expires));
 
             result.Outcome.Should().Be(expected, "expires_time {0} with a skew of {1} s at second {2}", expires, skewSeconds, nowSeconds);
             if (expected == Queued)
@@ -491,8 +492,8 @@ public sealed class MessagePickupLiveDeliverTests
         var storeWide = limit.StartsWith("the store", StringComparison.Ordinal);
         if (limit.EndsWith("message limit", StringComparison.Ordinal))
         {
-            first = await fixture.QueueAsync(alice, PickupFixture.Payload(10));
-            await fixture.QueueAsync(storeWide ? bob : alice, PickupFixture.Payload(10));
+            first = await fixture.QueueAsync(alice, PickupFixture.Payload(100));
+            await fixture.QueueAsync(storeWide ? bob : alice, PickupFixture.Payload(100));
         }
         else
         {
@@ -502,7 +503,7 @@ public sealed class MessagePickupLiveDeliverTests
         await MessagePickupLive.SetLiveAsync(fixture, alice, mediator, socket);
         var (count, bytes) = (fixture.Memory.MessageCount, fixture.Memory.TotalBytes);
 
-        var refused = await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(1));
+        var refused = await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(StandInJwe.MinSize));
 
         refused.Should().Be(new PickupDeliveryResult(PickupDeliveryOutcome.QueueFull, null, alice), "a full queue is an outcome, not an exception (JC-1)");
         fixture.Memory.MessageCount.Should().Be(count);
@@ -518,13 +519,13 @@ public sealed class MessagePickupLiveDeliverTests
         MessagePickupLive.QueueLogs(fixture, LogLevel.Warning).Should().ContainSingle().Which.State.Should().Contain("Outcome", expectedReason);
 
         // One grant's quota is not another's; the store's bounds are everyone's.
-        var other = await fixture.Queue.DeliverAsync(bob, PickupFixture.Payload(1));
+        var other = await fixture.Queue.DeliverAsync(bob, PickupFixture.Payload(StandInJwe.MinSize));
         other.Outcome.Should().Be(storeWide ? PickupDeliveryOutcome.QueueFull : Queued);
         MessagePickupLive.QueueLogs(fixture, LogLevel.Warning).Should().ContainSingle("the second refusal is logged at Debug");
 
         // The budget counts what is retained: once a message is gone there is room again.
         (await fixture.Queue.RemoveAsync(alice, first)).Should().BeTrue();
-        (await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(1))).Outcome.Should().Be(PushedLive);
+        (await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(StandInJwe.MinSize))).Outcome.Should().Be(PushedLive);
         MessagePickupLive.ShouldNotLeak(fixture.PickupLogs, alice, bob, mediator, first);
     }
 
@@ -710,14 +711,14 @@ public sealed class MessagePickupLiveDeliverTests
         var max = fixture.Queue.MaxAdmissiblePayloadBytes;
 
         (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(max + 1))).Outcome.Should().Be(PickupDeliveryOutcome.PayloadTooLarge);
-        (await fixture.Queue.DeliverAsync("did:example:nobody", PickupFixture.Payload(5))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5), new PickupDeliveryOptions(ExpiresTime: 1))).Outcome.Should().Be(Expired);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5))).Outcome.Should().Be(PushedLive);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5), new PickupDeliveryOptions(AllowLive: false))).Outcome.Should().Be(Queued);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
+        (await fixture.Queue.DeliverAsync("did:example:nobody", PickupFixture.Payload(50))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50), new PickupDeliveryOptions(ExpiresTime: 1))).Outcome.Should().Be(Expired);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50))).Outcome.Should().Be(PushedLive);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50), new PickupDeliveryOptions(AllowLive: false))).Outcome.Should().Be(Queued);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
 
         fixture.FakeStore!.OnEnqueue = (_, _, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5))).Outcome.Should().Be(PickupDeliveryOutcome.Faulted);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50))).Outcome.Should().Be(PickupDeliveryOutcome.Faulted);
         fixture.FakeStore.OnAcknowledge = (_, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
         (await fixture.Queue.RemoveAsync(peer, "no-such-id")).Should().BeFalse();
     }
@@ -731,7 +732,7 @@ public sealed class MessagePickupLiveDeliverTests
         var (_, peer) = await fixture.EnrolledAsync();
         var queue = fixture.Queue;
 
-        (await FluentActions.Awaiting(async () => await queue.DeliverAsync(null!, PickupFixture.Payload(5))).Should().ThrowAsync<ArgumentNullException>())
+        (await FluentActions.Awaiting(async () => await queue.DeliverAsync(null!, PickupFixture.Payload(50))).Should().ThrowAsync<ArgumentNullException>())
             .Which.ParamName.Should().Be("recipientDid");
         foreach (var empty in new[] { ReadOnlyMemory<byte>.Empty, new ReadOnlyMemory<byte>(Array.Empty<byte>()), new ReadOnlyMemory<byte>(new byte[8], 3, 0) })
         {
@@ -740,9 +741,13 @@ public sealed class MessagePickupLiveDeliverTests
         }
         fixture.FakeStore!.Calls.Should().BeEmpty();
 
-        (await queue.DeliverAsync(peer, PickupFixture.Payload(5), options: null)).Outcome.Should().Be(Queued);
-        (await queue.DeliverAsync(peer, new ReadOnlyMemory<byte>(new byte[8], 3, 1))).Outcome.Should().Be(Queued, "one byte is a message");
-        fixture.Memory.TotalBytes.Should().Be(6);
+        (await queue.DeliverAsync(peer, PickupFixture.Payload(50), options: null)).Outcome.Should().Be(Queued);
+        // The smallest message in encrypted form, as a slice of a larger buffer: not empty is all
+        // the argument check asks; the quota counts the slice.
+        var buffer = new byte[StandInJwe.MinSize + 8];
+        StandInJwe.OfSize(StandInJwe.MinSize).CopyTo(buffer, 3);
+        (await queue.DeliverAsync(peer, new ReadOnlyMemory<byte>(buffer, 3, StandInJwe.MinSize))).Outcome.Should().Be(Queued, "a slice is a message");
+        fixture.Memory.TotalBytes.Should().Be(50 + StandInJwe.MinSize);
     }
 
     [Fact]
@@ -757,7 +762,7 @@ public sealed class MessagePickupLiveDeliverTests
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
 
-        await FluentActions.Awaiting(async () => await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5), ct: cancelled.Token)).Should().ThrowAsync<OperationCanceledException>();
+        await FluentActions.Awaiting(async () => await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50), ct: cancelled.Token)).Should().ThrowAsync<OperationCanceledException>();
         await FluentActions.Awaiting(async () => await fixture.Queue.RemoveAsync(peer, "any-id", cancelled.Token)).Should().ThrowAsync<OperationCanceledException>();
         await FluentActions.Awaiting(async () => await fixture.Queue.PurgeExpiredAsync(cancelled.Token)).Should().ThrowAsync<OperationCanceledException>();
 
@@ -963,12 +968,12 @@ public sealed class MessagePickupLiveDeliverTests
         await fixture.EnrolAsync(alice, mediator, alice);
         await fixture.EnrolAsync(bob, mediator, bob);
 
-        (await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(10, 1))).Should().Be(new PickupDeliveryResult(Queued, "same-id-everywhere", alice));
-        (await fixture.Queue.DeliverAsync(bob, PickupFixture.Payload(11, 2))).Should().Be(new PickupDeliveryResult(Queued, "same-id-everywhere", bob), "ids are scoped to the grant (FR-PICK-04)");
+        (await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(100, 1))).Should().Be(new PickupDeliveryResult(Queued, "same-id-everywhere", alice));
+        (await fixture.Queue.DeliverAsync(bob, PickupFixture.Payload(110, 2))).Should().Be(new PickupDeliveryResult(Queued, "same-id-everywhere", bob), "ids are scoped to the grant (FR-PICK-04)");
 
         (await MessagePickupLive.AckAsync(fixture, alice, mediator, "same-id-everywhere")).MessageCount.Should().Be(0);
         var bobs = (await MessagePickupLive.FetchNowAsync(fixture, bob, mediator)).Should().ContainSingle("Alice's acknowledgement removed only her record").Subject;
-        bobs.Payload.ToArray().Should().Equal(PickupFixture.Payload(11, 2));
+        bobs.Payload.ToArray().Should().Equal(PickupFixture.Payload(110, 2));
     }
 
     [Fact]
@@ -1005,7 +1010,7 @@ public sealed class MessagePickupLiveDeliverTests
         await using var fixture = PickupFixture.Create();
         var (_, peer) = await fixture.EnrolledAsync();
 
-        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(5));
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(50));
 
         var text = result.ToString();
         text.Should().Contain(nameof(PickupDeliveryOutcome.Queued));

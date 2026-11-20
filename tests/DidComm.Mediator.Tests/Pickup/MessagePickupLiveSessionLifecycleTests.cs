@@ -238,7 +238,7 @@ public sealed class MessagePickupLiveSessionLifecycleTests
             var arriving = Task.Run(async () =>
             {
                 startLine.SignalAndWait(MessagePickupLive.Deadline).Should().BeTrue();
-                return await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16, (byte)round));
+                return await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160, (byte)round));
             });
             await Task.WhenAll(enabling, closing, arriving).WaitAsync(MessagePickupLive.Deadline);
 
@@ -248,7 +248,7 @@ public sealed class MessagePickupLiveSessionLifecycleTests
 
             // ... once both have completed the closed session is never live and never a target again ...
             var sentBefore = sent();
-            var after = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16, (byte)round));
+            var after = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160, (byte)round));
             after.Outcome.Should().Be(PickupDeliveryOutcome.Queued, "round {0}: a push must never be PushedLive to a closed session", round);
             sent().Should().Be(sentBefore);
 

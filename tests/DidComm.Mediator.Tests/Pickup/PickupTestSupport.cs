@@ -8,6 +8,7 @@ using DidComm.Mediator.Tests.Coordination;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Samples.Shared;
+using DidComm.TestSupport;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -332,14 +333,12 @@ internal sealed class PickupFixture : IAsyncDisposable
         }
     }
 
-    /// <summary>A payload of <paramref name="size"/> bytes that looks like nothing in particular (the mediator relays bytes).</summary>
-    public static byte[] Payload(int size, byte seed = 1)
-    {
-        var bytes = new byte[size];
-        for (var i = 0; i < size; i++)
-            bytes[i] = (byte)(seed + i * 31);
-        return bytes;
-    }
+    /// <summary>
+    /// A message of exactly <paramref name="size"/> bytes in encrypted form, the only kind the
+    /// mailbox stores: a stand-in JWE (<see cref="StandInJwe"/>), never decrypted. At least
+    /// <see cref="StandInJwe.MinSize"/> bytes.
+    /// </summary>
+    public static byte[] Payload(int size, byte seed = 1) => StandInJwe.OfSize(size, seed);
 
     /// <summary>Queue a message for <paramref name="recipientDid"/> and require that it was retained.</summary>
     public async Task<string> QueueAsync(string recipientDid, byte[] payload, PickupDeliveryOptions? options = null)

@@ -212,14 +212,14 @@ public sealed class MessagePickupDiTests
         await mediation.UpdateRecipientsAsync(alice.Did, new[] { new RecipientUpdate(alice.Did, RecipientUpdateAction.Add) }, CancellationToken.None);
 
         // In: the queue as a delivery pipeline resolves it. Out: the handler the dispatcher reaches.
-        var delivered = await sp.GetRequiredService<MessagePickupQueue>().DeliverAsync(alice.Did, new byte[] { 1, 2, 3 });
+        var delivered = await sp.GetRequiredService<MessagePickupQueue>().DeliverAsync(alice.Did, PickupFixture.Payload(30));
         var outcome = await DispatchAsync(sp, MessagePickup.CreateStatusRequest(alice.Did, mediator.Did), mediator.Did);
 
         delivered.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
         outcome.Handler.Should().BeSameAs(sp.GetRequiredService<MessagePickupHandler>());
         MessagePickup.TryParseStatus(outcome.Reply!, out var status).Should().BeTrue();
         status!.MessageCount.Should().Be(1);
-        status.TotalBytes.Should().Be(3);
+        status.TotalBytes.Should().Be(30);
         ((InMemoryMessageStore)sp.GetRequiredService<IMessageStore>()).MessageCount.Should().Be(1);
     }
 
@@ -265,7 +265,7 @@ public sealed class MessagePickupDiTests
             });
         await EnrolAliceAsync(sp);
 
-        (await sp.GetRequiredService<MessagePickupQueue>().DeliverAsync(Alice, new byte[] { 1 })).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await sp.GetRequiredService<MessagePickupQueue>().DeliverAsync(Alice, PickupFixture.Payload(20))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
         sp.GetRequiredService<ProtocolDispatcher>().Should().NotBeNull();
         sp.GetService<CoordinateMediationHandler>().Should().BeNull("pickup needs the store, not the protocol");
     }
@@ -288,8 +288,8 @@ public sealed class MessagePickupDiTests
         sp.GetRequiredService<IMessageStore>().Should().BeSameAs(store);
         sp.GetServices<IMessageStore>().Should().ContainSingle("AddMessagePickup's default is a TryAdd and stays out");
         var queue = sp.GetRequiredService<MessagePickupQueue>();
-        (await queue.DeliverAsync(Alice, new byte[] { 1, 2 })).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
-        (await queue.DeliverAsync(Alice, new byte[] { 3 })).Outcome.Should().Be(PickupDeliveryOutcome.Queued, "the host's store has its own bounds; the options only size the default store");
+        (await queue.DeliverAsync(Alice, PickupFixture.Payload(20, 1))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await queue.DeliverAsync(Alice, PickupFixture.Payload(20, 3))).Outcome.Should().Be(PickupDeliveryOutcome.Queued, "the host's store has its own bounds; the options only size the default store");
         store.MessageCount.Should().Be(2);
     }
 
@@ -319,8 +319,8 @@ public sealed class MessagePickupDiTests
         await EnrolAliceAsync(sp);
         var queue = sp.GetRequiredService<MessagePickupQueue>();
         for (var i = 0; i < 7; i++)
-            (await queue.DeliverAsync(Alice, new byte[] { (byte)i })).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
-        (await queue.DeliverAsync(Alice, new byte[] { 7 })).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
+            (await queue.DeliverAsync(Alice, PickupFixture.Payload(20, (byte)i))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await queue.DeliverAsync(Alice, PickupFixture.Payload(20, 7))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
     }
 
     // ---- option validation ----------------------------------------------------------------

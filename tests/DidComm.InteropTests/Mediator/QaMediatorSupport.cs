@@ -61,14 +61,14 @@ internal static class Qa
             s(m);
     };
 
-    /// <summary>A JSON object whose compact serialisation is exactly <paramref name="bytes"/> ASCII bytes (an opaque onward payload).</summary>
+    /// <summary>
+    /// An opaque onward payload in encrypted form, the only kind the mailbox stores: a JSON object
+    /// with a <c>ciphertext</c> member (a stand-in JWE, <see cref="StandInJwe"/>) whose compact
+    /// serialisation is exactly <paramref name="bytes"/> ASCII bytes.
+    /// </summary>
     public static string JsonPayloadOfSize(int bytes)
     {
-        const string Prefix = "{\"protected\":\"";
-        const string Suffix = "\"}";
-        var fill = bytes - Prefix.Length - Suffix.Length;
-        fill.Should().BeGreaterThan(0);
-        var text = Prefix + new string('a', fill) + Suffix;
+        var text = Encoding.ASCII.GetString(StandInJwe.OfSize(bytes));
         Encoding.UTF8.GetByteCount(text).Should().Be(bytes);
         return text;
     }

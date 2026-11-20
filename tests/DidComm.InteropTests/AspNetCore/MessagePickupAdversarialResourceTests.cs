@@ -94,7 +94,7 @@ public sealed class MessagePickupAdversarialResourceTests(ITestOutputHelper outp
         var max = mediator.Queue.MaxAdmissiblePayloadBytes;
         const int small = 200;
 
-        // The mediator relays bytes: these payloads stand for one large message and nine short ones.
+        // Stand-in envelopes the mediator relays unopened: one large message and nine short ones.
         var payloads = new List<byte[]> { Filled(max - 9 * small - 64, 1) };
         for (var i = 0; i < 9; i++)
             payloads.Add(Filled(small, (byte)(2 + i)));
@@ -137,13 +137,9 @@ public sealed class MessagePickupAdversarialResourceTests(ITestOutputHelper outp
         => mediator.Logs.OfOthers.Select(r => OverTheBound.Match(r.Text)).Where(m => m.Success)
             .Select(m => (int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value))).ToArray();
 
-    private static byte[] Filled(int size, byte seed)
-    {
-        var bytes = new byte[size];
-        for (var i = 0; i < size; i++)
-            bytes[i] = (byte)(seed + i * 31);
-        return bytes;
-    }
+    // A message of exactly `size` bytes in encrypted form, the only kind the mailbox stores (a
+    // stand-in JWE, never decrypted).
+    private static byte[] Filled(int size, byte seed) => StandInJwe.OfSize(size, seed);
 
     // ---- what a recipient that stops reading makes the mediator hold ---------------------------------
 

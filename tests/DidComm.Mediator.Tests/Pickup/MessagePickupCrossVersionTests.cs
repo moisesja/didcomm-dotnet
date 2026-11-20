@@ -29,11 +29,11 @@ public sealed class MessagePickupCrossVersionTests
 
         // A message the 3.0 handler's status counts is counted by 4.0's, and the other way round.
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.Fixture.QueueAsync(h.Alice, PickupFixture.Payload(7));
+        await h.Fixture.QueueAsync(h.Alice, PickupFixture.Payload(70));
         (await h.SendAsync(h.StatusRequest(h.Alice), h.Http(h.Alice))).Status().MessageCount.Should().Be(1);
         (await h.SendAsync(h.StatusRequest40(h.Alice), h.Http(h.Alice))).Status40().MessageCount.Should().Be(1);
-        (await queue.DeliverAsync(h.Alice, PickupFixture.Payload(3))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
-        (await h.SendAsync(h.StatusRequest40(h.Alice), h.Http(h.Alice))).Status40().TotalBytes.Should().Be(10);
+        (await queue.DeliverAsync(h.Alice, PickupFixture.Payload(30))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await h.SendAsync(h.StatusRequest40(h.Alice), h.Http(h.Alice))).Status40().TotalBytes.Should().Be(100);
 
         // And the per-session state: live delivery turned on through 4.0 is what 3.0 reports for that session.
         var socket = h.Live(h.Alice);
@@ -67,7 +67,7 @@ public sealed class MessagePickupCrossVersionTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var fetch = h.Http(h.Alice);
 
         var request = fetchedWith == "3.0" ? h.DeliveryRequest(h.Alice, 2) : h.DeliveryRequest40(h.Alice, 2);
@@ -82,7 +82,7 @@ public sealed class MessagePickupCrossVersionTests
         if (acknowledgedWith == "3.0")
         {
             var ack = h.MessagesReceived(h.Alice, fetched);
-            (await h.SendAsync(ack, h.Http(h.Alice))).ShouldBeStatus(ack, h.Mediator, h.Alice, 1, 30, live: false, times: Times30(h));
+            (await h.SendAsync(ack, h.Http(h.Alice))).ShouldBeStatus(ack, h.Mediator, h.Alice, 1, 300, live: false, times: Times30(h));
         }
         else
         {
@@ -103,7 +103,7 @@ public sealed class MessagePickupCrossVersionTests
         async Task<Message> PushAsync()
         {
             var before = socket.Sent.Count;
-            (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+            (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
             return socket.Sent.Skip(before).Should().ContainSingle().Subject;
         }
 
@@ -130,14 +130,14 @@ public sealed class MessagePickupCrossVersionTests
 
         var on = onWith == "3.0" ? MessagePickup.CreateLiveDeliveryChange(peer, mediator, true) : MessagePickup40.CreateLiveDeliveryChange(peer, mediator, true);
         (await fixture.SendAsync(on, mediator, socket)).Reply.Should().NotBeNull();
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(8))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(80))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
 
         var off = offWith == "3.0" ? MessagePickup.CreateLiveDeliveryChange(peer, mediator, false) : MessagePickup40.CreateLiveDeliveryChange(peer, mediator, false);
         var answer = await fixture.SendAsync(off, mediator, socket);
         var reportedLive = offWith == "3.0" ? answer.Status().LiveDelivery : answer.Status40().LiveDelivery;
 
         reportedLive.Should().BeFalse();
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(8))).Outcome.Should().Be(PickupDeliveryOutcome.Queued, "live delivery is off for the session, whichever version turned it off");
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(80))).Outcome.Should().Be(PickupDeliveryOutcome.Queued, "live delivery is off for the session, whichever version turned it off");
         socket.Sent.Should().HaveCount(1);
     }
 
@@ -151,8 +151,8 @@ public sealed class MessagePickupCrossVersionTests
         var bob = new List<string>();
         for (var i = 0; i < 3; i++)
         {
-            alice.Add(await h.QueueAsync(h.Alice, 10, (byte)i));
-            bob.Add(await h.QueueAsync(h.Bob, 20, (byte)(10 + i)));
+            alice.Add(await h.QueueAsync(h.Alice, 100, (byte)i));
+            bob.Add(await h.QueueAsync(h.Bob, 200, (byte)(10 + i)));
         }
 
         // Alice speaks 3.0, Bob 4.0, turn about.
@@ -187,7 +187,7 @@ public sealed class MessagePickupCrossVersionTests
         // request's thread exactly as written, upper case included, in both versions.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var thread = new LetterIds("switch").First.ToUpperInvariant();
         var session = h.Http(h.Alice);
 

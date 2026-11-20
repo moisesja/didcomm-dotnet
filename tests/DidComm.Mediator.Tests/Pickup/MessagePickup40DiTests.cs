@@ -155,7 +155,7 @@ public sealed class MessagePickup40DiTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync(o => o.EnableV4 = enableV4);
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         h.ResetTraces();
 
         var outcome = await h.SendAsync(h.StatusRequest40(h.Alice), h.Http(h.Alice));
@@ -348,7 +348,7 @@ public sealed class MessagePickup40DiTests
         var mediation = sp.GetRequiredService<IMediationStore>();
         await mediation.GrantAsync(new MediationGrant(alice.Did, new[] { mediator.Did }), CancellationToken.None);
         await mediation.UpdateRecipientsAsync(alice.Did, new[] { new RecipientUpdate(alice.Did, RecipientUpdateAction.Add) }, CancellationToken.None);
-        (await sp.GetRequiredService<MessagePickupQueue>().DeliverAsync(alice.Did, new byte[] { 1, 2, 3 })).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await sp.GetRequiredService<MessagePickupQueue>().DeliverAsync(alice.Did, PickupFixture.Payload(30))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
 
         var outcome = await DispatchAsync(sp, MessagePickup40.CreateStatusRequest(alice.Did, mediator.Did), mediator.Did);
 

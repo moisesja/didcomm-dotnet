@@ -36,7 +36,7 @@ public sealed partial class PickupRandomIdTests
         var ids = new List<string>(1000);
         for (var i = 0; i < 1000; i++)
         {
-            var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16, (byte)i));
+            var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160, (byte)i));
             result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
             ids.Add(result.MessageId!);
         }
@@ -78,8 +78,8 @@ public sealed partial class PickupRandomIdTests
             Options.Create(new MessagePickupOptions()),
             Options.Create(new DidCommOptions()));
 
-        var first = await queue.DeliverAsync(peer, PickupFixture.Payload(16, 1));
-        var second = await queue.DeliverAsync(peer, PickupFixture.Payload(16, 2));
+        var first = await queue.DeliverAsync(peer, PickupFixture.Payload(160, 1));
+        var second = await queue.DeliverAsync(peer, PickupFixture.Payload(160, 2));
 
         LowerHex32().IsMatch(first.MessageId!).Should().BeTrue();
         LowerHex32().IsMatch(second.MessageId!).Should().BeTrue();
@@ -93,7 +93,7 @@ public sealed partial class PickupRandomIdTests
         await using var fixture = PickupFixture.Create(services: s => s.AddSingleton(new PickupIdSource(() => "seam-" + Interlocked.Increment(ref calls))));
         var (_, peer) = await fixture.EnrolledAsync();
 
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16))).MessageId.Should().Be("seam-1");
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160))).MessageId.Should().Be("seam-1");
         FluentActions.Invoking(() => new PickupIdSource(null!)).Should().Throw<ArgumentNullException>();
     }
 

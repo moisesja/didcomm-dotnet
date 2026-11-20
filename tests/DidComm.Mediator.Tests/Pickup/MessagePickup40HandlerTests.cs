@@ -72,7 +72,7 @@ public sealed class MessagePickup40HandlerTests
         var otherMediator = await h.NewDidAsync();
         var hasGrant = situation != NoGrantHttp;
 
-        // Three messages, 10.123 s apart, 10 + 20 + 30 bytes.
+        // Three messages, 10.123 s apart, 100 + 200 + 300 bytes.
         var ids = new List<string>();
         var payloads = new List<byte[]>();
         if (hasGrant)
@@ -80,7 +80,7 @@ public sealed class MessagePickup40HandlerTests
             await h.EnrolAsync(alice, alice);
             for (var i = 0; i < 3; i++)
             {
-                payloads.Add(PickupFixture.Payload(10 * (i + 1), (byte)(i + 1)));
+                payloads.Add(PickupFixture.Payload(100 * (i + 1), (byte)(i + 1)));
                 ids.Add(await h.Fixture.QueueAsync(alice, payloads[i]));
                 h.Clock.Advance(Spacing);
             }
@@ -118,7 +118,7 @@ public sealed class MessagePickup40HandlerTests
 
         var thid = requestHasThid ? new LetterIds("thread").First : null;
         var count = hasGrant ? 3 : 0;
-        var bytes = hasGrant ? 60 : 0;
+        var bytes = hasGrant ? 600 : 0;
         MessagePickup40Times? times = hasGrant ? new MessagePickup40Times(t0 + 2 * (long)Spacing.TotalMilliseconds, t0) : null;
         var statusReads = hasGrant ? new[] { "GetStatusAsync" } : Array.Empty<string>();
         var delivered = false;
@@ -244,7 +244,7 @@ public sealed class MessagePickup40HandlerTests
         var aliceKey = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, aliceKey);
         await h.EnrolAsync(h.Bob, h.Bob);
-        await h.QueueAsync(h.Bob, 10);
+        await h.QueueAsync(h.Bob, 100);
         var recipientDid = filter switch
         {
             "none" => null,
@@ -272,7 +272,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10), await h.QueueAsync(h.Alice, 20) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100), await h.QueueAsync(h.Alice, 200) };
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -292,7 +292,7 @@ public sealed class MessagePickup40HandlerTests
         // "No messages are available to be sent" (L210): leased to an earlier request is not available.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var first = h.Http(h.Alice);
         var firstRequest = h.DeliveryRequest40(h.Alice);
         (await h.SendAsync(firstRequest, first)).ShouldBeNoReply40();
@@ -318,7 +318,7 @@ public sealed class MessagePickup40HandlerTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 5; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 10, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 100, (byte)i));
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -343,7 +343,7 @@ public sealed class MessagePickup40HandlerTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 5; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 8, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 80, (byte)i));
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -364,7 +364,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -386,7 +386,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var otherMediator = await h.NewDidAsync();
         PickupFakeSession? carried = session switch
         {
@@ -421,7 +421,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         // Leased first, as a recipient that fetched them would hold them.
         var fetch = h.Http(h.Alice);
         (await h.SendAsync(h.DeliveryRequest40(h.Alice), fetch)).ShouldBeNoReply40();
@@ -452,7 +452,7 @@ public sealed class MessagePickup40HandlerTests
             o.MaxAckIds = 3;
         });
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         h.ResetTraces();
 
         // L-055: three valid ids, then a number. The refusal must be the count, not the entry.
@@ -543,7 +543,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var session = withSession ? h.Live(h.Alice) : null;
         var request = name switch
         {
@@ -592,16 +592,16 @@ public sealed class MessagePickup40HandlerTests
         await h.EnrolAsync(h.Alice, h.Alice);
         h.Clock.Advance(TimeSpan.FromMilliseconds(789));
         var oldest = h.Clock.Now;
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         h.Clock.Advance(TimeSpan.FromMilliseconds(1_234));
         var newest = h.Clock.Now;
-        await h.QueueAsync(h.Alice, 5);
+        await h.QueueAsync(h.Alice, 50);
         h.Clock.Advance(TimeSpan.FromMinutes(2));
 
         var request = h.StatusRequest40(h.Alice);
         var outcome = await h.SendAsync(request, h.Http(h.Alice));
 
-        outcome.ShouldBeStatus40(request, h.Mediator, h.Alice, 2, 15, live: false, times: new MessagePickup40Times(newest.ToUnixTimeMilliseconds(), oldest.ToUnixTimeMilliseconds()));
+        outcome.ShouldBeStatus40(request, h.Mediator, h.Alice, 2, 150, live: false, times: new MessagePickup40Times(newest.ToUnixTimeMilliseconds(), oldest.ToUnixTimeMilliseconds()));
         (newest.ToUnixTimeMilliseconds() % 1000).Should().NotBe(0, "the instant is not a whole second, so seconds cannot pass for milliseconds");
     }
 
@@ -641,7 +641,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var socket = h.Live(h.Alice);
         var liveBefore = request == LiveOff;
         if (liveBefore)
@@ -676,7 +676,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var socket = h.Live(h.Alice);
         (await h.SendAsync(h.LiveChange40(h.Alice, true), socket)).Status40().LiveDelivery.Should().BeTrue();
         h.ResetTraces();
@@ -720,7 +720,7 @@ public sealed class MessagePickup40HandlerTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var handler = h.Fixture.Host.Services.GetRequiredService<MessagePickup40Handler>();
         var message = h.MessagesReceived40(h.Alice, new[] { id });
         var received = await h.Fixture.ReceiveAsync(message, h.Mediator);
@@ -746,7 +746,7 @@ public sealed class MessagePickup40HandlerTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var key = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, key);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10), await h.QueueAsync(key, 10) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100), await h.QueueAsync(key, 100) };
         var threads = new LetterIds("logthread");
         var secrets = new List<string>();
         string Thread()

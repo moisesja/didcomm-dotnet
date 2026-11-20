@@ -71,7 +71,7 @@ public sealed class MessagePickupAdversarialIdentityFindingsTests
         var bob = (await fx.NewPeerAsync()).Did;
         const string contactDid = "did:example:adv1-contact";
         await fx.EnrolAsync(bob, mediator, contactDid);
-        await fx.QueueAsync(contactDid, PickupFixture.Payload(16, 1));
+        await fx.QueueAsync(contactDid, PickupFixture.Payload(160, 1));
         await mediation.Inner.UpdateRecipientsAsync(bob, new[] { new RecipientUpdate(contactDid, RecipientUpdateAction.Remove) }, None);
 
         // Right after the delivery-time lookup has read "not registered to Bob": Bob's re-sync adds
