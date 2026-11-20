@@ -212,13 +212,14 @@ that every grantee references its granter directly (pack pins direct references 
 5. With the dispatcher overloads, `ProtocolDispatcher.DispatchAsync` routes the `UnpackResult` by
    message type to the `IProtocolHandler` registered for it, with `ProtocolContext.Session` (the
    session, or `null`) and `ProtocolContext.ReturnRoute` (this message's parsed header); a handler
-   may return a reply or push through the session. Every built-in responder answers in the request's
-   thread: the reply's `thid` is the request's `thid` when it declares one, else its `id` (DIDComm
+   may return a reply or push through the session. A built-in responder's answer is in the
+   request's thread: its `thid` is the request's `thid` when it declares one, else its `id` (DIDComm
    v2.1 threading.md L15/L17; DD-11). Core's Trust Ping `ping-response` and Discover Features
    `disclose` do this through `ThreadIds.ResponseThreadId` since #138 (before, they always used the
-   request's `id`); the mediator's answers through `CoordinateMediation.ResponseThreadId` and
-   `MessagePickup.ResponseThreadId`. A request built by hand (not unpacked) that declares an
-   invalid `thid` is refused with `MalformedMessageException`, quoting no value.
+   request's `id`); for a request built by hand (not unpacked) that declares an invalid `thid`, these
+   two refuse it with `MalformedMessageException`, quoting no value. The mediator's answers use
+   `CoordinateMediation.ResponseThreadId` and `MessagePickup.ResponseThreadId`. A problem report is
+   not in the request's thread: it starts a child thread whose `pthid` names it (problems.md L83).
 6. A reply with a session becomes the HTTP `200` body or a WebSocket push; without one it is
    logged, not sent (a reply to anyone else travels out of band, FR-TRN-10).
 7. `IProtocolObserver` instances get a read-only, best-effort copy off the reply path for every
