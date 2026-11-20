@@ -91,9 +91,9 @@ With 512-character keys and the default 10,000 entries, measured as heap size mi
 - [x] QA pass: no product defect. Tests in `91f8880`, `996b53b`. One low doubt fixed: the pack-signed warning's id (`9377736`)
 - [x] Adversarial pass (~24 min): no way around the limit. One Low fixed: the observer-drop id (`58cc68d`); the rest overlap #115 / #116 (see Review)
 - [x] Docs: CHANGELOG (leads with the behaviour change), PRD FR-MSG-02/11, FR-API-09, FR-RR-01/08, FR-PICK-03, FR-PROTO-10, architecture doc, SECURITY.md, XML docs with the measured bound
-- [ ] Build/test/pack gate; package validation negative control; DX gate (no new public members)
-- [ ] Live interop run (normal)
-- [ ] PR; CI green
+- [x] Build/test/pack gate (Core 2875 + 4 skipped, Mediator 4725 + 8, Interop 2112 + 5); package validation passes vs 1.5.0, negative control CP0002; DX gate (no new public members, no allowlist change)
+- [x] Live interop run (normal): 44803851719 on `2394f73`, green; python and jvm tables byte-identical to nightly 44730996966; mediator leg 10/10
+- [x] PR #142; CI 44806474087 green on `e3038ff` (44805245728 on `2394f73` red on ubuntu in the store heap probe, diagnosed; the probe is now opt-in)
 
 ## Review
 
