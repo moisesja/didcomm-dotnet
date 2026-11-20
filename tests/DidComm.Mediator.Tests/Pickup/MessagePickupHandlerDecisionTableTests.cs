@@ -645,7 +645,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var socket = h.Live(h.Alice);
         (await h.SendAsync(h.LiveChange(h.Alice, true), socket)).Status().LiveDelivery.Should().BeTrue();
         h.ResetTraces();
-        var longThread = new string('t', 5000);
+        var longThread = new string('t', DidComm.Consistency.IdentifierLimits.MaxMessageIdLength); // the longest unpack accepts (FR-MSG-02/11)
 
         var ignored = new[]
         {

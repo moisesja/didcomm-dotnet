@@ -148,12 +148,20 @@ internal sealed class ClientWorld : IAsyncDisposable
     /// <summary>A message of <paramref name="type"/> from <paramref name="from"/> (default: the mediator) to <paramref name="to"/> (default: the local DID).</summary>
     public Message Answer(string type, string? thid, string? from = null, string? to = null, JsonObject? body = null, string? pthid = null)
     {
+        // A matcher test also models a direct caller, whose answer may carry a thid or pthid longer
+        // than unpack and Build accept (FR-MSG-11, 512 characters): such a value is set after Build.
+        const int max = DidComm.Consistency.IdentifierLimits.MaxMessageIdLength;
         var builder = new MessageBuilder().WithType(type).WithFrom(from ?? Mediator.Did).WithTo(to ?? Local.Did).WithBody(body ?? new JsonObject());
-        if (thid is not null)
+        if (thid is { Length: <= max })
             builder.WithThid(thid);
-        if (pthid is not null)
+        if (pthid is { Length: <= max })
             builder.WithPthid(pthid);
-        return builder.Build();
+        var message = builder.Build();
+        if (thid is { Length: > max })
+            message.Thid = thid;
+        if (pthid is { Length: > max })
+            message.Pthid = pthid;
+        return message;
     }
 
     /// <summary>A <c>mediate-grant</c> answering <paramref name="thid"/>.</summary>

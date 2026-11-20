@@ -12,6 +12,13 @@ namespace DidComm.Threading;
 /// threading says a message <c>id</c> "MUST be compared case-insensitively", and <c>thid</c> and
 /// <c>pthid</c> obey the same constraints, so two thread ids that differ only in letter case name
 /// the same thread and every method here treats them as one.
+/// <para>
+/// The dispatcher calls <see cref="GetOrCreate"/> with a message's <c>thid</c>, else its <c>id</c>,
+/// for every unpacked message it dispatches to a handler and for every pure acknowledgement. Unpack
+/// refuses either when it is longer than 512 characters (FR-MSG-02/11), so a key from the dispatcher
+/// is at most that long; an implementation that bounds its entries bounds its memory with it. A caller
+/// that dispatches an <c>UnpackResult</c> it built itself is not held to that bound.
+/// </para>
 /// </remarks>
 public interface IThreadStateStore
 {

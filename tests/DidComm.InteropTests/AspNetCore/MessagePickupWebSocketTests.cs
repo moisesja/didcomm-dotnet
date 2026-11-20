@@ -1066,10 +1066,14 @@ public sealed class MessagePickupWebSocketTests
             mediator.Raw(recipient, MessagePickup.DeliveryRequestType, new JsonObject { ["limit"] = "SENTINEL-limit", ["recipient_did"] = recipient.Did }, thread),
             mediator.Raw(recipient, MessagePickup.MessagesReceivedType, new JsonObject { ["message_id_list"] = new JsonArray(pushed.Id, 7, "SENTINEL-id") }, thread),
             mediator.Raw(recipient, MessagePickup.LiveDeliveryChangeType, new JsonObject { ["live_delivery"] = "SENTINEL-yes" }, thread),
-            mediator.Raw(recipient, MessagePickup.StatusRequestType, new JsonObject(), "SENTINEL-" + new string('t', 512)),
         };
         foreach (var request in malformed)
             await mediator.SendAsync(socket, recipient, request);
+        // A thread id over 512 characters: the packers refuse it, so it is sent unvalidated; unpack
+        // refuses it (FR-MSG-11).
+        var overLong = mediator.Raw(recipient, MessagePickup.StatusRequestType, new JsonObject());
+        overLong.Thid = "SENTINEL-" + new string('t', 512);
+        await ReturnRouteTestHost.SendAsync(socket, await mediator.AuthcryptUnvalidatedAsync(recipient, overLong));
 
         // Nothing was written for any of them, the session is still there and still live, and
         // nothing was removed or leased: the next frame is the answer to this request…
@@ -1091,7 +1095,7 @@ public sealed class MessagePickupWebSocketTests
         // the object, whose text a stranger can shape).
         mediator.Logs.Records.Where(r => r.Exception is not null).Should().BeEmpty("no line carries an exception object");
         mediator.Logs.Records.Count(r => r.Text.Contains(nameof(DidComm.Exceptions.MalformedMessageException), StringComparison.Ordinal))
-            .Should().BeGreaterThanOrEqualTo(malformed.Length, "the endpoint logs each malformed request by its type");
+            .Should().BeGreaterThanOrEqualTo(malformed.Length + 1, "the endpoint logs each malformed request by its type");
         mediator.Logs.OfOthers.Where(r => r.Level >= LogLevel.Information && Leaks(r.Rendered)).Select(r => $"{r.Category}: {r.Text}").Should().BeEmpty(
             "no line of the host at Information or above carries one of these values either");
     }

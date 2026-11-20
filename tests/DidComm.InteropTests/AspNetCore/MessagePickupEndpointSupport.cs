@@ -157,6 +157,14 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
         return builder.Build();
     }
 
+    /// <summary>
+    /// Authcrypt <paramref name="request"/> (prepared here) from <paramref name="from"/> without the
+    /// packers' validation: for a request they refuse, such as a <c>thid</c> over 512 characters
+    /// (FR-MSG-11), to show that the receive side refuses it too.
+    /// </summary>
+    public async Task<string> AuthcryptUnvalidatedAsync(TestPeer from, Message request)
+        => await Host.RawAuthcryptAsync(from, ReturnRouteTestHost.UnvalidatedJson(Prepare(request)));
+
     /// <summary>Authcrypt <paramref name="request"/> (prepared here) from <paramref name="from"/> and POST it to the registry-aware endpoint.</summary>
     public async Task<HttpPostResult> PostAsync(TestPeer from, Message request, bool returnRoute = true)
         => await Host.PostAsync(await Host.AuthcryptAsync(from, Prepare(request, returnRoute)));

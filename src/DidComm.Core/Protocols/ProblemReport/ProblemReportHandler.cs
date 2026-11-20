@@ -1,5 +1,7 @@
 using DidComm.Consistency;
+using DidComm.Diagnostics;
 using DidComm.Messages;
+using DidComm.Protocols.Routing;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -28,12 +30,21 @@ namespace DidComm.Protocols.ProblemReport;
 /// sender; a plaintext report or a direct call falls back to the first <c>to</c> entry, as the Trust
 /// Ping and Discover Features responders do.
 /// </para>
+/// <para>
+/// Any sender can cause each of the handler's log lines once per report, so each is rate-limited:
+/// the first and every 1000th at its own level, the rest at Debug. They write the report's
+/// <c>pthid</c> only bounded (<c>LogValues.Id</c>) and its <c>code</c> only when it is short lower
+/// kebab-case (<c>LogValues.ProblemCode</c>); both are the sender's text.
+/// </para>
 /// </remarks>
 public sealed class ProblemReportHandler : IProtocolHandler
 {
     private readonly ProblemReportOptions _options;
     private readonly CascadeBudgetStore _cascadeBudget;
     private readonly ILogger<ProblemReportHandler>? _logger;
+    private long _malformedCodes;  // occurrences of the malformed-code line (RateLimitedLog)
+    private long _errorReports;    // occurrences of the counted-report line
+    private long _cascadeTrips;    // occurrences of the cascade-trip line
 
     /// <summary>Construct the handler with explicit options, an optional dedicated cascade-budget store, and an optional logger.</summary>
     /// <param name="options">Handler options (cascade threshold, etc.). Validated eagerly at ctor so a misconfig surfaces at DI resolution rather than as silently-degraded cascade-guard behaviour.</param>
@@ -70,9 +81,11 @@ public sealed class ProblemReportHandler : IProtocolHandler
         var codeString = ProblemReport.ReadCode(message);
         if (string.IsNullOrEmpty(codeString) || !ProblemCode.TryParse(codeString, out var code))
         {
-            _logger?.LogInformation(
-                "Received a problem-report with an absent or malformed code; ignoring (FR-PROTO-08). Pthid={Pthid}",
-                message.Pthid);
+            var level = RateLimitedLog.Level(ref _malformedCodes, LogLevel.Information, out var malformed);
+            _logger?.Log(
+                level,
+                "Received a problem-report with an absent or malformed code; ignoring (FR-PROTO-08). Pthid={Pthid}; {Count} so far.",
+                LogValues.Id(message.Pthid), malformed);
             return Task.FromResult<Message?>(null);
         }
 
@@ -104,9 +117,11 @@ public sealed class ProblemReportHandler : IProtocolHandler
 
         if (step.Log)
         {
-            _logger?.LogInformation(
-                "Inbound problem-report on thread {Pthid}: code={Code}, errorCount={Count}/{Threshold}",
-                message.Pthid, code.Value, step.Count, _options.CascadeThreshold);
+            var level = RateLimitedLog.Level(ref _errorReports, LogLevel.Information, out var reports);
+            _logger?.Log(
+                level,
+                "Inbound problem-report on thread {Pthid}: code={Code}, errorCount={Count}/{Threshold}; {Reports} such lines so far.",
+                LogValues.Id(message.Pthid), LogValues.ProblemCode(code.Value), step.Count, _options.CascadeThreshold, reports);
         }
 
         if (!step.Emit)
@@ -126,9 +141,11 @@ public sealed class ProblemReportHandler : IProtocolHandler
             pthid: message.Pthid,
             comment: "Per-thread error budget exceeded ({1} reports). Halting further responses on this thread.",
             args: new[] { errorCountSnapshot.ToString(System.Globalization.CultureInfo.InvariantCulture) });
-        _logger?.LogWarning(
-            "Cascade guard tripped on thread {Pthid} after {Count} errors; emitting {Code}.",
-            message.Pthid, errorCountSnapshot, ProblemReport.MaxErrorsExceededCode);
+        var tripLevel = RateLimitedLog.Level(ref _cascadeTrips, LogLevel.Warning, out var trips);
+        _logger?.Log(
+            tripLevel,
+            "Cascade guard tripped on thread {Pthid} after {Count} errors; emitting {Code}. {Trips} trips so far.",
+            LogValues.Id(message.Pthid), errorCountSnapshot, ProblemReport.MaxErrorsExceededCode, trips);
         return Task.FromResult<Message?>(stop);
     }
 }

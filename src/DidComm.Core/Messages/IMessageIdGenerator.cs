@@ -11,6 +11,6 @@ namespace DidComm.Messages;
 /// </summary>
 public interface IMessageIdGenerator
 {
-    /// <summary>Generate a new message identifier. MUST be ≤ 32 bytes of unreserved URI characters per FR-MSG-02 and MUST be unique per FR-MSG-14.</summary>
+    /// <summary>Generate a new message identifier: unreserved URI characters per FR-MSG-02 (the spec describes "a short (&lt;=32 bytes) string" and recommends UUIDs, which the default emits as 36 characters), unique per FR-MSG-14. A message whose id is longer than 512 characters is refused when it is built or packed.</summary>
     string NewId();
 }

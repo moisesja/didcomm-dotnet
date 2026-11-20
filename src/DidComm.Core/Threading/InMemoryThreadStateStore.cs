@@ -18,6 +18,13 @@ namespace DidComm.Threading;
 /// within the eviction window — a thread left idle while a peer floods more than (cap − low-water)
 /// fresh ids can still age out (the approximate-LRU tradeoff).
 /// <para>
+/// The size of each entry is bounded too: the dispatcher's keys come from unpacked messages, whose
+/// <c>thid</c> and <c>id</c> are at most 512 characters (FR-MSG-02/11). Measured, an entry with a
+/// 512-character key holds about 1.2 KB, so the store at <see cref="DefaultMaxEntries"/> holds about
+/// 12 MB at most, plus about 1.2 KB for each insert that completes
+/// while an eviction pass runs. Before the id limit a key could be as long as the whole message.
+/// </para>
+/// <para>
 /// Thread ids are compared ignoring letter case (ordinal, case-insensitive), as DIDComm v2.1
 /// threading requires for <c>id</c>, <c>thid</c> and <c>pthid</c>: <c>"ABC-1"</c> and
 /// <c>"abc-1"</c> name the same thread and share one <see cref="ThreadState"/>. Its
@@ -29,7 +36,8 @@ public sealed class InMemoryThreadStateStore : IThreadStateStore
     /// <summary>
     /// Default cap on retained thread states. Large enough that no realistic legitimate
     /// concurrent-thread workload on a single-instance agent is ever evicted, small enough that
-    /// worst-case memory stays bounded to a few MB instead of growing without limit (issue #21).
+    /// worst-case memory stays bounded (issue #21): about 12 MB with the longest keys unpack
+    /// accepts (512 characters), measured; see the remarks.
     /// </summary>
     public const int DefaultMaxEntries = 10_000;
 

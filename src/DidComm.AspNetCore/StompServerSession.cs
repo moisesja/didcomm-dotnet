@@ -65,8 +65,9 @@ internal sealed class StompServerSession
 
             default:
                 // Broker verbs (SUBSCRIBE, UNSUBSCRIBE, ACK, NACK, BEGIN, …) are deliberately
-                // unsupported — DIDComm's STOMP profile is send-only framing, not a broker.
-                logger?.LogWarning("MapDidCommWebSocket(STOMP): unsupported STOMP command '{Command}'; closing with 1002.", frame.Command);
+                // unsupported — DIDComm's STOMP profile is send-only framing, not a broker. The
+                // command is the peer's text (it can hold terminal escapes), so it is not written.
+                logger?.LogWarning("MapDidCommWebSocket(STOMP): unsupported STOMP command; closing with 1002.");
                 await CloseAsync(socket, WebSocketCloseStatus.ProtocolError, "unsupported STOMP command").ConfigureAwait(false);
                 return (null, true);
         }

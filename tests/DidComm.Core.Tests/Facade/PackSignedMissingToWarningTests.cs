@@ -39,6 +39,25 @@ public sealed class PackSignedMissingToWarningTests
     }
 
     [Fact]
+    public async Task PackSigned_WithoutTo_WritesAnOverLongId_Bounded_AndThenRefusesIt()
+    {
+        // The warning comes before the envelope layer validates the message, so a hand-built id over
+        // the 512-character bound (FR-MSG-02) reaches it: it is written by its length, never quoted.
+        var (client, log) = NewClient();
+        var message = new MessageBuilder()
+            .WithType("http://example.com/p/1.0/m")
+            .WithFrom(SignerDid)
+            .Build(); // no To
+        message.Id = new string('q', 513);
+
+        var thrown = await Record.ExceptionAsync(() => client.PackSignedAsync(message, SignerDid));
+
+        thrown.Should().BeOfType<DidComm.Exceptions.MalformedMessageException>();
+        var entry = log.Entries.Should().ContainSingle(e => e.Level == LogLevel.Warning).Subject;
+        entry.Message.Should().Contain("(id of 513 characters)").And.NotContain(new string('q', 64));
+    }
+
+    [Fact]
     public async Task PackSigned_WithEmptyToList_EmitsFrSig05Warning()
     {
         var (client, log) = NewClient();

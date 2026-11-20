@@ -40,7 +40,7 @@ public sealed class MessageBuilder
     }
 
     /// <summary>Set <see cref="Message.Id"/> explicitly; otherwise the id generator runs at <see cref="Build"/> time.</summary>
-    /// <param name="id">Caller-supplied id. Must satisfy FR-MSG-02.</param>
+    /// <param name="id">Caller-supplied id. Must satisfy FR-MSG-02: unreserved URI characters, at most 512 of them, or <see cref="Build"/> throws.</param>
     public MessageBuilder WithId(string id)
     {
         ArgumentException.ThrowIfNullOrEmpty(id);
@@ -84,7 +84,7 @@ public sealed class MessageBuilder
     }
 
     /// <summary>Set <see cref="Message.Thid"/>.</summary>
-    /// <param name="thid">Thread identifier (same constraints as <see cref="Message.Id"/>).</param>
+    /// <param name="thid">Thread identifier (same constraints as <see cref="Message.Id"/>, the 512-character limit included).</param>
     public MessageBuilder WithThid(string thid)
     {
         _message.Thid = thid;
@@ -92,7 +92,7 @@ public sealed class MessageBuilder
     }
 
     /// <summary>Set <see cref="Message.Pthid"/>.</summary>
-    /// <param name="pthid">Parent-thread identifier.</param>
+    /// <param name="pthid">Parent-thread identifier (same constraints as <see cref="Message.Id"/>, the 512-character limit included).</param>
     public MessageBuilder WithPthid(string pthid)
     {
         _message.Pthid = pthid;

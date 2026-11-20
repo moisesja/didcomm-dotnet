@@ -169,12 +169,24 @@ public sealed class MessagePickupHandlerBoundsTests
         }
 
         // 513: malformed, the value not echoed, and nothing done — the store is not even read.
+        // Pack and unpack refuse it first (FR-MSG-02/11); the handler's own bound is what a direct
+        // caller of the dispatcher meets, so both are checked.
         h.ResetTraces();
         var tooLong = new string('T', 513);
         var socket = h.Live(h.Alice);
-        var thrown = await Record.ExceptionAsync(() => h.SendAsync(Build(tooLong), request.StartsWith("live", StringComparison.Ordinal) ? socket : http));
+        var session = request.StartsWith("live", StringComparison.Ordinal) ? socket : http;
+        var refusedAtPack = await Record.ExceptionAsync(() => h.SendAsync(Build(tooLong), session));
+        var thrown = await Record.ExceptionAsync(() => h.SendHandBuiltAsync(
+            Build("short-thread"),
+            m => { if (threadIsItsOwnThid) m.Thid = tooLong; else m.Id = tooLong; },
+            session));
 
-        thrown.Should().BeOfType<MalformedMessageException>().Which.Message.Should().Contain("thread id").And.Contain("512").And.NotContain("TTTT");
+        refusedAtPack.Should().BeOfType<MalformedMessageException>().Which.Message.Should().Contain("exceeds the maximum length of 512").And.NotContain("TTTT");
+        // A declared thid is refused by ResponseThreadId ("not a valid thread id"); an id that is its
+        // own thread by the handler's echo bound, which names it.
+        thrown.Should().BeOfType<MalformedMessageException>().Which.Message.Should().Contain("thread id").And.NotContain("TTTT");
+        if (!threadIsItsOwnThid)
+            thrown!.Message.Should().Contain("512");
         h.StoreTrace.Should().BeEmpty();
         h.MediationTrace.Should().BeEmpty();
         http.Attempts.Should().BeEmpty();
@@ -216,8 +228,10 @@ public sealed class MessagePickupHandlerBoundsTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
 
-        var request = h.Raw("status-request", h.Alice, new JsonObject(), id: new string('i', 5000), thid: "short-thread");
-        var outcome = await h.SendAsync(request);
+        // Unpack refuses an id over 512 characters (FR-MSG-02), so the 5000-character one is a direct
+        // caller's: set after unpack.
+        var request = h.Raw("status-request", h.Alice, new JsonObject(), thid: "short-thread");
+        var outcome = await h.SendHandBuiltAsync(request, m => m.Id = new string('i', 5000));
 
         outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 0, 0, live: false);
         outcome.Reply!.Thid.Should().Be("short-thread");

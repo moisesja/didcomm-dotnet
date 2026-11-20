@@ -202,7 +202,12 @@ that every grantee references its granter directly (pack pins direct references 
    propagates as before. None of these escapes to Kestrel, which logs an escaped exception at Error
    as an unhandled application exception.
 3. `DidCommClient.UnpackAsync` opens the envelope; every unpack failure collapses to one opaque
-   rejection so a peer cannot distinguish the cause.
+   rejection so a peer cannot distinguish the cause. `Message.Validate` runs right after the
+   plaintext is deserialized and, first of all, refuses an `id`, `thid` or `pthid` longer than 512
+   characters (`IdentifierLimits.MaxMessageIdLength`, FR-MSG-02/11), quoting no value. So no later
+   step, store or log line sees a longer one. The two stores keyed by them, the dispatcher's thread
+   store (`thid`, else `id`) and the problem-report cascade budget (`pthid`), each capped at 10 000
+   entries, hold at most about 12 MB each (measured with 512-character keys: about 1.2 KB an entry).
 4. Return-route admission (the registry-aware endpoints and the session-aware HTTP callback):
    `InboundAdmission.Evaluate` reads `return_route`, decides FR-RR-03 session eligibility and runs
    the FR-RR-08 replay guard for in-scope messages. A refused message is dropped — HTTP `202`,
@@ -510,8 +515,8 @@ Inbound forward:
    sized, the plaintext as UTF-8 bytes (from `InboundMessageSnapshot.Detach`), the envelope's
    recipient kid list (`UnpackResult.AllRecipientKids`: any number of kids, of any length, the
    sender's verbatim) in one string, and the thread id of the context's thread state (the
-   dispatcher's, shared with its thread store: the message's `thid` or `id`, which no FR-API-09 bound
-   caps); for a forward addressed to the mediator itself, also the plaintext and kid list of the
+   dispatcher's, shared with its thread store: the message's `thid` or `id`, at most 512 characters
+   after unpack, FR-MSG-02/11); for a forward addressed to the mediator itself, also the plaintext and kid list of the
    forward found inside it. The charge against the byte budget is exactly that (`HeldForward.Bytes`):
    the plaintext's UTF-8 bytes, plus 2 bytes for each character of the kid lists and the thread id,
    plus 4 bytes for each kid. It is taken before the registry lookup, so the inline work is the same
@@ -617,7 +622,13 @@ listener on the `didcomm-dotnet` source) sees that tag value on every line writt
 the no-handler line included. Lines a stranger can repeat
 are rate-limited — the first and every 1000th at their level, Debug otherwise — where listed here:
 the handler's drop lines per reason, the mediator sink's drops, `InboundAdmission`'s malformed
-`return_route` and replay-refusal lines, and the dispatcher's FR-THR-04 rule-2 drop. Others are one
+`return_route` and replay-refusal lines, the dispatcher's FR-THR-04 rule-2 drop, and the
+problem-report handler's three lines (malformed code, counted report, cascade trip). Those three
+write the `pthid` through `LogValues.Id` and the `code` through `LogValues.ProblemCode`: as it is
+only when it is at most 128 characters of lower-case letters, digits, `-` and `.` (problems.md:
+"Problem codes are lower kebab-case"), a placeholder otherwise. The observer-drop warning and the
+client's pushed-message consumer write the id bounded too, and the STOMP endpoint does not write an
+unsupported command. Others are one
 line per message: the dispatcher's no-handler Information line, the endpoints' rejection lines for an
 envelope that cannot be unpacked, the consumed pure-ACK Information line and the opt-in Trace 2.0
 line.
@@ -881,7 +892,10 @@ Replay guard (`InMemoryReplayGuard`):
   the three bounds); a later change to the `ReplayProtectionOptions` object has no effect. The guard
   depends on nothing else — in particular not on `DidCommOptions` (#105: `ExpiresClockSkew` is
   FR-API-05's, `ClockSkew` the replay rule's own, default 60 s).
-- `MaxMessageIdLength` (default 512) is checked first → `MessageIdTooLong`. Then whole-second
+- `MaxMessageIdLength` (default 512) is checked first → `MessageIdTooLong`. Unpack already refuses
+  an id over 512 characters (FR-MSG-02), so for the endpoints and the client's inbound consumer,
+  which admit only unpacked messages, a value above 512 changes nothing; a lower one still applies.
+  Then whole-second
   arithmetic on the caller's reading: `created_time < now − Window` → `TooOld`; `created_time > now
   + ClockSkew` → `FutureDated`; expiry = `created_time + Window + ClockSkew`. No `created_time` →
   `MissingCreatedTime`, or with `RequireCreatedTime = false` expiry = `now + Window` (the caller's
@@ -1504,7 +1518,8 @@ The pieces:
 2. **Session.** `context.Session` is used only when it is bound to exactly this (peer, local) pair;
    a session that throws when asked is treated as absent.
 3. **Parse** by type; the `message_id_list` bound is part of the parse (counted before any entry
-   is read). A request thread id over 512 characters is malformed. Types the mediator does not
+   is read). A request thread id over 512 characters is malformed (unpack already refuses one,
+   FR-MSG-11; this is the check a direct caller of the dispatcher meets). Types the mediator does not
    act on are ignored.
 4. **Authorise.** No filter: the peer needs a grant (`GetGrantAsync`). With `recipient_did`: it must
    be a bare DID and `FindGrantByRecipientDidAsync(did).PeerDid` must equal the peer. Anything else

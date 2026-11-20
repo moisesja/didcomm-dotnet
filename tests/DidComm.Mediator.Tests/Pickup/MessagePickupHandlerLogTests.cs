@@ -211,7 +211,8 @@ public sealed class MessagePickupHandlerLogTests
         run.Secrets.Add("limit-secret");
         await StepAsync("too many ids", h.MessagesReceived(alice, Enumerable.Range(0, 101).Select(i => "id-secret-" + i).ToArray()), http);
         run.Secrets.Add("id-secret-");
-        await StepAsync("a thread id over the bound", h.Raw("status-request", alice, new JsonObject(), thid: new string('T', 513)), http);
+        // Unpack refuses a thid over 512 (FR-MSG-11): the handler's bound is a direct caller's, set after unpack.
+        await StepAsync("a thread id over the bound", h.Raw("status-request", alice, new JsonObject(), thid: run.NewThread()), http, tamper: received => received.Message.Thid = new string('T', 513));
         run.Secrets.Add(new string('T', 64));
 
         // -- another peer, to finish: its own queue, untouched by all of the above ---------------
@@ -348,7 +349,7 @@ public sealed class MessagePickupHandlerLogTests
     [Theory]
     [InlineData(128, true)]
     [InlineData(129, false)]
-    [InlineData(4096, false)]
+    [InlineData(512, false)] // the longest id unpack accepts (FR-MSG-02)
     public async Task A_request_id_is_written_up_to_128_characters_and_replaced_beyond_on_every_kind_of_line(int length, bool written)
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();

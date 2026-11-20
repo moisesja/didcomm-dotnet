@@ -425,13 +425,21 @@ internal static class PickupMessages
 
     public static Message Raw(string type, string from, string mediator, JsonObject? body, string? id = null, string? thid = null)
     {
+        // A handler test also models a direct caller, whose message may carry an id or thid longer
+        // than unpack and Build accept (FR-MSG-02/11, 512 characters): such a value is set after Build.
+        const int max = DidComm.Consistency.IdentifierLimits.MaxMessageIdLength;
         var builder = new MessageBuilder().WithType(type).WithFrom(from).WithTo(mediator);
-        if (id is not null)
+        if (id is { Length: <= max })
             builder.WithId(id);
-        if (thid is not null)
+        if (thid is { Length: <= max })
             builder.WithThid(thid);
         if (body is not null)
             builder.WithBody(body);
-        return builder.Build();
+        var message = builder.Build();
+        if (id is { Length: > max })
+            message.Id = id;
+        if (thid is { Length: > max })
+            message.Thid = thid;
+        return message;
     }
 }

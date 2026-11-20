@@ -1,4 +1,5 @@
 using System.Text;
+using DidComm.Diagnostics;
 using DidComm.Facade;
 using DidComm.Protocols;
 using DidComm.Transports.ReturnRoute;
@@ -115,7 +116,8 @@ internal sealed class InboundDispatchConsumer : IInboundFrameConsumer
             return;
         }
 
-        var messageId = unpacked.Message.Id;
+        // The sender's text: written bounded (LogValues.Id), as on every other receive path.
+        var messageId = LogValues.Id(unpacked.Message.Id);
         // FR-RR-01: a malformed header is `none` for this message; logged by id only, never the value.
         if (!ReturnRouteHeader.TryRead(unpacked.Message, out var header))
             Drop(MalformedHeaderSlot, "Pushed message {MessageId}: malformed return_route header treated as none (FR-RR-01).", messageId);

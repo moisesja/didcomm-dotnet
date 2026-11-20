@@ -248,8 +248,10 @@ public sealed partial class DidCommClient
             // FR-SIG-05 (SHOULD): warn — don't refuse — when a STANDALONE signed message lacks 'to'.
             // The signed-inside-encrypted path never reaches this method (its inner 'to' is FR-SIG-06's
             // MUST, enforced by the envelope layer), so this warning fires only for standalone packs.
+            // The id is written bounded (LogValues.Id): this runs before the envelope layer validates
+            // the message, so a hand-built id here is not yet held to its 512-character bound.
             if (message.To is not { Count: > 0 })
-                LogStandaloneSignedMissingTo(_logger, message.Id);
+                LogStandaloneSignedMissingTo(_logger, LogValues.Id(message.Id));
 
             var signer = await PickSignerAsync(signFrom, ct).ConfigureAwait(false);
             var parameters = new PackSignedParameters(message, new[] { signer });

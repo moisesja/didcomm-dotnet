@@ -304,6 +304,26 @@ public sealed class ObserverDeliveryTests
         await delivery.FlushAsync(TimeSpan.FromSeconds(30));
     }
 
+    [Theory]
+    [InlineData(128, true)]
+    [InlineData(129, false)]
+    [InlineData(512, false)] // the longest id unpack accepts (FR-MSG-02)
+    public async Task Overflow_log_writes_the_dropped_id_up_to_128_characters_and_replaces_it_beyond(int length, bool written)
+    {
+        var observer = new GatedObserver();
+        var logger = new CapturingLogger();
+        await using var delivery = new ObserverDelivery(new IProtocolObserver[] { observer }, logger, capacity: 1);
+        var id = new string('q', length);
+
+        delivery.Enqueue(Snapshot("accepted"));
+        delivery.Enqueue(Snapshot(id));
+
+        logger.Entries.Should().ContainSingle().Which["MessageId"].Should().Be(written ? id : $"(id of {length} characters)");
+
+        observer.Release();
+        await delivery.FlushAsync(TimeSpan.FromSeconds(30));
+    }
+
     [Fact]
     public async Task DisposeAsync_cancels_a_cooperative_inflight_observer()
     {
