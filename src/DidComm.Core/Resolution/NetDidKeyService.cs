@@ -244,7 +244,9 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
     /// <paramref name="did"/>. The document's own <c>id</c> is the resolver's self-declared answer to
     /// "whose document is this"; requiring it to match makes the misattribution impossible instead of
     /// merely unlikely (W3C DID Core §3.1: the document's <c>id</c> MUST be the DID that was
-    /// resolved).
+    /// resolved). The check is <see cref="ResolvedDidDocument.Require"/>, which
+    /// <see cref="NetDidServiceEndpointResolver"/> applies to the same answer before it reads a
+    /// service.
     /// </remarks>
     private async Task<DidDocument> ResolveDocumentAsync(string did, CancellationToken ct)
     {
@@ -288,21 +290,7 @@ public sealed class NetDidKeyService : IDidKeyService, IDidKeyBindingService
     private async Task<DidDocument> ResolveDocumentCoreAsync(string did, CancellationToken ct)
     {
         var result = await _resolver.ResolveAsync(did, ct: ct).ConfigureAwait(false);
-        if (result.DidDocument is null)
-        {
-            var error = result.ResolutionMetadata?.Error ?? "resolver returned no document";
-            throw new DidResolutionException(did, error);
-        }
-
-        var documentId = result.DidDocument.Id.Value;
-        if (!string.Equals(documentId, did, StringComparison.Ordinal))
-        {
-            throw new DidResolutionException(
-                did,
-                $"resolver returned a document whose id is '{documentId}'; refusing to attribute another subject's document to '{did}'");
-        }
-
-        return result.DidDocument;
+        return ResolvedDidDocument.Require(did, result);
     }
 
     /// <summary>
