@@ -7,9 +7,9 @@ namespace DidComm.Mediator.Pickup;
 /// </summary>
 /// <param name="MessageCount">The number of messages waiting (<c>message_count</c>). Never negative.</param>
 /// <param name="RecipientDid">The DID the status is about (<c>recipient_did</c>): present exactly when the <c>status-request</c> named one. At most 2048 characters (FR-API-09).</param>
-/// <param name="LongestWaitedSeconds">How long the oldest waiting message has been held, in seconds (<c>longest_waited_seconds</c>).</param>
-/// <param name="NewestReceivedTime">When the newest waiting message arrived, in UTC epoch seconds (<c>newest_received_time</c>).</param>
-/// <param name="OldestReceivedTime">When the oldest waiting message arrived, in UTC epoch seconds (<c>oldest_received_time</c>).</param>
+/// <param name="LongestWaitedSeconds">How long the oldest waiting message has been held, in seconds (<c>longest_waited_seconds</c>). Message Pickup 4.0 removed this member, so a status from a mediator that speaks 4.0 has <c>null</c> here.</param>
+/// <param name="NewestReceivedTime">When the newest waiting message arrived, in UTC epoch seconds (<c>newest_received_time</c>), whichever version the mediator speaks: 4.0 sends milliseconds, which <c>PickupClient</c> rounds down to the second.</param>
+/// <param name="OldestReceivedTime">When the oldest waiting message arrived, in UTC epoch seconds (<c>oldest_received_time</c>), whichever version the mediator speaks: 4.0 sends milliseconds, which <c>PickupClient</c> rounds down to the second.</param>
 /// <param name="TotalBytes">The total size of the waiting messages in bytes (<c>total_bytes</c>).</param>
 /// <param name="LiveDelivery">Whether live delivery is on for the connection the status travels on (<c>live_delivery</c>).</param>
 public sealed record PickupStatus(

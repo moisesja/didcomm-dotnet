@@ -314,9 +314,9 @@ public static class MessagePickup
         return true;
     }
 
-    // ---- shared pieces --------------------------------------------------------------------
+    // ---- shared pieces (also used by the internal 4.0 codec, MessagePickup40) ----------------
 
-    private static MessageBuilder Start(string type, string from, string to, IMessageIdGenerator? idGenerator, string? thid = null)
+    internal static MessageBuilder Start(string type, string from, string to, IMessageIdGenerator? idGenerator, string? thid = null)
     {
         RequireDid(from, nameof(from));
         RequireDid(to, nameof(to));
@@ -332,7 +332,7 @@ public static class MessagePickup
         return builder;
     }
 
-    private static void RequireDid(string? value, string parameter)
+    internal static void RequireDid(string? value, string parameter)
     {
         if (string.IsNullOrEmpty(value))
             throw new ArgumentException("A DID is required.", parameter);
@@ -340,13 +340,13 @@ public static class MessagePickup
             throw new ArgumentException("A DID exceeds the maximum length of 2048 characters (FR-API-09).", parameter);
     }
 
-    private static void RequireOptionalDid(string? value, string parameter)
+    internal static void RequireOptionalDid(string? value, string parameter)
     {
         if (value is not null)
             RequireDid(value, parameter);
     }
 
-    private static void RequireId(string? value, string parameter)
+    internal static void RequireId(string? value, string parameter)
     {
         if (string.IsNullOrEmpty(value))
             throw new ArgumentException("A message id is required.", parameter);
@@ -354,7 +354,7 @@ public static class MessagePickup
             throw new ArgumentException("A message id exceeds the maximum length of 2048 characters (FR-API-09).", parameter);
     }
 
-    private static void RequireNotNegative(long? value, string parameter)
+    internal static void RequireNotNegative(long? value, string parameter)
     {
         if (value is < 0)
             throw new ArgumentOutOfRangeException(parameter, "A status member must not be negative.");
