@@ -90,6 +90,20 @@ internal sealed class ReceiveDeadline : IDisposable
         return receive.IsCompleted;
     }
 
-    /// <summary>Stop the timer (idempotent).</summary>
-    public void Dispose() => _timer.Dispose();
+    /// <summary>
+    /// Stop the timer (idempotent). Never throws: it runs in the receive loops' cleanup, before the
+    /// session is unregistered and the socket closed, so a host clock whose timer fails to dispose
+    /// must not skip that cleanup.
+    /// </summary>
+    public void Dispose()
+    {
+        try
+        {
+            _timer.Dispose();
+        }
+        catch
+        {
+            // A host TimeProvider's timer threw on Dispose; the timer is the host's to clean up.
+        }
+    }
 }

@@ -41,7 +41,7 @@ internal static class LogValues
     /// </summary>
     /// <param name="type">The type as it arrived, or <c>null</c>.</param>
     internal static string MessageType(string? type)
-        => type is null ? "(none)"
+        => type is null ? "(no type)"
             : type.Length > MaxTypeLength ? $"(type of {type.Length} characters)"
             : type.AsSpan().ContainsAnyExcept(UriCharacters) ? "(type with characters outside a URI)"
             : type;

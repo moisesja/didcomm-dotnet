@@ -956,6 +956,16 @@ public static class DidCommEndpointRouteBuilderExtensions
             // Server-initiated end of the connection: an evicted peer never answered the close frame,
             // or the session's writer found the socket broken. Nothing more to read or write.
         }
+        catch (WebSocketException ex)
+        {
+            // The peer broke the WebSocket protocol (a reserved opcode, a text frame that is not
+            // UTF-8, a new message inside an unfinished one) or dropped the connection without a
+            // close: the socket has already failed it. Any peer can do this, so it is one Debug line
+            // by type name, not an unhandled application error — also when the drop aborted the
+            // request first (the server reports a WebSocketException as an application error even
+            // then; a cancellation still propagates as before).
+            LogConnectionFailed(logger, ex);
+        }
         finally
         {
             deadline.Dispose();
@@ -998,6 +1008,13 @@ public static class DidCommEndpointRouteBuilderExtensions
     private static bool IsPair(string? peerDid, string? localDid, InboundAdmissionResult admission)
         => string.Equals(peerDid, admission.PeerDid, StringComparison.Ordinal)
            & string.Equals(localDid, admission.LocalDid, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The connection failed under the peer (a protocol violation the socket refused, or a drop
+    /// without a close frame): Debug, by type name and the socket's error code only.
+    /// </summary>
+    private static void LogConnectionFailed(ILogger? logger, WebSocketException ex)
+        => SafeLog.Write(logger, LogLevel.Debug, "MapDidCommWebSocket: the connection failed ({ExceptionType}, {WebSocketError}); it is closed.", ex.GetType().Name, ex.WebSocketErrorCode);
 
     // Runs after the handler, and after a session push: through SafeLog, so a logging provider (host
     // code) that fails on these lines can neither turn the HTTP 200 carrying the push into the
@@ -1232,6 +1249,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                     SafeLog.Write(logger, LogLevel.Error, "MapDidCommWebSocket: inbound {MessageId}: receive callback threw {ExceptionType} (innermost: {InnerExceptionType}); continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
                 }
             }
+        }
+        catch (WebSocketException ex)
+        {
+            // The peer broke the protocol or dropped the connection (see the dispatcher-backed loop).
+            LogConnectionFailed(logger, ex);
         }
         finally
         {

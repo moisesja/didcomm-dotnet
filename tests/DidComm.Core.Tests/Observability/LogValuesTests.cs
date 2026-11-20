@@ -27,7 +27,7 @@ public sealed class LogValuesTests
         var over = TypeOfLength(257);
         var huge = TypeOfLength(200_000);
 
-        LogValues.MessageType(null).Should().Be("(none)");
+        LogValues.MessageType(null).Should().Be("(no type)");
         LogValues.MessageType("").Should().Be("");
         LogValues.MessageType("https://didcomm.org/basicmessage/2.0/message").Should().Be("https://didcomm.org/basicmessage/2.0/message");
         LogValues.MessageType(at).Should().Be(at);
