@@ -94,16 +94,17 @@ public sealed class DeliveryReaderTests
     [Fact]
     public void ReadEntries_keeps_each_id_once_the_first_wins_and_counts_what_it_left_out()
     {
+        // Each payload a JWE (#100 F-2: anything else is a failed entry, which this test is not about).
         var contents = DeliveryReader.ReadEntries(new List<Attachment>
         {
-            Base64("a", "1"),
-            Base64(null, "2"),
-            Base64("a", "3"),
-            Base64("b", "4"),
-            Base64("c", "5"),
+            Base64("a", FakePickupExchange.Jwe("1")),
+            Base64(null, FakePickupExchange.Jwe("2")),
+            Base64("a", FakePickupExchange.Jwe("3")),
+            Base64("b", FakePickupExchange.Jwe("4")),
+            Base64("c", FakePickupExchange.Jwe("5")),
         }, 4);
 
-        contents.Entries.Select(e => (e.Id, Text: Encoding.UTF8.GetString(e.Payload!))).Should().Equal(("a", "1"), ("b", "4"));
+        contents.Entries.Select(e => (e.Id, Text: Encoding.UTF8.GetString(e.Payload!))).Should().Equal(("a", FakePickupExchange.Jwe("1")), ("b", FakePickupExchange.Jwe("4")));
         contents.AttachmentCount.Should().Be(5);
         contents.Excess.Should().Be(1);
         contents.Unusable.Should().Be(1);

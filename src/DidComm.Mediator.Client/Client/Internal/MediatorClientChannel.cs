@@ -14,7 +14,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// <summary>
 /// The one correlation channel of a container (design D-2, §3.2, §4.1–4.3): the bounded pending
 /// map, the matcher (identity before lookup, D-7), route resolution, the live-stream registry, the
-/// duplicate filter, the version cache and the unpack limiter. It is the
+/// duplicate filter, the version caches and the unpack limiter. It is the
 /// <see cref="IInboundCorrelator"/> the dispatcher hands every verified inbound to (DI only), and
 /// the <see cref="IMediatorExchange"/> both facades are built over. Owner: engineer A.
 /// </summary>
@@ -165,7 +165,8 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         Time = time;
         Logger = loggerFactory?.CreateLogger<MediatorClientChannel>();
         Duplicates = new DuplicateFilter(Options.DedupeCapacity);
-        Versions = new NegotiatedVersionCache(time);
+        Versions = new NegotiatedVersionCache<CoordinateMediationVersion>(time);
+        PickupVersions = new NegotiatedVersionCache<MessagePickupVersion>(time);
         // The shutdown reaches deliveries being opened (ADV3-7).
         Unpacker = new DeliveredMessageUnpacker(unpack ?? client.UnpackDeliveredAsync, Options.UnpackTimeout, time, _shutdown.Token);
         _send = send ?? client.SendAsync;
@@ -206,7 +207,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     public DuplicateFilter Duplicates { get; }
 
     /// <inheritdoc/>
-    public NegotiatedVersionCache Versions { get; }
+    public NegotiatedVersionCache<CoordinateMediationVersion> Versions { get; }
+
+    /// <inheritdoc/>
+    public NegotiatedVersionCache<MessagePickupVersion> PickupVersions { get; }
 
     /// <inheritdoc/>
     public async Task<MediatorRoute> ResolveRouteAsync(string mediatorDid, Uri? serviceEndpointOverride, bool requireWebSocket, CancellationToken ct)
@@ -400,6 +404,78 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 MediatorProblemCode.Sanitize(ReadProblemCode(answer)));
         }
         return answer;
+    }
+
+    /// <inheritdoc/>
+    public async Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
+        if (string.IsNullOrEmpty(request.Id) || request.Id.Length > MaxThreadIdLength)
+            throw new ArgumentException($"The request id must be 1 to {MaxThreadIdLength} characters (a UUID this agent mints).", nameof(request));
+        _ = DidSubject.DidSubjectOf(mediatorDid) ?? throw new ArgumentException("The mediator DID is not a DID.", nameof(mediatorDid));
+        _ = DidSubject.DidSubjectOf(localDid) ?? throw new ArgumentException("The local DID is not a DID.", nameof(localDid));
+        ct.ThrowIfCancellationRequested();
+
+        // The same bound as a request that waits for an answer, taken before anything is sent
+        // (L-055): a send in flight holds a slot until it completes.
+        if (Interlocked.Increment(ref _pendingCount) > Options.MaxPendingRequests)
+        {
+            Interlocked.Decrement(ref _pendingCount);
+            throw new MediatorBusyException(string.Create(CultureInfo.InvariantCulture,
+                $"{Options.MaxPendingRequests} mediator requests are already waiting for an answer (MediatorClientOptions.MaxPendingRequests); request '{request.Id}' ({name}) was not sent."));
+        }
+
+        var startedAt = Time.GetTimestamp();
+        try
+        {
+            if (IsDisposed)
+                throw Disposed();
+            using var deadline = new GuardedDeadline(Time, Options.RequestTimeout, ct, ShutdownToken);
+            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) sending; no answer is expected.", request.Id, name);
+            // No return_route header: omitted, the extension's default is none (return_route
+            // main.md L25), and Message Pickup 4.0 removed it from messages-received (L35). Nothing
+            // is registered, so nothing can answer it; an HTTP response's message is not looked at.
+            var options = new SendOptions(new[] { mediatorDid }, From: localDid, ServiceEndpointOverride: route.Endpoint)
+            {
+                ReturnRoute = null,
+            };
+            Task<SendResult>? sending = null;
+            try
+            {
+                sending = _send(request, options, deadline.Token);
+                await sending.WaitAsync(deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (deadline.Token.IsCancellationRequested)
+            {
+                if (sending is not null)
+                    GuardedDeadline.ObserveAbandoned(sending);
+                if (IsDisposed)
+                    throw Disposed();
+                if (ct.IsCancellationRequested)
+                    throw new OperationCanceledException(ct);
+                if (deadline.TimedOut)
+                {
+                    throw new TimeoutException(string.Create(CultureInfo.InvariantCulture,
+                        $"Mediator message '{request.Id}' ({name}) was not sent within {Options.RequestTimeout} (MediatorClientOptions.RequestTimeout); the mediator may still have received it, so retry it (every message these clients send is safe to repeat)."));
+                }
+                throw Disposed();
+            }
+            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) sent after {ElapsedMs} ms; no answer is expected.",
+                request.Id, name, (long)Time.GetElapsedTime(startedAt).TotalMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}) was not sent after {ElapsedMs} ms: {ExceptionType}.",
+                request.Id, name, (long)Time.GetElapsedTime(startedAt).TotalMilliseconds, ex.GetType().Name);
+            throw;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingCount);
+        }
     }
 
     /// <inheritdoc/>

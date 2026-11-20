@@ -97,7 +97,7 @@ public sealed class PickupClientBudgetLeaseTests
             o.ConfigureServices = services => services.AddSingleton(sp =>
             {
                 var client = sp.GetRequiredService<DidCommClient>();
-                return new MediatorClientChannel(client, new MediatorClientOptions(), receivesInbound: false, time, sp.GetService<ILoggerFactory>(),
+                return new MediatorClientChannel(client, new MediatorClientOptions { MessagePickupVersion = MessagePickupVersion.V3 }, receivesInbound: false, time, sp.GetService<ILoggerFactory>(),
                     send: null, resolveEndpoint: null, unpack: (text, ct) => slow.UnpackAsync(client, text, ct));
             });
         });

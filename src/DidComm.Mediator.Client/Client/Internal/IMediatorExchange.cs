@@ -22,7 +22,10 @@ internal interface IMediatorExchange
     DuplicateFilter Duplicates { get; }
 
     /// <summary>The negotiated Coordinate Mediation versions (engineer B's), held here so they outlive a call.</summary>
-    NegotiatedVersionCache Versions { get; }
+    NegotiatedVersionCache<CoordinateMediationVersion> Versions { get; }
+
+    /// <summary>The negotiated Message Pickup versions (#100 DC-6), held here so they outlive a call; the same bounds as <see cref="Versions"/>.</summary>
+    NegotiatedVersionCache<MessagePickupVersion> PickupVersions { get; }
 
     /// <summary>
     /// Resolve the route of one operation (design §4.3): <paramref name="serviceEndpointOverride"/>
@@ -82,6 +85,30 @@ internal interface IMediatorExchange
     /// <returns>The answer's snapshot, or <c>null</c> when the HTTP response carried none.</returns>
     async Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
         => await ExchangeAsync(route, request, spec, mediatorDid, localDid, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// Send <paramref name="request"/> to the mediator on <paramref name="route"/> and expect no
+    /// answer (#100 DC-8): Message Pickup 4.0 <c>messages-received</c>, which carries no
+    /// <c>return_route</c> (4.0 L35) and which the mediator does not answer. Sent without a
+    /// <c>return_route</c> header (<c>none</c> is the extension's default when it is omitted), with
+    /// <paramref name="route"/>'s endpoint as the override and authcrypted from
+    /// <paramref name="localDid"/>; never stamped by hand (the send stamps <c>created_time</c> on its
+    /// copy, FR-RR-09). Nothing is registered for an answer, and whatever an HTTP response carries is
+    /// ignored. It completes when the send does, bounded by
+    /// <see cref="MediatorClientOptions.RequestTimeout"/> and the owner's shutdown, and it counts
+    /// against <see cref="MediatorClientOptions.MaxPendingRequests"/> while the send runs.
+    /// </summary>
+    /// <param name="route">The operation's route, from <see cref="ResolveRouteAsync"/>.</param>
+    /// <param name="request">The message, built with <c>UuidV4MessageIdGenerator.Instance</c>, <c>from</c> = <paramref name="localDid"/>, <c>to</c> = [<paramref name="mediatorDid"/>].</param>
+    /// <param name="name">The message's name for log lines and exception texts (a constant such as <c>messages-received</c>; never a wire value).</param>
+    /// <param name="mediatorDid">The mediator's DID: the recipient.</param>
+    /// <param name="localDid">Our DID: the authcrypt sender.</param>
+    /// <param name="ct">The caller's cancellation.</param>
+    /// <exception cref="InvalidOperationException"><see cref="MediatorClientOptions.MaxPendingRequests"/> requests are already waiting (refused before sending).</exception>
+    /// <exception cref="TimeoutException">The send did not complete within <see cref="MediatorClientOptions.RequestTimeout"/>; the text names the request id and <paramref name="name"/>, never a DID. The mediator may still have received it.</exception>
+    /// <exception cref="Exceptions.TransportException">Propagated from the send as it is.</exception>
+    /// <exception cref="ObjectDisposedException">The channel was disposed.</exception>
+    Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct);
 
     /// <summary>
     /// Open the live-push mailbox of (<paramref name="mediatorDid"/>, <paramref name="localDid"/>)

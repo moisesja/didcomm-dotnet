@@ -62,7 +62,7 @@ public sealed class D6TransportExceptionEchoTests(ITestOutputHelper output)
                 o.AllowedSchemes = new[] { "http" };
                 o.MaxRetryAttempts = 0;
             });
-            b.AddMediatorClient();
+            b.AddMediatorClient(c => c.MessagePickupVersion = MessagePickupVersion.V3);
             b.Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"));
         });
         await using var sp = services.BuildServiceProvider();

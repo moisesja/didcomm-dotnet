@@ -3,19 +3,22 @@ using DidComm.Facade;
 namespace DidComm.Mediator.Client;
 
 /// <summary>
-/// One message a mediator delivered (Message Pickup 3.0, FR-PICK-11): either it unpacked, and
-/// <see cref="Unpacked"/> holds it, or it did not, and <see cref="Error"/> says why.
+/// One message a mediator delivered (Message Pickup 3.0 or 4.0, FR-PICK-11, FR-PICK-12): either it
+/// unpacked, and <see cref="Unpacked"/> holds it, or it did not, and <see cref="Error"/> says why.
 /// </summary>
 /// <remarks>
 /// <para>
 /// A failed item is not acknowledged: the mediator keeps it and delivers it again after its lease
-/// ends (60 seconds at this library's mediator). When you have given up on it, discard it with
+/// ends (60 seconds at this library's mediator). A delivered message that is not a DIDComm message
+/// in encrypted form (a JWE, as delivered) is always a failed item: Message Pickup allows no other
+/// kind of attachment, so it is never unpacked. When you have given up on it, discard it with
 /// <see cref="PickupClient.AckAsync"/> and its <see cref="Id"/>.
 /// </para>
 /// <para>
-/// <strong>Who sent it.</strong> The message in <see cref="Unpacked"/> can be plaintext or
-/// anoncrypted, and then its <c>from</c> is anyone's claim: check
-/// <see cref="UnpackResult.Authenticated"/> before you trust it.
+/// <strong>Who sent it.</strong> The message in <see cref="Unpacked"/> was delivered encrypted, but
+/// it can be anoncrypted (or, inside a forward the mediator re-wrapped for you, not protected at
+/// all), and then its <c>from</c> is anyone's claim: check <see cref="UnpackResult.Authenticated"/>
+/// before you trust it.
 /// </para>
 /// <para>
 /// <strong>No replay check.</strong> The message has not been through the replay check that messages

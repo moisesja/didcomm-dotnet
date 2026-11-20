@@ -12,10 +12,10 @@ internal enum MediatorAnswerKind
     /// <summary>An answer that completes a request expecting it.</summary>
     Answer,
 
-    /// <summary>A Message Pickup <c>delivery</c>: with a thread it answers a <c>delivery-request</c>; without one it is a live push.</summary>
+    /// <summary>A Message Pickup <c>delivery</c> (3.0 or 4.0): with a thread it answers a <c>delivery-request</c>; without one it is a live push.</summary>
     Delivery,
 
-    /// <summary>A Report Problem 2.x message: completes the request its <c>pthid</c> (else <c>thid</c>) names, whatever it expected.</summary>
+    /// <summary>A Report Problem 2.x message, or a Message Pickup 4.0 <c>problem-report</c>: completes the request its <c>pthid</c> (else <c>thid</c>) names, whatever it expected.</summary>
     ProblemReport,
 }
 
@@ -24,7 +24,8 @@ internal enum MediatorAnswerKind
 /// matcher looks at (design §4.2 step 1): Discover Features 2.0 <c>disclose</c>; Coordinate
 /// Mediation 3.0 <c>mediate-grant</c>, <c>mediate-deny</c>, <c>recipient-update-response</c>,
 /// <c>recipient</c> and 2.0 <c>mediate-grant</c>, <c>mediate-deny</c>, <c>keylist-update-response</c>,
-/// <c>keylist</c>; Message Pickup 3.0 <c>status</c> and <c>delivery</c>; Report Problem 2.0
+/// <c>keylist</c>; Message Pickup 3.0 <c>status</c> and <c>delivery</c>; Message Pickup 4.0
+/// <c>status</c>, <c>delivery</c> and <c>problem-report</c> (4.0 L362); Report Problem 2.0
 /// <c>problem-report</c>. Matching is the registry's (FR-PROTO-01: case and punctuation ignored, any
 /// minor of the major). Each entry carries a constant name, which is what a log line writes —
 /// never the type as it arrived. Every <see cref="MediatorExchangeSpec.Expected"/> type must be one
@@ -45,6 +46,9 @@ internal static class MediatorAnswerTypes
         Entry(MediatorServiceProtocols.CoordinateMediation20 + "/keylist", "keylist (2.0)"),
         Entry(MessagePickup.StatusType, "status"),
         Entry(MessagePickup.DeliveryType, "delivery", MediatorAnswerKind.Delivery),
+        Entry(MessagePickup40.StatusType, "status (4.0)"),
+        Entry(MessagePickup40.DeliveryType, "delivery (4.0)", MediatorAnswerKind.Delivery),
+        Entry(MessagePickup40.ProblemReportType, "problem-report (4.0)", MediatorAnswerKind.ProblemReport),
         Entry(Protocols.ProblemReport.ProblemReport.MessageType, "problem-report", MediatorAnswerKind.ProblemReport),
     };
 

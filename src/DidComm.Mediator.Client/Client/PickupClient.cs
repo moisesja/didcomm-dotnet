@@ -12,11 +12,23 @@ using Microsoft.Extensions.Logging;
 namespace DidComm.Mediator.Client;
 
 /// <summary>
-/// The recipient side of Message Pickup 3.0 (FR-PICK-11): see what a mediator holds for you, fetch
-/// and acknowledge it, or receive it as it arrives over a WebSocket. Messages the mediator
-/// re-wrapped for you are opened (FR-ROUTE-06, receiver side).
+/// The recipient side of Message Pickup 3.0 and 4.0 (FR-PICK-11, FR-PICK-12): see what a mediator
+/// holds for you, fetch and acknowledge it, or receive it as it arrives over a WebSocket. Messages
+/// the mediator re-wrapped for you are opened (FR-ROUTE-06, receiver side).
 /// </summary>
 /// <remarks>
+/// <para>
+/// <strong>Which version.</strong> <see cref="MediatorClientOptions.MessagePickupVersion"/> decides.
+/// By default each call first asks the mediator with Discover Features which versions it speaks, on
+/// the same route, and speaks 4.0 when the mediator discloses it, 3.0 otherwise; the answer is
+/// remembered per mediator for an hour, so later calls send no query. A mediator that discloses
+/// neither fails the call with <see cref="MediationNotSupportedException"/>, and one that does not
+/// answer Discover Features at all fails it with <see cref="TimeoutException"/>: pin
+/// <see cref="MessagePickupVersion.V4"/> or <see cref="MessagePickupVersion.V3"/> for such a
+/// mediator. A live stream settles the version once, when it starts. The public types are the same
+/// in both versions; where 4.0 differs, the member says so (a 4.0 status gives no
+/// <see cref="PickupStatus.LongestWaitedSeconds"/>, and a drained 4.0 fetch carries no status).
+/// </para>
 /// <para>
 /// <strong>Setting up.</strong> With dependency injection, call <c>AddMediatorClient()</c> on the
 /// <c>AddDidComm</c> builder and resolve this class. Over HTTP the mediator's answer comes back in
@@ -44,7 +56,9 @@ namespace DidComm.Mediator.Client;
 /// <para>
 /// <strong>Messages that do not unpack</strong> are returned as items with
 /// <see cref="PickupItem.Error"/> set and are not acknowledged: the mediator keeps them and delivers
-/// them again after its lease (60 seconds at this library's mediator). The clients never discard
+/// them again after its lease (60 seconds at this library's mediator). So is a delivered message
+/// that is not a DIDComm message in encrypted form (a JWE, as delivered): Message Pickup allows no
+/// other kind of attachment, so it is never unpacked. The clients never discard
 /// one on their own: discard one you have given up on with <see cref="AckAsync"/>. That includes a
 /// message that did not open in time: all the messages of one delivery share one
 /// <see cref="MediatorClientOptions.UnpackTimeout"/>. The error is the unpack's own exception, and
@@ -79,10 +93,11 @@ namespace DidComm.Mediator.Client;
 /// <para>
 /// <strong>What confirms an acknowledgement.</strong> Only a status does. Message Pickup 3.0 says a
 /// mediator SHOULD answer <c>messages-received</c> with its status, not that it must, and some send
-/// none (the Identus mediator). <see cref="AckAsync"/> then asks for one with a
-/// <c>status-request</c> and returns it: the count that status reports is the confirmation. The
-/// acknowledgement a fetch sends is not confirmed to you: if the mediator did not apply it, the
-/// messages come back and are recognised as repeats.
+/// none (the Identus mediator). Under 4.0 no status ever answers <c>messages-received</c>: it is sent
+/// without <c>return_route</c> and nothing is waited for. In either case <see cref="AckAsync"/> asks
+/// with a <c>status-request</c> when no status came, and returns that status: the count it reports
+/// is the confirmation. The acknowledgement a fetch sends is not confirmed to you: if the mediator
+/// did not apply it, the messages come back and are recognised as repeats.
 /// </para>
 /// <para>
 /// <strong>Clocks.</strong> Every request carries the time from <c>DidCommOptions.Clock</c>
@@ -171,8 +186,8 @@ public sealed class PickupClient
     /// <returns>The mediator's <c>status</c>.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information (<see cref="ArgumentNullException"/> for a <c>null</c> DID).</exception>
     /// <exception cref="InvalidOperationException">A WebSocket route this client cannot receive on, a mediator reached through routing, no service endpoint resolver, or too many requests already waiting; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response); the message names the request id. Retry. (Running out of time while finding the mediator's endpoint names none: nothing was sent.)</exception>
-    /// <exception cref="MediationProtocolException">The mediator answered with a problem report, or with a malformed status or one about another DID than <paramref name="recipientDid"/>.</exception>
+    /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/> (or none in the HTTP response), to the request or to the Discover Features query that negotiates the version; the message names the request id. Retry. (Running out of time while finding the mediator's endpoint names none: nothing was sent.)</exception>
+    /// <exception cref="MediationProtocolException">The mediator answered with a problem report, or with a malformed status, one about another DID than <paramref name="recipientDid"/>, or one that does not repeat <paramref name="recipientDid"/>; or, negotiating, it disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>).</exception>
     /// <exception cref="TransportException">The transport failed (over HTTP with status 200: the mediator accepted the request but its answer was too large, stalled or unreadable; retry).</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public async Task<PickupStatus> GetStatusAsync(string mediatorDid, string from, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
@@ -183,10 +198,10 @@ public sealed class PickupClient
         RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
 
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
-        var spec = DeliveryReader.StatusRequestSpec;
-        var request = MessagePickup.CreateStatusRequest(from, mediatorDid, recipientDid, UuidV4MessageIdGenerator.Instance);
+        var version = await ResolveVersionAsync(route, mediatorDid, from, ct).ConfigureAwait(false);
+        var (request, spec) = PickupWire.StatusRequest(version, from, mediatorDid, recipientDid);
         var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
-        return DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, recipientDid);
+        return PickupWire.ReadStatus(version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, recipientDid);
     }
 
     /// <summary>
@@ -208,7 +223,9 @@ public sealed class PickupClient
     /// (Message Pickup 3.0 allows that; the Identus mediator over HTTP answers with an empty 202)
     /// has not failed it: over HTTP nothing is logged. On a WebSocket the client cannot tell that
     /// silence from a slow answer, so there it is still logged as failed after
-    /// <see cref="MediatorClientOptions.RequestTimeout"/>. A message that failed stays leased to you for the
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. Under Message Pickup 4.0 the
+    /// acknowledgement is sent one way (nothing answers it), so only a failure to send it within
+    /// <see cref="MediatorClientOptions.RequestTimeout"/> is logged. A message that failed stays leased to you for the
     /// mediator's lease, so a loop that fetches until drained gets past failures to what is behind
     /// them (for messages that are slow to open, only so many: see the known limits below); one that
     /// polls more slowly than the lease, with more failures than <paramref name="limit"/>, keeps
@@ -309,22 +326,32 @@ public sealed class PickupClient
     /// it, discard it with <see cref="AckAsync"/>, or let it age out at the mediator.
     /// </para>
     /// <para>
-    /// <strong>Who sent it.</strong> The message inside an item can be plaintext or anoncrypted, so
-    /// its <c>from</c> may be anyone's claim: check <see cref="UnpackResult.Authenticated"/> before you
-    /// trust it.
+    /// <strong>Who sent it.</strong> A delivered message is encrypted (one that is not, as delivered,
+    /// is a failed item), but it can be anoncrypted (or, inside a forward the mediator re-wrapped for
+    /// you, not protected at all), so its <c>from</c> may be anyone's claim: check
+    /// <see cref="UnpackResult.Authenticated"/> before you trust it.
+    /// </para>
+    /// <para>
+    /// <strong>Message Pickup 4.0.</strong> The request carries <c>message_count_limit</c>, and the
+    /// mediator answers a queue with nothing to deliver with an empty <c>delivery</c>, never a status,
+    /// so a drained 4.0 fetch has <see cref="PickupBatch.Status"/> <c>null</c> (call
+    /// <see cref="GetStatusAsync"/> for one). 4.0 is strict where 3.0 is not: a delivery with more
+    /// messages than <paramref name="limit"/>, or without an <c>attachments</c> array, is refused as a
+    /// whole (<see cref="MediationProtocolException"/>), before any of it is opened, and nothing in it
+    /// is acknowledged.
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>
     /// <param name="from">Your DID, the one you enrolled as: a bare DID whose keys this agent holds.</param>
-    /// <param name="limit">The most messages to take, 1 to 100. Anything the mediator sends beyond it is not opened and not acknowledged.</param>
+    /// <param name="limit">The most messages to take, 1 to 100. Under 3.0, anything the mediator sends beyond it is not opened and not acknowledged; under 4.0, such a delivery is refused whole.</param>
     /// <param name="recipientDid">Only messages for this DID: a bare DID, or <c>null</c> for all of yours. A message is this DID's only when one of this DID's own keys opened it; any other is returned as a failed item and not acknowledged (see the remarks for a message encrypted to two of your DIDs).</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>The batch: the items in delivery order, whether the queue was drained, and the mediator's <c>status</c> when it answered with one.</returns>
+    /// <returns>The batch: the items in delivery order, whether the queue was drained, and the mediator's <c>status</c> when it answered with one (3.0 only: a drained 4.0 fetch has none).</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="limit"/> is outside 1 to 100, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">As for <see cref="GetStatusAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer in time; retry (nothing was acknowledged).</exception>
-    /// <exception cref="MediationProtocolException">A problem report; an answer that is malformed or about another DID than <paramref name="recipientDid"/>; or a delivery in which no message has a usable id, so nothing in it could be acknowledged.</exception>
+    /// <exception cref="TimeoutException">No answer in time, to the request or to the Discover Features query that negotiates the version; retry (nothing was acknowledged).</exception>
+    /// <exception cref="MediationProtocolException">A problem report; an answer that is malformed or about another DID than <paramref name="recipientDid"/> (or, as a status, does not repeat it); a delivery in which no message has a usable id, so nothing in it could be acknowledged; under 4.0, a delivery with more messages than <paramref name="limit"/> or without an <c>attachments</c> array; or, negotiating, a mediator that disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>).</exception>
     /// <exception cref="TransportException">The transport failed. Over HTTP with <see cref="TransportException.HttpStatusCode"/> 200, the mediator answered but its delivery was larger than this agent's <c>DidCommOptions.MaxReceiveBytes</c>, or could not be read: retry with a smaller <paramref name="limit"/>, or raise <c>MaxReceiveBytes</c>.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed, also while the fetch was opening its delivery: it then ends at once, nothing is acknowledged, and the resolvers opening the delivery see their cancellation token cancelled.</exception>
     public async Task<PickupBatch> FetchAsync(string mediatorDid, string from, int limit, string? recipientDid = null, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
@@ -337,21 +364,18 @@ public sealed class PickupClient
         RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
 
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
-        var spec = DeliveryReader.DeliveryRequestSpec;
-        var request = MessagePickup.CreateDeliveryRequest(from, mediatorDid, limit, recipientDid, UuidV4MessageIdGenerator.Instance);
+        var version = await ResolveVersionAsync(route, mediatorDid, from, ct).ConfigureAwait(false);
+        var (request, spec) = PickupWire.DeliveryRequest(version, from, mediatorDid, limit, recipientDid);
         var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
-        var message = DeliveryReader.Open(answer, request.Id, spec);
 
-        // Nothing deliverable: the mediator answered with its status.
-        if (DeliveryReader.IsStatus(message))
-            return new PickupBatch(Array.Empty<PickupItem>(), drained: true, DeliveryReader.ReadStatus(message, request.Id, spec, checkFilter: true, recipientDid));
-        if (!DeliveryReader.IsDelivery(message))
-            throw DeliveryReader.Unexpected(request.Id, spec);
-        DeliveryReader.RequireDeliveryFilterEcho(message, request.Id, spec, recipientDid);
-
-        // Only the first `limit` attachments are read (L-055): what the mediator sent beyond the
-        // request is not decoded, not unpacked and not acknowledged, so it stays queued.
-        var contents = DeliveryReader.ReadEntries(message.Attachments, limit);
+        // 3.0: a status when nothing is deliverable, or a delivery whose first `limit` attachments
+        // are read (L-055: what the mediator sent beyond the request is not decoded, not unpacked and
+        // not acknowledged, so it stays queued). 4.0: a delivery only, an empty one when nothing is
+        // deliverable, refused whole when it has more than `limit` attachments or none at all.
+        var read = PickupWire.ReadDeliveryAnswer(version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, limit, checkFilter: true, recipientDid);
+        if (read.Status is { } status)
+            return new PickupBatch(Array.Empty<PickupItem>(), drained: true, status);
+        var contents = read.Contents!;
         if (contents.AttachmentCount == 0)
             return new PickupBatch(Array.Empty<PickupItem>(), drained: true, status: null);
         // A delivery of messages none of which can be acknowledged is not an empty batch: returned
@@ -427,7 +451,7 @@ public sealed class PickupClient
         foreach (var key in commit)
             Exchange.Duplicates.Add(from, key);
         if (acknowledge.Count > 0)
-            await AcknowledgeQuietlyAsync(route, mediatorDid, from, acknowledge).ConfigureAwait(false);
+            await AcknowledgeQuietlyAsync(version, route, mediatorDid, from, acknowledge).ConfigureAwait(false);
 
         Log.Fetched(request.Id, commit.Count, failures.Count + mismatches, repeats);
         return new PickupBatch(items, drained: false, status: null);
@@ -453,7 +477,9 @@ public sealed class PickupClient
     /// last message is asked for one with a <c>status-request</c>, and the count that status reports
     /// is the confirmation; after an earlier message that gets no status, the next message is sent
     /// without asking. A mediator that does answer with its status gets one message per 100 ids and
-    /// nothing more.
+    /// nothing more. Under Message Pickup 4.0 no status ever answers <c>messages-received</c>: each
+    /// message is sent one way, without <c>return_route</c>, and the call always ends with the
+    /// <c>status-request</c>.
     /// </para>
     /// <para>
     /// <strong>Time.</strong> Each <c>messages-received</c> and the <c>status-request</c> that may
@@ -463,6 +489,8 @@ public sealed class PickupClient
     /// and the <c>status-request</c> gets the rest of that time. On a WebSocket, silence cannot be
     /// told from a slow answer, so the client waits half of <c>RequestTimeout</c> for the status, then
     /// moves on: to the next message, or to the <c>status-request</c>, which gets the other half.
+    /// Under 4.0 nothing is waited for after a message: it is only sent, within its
+    /// <c>RequestTimeout</c>, and the <c>status-request</c> gets what is left of the last one's.
     /// </para>
     /// <para>
     /// <strong>Which status answers which message.</strong> DIDComm threading: a reply carries the
@@ -480,11 +508,11 @@ public sealed class PickupClient
     /// <param name="ids">1 to 10 000 ids, each exactly as <see cref="PickupItem.Id"/> gave it.</param>
     /// <param name="serviceEndpointOverride">The mediator address to use instead of the first one in its DID document (see <see cref="GetStatusAsync"/>).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>The mediator's <c>status</c> after the last message: its answer to that message, or, when it sent none, its answer to the <c>status-request</c> that asked for it.</returns>
+    /// <returns>The mediator's <c>status</c> after the last message: its answer to that message, or, when it sent none (always under 4.0), its answer to the <c>status-request</c> that asked for it.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="ids"/> is empty, longer than 10 000 or has an empty, over-long or non-URI-safe id (the message names its index), or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">As for <see cref="GetStatusAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No status in time (see the remarks): a message got no answer within <see cref="MediatorClientOptions.RequestTimeout"/>, or the <c>status-request</c> after the last one got none in the time left (over HTTP, none in its response). The mediator may still have applied the acknowledgement; retry (acknowledging twice is harmless).</exception>
-    /// <exception cref="MediationProtocolException">A problem report or a malformed status; for the <c>status-request</c>, also a status about one DID only (it asked about all of yours).</exception>
+    /// <exception cref="TimeoutException">No status in time (see the remarks): a message got no answer within <see cref="MediatorClientOptions.RequestTimeout"/> (under 4.0: was not sent within it), the <c>status-request</c> after the last one got none in the time left (over HTTP, none in its response), or the Discover Features query that negotiates the version got none. The mediator may still have applied the acknowledgement; retry (acknowledging twice is harmless).</exception>
+    /// <exception cref="MediationProtocolException">A problem report or a malformed status; for the <c>status-request</c>, also a status about one DID only (it asked about all of yours); or, negotiating, a mediator that disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>).</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public async Task<PickupStatus> AckAsync(string mediatorDid, string from, IReadOnlyList<string> ids, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
@@ -495,6 +523,7 @@ public sealed class PickupClient
         RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
 
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
+        var version = await ResolveVersionAsync(route, mediatorDid, from, ct).ConfigureAwait(false);
         var spec = DeliveryReader.MessagesReceivedSpec;
         PickupStatus? status = null;
         var lastId = string.Empty;
@@ -502,16 +531,23 @@ public sealed class PickupClient
         for (var start = 0; start < copy.Length; start += AckChunk)
         {
             var chunk = copy.AsSpan(start, Math.Min(AckChunk, copy.Length - start)).ToArray();
-            var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, chunk, UuidV4MessageIdGenerator.Instance);
+            var request = PickupWire.MessagesReceived(version, from, mediatorDid, chunk);
             lastId = request.Id;
             lastSentAt = Exchange.Time.GetTimestamp();
+            if (!PickupWire.AnswersAcknowledgement(version))
+            {
+                // 4.0: nothing answers messages-received (L62, L294); it is only sent, and the
+                // status-request after the last one confirms them all.
+                await Exchange.SendOneWayAsync(route, request, PickupWire.MessagesReceivedName, mediatorDid, from, ct).ConfigureAwait(false);
+                continue;
+            }
             var answer = await AcknowledgeChunkAsync(route, request, mediatorDid, from, ct).ConfigureAwait(false);
             // A message left without a status is confirmed by the status after the last one.
             status = answer is null
                 ? null
                 : DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
         }
-        return status ?? await AskForStatusAsync(route, mediatorDid, from, lastId, lastSentAt, ct).ConfigureAwait(false);
+        return status ?? await AskForStatusAsync(version, route, mediatorDid, from, lastId, lastSentAt, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -529,8 +565,8 @@ public sealed class PickupClient
     /// <returns>The mediator's <c>status</c>; <see cref="PickupStatus.LiveDelivery"/> says what is now in effect.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">The route is not a WebSocket, or as for <see cref="GetStatusAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No answer in time; retry.</exception>
-    /// <exception cref="MediationProtocolException">A problem report (<see cref="MediationProtocolException.ProblemCode"/> <c>e.m.live-mode-not-supported</c> when the mediator cannot deliver live on this connection) or a malformed status.</exception>
+    /// <exception cref="TimeoutException">No answer in time, to the request or to the Discover Features query that negotiates the version; retry.</exception>
+    /// <exception cref="MediationProtocolException">A problem report — Report Problem 2.0 under 3.0, Message Pickup 4.0's own <c>problem-report</c> under 4.0 — (<see cref="MediationProtocolException.ProblemCode"/> <c>e.m.live-mode-not-supported</c> when the mediator cannot deliver live on this connection), a malformed status, or, negotiating, a mediator that disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>).</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public async Task<PickupStatus> SetLiveDeliveryAsync(string mediatorDid, string from, bool liveDelivery, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
@@ -541,10 +577,10 @@ public sealed class PickupClient
 
         // Refused before anything is sent when the route is not a WebSocket (design §4.3).
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: true, ct).ConfigureAwait(false);
-        var spec = DeliveryReader.LiveDeliveryChangeSpec;
-        var request = MessagePickup.CreateLiveDeliveryChange(from, mediatorDid, liveDelivery, UuidV4MessageIdGenerator.Instance);
+        var version = await ResolveVersionAsync(route, mediatorDid, from, ct).ConfigureAwait(false);
+        var (request, spec) = PickupWire.LiveDeliveryChange(version, from, mediatorDid, liveDelivery);
         var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
-        return DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
+        return PickupWire.ReadStatus(version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
     }
 
     /// <summary>
@@ -641,7 +677,12 @@ public sealed class PickupClient
     /// <strong>Starting and failing.</strong> The arguments are checked when you call this method.
     /// The route is resolved at the first <c>MoveNextAsync</c>, and refused when it is not a
     /// WebSocket, before anything is sent. One stream per mediator and DID may be open at a time,
-    /// and at most 16 per container. A step that got no answer (<see cref="TimeoutException"/>) or
+    /// and at most 16 per container. Then the Message Pickup version is settled, once for the
+    /// stream's whole life (<see cref="MediatorClientOptions.MessagePickupVersion"/>: the pinned
+    /// one, the one remembered for this mediator, or a Discover Features query); a query that fails
+    /// ends the stream with its exception at once, not retried, and frees its place. A push of the
+    /// other version is ignored and not acknowledged. Under 4.0 acknowledgements are sent one way:
+    /// nothing answers them, so none is waited for. A step that got no answer (<see cref="TimeoutException"/>) or
     /// failed in the transport (<see cref="TransportException"/>) is retried after a pause of 1, 2,
     /// 4, 8, 16, then 30 seconds; so is a request refused because too many of the container's
     /// requests are already waiting (an <see cref="InvalidOperationException"/>; every other one is
@@ -671,9 +712,9 @@ public sealed class PickupClient
     /// <param name="ct">Cancellation token (combined with one passed through <c>WithCancellation</c>); cancelling ends the enumeration.</param>
     /// <returns>The items, as they arrive.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
-    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent. While enumerating: a refusal of the send path (no key curve in common with the mediator, a mediator reached through routing, no transport router), at once; or the stream's steps kept being refused because too many of the container's requests were waiting for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds.</exception>
-    /// <exception cref="MediationProtocolException">While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>), a malformed answer, or a drain answered with a delivery in which no message has a usable id.</exception>
-    /// <exception cref="TimeoutException">While enumerating: the stream's steps kept getting no answer for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds (this is the last one).</exception>
+    /// <exception cref="InvalidOperationException">At the first <c>MoveNextAsync</c>: the route is not a WebSocket, this container cannot receive on one, a stream for this mediator and DID is already open, or 16 are; nothing was sent (or, negotiating, too many requests were waiting for the Discover Features query to be sent). While enumerating: a refusal of the send path (no key curve in common with the mediator, a mediator reached through routing, no transport router), at once; or the stream's steps kept being refused because too many of the container's requests were waiting for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds.</exception>
+    /// <exception cref="MediationProtocolException">At the first <c>MoveNextAsync</c>, negotiating: a mediator that disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>). While enumerating: a problem report (for example <c>e.m.live-mode-not-supported</c>), a malformed answer, a drain answered with a delivery in which no message has a usable id, or under 4.0 a drain answered with a delivery of more than its limit or without an <c>attachments</c> array.</exception>
+    /// <exception cref="TimeoutException">At the first <c>MoveNextAsync</c>, negotiating: the Discover Features query got no answer within <see cref="MediatorClientOptions.RequestTimeout"/>. While enumerating: the stream's steps kept getting no answer for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds (this is the last one).</exception>
     /// <exception cref="TransportException">While enumerating: the stream's steps kept failing to send for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus 30 seconds (this is the last one).</exception>
     /// <exception cref="SecretNotFoundException">While enumerating: this agent holds no key for <paramref name="from"/> (at once, like any failure that no retry can fix).</exception>
     /// <exception cref="ObjectDisposedException">While enumerating: the container was disposed, also while the stream was opening a delivery (it then ends at once, and the resolvers opening it see their cancellation token cancelled).</exception>
@@ -683,10 +724,31 @@ public sealed class PickupClient
         RequireBareDid(mediatorDid, nameof(mediatorDid));
         RequireBareDid(from, nameof(from));
         RequireEndpoint(serviceEndpointOverride, nameof(serviceEndpointOverride));
-        return LiveDeliveryStream.ReceiveAsync(Exchange, Log, mediatorDid, from, serviceEndpointOverride, ct);
+        return LiveDeliveryStream.ReceiveAsync(Exchange, Log, mediatorDid, from, serviceEndpointOverride, ResolveVersionAsync, ct);
     }
 
     // ---- helpers ------------------------------------------------------------------------------
+
+    // The version to speak on `route` (#100 DC-6), resolved after the route in every call: the pinned
+    // one; else the one negotiated with this mediator within the hour; else one Discover Features
+    // query on the same route, with its own RequestTimeout. A query that is not answered fails the
+    // call (no guessing, no fallback); a disclose naming neither version is
+    // MediationNotSupportedException. Only a negotiated version is remembered.
+    private async Task<MessagePickupVersion> ResolveVersionAsync(MediatorRoute route, string mediatorDid, string from, CancellationToken ct)
+    {
+        var pinned = Exchange.Options.MessagePickupVersion;
+        if (pinned != MessagePickupVersion.Negotiate)
+            return pinned;
+        if (Exchange.PickupVersions.TryGet(mediatorDid, out var remembered))
+            return remembered;
+
+        var query = FeatureNegotiation.CreatePickupQuery(from, mediatorDid);
+        var answer = await Exchange.ExchangeAsync(route, query, FeatureNegotiation.QuerySpec, mediatorDid, from, ct).ConfigureAwait(false);
+        var version = FeatureNegotiation.ChoosePickup(DeliveryReader.Open(answer, query.Id, FeatureNegotiation.QuerySpec), query.Id);
+        Exchange.PickupVersions.Set(mediatorDid, version);
+        Log.VersionNegotiated(query.Id, version);
+        return version;
+    }
 
     // One messages-received of AckAsync: the mediator's answer, or null when it sent no status
     // (Message Pickup 3.0: it SHOULD, not MUST). Over HTTP the response says so at once. On any other
@@ -714,10 +776,10 @@ public sealed class PickupClient
         }
     }
 
-    // The status-request after the last messages-received when the mediator sent no status for it,
-    // in what is left of that message's RequestTimeout (counted from `sentAt`): never a
-    // RequestTimeout of its own.
-    private async Task<PickupStatus> AskForStatusAsync(MediatorRoute route, string mediatorDid, string from, string acknowledgementId, long sentAt, CancellationToken ct)
+    // The status-request after the last messages-received when the mediator sent no status for it
+    // (under 4.0, always), in what is left of that message's RequestTimeout (counted from `sentAt`):
+    // never a RequestTimeout of its own.
+    private async Task<PickupStatus> AskForStatusAsync(MessagePickupVersion version, MediatorRoute route, string mediatorDid, string from, string acknowledgementId, long sentAt, CancellationToken ct)
     {
         var timeout = Exchange.Options.RequestTimeout;
         var left = timeout - Exchange.Time.GetElapsedTime(sentAt);
@@ -727,8 +789,7 @@ public sealed class PickupClient
                 $"Mediator request '{acknowledgementId}' (messages-received) got no status back, and no time was left within {timeout} (MediatorClientOptions.RequestTimeout) to ask for one; the mediator may still have applied it, so retry it (acknowledging twice is harmless)."));
         }
 
-        var spec = DeliveryReader.StatusRequestSpec;
-        var request = MessagePickup.CreateStatusRequest(from, mediatorDid, recipientDid: null, UuidV4MessageIdGenerator.Instance);
+        var (request, spec) = PickupWire.StatusRequest(version, from, mediatorDid, recipientDid: null);
         using var budget = new GuardedDeadline(Exchange.Time, left, ct);
         InboundMessageSnapshot answer;
         try
@@ -744,7 +805,7 @@ public sealed class PickupClient
             throw new TimeoutException(string.Create(CultureInfo.InvariantCulture,
                 $"Mediator request '{acknowledgementId}' (messages-received) got no status back, and the status-request '{request.Id}' that asked for one was not answered within {timeout} of it (MediatorClientOptions.RequestTimeout); the mediator may still have applied it, so retry it (acknowledging twice is harmless)."));
         }
-        return DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, filter: null);
+        return PickupWire.ReadStatus(version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, filter: null);
     }
 
     // Acknowledge on a deadline of our own (RequestTimeout), not the caller's token: the batch is
@@ -752,13 +813,17 @@ public sealed class PickupClient
     // logged by type name; the messages come back and are then recognised as repeats. The status
     // that may answer is not read, and Message Pickup 3.0 lets a mediator send none (it SHOULD, not
     // MUST): over HTTP an empty response is that, not a failure. On a WebSocket the wait is as before.
-    private async Task AcknowledgeQuietlyAsync(MediatorRoute route, string mediatorDid, string from, IReadOnlyList<string> ids)
+    // Under 4.0 nothing answers it (L62, L294): it is sent one way, and only the send is waited for.
+    private async Task AcknowledgeQuietlyAsync(MessagePickupVersion version, MediatorRoute route, string mediatorDid, string from, IReadOnlyList<string> ids)
     {
-        var request = MessagePickup.CreateMessagesReceived(from, mediatorDid, ids, UuidV4MessageIdGenerator.Instance);
+        var request = PickupWire.MessagesReceived(version, from, mediatorDid, ids);
         try
         {
             using var deadline = OwnDeadline.Start(Exchange.Time, Exchange.Options.RequestTimeout);
-            await Exchange.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
+            if (PickupWire.AnswersAcknowledgement(version))
+                await Exchange.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, deadline.Token).ConfigureAwait(false);
+            else
+                await Exchange.SendOneWayAsync(route, request, PickupWire.MessagesReceivedName, mediatorDid, from, deadline.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

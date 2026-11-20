@@ -292,7 +292,9 @@ internal static class PickupBodies
     /// characters (FR-ATT-04). An attachment without a usable id has a <c>null</c>
     /// <see cref="DeliveredAttachment.Id"/> and its data is not decoded. Otherwise the data is
     /// decoded as <see cref="ReadAttachments"/> decodes it, and a failure is the reading's
-    /// <see cref="DeliveredAttachment.Error"/>. Error texts never quote a wire value.
+    /// <see cref="DeliveredAttachment.Error"/>. The decoded bytes are not inspected here; the
+    /// client's reader fails those that are not a DIDComm message in encrypted form
+    /// (<c>DeliveryReader.ReadEntries</c>). Error texts never quote a wire value.
     /// </summary>
     /// <param name="attachments">The delivery's attachments, or <c>null</c>.</param>
     /// <param name="max">How many attachments, from the first, to read; zero or more.</param>

@@ -391,6 +391,7 @@ public sealed class PickupClientLiveRobustnessQa2Tests
         var unpacking = 0;
         var settings = new MediatorClientOptions
         {
+            MessagePickupVersion = MessagePickupVersion.V3,
             LivePollInterval = Poll,
             RequestTimeout = TimeSpan.FromMinutes(10),
             UnpackTimeout = TimeSpan.FromMinutes(10),

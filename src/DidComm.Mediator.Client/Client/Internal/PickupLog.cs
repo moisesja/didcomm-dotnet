@@ -26,6 +26,7 @@ internal sealed class PickupLog
     private long _takenDropped;
     private long _endFailures;
     private long _filterMismatches;
+    private long _otherVersionPushes;
 
     /// <summary>Create the log of one client.</summary>
     /// <param name="logger">The client's logger, or <c>null</c> for none.</param>
@@ -106,6 +107,24 @@ internal sealed class PickupLog
     /// <summary>The mediator answered <c>live-delivery-change</c> with live delivery off; the stream keeps polling.</summary>
     internal void LiveNotInEffect(string requestId)
         => MediatorLog.Write(_logger, LogLevel.Warning, "The mediator answered live delivery request {RequestId} with live delivery off; the stream only polls.", Id(requestId));
+
+    /// <summary>
+    /// The Message Pickup version a Discover Features query negotiated with a mediator (#100 DC-6).
+    /// The template is not Coordinate Mediation's, so a count of that one counts only that protocol.
+    /// </summary>
+    internal void VersionNegotiated(string requestId, MessagePickupVersion version)
+        => MediatorLog.Write(_logger, LogLevel.Debug, "Message Pickup version negotiated by query {RequestId}: {Version}.", Id(requestId), version);
+
+    /// <summary>
+    /// A push of the other Message Pickup version than the stream speaks was ignored (not
+    /// acknowledged; the mediator delivers it again). Debug for the first and every 1000th, Trace
+    /// otherwise: a mediator can send it again and again.
+    /// </summary>
+    internal void PushOfOtherVersion()
+    {
+        var level = MediatorLog.RateLimited(ref _otherVersionPushes, out var n) == LogLevel.Warning ? LogLevel.Debug : LogLevel.Trace;
+        MediatorLog.Write(_logger, level, "A live push of another Message Pickup version than the stream speaks was ignored; it is not acknowledged. {Total} such pushes.", n);
+    }
 
     /// <summary>A push that is not a readable delivery was ignored (not acknowledged).</summary>
     internal void PushIgnored(string reason)

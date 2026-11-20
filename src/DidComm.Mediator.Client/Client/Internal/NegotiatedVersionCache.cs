@@ -3,11 +3,14 @@ using DidComm.Consistency;
 namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
-/// The Coordinate Mediation version each mediator negotiated through Discover Features
-/// (design D-10, §4.4), keyed by the mediator's DID subject: at most <see cref="Capacity"/> entries
+/// The version of one protocol each mediator negotiated through Discover Features (design D-10,
+/// §4.4; #100 DC-6), keyed by the mediator's DID subject: at most <see cref="Capacity"/> entries
 /// (no insert when full), each valid for <see cref="TimeToLive"/> on the monotonic clock of
-/// <see cref="Time"/>. Held by the channel so it outlives one call; thread-safe. Owner: engineer B.
+/// <see cref="Time"/>. Held by the channel so it outlives one call, one instance per protocol:
+/// Coordinate Mediation (<see cref="CoordinateMediationVersion"/>) and Message Pickup
+/// (<see cref="MessagePickupVersion"/>); thread-safe. Owner: engineer B.
 /// </summary>
+/// <typeparam name="TVersion">The protocol's version enum, whose <c>default</c> (<c>Negotiate</c>) is not a negotiated version.</typeparam>
 /// <remarks>
 /// Every reading of the clock is taken inside the lock, so entries are judged against readings in
 /// the order they were taken (L-060). An entry whose timestamp lies ahead of the clock (a clock that
@@ -16,7 +19,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// caller negotiates again next time. Only the version and a timestamp are retained per entry, with
 /// a key no longer than a bare DID (the facade validates the DID before it gets here; L-062).
 /// </remarks>
-internal sealed class NegotiatedVersionCache
+internal sealed class NegotiatedVersionCache<TVersion>
+    where TVersion : struct, Enum
 {
     /// <summary>The default bound on remembered mediators.</summary>
     internal const int DefaultCapacity = 64;
@@ -61,10 +65,10 @@ internal sealed class NegotiatedVersionCache
 
     /// <summary>The version negotiated with <paramref name="mediatorDid"/>, when one is remembered and has not expired.</summary>
     /// <param name="mediatorDid">The mediator's DID (compared as a DID subject).</param>
-    /// <param name="version"><see cref="CoordinateMediationVersion.V3"/> or <see cref="CoordinateMediationVersion.V2"/> when found.</param>
-    internal bool TryGet(string mediatorDid, out CoordinateMediationVersion version)
+    /// <param name="version">The negotiated version when found; <c>default</c> (<c>Negotiate</c>) otherwise.</param>
+    internal bool TryGet(string mediatorDid, out TVersion version)
     {
-        version = CoordinateMediationVersion.Negotiate;
+        version = default;
         if (DidSubject.DidSubjectOf(mediatorDid) is not { } key)
             return false;
 
@@ -84,11 +88,12 @@ internal sealed class NegotiatedVersionCache
 
     /// <summary>Remember the version negotiated with <paramref name="mediatorDid"/>; nothing is added when the cache is full.</summary>
     /// <param name="mediatorDid">The mediator's DID (keyed by its DID subject).</param>
-    /// <param name="version"><see cref="CoordinateMediationVersion.V3"/> or <see cref="CoordinateMediationVersion.V2"/>.</param>
-    internal void Set(string mediatorDid, CoordinateMediationVersion version)
+    /// <param name="version">A negotiated version: defined, and not <c>default</c> (<c>Negotiate</c>).</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="version"/> is <c>default</c> or not a defined value.</exception>
+    internal void Set(string mediatorDid, TVersion version)
     {
-        if (version is not (CoordinateMediationVersion.V3 or CoordinateMediationVersion.V2))
-            throw new ArgumentOutOfRangeException(nameof(version), "Only a negotiated version (V3 or V2) is remembered.");
+        if (EqualityComparer<TVersion>.Default.Equals(version, default) || !Enum.IsDefined(version))
+            throw new ArgumentOutOfRangeException(nameof(version), "Only a negotiated version is remembered.");
         if (DidSubject.DidSubjectOf(mediatorDid) is not { } key)
             return;
 
@@ -123,5 +128,5 @@ internal sealed class NegotiatedVersionCache
         return age < TimeSpan.Zero || age >= TimeToLive;
     }
 
-    private readonly record struct Entry(CoordinateMediationVersion Version, long Stamp);
+    private readonly record struct Entry(TVersion Version, long Stamp);
 }

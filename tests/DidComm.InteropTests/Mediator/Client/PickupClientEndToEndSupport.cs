@@ -371,7 +371,8 @@ internal sealed class MediatorAndRecipientHost : IAsyncDisposable
             });
             b.UseInboundDispatch();
             b.AddMediator(m => m.CoordinateMediation.RoutingDids.Add(identity.Did));
-            b.AddMediatorClient();
+            // The acceptance tests are Message Pickup 3.0's (#100 DC-9).
+            b.AddMediatorClient(c => c.MessagePickupVersion = MessagePickupVersion.V3);
             b.Configure(o =>
             {
                 o.Clock = () => clock.Now;

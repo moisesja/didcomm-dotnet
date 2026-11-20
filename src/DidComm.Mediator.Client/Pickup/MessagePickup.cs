@@ -259,7 +259,9 @@ public static class MessagePickup
     /// <summary>
     /// Read a <c>delivery</c>. The payloads are decoded (<c>data.base64</c> in base64url or standard
     /// base64, padded or not; or <c>data.json</c>) and not inspected: whether each is a DIDComm
-    /// message is for the recipient's own unpack to say, one attachment at a time.
+    /// message in encrypted form, the only kind of attachment the protocol allows, is for the
+    /// recipient to check, one attachment at a time (<see cref="Client.PickupClient"/> fails any
+    /// other as an item).
     /// </summary>
     /// <param name="message">The message to inspect.</param>
     /// <param name="messages">The delivered messages in wire order; empty when the message has no attachments.</param>

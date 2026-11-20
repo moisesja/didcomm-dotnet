@@ -254,7 +254,12 @@ internal static class ClientSpecs
         new[] { MessageTypeUri.Parse(Protocols.DiscoverFeatures.DiscoverFeatures.DiscloseType) }, ExpectsDelivery: false);
 }
 
-/// <summary>Channels over a <see cref="FakeSend"/>, built the way production builds them otherwise.</summary>
+/// <summary>
+/// Channels over a <see cref="FakeSend"/>, built the way production builds them otherwise, except
+/// that the options pin <see cref="MessagePickupVersion.V3"/> unless the test's configuration says
+/// otherwise (#100 DC-9): the existing suites test Message Pickup 3.0 and send no Discover Features
+/// query for it.
+/// </summary>
 internal static class ClientChannels
 {
     public static readonly Uri Https = new("https://mediator.example/didcomm");
@@ -272,7 +277,7 @@ internal static class ClientChannels
         Func<string, CancellationToken, Task<Uri>>? resolveEndpoint = null,
         Func<string, CancellationToken, Task<DeliveredUnpack>>? unpack = null)
     {
-        var options = new MediatorClientOptions();
+        var options = new MediatorClientOptions { MessagePickupVersion = MessagePickupVersion.V3 };
         configure?.Invoke(options);
         return new MediatorClientChannel(world.Client, options, receivesInbound, time ?? TimeProvider.System, logs, send.SendAsync, resolveEndpoint, unpack);
     }

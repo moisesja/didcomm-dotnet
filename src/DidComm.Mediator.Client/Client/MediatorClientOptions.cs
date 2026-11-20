@@ -3,9 +3,9 @@ namespace DidComm.Mediator.Client;
 /// <summary>
 /// Settings of the recipient-side mediator clients, <see cref="MediationClient"/> and
 /// <see cref="PickupClient"/>: how long a request waits for the mediator's answer, how many
-/// requests may wait at once, which Coordinate Mediation version to speak, how many delivered
-/// messages to remember so a repeat is not returned twice, how often a live stream polls, and how
-/// long opening one delivery may take (FR-MED-09, FR-PICK-11).
+/// requests may wait at once, which Coordinate Mediation and Message Pickup versions to speak, how
+/// many delivered messages to remember so a repeat is not returned twice, how often a live stream
+/// polls, and how long opening one delivery may take (FR-MED-09, FR-PICK-11, FR-PICK-12).
 /// </summary>
 /// <remarks>
 /// The settings are copied and checked once, when the clients are built (by
@@ -42,6 +42,16 @@ public sealed class MediatorClientOptions
     /// Discover Features queries.
     /// </summary>
     public CoordinateMediationVersion CoordinateMediationVersion { get; set; } = CoordinateMediationVersion.Negotiate;
+
+    /// <summary>
+    /// Which Message Pickup version <see cref="PickupClient"/> speaks (FR-PICK-12). Default
+    /// <see cref="Client.MessagePickupVersion.Negotiate"/>: ask the mediator with Discover Features
+    /// and prefer 4.0. Pin <see cref="Client.MessagePickupVersion.V4"/> or
+    /// <see cref="Client.MessagePickupVersion.V3"/> for a mediator that does not answer Discover
+    /// Features queries. A live stream (<see cref="PickupClient.ReceiveLiveAsync"/>) settles the
+    /// version once, when it starts, and keeps it until it ends.
+    /// </summary>
+    public MessagePickupVersion MessagePickupVersion { get; set; } = MessagePickupVersion.Negotiate;
 
     /// <summary>
     /// How many delivered messages the clients remember, so a message the mediator delivers again
@@ -149,6 +159,8 @@ public sealed class MediatorClientOptions
             throw new ArgumentOutOfRangeException(nameof(MaxPendingRequests), "The value must be from 1 to 4096.");
         if (!Enum.IsDefined(CoordinateMediationVersion))
             throw new ArgumentOutOfRangeException(nameof(CoordinateMediationVersion), "The value must be Negotiate, V3 or V2.");
+        if (!Enum.IsDefined(MessagePickupVersion))
+            throw new ArgumentOutOfRangeException(nameof(MessagePickupVersion), "The value must be Negotiate, V4 or V3.");
         if (DedupeCapacity is < 0 or > MaxDedupeCapacity)
             throw new ArgumentOutOfRangeException(nameof(DedupeCapacity), "The value must be from 0 (off) to 1 000 000.");
         if (LivePollInterval < TimeSpan.FromSeconds(1) || LivePollInterval > TimeSpan.FromHours(24))
@@ -170,6 +182,7 @@ public sealed class MediatorClientOptions
             RequestTimeout = RequestTimeout,
             MaxPendingRequests = MaxPendingRequests,
             CoordinateMediationVersion = CoordinateMediationVersion,
+            MessagePickupVersion = MessagePickupVersion,
             DedupeCapacity = DedupeCapacity,
             LivePollInterval = LivePollInterval,
             UnpackTimeout = UnpackTimeout,
