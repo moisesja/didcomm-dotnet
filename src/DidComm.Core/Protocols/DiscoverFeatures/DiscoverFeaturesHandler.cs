@@ -23,7 +23,10 @@ namespace DidComm.Protocols.DiscoverFeatures;
 ///   <item><description>When decrypt metadata is available, the reply's <c>from</c> is the DID
 ///     subject of the recipient key that actually decrypted the query. This prevents a different
 ///     tenant placed first in a multi-recipient <c>to</c> array from selecting the responder.
-///     Plaintext/direct handler calls retain the construction-time first-recipient fallback.</description></item>
+///     Plaintext/direct handler calls retain the construction-time first-recipient fallback. A
+///     decrypted query without <c>to</c> is answered from the decrypting DID (DIDComm v2.1: without
+///     <c>to</c>, each recipient SHOULD assume it is the only one); a query without <c>from</c>, or a
+///     plaintext one without <c>to</c>, gets no reply.</description></item>
 ///   <item><description>A query passed in directly (not through unpack) that declares a <c>thid</c>
 ///     that is not a valid thread id is refused with <see cref="Exceptions.MalformedMessageException"/>,
 ///     never answered on another thread.</description></item>
@@ -57,8 +60,15 @@ public sealed class DiscoverFeaturesHandler : IProtocolHandler
         if (!string.Equals(message.Type, DiscoverFeatures.QueriesType, StringComparison.OrdinalIgnoreCase))
             return Task.FromResult<Message?>(null);
 
-        // Replies need both ends present so we can flip from/to.
-        if (string.IsNullOrEmpty(message.From) || message.To is not { Count: > 0 } || string.IsNullOrEmpty(message.To[0]))
+        // A reply needs both ends: the querier's `from`, and our DID. Ours is the DID whose key
+        // decrypted the query; without one (plaintext, a direct call) it is the first `to` entry.
+        // A decrypted query without `to` is still ours: "If the header is omitted, each recipient
+        // SHOULD assume they are the only recipient" (DIDComm v2.1 message_structure.md, `to`).
+        if (string.IsNullOrEmpty(message.From))
+            return Task.FromResult<Message?>(null);
+        var responder = DidSubject.DidSubjectOf(context.Received.RecipientKid)
+            ?? (message.To is { Count: > 0 } && !string.IsNullOrEmpty(message.To[0]) ? message.To[0] : null);
+        if (responder is null)
             return Task.FromResult<Message?>(null);
 
         var queries = DiscoverFeatures.ReadQueries(message);
@@ -83,9 +93,8 @@ public sealed class DiscoverFeaturesHandler : IProtocolHandler
             }
         }
 
-        var decryptingDid = DidSubject.DidSubjectOf(context.Received.RecipientKid);
         var reply = DiscoverFeatures.CreateDisclose(
-            from: decryptingDid ?? message.To[0],
+            from: responder,
             to: message.From,
             thid: ThreadIds.ResponseThreadId(message),
             disclosures: disclosures.ToArray());

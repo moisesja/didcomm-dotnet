@@ -10,7 +10,8 @@ namespace DidComm.Protocols.TrustPing;
 /// member is <c>true</c> (the default); replies with <c>null</c> when the sender explicitly opted out.
 /// A ping passed in directly (not through unpack) that declares a <c>thid</c> that is not a valid
 /// thread id is refused with <see cref="Exceptions.MalformedMessageException"/>, never answered on
-/// another thread.
+/// another thread. The reply is sent from the DID whose key decrypted the ping, else the first
+/// <c>to</c> entry; a ping without <c>from</c>, or a plaintext one without <c>to</c>, gets no reply.
 /// </summary>
 /// <example>
 /// Registered in <c>samples/02-Cookbook</c> (section S) and <c>samples/05-WebSocketChat</c>.
@@ -34,10 +35,18 @@ public sealed class TrustPingHandler : IProtocolHandler
         if (!TrustPing.IsResponseRequested(message))
             return Task.FromResult<Message?>(null);
 
-        var decryptingDid = DidSubject.DidSubjectOf(context.Received.RecipientKid);
-        var response = decryptingDid is null
-            ? TrustPing.CreateResponse(message)
-            : TrustPing.CreateResponse(message, decryptingDid);
-        return Task.FromResult<Message?>(response);
+        // A reply needs both ends: the pinger's `from` (an anonymous ping has nobody to answer),
+        // and our DID: the one whose key decrypted the ping, else (plaintext, a direct call) the
+        // first `to` entry. A decrypted ping without `to` is still ours: "If the header is omitted,
+        // each recipient SHOULD assume they are the only recipient" (DIDComm v2.1
+        // message_structure.md, `to`).
+        if (string.IsNullOrEmpty(message.From))
+            return Task.FromResult<Message?>(null);
+        var responder = DidSubject.DidSubjectOf(context.Received.RecipientKid)
+            ?? (message.To is { Count: > 0 } && !string.IsNullOrEmpty(message.To[0]) ? message.To[0] : null);
+        if (responder is null)
+            return Task.FromResult<Message?>(null);
+
+        return Task.FromResult<Message?>(TrustPing.CreateResponse(message, responder));
     }
 }
