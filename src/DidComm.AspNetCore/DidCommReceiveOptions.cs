@@ -1,3 +1,5 @@
+using DidComm.Transports;
+
 namespace DidComm.AspNetCore;
 
 /// <summary>
@@ -93,6 +95,50 @@ public sealed class DidCommReceiveOptions
     /// </summary>
     public TimeSpan ReceiveRejectionFloor { get; set; } = TimeSpan.FromMilliseconds(5);
 
+    private TimeSpan _messageReceiveTimeout = ReceiveDeadline.DefaultTimeout;
+
+    /// <summary>
+    /// How long a peer has to deliver each whole WebSocket message on the <c>MapDidCommWebSocket</c>
+    /// endpoints and on the mediator's WebSocket endpoint (<c>MapDidCommMediator</c>): the time runs
+    /// from the moment the message's first part is read until its last frame arrives. On a connection
+    /// the endpoint accepted, the first message's time starts when the connection is accepted, so a
+    /// connection that stays silent is closed too. After the first message, the wait for the next one
+    /// has no limit, so return-route sessions and live delivery stay open while they are idle. When
+    /// the time runs out the endpoint closes the connection with status 1008 (policy violation) and
+    /// drops what it had read of the message; a peer that does not answer that close within a few
+    /// seconds is disconnected. Defaults to 60 seconds; <see cref="Timeout.InfiniteTimeSpan"/> turns
+    /// the limit off. The HTTP endpoints (<c>MapDidCommEndpoint</c>) are not affected.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The time is measured on the container's <see cref="TimeProvider"/> (<see cref="TimeProvider.System"/>
+    /// when none is registered). The limit is the same for every message, large or small: a sender
+    /// that needs longer than this to send one message (60 seconds is about 17 KB/s for a message of
+    /// <c>DidCommOptions.MaxReceiveBytes</c> at its 1 MiB default), or that opens a connection and
+    /// waits longer than this before its first message, is cut off, so raise it for peers on slow
+    /// links.
+    /// </para>
+    /// <para>
+    /// The limit bounds how long one connection can hold a message it never finishes. It does not
+    /// bound how many connections are open: a connection that finished a message is then untimed by
+    /// design. Bound the count with Kestrel's connection limits
+    /// (<c>KestrelServerLimits.MaxConcurrentUpgradedConnections</c>, <c>MaxConcurrentConnections</c>)
+    /// and a concurrency limiter in front of the endpoint.
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// builder.Services.AddOptions&lt;DidCommReceiveOptions&gt;().Configure(o => o.MessageReceiveTimeout = TimeSpan.FromSeconds(30));
+    /// app.MapDidCommWebSocket("/ws/didcomm");
+    /// </code>
+    /// </example>
+    /// <exception cref="ArgumentOutOfRangeException">On set: the value is zero, negative (other than <see cref="Timeout.InfiniteTimeSpan"/>) or more than <see cref="int.MaxValue"/> milliseconds.</exception>
+    public TimeSpan MessageReceiveTimeout
+    {
+        get => _messageReceiveTimeout;
+        set => _messageReceiveTimeout = ReceiveDeadline.Validate(value, nameof(MessageReceiveTimeout));
+    }
+
     /// <summary>
     /// A copy of these options for the mediator's WebSocket endpoint: same-socket replies on (pickup
     /// over a WebSocket answers on the socket) and STOMP off (a STOMP session can never push). The
@@ -102,6 +148,7 @@ public sealed class DidCommReceiveOptions
     {
         AcceptedMediaTypes = AcceptedMediaTypes,
         ReceiveRejectionFloor = ReceiveRejectionFloor,
+        MessageReceiveTimeout = MessageReceiveTimeout,
         AllowSameSocketReplies = true,
         UseStomp = false,
     };
