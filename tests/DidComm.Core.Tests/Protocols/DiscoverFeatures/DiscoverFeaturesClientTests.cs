@@ -488,6 +488,54 @@ public sealed class DiscoverFeaturesClientTests
         await act.Should().NotThrowAsync();
     }
 
+    public enum OtherThread { Unrelated, QueryIdWithSuffix, QueryIdPrefix, NoThid, QueryIdOnlyAsPthid }
+
+    // #138, threading.md L17: a message whose thid is not the query's thread is not part of it, so even
+    // an authenticated disclose from the queried peer cannot answer the query on another thid.
+    [Theory]
+    [InlineData(OtherThread.Unrelated)]
+    [InlineData(OtherThread.QueryIdWithSuffix)]
+    [InlineData(OtherThread.QueryIdPrefix)]
+    [InlineData(OtherThread.NoThid)]
+    [InlineData(OtherThread.QueryIdOnlyAsPthid)]
+    public async Task An_authenticated_disclose_from_the_queried_peer_on_another_thid_does_not_complete_the_query_which_times_out(OtherThread other)
+    {
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromMilliseconds(500));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
+        var disclose = Disclose(other switch
+        {
+            OtherThread.QueryIdWithSuffix => query.Id + "0",
+            OtherThread.QueryIdPrefix => query.Id[..^1],
+            _ => "thread-the-query-never-named",
+        }, disclosures: Legit());
+        if (other == OtherThread.NoThid)
+            disclose.Message.Thid = null;
+        if (other == OtherThread.QueryIdOnlyAsPthid)
+            disclose.Message.Pthid = query.Id;
+
+        var claimed = ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(disclose));
+        var ex = await Record.ExceptionAsync(() => task);
+
+        claimed.Should().BeFalse("a disclose outside the query's thread is not an answer to it");
+        ex.Should().BeOfType<TimeoutException>();
+    }
+
+    [Fact]
+    public async Task The_same_authenticated_disclose_on_the_query_id_completes_the_query()
+    {
+        // Control for the test above: only the thid differs.
+        var client = Client(out var sent);
+        var task = client.QueryFeaturesAsync(Alice, Bob, new[] { ProtocolWildcard }, TimeSpan.FromSeconds(30));
+        var (query, _) = await sent.Task.WaitAsync(SyncTimeout);
+
+        var claimed = ((IInboundCorrelator)client).OnInbound(InboundMessageSnapshot.CreateFallback(Disclose(query.Id, disclosures: Legit())));
+        var disclosures = await task;
+
+        claimed.Should().BeTrue();
+        disclosures.Should().ContainSingle(d => d.Id == "legit");
+    }
+
     [Fact]
     public async Task Concurrent_queries_correlate_independently()
     {

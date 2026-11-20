@@ -159,6 +159,63 @@ public sealed class DiscoverFeaturesRoundTripTests
         }
     }
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task Out_of_band_reply_from_Bobs_endpoint_reaches_Alice_on_the_thid_her_request_declared(bool trustPing, bool declaresThid)
+    {
+        // #138, the plain outbound path (no return route): Bob's app sends the built-in responder's
+        // reply back over HTTP. threading.md L15: a request without a thid has its id as its thid;
+        // L17: the reply MUST carry the request's thid, so it is never answered on the id instead.
+        var aliceSecrets = new InMemorySecretsResolver();
+        var bobSecrets = new InMemorySecretsResolver();
+        var (aliceDid, bobDid) = await CreateTwoPeersAsync(aliceSecrets, bobSecrets);
+        var aliceInbox = new LateBoundHandler();
+        var bobInbox = new LateBoundHandler();
+        var receivedReply = new TaskCompletionSource<UnpackResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var bob = await BuildAgentAsync("bob", bobSecrets, outboundTo: aliceInbox, isResponder: true,
+            serviceResolver: new FixedServiceResolver(aliceDid, "http://localhost/didcomm"),
+            localDid: bobDid, expectedPeerDid: aliceDid);
+        var alice = await BuildAgentAsync("alice", aliceSecrets, outboundTo: bobInbox, isResponder: false,
+            serviceResolver: new FixedServiceResolver(bobDid, "http://localhost/didcomm"),
+            localDid: aliceDid, expectedPeerDid: bobDid, captureInbound: receivedReply);
+        aliceInbox.Target = alice.Server.CreateHandler();
+        bobInbox.Target = bob.Server.CreateHandler();
+
+        try
+        {
+            var declared = declaresThid ? "thr-" + Guid.NewGuid().ToString("N") : null;
+            var request = trustPing
+                ? TrustPingApi.CreatePing(aliceDid, bobDid)
+                : DiscoverFeaturesApi.CreateQuery(aliceDid, bobDid, new FeatureQuery { FeatureType = "protocol", Match = "https://didcomm.org/*" });
+            request.Thid = declared;
+
+            var client = alice.Services.GetRequiredService<DidCommClient>();
+            await client.SendAsync(request, new SendOptions(
+                Recipients: new[] { bobDid },
+                From: aliceDid,
+                ServiceEndpointOverride: new Uri("http://localhost/didcomm")));
+
+            // Hang guard only: Bob's reply is certain with a correct product.
+            var reply = await receivedReply.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            reply.Authenticated.Should().BeTrue();
+            reply.Message.Type.Should().Be(trustPing ? TrustPingApi.ResponseType : DiscoverFeaturesApi.DiscloseType);
+            reply.Message.From.Should().Be(bobDid);
+            reply.Message.Thid.Should().Be(declared ?? request.Id);
+            if (declared is not null)
+                reply.Message.Thid.Should().NotBe(request.Id, "a reply on the request's id is not in the thread the request declared (threading.md L17)");
+            reply.Message.Pthid.Should().BeNull();
+        }
+        finally
+        {
+            await alice.App.DisposeAsync();
+            await bob.App.DisposeAsync();
+        }
+    }
+
     private static async Task<(string AliceDid, string BobDid)> CreateTwoPeersAsync(
         InMemorySecretsResolver aliceSecrets, InMemorySecretsResolver bobSecrets)
     {
