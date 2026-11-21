@@ -67,7 +67,10 @@ public sealed class PickupClientAckOd6AdversarialTests : IAsyncLifetime
         }
         var thrown = await Record.ExceptionAsync(() => PickupTest.Within(acking));
 
-        (thrown is ArgumentOutOfRangeException).Should().BeFalse("a RequestTimeout the options accept must not be refused as an answerWait of zero");
+        // A hang would fail here too: PickupTest.Within gives up in real time with a TimeoutException.
+        thrown.Should().BeNull("a RequestTimeout the options accept must not be refused as an answerWait of zero, and the call must end");
+        acking.IsCompletedSuccessfully.Should().BeTrue("the call ended");
+        (await acking).Should().BeNull("the acknowledgement was sent and no status came");
         send.Count.Should().Be(1, "the acknowledgement should have been sent");
     }
 

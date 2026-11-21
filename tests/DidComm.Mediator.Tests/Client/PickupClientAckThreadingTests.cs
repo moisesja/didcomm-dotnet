@@ -115,8 +115,11 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
 
         var acking = Observed(new PickupClient(channel, logger: null).AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(150), serviceEndpointOverride: Wss));
         var first = await NextAsync(sent);
-        channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(first.Id, count: 50))).Should().BeTrue();
+        // Taken before the answer that lets chunk 2 go out, so chunk 2's wait is created after it
+        // (L-065 rule 2). Chunk 1's own wait, which may also come after it, has ended by the time
+        // chunk 2 is sent.
         var mark = time.Mark();
+        channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Status(first.Id, count: 50))).Should().BeTrue();
         var second = await NextAsync(sent);
         await time.WaitForTimerAsync(Half, mark, PickupTest.Timeout);
         time.Advance(Half).Should().Be(1, "chunk 2's wait for its status");

@@ -337,6 +337,202 @@ public sealed class MediatorClientChannelAnswerWaitTests : IAsyncLifetime
         channel.PendingCount.Should().Be(0);
     }
 
+    // ---- on a WebSocket: a timer, and the caller or the disposal, before the channel decides ------
+    //
+    // PR #143 review round 3 (P3-2, P3-3). Each case is set up so that the channel finds every event
+    // the assertion depends on already recorded when it decides, whatever thread it resumes on: a
+    // timer is fired from inside a step the channel is parked in, or from a callback that runs before
+    // the request's own (cancellation callbacks run newest first, L-065 rule 6).
+    //
+    // One deletion cannot be pinned this way: `&& !IsDisposed` in the window's catch filter (the
+    // filter on the window's OperationCanceledException). For it to decide anything, the channel must
+    // be disposed after a timer ended the window's wait and before the filter runs. Nothing runs in
+    // that gap: the timer's callback cancels the window's token, and the only callback on that token
+    // is the wait's own, which resumes the channel. The disposal cannot be put in front of it either:
+    // Dispose marks the channel disposed and, in the same call, fails the waiting request, and that
+    // failure reaches the window's wait through the thread pool (the request's completion runs its
+    // continuations asynchronously). So when the deadline's token then ends the wait, whether the
+    // filter runs or the failure ends the wait first is up to the thread pool. The last test below
+    // pins the outcome of that instant (ObjectDisposedException, in every order), and catches the
+    // deletion only in the runs where the token comes first (when measured: 7 of 60 runs on their
+    // own, 13 of 15 inside the client suite), so it does not count as pinning it. Pinning it
+    // deterministically needs a seam in the product, which is not added here.
+
+    [Fact]
+    public async Task On_a_WebSocket_a_send_that_honours_its_token_and_is_ended_by_the_deadline_is_a_TimeoutException_never_null()
+    {
+        // (m) The send honours its token: it stays on the wire until its token ends it. It takes the
+        // whole RequestTimeout, so the deadline ends it; its task then ended, but did not succeed. The
+        // message was not sent, so this is a TimeoutException, not null (a send whose task merely
+        // ended is not one that completed). Deterministic: the clock moves to the deadline inside the
+        // send, so the send's task has already ended when the channel looks at it.
+        await using var channel = Create(_w, _send, time: _time);
+        var timeout = channel.Options.RequestTimeout;
+        var fired = -1;
+        _send.Respond = async (_, options, ct) =>
+        {
+            var onTheWire = Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            fired = _time.Advance(timeout);
+            await onTheWire;
+            return FakeSend.Accepted(options.ServiceEndpointOverride!);
+        };
+        var request = Acknowledgement();
+        var started = _time.GetUtcNow();
+
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(Exchange(channel, WebSocketRoute, request, Wait)));
+
+        fired.Should().Be(1, "the request's deadline, while the message was being sent");
+        _send.Calls.Single().Token.IsCancellationRequested.Should().BeTrue("the deadline ended the send through its token");
+        thrown.Should().BeOfType<TimeoutException>("a message whose send the deadline ended was not sent")
+            .Which.Message.Should().Contain(request.Id);
+        (_time.GetUtcNow() - started).Should().Be(timeout);
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0, "no window was opened for a message that was not sent");
+    }
+
+    [Fact]
+    public async Task On_a_WebSocket_when_the_deadline_gave_up_on_a_sent_request_and_the_caller_cancelled_too_it_is_an_OperationCanceledException_with_the_callers_token_never_null()
+    {
+        // (n) The message is sent, and before the channel looks at the send, the deadline fires (it
+        // gives up the request) and then the caller cancels. Without the cancellation this is null
+        // (the message was sent: OD6-ADV-2); with it, the caller's cancellation wins, as for any
+        // request. Deterministic: the send completes, then fires the deadline and cancels the caller's
+        // token before it returns, so the channel finds all three when it resumes.
+        await using var channel = Create(_w, _send, time: _time);
+        using var cts = new CancellationTokenSource();
+        var timeout = channel.Options.RequestTimeout;
+        var fired = -1;
+        _send.Respond = (_, options, _) =>
+        {
+            var sent = Task.FromResult(FakeSend.Accepted(options.ServiceEndpointOverride!));
+            fired = _time.Advance(timeout);
+            cts.Cancel();
+            return sent;
+        };
+
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(Exchange(channel, WebSocketRoute, Acknowledgement(), Wait, cts.Token)));
+
+        fired.Should().Be(1, "the request's deadline");
+        thrown.Should().BeAssignableTo<OperationCanceledException>("the caller cancelled before the channel decided")
+            .Which.CancellationToken.Should().Be(cts.Token);
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0, "no window was opened: the deadline had already given up");
+    }
+
+    [Fact]
+    public async Task On_a_WebSocket_when_the_deadline_gave_up_on_a_sent_request_and_the_channel_was_disposed_too_it_is_an_ObjectDisposedException_never_null()
+    {
+        // (o) As (n), with the channel disposed instead of the caller cancelling.
+        await using var channel = Create(_w, _send, time: _time);
+        var timeout = channel.Options.RequestTimeout;
+        var fired = -1;
+        _send.Respond = (_, options, _) =>
+        {
+            var sent = Task.FromResult(FakeSend.Accepted(options.ServiceEndpointOverride!));
+            fired = _time.Advance(timeout);
+            channel.Dispose();
+            return sent;
+        };
+
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(Exchange(channel, WebSocketRoute, Acknowledgement(), Wait)));
+
+        fired.Should().Be(1, "the request's deadline");
+        thrown.Should().BeOfType<ObjectDisposedException>("the channel was disposed before it decided");
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0, "no window was opened: the deadline had already given up");
+    }
+
+    [Fact]
+    public async Task On_a_WebSocket_when_the_window_runs_out_while_the_callers_cancellation_is_on_its_way_it_is_an_OperationCanceledException_with_the_callers_token_never_null()
+    {
+        // (p) The caller cancels, and before the cancellation reaches the request, the window runs
+        // out. Both happened before the channel decided: the caller's cancellation wins. Deterministic:
+        // a callback registered on the caller's token after the request's own runs first, and it moves
+        // the clock to the end of the window; the window's wait then ends with the caller's token
+        // already cancelled and the request still waiting.
+        await using var channel = Create(_w, _send, time: _time);
+        using var cts = new CancellationTokenSource();
+        var mark = _time.Mark();
+
+        var call = Exchange(channel, WebSocketRoute, Acknowledgement(), Wait, cts.Token).Observed();
+        await _time.WaitForTimerAsync(Wait, mark, PickupTest.Timeout);
+        var fired = -1;
+        using (cts.Token.Register(() => fired = _time.Advance(Wait)))
+            cts.Cancel();
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(call));
+
+        fired.Should().Be(1, "the window, which ends before the request's deadline");
+        thrown.Should().BeAssignableTo<OperationCanceledException>("the caller cancelled before the channel decided")
+            .Which.CancellationToken.Should().Be(cts.Token);
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task On_a_WebSocket_when_the_deadline_cuts_the_window_short_while_the_callers_cancellation_is_on_its_way_it_is_an_OperationCanceledException_with_the_callers_token_never_null()
+    {
+        // (q) As (k): the send completes at 25 s, so the request's 30 s deadline ends the window. Here
+        // the caller cancels, and the deadline fires before the cancellation reaches the request, as
+        // in (p).
+        await using var channel = Create(_w, _send, time: _time);
+        using var cts = new CancellationTokenSource();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _send.Respond = async (_, options, _) =>
+        {
+            await release.Task;
+            return FakeSend.Accepted(options.ServiceEndpointOverride!);
+        };
+        var timeout = channel.Options.RequestTimeout;
+        var lateSend = timeout - TimeSpan.FromSeconds(5);
+
+        var call = Exchange(channel, WebSocketRoute, Acknowledgement(), Wait, cts.Token).Observed();
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
+        _time.Advance(lateSend).Should().Be(0, "the send takes 25 s and nothing ends it");
+        var afterSend = _time.Mark();
+        release.SetResult();
+        await _time.WaitForTimerAsync(Wait, afterSend, PickupTest.Timeout);
+        var fired = -1;
+        using (cts.Token.Register(() => fired = _time.Advance(timeout - lateSend)))
+            cts.Cancel();
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(call));
+
+        fired.Should().Be(1, "the request's deadline, before the window would end");
+        thrown.Should().BeAssignableTo<OperationCanceledException>("the caller cancelled before the channel decided")
+            .Which.CancellationToken.Should().Be(cts.Token);
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task On_a_WebSocket_when_the_channel_is_disposed_as_the_deadline_ends_the_window_it_is_an_ObjectDisposedException_never_null()
+    {
+        // (r) The deadline fires during the window, and the channel is disposed in the same instant,
+        // before the deadline's cancellation reaches the window's wait. The disposal wins: an
+        // ObjectDisposedException, never null. The send completes at once, so the window's wait is set
+        // up by the time the call returns; the window is longer than the deadline, so the deadline
+        // ends it; and a callback registered on the deadline's token after that runs first and
+        // disposes the channel. See the note above this section: this outcome holds in every order,
+        // but the window's filter decides it only when the deadline's token reaches the wait before
+        // the disposal's failure does.
+        await using var channel = Create(_w, _send, time: _time);
+        var timeout = channel.Options.RequestTimeout;
+        var longWait = timeout + Wait;
+        var mark = _time.Mark();
+
+        var call = Exchange(channel, WebSocketRoute, Acknowledgement(), longWait).Observed();
+        await _time.WaitForTimerAsync(longWait, mark, PickupTest.Timeout);
+        var deadlineToken = _send.Calls.Single().Token;
+        int fired;
+        using (deadlineToken.Register(channel.Dispose))
+            fired = _time.Advance(timeout);
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(call));
+
+        fired.Should().Be(1, "the request's deadline, before the window would end");
+        thrown.Should().BeOfType<ObjectDisposedException>("the channel was disposed before it decided");
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0);
+    }
+
     // ---- over HTTP: answerWait plays no part ---------------------------------------------------
 
     [Theory]
