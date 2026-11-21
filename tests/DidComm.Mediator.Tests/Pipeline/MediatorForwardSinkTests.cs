@@ -169,6 +169,30 @@ public sealed class MediatorForwardSinkTests
     }
 
     [Fact]
+    public async Task A_forward_whose_message_is_not_in_encrypted_form_is_dropped_as_payload_not_encrypted_with_its_own_rate_limit()
+    {
+        // #100 OD-1: in pass-through mode the onward payload is the attachment as its sender wrapped
+        // it; the mailbox refuses one that is not a JWE. The drop has its own name — Dropped-NotEncrypted
+        // is the handler's, about the forward's own envelope — and its own rate limit.
+        await using var fixture = PushFixture.Create();
+        await fixture.EnrolAsync(Peer, Recipient);
+        var plaintext = System.Text.Encoding.UTF8.GetBytes("""{"id":"m-1","type":"https://didcomm.org/basicmessage/2.0/message","body":{"content":"SINKNOTENC"}}""");
+
+        await fixture.Sink.AcceptAsync(Forward(Recipient, PushFixture.Payload(fixture.Queue.MaxAdmissiblePayloadBytes + 1)), Context(fixture, "fwd-0"), CancellationToken.None);
+        await fixture.Sink.AcceptAsync(Forward(Recipient, plaintext), Context(fixture, "fwd-1"), CancellationToken.None);
+        await fixture.Sink.AcceptAsync(Forward(Recipient + "#key-1", plaintext), Context(fixture, "fwd-2"), CancellationToken.None);
+
+        fixture.Store.MessageCount.Should().Be(0);
+        fixture.ForwardOutcomeLog.Should().Equal(ForwardOutcomes.DroppedTooLarge, ForwardOutcomes.DroppedPayloadNotEncrypted, ForwardOutcomes.DroppedPayloadNotEncrypted);
+        var lines = SinkLines(fixture);
+        lines.Select(e => e.Level).Should().Equal(new[] { LogLevel.Warning, LogLevel.Warning, LogLevel.Debug }, "the first drop of each reason is said at Warning");
+        lines.Skip(1).Should().OnlyContain(e => e.Formatted.Contains("not in encrypted form", StringComparison.Ordinal) && e.Formatted.Contains("nothing is sent back to the sender", StringComparison.Ordinal));
+        lines.Skip(1).Select(e => e.State["ForwardId"]).Should().Equal("fwd-1", "fwd-2");
+        lines.Should().OnlyContain(e => !e.Everything.Contains("SINKNOTENC", StringComparison.Ordinal));
+        NoLeaks(fixture);
+    }
+
+    [Fact]
     public async Task A_forward_beyond_the_recipient_quota_is_dropped_as_quota()
     {
         await using var fixture = PushFixture.Create(configure: o => o.Pickup.MaxQueueMessages = 1);
