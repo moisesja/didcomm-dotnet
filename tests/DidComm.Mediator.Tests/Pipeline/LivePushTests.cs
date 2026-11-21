@@ -363,13 +363,15 @@ public sealed class LivePushTests
         live.Fixture.Store.MessageCount.Should().Be(2, "nothing is lost: both wait for pickup");
         PipelineLogs.Leaking(live.Fixture.Logs, live.Peer.Did, live.Mediator.Did, Recipient).Should().BeEmpty();
 
-        // The cooldown over, the grant's next wake-up pushes what is due, oldest first.
+        // The cooldown over, the grant's next wake-up pushes what is due. The push that timed out
+        // inside its send counts as pushed: owner decision 2026-11-21 (OD-5), the next delivery-request delivers it.
         live.Fixture.Time.Advance(TimeSpan.FromTicks(1));
         session.OnPush = null;
         live.Fixture.Dispatcher.Wake(during.GrantPeerDid).Should().BeTrue();
         await live.Fixture.Dispatcher.WaitForIdleAsync(Wait);
-        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown, PushOutcomes.PushedLive, PushOutcomes.PushedLive);
-        Deliveries(session).Select(d => d.Id).Should().Equal(first.MessageId, during.MessageId);
+        live.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed, PushOutcomes.SkippedCooldown, PushOutcomes.PushedLive);
+        Deliveries(session).Select(d => d.Id).Should().Equal(during.MessageId);
+        (await live.PickupAsync()).Should().Equal(new[] { first.MessageId }, "the timed-out push waits for the recipient's next delivery-request");
     }
 
     [Fact]

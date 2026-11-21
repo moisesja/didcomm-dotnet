@@ -30,16 +30,17 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         return taken.Select(m => m.Id).ToArray();
     }
 
-    // ---- ADV4-1: a push that never reached the connection comes back marked --------------------
+    // ---- ADV4-1: a push that never reached the connection comes back the same in every order -------
 
-    // ADV4-1 (Low, fixed in #100): a push whose session closed while it was in hand used to come back
-    // marked or unmarked depending on whether the close's clean-up (ReleaseLeasesAsync by owner) or
-    // the coordinator's give-back by id landed first. Now the coordinator ends such a lease the way
-    // the close does, so it always comes back as a returned live push: delivered by a
-    // delivery-request only, whichever end lands first (whether it reached the connection cannot be
-    // told). The three tests below are the three interleavings.
+    // ADV4-1 (Low, fixed in #100; reworked for PR #143 review P2-1): a push whose session closed while
+    // it was in hand used to come back marked or unmarked depending on whether the close's clean-up
+    // (ReleaseLeasesAsync by owner) or the coordinator's give-back by id landed first. Now the take
+    // marks the record and only the push's own "not sent" clears the mark, also after the close ended
+    // the lease: a push whose session closed before it was handed over never reached the connection,
+    // so it stays eligible for a later live push, whichever end lands first — what ADV-4 expected.
+    // The three tests below are the three interleavings.
     [Fact]
-    public async Task Adv4_1_a_queue_push_whose_session_closes_before_it_is_sent_comes_back_as_a_returned_live_push_when_the_close_cleans_up_first()
+    public async Task Adv4_1_a_queue_push_whose_session_closes_before_it_is_sent_stays_pushable_when_the_close_cleans_up_first()
     {
         // The peer has two live sessions; the record is admitted under the newer one's live-push
         // lease, and that session closes, and its clean-up runs to its end, before the push is sent.
@@ -64,14 +65,13 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
 
         result.Outcome.Should().Be(PickupDeliveryOutcome.Queued, "precondition: the session closed before the push");
         newer.Sent.Should().BeEmpty("precondition: the push never reached the connection");
-        await MessagePickupLive.UntilAsync(() => tracker.PendingReleases == 0, "the coordinator's release ran to its end");
-        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "a push in hand when its session closed counts as returned");
-        older.Sent.Should().BeEmpty();
-        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { result.MessageId }, "a delivery-request gets it");
+        store.ReturnedUnsent.Should().ContainSingle("the push was given back as unsent").Which.Ids.Should().Equal(result.MessageId);
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent, "a push that never reached the connection may be pushed live");
+        PushedIds(older).Should().Equal(result.MessageId);
     }
 
     [Fact]
-    public async Task Adv4_1_a_worker_push_whose_session_closes_before_it_is_sent_comes_back_as_a_returned_live_push()
+    public async Task Adv4_1_a_worker_push_whose_session_closes_before_it_is_sent_stays_pushable()
     {
         // The push worker takes the record under the newer session's live-push lease; the session
         // closes, and its clean-up runs to its end, before the send.
@@ -99,10 +99,9 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         store.OnLease = null;
 
         newer.Sent.Should().BeEmpty("precondition: the push never reached the connection");
-        await MessagePickupLive.UntilAsync(() => tracker.PendingReleases == 0, "the coordinator's release ran to its end");
-        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "a push in hand when its session closed counts as returned");
-        older.Sent.Should().BeEmpty();
-        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { id }, "a delivery-request gets it");
+        store.ReturnedUnsent.Should().ContainSingle("the push was given back as unsent").Which.Ids.Should().Equal(id);
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent, "a push that never reached the connection may be pushed live");
+        PushedIds(older).Should().Equal(id);
     }
 
     [Fact]
@@ -139,9 +138,9 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
 
         result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
         newer.Sent.Should().BeEmpty();
-        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "a push in hand when its session closed counts as returned");
-        older.Sent.Should().BeEmpty();
-        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { result.MessageId }, "a delivery-request gets it");
+        store.ReturnedUnsent.Should().ContainSingle("the push was given back as unsent, before the close's clean-up ran").Which.Ids.Should().Equal(result.MessageId);
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent, "the same outcome as when the close cleans up first");
+        PushedIds(older).Should().Equal(result.MessageId);
     }
 
     // ---- what held -------------------------------------------------------------------------------
@@ -280,7 +279,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.NotSent);
         socket.OnSend = null;
 
-        // The lease of each refused push was given back by id; time passing marks nothing.
+        // Each refused push was given back as unsent; time passing marks nothing.
         fixture.Clock.Advance(LeaseFor * 3);
         (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent);
         socket.Sent.Should().ContainSingle();
@@ -343,7 +342,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
             }
             (await store.LeaseIdsAsync(LiveTake(Alice, "live-" + cycle, now + LeaseFor, now + LeaseFor + LeaseFor, leaseId: "live-" + cycle)))
                 .Should().Equal(new[] { "never-pushed" }, "cycle {0}", cycle);
-            (await store.ReleaseAsync(Alice, new[] { "never-pushed" }, "live-" + cycle, None)).Should().Be(1, "the live push gives back what it did not send");
+            (await store.ReturnUnsentAsync(Alice, new[] { "never-pushed" }, "live-" + cycle, None)).Should().Be(1, "the live push gives back what it did not send");
         }
 
         (await store.HeldAsync(now: now)).Should().Be(before, "the mark changes no count, byte total or status");
@@ -359,11 +358,12 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         (await store.LeaseIdsAsync(LiveTake(Bob, "bob-socket", T0, Far, leaseId: "bob-push"))).Should().Equal("bob-1");
 
         // Alice's socket closes and her other push runs out; Bob's live push is still in hand and
-        // given back unsent (by id): none of it touches Bob's record.
+        // given back as unsent: none of it touches Bob's record.
         await store.ReleaseLeasesAsync("alice-socket", None);
-        (await store.ReleaseAsync(Bob, new[] { "bob-1" }, "bob-push", None)).Should().Be(1);
+        (await store.ReturnUnsentAsync(Bob, new[] { "bob-1" }, "bob-push", None)).Should().Be(1);
         // A lease id of Bob's named against Alice's grant, and an owner token that is not Bob's, do nothing.
         (await store.ReleaseAsync(Alice, new[] { "bob-1" }, "bob-push", None)).Should().Be(0);
+        (await store.ReturnUnsentAsync(Alice, new[] { "bob-1" }, "bob-push", None)).Should().Be(0);
         (await store.ReleaseLeasesAsync("bob-socket", None)).Should().Be(0);
 
         var later = T0 + LeaseFor;
@@ -389,6 +389,9 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         (await store.GetStatusAsync(Alice, null, expired, None)).MessageCount.Should().Be(2, "the marked record expired like any other");
         (await store.LeaseIdsAsync(PickupTake(Alice, expired))).Should().Equal("b");
     }
+
+    private static string[] PushedIds(PickupFakeSession session)
+        => session.Sent.Select(m => MessagePickup.TryParseDelivery(m, out var delivered, out _) ? delivered!.Single().Id : "?").ToArray();
 
     private static async Task TurnLiveOnAsync(PickupFixture fixture, string peer, string mediator, IReturnRouteSession session, string version)
     {

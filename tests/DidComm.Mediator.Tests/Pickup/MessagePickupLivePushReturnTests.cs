@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using DidComm.Mediator.Pickup;
+using DidComm.Mediator.Tests.Coordination;
 using DidComm.Transports.ReturnRoute;
 using Xunit;
 
@@ -9,8 +10,10 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// The coordinator's side of "a live push that comes back unacknowledged is never pushed again"
 /// (owner decision on #100, 2026-11-20): every lease it takes for a live push says so
 /// (<see cref="MessageLease.LivePush"/>) and no delivery-request's lease does; a push the session
-/// took and that found the session closed is ended the way the close ends it (so the store marks
-/// it); and a record a store hands to a live push although it is marked is refused.
+/// took, or whose send threw or was cancelled once the session had it, counts as pushed — its lease
+/// is given back by id and the mark its take set stays, whichever of that give-back and the close's
+/// clean-up lands first (owner decision 2026-11-21, OD-5; PR #143 review P2-1); and a record a store
+/// hands to a live push although it is marked is refused and given back as unsent.
 /// </summary>
 public sealed class MessagePickupLivePushReturnTests
 {
@@ -51,13 +54,13 @@ public sealed class MessagePickupLivePushReturnTests
     [Theory]
     [InlineData("the queue's own live push")]
     [InlineData("the push workers' push")]
-    public async Task A_push_the_session_took_as_it_closed_is_ended_as_the_close_ends_it_and_comes_back_for_a_delivery_request_only(string path)
+    public async Task A_push_the_session_took_as_it_closed_is_given_back_by_id_and_comes_back_for_a_delivery_request_only(string path)
     {
         // The session takes the push (Sent) and its close lands before the coordinator looks again.
-        // The close's own clean-up may have run before the lease existed, so the coordinator ends the
-        // lease too — the way the close does, which marks it: the push came back unacknowledged. The
-        // close's clean-up is held here until the coordinator is done, so a give-back by lease id
-        // (which would leave the record unmarked) cannot hide behind it.
+        // Whether it reached the connection cannot be told: the coordinator gives the lease back by
+        // its id (the close's own clean-up may have run before the lease existed), and the mark the
+        // take set stays. The close's clean-up is held here until the coordinator is done, so the
+        // give-back by id lands first: it must not unmark the record.
         await using var fixture = PickupFixture.Create(fakeStore: true);
         var (mediator, peer) = await fixture.EnrolledAsync();
         var socket = fixture.Session(peer, mediator, live: true);
@@ -91,10 +94,11 @@ public sealed class MessagePickupLivePushReturnTests
             result.Outcome.Should().Be(PickupDeliveryOutcome.Queued, "the session closed as it took the push: the message is held in the queue");
             id = result.MessageId!;
         }
-        store.Released.Should().BeEmpty("the lease is not given back by its id: that would say the session never took the push");
+        store.Released.Should().ContainSingle("the lease is given back by its id").Which.Ids.Should().Equal(id);
+        store.ReturnedUnsent.Should().BeEmpty("the session took the push: it is not given back as unsent");
 
         cleanUp.SetResult();
-        await MessagePickupLive.UntilAsync(() => fixture.Queue.Coordinator.Tracker.PendingReleases == 0 && store.ReleasedOwners.Count >= 2, "the close's clean-up and the coordinator's ran");
+        await MessagePickupLive.UntilAsync(() => fixture.Queue.Coordinator.Tracker.PendingReleases == 0 && store.ReleasedOwners.Count >= 1, "the close's clean-up ran");
 
         var now = fixture.Clock.Now;
         var live = new MessageLeaseRequest(peer, null, 10, long.MaxValue, now, new MessageLease("another-socket", now + TimeSpan.FromMinutes(1)) { LivePush = true });
@@ -125,8 +129,62 @@ public sealed class MessagePickupLivePushReturnTests
 
         await push.Should().ThrowAsync<InvalidOperationException>("outside the store contract: such a record is the recipient's to ask for");
         socket.Sent.Should().BeEmpty("nothing is pushed");
-        store.Released.Should().ContainSingle().Which.Ids.Should().Equal(id);
+        store.ReturnedUnsent.Should().ContainSingle("taken and not handed over: given back as unsent").Which.Ids.Should().Equal(id);
+        store.Released.Should().BeEmpty();
         store.OnLease = null;
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle("pickup still works").Which.Id.Should().Be(id);
+    }
+
+    // ---- PR #143 review P2-1: the reviewer's reproduction -----------------------------------------
+
+    [Theory]
+    [InlineData("cancelled")]
+    [InlineData("faulted")]
+    [InlineData("returned Sent")]
+    public async Task A_queue_push_whose_session_closes_during_the_send_and_whose_send_then_throws_is_never_pushed_live_again(string send)
+    {
+        // The reviewer's reproduction (PR #143, P2-1): an older and a newer live session; the close's
+        // clean-up is held; the newer session's send closes the session, cancels the delivery's token
+        // and throws (or, the control, returns Sent). The coordinator gives the lease back by its id
+        // before the clean-up runs. That give-back used to end the live push's lease without marking
+        // the record, so the next live push sent it to the older session. A send that threw once the
+        // session had the push counts as pushed (owner decision 2026-11-21, OD-5): the mark its take
+        // set stays, and only a delivery-request gets it.
+        await using var fixture = PickupFixture.Create(fakeStore: true);
+        var (mediator, peer) = await fixture.EnrolledAsync();
+        var older = fixture.Session(peer, mediator, live: true);
+        await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, older);
+        var newer = fixture.Session(peer, mediator, live: true);
+        await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, newer);
+        var store = fixture.FakeStore!;
+        var cleanUp = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.OnReleaseLeases = async (owner, ct) =>
+        {
+            await cleanUp.Task;
+            return await store.Inner.ReleaseLeasesAsync(owner, ct);
+        };
+        using var delivery = new CancellationTokenSource();
+        newer.OnSend = (_, _) =>
+        {
+            newer.Close();
+            if (send == "returned Sent")
+                return ReturnRouteSendResult.Sent;
+            delivery.Cancel();
+            throw send == "cancelled" ? new OperationCanceledException(delivery.Token) : new HandlerBoomException(HandlerBoomException.Marker);
+        };
+
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(40, 1), ct: delivery.Token);
+
+        result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        store.Released.Should().ContainSingle("the coordinator gave the lease back by its id, before the close's clean-up").Which.Ids.Should().Equal(result.MessageId);
+        store.ReturnedUnsent.Should().BeEmpty("the send may have reached the connection");
+        await MessagePickupLive.UntilAsync(() => store.ReleasedOwners.Count == 1, "the close's clean-up is waiting at the store's door");
+        cleanUp.SetResult();
+        await MessagePickupLive.UntilAsync(() => fixture.Queue.Coordinator.Tracker.PendingReleases == 0, "the close's clean-up ran to its end");
+
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "never pushed live again, to any session");
+        older.Sent.Should().BeEmpty();
+        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { result.MessageId }, "a delivery-request delivers it");
+        fixture.Memory.MessageCount.Should().Be(1);
     }
 }

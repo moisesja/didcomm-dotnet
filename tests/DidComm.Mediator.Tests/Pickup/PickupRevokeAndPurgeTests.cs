@@ -263,7 +263,7 @@ public sealed class PickupRevokeAndPurgeTests
         result.MessageId.Should().NotBeNull();
         socket.Attempts.Should().BeEmpty("no live push on an unconfirmed registration");
         fixture.Memory.MessageCount.Should().Be(1);
-        fixture.FakeStore!.Released.Should().ContainSingle("the live lease it was admitted under is given back").Which.Ids.Should().Equal(result.MessageId);
+        fixture.FakeStore!.ReturnedUnsent.Should().ContainSingle("the live lease it was admitted under is given back, as unsent: nothing was pushed").Which.Ids.Should().Equal(result.MessageId);
         mediation.OnFind = null;
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle("deliverable at once by delivery-request").Which.Id.Should().Be(result.MessageId);
         var line = MessagePickupLive.QueueLogs(fixture, LogLevel.Warning).Should().ContainSingle().Subject;
@@ -360,7 +360,7 @@ public sealed class PickupRevokeAndPurgeTests
 
         result.Outcome.Should().Be(PickupDeliveryOutcome.Queued, "the outcome tells the truth: the record is still held");
         socket.Attempts.Should().BeEmpty();
-        fixture.FakeStore.Released.Should().ContainSingle().Which.Ids.Should().Equal(result.MessageId);
+        fixture.FakeStore.ReturnedUnsent.Should().ContainSingle("given back as unsent: nothing was pushed").Which.Ids.Should().Equal(result.MessageId);
         fixture.Memory.MessageCount.Should().Be(1);
         MessagePickupLive.QueueLogs(fixture, LogLevel.Error).Should().ContainSingle().Which.State["ExceptionType"].Should().Be(nameof(HandlerBoomException));
         fixture.FakeStore.OnAcknowledge = null;

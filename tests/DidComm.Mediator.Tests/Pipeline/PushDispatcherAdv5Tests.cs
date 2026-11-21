@@ -373,8 +373,14 @@ public sealed class PushDispatcherAdv5Tests
 
         await ForwardAsync(fixture, mediator.Did, Recipient, PushFixture.Payload(64, 3), "fwd-adv5-cool-3");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        Deliveries(session).Select(d => d.Id).Should().HaveCount(3).And.OnlyHaveUniqueItems();
-        fixture.PushOutcomeLog.Skip(2).Should().Equal(PushOutcomes.PushedLive, PushOutcomes.PushedLive, PushOutcomes.PushedLive);
+        // The push that timed out inside its send counts as pushed: owner decision 2026-11-21 (OD-5), the next delivery-request delivers it.
+        var pushed = Deliveries(session).Select(d => d.Id).ToArray();
+        pushed.Should().HaveCount(2).And.OnlyHaveUniqueItems();
+        fixture.PushOutcomeLog.Skip(2).Should().Equal(PushOutcomes.PushedLive, PushOutcomes.PushedLive);
+        var now = fixture.Time.GetUtcNow();
+        var picked = await fixture.Store.LeaseAsync(new MessageLeaseRequest(peer.Did, null, 10, int.MaxValue, now, new MessageLease(null, now + TimeSpan.FromMinutes(1))), CancellationToken.None);
+        var waiting = picked.Select(m => m.Id).Should().ContainSingle("the timed-out push is the delivery-request's").Subject;
+        pushed.Should().NotContain(waiting);
     }
 
     // ---- clock: the cooldown -------------------------------------------------------------------------------
@@ -389,7 +395,7 @@ public sealed class PushDispatcherAdv5Tests
         var (grant, session) = await world.LiveGrantAsync("wall-back");
         var entered = SlowOnce(session);
         var fixture = world.Fixture;
-        await world.StoreAsync(grant, 1);
+        var first = await world.StoreAsync(grant, 1);
 
         fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue();
         await entered.WaitAsync(Wait);
@@ -404,7 +410,9 @@ public sealed class PushDispatcherAdv5Tests
 
         fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue("2 x PushTimeout has passed on the monotonic clock");
         await fixture.Dispatcher.WaitForIdleAsync(Wait);
-        fixture.Pushes(PushOutcomes.PushedLive).Should().Be(2, "the timed-out message (given back) and the new one, oldest first");
+        // The push that timed out inside its send counts as pushed: owner decision 2026-11-21 (OD-5), the next delivery-request delivers it.
+        fixture.Pushes(PushOutcomes.PushedLive).Should().Be(1, "the new one: the cooldown ended on time");
+        (await world.PickupAsync(grant.Peer)).Should().Equal(new[] { first.MessageId }, "the timed-out message waits for a delivery-request");
     }
 
     [Fact]

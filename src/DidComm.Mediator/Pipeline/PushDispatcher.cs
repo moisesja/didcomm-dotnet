@@ -40,10 +40,13 @@ namespace DidComm.Mediator.Pipeline;
 /// <c>AddMediator()</c>).
 /// </para>
 /// <para>
-/// <strong>Retries.</strong> A live push the session did not take (<c>NotSent</c>: no free push
-/// slot, downgraded or closing) — or that faulted, or reached its deadline and was then given back —
-/// is tried again at the grant's next wake-up (it never reached the connection; one the session took
-/// and that came back unacknowledged is not tried again): that is at most one live attempt per
+/// <strong>Retries.</strong> Only a live push the session answered "not sent" for (<c>NotSent</c>: no
+/// free push slot, downgraded or closing; or too large, then passed over), or that never got to the
+/// session (the deadline, a closed session or a fault before the send), is given back as unsent and
+/// tried again live at the grant's next wake-up. One that may have reached the connection — the
+/// session took it, or the send faulted, was cancelled or reached its deadline once the session had
+/// it — counts as pushed and is not tried again live: it waits for the recipient's next
+/// <c>delivery-request</c> (owner decision 2026-11-21 on #100, OD-5). That is at most one live attempt per
 /// wake-up (the operation ends there, and a deadline also pauses the grant), a wake-up is a stored message or a
 /// session turning live delivery on, and nothing is written to the connection unless the session
 /// takes it — so it cannot multiply the traffic of what was forwarded. One too large for the session
@@ -456,7 +459,7 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
     private void Failed(string reason)
     {
         var level = MediatorLog.RateLimited(ref _failedLines, out var n);
-        MediatorLog.Write(_logger, level, "Live push not delivered ({Reason}); the message stays queued for pickup and is tried again at the recipient's next wake-up. {Count} such failures.", reason, n);
+        MediatorLog.Write(_logger, level, "Live push not delivered ({Reason}); the message stays queued for pickup, and is pushed again at the recipient's next wake-up unless it may have reached the connection. {Count} such failures.", reason, n);
     }
 
     // Under _gate. On the monotonic clock: a step of the wall clock does not move it.

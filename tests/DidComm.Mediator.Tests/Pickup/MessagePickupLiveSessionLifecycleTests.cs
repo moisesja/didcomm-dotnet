@@ -495,14 +495,14 @@ public sealed class MessagePickupLiveSessionLifecycleTests
         socket.OnSend = (_, _) => ReturnRouteSendResult.NotSent;
 
         // The arrival is admitted under the socket's lease, the push is refused, and the arrival is
-        // parked just before it gives that lease back.
+        // parked just before it gives that lease back (as unsent: the push was refused).
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.FakeStore!.OnRelease = async (grant, ids, lease, ct) =>
+        fixture.FakeStore!.OnReturnUnsent = async (grant, ids, lease, ct) =>
         {
             parked.TrySetResult();
             await resume.Task.WaitAsync(MessagePickupLive.Deadline);
-            return await fixture.FakeStore.Inner.ReleaseAsync(grant, ids, lease, ct);
+            return await fixture.FakeStore.Inner.ReturnUnsentAsync(grant, ids, lease, ct);
         };
         var closed = ExpectOwnerRelease(fixture);
         var delivering = fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30)).AsTask();

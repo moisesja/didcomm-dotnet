@@ -188,6 +188,11 @@ internal sealed class Qa2LiveStore(InMemoryMessageStore inner) : IMessageStore, 
     /// <summary>How many records each owner release (a session's close) gave back, in order.</summary>
     public IReadOnlyList<int> OwnerReleases => _ownerReleases.ToArray();
 
+    private readonly System.Collections.Concurrent.ConcurrentQueue<int> _returnedUnsent = new();
+
+    /// <summary>How many records each give-back of an unsent live push changed, in order (recorded after the call returned).</summary>
+    public IReadOnlyList<int> ReturnedUnsent => _returnedUnsent.ToArray();
+
     public static void Register(IServiceCollection services, Action<Qa2LiveStore> created)
         => services.AddSingleton<IMessageStore>(sp =>
         {
@@ -232,6 +237,12 @@ internal sealed class Qa2LiveStore(InMemoryMessageStore inner) : IMessageStore, 
     public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct) => Inner.EnqueueAsync(message, lease, now, ct);
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
     public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    public async ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
+    {
+        var changed = await Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
+        _returnedUnsent.Enqueue(changed);
+        return changed;
+    }
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct) => Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);
     public ValueTask<int> PurgeRecipientAsync(string grantPeerDid, string recipientDid, CancellationToken ct) => Inner.PurgeRecipientAsync(grantPeerDid, recipientDid, ct);

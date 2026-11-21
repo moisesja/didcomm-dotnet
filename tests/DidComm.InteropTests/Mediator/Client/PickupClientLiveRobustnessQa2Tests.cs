@@ -502,6 +502,7 @@ public sealed class PickupClientLiveRobustnessQa2Tests
         public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct) => inner.EnqueueAsync(message, lease, now, ct);
         public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => inner.LeaseAsync(request, ct);
         public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+        public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
         public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
         public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => inner.ReleaseLeasesAsync(leaseOwner, ct);
         public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct) => inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);

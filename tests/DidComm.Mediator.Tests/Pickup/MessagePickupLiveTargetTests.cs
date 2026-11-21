@@ -153,8 +153,14 @@ public sealed class MessagePickupLiveTargetTests
         older.Attempts.Should().BeEmpty("one target per message (JC-13): the older session is not a fallback");
         fixture.Memory.MessageCount.Should().Be(1);
 
-        // Deliverable immediately: the lease it was admitted under is released, not left to time out.
-        var released = fixture.FakeStore!.Released.Should().ContainSingle().Subject;
+        // Deliverable immediately: the lease it was admitted under is released, not left to time out —
+        // as unsent when the session refused it, by id when the send threw (it counts as pushed:
+        // owner decision 2026-11-21, OD-5).
+        var store = fixture.FakeStore!;
+        var released = refusal == "throws"
+            ? store.Released.Should().ContainSingle().Subject
+            : store.ReturnedUnsent.Select(r => (r.GrantPeerDid, r.Ids)).Should().ContainSingle().Subject;
+        (refusal == "throws" ? store.ReturnedUnsent.Count : store.Released.Count).Should().Be(0, "one give-back, of one kind");
         released.GrantPeerDid.Should().Be(peer);
         released.Ids.Should().Equal(result.MessageId);
         var held = (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle().Subject;
@@ -173,7 +179,7 @@ public sealed class MessagePickupLiveTargetTests
         var socket = fixture.Session(peer, mediator, live: true);
         await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket);
         socket.OnSend = (_, _) => ReturnRouteSendResult.NotSent;
-        fixture.FakeStore!.OnRelease = (_, _, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
+        fixture.FakeStore!.OnReturnUnsent = (_, _, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
 
         var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(20));
 
@@ -182,7 +188,7 @@ public sealed class MessagePickupLiveTargetTests
         MessagePickupLive.QueueLogs(fixture, LogLevel.Warning).Should().ContainSingle().Which.State.Should().Contain("ExceptionType", nameof(HandlerBoomException));
         MessagePickupLive.ShouldNotLeak(fixture.PickupLogs, peer, mediator, result.MessageId);
 
-        fixture.FakeStore.OnRelease = null;
+        fixture.FakeStore.OnReturnUnsent = null;
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().BeEmpty("the lease could not be released");
         fixture.Clock.Advance(TimeSpan.FromSeconds(20));
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle().Which.Id.Should().Be(result.MessageId);

@@ -200,11 +200,12 @@ public sealed class PickupV4LiveQa2Tests
                 await mediator.PushesIdleAsync();
                 mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(0);
                 mediator.PushOutcome(PushOutcomes.Failed).Should().Be(1, "the push found its session closed and gave the record back");
-                // The close found nothing taken (0); the push, finding its session closed, ended the
-                // lease it then took the way the close ends it (#100 ADV4-1): by owner, so it counts
-                // as returned (1).
-                await MediatorTestServer.WaitUntilAsync(() => store.OwnerReleases.Count == 2, "the push's own release by owner ran");
-                store.OwnerReleases.Should().Equal(new[] { 0, 1 }, "the session had taken nothing when it closed, and the push gave back the one it took after");
+                // The close found nothing taken (0); the push, finding its session closed before it
+                // handed the record over, gave it back as unsent (PR #143 review P2-1): it never
+                // reached the connection.
+                await MediatorTestServer.WaitUntilAsync(() => store.ReturnedUnsent.Count == 1, "the push's give-back as unsent ran");
+                store.ReturnedUnsent.Should().Equal(new[] { 1 }, "the push gave back the one record it took after the close");
+                store.OwnerReleases.Should().Equal(new[] { 0 }, "the session had taken nothing when it closed");
             }
             else
             {

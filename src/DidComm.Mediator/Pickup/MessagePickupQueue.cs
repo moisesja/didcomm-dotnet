@@ -235,7 +235,7 @@ public enum PickupDeliveryOutcome
     /// <summary>Stored and pushed over the recipient's live connection; held (leased) until the recipient acknowledges it, the lease runs out or the connection closes — after which it is deliverable by <c>delivery-request</c> only: it is never pushed live again.</summary>
     PushedLive,
 
-    /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent, or the call failed or was cancelled after the message was stored (the recipient may then see the message twice).</summary>
+    /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent, or the call failed or was cancelled after the message was stored (the recipient may then see the message twice). A live push the session may have received — taken as its session closed, or whose send failed or was cancelled — is never pushed live again: only a <c>delivery-request</c> gets it.</summary>
     Queued,
 
     /// <summary>Not stored: no grant has this recipient DID registered (or the value is not a bare DID), or it stopped being registered to that grant while the message was being stored — a grant revoked meanwhile (<see cref="MessagePickupQueue.RevokeAndPurgeAsync"/>) — and the record was removed again.</summary>
