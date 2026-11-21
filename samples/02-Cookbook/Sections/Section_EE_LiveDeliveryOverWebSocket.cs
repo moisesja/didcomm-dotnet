@@ -325,15 +325,55 @@ public static class Section_EE_LiveDeliveryOverWebSocket
             // handled it, so the mediator would deliver it again later.
         }
 
-        // To discard the last item, acknowledge it yourself.
-        var left = await pickup.AckAsync(mediatorDid, ctx.Bob.Did, new[] { last.Id });
-        narrator.Value("[bob] Messages left after discarding the last one", left.MessageCount);
+        // To discard the last item, acknowledge it yourself. A status counts the messages that were
+        // delivered but not acknowledged yet, so the one taken now still counts the last item
+        // (FR-PICK-02).
+        var before = await pickup.GetStatusAsync(mediatorDid, ctx.Bob.Did);
+        // Under Message Pickup 4.0 the mediator sends no answer to an acknowledgement, so AckAsync
+        // returns null: there is no status to return.
+        var answer = await pickup.AckAsync(mediatorDid, ctx.Bob.Did, new[] { last.Id });
+        narrator.Value("[bob] discarded the last one; the mediator's answer", answer is null ? "none" : $"status, {answer.MessageCount} message(s)");
+        if (answer is null)
+        {
+            // Nothing answered the acknowledgement, so Bob cannot tell when the mediator applied it.
+            // If his connection closed first (this wallet's container is disposed when the section
+            // ends), the mediator could drop the acknowledgement with the connection and deliver
+            // the message again later. So before going offline, he waits until his status stops
+            // counting the message.
+            var after = await WaitUntilCountedLessThanAsync(pickup, mediatorDid, ctx.Bob.Did, before.MessageCount);
+            narrator.Value("[bob] the mediator applied the acknowledgement; GetStatusAsync counts", $"{after} message(s)");
+        }
 
         narrator.Note("A live item is acknowledged when you ask for the next one; AckAsync(item.Id) discards the last one.");
-        narrator.Note("This stream spoke Message Pickup 4.0, which the client chose after asking the mediator: every live message came in a delivery, and each acknowledgement (messages-received) got no answer: under 4.0 the client sends it and does not wait. AckAsync then asks for the status, which is what it returns.");
+        narrator.Note("This stream spoke Message Pickup 4.0, which the client chose after asking the mediator: every live message came in a delivery, and each acknowledgement (messages-received) got no answer: under 4.0 the client sends it and does not wait. So AckAsync returned null, and it does not ask for a status in its place.");
+        narrator.Note("With no answer, the client cannot tell when the mediator applied the acknowledgement, and a connection closed before then can lose it (the message comes back later). So before going offline, wait until GetStatusAsync stops counting the message, as Bob did above.");
         narrator.Note("Delivery is at-least-once: a message can come twice (after a dropped connection or an expired lease). The stream skips repeats it remembers; de-duplicate by message id too.");
         narrator.Note("Polling in live mode is permanent: the next poll comes one LivePollInterval after the previous drain ends. A delayed message that becomes due is not pushed; the next poll picks it up.");
         narrator.Note("So keep LivePollInterval at or below the longest delay your senders ask for (this library's mediator caps a delay at 1 hour by default).");
+    }
+
+    // How long Bob waits for the mediator to apply his last acknowledgement, and how long he
+    // pauses between two status checks while he waits.
+    private static readonly TimeSpan AcknowledgementWait = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StatusPollDelay = TimeSpan.FromMilliseconds(100);
+
+    // Ask for the status until it counts fewer than `countBefore` messages; give up after
+    // AcknowledgementWait. Returns the count that was lower.
+    private static async Task<int> WaitUntilCountedLessThanAsync(PickupClient pickup, string mediatorDid, string did, int countBefore)
+    {
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            var status = await pickup.GetStatusAsync(mediatorDid, did);
+            if (status.MessageCount < countBefore)
+                return status.MessageCount;
+            if (waited.Elapsed >= AcknowledgementWait)
+            {
+                throw new InvalidOperationException(
+                    $"The mediator had not applied the acknowledgement after {AcknowledgementWait.TotalSeconds:0} seconds: its status still counts {status.MessageCount} message(s).");
+            }
+            await Task.Delay(StatusPollDelay);
+        }
     }
 
     private static async Task<PickupItem> NextLiveAsync(GuardedStreamReader<PickupItem> live, string what)

@@ -10,11 +10,14 @@ namespace DidComm.InteropTests.Mediator.Client;
 
 /// <summary>
 /// #100 P2-2 (PR #143 review): the client's side of every WebSocket its transport opens, in the
-/// order they were created, each counting the whole messages the transport wrote on it. The
-/// mediator's side (<see cref="CountingSockets"/>) only counts what the mediator read, and a
-/// mediator busy with one message does not read the next; this shows that the client has already
-/// sent it. Install with <c>o.WebSocket = sockets.Install</c> on the harness options: the harness's
-/// own connect (and its <see cref="MediatorClientHarness.Connects"/> count) is kept.
+/// order they were created, each counting the whole messages the transport wrote on it and read
+/// from it. The mediator's side (<see cref="CountingSockets"/>) only counts what the mediator read,
+/// and a mediator busy with one message does not read the next; this shows that the client has
+/// already sent it (a status-request the client wrote shows here before the mediator reads it). A
+/// socket can also be set to drop right after it received a given message
+/// (<see cref="AbortAfterReceiving"/>). Install with <c>o.WebSocket = sockets.Install</c> on the
+/// harness options: the harness's own connect (and its <see cref="MediatorClientHarness.Connects"/>
+/// count) is kept.
 /// </summary>
 internal sealed class ClientSockets
 {
@@ -47,19 +50,67 @@ internal sealed class ClientSockets
             return index < _created.Count ? _created[index].MessagesSent : 0;
     }
 
+    /// <summary>The whole messages the client wrote on all its sockets so far.</summary>
+    public int SentOnAll
+    {
+        get
+        {
+            lock (_lock)
+                return _created.Sum(s => s.MessagesSent);
+        }
+    }
+
+    private readonly Dictionary<int, int> _abortAfter = new();
+
+    /// <summary>
+    /// The connection drops under the client: the <paramref name="index"/>-th socket (from 0) is
+    /// aborted as soon as it has received its <paramref name="messages"/>-th whole message, before
+    /// the client acts on that message (a network loss right after an answer arrived).
+    /// </summary>
+    public void AbortAfterReceiving(int index, int messages)
+    {
+        lock (_lock)
+        {
+            if (index < _created.Count)
+                _created[index].AbortAfterReceiving(messages);
+            else
+                _abortAfter[index] = messages;
+        }
+    }
+
     private ClientCountingWebSocket Add(WebSocket inner)
     {
         var socket = new ClientCountingWebSocket(inner);
         lock (_lock)
+        {
+            if (_abortAfter.Remove(_created.Count, out var messages))
+                socket.AbortAfterReceiving(messages);
             _created.Add(socket);
+        }
         return socket;
     }
 }
 
-/// <summary>The client's side of one WebSocket: forwards everything to the harness's socket and counts the whole data messages sent on it.</summary>
+/// <summary>The client's side of one WebSocket: forwards everything to the harness's socket, counts the whole data messages sent and received on it, and can drop the connection right after a given message arrived.</summary>
 internal sealed class ClientCountingWebSocket(WebSocket inner) : WebSocket
 {
     private int _sent;
+    private int _received;
+    private int _abortAfter = int.MaxValue;
+
+    /// <summary>Abort this socket once it has received <paramref name="messages"/> whole data messages (counting those already received).</summary>
+    public void AbortAfterReceiving(int messages) => Volatile.Write(ref _abortAfter, messages);
+
+    /// <summary>Whole data messages received on this socket.</summary>
+    public int MessagesReceived => Volatile.Read(ref _received);
+
+    private void Received(bool endOfMessage, WebSocketMessageType type)
+    {
+        if (!endOfMessage || type == WebSocketMessageType.Close)
+            return;
+        if (Interlocked.Increment(ref _received) >= Volatile.Read(ref _abortAfter))
+            Inner.Abort();
+    }
 
     /// <summary>The harness's socket (what its connect connects).</summary>
     public WebSocket Inner { get; } = inner;
@@ -80,9 +131,19 @@ internal sealed class ClientCountingWebSocket(WebSocket inner) : WebSocket
     public override ValueTask SendAsync(ReadOnlyMemory<byte> buffer, WebSocketMessageType messageType, WebSocketMessageFlags messageFlags, CancellationToken cancellationToken)
         => SendAsync(buffer, messageType, messageFlags.HasFlag(WebSocketMessageFlags.EndOfMessage), cancellationToken);
 
-    public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken) => Inner.ReceiveAsync(buffer, cancellationToken);
+    public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
+    {
+        var result = await Inner.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+        Received(result.EndOfMessage, result.MessageType);
+        return result;
+    }
 
-    public override ValueTask<ValueWebSocketReceiveResult> ReceiveAsync(Memory<byte> buffer, CancellationToken cancellationToken) => Inner.ReceiveAsync(buffer, cancellationToken);
+    public override async ValueTask<ValueWebSocketReceiveResult> ReceiveAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        var result = await Inner.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+        Received(result.EndOfMessage, result.MessageType);
+        return result;
+    }
 
     public override WebSocketCloseStatus? CloseStatus => Inner.CloseStatus;
 

@@ -150,11 +150,14 @@ public sealed class PickupV4MailboxEndToEndTests
         leased4.Id.Should().NotBe(leased3.Id);
         (await mediator.StatusAsync(bob)).MessageCount.Should().Be(2, "leased, not acknowledged");
 
+        // Over HTTP the mediator handles a POST before it answers it, so each acknowledgement has been
+        // applied once its AckAsync has returned, and the store can be read right after.
         var afterAck4 = await harness4.Pickup.AckAsync(mediator.Did, bob.Did, new[] { leased3.Id });
+        afterAck4.Should().BeNull("under 4.0 nothing answers an acknowledgement");
+        mediator.Store.MessageCount.Should().Be(1, "the 4.0 acknowledgement removed the message leased through 3.0");
         var afterAck3 = await harness3.Pickup.AckAsync(mediator.Did, bob.Did, new[] { leased4.Id });
 
-        afterAck4.MessageCount.Should().Be(1, "the 4.0 acknowledgement removed the message leased through 3.0");
-        afterAck3.MessageCount.Should().Be(0, "the 3.0 acknowledgement removed the message leased through 4.0");
+        PickupE2E.Answered(afterAck3).MessageCount.Should().Be(0, "the 3.0 acknowledgement removed the message leased through 4.0");
         mediator.Store.MessageCount.Should().Be(0);
     }
 

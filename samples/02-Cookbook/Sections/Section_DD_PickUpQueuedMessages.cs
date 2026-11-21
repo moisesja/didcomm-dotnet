@@ -112,8 +112,12 @@ public static class Section_DD_PickUpQueuedMessages
 
         // A failed item stays queued (it comes back after its lease, 60 s at this mediator). When you
         // have given up on it, discard it yourself: nothing does it for you.
-        var afterAck = await pickup.AckAsync(mediator.Did, ctx.Bob.Did, unopened);
-        ctx.Narrator.Value("[bob] discarded the unopenable one; status", $"{afterAck.MessageCount} message(s)");
+        // AckAsync returns the mediator's status only when the mediator answers the acknowledgement
+        // with one, and null otherwise. Message Pickup 3.0 says a mediator should answer; 4.0, which
+        // this wallet uses, never does. AckAsync does not ask for a status in its place: a status
+        // asked for separately is not guaranteed to count the queue after the acknowledgement.
+        var answer = await pickup.AckAsync(mediator.Did, ctx.Bob.Did, unopened);
+        ctx.Narrator.Value("[bob] discarded the unopenable one; the mediator's answer", answer is null ? "none" : $"status, {answer.MessageCount} message(s)");
 
         // This wallet did not pin a Message Pickup version, so the client asked the mediator which
         // ones it speaks and chose 4.0. Under 4.0 a drained fetch carries no status (the mediator

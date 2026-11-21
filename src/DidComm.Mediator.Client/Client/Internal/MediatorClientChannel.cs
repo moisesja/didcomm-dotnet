@@ -263,18 +263,20 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     /// <inheritdoc/>
     public Task<InboundMessageSnapshot> ExchangeAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
-        => ExchangeCheckedAsync(route, request, spec, mediatorDid, localDid, answerOptional: false, ct)!; // never null without answerOptional
+        => ExchangeCheckedAsync(route, request, spec, mediatorDid, localDid, answerOptional: false, answerWait: null, ct)!; // never null without answerOptional
 
     /// <inheritdoc/>
-    public Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
-        => ExchangeCheckedAsync(route, request, spec, mediatorDid, localDid, answerOptional: true, ct);
+    public Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, TimeSpan? answerWait, CancellationToken ct)
+        => ExchangeCheckedAsync(route, request, spec, mediatorDid, localDid, answerOptional: true, answerWait, ct);
 
     // One request (§4.1): the checks, the bound and the registration around ExchangeCoreAsync.
-    private async Task<InboundMessageSnapshot?> ExchangeCheckedAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, bool answerOptional, CancellationToken ct)
+    private async Task<InboundMessageSnapshot?> ExchangeCheckedAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, bool answerOptional, TimeSpan? answerWait, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(spec);
+        if (answerWait is { } positive)
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(positive, TimeSpan.Zero, nameof(answerWait));
         ObjectDisposedException.ThrowIf(IsDisposed, this);
         MediatorAnswerTypes.Validate(spec);
         if (string.IsNullOrEmpty(request.Id) || request.Id.Length > MaxThreadIdLength)
@@ -304,10 +306,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             if (IsDisposed)
                 throw Disposed();
 
-            var answer = await ExchangeCoreAsync(route, request, pending, mediatorDid, localDid, answerOptional, ct).ConfigureAwait(false);
+            var answer = await ExchangeCoreAsync(route, request, pending, mediatorDid, localDid, answerOptional, answerWait, ct).ConfigureAwait(false);
             if (answer is null)
             {
-                MediatorLog.Write(Logger, LogLevel.Debug, "Mediator request {RequestId} ({Request}) got no answer in the HTTP response after {ElapsedMs} ms, which it allows.",
+                MediatorLog.Write(Logger, LogLevel.Debug, "Mediator request {RequestId} ({Request}) got no answer after {ElapsedMs} ms, which it allows.",
                     pending.Id, spec.Name, ElapsedMs(pending));
                 return null;
             }
@@ -331,9 +333,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         }
     }
 
-    // Steps 3–9 of §4.1, for a registered request. Returns null only with answerOptional, over HTTP,
-    // when the response carried no answer.
-    private async Task<InboundMessageSnapshot?> ExchangeCoreAsync(MediatorRoute route, Message request, PendingRequest pending, string mediatorDid, string localDid, bool answerOptional, CancellationToken ct)
+    // Steps 3–9 of §4.1, for a registered request. Returns null only with answerOptional: over HTTP
+    // when the response carried no answer, and on any other route, with answerWait, when none came
+    // within answerWait after the send completed.
+    private async Task<InboundMessageSnapshot?> ExchangeCoreAsync(MediatorRoute route, Message request, PendingRequest pending, string mediatorDid, string localDid, bool answerOptional, TimeSpan? answerWait, CancellationToken ct)
     {
         using var deadline = new GuardedDeadline(Time, Options.RequestTimeout, ct, ShutdownToken);
         // The deadline, the caller and the shutdown end the wait through the same terminal CAS an
@@ -346,6 +349,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         {
             ReturnRoute = ReturnRouteMode.All,
         };
+        // A request the mediator may leave unanswered, on a route that is not HTTP: once sent, no
+        // answer is an outcome (see the window below).
+        var optionalAfterSend = !route.IsHttp && answerOptional && answerWait is not null;
         Task<SendResult>? sending = null;
         try
         {
@@ -356,8 +362,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         {
             if (sending is not null)
                 GuardedDeadline.ObserveAbandoned(sending);
-            // An answer that already won (over a WebSocket, before the send returned) holds.
-            if (!pending.IsCompleted)
+            // An answer that already won (over a WebSocket, before the send returned) holds. So does
+            // a send that completed before the deadline but was resumed after it (OD6-ADV-2): it was
+            // sent, and the window below decides.
+            if (!pending.IsCompleted && !(optionalAfterSend && sending is { IsCompletedSuccessfully: true }))
                 throw Unanswered(pending, deadline, ct);
         }
 
@@ -377,6 +385,40 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 $"Mediator request '{pending.Id}' ({pending.Spec.Name}) got no answer in the HTTP response; the mediator may still have acted on it, so retry it (every request these clients send is safe to repeat).");
             if (pending.TryFail(noAnswer))
                 throw noAnswer;
+        }
+
+        // On any other route (a WebSocket) silence cannot be told from a slow answer. For a request
+        // the mediator may leave unanswered, the answer is waited for answerWait once the request is
+        // sent (the send completed above, or an answer already won), and never past the request's
+        // deadline. No answer by the end of either is an outcome, not a failure: the request was
+        // sent. The terminal CAS decides it, so an answer that won the race still holds. A send that
+        // did not complete never gets here: it ended above, with the deadline, as a TimeoutException
+        // (or with its transport failure). The caller's cancellation and the disposal are decided
+        // below, as for any request.
+        if (optionalAfterSend && !pending.IsWaiting && !pending.IsCompleted
+            && deadline.TimedOut && !ct.IsCancellationRequested && !IsDisposed)
+        {
+            // The deadline gave up between the send and here (OD6-ADV-2): it was sent, so no answer.
+            return null;
+        }
+        if (optionalAfterSend && answerWait is { } wait && pending.IsWaiting)
+        {
+            using var window = new GuardedDeadline(Time, wait, deadline.Token);
+            try
+            {
+                await pending.Completion.Task.WaitAsync(window.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when ((window.TimedOut || deadline.TimedOut) && !ct.IsCancellationRequested && !IsDisposed)
+            {
+                // The window: give up here. The deadline: its own registration already gave up, so
+                // only an answer that won first (Completed) is left to take.
+                if (pending.TryAbandon() || !pending.IsCompleted)
+                    return null;
+            }
+            catch (OperationCanceledException)
+            {
+                // The caller or the shutdown: decided below, as for any request.
+            }
         }
 
         InboundMessageSnapshot answer;

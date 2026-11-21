@@ -26,7 +26,7 @@ public sealed class PickupV4ThreadCaseEndToEndTests
 
     [Theory]
     [MemberData(nameof(Transports))]
-    public async Task Answers_whose_thid_is_the_request_id_upper_cased_complete_status_fetch_and_acknowledgement(bool webSocket)
+    public async Task Answers_whose_thid_is_the_request_id_upper_cased_complete_status_and_fetch_and_the_unanswered_acknowledgement_is_applied(bool webSocket)
     {
         await using var mediator = await MediatorTestServer.StartAsync(o => o.PostConfigureServices = RewritingPickup40Handler.Register(thid => thid?.ToUpperInvariant()));
         await using var harness = await PickupV4E2E.HarnessAsync(mediator, MessagePickupVersion.V4, webSocket);
@@ -42,16 +42,18 @@ public sealed class PickupV4ThreadCaseEndToEndTests
         var batch = await PickupE2E.Within(pickup.FetchAsync(mediator.Did, bob.Did, limit: 10, serviceEndpointOverride: over));
         var failed = batch.Items.Single(i => i.Error is not null);
         var afterAck = await PickupE2E.Within(pickup.AckAsync(mediator.Did, bob.Did, new[] { failed.Id }, over));
+        // Under 4.0 nothing answers an acknowledgement and AckAsync asks for no status (OD-6). On a
+        // WebSocket the call returns once its message is sent, before the mediator has applied it, so
+        // the store is waited for.
+        await Qa2.StoreHoldsAsync(mediator, 0, "the mediator applied AckAsync's acknowledgement (the fetch had acknowledged the note)");
 
-        rewriter.Rewritten.Should().HaveCount(webSocket ? 4 : 3, webSocket
-            ? "status-request, delivery-request, the status-request AckAsync sends first on a WebSocket and the one after the acknowledgement were answered"
-            : "status-request, delivery-request and the status-request after the acknowledgement were answered");
+        rewriter.Rewritten.Should().HaveCount(2, "the status-request and the delivery-request were answered, and nothing else was");
         rewriter.Rewritten.Should().OnlyContain(r => r.Written != r.Original && string.Equals(r.Written, r.Original, StringComparison.OrdinalIgnoreCase),
             "precondition: every answer's thread is its request's with the letters re-cased");
         rewriter.Rewritten.Select(r => r.Original).Should().OnlyContain(id => id.StartsWith("request-abcdef-", StringComparison.Ordinal), "precondition: the request ids are the pinned ones");
         status.MessageCount.Should().Be(2);
         PickupE2E.ShouldBeAlicesNote(batch.Items.Single(i => i.Error is null), alice, recipient, note);
-        afterAck.MessageCount.Should().Be(0);
+        afterAck.Should().BeNull("under 4.0 nothing answers an acknowledgement");
         harness.Channel.PendingCount.Should().Be(0);
     }
 

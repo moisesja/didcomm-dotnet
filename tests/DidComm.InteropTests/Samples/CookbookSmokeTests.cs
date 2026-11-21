@@ -89,7 +89,7 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("[bob] status = 2 message(s)");                         // DD: status
         transcript.Should().Contain("[bob] opened = \"Hello Bob, from your mailbox.\" (authenticated sender: True)"); // DD: fetch
         transcript.Should().Contain("[bob] could not open = ");                             // DD: failure reported
-        transcript.Should().Contain("[bob] discarded the unopenable one; status = 0 message(s)"); // DD: AckAsync discards
+        transcript.Should().Contain("[bob] discarded the unopenable one; the mediator's answer = none"); // DD: AckAsync discards; under 4.0, which the wallet negotiated, nothing answers it
         transcript.Should().Contain("EnqueueAsync m1 again = DuplicateId");                 // DD.3: store contract
         transcript.Should().Contain("Store bounded at 2 per grant: EnqueueAsync ×3 = Enqueued, Enqueued, GrantMessageLimitReached"); // DD.3
         transcript.Should().Contain("connection-2 closed unacknowledged; the next live push takes = b2 (#2)"); // DD.3: a returned live push is not pushed again
@@ -112,7 +112,8 @@ public sealed class CookbookSmokeTests
         transcript.Should().NotContain("skipped a frame");                                  // EE: every frame came from the peer
         transcript.Should().Contain("Session closed (its Closed token fired) = True");      // EE: Closed token
         transcript.Should().Contain("[bob] live = Hello again");                            // EE: live pickup
-        transcript.Should().Contain("[bob] Messages left after discarding the last one = 0"); // EE: AckAsync(last)
+        transcript.Should().Contain("[bob] discarded the last one; the mediator's answer = none"); // EE: AckAsync(last); the stream spoke 4.0, so nothing answers it
+        transcript.Should().Contain("[bob] the mediator applied the acknowledgement; GetStatusAsync counts = 0 message(s)"); // EE: Bob waits for that before going offline
         transcript.Should().Contain("[bob] granted (on the allow-list) = True");            // FF: allow-list grants
         transcript.Should().Contain("[carol] granted = False");                             // FF: allow-list denies
         transcript.Should().Contain("AddMediator() with a host IForwardSink = refused");    // FF: refusal shown

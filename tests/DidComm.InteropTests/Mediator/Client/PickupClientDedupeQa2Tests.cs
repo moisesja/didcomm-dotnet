@@ -159,7 +159,9 @@ public sealed class PickupClientDedupeQa2Tests
         item.Unpacked.RecipientKid.Should().StartWith(b1.Did + "#", "b1's key opened it");
         (await mediator.StatusAsync(bob, b1.Did)).MessageCount.Should().Be(0, "b1's copy was acknowledged");
 
-        // The host gives up on b2's copy.
+        // The host gives up on b2's copy. Over HTTP the mediator handles a POST before it answers it,
+        // so the acknowledgement has been applied once AckAsync has returned, and a status asked for
+        // after it counts the queue without b2's copy.
         await harness.Pickup.AckAsync(mediator.Did, bob.Did, new[] { failed.Id });
         (await mediator.StatusAsync(bob)).MessageCount.Should().Be(0, "AckAsync discarded b2's copy");
     }
