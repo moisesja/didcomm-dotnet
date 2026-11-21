@@ -63,7 +63,7 @@ internal static class Program
               MediatorWallet enrol --identity-dir <dir> --invitation <invitation.json> --expect-mediator-did <did>
                                    [--expect-version 2.0|3.0] [--pin V2|V3] [--endpoint-override <url>] --out <state.json>
               MediatorWallet fetch --state <state.json> --expect-count <n> [--limit <n>] [--explicit-ack]
-                                   [--wait-timeout <s>] [--ws-endpoint auto|<url>] --out-dir <dir>
+                                   [--wait-timeout <s>] [--ws-endpoint auto|<url>] [--expect-pickup-version 3.0|4.0] --out-dir <dir>
               MediatorWallet ws-attempt --state <state.json> --ws-endpoint auto|<url> [--timeout <s>]
               MediatorWallet live --state <state.json> --ws-endpoint auto|<url> --expect-count <n> [--guard <s>]
               MediatorWallet observe --state <state.json> [--triggers <dir>] --out <observations.json>
