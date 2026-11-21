@@ -370,6 +370,42 @@ public sealed class WebSocketMessageFinishTests
         host.Logs.Records.Should().NotContain(r => r.Text.Contains("unhandled", StringComparison.OrdinalIgnoreCase));
     }
 
+    // ---- a handler's own cancellation is a fault of its message, not the end of the connection --------
+
+    [Fact]
+    public async Task A_handler_that_throws_the_cancellation_of_its_own_timeout_leaves_the_connection_serving_the_next_message()
+    {
+        var state = new TimingOutState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, TimingOutHandler>();
+        });
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+
+        var mark = host.Time.Mark();
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(TimingOutHandler.Message(host)), endOfMessage: true);
+        await host.Time.WaitForTimerAsync(mark, TimingOutHandler.OwnTimeout, Guard); // the handler's own timeout runs
+        await state.Entered.Task.WaitAsync(Guard);
+        var fired = host.Time.TimersFired;
+        host.Time.Advance(TimingOutHandler.OwnTimeout);
+        host.Time.TimersFired.Should().Be(fired + 1, "only the handler's own timeout fires");
+        await state.TimedOut.Task.WaitAsync(Guard); // it threw a TaskCanceledException of its own token
+
+        var next = host.Probe();
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(next), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, next.Id);
+        socket.State.Should().Be(WebSocketState.Open, "a handler's own cancellation does not end the connection");
+        host.EndedWebSockets.Should().Be(0);
+        host.Logs.Records.Should().ContainSingle(r => r.Level == LogLevel.Warning && r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal));
+        using (var guard = new CancellationTokenSource(Guard))
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", guard.Token);
+        socket.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure, "the connection still answers a close");
+        await host.WaitEndedWebSocketsAsync(1);
+        Loud(host).Should().BeEmpty();
+    }
+
     // ---- harness -------------------------------------------------------------------------------------
 
     internal static async Task<(DeadlineKestrelHost Host, AckDelayingStore Store, HoldingHandler Holding)> StartAsync(Action<DeadlineKestrelHostOptions>? configure = null)
@@ -575,6 +611,56 @@ internal sealed class HoldingHandler : IProtocolHandler
             pushed = await context.Session.TrySendAsync(push, ct);
         Handled.TrySetResult(pushed);
         return reply;
+    }
+}
+
+/// <summary>What the <see cref="TimingOutHandler"/> did.</summary>
+internal sealed class TimingOutState
+{
+    /// <summary>The handler has the message and its own timeout is running.</summary>
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>The handler's own timeout fired and it threw its cancellation.</summary>
+    public TaskCompletionSource TimedOut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+/// <summary>
+/// A protocol handler that waits on a timeout of its own, timed on the container's clock (as a handler
+/// whose DID resolution or HTTP call times out does), and lets that timeout's
+/// <see cref="TaskCanceledException"/> escape: a cancellation that is not the receive loop's.
+/// </summary>
+internal sealed class TimingOutHandler(TimingOutState state, TimeProvider time) : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8-timeout/1.0";
+
+    /// <summary>The handler's own timeout: a value no other timer of these tests has.</summary>
+    public static readonly TimeSpan OwnTimeout = TimeSpan.FromSeconds(11);
+
+    public string ProtocolUri => Piuri;
+
+    /// <summary>A message of this protocol from Alice to the host, stamped now.</summary>
+    public static Message Message(DeadlineKestrelHost host)
+        => new MessageBuilder()
+            .WithType(Piuri + "/wait")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+
+    public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        using var own = new CancellationTokenSource(OwnTimeout, time);
+        state.Entered.TrySetResult();
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, own.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            state.TimedOut.TrySetResult();
+            throw;
+        }
+        return null;
     }
 }
 
