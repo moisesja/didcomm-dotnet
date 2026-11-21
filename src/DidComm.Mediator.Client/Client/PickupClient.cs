@@ -496,8 +496,10 @@ public sealed class PickupClient
     /// mediator has applied the acknowledgement yet. A mediator may drop the work of a connection
     /// that closes (this library's does), so closing your container or connection right after this
     /// call can lose the acknowledgement; the messages then come back, as for a fetch whose
-    /// acknowledgement was lost. If you need it applied before you go offline, call
-    /// <see cref="GetStatusAsync"/> until it stops counting the messages you acknowledged.
+    /// acknowledgement was lost. If you need it applied before you go offline, keep the connection
+    /// open and call <see cref="GetStatusAsync"/> until its count drops by the messages you
+    /// acknowledged, with a bound of your own (acknowledge again if it does not; that is harmless).
+    /// A count says how many are left, not which: messages that arrive meanwhile are counted too.
     /// </para>
     /// <para>
     /// <strong>A failure is never <c>null</c>.</strong> A message that could not be sent ends the
@@ -778,7 +780,10 @@ public sealed class PickupClient
     // waited for half of RequestTimeout (as before OD-6), and then the wait is given up. A message
     // whose send did not complete is a TimeoutException or a TransportException, never null.
     private async Task<InboundMessageSnapshot?> AcknowledgeChunkAsync(MediatorRoute route, Message request, string mediatorDid, string from, CancellationToken ct)
-        => await Exchange.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, Exchange.Options.RequestTimeout / 2, ct).ConfigureAwait(false);
+        => await Exchange.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, mediatorDid, from, StatusWait(Exchange.Options.RequestTimeout), ct).ConfigureAwait(false);
+
+    // Half of RequestTimeout, at least one tick: a RequestTimeout of one tick is valid (OD6-ADV-1).
+    private static TimeSpan StatusWait(TimeSpan requestTimeout) => TimeSpan.FromTicks(Math.Max(1, requestTimeout.Ticks / 2));
 
     // Acknowledge on a deadline of our own (RequestTimeout), not the caller's token: the batch is
     // committed, so a cancellation now would only make the messages come back. Any failure is

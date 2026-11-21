@@ -14,8 +14,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// Red-team reproductions against owner decision OD-6 (#100, PR #143 review round 2):
 /// <see cref="PickupClient.AckAsync"/> returns only the mediator's own status answering the last
 /// <c>messages-received</c>, or <c>null</c>; a message that was not sent is an exception, and a status
-/// that did not come is <c>null</c>, "never a <see cref="TimeoutException"/>". Each test here fails on
-/// the code under review (commit 2e3b3d0). Real channel, fake send, manual clock; nothing sleeps.
+/// that did not come is <c>null</c>, "never a <see cref="TimeoutException"/>". Each test here failed on
+/// commit 2e3b3d0 and holds since the OD6-ADV-1 and OD6-ADV-2 fixes. Real channel, fake send, manual
+/// clock; nothing sleeps.
 /// </summary>
 public sealed class PickupClientAckOd6AdversarialTests : IAsyncLifetime
 {
@@ -34,7 +35,7 @@ public sealed class PickupClientAckOd6AdversarialTests : IAsyncLifetime
     // ---- OD6-ADV-1 --------------------------------------------------------------------------------
 
     [Fact]
-    public async Task OD6_ADV_1_over_HTTP_a_valid_RequestTimeout_of_one_tick_makes_AckAsync_under_3_0_throw_ArgumentOutOfRangeException_for_answerWait()
+    public async Task OD6_ADV_1_over_HTTP_a_valid_RequestTimeout_of_one_tick_never_makes_AckAsync_under_3_0_refuse_its_own_status_wait()
     {
         // MediatorClientOptions accepts any RequestTimeout above zero. AckAsync passes
         // RequestTimeout / 2 as answerWait; one tick / 2 rounds to zero ticks (banker's rounding of
@@ -51,7 +52,7 @@ public sealed class PickupClientAckOd6AdversarialTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task OD6_ADV_1b_on_a_WebSocket_a_valid_RequestTimeout_of_one_tick_makes_AckAsync_under_3_0_throw_ArgumentOutOfRangeException_for_answerWait()
+    public async Task OD6_ADV_1b_on_a_WebSocket_a_valid_RequestTimeout_of_one_tick_never_makes_AckAsync_under_3_0_refuse_its_own_status_wait()
     {
         var time = new ManualTimeProvider();
         var send = new FakeSend();
@@ -66,14 +67,14 @@ public sealed class PickupClientAckOd6AdversarialTests : IAsyncLifetime
         }
         var thrown = await Record.ExceptionAsync(() => PickupTest.Within(acking));
 
-        thrown.Should().NotBeOfType<ArgumentOutOfRangeException>("a RequestTimeout the options accept must not be refused as an answerWait of zero");
+        (thrown is ArgumentOutOfRangeException).Should().BeFalse("a RequestTimeout the options accept must not be refused as an answerWait of zero");
         send.Count.Should().Be(1, "the acknowledgement should have been sent");
     }
 
     // ---- OD6-ADV-2 --------------------------------------------------------------------------------
 
     [Fact]
-    public async Task OD6_ADV_2_a_send_that_completed_before_the_deadline_but_was_resumed_after_it_is_a_TimeoutException_not_null()
+    public async Task OD6_ADV_2_a_send_that_completed_before_the_deadline_but_was_resumed_after_it_is_null_not_a_TimeoutException()
     {
         // The send completes at 20 s, inside the 30 s RequestTimeout: the message was sent. The
         // channel's continuation is late (a busy thread pool): the deadline's timer fires at 30 s

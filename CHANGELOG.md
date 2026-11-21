@@ -56,9 +56,20 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   - Before you close the connection: when no status came, nothing says the mediator has applied the
     acknowledgement yet. This library's mediator drops the work of a WebSocket connection that
     closes, so closing your container right after `AckAsync` can lose the acknowledgement, and the
-    messages then come back. If it must be applied before you go offline, call `GetStatusAsync`
-    until it stops counting the messages; the cookbook's section EE and sample 11 now do. A
+    messages then come back. If it must be applied before you go offline, keep the connection open
+    and call `GetStatusAsync` until its count drops, with a bound of your own (acknowledge again if
+    it does not); the cookbook's section EE and sample 11 now do. A
     `GetStatusAsync` is not ordered after an acknowledgement that got no answer.
+  - Tests: `PickupV4AckOrderEndToEndTests` (the round-2 reproduction, rewritten: under 4.0, with the
+    acknowledgement held at the mailbox and the connection dropped at each point that matters,
+    `AckAsync` returns `null` and the mediator sees no `status-request`; under 3.0 the status
+    returned is the one whose `thid` is the call's own `messages-received`), `PickupClientV4AckOneWay*`,
+    `PickupClientAckWithoutStatusTests` (unit and interop), `PickupClientAckThreadingTests`, and
+    `MediatorClientChannelAnswerWaitTests` for the channel's wait after the send. The red-team pass
+    found two edges, fixed here: a `RequestTimeout` of one tick made the half-wait zero and refused
+    (OD6-ADV-1), and a send that completed just before the deadline, resumed after it, was reported
+    as a `TimeoutException` (OD6-ADV-2) (`PickupClientAckOd6AdversarialTests`). Sample 11 used to
+    lose its last acknowledgement when it closed at once; `MediatedAgentSmokeTests` pins the wait.
 - **Pin the version for mediators that cannot answer the question.** A mediator that answers
   Discover Features but discloses neither pickup version now fails every pickup call with
   `MediationNotSupportedException`. One that does not answer the query fails it with

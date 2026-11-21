@@ -2912,8 +2912,15 @@ A transport failure is never `null`. `null` says only that no status came, not w
 acknowledgement was applied, and `GetStatusAsync` is not ordered after such an acknowledgement.
 This library's mediator handles a WebSocket message on the connection's `RequestAborted`, so a
 client that closes its connection right after an unanswered acknowledgement can lose it, and the
-messages come back (at-least-once); a host that needs it applied before going offline polls
-`GetStatusAsync` until the count drops, as cookbook section EE and sample 11 do.
+messages come back (at-least-once); a host that needs it applied before going offline keeps the
+connection open and polls `GetStatusAsync`, bounded, until the count drops, as cookbook section EE
+and sample 11 do.
+
+Two edges of the 3.0 window (red-team pass OD6-ADV, PR #143 review round 2): the wait is half of
+`RequestTimeout` but at least one tick, since a `RequestTimeout` of one tick is valid (OD6-ADV-1);
+and a send that completed before the deadline is sent even when the channel resumes only after the
+deadline fired, so it is `null`, not a `TimeoutException` (OD6-ADV-2: the send's own catch lets a
+completed send through, and a request the deadline gave up on after its send is `null`).
 
 `FetchAsync`'s acknowledgement (step 10 above) passes `answerWait: null`: it asks for no status,
 an empty HTTP response is not a failure, and on a WebSocket it still waits its `RequestTimeout` and

@@ -349,6 +349,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         {
             ReturnRoute = ReturnRouteMode.All,
         };
+        // A request the mediator may leave unanswered, on a route that is not HTTP: once sent, no
+        // answer is an outcome (see the window below).
+        var optionalAfterSend = !route.IsHttp && answerOptional && answerWait is not null;
         Task<SendResult>? sending = null;
         try
         {
@@ -359,8 +362,10 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         {
             if (sending is not null)
                 GuardedDeadline.ObserveAbandoned(sending);
-            // An answer that already won (over a WebSocket, before the send returned) holds.
-            if (!pending.IsCompleted)
+            // An answer that already won (over a WebSocket, before the send returned) holds. So does
+            // a send that completed before the deadline but was resumed after it (OD6-ADV-2): it was
+            // sent, and the window below decides.
+            if (!pending.IsCompleted && !(optionalAfterSend && sending is { IsCompletedSuccessfully: true }))
                 throw Unanswered(pending, deadline, ct);
         }
 
@@ -390,7 +395,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         // did not complete never gets here: it ended above, with the deadline, as a TimeoutException
         // (or with its transport failure). The caller's cancellation and the disposal are decided
         // below, as for any request.
-        if (!route.IsHttp && answerOptional && answerWait is { } wait && pending.IsWaiting)
+        if (optionalAfterSend && !pending.IsWaiting && !pending.IsCompleted
+            && deadline.TimedOut && !ct.IsCancellationRequested && !IsDisposed)
+        {
+            // The deadline gave up between the send and here (OD6-ADV-2): it was sent, so no answer.
+            return null;
+        }
+        if (optionalAfterSend && answerWait is { } wait && pending.IsWaiting)
         {
             using var window = new GuardedDeadline(Time, wait, deadline.Token);
             try
