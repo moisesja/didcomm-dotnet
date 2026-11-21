@@ -39,6 +39,11 @@ namespace DidComm.AspNetCore;
 /// is a no-op on it and <see cref="Mode"/> reports <see cref="ReturnRouteMode.None"/> (PA-3).
 /// </para>
 /// <para>
+/// The session closes (<see cref="SessionCloseReason.Unregistered"/>, unless it closed already) as
+/// soon as its connection's token is cancelled, so it never outlives its connection (#100 OD-8: the
+/// receive loop may still be handling the message it had in hand, and whatever that pushes is refused).
+/// </para>
+/// <para>
 /// On close for any reason queued pushes are discarded — <c>true</c> from
 /// <see cref="TrySendAsync(Message, CancellationToken)"/> (<see cref="ReturnRouteSendResult.Sent"/>
 /// from the size-bounded overload) meant queued, not delivered. A push dequeued while the session is
@@ -160,11 +165,22 @@ internal sealed class WebSocketReturnRouteSession : IReturnRouteSession
         }
     }
 
-    /// <summary>Start the writer task. Idempotent; called once the registry accepted the session.</summary>
+    /// <summary>
+    /// Start the writer task, and close the session as soon as its connection ends. Idempotent; called
+    /// once the registry accepted the session.
+    /// </summary>
     internal void Start()
     {
         if (_writer is not null)
             return;
+        // #100 OD-8: a session never outlives its connection. When the connection token is cancelled
+        // (the peer dropped the connection, or this session ended it) the session closes at once, so a
+        // reply or push made while the receive loop finishes the message it has in hand is refused
+        // quietly (NotSent) rather than queued for a socket that is gone. A no-op when the session
+        // closed first (eviction, writer fault, StopAsync): the first reason wins. Runs at once when
+        // the connection already ended. The registration goes with the connection's token source,
+        // which the receive loop disposes with the connection.
+        _connectionToken.UnsafeRegister(static state => ((WebSocketReturnRouteSession)state!).RequestClose(SessionCloseReason.Unregistered), this);
         _writer = Task.Run(WriteLoopAsync);
     }
 

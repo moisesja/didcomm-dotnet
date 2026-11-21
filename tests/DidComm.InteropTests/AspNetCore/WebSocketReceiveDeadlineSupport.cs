@@ -84,6 +84,7 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
     public const string MediatorPath = "/didcomm";
 
     private readonly List<IAsyncDisposable> _owned = new();
+    private EndedWebSocketCounter _ended = new();
 
     private DeadlineKestrelHost(WebApplication app, int port, string did, QaManualTimeProvider time, CapturingLoggerProvider logs, RecordingHandlerState recorder, ConcurrentQueue<string> callbackSeen, TestPeer alice)
     {
@@ -116,6 +117,16 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
     public TestPeer Alice { get; }
 
     public IReturnRouteSessionRegistry Registry => App.Services.GetRequiredService<IReturnRouteSessionRegistry>();
+
+    /// <summary>WebSocket requests (any path) whose endpoint delegate has returned: their receive loop ended.</summary>
+    public int EndedWebSockets => Volatile.Read(ref _ended.Count);
+
+    /// <summary>The abort token of every WebSocket request so far, in arrival order.</summary>
+    public IReadOnlyList<CancellationToken> WebSocketRequestAborts => _ended.Aborts.ToArray();
+
+    /// <summary>Wait (real-time hang guard) until <paramref name="count"/> WebSocket requests have ended.</summary>
+    public async Task WaitEndedWebSocketsAsync(int count)
+        => (await ReturnRouteTestHost.WaitUntilAsync(() => EndedWebSockets >= count, Guard)).Should().BeTrue($"{count} WebSocket connections ended");
 
     public static async Task<DeadlineKestrelHost> StartAsync(Action<DeadlineKestrelHostOptions>? configure = null)
     {
@@ -160,6 +171,24 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
 
         var app = builder.Build();
         app.UseWebSockets();
+        var ended = new EndedWebSocketCounter();
+        app.Use(async (context, next) =>
+        {
+            // #100 OD-8: observe when a WebSocket request's endpoint delegate returns, which is after
+            // its receive loop and the loop's finally ran (nothing more is read or handled), and keep
+            // each WebSocket request's abort token, so a test can wait until the server saw a drop.
+            if (context.WebSockets.IsWebSocketRequest)
+                ended.Aborts.Enqueue(context.RequestAborted);
+            try
+            {
+                await next(context);
+            }
+            finally
+            {
+                if (context.WebSockets.IsWebSocketRequest)
+                    Interlocked.Increment(ref ended.Count);
+            }
+        });
         app.MapDidCommWebSocket(DispatchPath);
         app.MapDidCommWebSocket(CallbackPath, (unpacked, _) =>
         {
@@ -174,6 +203,7 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
         var host = new DeadlineKestrelHost(app, new Uri(address).Port, identity.Did, time, logs, recorder, callbackSeen, alice);
         host._owned.Add(alice);
+        host._ended = ended;
         return host;
     }
 
@@ -289,6 +319,13 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         content.Headers.ContentType = MediaTypeHeaderValue.Parse(MediaTypes.Encrypted);
         using var response = await http.PostAsync($"http://127.0.0.1:{Port}{MediatorPath}", content);
         return response.StatusCode;
+    }
+
+    private sealed class EndedWebSocketCounter
+    {
+        public int Count;
+
+        public ConcurrentQueue<CancellationToken> Aborts { get; } = new();
     }
 
     public async ValueTask DisposeAsync()
