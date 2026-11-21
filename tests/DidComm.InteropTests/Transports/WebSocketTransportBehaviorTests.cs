@@ -353,14 +353,19 @@ public sealed class WebSocketTransportBehaviorTests
         factoryCalls.Should().Be(1, "a disposed transport must not open new connections (pool-resurrection leak)");
     }
 
-    [Fact]
-    public async Task DisposeAsync_is_bounded_when_the_peer_never_answers_the_close()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DisposeAsync_is_bounded_when_the_peer_never_answers_the_close(bool disconnectHangs)
     {
-        // A hostile / wedged peer must not be able to hang DisposeAsync forever. Both shutdown
-        // writes — the STOMP DISCONNECT frame and the WebSocket close — go to a peer that never
-        // completes them, so an unbounded dispose (CancellationToken.None + CloseAsync, which
-        // additionally waits for the peer's close frame) blocks the caller indefinitely.
-        var peer = new UnresponsiveClosePeerWebSocket();
+        // A hostile / wedged peer must not be able to hang DisposeAsync forever. Dispose sends the
+        // STOMP DISCONNECT frame, then its close frame, and waits for the peer's close (#100 OD-7:
+        // CloseAsync, so a peer finishes handling what it received first). All three share one
+        // budget. disconnectHangs = true: the peer never completes the DISCONNECT (it stopped
+        // reading); false: the DISCONNECT goes out and the peer never answers the close, so the
+        // close's wait is what the budget must end. Without the budget (CancellationToken.None)
+        // either one blocks the caller indefinitely.
+        var peer = new UnresponsiveClosePeerWebSocket(disconnectHangs);
         var options = Options.Create(new WebSocketTransportOptions
         {
             AllowedSchemes = new[] { "ws" },
@@ -380,6 +385,7 @@ public sealed class WebSocketTransportBehaviorTests
             "dispose must be bounded by its own timeout budget, not by the peer's willingness to answer");
         await dispose;
         peer.Disposed.Should().BeTrue("the bounded close falls through to the hard Dispose");
+        peer.CloseWaitEntered.Should().Be(!disconnectHangs, "the close and its wait come after the DISCONNECT, under the same budget");
     }
 
     [Fact]
@@ -1007,16 +1013,20 @@ public sealed class WebSocketTransportBehaviorTests
 
     /// <summary>
     /// A STOMP peer that answers CONNECTED and accepts application SEND frames, then goes silent at
-    /// shutdown: the DISCONNECT frame and the close handshake complete only if the caller's
-    /// cancellation token fires. Models a peer that stopped reading (TCP backpressure) or never
-    /// returns its close frame — the case that hangs an unbounded dispose forever.
+    /// shutdown: the DISCONNECT frame (when <c>disconnectHangs</c>) and the close handshake complete
+    /// only if the caller's cancellation token fires. Models a peer that stopped reading (TCP
+    /// backpressure) or never returns its close frame — the case that hangs an unbounded dispose
+    /// forever.
     /// </summary>
-    private sealed class UnresponsiveClosePeerWebSocket : System.Net.WebSockets.WebSocket
+    private sealed class UnresponsiveClosePeerWebSocket(bool disconnectHangs = true) : System.Net.WebSockets.WebSocket
     {
         private readonly byte[] _connected = StompFrameCodec.Encode(ConnectedFrame());
         private int _receiveOffset;
 
         public bool Disposed { get; private set; }
+
+        /// <summary>Whether dispose reached the close that waits for the peer's close frame.</summary>
+        public bool CloseWaitEntered { get; private set; }
 
         public override WebSocketCloseStatus? CloseStatus => null;
         public override string? CloseStatusDescription => null;
@@ -1024,8 +1034,11 @@ public sealed class WebSocketTransportBehaviorTests
         public override string? SubProtocol => null;
 
         public override void Abort() { }
-        public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
-            Task.Delay(Timeout.Infinite, cancellationToken);
+        public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken)
+        {
+            CloseWaitEntered = true;
+            return Task.Delay(Timeout.Infinite, cancellationToken);
+        }
         public override Task CloseOutputAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
             Task.Delay(Timeout.Infinite, cancellationToken);
         public override void Dispose() => Disposed = true;
@@ -1040,7 +1053,7 @@ public sealed class WebSocketTransportBehaviorTests
         }
 
         public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken) =>
-            string.Equals(StompFrameCodec.Decode(buffer).Command, "DISCONNECT", StringComparison.Ordinal)
+            disconnectHangs && string.Equals(StompFrameCodec.Decode(buffer).Command, "DISCONNECT", StringComparison.Ordinal)
                 ? Task.Delay(Timeout.Infinite, cancellationToken)
                 : Task.CompletedTask;
     }

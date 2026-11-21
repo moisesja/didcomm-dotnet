@@ -305,7 +305,14 @@ public sealed class WebSocketSessionReceiveDeadlineTests
             }
             else
             {
-                await t.Transport.DisposeAsync().AsTask().WaitAsync(Guard);
+                // Dispose sends its close and waits (bounded) for the peer's (#100 OD-7): the peer
+                // answers it, so the socket ends by dispose's close handshake while the loop is
+                // still inside the message.
+                var dispose = t.Transport.DisposeAsync().AsTask();
+                (await NextCloseAsync(s)).CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure);
+                await s.SendCloseAsync(WebSocketCloseStatus.NormalClosure, "bye");
+                s.End();
+                await dispose.WaitAsync(Guard);
             }
 
             (await WaitUntilAsync(() => t.Transport.LiveSessionSocketCount == 0)).Should().BeTrue();
@@ -661,8 +668,11 @@ public sealed class WebSocketSessionReceiveDeadlineTests
 
         public async ValueTask DisposeAsync()
         {
-            await Transport.DisposeAsync();
+            // The peer first: it ends every connection. The transport's dispose waits (up to one
+            // SendTimeout, 2 minutes here) for a peer that is still connected to answer its close
+            // (#100 OD-7), and this peer never answers one on its own.
             await Peer.DisposeAsync();
+            await Transport.DisposeAsync();
         }
     }
 

@@ -319,9 +319,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     private TimeSpan DrainBudget => AsWaitBudget(AsWaitBudget(_options.ConnectTimeout) + AsWaitBudget(_options.SendTimeout));
 
     /// <summary>
-    /// How long dispose's polite shutdown (STOMP DISCONNECT + close frame) and its wait for the
-    /// session receive loops may take. One per-send budget: these are ordinary socket writes, and the
-    /// peer is under no obligation to read them. Dispose only: an infinite or non-positive
+    /// How long dispose's polite shutdown of one socket (STOMP DISCONNECT, close frame, and the wait
+    /// for the peer's close frame) and its wait for the session receive loops may take. One
+    /// per-send budget: the writes are ordinary socket writes, and the peer is under no obligation to
+    /// read them or to answer. Dispose only: an infinite or non-positive
     /// <see cref="WebSocketTransportOptions.SendTimeout"/> maps to zero here (see
     /// <see cref="AsWaitBudget"/>), which is right for a teardown that must be bounded and wrong for
     /// a session socket that is still meant to be read (see <see cref="CloseGrace"/>).
@@ -1494,14 +1495,25 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// hard-disposed (or, if it has not been published yet, refused by the seal in
     /// <see cref="GetOrConnectAsync"/> / <see cref="OpenSessionAsync"/>), so no Open socket survives
     /// this call either way: pooled, return-route session, or retiring session socket.</item>
+    /// <item>Every open pooled socket and active session socket is closed politely: its close frame
+    /// is sent (after a STOMP <c>DISCONNECT</c> under <see cref="WebSocketTransportOptions.UseStomp"/>)
+    /// and the peer's close frame is waited for, up to <see cref="CloseBudget"/>, every endpoint
+    /// concurrently. A peer answers the close only after it has handled the messages it received
+    /// before it, so a one-way message sent just before this call (a Message Pickup 4.0
+    /// acknowledgement) has been handled when the call returns, unless the peer does not answer in
+    /// time: the socket is then aborted. With an infinite or non-positive
+    /// <see cref="WebSocketTransportOptions.SendTimeout"/> the budget is zero and nothing is waited
+    /// for. A retiring session socket has already sent its close: it is not closed again, only
+    /// stopped and disposed (below).</item>
     /// <item>Every session socket's receive loop is cancelled and awaited for at most
     /// <see cref="CloseBudget"/>. A loop held by an inbound consumer that ignores cancellation is
     /// abandoned; its socket is already disposed, and the loop raises nothing more when it ends.
     /// A loop never waits on a send gate once this call has begun.</item>
     /// <item><c>Disconnected</c> is raised once per socket that was connected, naming its endpoint.</item>
     /// <item>The call is bounded: at most <see cref="DrainBudget"/> + 2 × <see cref="CloseBudget"/>
-    /// in total, no matter how many endpoints are wedged (they drain concurrently) or how
-    /// unresponsive the peers are (every network write here is cancellation-bounded).</item>
+    /// in total, no matter how many endpoints are wedged (they drain and close concurrently) or how
+    /// unresponsive the peers are (every network write here, and every wait for a peer's close, is
+    /// cancellation-bounded).</item>
     /// <item>It is idempotent and concurrency-safe: the first caller tears down, the rest wait.</item>
     /// </list>
     /// </summary>
@@ -1621,14 +1633,20 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             _sessions.TryRemove(key, out session);
             if (gateHeld && session is not null && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
+                // The same bounded close as the pooled socket's below: send ours, wait for the peer's.
+                // The socket's receive loop has a receive outstanding; CloseAsync waits for it (a
+                // ManagedWebSocket runs one receive at a time) rather than failing, and the loop,
+                // once it reads the peer's close, ends without answering it and without waiting on
+                // this send gate (both skipped once dispose began). It is stopped in the finally.
                 using var closeCts = new CancellationTokenSource(CloseBudget);
-                await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
+                await session.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
             }
             if (gateHeld && socket is not null && socket.State == WebSocketState.Open)
             {
-                // Both shutdown writes are cancellation-bounded: a peer that stopped reading (TCP
-                // backpressure on the DISCONNECT) or never answers the close would otherwise hang
-                // dispose forever. On expiry we fall through to the hard Dispose below.
+                // The shutdown writes and the wait for the peer's close share one budget: a peer that
+                // stopped reading (TCP backpressure on the DISCONNECT) or never answers the close
+                // would otherwise hang dispose forever. On expiry the cancellation aborts the socket
+                // and we fall through to the hard Dispose below.
                 using var closeCts = new CancellationTokenSource(CloseBudget);
                 // FR-TRN-12: end the STOMP session politely before the WebSocket close. Best
                 // effort — no RECEIPT is requested (receipts are out of the minimal subset).
@@ -1638,10 +1656,17 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                         "DISCONNECT", Array.Empty<KeyValuePair<string, string>>(), ReadOnlyMemory<byte>.Empty));
                     await socket.SendAsync(disconnect, WebSocketMessageType.Binary, endOfMessage: true, closeCts.Token).ConfigureAwait(false);
                 }
-                // CloseOutputAsync, not CloseAsync: CloseAsync additionally waits for the peer's
-                // close frame, which a hostile or wedged peer simply never sends. We send our close
-                // frame and drop the connection; the peer sees a clean NormalClosure either way.
-                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
+                // CloseAsync, not CloseOutputAsync (#100, OD-7): send our close frame and wait for
+                // the peer's. A peer answers the close only after it has handled what it received
+                // before it (the mediator handles one connection's messages in order), while it may
+                // stop handling a message once the connection drops (the mediator does, on Kestrel).
+                // Waiting is what keeps a one-way message sent just before dispose, such as a
+                // Message Pickup 4.0 acknowledgement, from being lost. Still bounded: the wait runs
+                // under the same CloseBudget, every endpoint closes concurrently (one budget in
+                // total, not one per socket), and a peer that never answers is cut off when it
+                // expires. Data frames that arrive before the peer's close are read and dropped
+                // (nothing else reads this socket).
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
