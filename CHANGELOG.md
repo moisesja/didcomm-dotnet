@@ -159,6 +159,12 @@ internal, so 4.0 adds no public message builders.
   Mediation): after a mediator stops serving the version a client negotiated, the client's calls
   time out until the hour is up or the client restarts; pin the version, or restart, after such a
   change.
+- The live stream needs a mediator that accepts at least 10 ids per confirmation (a known limit,
+  owner decision 2026-11-21: "Document it as a known limit"). `ReceiveLiveAsync` confirms up to 10
+  messages per `messages-received`. A mediator that accepts fewer (ours with
+  `MessagePickupOptions.MaxAckIds` set below 10; the default is ten times the delivery batch)
+  refuses it, and the messages are delivered again at the stream's next collection (one
+  `LivePollInterval` later) instead of being confirmed. Nothing is lost; no code changed.
 - DIDComm v1 forms of 4.0 are out of scope, as before.
 - The live interop leg's R-2 cell (our wallet against our mediator) now negotiates and asserts 4.0,
   with a negative-control twin. The Identus cells negotiate 3.0 and are otherwise unchanged.

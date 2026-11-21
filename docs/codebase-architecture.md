@@ -3267,6 +3267,17 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   stays leased until the connection closes or the lease runs out (60 s at ours); at ours it is then
   delivered by the stream's next drain, not pushed again (owner decision 2026-11-20).
   With the default `Negotiate` one version is used throughout.
+- **A live stream needs a mediator that accepts at least 10 ids per confirmation (#100, owner
+  decision 2026-11-21: documented, not changed).** `LiveDeliveryStream` confirms up to 10 taken items
+  per `messages-received` (`MaxAckIds`, a constant). A mediator that accepts fewer refuses such a list
+  as malformed: this library's with `MessagePickupOptions.MaxAckIds` set below 10 (allowed when
+  `MaxDeliveryBatch` is below 10; the default is the batch × 10). Under 4.0 the refusal is silent
+  (nothing answers a `messages-received`); under 3.0 the confirmation times out and is retried after
+  the back-off. Either way the messages it named stay leased until the lease ends, and are delivered
+  again at the stream's next collection (`LivePollInterval`, 1 minute by default; a live push that
+  ran out is marked and goes only to that collection) and recognised as repeats. Nothing is lost;
+  delivery is late. The stream is left untouched under the owner's live-stream rule (no more
+  patches to its scheduling).
 - **A pinned-4.0 `AckAsync` over a WebSocket before any session socket exists (#100).** The
   header-less acknowledgement then goes over the endpoint's pooled socket, and the `status-request`
   that confirms it opens the session socket. The mediator handles the two connections

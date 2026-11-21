@@ -37,7 +37,9 @@ public sealed class MessagePickupOptions
 
     /// <summary>
     /// The largest number of messages one <c>delivery</c> carries (FR-PICK-03). A
-    /// <c>delivery-request</c> asking for more gets this many. Default 10.
+    /// <c>delivery-request</c> asking for more gets this many. Default 10. Below 10 it also allows a
+    /// <see cref="MaxAckIds"/> below 10, which delays this library's live stream's confirmations
+    /// (see <see cref="MaxAckIds"/>).
     /// </summary>
     public int MaxDeliveryBatch { get; set; } = 10;
 
@@ -59,7 +61,11 @@ public sealed class MessagePickupOptions
     /// FR-PICK-10). A longer list is refused as malformed from its length alone: no id is decoded
     /// and the store is not called. <c>null</c> (the default) means
     /// <see cref="MaxDeliveryBatch"/> × 10. Must be at least <see cref="MaxDeliveryBatch"/>, so a
-    /// full batch can be acknowledged in one message.
+    /// full batch can be acknowledged in one message. A value below 10 delays this library's live
+    /// stream (<c>PickupClient.ReceiveLiveAsync</c>, in <c>DidComm.Mediator.Client</c>): it confirms
+    /// up to 10 pushed messages per <c>messages-received</c>, the mediator refuses such a list as
+    /// malformed, and the messages it named are delivered again at the stream's next collection
+    /// instead (a known limit, owner decision 2026-11-21: documented, not changed).
     /// </summary>
     public int? MaxAckIds { get; set; }
 

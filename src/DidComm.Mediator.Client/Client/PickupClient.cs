@@ -597,8 +597,13 @@ public sealed class PickupClient
     /// next <c>MoveNextAsync</c>, which <c>await foreach</c> makes when your loop body has finished
     /// with the item. Nothing is acknowledged before it was handed to you. Acknowledgements are sent
     /// in batches (when ten are waiting, when nothing else is ready, or after ten seconds) of at most
-    /// ten ids per message, which a mediator that accepts no more ids per message than it delivers
-    /// at once (ten by default at this library's mediator) still takes. The stream remembers the item
+    /// ten ids per message. <strong>Known limit</strong> (owner decision 2026-11-21: documented, not
+    /// changed): a mediator must accept at least ten ids per <c>messages-received</c> for the stream
+    /// to confirm on time. One that accepts fewer (this library's mediator with
+    /// <c>MessagePickupOptions.MaxAckIds</c> set below 10; the default is ten times its delivery
+    /// batch) refuses such a confirmation, and the messages it named are delivered again at the
+    /// stream's next collection, one <see cref="MediatorClientOptions.LivePollInterval"/> later,
+    /// and recognised as repeats. Nothing is lost. The stream remembers the item
     /// (<see cref="MediatorClientOptions.DedupeCapacity"/>) so a repeat is acknowledged and not
     /// yielded again. With <c>DedupeCapacity</c> set to 0 it remembers nothing, so a message that
     /// comes twice in one delivery is yielded twice (<see cref="FetchAsync"/> returns it once).
