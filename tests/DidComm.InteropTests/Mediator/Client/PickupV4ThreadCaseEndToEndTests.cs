@@ -43,7 +43,9 @@ public sealed class PickupV4ThreadCaseEndToEndTests
         var failed = batch.Items.Single(i => i.Error is not null);
         var afterAck = await PickupE2E.Within(pickup.AckAsync(mediator.Did, bob.Did, new[] { failed.Id }, over));
 
-        rewriter.Rewritten.Should().HaveCount(3, "status-request, delivery-request and the status-request after the acknowledgement were answered");
+        rewriter.Rewritten.Should().HaveCount(webSocket ? 4 : 3, webSocket
+            ? "status-request, delivery-request, the status-request AckAsync sends first on a WebSocket and the one after the acknowledgement were answered"
+            : "status-request, delivery-request and the status-request after the acknowledgement were answered");
         rewriter.Rewritten.Should().OnlyContain(r => r.Written != r.Original && string.Equals(r.Written, r.Original, StringComparison.OrdinalIgnoreCase),
             "precondition: every answer's thread is its request's with the letters re-cased");
         rewriter.Rewritten.Select(r => r.Original).Should().OnlyContain(id => id.StartsWith("request-abcdef-", StringComparison.Ordinal), "precondition: the request ids are the pinned ones");

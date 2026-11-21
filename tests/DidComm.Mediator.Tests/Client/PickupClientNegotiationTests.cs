@@ -144,7 +144,7 @@ public sealed class PickupClientNegotiationTests
         exchange.Sent.Select(s => s.Type).Should().Equal(
             DiscoverFeatures.QueriesType, MessagePickup40.StatusRequestType,
             DiscoverFeatures.QueriesType, MessagePickup40.DeliveryRequestType,
-            DiscoverFeatures.QueriesType, MessagePickup40.MessagesReceivedType, MessagePickup40.StatusRequestType,
+            DiscoverFeatures.QueriesType, MessagePickup40.StatusRequestType, MessagePickup40.MessagesReceivedType, MessagePickup40.StatusRequestType,
             DiscoverFeatures.QueriesType, MessagePickup40.LiveDeliveryChangeType);
         exchange.RouteCalls.Should().HaveCount(4, "one route per call, resolved before its query");
     }

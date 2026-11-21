@@ -482,6 +482,18 @@ public sealed class PickupClient
     /// <c>status-request</c>.
     /// </para>
     /// <para>
+    /// <strong>Under 4.0 on a WebSocket</strong> the call first sends a <c>status-request</c> of its
+    /// own, before any <c>messages-received</c>; its answer is checked as a status and not returned.
+    /// A message sent one way goes on the connection that carries this agent's answers when one is
+    /// open, and on another connection when none is; that first <c>status-request</c> opens it, or
+    /// reuses the open one. The acknowledgements and the <c>status-request</c> after them then travel
+    /// on that one connection, which the mediator handles in order, so the status returned is taken
+    /// after the acknowledgements were applied. If that connection drops after the first status and
+    /// before an acknowledgement is sent, the acknowledgement goes on another connection and the status
+    /// may not reflect it yet; call again (acknowledging twice is harmless). Over HTTP nothing is sent
+    /// first: the mediator handles each request before it answers it.
+    /// </para>
+    /// <para>
     /// <strong>Time.</strong> Each <c>messages-received</c> and the <c>status-request</c> that may
     /// follow it share one <see cref="MediatorClientOptions.RequestTimeout"/>, counted from when the
     /// <c>messages-received</c> is sent; the <c>status-request</c> never gets a
@@ -490,7 +502,9 @@ public sealed class PickupClient
     /// told from a slow answer, so the client waits half of <c>RequestTimeout</c> for the status, then
     /// moves on: to the next message, or to the <c>status-request</c>, which gets the other half.
     /// Under 4.0 nothing is waited for after a message: it is only sent, within its
-    /// <c>RequestTimeout</c>, and the <c>status-request</c> gets what is left of the last one's.
+    /// <c>RequestTimeout</c>, and the <c>status-request</c> gets what is left of the last one's. The
+    /// <c>status-request</c> a 4.0 call sends first on a WebSocket has a <c>RequestTimeout</c> of its
+    /// own, which does not count against the messages after it.
     /// </para>
     /// <para>
     /// <strong>Which status answers which message.</strong> DIDComm threading: a reply carries the
@@ -511,8 +525,8 @@ public sealed class PickupClient
     /// <returns>The mediator's <c>status</c> after the last message: its answer to that message, or, when it sent none (always under 4.0), its answer to the <c>status-request</c> that asked for it.</returns>
     /// <exception cref="ArgumentException">A DID is not a bare DID, <paramref name="ids"/> is empty, longer than 10 000 or has an empty, over-long or non-URI-safe id (the message names its index), or <paramref name="serviceEndpointOverride"/> is relative or carries user information.</exception>
     /// <exception cref="InvalidOperationException">As for <see cref="GetStatusAsync"/>; nothing was sent.</exception>
-    /// <exception cref="TimeoutException">No status in time (see the remarks): a message got no answer within <see cref="MediatorClientOptions.RequestTimeout"/> (under 4.0: was not sent within it), the <c>status-request</c> after the last one got none in the time left (over HTTP, none in its response), or the Discover Features query that negotiates the version got none. The mediator may still have applied the acknowledgement; retry (acknowledging twice is harmless).</exception>
-    /// <exception cref="MediationProtocolException">A problem report or a malformed status; for the <c>status-request</c>, also a status about one DID only (it asked about all of yours); or, negotiating, a mediator that disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>).</exception>
+    /// <exception cref="TimeoutException">No status in time (see the remarks): a message got no answer within <see cref="MediatorClientOptions.RequestTimeout"/> (under 4.0: was not sent within it), the <c>status-request</c> after the last one got none in the time left (over HTTP, none in its response), or the Discover Features query that negotiates the version got none. The mediator may still have applied the acknowledgement; retry (acknowledging twice is harmless). Under 4.0 on a WebSocket, also the <c>status-request</c> sent first got no answer within its own <c>RequestTimeout</c>; the message names that request, and nothing was acknowledged.</exception>
+    /// <exception cref="MediationProtocolException">A problem report or a malformed status; for a <c>status-request</c>, also a status about one DID only (it asked about all of yours); or, negotiating, a mediator that disclosed neither Message Pickup version (<see cref="MediationNotSupportedException"/>). When it is the answer to the <c>status-request</c> a 4.0 call sends first on a WebSocket, nothing was acknowledged.</exception>
     /// <exception cref="TransportException">The transport failed.</exception>
     /// <exception cref="ObjectDisposedException">The container was disposed.</exception>
     public async Task<PickupStatus> AckAsync(string mediatorDid, string from, IReadOnlyList<string> ids, Uri? serviceEndpointOverride = null, CancellationToken ct = default)
@@ -524,6 +538,8 @@ public sealed class PickupClient
 
         var route = await Exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: false, ct).ConfigureAwait(false);
         var version = await ResolveVersionAsync(route, mediatorDid, from, ct).ConfigureAwait(false);
+        if (!PickupWire.AnswersAcknowledgement(version) && !route.IsHttp)
+            await OpenReturnRouteAsync(version, route, mediatorDid, from, ct).ConfigureAwait(false);
         var spec = DeliveryReader.MessagesReceivedSpec;
         PickupStatus? status = null;
         var lastId = string.Empty;
@@ -537,7 +553,8 @@ public sealed class PickupClient
             if (!PickupWire.AnswersAcknowledgement(version))
             {
                 // 4.0: nothing answers messages-received (L62, L294); it is only sent, and the
-                // status-request after the last one confirms them all.
+                // status-request after the last one confirms them all. On a WebSocket it rides the
+                // session OpenReturnRouteAsync opened, as that status-request does.
                 await Exchange.SendOneWayAsync(route, request, PickupWire.MessagesReceivedName, mediatorDid, from, ct).ConfigureAwait(false);
                 continue;
             }
@@ -779,6 +796,22 @@ public sealed class PickupClient
         {
             return null;
         }
+    }
+
+    // Under 4.0 on a route that is not HTTP, before the first messages-received: one status-request
+    // as an ordinary exchange (return_route all, its own RequestTimeout), its answer read as a status
+    // and not returned. A header-less message rides the return-route session socket only when one is
+    // open (FR-RR-05 affinity, FR-RR-07), and the pooled socket otherwise, while the status-request
+    // after the last acknowledgement would open the session socket: two connections, which the
+    // mediator handles independently, so that status could be answered before an acknowledgement was
+    // applied. This exchange opens the session socket, or reuses the open one, so the acknowledgements
+    // and the status-request after them travel on one connection, which the mediator handles in order.
+    // Over HTTP each POST is handled before its response, so nothing is needed there.
+    private async Task OpenReturnRouteAsync(MessagePickupVersion version, MediatorRoute route, string mediatorDid, string from, CancellationToken ct)
+    {
+        var (request, spec) = PickupWire.StatusRequest(version, from, mediatorDid, recipientDid: null);
+        var answer = await Exchange.ExchangeAsync(route, request, spec, mediatorDid, from, ct).ConfigureAwait(false);
+        _ = PickupWire.ReadStatus(version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: true, filter: null);
     }
 
     // The status-request after the last messages-received when the mediator sent no status for it
