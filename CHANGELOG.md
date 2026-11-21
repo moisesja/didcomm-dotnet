@@ -28,14 +28,37 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   - the arrival times are 4.0's milliseconds rounded down to seconds. `PickupStatus` keeps epoch
     seconds whichever version is spoken.
 
-  Acknowledgements get no answer under 4.0; `AckAsync` still returns the status, which it now asks
-  for with a `status-request`. Over a WebSocket it first sends one `status-request` too, before the
-  acknowledgements: under 4.0 that is the only message that can open the connection's return-route
-  session, because 4.0 dropped `return_route` from `messages-received` (L35). The acknowledgements
-  and the confirming `status-request` then travel on that one connection, which the mediator reads
-  in order, so the status always follows them. It costs one extra round trip per `AckAsync` over a
-  WebSocket (PR #143 review P2-2; before the fix, a first call on a cold WebSocket could return a
-  status from before its acknowledgement).
+  Acknowledgements get no answer under 4.0, so `AckAsync` returns `null` under 4.0: see the next
+  entry.
+- **`AckAsync` returns only the mediator's own status, and `null` when it sent none (owner decision
+  OD-6, 2026-11-21: "Stop promising a status").** In the owner's words as put to them: "AckAsync
+  returns the mediator's own status when it sends one (3.0's optional answer), and nothing (null)
+  otherwise: always under 4.0, and for a 3.0 mediator like Identus that skips it. Nothing is ever
+  made up, so it can't be stale. Removes the extra requests. Cost: the return type becomes nullable
+  (unpublished package only); the cookbook, sample 11 and a live-interop check adapt; callers who
+  want the queue state call GetStatusAsync."
+  - Why: Message Pickup 3.0 L193: "The `mediator` **SHOULD** send an updated `status` message
+    reflecting the changes to the queue." 4.0 L294 is the same paragraph without that sentence, and
+    4.0 sends `messages-received` without `return_route` (L35: "Removed return route all from
+    `messages-received` messages, as it is not required."). So nothing confirms an acknowledgement
+    under 4.0, and a status asked for separately is not ordered after it. Before this change
+    `AckAsync` asked with a `status-request` and returned that status; PR #143 review round 2
+    showed it returning a count from before its own acknowledgement when its WebSocket connection
+    dropped mid-call. The protocol gives no confirmation to wait for, so the claim is removed
+    instead of adding plumbing.
+  - What you see: `AckAsync` returns `Task<PickupStatus?>`. Under 4.0 it sends each
+    `messages-received` one way and returns `null`; it sends no `status-request`, before or after.
+    Under 3.0 it returns the status that answered the last message, or `null` when that message got
+    none, even if an earlier one did. A failure is never `null`: a message that was not sent is a
+    `TimeoutException` or a `TransportException`. Over a WebSocket, a 3.0 status is waited for half
+    of `RequestTimeout` once the message is sent (our fix, PR #143 review round 2: the wait used to
+    include the send, so a slow connect could pass for "no status").
+  - Before you close the connection: when no status came, nothing says the mediator has applied the
+    acknowledgement yet. This library's mediator drops the work of a WebSocket connection that
+    closes, so closing your container right after `AckAsync` can lose the acknowledgement, and the
+    messages then come back. If it must be applied before you go offline, call `GetStatusAsync`
+    until it stops counting the messages; the cookbook's section EE and sample 11 now do. A
+    `GetStatusAsync` is not ordered after an acknowledgement that got no answer.
 - **Pin the version for mediators that cannot answer the question.** A mediator that answers
   Discover Features but discloses neither pickup version now fails every pickup call with
   `MediationNotSupportedException`. One that does not answer the query fails it with
@@ -771,23 +794,23 @@ Message Pickup 3.0 says that after a `messages-received` the mediator **SHOULD**
 `status`, not that it must. The Identus mediator v1.2.1 removes the messages and sends nothing back
 (over HTTP, a 202 with an empty body). `AckAsync` required that status, so against Identus it always
 threw `TimeoutException`, although the messages had been removed: the client had turned a SHOULD
-into a MUST. The client has not been released, so no released behaviour changes. No public API
-changes: same signature, same `Task<PickupStatus>`.
+into a MUST. The client has not been released, so no released behaviour changes. As first fixed
+here, `AckAsync` asked with a `status-request` when no status came; #100 (owner decision OD-6, the
+entry at the top of this section) removed that request and made the return type
+`Task<PickupStatus?>`. What ships is described below.
 
 - **No status is not an error any more.** When the last `messages-received` of a call gets no
-  status, the client asks for one with a `status-request` and returns that status. Its count is the
-  confirmation that the acknowledgement was applied. An earlier chunk (the call sends 100 ids per
-  message) that gets no status is not asked about: the next chunk goes out, and the status after the
-  last one covers them all. A mediator that does send its status, like this library's, gets exactly
-  the requests it got before: one per 100 ids. A problem report or a malformed status is still a
+  status, `AckAsync` returns `null`. An earlier chunk (the call sends 100 ids per message) that gets
+  no status does not stop the call: the next chunk goes out, and only the last one's answer is
+  returned. A mediator that does send its status, like this library's under 3.0, gets one request
+  per 100 ids and nothing more. A problem report or a malformed status is still a
   `MediationProtocolException`.
-- **The same time limit.** A `messages-received` and the `status-request` after it share one
-  `MediatorClientOptions.RequestTimeout`; the `status-request` gets what is left, never a second
-  full timeout. Over HTTP the empty response shows at once that no status came. On a WebSocket,
-  silence looks the same as a slow answer, so the client waits half of `RequestTimeout` for the
-  status and then asks, in the other half. If the `status-request` is not answered either, the call
-  fails with a `TimeoutException` (the messages may still have been removed; acknowledging again is
-  harmless).
+- **The time limit.** Each `messages-received` gets its own `MediatorClientOptions.RequestTimeout`.
+  Over HTTP the empty response shows at once that no status came. On a WebSocket, silence looks the
+  same as a slow answer, so once the message is sent the client waits half of `RequestTimeout` for
+  the status (never past the message's `RequestTimeout`), then moves on. A message that was not
+  sent in time is a `TimeoutException` (it may still have reached the mediator; acknowledging again
+  is harmless).
 - **An answer without `thid` that arrives on its own is no longer taken as an answer** (PR #130
   review, rounds 1 and 2). On a WebSocket, a status the client stopped waiting for can still arrive
   later. The mediator client used to take an answer without `thid` as the answer of the only
@@ -808,8 +831,8 @@ changes: same signature, same `Task<PickupStatus>`.
   until the owner's answer "2"; the entry at the top of this section extends the rule to the HTTP
   response. A first fix had only narrowed the window inside one `AckAsync` call; it is gone, the
   rule replaces it.
-- **Documented.** The `AckAsync` and `PickupClient` docs now say that only the returned status
-  confirms an acknowledgement, and give the time rule and the `thid` rule. The mediator client's
+- **Documented.** The `AckAsync` and `PickupClient` docs now say that only the mediator's own
+  status confirms an acknowledgement, and give the time rule and the `thid` rule. The mediator client's
   matcher docs, the PRD (FR-MED-04, FR-MED-09) and the architecture map say that an answer without
   `thid` completes no request (on any path since the entry at the top of this section).
 - **`FetchAsync` no longer logs a false warning over HTTP.** A fetch acknowledges what it returns
@@ -824,8 +847,10 @@ changes: same signature, same `Task<PickupStatus>`.
   as a slow answer. The live stream's acknowledgement still expects the status too: against a
   mediator that sends none it keeps the ids and sends them again after its back-off. That is left for
   a separate decision.
-- **Tests.** `PickupClientAckWithoutStatusTests` in the interop tests runs the client against this
-  library's mediator with its answer to `messages-received` dropped (the Identus shape: a real HTTP
+- **Tests.** (As written for this fix; since #100's OD-6 the `AckAsync` tests below pin a `null`
+  result and no `status-request` instead: see that entry.) `PickupClientAckWithoutStatusTests` in
+  the interop tests runs the client against this library's mediator with its answer to
+  `messages-received` dropped (the Identus shape: a real HTTP
   202 with an empty body), with one or both of two chunks unanswered, with the `status-request`
   unanswered too, with a problem report, and unchanged (no extra request). Five of the seven fail on
   the code before this fix with "got no answer in the HTTP response"; the two that pass there are the

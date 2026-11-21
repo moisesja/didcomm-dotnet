@@ -2597,6 +2597,11 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    `PickupClient.AckAsync` and `FetchAsync`'s own acknowledgement for `messages-received` (whose
    `status` is a SHOULD): there the waiting request is abandoned through the same compare-and-swap
    (`TryAbandon`) and the call returns `null`. An answer that won the race still holds.
+   On a route that is not HTTP, `ExchangeAllowingNoAnswerAsync` takes an `answerWait` (#100 OD-6):
+   once the send has completed, the answer is waited for that long and never past the request's
+   deadline; when either ends the wait it is `null` through the same CAS. A send that did not
+   complete never gets there: it is a `TimeoutException` or its transport failure. With
+   `answerWait: null` (`FetchAsync`'s acknowledgement) the wait is as for any request.
 6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
    has already completed the request in step 5). It is awaited; then the continuation yields
    (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
@@ -2865,48 +2870,56 @@ does not set fetched messages aside delivers a failing message first on every fe
 host's `AckAsync` gets past it; the budget does not.
 
 `AckAsync(ids)` takes 1 to 10 000 ids (the count first, then a copy; each non-empty, at most 2048
-characters and unreserved URI characters). It sends 100 per `messages-received` and returns the
-`status` after the last one; a failing chunk ends the call after the earlier chunks were sent. A
-mediator configured to accept fewer ids per message refuses a longer one as malformed, so call it
-with at most as many.
+characters and unreserved URI characters). It sends 100 per `messages-received` and returns
+`Task<PickupStatus?>`: the `status` that answered the last one, or `null`; a failing chunk ends the
+call after the earlier chunks were sent. A mediator configured to accept fewer ids per message
+refuses a longer one as malformed, so call it with at most as many.
 
-Only that status confirms the acknowledgement (#98 F-1). Message Pickup 3.0 says the mediator
-SHOULD answer `messages-received` with an updated `status`, not that it must, and the Identus
-mediator v1.2.1 sends none (its `PickupExecuter` returns `NoReply`; over HTTP a 202 with an empty
-body). So a chunk left without a status is not an error: the next chunk goes out, and when the last
-one is left without a status the client sends one `status-request` (no `recipient_did`; a status
-that names one DID does not answer it) and returns its status, whose count is the confirmation. A
-mediator that does answer gets exactly one request per chunk. A problem report or a malformed status
-is still a `MediationProtocolException`. How "no status" is known:
+Only the mediator's own answer confirms an acknowledgement, and `AckAsync` returns only that (owner
+decision OD-6, #100). Message Pickup 3.0 says the mediator SHOULD answer `messages-received` with an
+updated `status` (3.0 L193), not that it must, and the Identus mediator v1.2.1 sends none (its
+`PickupExecuter` returns `NoReply`; over HTTP a 202 with an empty body). Message Pickup 4.0 dropped
+that answer (L294) and `return_route` from `messages-received` (L35). `AckAsync` never sends a
+`status-request`: one asked for separately is not ordered after an acknowledgement nothing answered
+(PR #143 review round 2 showed such a status counting a message whose acknowledgement had not been
+applied yet). So:
 
-- **Over HTTP, at once.** The chunk goes through `IMediatorExchange.ExchangeAllowingNoAnswerAsync`:
-  the channel's HTTP no-answer branch, which for every other request throws `TimeoutException`
-  ("got no answer in the HTTP response"), settles the pending request with the same terminal CAS
-  (`TryAbandon`) and returns `null`. A real timeout (no response within `RequestTimeout`) is still a
-  `TimeoutException` and ends the call.
-- **On a WebSocket (any route that is not HTTP), after half of `RequestTimeout`.** Silence cannot be
-  told from a slow answer there, so the chunk's `ExchangeAsync` runs under a `GuardedDeadline` of
-  `RequestTimeout / 2` linked to the caller's token; when that deadline (not the caller) ends the
-  wait, the chunk counts as left without a status. Its late status completes nothing: with its
-  `thid` it finds no waiting request (dropped, quiet), and without one it belongs to no request's
-  thread (dropped, Warning; see "No thread-less correlation" above), so it can answer neither the
-  next chunk, the `status-request`, nor a later call. The Message Pickup 3.0 `status` example
-  leaves `thid` out; a mediator that does so over a WebSocket is treated as one that sends no
-  status, and its thread-less answer to the `status-request` is not taken either, so the call ends
-  with `TimeoutException` (before #98 such a mediator worked over a WebSocket through the
-  fallback). The same holds over HTTP: the response answers the `status-request` only with its
-  `thid` (before #98 it was the answer with or without one).
+- **Under 4.0** each chunk goes one way (`SendOneWayAsync`, below) and the call returns `null`.
+- **Under 3.0** each chunk goes through `IMediatorExchange.ExchangeAllowingNoAnswerAsync` with
+  `answerWait: RequestTimeout / 2`, and the call returns the last chunk's answer, or `null` when the
+  last chunk got none, even if an earlier one did (that status predates the later chunks). A chunk
+  without a status does not stop the call. A mediator that does answer gets exactly one request per
+  chunk. A problem report or a malformed status is still a `MediationProtocolException`.
 
-The budget rule: a `messages-received` and the `status-request` that may follow it share one
-`RequestTimeout`, counted from when the `messages-received` is sent. The `status-request` runs under
-a `GuardedDeadline` of what is left (over HTTP, the rest; on a WebSocket, the other half); with
-nothing left it is not sent. When it gets no answer (that deadline, or over HTTP an empty response)
-the call fails with a `TimeoutException` naming the request ids, never a DID; it never waits a second
-full `RequestTimeout`. `FetchAsync`'s acknowledgement (step 10 above) shares only the HTTP half of
-this: it asks for no status, and on a WebSocket it still waits its `RequestTimeout` and logs a
-missing status as a failed acknowledgement. The live stream does not take this path: it sends
-through `ExchangeAsync`, treats a missing status as a failed acknowledgement, keeps the ids and sends
-them again after its back-off.
+How "no status" is known under 3.0:
+
+- **Over HTTP, at once.** The channel's HTTP no-answer branch, which for every other request throws
+  `TimeoutException` ("got no answer in the HTTP response"), settles the pending request with the
+  same terminal CAS (`TryAbandon`) and returns `null`. A real timeout (no response within
+  `RequestTimeout`) is still a `TimeoutException` and ends the call.
+- **On a WebSocket (any route that is not HTTP), half of `RequestTimeout` after the send.** Silence
+  cannot be told from a slow answer there, so the channel waits `answerWait` once the send has
+  completed, and never past the chunk's `RequestTimeout`; then the chunk counts as left without a
+  status. A send or connect that does not complete within `RequestTimeout` is a `TimeoutException`,
+  never `null` (before PR #143 review round 2 the half-timeout wait included the send). A late status
+  completes nothing: with its `thid` it finds no waiting request (dropped, quiet), and without one it
+  belongs to no request's thread (dropped, Warning; see "No thread-less correlation" above), so it
+  can answer neither the next chunk nor a later call. The Message Pickup 3.0 `status` example leaves
+  `thid` out; a mediator that does so is treated as one that sends no status, over a WebSocket and
+  in the HTTP response alike, and the call returns `null`.
+
+A transport failure is never `null`. `null` says only that no status came, not whether the
+acknowledgement was applied, and `GetStatusAsync` is not ordered after such an acknowledgement.
+This library's mediator handles a WebSocket message on the connection's `RequestAborted`, so a
+client that closes its connection right after an unanswered acknowledgement can lose it, and the
+messages come back (at-least-once); a host that needs it applied before going offline polls
+`GetStatusAsync` until the count drops, as cookbook section EE and sample 11 do.
+
+`FetchAsync`'s acknowledgement (step 10 above) passes `answerWait: null`: it asks for no status,
+an empty HTTP response is not a failure, and on a WebSocket it still waits its `RequestTimeout` and
+logs a missing status as a failed acknowledgement. The live stream does not take this path: under
+3.0 it sends through `ExchangeAsync`, treats a missing status as a failed acknowledgement, keeps the
+ids and sends them again after its back-off; under 4.0 it sends one way.
 
 `SetLiveDeliveryAsync` needs a WebSocket route, sends `live-delivery-change` and returns the
 `status`; a problem report is a `MediationProtocolException` with `ProblemCode`, for example
@@ -3250,17 +3263,10 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   affinity puts it on the session socket of the (endpoint, local, peer) triple, where a header-less
   message leaves the session as it is (FR-RR-05).
   - `FetchAsync` acknowledges one way under its own deadline.
-  - `AckAsync` sends each 100-id chunk one way, then its existing `status-request` within what is
-    left of the last chunk's `RequestTimeout`. On a route that is not HTTP it first sends one 4.0
-    `status-request` as an ordinary exchange (`return_route: all`, its own `RequestTimeout`, the
-    answer checked and dropped). Under 4.0 that is the only message that can open the return-route
-    session, since `messages-received` carries no `return_route` (L35). It opens the session socket
-    if none is open, or reuses the open one, so the header-less acknowledgements and the confirming
-    `status-request` ride that one socket, and the mediator handles them in order (FR-RR-05
-    affinity in the WebSocket transport). If the opening request fails, nothing is acknowledged.
-    Cost: one extra round trip per `AckAsync` off HTTP. Residual: a connection that drops after the
-    opening status and before an acknowledgement is sent puts that acknowledgement on another
-    connection; a repeat is harmless (PR #143 review P2-2, `3890622`).
+  - `AckAsync` sends each 100-id chunk one way and returns `null`; it sends no `status-request`
+    (owner decision OD-6, PR #143 review round 2). Round 1's opening and confirming
+    `status-request`s are gone: nothing in 4.0 orders a separately requested status after a one-way
+    acknowledgement (a connection that dropped mid-call put them on two connections).
   - The live stream's flush and end acknowledge one way under 4.0.
 - **The live stream** keeps a read-only version. `CycleAsync` and `DrainRoundAsync` build and read
   through `PickupWire`; an empty 4.0 delivery ends the drain. `LoadPushAsync` takes only a

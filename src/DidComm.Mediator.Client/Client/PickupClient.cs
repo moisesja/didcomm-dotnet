@@ -492,6 +492,14 @@ public sealed class PickupClient
     /// acknowledgement that got no status, so it may still count messages just acknowledged.
     /// </para>
     /// <para>
+    /// <strong>Before you close the connection.</strong> When no status came, nothing tells you the
+    /// mediator has applied the acknowledgement yet. A mediator may drop the work of a connection
+    /// that closes (this library's does), so closing your container or connection right after this
+    /// call can lose the acknowledgement; the messages then come back, as for a fetch whose
+    /// acknowledgement was lost. If you need it applied before you go offline, call
+    /// <see cref="GetStatusAsync"/> until it stops counting the messages you acknowledged.
+    /// </para>
+    /// <para>
     /// <strong>A failure is never <c>null</c>.</strong> A message that could not be sent ends the
     /// call with an exception: <see cref="TransportException"/> when the transport failed,
     /// <see cref="TimeoutException"/> when it was not sent (over HTTP: not answered by a response)
