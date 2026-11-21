@@ -1604,9 +1604,12 @@ instead of naming a record:
   MaxDeliveryBytes, ct)`, under a live-push lease (`MessageLease.LivePush`). `Sent` with the session
   still open → `Sent`: the record stays leased to the session until `messages-received`, its close or
   `LeaseTimeout`; a close or a timeout returns it marked, for a `delivery-request` only (see "A live
-  push returned unconfirmed is not pushed again" below). `Sent` by a session that closed meanwhile →
-  the lease is ended the way the close ends it (`ReleaseLeasesInBackground(owner)`, so it is marked),
-  and the step counts as not delivered. `TooLarge` → passed over (`PassOverAsync` until `now +
+  push returned unconfirmed is not pushed again" below). A session that closed while the push was in
+  hand — before the send, during it or after it took it, whatever the send reported → the lease is
+  ended the way the close ends it (`ReleaseLeasesInBackground(owner)`, so it is marked), and the
+  step counts as not delivered: whether the push reached the connection cannot be told, and the
+  outcome no longer depends on whether the close's clean-up or the coordinator's give-back lands
+  first (ADV4-1). `TooLarge` → passed over (`PassOverAsync` until `now +
   LeaseTimeout × 2^PassOvers`), as a pickup does → `PassedOver`. Anything else — not taken, closing
   first, a fault, a cancellation — gives the lease back unmarked in a `finally` (`ReleaseAsync`
   naming the lease, never cancelled) once the send has ended, however long that takes; `NotSent`, or
@@ -1857,9 +1860,9 @@ live again at its grant's next wake-up. How it is built (ours):
   | Path | Mark |
   |---|---|
   | `AcknowledgeAsync`, any purge | the record is removed |
-  | `ReleaseLeasesAsync(owner)` (the session closed; also a push the session took while it closed) | every live-push lease it ends is marked, expired or not; a `delivery-request`'s lease is not |
+  | `ReleaseLeasesAsync(owner)` (the session closed; also, from the coordinator, any push in hand when its session closed, whatever the send reported — ADV4-1) | every live-push lease it ends is marked, expired or not; a `delivery-request`'s lease is not |
   | a live-push lease runs out | marked from that instant, judged lazily: the record counts as marked when the store reads it, and the mark is written when another lease replaces that one or the owner's leases are released |
-  | `ReleaseAsync` by lease id (a push the session did not take, a too-large batch trimmed, a registration gone, a refusal, a cancellation or fault before the send) | not marked: it never reached the connection, so a later wake-up pushes it |
+  | `ReleaseAsync` by lease id (a push an open session did not take, a too-large batch trimmed, a registration gone, a refusal, a cancellation or fault before the send with the session open) | not marked: it never reached the connection, so a later wake-up pushes it. Should the session close before this give-back lands, the close's clean-up ends the lease first and the record comes back marked (pickup only; nothing lost) |
   | `PassOverAsync` | not marked |
   | a `delivery-request`'s lease ends, any way | nothing new; an existing mark stays |
   | the close's clean-up backlog was full | the lease runs out, so it is marked anyway |

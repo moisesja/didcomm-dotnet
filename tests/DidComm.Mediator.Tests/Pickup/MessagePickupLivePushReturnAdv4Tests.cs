@@ -32,15 +32,17 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
 
     // ---- ADV4-1: a push that never reached the connection comes back marked --------------------
 
-    [Fact(Skip = "ADV4-1 (Low): a queue push admitted to a session that closes before it is sent is marked when the close's clean-up runs before the give-back by id")]
-    public async Task Adv4_1_a_queue_push_whose_session_closes_before_it_is_sent_may_still_be_pushed_live()
+    // ADV4-1 (Low, fixed in #100): a push whose session closed while it was in hand used to come back
+    // marked or unmarked depending on whether the close's clean-up (ReleaseLeasesAsync by owner) or
+    // the coordinator's give-back by id landed first. Now the coordinator ends such a lease the way
+    // the close does, so it always comes back as a returned live push: delivered by a
+    // delivery-request only, whichever end lands first (whether it reached the connection cannot be
+    // told). The three tests below are the three interleavings.
+    [Fact]
+    public async Task Adv4_1_a_queue_push_whose_session_closes_before_it_is_sent_comes_back_as_a_returned_live_push_when_the_close_cleans_up_first()
     {
-        // PickupCoordinator.DeliverAsync: "Not pushed (... a downgraded or closing session ...): the
-        // record ... loses this lease, so a delivery-request gets it — and so may a later live push,
-        // since this one never reached the connection." The peer has two live sessions; the record is
-        // admitted under the newer one's live-push lease, and that session closes before the push is
-        // sent. When the close's clean-up (ReleaseLeasesAsync by owner) finishes before the coordinator
-        // gives the lease back by id, the store marks the record as a returned live push.
+        // The peer has two live sessions; the record is admitted under the newer one's live-push
+        // lease, and that session closes, and its clean-up runs to its end, before the push is sent.
         await using var fixture = PickupFixture.Create(fakeStore: true);
         var (mediator, peer) = await fixture.EnrolledAsync();
         var older = fixture.Session(peer, mediator, live: true);
@@ -62,16 +64,17 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
 
         result.Outcome.Should().Be(PickupDeliveryOutcome.Queued, "precondition: the session closed before the push");
         newer.Sent.Should().BeEmpty("precondition: the push never reached the connection");
-        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent, "a push that never reached the connection is not a returned live push");
-        older.Sent.Should().ContainSingle();
+        await MessagePickupLive.UntilAsync(() => tracker.PendingReleases == 0, "the coordinator's release ran to its end");
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "a push in hand when its session closed counts as returned");
+        older.Sent.Should().BeEmpty();
+        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { result.MessageId }, "a delivery-request gets it");
     }
 
-    [Fact(Skip = "ADV4-1 (Low): a worker push whose session closes after the take and before the send is marked when the close's clean-up runs before the give-back by id")]
-    public async Task Adv4_1_a_worker_push_whose_session_closes_before_it_is_sent_may_still_be_pushed_live()
+    [Fact]
+    public async Task Adv4_1_a_worker_push_whose_session_closes_before_it_is_sent_comes_back_as_a_returned_live_push()
     {
-        // PickupCoordinator.PushNextLiveAsync remarks: "Anything else — not taken, the session closing
-        // first ... — gives the lease back unmarked ... (it never reached the connection, so a later
-        // wake-up pushes it)."
+        // The push worker takes the record under the newer session's live-push lease; the session
+        // closes, and its clean-up runs to its end, before the send.
         await using var fixture = PickupFixture.Create(fakeStore: true);
         var (mediator, peer) = await fixture.EnrolledAsync();
         var older = fixture.Session(peer, mediator, live: true);
@@ -96,16 +99,18 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         store.OnLease = null;
 
         newer.Sent.Should().BeEmpty("precondition: the push never reached the connection");
-        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent, "a push that never reached the connection is not a returned live push");
-        MessagePickup.TryParseDelivery(older.Sent.Single(), out var delivered, out _).Should().BeTrue();
-        delivered!.Select(m => m.Id).Should().Equal(id);
+        await MessagePickupLive.UntilAsync(() => tracker.PendingReleases == 0, "the coordinator's release ran to its end");
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "a push in hand when its session closed counts as returned");
+        older.Sent.Should().BeEmpty();
+        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { id }, "a delivery-request gets it");
     }
 
     [Fact]
-    public async Task Adv4_1_counterpart_the_same_interleaving_with_the_give_back_by_id_first_leaves_the_record_pushable()
+    public async Task Adv4_1_with_the_close_s_clean_up_held_until_after_the_coordinator_is_done_the_outcome_is_the_same()
     {
-        // The same scenario as the first ADV4-1 test, the only change being which of the two ends of
-        // the lease lands first: the outcome depends on a thread-pool race, not on what reached the wire.
+        // The same scenario as the first ADV4-1 test, the only change being that the close's clean-up
+        // is held until the coordinator has ended its part: the outcome no longer depends on which
+        // end of the lease lands first.
         await using var fixture = PickupFixture.Create(fakeStore: true);
         var (mediator, peer) = await fixture.EnrolledAsync();
         var older = fixture.Session(peer, mediator, live: true);
@@ -130,12 +135,13 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(40, 1));
         store.OnEnqueue = null;
         cleanUp.SetResult();
-        await MessagePickupLive.UntilAsync(() => store.ReleasedOwners.Count == 1 && tracker.PendingReleases == 0, "the close's clean-up ran to its end");
+        await MessagePickupLive.UntilAsync(() => store.ReleasedOwners.Count >= 1 && tracker.PendingReleases == 0, "the held releases ran to their end");
 
         result.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
         newer.Sent.Should().BeEmpty();
-        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent);
-        older.Sent.Should().ContainSingle();
+        (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Empty, "a push in hand when its session closed counts as returned");
+        older.Sent.Should().BeEmpty();
+        (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { result.MessageId }, "a delivery-request gets it");
     }
 
     // ---- what held -------------------------------------------------------------------------------

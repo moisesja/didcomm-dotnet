@@ -95,7 +95,8 @@ internal static class DeliveryReader
     /// Check the <c>recipient_did</c> of a <c>status</c> against the DID its request asked about
     /// (#100 F-1): when the request named one (<paramref name="filter"/>), the status MUST repeat it
     /// (3.0 L116, 4.0 L168), so an absent echo is refused as well as one about another DID; when it
-    /// named none, a status about one DID does not answer it. Compared as DID subjects; both
+    /// named none, a status about one DID does not answer it. Compared exactly, as DIDs are: "the
+    /// matching value", so a DID URL of the DID asked about is another value (#100 ADV3-2); both
     /// conditions are evaluated, without short circuit.
     /// </summary>
     /// <param name="echo">The status's <c>recipient_did</c>, or <c>null</c>.</param>

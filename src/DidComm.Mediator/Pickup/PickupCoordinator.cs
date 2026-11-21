@@ -54,7 +54,7 @@ internal enum LiveStep
     /// <summary>Too large for the session's envelope even alone: passed over, as a pickup does.</summary>
     PassedOver,
 
-    /// <summary>The session did not take it (no free push slot, downgraded or closing) and the lease was given back unmarked; or it took it and closed meanwhile, and the lease was ended as the close ends it.</summary>
+    /// <summary>The session, still open, did not take it (no free push slot, downgraded) and the lease was given back unmarked; or the session closed while the push was in hand (before, during or after the send), and the lease was ended as the close ends it, marked (#100 ADV4-1).</summary>
     NotSent,
 }
 
@@ -459,20 +459,25 @@ internal sealed class PickupCoordinator
                 var delivery = build(session.LocalDid, peerDid, new DeliveredMessage(id!, payload));
                 sent = await session.TrySendAsync(delivery, _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
             }
-            if (sent == ReturnRouteSendResult.Sent)
+            // A session that closed while the push was in hand (before it, during it, or after it
+            // took it): whether it reached the connection cannot be told, and the close's own
+            // clean-up may already have ended this lease. Either way the lease is ended the way the
+            // close ends it, so the outcome does not hang on which of the two runs first (#100
+            // ADV4-1): a live push that came back unacknowledged, which only a delivery-request gets
+            // from now on (owner decision on #100; 4.0 L308).
+            if (state.IsClosed)
             {
-                if (!state.IsClosed)
-                    return new PickupDeliveryResult(PickupDeliveryOutcome.PushedLive, id, peerDid);
-                // The session took the push and closed meanwhile; its close may have run its clean-up
-                // before this lease existed. End it the way the close does: a live push that came
-                // back unacknowledged, which only a delivery-request gets from now on.
                 _tracker.ReleaseLeasesInBackground(state.OwnerToken);
                 return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
             }
+            if (sent == ReturnRouteSendResult.Sent)
+                return new PickupDeliveryResult(PickupDeliveryOutcome.PushedLive, id, peerDid);
 
-            // Not pushed (no free push slot, a downgraded or closing session, an envelope over the
-            // budget): the record stays where it is and loses this lease, so a delivery-request gets
-            // it — and so may a later live push, since this one never reached the connection.
+            // Not taken by a session that is still open (no free push slot, a downgraded session, an
+            // envelope over the budget): the record loses this lease unmarked, so a delivery-request
+            // gets it and so may a later live push, since this one never reached the connection.
+            // (Should the session close before this give-back lands, the close's clean-up ends the
+            // lease first, and the record comes back marked: delivered by a delivery-request only.)
             await ReleaseQuietlyAsync(peerDid, new[] { id! }, lease.Id).ConfigureAwait(false);
             return new PickupDeliveryResult(PickupDeliveryOutcome.Queued, id, peerDid);
         }
@@ -600,12 +605,15 @@ internal sealed class PickupCoordinator
     /// Taken by the session, it stays leased until <c>messages-received</c>, the session's close or
     /// the lease timeout; a close or a timeout returns it to the queue marked
     /// (<see cref="QueuedMessage.LivePushReturned"/>), and it is never pushed live again: only a
-    /// <c>delivery-request</c> gets it (owner decision on #100; 4.0 L304, L308). Taken by a session
-    /// that closed meanwhile, its lease is ended the way the close ends it. Too large for the
-    /// session's envelope even alone, it is passed over, as a pickup does. Anything else — not
-    /// taken, the session closing first, a fault, a cancellation — gives the lease back unmarked,
-    /// once the send has ended, however long that takes (it never reached the connection, so a later
-    /// wake-up pushes it). Faults and cancellation propagate after that.
+    /// <c>delivery-request</c> gets it (owner decision on #100; 4.0 L304, L308). When the session
+    /// closes while the push is in hand — before the send, during it or after it took it — the
+    /// lease is ended the way the close ends it whatever the send reported: whether the push
+    /// reached the connection cannot be told, so it counts as returned (#100 ADV4-1). Too large for
+    /// an open session's envelope even alone, it is passed over, as a pickup does. Anything else
+    /// with the session still open — not taken, a fault, a cancellation — gives the lease back
+    /// unmarked once the send has ended, however long that takes, and a later wake-up pushes it;
+    /// should the session close before that give-back lands, its close returns the record marked.
+    /// Faults and cancellation propagate after that.
     /// </remarks>
     /// <param name="grantPeerDid">The grant; its peer gets the push.</param>
     /// <param name="ct">Cancellation token: the push's deadline.</param>
@@ -627,7 +635,6 @@ internal sealed class PickupCoordinator
             return taken == TakeResult.Removed ? LiveStep.Removed : LiveStep.Empty;
 
         var step = LiveStep.NotSent;
-        var endedByClose = false;
         try
         {
             // A take that came back after the deadline sends nothing: the record goes straight back.
@@ -636,22 +643,14 @@ internal sealed class PickupCoordinator
             {
                 var delivery = live.Build(session.LocalDid, grantPeerDid, new DeliveredMessage(record.Id, record.Payload));
                 var sent = await session.TrySendAsync(delivery, _sizing.MaxDeliveryBytes, ct).ConfigureAwait(false);
-                if (sent == ReturnRouteSendResult.Sent)
+                // Looked at again once the send has ended: a session that closed meanwhile is
+                // handled in the finally block, whatever the send reported.
+                if (state.IsClosed)
                 {
-                    // Looked at again once the lease is in use: a session that closed meanwhile may
-                    // have run its clean-up before the lease existed. The session took the push, so
-                    // its lease is ended the way the close ends it (it came back unacknowledged:
-                    // a delivery-request gets it, no live push again); the step still counts as not
-                    // delivered.
-                    if (!state.IsClosed)
-                    {
-                        step = LiveStep.Sent;
-                    }
-                    else
-                    {
-                        endedByClose = true;
-                        _tracker.ReleaseLeasesInBackground(state.OwnerToken);
-                    }
+                }
+                else if (sent == ReturnRouteSendResult.Sent)
+                {
+                    step = LiveStep.Sent;
                 }
                 else if (sent == ReturnRouteSendResult.TooLarge)
                 {
@@ -664,8 +663,20 @@ internal sealed class PickupCoordinator
         }
         finally
         {
-            if (step == LiveStep.NotSent && !endedByClose)
-                await ReleaseQuietlyAsync(grantPeerDid, new[] { record.Id }, lease.Id).ConfigureAwait(false);
+            if (step == LiveStep.NotSent)
+            {
+                // A session that closed while the push was in hand (before the send, during it, or
+                // after it took it): whether it reached the connection cannot be told, and the
+                // close's own clean-up may already have ended this lease. Either way the lease is
+                // ended the way the close ends it, so the outcome does not hang on which of the two
+                // runs first (#100 ADV4-1): returned unacknowledged, delivered by a delivery-request
+                // only from now on. An open session that did not take it (or a fault, or the
+                // deadline) gives the lease back unmarked, and a later wake-up pushes it.
+                if (state.IsClosed)
+                    _tracker.ReleaseLeasesInBackground(state.OwnerToken);
+                else
+                    await ReleaseQuietlyAsync(grantPeerDid, new[] { record.Id }, lease.Id).ConfigureAwait(false);
+            }
         }
         return step;
     }
