@@ -31,7 +31,10 @@ namespace DidComm.Mediator.Pickup;
 /// is no timer. Until one of those happens an expired record still occupies memory, so a host with
 /// many idle grants calls <see cref="MessagePickupQueue.PurgeExpiredAsync"/> now and then. A lease
 /// that has run out is simply no longer honoured by the next <see cref="LeaseAsync"/>, and so is a
-/// pass-over mark whose instant has come.
+/// pass-over mark whose instant has come. A live push's lease that has run out marks its record
+/// from that instant (<see cref="QueuedMessage.LivePushReturned"/>): a live-push lease request
+/// passes such a record by, and the mark is written onto the record when another lease replaces
+/// the one that ran out, or when its connection's leases are released.
 /// </para>
 /// </remarks>
 public sealed class InMemoryMessageStore : IMessageStore
@@ -127,7 +130,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                 _grants.Add(message.GrantPeerDid, queue);
             }
 
-            var entry = new Entry(message with { Sequence = ++_sequence });
+            // The sequence and the live-push mark are the store's: a new record has never been pushed.
+            var entry = new Entry(message with { Sequence = ++_sequence, LivePushReturned = false });
             entry.Node = queue.Order.AddLast(entry);
             queue.ById.Add(message.Id, entry);
             queue.Bytes += size;
@@ -182,6 +186,9 @@ public sealed class InMemoryMessageStore : IMessageStore
                     continue;
                 if (request.AfterSequence is { } after && message.Sequence <= after)
                     continue;
+                // Pushed live and back unacknowledged: only a delivery-request gets it now.
+                if (request.Lease.LivePush && ReturnedFromLivePush(entry, request.Now))
+                    continue;
 
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
                 // skip to a smaller one. The first record is taken whatever its size.
@@ -190,7 +197,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                     break;
 
                 Mark(entry, request.Lease);
-                (taken ??= new List<QueuedMessage>(Math.Min(request.MaxMessages, queue.ById.Count))).Add(message);
+                // Read after the mark: a live-push lease that ran out has left its mark on the record.
+                (taken ??= new List<QueuedMessage>(Math.Min(request.MaxMessages, queue.ById.Count))).Add(entry.Message);
                 total += size;
                 if (taken.Count >= request.MaxMessages)
                     break;
@@ -290,9 +298,13 @@ public sealed class InMemoryMessageStore : IMessageStore
                 return new ValueTask<int>(0);
             foreach (var entry in entries)
             {
+                // The connection closed with this push unacknowledged (or its lease had run out).
+                if (entry.LeaseLivePush)
+                    MarkReturned(entry);
                 entry.LeaseId = null;
                 entry.LeaseOwner = null;
                 entry.LeaseExpiresAt = default;
+                entry.LeaseLivePush = false;
             }
             return new ValueTask<int>(entries.Count);
         }
@@ -493,13 +505,17 @@ public sealed class InMemoryMessageStore : IMessageStore
             _grants.Remove(grantPeerDid);
     }
 
-    // Callers hold _gate. Puts the lease on the record, replacing whatever (expired) lease it had.
+    // Callers hold _gate. Puts the lease on the record, replacing whatever (expired) lease it had: a
+    // live push's lease replaced here ran out unacknowledged, and its mark stays on the record.
     private void Mark(Entry entry, MessageLease lease)
     {
+        if (entry.LeaseId is not null && entry.LeaseLivePush)
+            MarkReturned(entry);
         Unmark(entry);
         entry.LeaseId = lease.Id;
         entry.LeaseExpiresAt = lease.ExpiresAt;
         entry.LeaseOwner = lease.Owner;
+        entry.LeaseLivePush = lease.LivePush;
         if (lease.Owner is { } owner)
         {
             if (!_owners.TryGetValue(owner, out var entries))
@@ -508,7 +524,8 @@ public sealed class InMemoryMessageStore : IMessageStore
         }
     }
 
-    // Callers hold _gate.
+    // Callers hold _gate. Takes the lease off without marking the record: a give-back by its taker
+    // (a push the connection did not take), a pass-over, or the record's removal.
     private void Unmark(Entry entry)
     {
         if (entry.LeaseOwner is { } owner && _owners.TryGetValue(owner, out var entries))
@@ -520,10 +537,24 @@ public sealed class InMemoryMessageStore : IMessageStore
         entry.LeaseId = null;
         entry.LeaseOwner = null;
         entry.LeaseExpiresAt = default;
+        entry.LeaseLivePush = false;
+    }
+
+    // Callers hold _gate. Pushed live and back unacknowledged: marked, or under a live push's lease
+    // that has run out (a lease is judged when it is read; Mark writes the mark when it replaces one).
+    private static bool ReturnedFromLivePush(Entry entry, DateTimeOffset now)
+        => entry.Message.LivePushReturned || (entry.LeaseId is not null && entry.LeaseLivePush && entry.LeaseExpiresAt <= now);
+
+    // Callers hold _gate.
+    private static void MarkReturned(Entry entry)
+    {
+        if (!entry.Message.LivePushReturned)
+            entry.Message = entry.Message with { LivePushReturned = true };
     }
 
     // One stored record with its lease mark. LeaseId == null means "not leased"; a lease whose
-    // expiry has passed is ignored by the readers and overwritten by the next Mark. PassedOverUntil
+    // expiry has passed is ignored by the readers and overwritten by the next Mark — except that a
+    // live push's lease (LeaseLivePush) that ran out counts as Message.LivePushReturned. PassedOverUntil
     // is the other mark: no owner, no id, ended only by time (default = never passed over).
     private sealed class Entry(QueuedMessage message)
     {
@@ -533,6 +564,7 @@ public sealed class InMemoryMessageStore : IMessageStore
         public string? LeaseId { get; set; }
         public string? LeaseOwner { get; set; }
         public DateTimeOffset LeaseExpiresAt { get; set; }
+        public bool LeaseLivePush { get; set; }
     }
 
     // A grant's records in arrival order (O(1) append and remove, stable position across leases)

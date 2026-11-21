@@ -15,8 +15,9 @@ namespace DidComm.InteropTests.Adv98.D4;
 /// authcrypted <c>live-delivery-change</c> sent first on a fresh socket "holds the victim's live
 /// session". This measures what else it holds: every message pushed to Mallory's socket is leased to
 /// it for <see cref="MessagePickupOptions.LeaseTimeout"/>, so Bob's own HTTP pickup sees nothing of
-/// it within the lease; and once a lease ends while Mallory still holds the socket, the next wake-up
-/// pushes the record to Mallory again under a new lease.
+/// it within the lease. Once a lease ends while Mallory still holds the socket, the record is not
+/// pushed to her again (owner decision on #100, 2026-11-20: a message pushed live and returned
+/// unconfirmed waits until the recipient asks for it): Bob's own delivery-request gets it.
 /// </summary>
 public sealed class D4CapturedLiveChangeLeaseTests(ITestOutputHelper output)
 {
@@ -47,23 +48,25 @@ public sealed class D4CapturedLiveChangeLeaseTests(ITestOutputHelper output)
         var pushedAfterExpiry = mediator.PushOutcome(PushOutcomes.PushedLive);
         for (var i = 1; i < pushedAfterExpiry; i++)
             (await ReturnRouteTestHost.ReceiveAsync(socket, MediatorTestServer.Timeout)).Type.Should().Be(WebSocketMessageType.Text);
-        var afterExpiry = (await mediator.FetchAsync(bob)).Count;
+        var fetchedAfterExpiry = await mediator.FetchAsync(bob);
+        var afterExpiry = fetchedAfterExpiry.Count;
         output.WriteLine($"D4 E-28: Bob fetched {withinLease} within the lease; pushes to Mallory after expiry+arrival {pushedAfterExpiry} (outcomes [{string.Join(",", mediator.PushOutcomes)}]); Bob fetched {afterExpiry} after");
 
         withinLease.Should().Be(0, "the pushed record is leased to the session Mallory holds");
         mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.Queued);
-        // Pins today's behaviour: the second arrival re-pushes the expired record to Mallory too
-        // (3 pushes: first, then first again and second), so Bob's poll right after finds nothing.
-        pushedAfterExpiry.Should().Be(3, "the wake-up pushes the expired record again and the new one, both to Mallory");
-        afterExpiry.Should().Be(0, "every record is leased to Mallory's socket again");
+        // The second arrival is pushed to Mallory; the first, whose push came back unacknowledged when
+        // its lease ran out, is not pushed again (2 pushes in all), so Bob's poll right after gets it.
+        pushedAfterExpiry.Should().Be(2, "only the new arrival is pushed; the expired push is never pushed live again");
+        afterExpiry.Should().Be(1, "the record whose push ran out waits for Bob's own delivery-request; only the second is leased to Mallory's socket");
 
-        // Closing Mallory's socket gives the leases back in the background. Poll Bob's own pickup,
-        // the record asserted below, until both come back; the monotonic clock is only a hang guard.
+        // Closing Mallory's socket gives the second lease back in the background. Poll Bob's own
+        // pickup, the record asserted below, until it comes back; the monotonic clock is only a hang guard.
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         IReadOnlyList<DeliveredMessage> again;
-        while ((again = await mediator.FetchAsync(bob)).Count < 2 && System.Diagnostics.Stopwatch.GetElapsedTime(started) < MediatorTestServer.Timeout)
+        while ((again = await mediator.FetchAsync(bob)).Count < 1 && System.Diagnostics.Stopwatch.GetElapsedTime(started) < MediatorTestServer.Timeout)
             await Task.Delay(20);
-        again.Should().HaveCount(2, "closing Mallory's socket gives every lease back");
+        again.Should().ContainSingle("closing Mallory's socket gives the lease of the second message back")
+            .Which.Id.Should().NotBe(fetchedAfterExpiry[0].Id, "the first is leased to Bob's earlier fetch");
     }
 }

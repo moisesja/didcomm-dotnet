@@ -59,9 +59,12 @@ namespace DidComm.Mediator.Pickup;
 /// <strong>Live delivery.</strong> <c>live-delivery-change</c> with <c>true</c> on a WebSocket
 /// session turns on pushes for that session: a message arriving through
 /// <see cref="MessagePickupQueue.DeliverAsync"/> is then sent as a <c>delivery</c> with one
-/// attachment and no <c>thid</c>, and held until acknowledged. The flag belongs to the session and
-/// ends with it. On a connection that cannot do it (HTTP, or no session) the answer is a problem
-/// report with code <c>e.m.live-mode-not-supported</c>.
+/// attachment and no <c>thid</c>, and held until acknowledged. A push left unacknowledged — its
+/// session closed, or its lease ran out — goes back to the mailbox and is delivered only by a
+/// <c>delivery-request</c>: it is never pushed live again, over this connection or another (owner
+/// decision on #100; 3.0 L203, 4.0 L304, L308). The flag belongs to the session and ends with it.
+/// On a connection that cannot do it (HTTP, or no session) the answer is a problem report with code
+/// <c>e.m.live-mode-not-supported</c>.
 /// </para>
 /// <para>
 /// <strong>Errors.</strong> A malformed body from an authenticated peer throws
