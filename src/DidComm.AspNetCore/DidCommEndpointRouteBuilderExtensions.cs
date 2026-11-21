@@ -18,6 +18,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -559,6 +560,11 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// not timed. A close this endpoint starts (1008, 1009, or a STOMP close) waits at most 5 s for
     /// the peer's answer, then the connection is aborted.
     /// </para>
+    /// <para>
+    /// The callback's token is the request's abort token: it is cancelled when the peer drops the
+    /// connection, also while the callback handles a message received in full. (The registry-aware
+    /// overload instead finishes such a message, within a bound; see there.)
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -636,6 +642,20 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// open.
     /// </para>
     /// <para>
+    /// <b>A message received in full is handled even when the connection ends.</b> Once a message's
+    /// last frame has been read, its unpack, admission, dispatch and reply run under a token of their
+    /// own, not the request's abort. While the connection lives nothing cancels that token: a handler
+    /// has no time limit of its own. When the connection ends with the message in hand (the peer
+    /// dropped it, or the server ended it: a broken socket, or an evicted peer that did not answer the
+    /// close frame), the message is still handled, for at most the close grace (5 s, timed on the
+    /// container's <see cref="TimeProvider"/>) and only until the host starts to stop
+    /// (<c>IHostApplicationLifetime.ApplicationStopping</c>); then the handler's token is cancelled. So
+    /// a one-way message whose sender drops the connection right after sending it, such as a Message
+    /// Pickup 4.0 <c>messages-received</c>, is still applied. Nothing more is read from a connection
+    /// that ended, so a message it had not received in full is never handled; and its session closes
+    /// at once, so a reply or a push made meanwhile is refused (<c>false</c>) and nothing is written.
+    /// </para>
+    /// <para>
     /// There is no per-message wire acknowledgement on a WebSocket (nothing is written back for an
     /// accepted envelope), so the dispatch carries none: <see cref="ProtocolContext.Acknowledged"/>
     /// is already complete and a handler that defers past the acknowledgement — the mediator's
@@ -656,7 +676,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// on, STOMP off — for this endpoint only; the host's other WebSocket endpoints keep the
     /// configured options. Both apply <see cref="DidCommReceiveOptions.MessageReceiveTimeout"/>
     /// (the mediator endpoint through the copy): the first message is timed from the accept, every
-    /// later one from its first part, and the wait between messages is not timed.
+    /// later one from its first part, and the wait between messages is not timed. Both finish a
+    /// message received in full when its connection ends, within the close grace and until the host
+    /// starts to stop (#100 OD-8, <see cref="WebSocketMessageHandling"/>).
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern.</param>
@@ -686,6 +708,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             if (mediatorEndpoint)
                 receiveOptions = receiveOptions.ForMediatorEndpoint();
             var time = Clock(sp);
+            // OD-8: a message received in full is still handled when its connection ends, until the
+            // close grace runs out or the host starts to stop.
+            var stopping = sp.GetService<IHostApplicationLifetime>()?.ApplicationStopping ?? CancellationToken.None;
             using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
             using var deadline = WebSocketMessageDeadline.StartAtAccept(time, receiveOptions.MessageReceiveTimeout, timeoutLog);
             var client = sp.GetRequiredService<DidCommClient>();
@@ -700,7 +725,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? admissionEndpoint.ResolveRegistry(sp, logger) : null,
                 receiveOptions.AllowSameSocketReplies && !receiveOptions.UseStomp ? InboundAdmissionEndpoint.ResolveSessionOptions(sp).MaxPendingPushes : 0);
 
-            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, returnRoute, deadline, logger, httpContext.RequestAborted)
+            await ReceiveLoopWithDispatchAsync(socket, client, coreOptions, receiveOptions, dispatcher, returnRoute, deadline, time, stopping, logger, httpContext.RequestAborted)
                 .ConfigureAwait(false);
         });
     }
@@ -724,11 +749,16 @@ public static class DidCommEndpointRouteBuilderExtensions
         ProtocolDispatcher dispatcher,
         WebSocketReturnRoute returnRoute,
         WebSocketMessageDeadline deadline,
+        TimeProvider time,
+        CancellationToken stopping,
         ILogger? logger,
         CancellationToken requestAborted)
     {
         // The connection's own token: cancelled by a client abort, or by the session when the socket
-        // is broken (writer fault) or an evicted peer never answers the close frame (JC-21).
+        // is broken (writer fault) or an evicted peer never answers the close frame (JC-21). Reads use
+        // it, so once it is cancelled nothing more is read. A message already received in full is
+        // handled under a token of its own (WebSocketMessageHandling, #100 OD-8), which any of these
+        // ends does not cancel: from then on its handling has the close grace, or until the host stops.
         using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
         var ct = connectionCts.Token;
         var maxBytes = coreOptions.MaxReceiveBytes;
@@ -758,6 +788,8 @@ public static class DidCommEndpointRouteBuilderExtensions
             // dispatched (without a session) — until the peer's answering close frame completes the
             // handshake, bounded by the eviction backstop (JC-21). Stopping at CloseSent would dispose
             // the socket mid-handshake whenever the eviction landed while this loop was dispatching.
+            // Once the connection token is cancelled nothing more is read (OD-8): the message in hand
+            // when it ended was the last one handled, so a connection has at most one such finish.
             while (!ct.IsCancellationRequested && socket.State is WebSocketState.Open or WebSocketState.CloseSent)
             {
                 using var ms = new MemoryStream();
@@ -813,11 +845,22 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // for the next one is untimed (an idle session stays open).
                 deadline.MessageReceived();
 
+                // #100 OD-8: everything done for this message from here — its STOMP frame, unpack,
+                // admission, dispatch and reply — runs under its own token, not the connection's. If
+                // the connection ends now (the peer dropped it, or the session ended it), the message is
+                // still handled: from that moment it has the close grace (5 s, on the container's clock),
+                // or until the host starts to stop. While the connection lives nothing cancels it.
+                using var handling = WebSocketMessageHandling.Start(ct, time, WebSocketReturnRouteSession.DefaultCloseGrace, stopping, logger);
+                var handlingToken = handling.Token;
+
                 string packed;
                 if (stomp is not null)
                 {
+                    // A SEND only hands over its envelope (no write), so a complete SEND is dispatched
+                    // after the connection ended too. A CONNECT's CONNECTED write after the end goes
+                    // nowhere or fails on the dead socket as a WebSocketException (one Debug line below).
                     var (envelope, closeConnection) = await stomp.ProcessAsync(
-                        socket, ms.ToArray(), receiveOptions.AcceptedMediaTypes, logger, ct).ConfigureAwait(false);
+                        socket, ms.ToArray(), receiveOptions.AcceptedMediaTypes, logger, handlingToken).ConfigureAwait(false);
                     if (closeConnection)
                         return;
                     if (envelope is null)
@@ -837,7 +880,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                 UnpackResult unpacked;
                 try
                 {
-                    unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
+                    unpacked = await client.UnpackAsync(packed, handlingToken).ConfigureAwait(false);
                 }
                 catch (MalformedMessageException ex)
                 {
@@ -849,7 +892,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding undecryptable envelope ({ExceptionType}).", ex.GetType().Name);
                     continue;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                catch (Exception ex) when (ex is not OperationCanceledException || !handlingToken.IsCancellationRequested)
                 {
                     // ANY other unpack failure is a property of THIS envelope, not of the connection.
                     // Without this the first such message escapes the loop and tears down a socket
@@ -860,8 +903,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // DID-resolution timeout, which arrives as a TaskCanceledException with our token
                     // NOT cancelled. The
                     // HTTP path already collapses every unpack failure into one opaque rejection for
-                    // the same reason; this is the socket equivalent. A genuine shutdown (our token
-                    // cancelled) still propagates and ends the loop.
+                    // the same reason; this is the socket equivalent. The end of the message's handling
+                    // (its token cancelled: the close grace ran out after the connection ended, or the
+                    // host is stopping) still propagates and ends the loop.
                     SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding rejected envelope ({ExceptionType}, innermost: {InnerExceptionType}).", ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
@@ -891,7 +935,10 @@ public static class DidCommEndpointRouteBuilderExtensions
                     {
                         if (session is null)
                         {
-                            if (admission.SessionEligible && (socketPeer is null || IsPair(socketPeer, socketLocal, admission)))
+                            // A connection that already ended opens no session (OD-8: its message in
+                            // hand is still handled): one registered now would only take a place in
+                            // the registry, or evict a live session of the same peer.
+                            if (admission.SessionEligible && !ct.IsCancellationRequested && (socketPeer is null || IsPair(socketPeer, socketLocal, admission)))
                             {
                                 socketPeer ??= admission.PeerDid;
                                 socketLocal ??= admission.LocalDid;
@@ -922,8 +969,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                 DispatchOutcome outcome;
                 try
                 {
-                    // No wire acknowledgement on a WebSocket (#90): the dispatch carries none.
-                    outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, Task.CompletedTask, dispatchSession, ct).ConfigureAwait(false);
+                    // No wire acknowledgement on a WebSocket (#90): the dispatch carries none. The
+                    // handler's token is the message's own (OD-8), not the connection's.
+                    outcome = await dispatcher.DispatchAsync(unpacked, client, coreOptions, Task.CompletedTask, dispatchSession, handlingToken).ConfigureAwait(false);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -942,10 +990,11 @@ public static class DidCommEndpointRouteBuilderExtensions
                 }
 
                 // A reply rides the session only; without one it is logged, not sent (a header-less
-                // message on a socket without a session gets no reply — FR-RR-01/05).
+                // message on a socket without a session gets no reply — FR-RR-01/05). After the
+                // connection ended the session is closed, so the reply is refused quietly (false).
                 var returned = false;
                 if (dispatchSession is not null && outcome is { Result: DispatchResult.ReplyProduced, Reply: not null })
-                    returned = await dispatchSession.TrySendAsync(outcome.Reply, ct).ConfigureAwait(false);
+                    returned = await dispatchSession.TrySendAsync(outcome.Reply, handlingToken).ConfigureAwait(false);
                 LogOutcome(logger, outcome, returnedOnSession: returned);
             }
         }
@@ -954,7 +1003,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                                    && !requestAborted.IsCancellationRequested)
         {
             // Server-initiated end of the connection: an evicted peer never answered the close frame,
-            // or the session's writer found the socket broken. Nothing more to read or write.
+            // or the session's writer found the socket broken; or, after such an end, the close grace
+            // or the host's shutdown ended the handling of the message in hand (OD-8). Nothing more
+            // to read or write. After a client abort a cancellation propagates, as before.
         }
         catch (WebSocketException ex)
         {
