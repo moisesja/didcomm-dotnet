@@ -501,8 +501,9 @@ public sealed class PickupClient
     /// <strong>Time.</strong> Each message gets its own <see cref="MediatorClientOptions.RequestTimeout"/>.
     /// Over HTTP the response shows at once whether a status came. On a WebSocket, silence cannot be
     /// told from a slow answer, so once a 3.0 message is sent the client waits half of
-    /// <c>RequestTimeout</c> for its status, then moves on: to the next message, or it returns
-    /// <c>null</c>. Under 4.0 nothing is waited for after a message: it is only sent.
+    /// <c>RequestTimeout</c> for its status (never past that message's <c>RequestTimeout</c>), then
+    /// moves on: to the next message, or it returns <c>null</c>. Under 4.0 nothing is waited for
+    /// after a message: it is only sent.
     /// </para>
     /// <para>
     /// <strong>Which status answers which message.</strong> DIDComm threading: a reply carries the

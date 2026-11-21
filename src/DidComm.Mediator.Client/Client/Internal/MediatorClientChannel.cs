@@ -384,10 +384,12 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
         // On any other route (a WebSocket) silence cannot be told from a slow answer. For a request
         // the mediator may leave unanswered, the answer is waited for answerWait once the request is
-        // sent (the send completed above, or an answer already won), within the request's deadline;
-        // none by then is an outcome, decided by the same terminal CAS, so an answer that won the
-        // race still holds. A send that did not complete never gets here: it ended above, with the
-        // deadline, as a TimeoutException (or with its transport failure).
+        // sent (the send completed above, or an answer already won), and never past the request's
+        // deadline. No answer by the end of either is an outcome, not a failure: the request was
+        // sent. The terminal CAS decides it, so an answer that won the race still holds. A send that
+        // did not complete never gets here: it ended above, with the deadline, as a TimeoutException
+        // (or with its transport failure). The caller's cancellation and the disposal are decided
+        // below, as for any request.
         if (!route.IsHttp && answerOptional && answerWait is { } wait && pending.IsWaiting)
         {
             using var window = new GuardedDeadline(Time, wait, deadline.Token);
@@ -395,14 +397,16 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             {
                 await pending.Completion.Task.WaitAsync(window.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (window.TimedOut)
+            catch (OperationCanceledException) when ((window.TimedOut || deadline.TimedOut) && !ct.IsCancellationRequested && !IsDisposed)
             {
-                if (pending.TryAbandon())
+                // The window: give up here. The deadline: its own registration already gave up, so
+                // only an answer that won first (Completed) is left to take.
+                if (pending.TryAbandon() || !pending.IsCompleted)
                     return null;
             }
             catch (OperationCanceledException)
             {
-                // The request's deadline, the caller or the shutdown: decided below, as for any request.
+                // The caller or the shutdown: decided below, as for any request.
             }
         }
 

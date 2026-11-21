@@ -101,7 +101,11 @@ internal interface IMediatorExchange
         {
             return await ExchangeAsync(route, request, spec, mediatorDid, localDid, window.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested && window.TimedOut)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(ct);
+        }
+        catch (OperationCanceledException) when (window.TimedOut)
         {
             return null;
         }
