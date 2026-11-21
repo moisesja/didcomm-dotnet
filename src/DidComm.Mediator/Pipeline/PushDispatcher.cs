@@ -15,17 +15,20 @@ namespace DidComm.Mediator.Pipeline;
 /// <strong>The store decides what is pushed (D-1).</strong> The dispatcher keeps no per-message
 /// state. The forward sink stores a message and wakes its grant (<see cref="Wake"/>); an operation
 /// for that grant then takes, one at a time, the next message the store hands out at that moment
-/// (<see cref="PickupCoordinator.TakeNextAsync"/>: due, unexpired, unleased, not passed over, oldest
-/// first, its recipient DID still registered under the grant) and pushes it. A message that expired,
-/// was acknowledged, purged or picked up is therefore never pushed and never occupies anything.
+/// (<see cref="PickupCoordinator.TakeNextAsync"/>: due, unexpired, unleased, not passed over, not a
+/// live push that came back unacknowledged, oldest first, its recipient DID still registered under
+/// the grant) and pushes it. A message that expired, was acknowledged, purged or picked up is
+/// therefore never pushed and never occupies anything.
 /// </para>
 /// <para>
 /// <strong>In the delivery order (D6).</strong> While the grant's peer has a live session with live
 /// delivery on, the messages that arrived after it turned live delivery on go over that session
 /// (<see cref="PickupCoordinator.PushNextLiveAsync"/>, <c>Pushed-Live</c>): each stays leased to the
-/// session until <c>messages-received</c>, its close or the lease timeout; one too large for the
-/// session's envelope is passed over, as a pickup does; one the session does not take is given back
-/// and ends the operation. "Arrived after" is arrival order, not time: the store numbers every record
+/// session until <c>messages-received</c>, its close or the lease timeout — after a close or a
+/// timeout it waits in the queue for a <c>delivery-request</c> and is never pushed live again (owner
+/// decision on #100; Message Pickup 4.0 L304, L308; <see cref="QueuedMessage.LivePushReturned"/>);
+/// one too large for the session's envelope is passed over, as a pickup does; one the session does
+/// not take is given back and ends the operation. "Arrived after" is arrival order, not time: the store numbers every record
 /// as it stores it (<see cref="QueuedMessage.Sequence"/>), and the session's mark is the highest
 /// number in the status that answered its turning live delivery on — so a message is either counted
 /// in that status, and the recipient's to pick up (FR-PICK-06), or pushed, whatever the clocks do.
@@ -39,8 +42,9 @@ namespace DidComm.Mediator.Pipeline;
 /// <para>
 /// <strong>Retries.</strong> A live push the session did not take (<c>NotSent</c>: no free push
 /// slot, downgraded or closing) — or that faulted, or reached its deadline and was then given back —
-/// is tried again at the grant's next wake-up: that is at most one live attempt per wake-up (the
-/// operation ends there, and a deadline also pauses the grant), a wake-up is a stored message or a
+/// is tried again at the grant's next wake-up (it never reached the connection; one the session took
+/// and that came back unacknowledged is not tried again): that is at most one live attempt per
+/// wake-up (the operation ends there, and a deadline also pauses the grant), a wake-up is a stored message or a
 /// session turning live delivery on, and nothing is written to the connection unless the session
 /// takes it — so it cannot multiply the traffic of what was forwarded. One too large for the session
 /// is passed over, for a period that doubles each time. Pickup always works. Delivery is

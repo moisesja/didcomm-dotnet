@@ -57,7 +57,9 @@ namespace DidComm.Mediator.Pickup;
 /// <strong>Live delivery.</strong> <c>live-delivery-change</c> with <c>true</c> on a WebSocket
 /// session turns on pushes for that session, framed as 4.0 <c>delivery</c> messages with one
 /// attachment and no <c>thid</c> (they answer no request), held until a <c>messages-received</c>
-/// names them and handed back to the queue when the session closes or the lease runs out. The
+/// names them and handed back to the queue when the session closes or the lease runs out: a push
+/// left unacknowledged goes back to the mailbox and is delivered only by a <c>delivery-request</c>,
+/// never pushed live again (L304, L308; the same rule as 3.0, since one mailbox serves both). The
 /// framing is the session's, set by the version of its last <c>live-delivery-change</c> that turned
 /// live delivery on; turning it off in either version turns it off. On a connection that cannot do
 /// it (HTTP, or no session) the answer is the 4.0 problem report

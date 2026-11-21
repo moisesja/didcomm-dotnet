@@ -66,9 +66,11 @@ public sealed class MessagePickupOptions
     /// <summary>
     /// How long a delivered message waits for its <c>messages-received</c> before it may be
     /// delivered again (FR-PICK-04). Over HTTP this is the only way a lease ends; over a WebSocket
-    /// it also ends when the connection closes. Default 60 seconds; at most 24 hours. It is also the
-    /// first period a message that does not fit the recipient's envelope is passed over for (the
-    /// period doubles each time such a message is tried again).
+    /// it also ends when the connection closes. A live push whose lease ends unacknowledged is
+    /// delivered again only by a <c>delivery-request</c>, never pushed live again. Default 60
+    /// seconds; at most 24 hours. It is also the first period a message that does not fit the
+    /// recipient's envelope is passed over for (the period doubles each time such a message is
+    /// tried again).
     /// </summary>
     public TimeSpan LeaseTimeout { get; set; } = TimeSpan.FromSeconds(60);
 

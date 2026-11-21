@@ -344,7 +344,9 @@ public sealed class PickupV4LiveQa2Tests
         // in the other version: the session's pushes are then framed in that version (a session's
         // framing is its last live-delivery-change). The stream lets such a push go unacknowledged;
         // the mediator's lease on it runs out (its clock) and the stream's next cycle (its clock)
-        // takes it in its own version.
+        // drains it in its own version. A push that came back unacknowledged is never pushed live
+        // again (owner decision on #100, 2026-11-20; 4.0 L304), so the cycle's live-delivery-change,
+        // which wakes the pushes, cannot race its drain for it: only the drain delivers it.
         var observer = new PickupWireObserver();
         var clientSeen = new PickupWireObserver();
         var clientTime = new QaManualTimeProvider();
@@ -392,14 +394,25 @@ public sealed class PickupV4LiveQa2Tests
         var taken = stream.Current.Id;
         var next = PickupE2E.MoveNext(stream);
         await Qa2.StoreHoldsAsync(mediator, 0, "acknowledged in the stream's version");
+        // The store's removal is a neighbour of what the assertions below read (L-065 rule 1): under
+        // 3.0 the stream's messages-received is an exchange, and the mediator removes the message
+        // before its status answer reaches the stream. A stop that lands in between cancels that
+        // exchange, and the stream, not knowing it was applied, acknowledges the message again as it
+        // ends — two acknowledgements (the one failure of a full run on fc1e120, forced here in the
+        // #100 diagnosis). So wait for the stream itself: no request waiting for its answer, and its
+        // only timer the next cycle, which it arms only once the acknowledgement has ended.
+        await MediatorTestServer.WaitUntilAsync(() => harness.Channel.PendingCount == 0 && clientTime.HasOnlyTimerDueIn(Poll), "the stream's acknowledgement ended and it waits for its next cycle");
         await PickupE2E.StopAsync(stream, next, cts);
+        await mediator.PushesIdleAsync();
+        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(1, "the push that came back unacknowledged was not pushed again");
 
         await mediator.FlushObserversAsync();
         var acks = observer.From(bob.Did).Where(r => r.Kind.EndsWith("/messages-received", StringComparison.Ordinal)).ToArray();
         acks.Should().OnlyContain(r => r.Kind == streamVersion + "/messages-received");
         acks.SelectMany(r => r.Body!["message_id_list"]!.AsArray().Select(n => n!.GetValue<string>())).Should().Equal(taken);
         await harness.Dispatcher.FlushObserversAsync(MediatorTestServer.Timeout);
-        clientSeen.From(mediator.Did).Where(r => r.Kind == streamVersion + "/delivery" && r.Attachments == 1).Should().ContainSingle("the message reached the stream once in its own version, pushed or drained");
+        clientSeen.From(mediator.Did).Where(r => r.Kind == streamVersion + "/delivery" && r.Attachments == 1).Should().ContainSingle("the message reached the stream once in its own version")
+            .Which.Thid.Should().NotBeNull("the cycle's delivery-request drained it: it was not pushed live again");
     }
 
     // ---- 8. the count limit and the byte budget together (L255) ---------------------------------------

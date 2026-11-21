@@ -18,7 +18,8 @@ namespace DidComm.InteropTests.Mediator;
 /// and on a WebSocket session downgraded by <c>return_route: none</c> (no answer can travel there, and
 /// nothing changes) — and a 4.0 live session that never acknowledges: what it can hold is bounded by
 /// the session's push bound and the grant's quota throughout, and its close gives every push back to
-/// the queue (L308).
+/// the queue (L308). And QA2-Q1 as the owner ruled it: a push whose lease ran out is not pushed live
+/// again; it waits for a delivery-request (L304).
 /// </summary>
 public sealed class PickupV4LiveWireQa2Tests
 {
@@ -155,18 +156,20 @@ public sealed class PickupV4LiveWireQa2Tests
         await again.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
     }
 
-    // ---- a reading the spec leaves open (reported as QA2-Q1, not a defect) ---------------------------
+    // ---- QA2-Q1, as the owner ruled it ----------------------------------------------------------------
 
     [Fact]
-    public async Task Qa2_Q1_A_live_push_whose_lease_ran_out_unacknowledged_is_pushed_live_again_at_the_grants_next_wake_up()
+    public async Task Qa2_Q1_A_live_push_whose_lease_ran_out_unacknowledged_is_not_pushed_live_again_and_waits_for_a_delivery_request()
     {
-        // Documents what the mediator does today, for the owner to rule on. 4.0 L308: "If a message is
-        // not acknowledged, the message MUST be added to the queue for later pickup." L304: "Messages
-        // already in the queue are not affected by Live Mode; they MUST still be requested with
-        // delivery-request messages." The mediator pushes, at each wake-up of the grant, the oldest
-        // deliverable message that arrived after the session went live — which includes one whose
-        // earlier push was never acknowledged and whose lease ran out. So m1, re-queued, reaches the
-        // live connection again as a push (before m2), not only through a delivery-request.
+        // QA-2 reported this reading as QA2-Q1: the mediator pushed, at each wake-up of the grant, the
+        // oldest deliverable message that arrived after the session went live — including one whose
+        // earlier push was never acknowledged and whose lease ran out, so m1 reached the live
+        // connection again as a push. The owner ruled (2026-11-20, #88, "Never push it live again"): a
+        // message pushed live and returned unconfirmed waits until the recipient asks for it, in 3.0
+        // and 4.0 alike. 4.0 L304: "Messages already in the queue are not affected by Live Mode; they
+        // MUST still be requested with delivery-request messages." L308: "If a message is not
+        // acknowledged, the message MUST be added to the queue for later pickup." So at m2's wake-up
+        // only m2 is pushed, and a delivery-request gets m1.
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
@@ -180,14 +183,16 @@ public sealed class PickupV4LiveWireQa2Tests
         mediator.Clock.Advance(new MessagePickupOptions().LeaseTimeout + TimeSpan.FromSeconds(1)); // never acknowledged: back in the queue (L308)
 
         var m2 = await Qa.SendNoteAsync(mediator, alice, bob, content: "m2");
-        var again = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery40(thid: null).Should().ContainSingle().Subject;
         var next = (await mediator.ReceiveOverSocketAsync(socket, bob)).Delivery40(thid: null).Should().ContainSingle().Subject;
         await mediator.PushesIdleAsync();
 
-        again.Id.Should().Be(pushed.Id, "today the re-queued m1 is pushed live again, first, at m2's wake-up");
-        (await PickupV4Qa2.InnerIdsAsync(bob, new[] { again, next })).Should().Equal(m1.Id, m2.Id);
-        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(3);
-        (await PickupV4Qa2.Ack40OverSocketAsync(mediator, socket, bob, again.Id, next.Id)).MessageCount.Should().Be(0);
+        (await PickupV4Qa2.InnerIdsAsync(bob, new[] { next })).Should().Equal(new[] { m2.Id }, "only the newly arriving message is pushed (L302); the returned m1 is not pushed again");
+        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(2);
+        var fetched = await PickupV4Qa2.Fetch40OverSocketAsync(mediator, socket, bob);
+        fetched.Select(m => m.Id).Should().Equal(new[] { pushed.Id }, "m1 must be requested with a delivery-request (L304)");
+        (await PickupV4Qa2.InnerIdsAsync(bob, fetched)).Should().Equal(m1.Id);
+        (await PickupV4Qa2.Ack40OverSocketAsync(mediator, socket, bob, pushed.Id, next.Id)).MessageCount.Should().Be(0);
+        mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(2);
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
     }
 }

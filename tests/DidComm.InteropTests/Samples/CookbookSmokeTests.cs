@@ -92,6 +92,8 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("[bob] discarded the unopenable one; status = 0 message(s)"); // DD: AckAsync discards
         transcript.Should().Contain("EnqueueAsync m1 again = DuplicateId");                 // DD.3: store contract
         transcript.Should().Contain("Store bounded at 2 per grant: EnqueueAsync ×3 = Enqueued, Enqueued, GrantMessageLimitReached"); // DD.3
+        transcript.Should().Contain("connection-2 closed unacknowledged; the next live push takes = b2 (#2)"); // DD.3: a returned live push is not pushed again
+        transcript.Should().Contain("A delivery-request takes = b1 (came back from a live push: True)");      // DD.3: only a delivery-request gets it
         transcript.Should().Contain("[bob] fetch again = drained True, status carried False");     // DD: the wallet negotiated 4.0, whose drained fetch has no status
         transcript.Should().Contain("[bob] status after the drain (GetStatusAsync) = 0 message(s)"); // DD: so it asks
         transcript.Should().MatchRegex(@"\[bob, 4\.0\] status = 1 message\(s\), oldest arrived at \d+ s, longest waited not reported"); // DD: 4.0 has no longest_waited_seconds

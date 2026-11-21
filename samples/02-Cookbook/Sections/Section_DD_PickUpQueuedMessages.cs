@@ -393,6 +393,19 @@ public static class Section_DD_PickUpQueuedMessages
         foreach (var id in new[] { "b1", "b2", "b3" })
             bounded.Add(await small.EnqueueAsync(Record(id, bob, bobPublic), lease: null, now, ct));
         ctx.Narrator.Value("Store bounded at 2 per grant: EnqueueAsync ×3", string.Join(", ", bounded));
+
+        // A live push says so on its lease. When such a lease ends without an acknowledgement — its
+        // connection closed (ReleaseLeasesAsync) or it ran out — the store marks the record, and from
+        // then on only a delivery-request takes it: a message pushed live and returned unconfirmed
+        // is never pushed live again, it waits until the recipient asks for it.
+        var pushLease = new MessageLease(Owner: "connection-2", ExpiresAt: now.AddSeconds(60)) { LivePush = true };
+        var pushed = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 1, 64 * 1024, now, pushLease), ct);
+        ctx.Narrator.Value("LeaseAsync for a live push over connection-2", $"{Ids(pushed)}; a live push's lease: {pushLease.LivePush}");
+        await small.ReleaseLeasesAsync("connection-2", ct);
+        var nextPush = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 10, 64 * 1024, now, new MessageLease("connection-3", now.AddSeconds(60)) { LivePush = true }), ct);
+        ctx.Narrator.Value("connection-2 closed unacknowledged; the next live push takes", Ids(nextPush));
+        var asked = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 10, 64 * 1024, now, new MessageLease(null, now.AddSeconds(60))), ct);
+        ctx.Narrator.Value("A delivery-request takes", string.Join(", ", asked.Select(m => $"{m.Id} (came back from a live push: {m.LivePushReturned})")));
     }
 
     private static string Ids(IReadOnlyList<QueuedMessage> records)

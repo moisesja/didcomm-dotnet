@@ -232,7 +232,7 @@ public readonly record struct PickupDeliveryResult(PickupDeliveryOutcome Outcome
 /// <summary>The outcomes of <see cref="MessagePickupQueue.DeliverAsync"/>.</summary>
 public enum PickupDeliveryOutcome
 {
-    /// <summary>Stored and pushed over the recipient's live connection; held (leased) until the recipient acknowledges it, the lease runs out or the connection closes — after which it is deliverable by <c>delivery-request</c>.</summary>
+    /// <summary>Stored and pushed over the recipient's live connection; held (leased) until the recipient acknowledges it, the lease runs out or the connection closes — after which it is deliverable by <c>delivery-request</c> only: it is never pushed live again.</summary>
     PushedLive,
 
     /// <summary>Stored, waiting for a <c>delivery-request</c>. Also the outcome when a live push was tried and not taken, or its session closed while it was being sent, or the call failed or was cancelled after the message was stored (the recipient may then see the message twice).</summary>
