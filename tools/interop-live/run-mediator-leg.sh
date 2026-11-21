@@ -23,8 +23,10 @@
 # fetch; DIDComm messages go out as text frames, owner decision O-98-1 = 1a, and the wallet sets
 # RequireCreatedTime = false because Identus stamps no created_time), R-1 python recipient via the
 # dotnet mediator, R-2 the wallet against the dotnet mediator (attribution control, including a
-# WebSocket call). Live mode against Identus is an observation (O-1b): it delivers at the next
-# poll (issue #134). Observations are recorded in a separate table and in
+# WebSocket call). The wallet pins no Message Pickup version: it negotiates 3.0 with Identus (the
+# only version Identus discloses; the M cells check it) and 4.0 with our mediator (R-2 checks it,
+# and its expect-pickup-v3 twin must fail). Live mode against Identus is an observation (O-1b):
+# it delivers at the next poll (issue #134). Observations are recorded in a separate table and in
 # mediator-observations.json; they never fail the leg.
 #
 # Usage: bash tools/interop-live/run-mediator-leg.sh [--negative-controls | --up]
@@ -122,7 +124,7 @@ LEG_WATCHDOG_S="${MEDIATOR_LEG_DEBUG_WATCHDOG:-$LEG_WATCHDOG_S}"
 # The cells this mode runs, in order. "<id>|<sabotage>" (sabotage empty = the real cell). In
 # --negative-controls mode M-1's "Identus stopped after the 202" runs last: it stops Identus.
 GATE_PLAN="B-0| M-1| M-2| M-3| M-4| M-5| M-6| M-8| R-1| R-2|"
-NC_PLAN="B-0|forbid-client M-1|pin-v3 M-1|unregistered-next M-1|wrong-message M-2|expect-13 M-3|no-forward M-4|no-proxy M-5|no-proxy M-5|ws-wrong-path M-6|with-trusted-proxy M-6|no-proxy-env M-6|proxy-in-b M-6|squid-request-in-window M-8|no-relax M-8|fetch-no-relax R-2|expect-v2 R-2|ws-wrong-path R-1|no-created-time R-1|v2-disabled M-1|identus-stopped"
+NC_PLAN="B-0|forbid-client M-1|pin-v3 M-1|unregistered-next M-1|wrong-message M-2|expect-13 M-3|no-forward M-4|no-proxy M-5|no-proxy M-5|ws-wrong-path M-6|with-trusted-proxy M-6|no-proxy-env M-6|proxy-in-b M-6|squid-request-in-window M-8|no-relax M-8|fetch-no-relax R-2|expect-v2 R-2|expect-pickup-v3 R-2|ws-wrong-path R-1|no-created-time R-1|v2-disabled M-1|identus-stopped"
 case "$MODE" in nc) PLAN="$NC_PLAN" ;; *) PLAN="$GATE_PLAN" ;; esac
 if [ -n "${MEDIATOR_LEG_ONLY:-}" ]; then
     filtered=""
@@ -819,8 +821,8 @@ cell_M1() { # dotnet recipient via Identus over HTTP (E-30, E-51)
         step "sabotage: stop Identus after the 202"
         docker stop "$IDENTUS" >/dev/null
     fi
-    step "wallet fetches until drained (status ≥ 1 first; final status 0)"
-    wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --allow-hosts 127.0.0.1 ||
+    step "wallet fetches until drained (status ≥ 1 first; final status 0; Message Pickup 3.0 negotiated)"
+    wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --allow-hosts 127.0.0.1 --expect-pickup-version 3.0 ||
         { cfail "fetch: $(wallet_error fetch)"; return 1; }
     local expected="$C/m.msg.json"
     if [ "$sab" = wrong-message ]; then
@@ -852,7 +854,7 @@ cell_M2() { # burst of 12 via Identus, fetched with limit 5 (E-35; Identus ignor
         --meta-out "$C/burst.json" || { cfail "not every forward was accepted with 202"; return 1; }
     step "wallet fetches with limit 5 until drained, expecting $expect"
     wallet fetch fetch --state "$C/w.state.json" --expect-count "$expect" --limit 5 --out-dir "$C/fetch" \
-        --allow-hosts 127.0.0.1 || { cfail "fetch: $(wallet_error fetch)"; return 1; }
+        --allow-hosts 127.0.0.1 --expect-pickup-version 3.0 || { cfail "fetch: $(wallet_error fetch)"; return 1; }
     step "the 12 fetched messages are exactly the 12 sent"
     "$VPY" -I -c 'import glob, json, os, sys
 d = sys.argv[1]
@@ -899,7 +901,7 @@ cell_M4() { # HTTP through TrustedProxy (E-47, HTTP half)
     peer post --url http://identus-px:8080 --proxy "$SQUID_URL" --in "$C/m.fwd.json" --expect-status 202 \
         --meta-out "$C/m.post.json" || { cfail "forward through squid: HTTP $(json_get "$C/m.post.json" status)"; return 1; }
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --allow-hosts identus-px \
-        --resolve-dns-names false ${proxy[@]+"${proxy[@]}"} || { cfail "fetch through the proxy: $(wallet_error fetch)"; return 1; }
+        --resolve-dns-names false --expect-pickup-version 3.0 ${proxy[@]+"${proxy[@]}"} || { cfail "fetch through the proxy: $(wallet_error fetch)"; return 1; }
     assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
     # Not gated: identus-px has no route but squid (no host port; its name resolves only on the
     # leg's network), so the passing flow is the proof. The window is kept as evidence, with the
@@ -977,7 +979,7 @@ cell_M6() { # process proxy variables are ignored (E-48)
         { cfail "forward not accepted"; return 1; }
     WALLET_ENV=("${envp[@]}")
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --allow-hosts 127.0.0.1 \
-        --expect-env-proxy "$SQUID_URL" ${proxy[@]+"${proxy[@]}"}
+        --expect-env-proxy "$SQUID_URL" --expect-pickup-version 3.0 ${proxy[@]+"${proxy[@]}"}
     rc=$?
     WALLET_ENV=()
     [ "$rc" = 0 ] || { cfail "fetch with proxy variables set: $(wallet_error fetch)"; return 1; }
@@ -1040,7 +1042,7 @@ cell_M8() { # dotnet recipient via Identus over WebSocket (O-98-1 = 1a: text fra
     # the cell fast; the client is unchanged.
     step "the wallet fetches over WebSocket until drained"
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --out-dir "$C/fetch" --ws-endpoint auto \
-        --request-timeout 3 --wait-timeout 15 --allow-hosts 127.0.0.1 ${fetch_relax[@]+"${fetch_relax[@]}"} ||
+        --request-timeout 3 --wait-timeout 15 --allow-hosts 127.0.0.1 --expect-pickup-version 3.0 ${fetch_relax[@]+"${fetch_relax[@]}"} ||
         { cfail "fetch over WebSocket: $(wallet_error fetch)"; return 1; }
     assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
 }
@@ -1075,9 +1077,11 @@ cell_R1() { # python recipient via the dotnet mediator (reverse)
     assert_message authcrypt "$C/m.msg.json" "$C/pick/item-1.unpacked.json" || return 1
 }
 
-cell_R2() { # attribution control: the same wallet against the dotnet mediator (CM 3.0)
-    local version=3.0 ws="$SERVE_WS"
+cell_R2() { # attribution control: the same wallet against the dotnet mediator (CM 3.0, Message Pickup 4.0)
+    local version=3.0 pickup=4.0 ws="$SERVE_WS"
     [ "$1" = expect-v2 ] && version=2.0
+    # expect-pickup-v3: our mediator serves Message Pickup 4.0, so the unpinned wallet negotiates it.
+    [ "$1" = expect-pickup-v3 ] && pickup=3.0
     # ws-wrong-path: a path with no WebSocket endpoint behind it, so the gated WebSocket call fails.
     [ "$1" = ws-wrong-path ] && ws="${SERVE_WS%/didcomm}/no-websocket-here"
     oob_invitation "$SERVE_DID" "$C/invitation.json"
@@ -1087,8 +1091,9 @@ cell_R2() { # attribution control: the same wallet against the dotnet mediator (
     python_forward "$routed" "$RUN/dotnet-medsvc.json" m || { cfail "python forward failed"; return 1; }
     peer post --url "$SERVE_HTTP" --in "$C/m.fwd.json" --expect-status 202 --meta-out "$C/m.post.json" ||
         { cfail "forward not accepted"; return 1; }
+    step "wallet fetches until drained in the Message Pickup version it negotiated ($pickup expected), then AckAsync"
     wallet fetch fetch --state "$C/w.state.json" --expect-count 1 --explicit-ack --out-dir "$C/fetch" \
-        --allow-hosts 127.0.0.1 || { cfail "fetch + AckAsync: $(wallet_error fetch)"; return 1; }
+        --allow-hosts 127.0.0.1 --expect-pickup-version "$pickup" || { cfail "fetch + AckAsync: $(wallet_error fetch)"; return 1; }
     assert_message authcrypt "$C/m.msg.json" "$C/fetch/item-1.unpacked.json" || return 1
     step "the one gated WebSocket exchange: our client and our mediator (status over ws)"
     wallet ws ws-attempt --state "$C/w.state.json" --ws-endpoint "$ws" --timeout 10 --allow-hosts 127.0.0.1
@@ -1101,7 +1106,7 @@ cell_R2() { # attribution control: the same wallet against the dotnet mediator (
 cell_title() {
     case "$1" in
         B-0) echo "wallet references only DidComm.Mediator.Client (E-36)" ;;
-        M-1) echo "dotnet recipient via Identus over HTTP: CM 2.0 negotiated, register, python forward, fetch, status 0 (E-30, E-51)" ;;
+        M-1) echo "dotnet recipient via Identus over HTTP: CM 2.0 and Pickup 3.0 negotiated, register, python forward, fetch, status 0 (E-30, E-51)" ;;
         M-2) echo "burst of 12 via Identus, fetched with limit 5 until drained (E-35)" ;;
         M-3) echo "dotnet sender via Identus to a python recipient (CM 2.0 + Pickup 3.0 by hand)" ;;
         M-4) echo "HTTP through TrustedProxy to a proxy-only Identus (E-47)" ;;
@@ -1109,7 +1114,7 @@ cell_title() {
         M-6) echo "process proxy variables ignored (E-48)" ;;
         M-8) echo "dotnet recipient via Identus over WebSocket: a status, then a fetch of a python-forwarded message (E-53)" ;;
         R-1) echo "python recipient via the dotnet mediator (CM 2.0 + Pickup 3.0 by hand)" ;;
-        R-2) echo "control: the same wallet against the dotnet mediator (CM 3.0, AckAsync, a WebSocket status call)" ;;
+        R-2) echo "control: the same wallet against the dotnet mediator (CM 3.0, Pickup 4.0 negotiated, AckAsync, a WebSocket status call)" ;;
     esac
 }
 
@@ -1141,6 +1146,7 @@ nc_expect() {
         "M-8|fetch-no-relax") echo "^fetch over WebSocket: exit 1 at wait-for-status: TimeoutException" ;;
         "R-1|no-created-time"|"R-1|v2-disabled") echo "^cm2-enrol: expected HTTP 200 with a reply, got 202" ;;
         "R-2|expect-v2") echo "negotiated-version-is-expected" ;;
+        "R-2|expect-pickup-v3") echo "^fetch \+ AckAsync: exit 1 at negotiated-pickup-version-is-expected" ;;
         "R-2|ws-wrong-path") echo "^WebSocket call to our mediator: (error|timeout)" ;;
         *) echo "(no expected detail declared)" ;;
     esac

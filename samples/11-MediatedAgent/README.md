@@ -29,9 +29,12 @@ and no routing code. **Carol**, who is not on the operator's allow-list, is refu
    wraps one forward for the mediator and posts it: `202`. A `202` means *received*; the
    mediator stores the message just after, and the sample waits for that from the mediator's
    own metrics (`didcomm.forward.outcomes`, outcome `Queued`).
-4. **Picking up over HTTP (Message Pickup).** `GetStatusAsync` says one message is waiting;
-   `FetchAsync` (until `Drained`) returns it opened and acknowledges it before returning; the
-   status is then zero.
+4. **Picking up over HTTP (Message Pickup).** The wallet does not pin a Message Pickup version
+   (`MediatorClientOptions.MessagePickupVersion = Negotiate`): the client asks the mediator, which
+   serves 4.0 and 3.0, and speaks 4.0. `GetStatusAsync` says one message is waiting, with when
+   the oldest and newest arrived (4.0 reports no longest waiting time); `FetchAsync` (until
+   `Drained`) returns it opened and acknowledges it before returning. A drained 4.0 fetch carries
+   no status (3.0's does), so the wallet asks again with `GetStatusAsync`: zero.
 5. **Live delivery over a WebSocket.** A second container with the WebSocket's three set-up
    calls — `UseWebSocketTransport(o => o.ReceiveInbound = true)`, `UseInboundDispatch()`,
    `AddMediatorClient()` — shows the live switch (`SetLiveDeliveryAsync`), then
@@ -143,6 +146,7 @@ Ports, DIDs and ids change every run; the structure is stable:
 == Section 4 — Bob picks up over HTTP: status, fetch, status again ==
   • [bob] status: 1 message(s)
   • [bob] fetched: Hello Bob
+    [bob] Message Pickup version negotiated with the mediator = 4.0
   • [bob] status after fetch: 0 message(s) (the fetch acknowledged what it opened)
 
 == Section 5 — Bob goes live over a WebSocket: Alice sends again, Bob receives it ==

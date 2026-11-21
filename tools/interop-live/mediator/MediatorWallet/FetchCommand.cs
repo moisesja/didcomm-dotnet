@@ -8,8 +8,13 @@ using DidComm.Mediator.Pickup;
 namespace MediatorWallet;
 
 /// <summary>
-/// <c>fetch --state S --expect-count N [--limit L] [--explicit-ack] [--wait-timeout s] [--ws-endpoint auto|U] --out-dir D</c>:
-/// pick up through the shipped <see cref="PickupClient"/> only.
+/// <c>fetch --state S --expect-count N [--limit L] [--explicit-ack] [--wait-timeout s] [--ws-endpoint auto|U]
+/// [--expect-pickup-version 3.0|4.0] --out-dir D</c>: pick up through the shipped
+/// <see cref="PickupClient"/> only. No Message Pickup version is pinned: the client asks the mediator
+/// with Discover Features at its first call (#100), and the captured Debug record "Message Pickup
+/// version negotiated by query {RequestId}: {Version}." names the version it chose (exactly one such
+/// record: the answer is remembered for the command's later calls), checked against
+/// <c>--expect-pickup-version</c>.
 /// <list type="number">
 /// <item>Wait until <c>GetStatusAsync</c> counts at least N (100 ms pacing; hang guard
 /// <c>--wait-timeout</c>, default 30 s).</item>
@@ -17,8 +22,10 @@ namespace MediatorWallet;
 /// fetch acknowledges what it opened; against a mediator that does not answer
 /// <c>messages-received</c> that acknowledgement fails quietly (logged) and the mediator applies it
 /// anyway, so the loop still ends.</item>
-/// <item>Exactly N items, every one opened, no message id twice; the drained fetch's status counts
-/// 0, and so does a separate <c>GetStatusAsync</c>.</item>
+/// <item>Exactly N items, every one opened, no message id twice. Under 3.0 the drained fetch carries
+/// the mediator's status, which must count 0; under 4.0 it carries none (the mediator answers an
+/// empty queue with an empty <c>delivery</c>), and that is checked instead. Either way a separate
+/// <c>GetStatusAsync</c> must count 0.</item>
 /// <item>With <c>--explicit-ack</c>, <c>AckAsync</c> with the fetched ids must answer a status of 0
 /// (works against our mediator; against Identus see O-9). <c>FetchAsync</c> has acknowledged those
 /// ids already, so this proves AckAsync's answer, not its effect on the queue.</item>
@@ -30,6 +37,9 @@ internal static class FetchCommand
 {
     private const int MaxRounds = 60;
 
+    /// <summary>The template of the Debug record <see cref="PickupClient"/> writes after Discover Features chose a version.</summary>
+    public const string NegotiatedPickupTemplate = "Message Pickup version negotiated by query {RequestId}: {Version}.";
+
     public static async Task<int> RunAsync(CommandLine line, CommandResult result)
     {
         var common = CommonOptions.From(line);
@@ -39,6 +49,13 @@ internal static class FetchCommand
             throw new UsageException("Missing required option '--expect-count'.");
         var limit = line.Int("limit", 10);
         var explicitAck = line.Flag("explicit-ack");
+        var expectPickupVersion = line.Get("expect-pickup-version") switch
+        {
+            null => (MessagePickupVersion?)null,
+            "3.0" => MessagePickupVersion.V3,
+            "4.0" => MessagePickupVersion.V4,
+            var other => throw new UsageException($"Unknown --expect-pickup-version '{other}' (3.0|4.0)."),
+        };
         var waitTimeout = TimeSpan.FromSeconds(line.Int("wait-timeout", 30));
         var outDir = Path.GetFullPath(line.Require("out-dir"));
         Directory.CreateDirectory(outDir);
@@ -142,6 +159,10 @@ internal static class FetchCommand
         }
         var failures = new JsonArray(failed.Select(f => (JsonNode?)new JsonObject { ["pickup_id"] = f.Id, ["error"] = CommandResult.Describe(f.Error!) }).ToArray());
 
+        // Which Message Pickup version the client negotiated (no version is pinned here).
+        var pickupVersion = NegotiatedPickupVersion(capture);
+        result.Observed["negotiated_pickup_version"] = pickupVersion;
+
         var separate = await result.StepAsync("status-after-fetch",
             () => host.Pickup.GetStatusAsync(state.MediatorDid, state.WalletDid, serviceEndpointOverride: endpoint),
             s => s.MessageCount);
@@ -168,6 +189,7 @@ internal static class FetchCommand
             ["items"] = listing,
             ["failures"] = failures,
             ["rounds"] = rounds.DeepClone(),
+            ["pickup_version"] = pickupVersion,
             ["final_status_count"] = finalStatus?.MessageCount,
             ["status_after_fetch"] = separate.MessageCount,
             ["explicit_ack"] = explicitAckOutcome,
@@ -181,10 +203,26 @@ internal static class FetchCommand
         result.Check("exactly-the-expected-count", opened.Count == expectCount, opened.Count);
         // Ids that differ only in letter case are one id (DIDComm v2.1 threading).
         result.Check("no-message-id-twice", opened.Select(i => i.Unpacked!.Message.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == opened.Count);
-        result.Check("drained-status-counts-zero", finalStatus?.MessageCount == 0, finalStatus?.MessageCount);
+        result.Check("pickup-negotiation-record-captured-once", capture.Records.Count(r => r.Template == NegotiatedPickupTemplate) == 1,
+            capture.Records.Count(r => r.Template == NegotiatedPickupTemplate));
+        if (expectPickupVersion is { } expectedPickup)
+            result.Check("negotiated-pickup-version-is-expected", pickupVersion == expectedPickup.ToString(), pickupVersion);
+        // 3.0 answers a drained queue with its status; 4.0 with an empty delivery and no status (the
+        // separate status below confirms the count either way).
+        if (pickupVersion == nameof(MessagePickupVersion.V4))
+            result.Check("drained-fetch-carries-no-status-under-4.0", finalStatus is null, finalStatus?.MessageCount);
+        else
+            result.Check("drained-status-counts-zero", finalStatus?.MessageCount == 0, finalStatus?.MessageCount);
         result.Check("separate-status-counts-zero", separate.MessageCount == 0, separate.MessageCount);
         return 0;
     }
+
+    /// <summary>
+    /// The <c>{Version}</c> of the first negotiation record the client wrote (<c>V3</c> or
+    /// <c>V4</c>), or <c>null</c> when it wrote none.
+    /// </summary>
+    public static string? NegotiatedPickupVersion(CaptureLoggerProvider capture)
+        => capture.Records.FirstOrDefault(r => r.Template == NegotiatedPickupTemplate)?.Values.GetValueOrDefault("Version");
 
     /// <summary>The mediator addresses a command may use (for the env-proxy precondition).</summary>
     public static IEnumerable<Uri> MediatorAddresses(WalletState state)

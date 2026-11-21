@@ -52,6 +52,8 @@ internal static class WsAttemptCommand
         }
         outcome["elapsed_ms"] = watch.ElapsedMilliseconds;
         result.Observed["attempt"] = outcome;
+        // The Message Pickup version the client negotiated before the call (recorded, not judged).
+        result.Observed["negotiated_pickup_version"] = FetchCommand.NegotiatedPickupVersion(capture);
 
         // What the transports and the client logged about it (no DID or content is logged by them).
         result.Observed["log"] = new JsonArray(capture.Records
