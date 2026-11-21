@@ -171,13 +171,12 @@ internal sealed class PushFixture : IAsyncDisposable
             Services.GetService<ILogger<PushDispatcher>>(),
             Time);
 
-    public static byte[] Payload(int size, byte seed = 7)
-    {
-        var bytes = new byte[size];
-        for (var i = 0; i < size; i++)
-            bytes[i] = (byte)(seed + i * 13);
-        return bytes;
-    }
+    /// <summary>
+    /// A message of exactly <paramref name="size"/> bytes in encrypted form, the only kind the
+    /// mailbox stores: a stand-in JWE (<see cref="StandInJwe"/>), never decrypted. At least
+    /// <see cref="StandInJwe.MinSize"/> bytes.
+    /// </summary>
+    public static byte[] Payload(int size, byte seed = 7) => StandInJwe.OfSize(size, seed);
 
     public async ValueTask DisposeAsync()
     {

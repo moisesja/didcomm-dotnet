@@ -93,7 +93,7 @@ public sealed class MessagePickupFlowTests
 
         (await fixture.StatusOfAsync(MessagePickup.CreateDeliveryRequest(peer, mediator, 10), mediator, session)).MessageCount.Should().Be(0);
 
-        await fixture.QueueAsync(peer, PickupFixture.Payload(10));
+        await fixture.QueueAsync(peer, PickupFixture.Payload(100));
         (await fixture.StatusOfAsync(MessagePickup.CreateDeliveryRequest(peer, mediator, 0), mediator, session)).MessageCount.Should().Be(1);
         session.Sent.Should().BeEmpty();
     }
@@ -224,7 +224,7 @@ public sealed class MessagePickupFlowTests
     {
         await using var fixture = PickupFixture.Create();
         var (mediator, peer) = await fixture.EnrolledAsync();
-        var id = await fixture.QueueAsync(peer, PickupFixture.Payload(10));
+        var id = await fixture.QueueAsync(peer, PickupFixture.Payload(100));
 
         (await fixture.SendAsync(MessagePickup.CreateStatusRequest(peer, mediator), mediator, shape: shape)).Result.Should().Be(DispatchResult.NoReply);
         (await fixture.SendAsync(MessagePickup.CreateMessagesReceived(peer, mediator, new[] { id }), mediator, shape: shape)).Result.Should().Be(DispatchResult.NoReply);
@@ -241,8 +241,8 @@ public sealed class MessagePickupFlowTests
         var aliceOther = (await fixture.NewPeerAsync()).Did;
         await fixture.EnrolAsync(alice, mediator, alice, aliceOther);
         await fixture.EnrolAsync(bob, mediator, bob);
-        var aliceId = await fixture.QueueAsync(alice, PickupFixture.Payload(10));
-        await fixture.QueueAsync(aliceOther, PickupFixture.Payload(11));
+        var aliceId = await fixture.QueueAsync(alice, PickupFixture.Payload(100));
+        await fixture.QueueAsync(aliceOther, PickupFixture.Payload(110));
 
         // Bob names Alice's DID: the answer of an empty queue, echoing the value.
         var bobSession = fixture.Session(bob, mediator);

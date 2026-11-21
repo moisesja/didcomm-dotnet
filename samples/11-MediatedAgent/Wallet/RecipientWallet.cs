@@ -87,6 +87,9 @@ public sealed class RecipientWallet : IAsyncDisposable
         // Ask the mediator which Coordinate Mediation version it speaks (3.0 preferred). Pin V3 or
         // V2 for a mediator that does not answer Discover Features queries.
         options.CoordinateMediationVersion = CoordinateMediationVersion.Negotiate;
+        // The same for Message Pickup (4.0 preferred, else 3.0). Pin V4 or V3 for a mediator that
+        // does not answer Discover Features queries.
+        options.MessagePickupVersion = MessagePickupVersion.Negotiate;
         // Delivery is at-least-once: remember this many delivered messages so a repeat is not
         // handed to the app twice.
         options.DedupeCapacity = 1024;
@@ -264,7 +267,9 @@ public sealed class RecipientWallet : IAsyncDisposable
         _narrator.Step($"[{_name}] status: {status.MessageCount} message(s)");
         _narrator.Value($"[{_name}] status is about the DID asked for", string.Equals(status.RecipientDid, recipientDid, StringComparison.Ordinal));
         _narrator.Value($"[{_name}] total bytes waiting", status.TotalBytes);
-        _narrator.Value($"[{_name}] waiting times reported", status.LongestWaitedSeconds is not null && status.OldestReceivedTime is not null && status.NewestReceivedTime is not null);
+        // When the oldest and the newest waiting message arrived, in UTC epoch seconds. (Message
+        // Pickup 3.0 also reports how long the oldest has waited, LongestWaitedSeconds; 4.0 does not.)
+        _narrator.Value($"[{_name}] arrival times reported (oldest, newest)", status.OldestReceivedTime is not null && status.NewestReceivedTime is not null);
         _narrator.Value($"[{_name}] live delivery on this connection", status.LiveDelivery?.ToString() ?? "<not reported>");
 
         // Fetch until drained. Each fetch acknowledges the messages that opened before it returns,
@@ -296,8 +301,12 @@ public sealed class RecipientWallet : IAsyncDisposable
         }
         while (!batch.Drained);
 
-        // A drained fetch carries the mediator's status.
-        _narrator.Step($"[{_name}] status after fetch: {batch.Status?.MessageCount} message(s) (the fetch acknowledged what it opened)");
+        // The drained fetch shows which Message Pickup version the client negotiated: under 3.0 the
+        // mediator answers "nothing more" with its status, under 4.0 with an empty delivery and no
+        // status. Under 4.0, ask for the status when you want it.
+        _narrator.Value($"[{_name}] Message Pickup version negotiated with the mediator", batch.Status is null ? "4.0" : "3.0");
+        var after = batch.Status ?? await _pickup.GetStatusAsync(MediatorDid, Did, ct: ct).ConfigureAwait(false);
+        _narrator.Step($"[{_name}] status after fetch: {after.MessageCount} message(s) (the fetch acknowledged what it opened)");
         return texts;
     }
 

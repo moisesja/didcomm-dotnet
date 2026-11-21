@@ -238,7 +238,7 @@ public sealed class MessagePickupLiveSessionLifecycleTests
             var arriving = Task.Run(async () =>
             {
                 startLine.SignalAndWait(MessagePickupLive.Deadline).Should().BeTrue();
-                return await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16, (byte)round));
+                return await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160, (byte)round));
             });
             await Task.WhenAll(enabling, closing, arriving).WaitAsync(MessagePickupLive.Deadline);
 
@@ -248,7 +248,7 @@ public sealed class MessagePickupLiveSessionLifecycleTests
 
             // ... once both have completed the closed session is never live and never a target again ...
             var sentBefore = sent();
-            var after = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(16, (byte)round));
+            var after = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(160, (byte)round));
             after.Outcome.Should().Be(PickupDeliveryOutcome.Queued, "round {0}: a push must never be PushedLive to a closed session", round);
             sent().Should().Be(sentBefore);
 
@@ -495,14 +495,14 @@ public sealed class MessagePickupLiveSessionLifecycleTests
         socket.OnSend = (_, _) => ReturnRouteSendResult.NotSent;
 
         // The arrival is admitted under the socket's lease, the push is refused, and the arrival is
-        // parked just before it gives that lease back.
+        // parked just before it gives that lease back (as unsent: the push was refused).
         var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.FakeStore!.OnRelease = async (grant, ids, lease, ct) =>
+        fixture.FakeStore!.OnReturnUnsent = async (grant, ids, lease, ct) =>
         {
             parked.TrySetResult();
             await resume.Task.WaitAsync(MessagePickupLive.Deadline);
-            return await fixture.FakeStore.Inner.ReleaseAsync(grant, ids, lease, ct);
+            return await fixture.FakeStore.Inner.ReturnUnsentAsync(grant, ids, lease, ct);
         };
         var closed = ExpectOwnerRelease(fixture);
         var delivering = fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(30)).AsTask();

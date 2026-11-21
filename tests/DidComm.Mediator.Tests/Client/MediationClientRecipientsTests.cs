@@ -221,7 +221,7 @@ public sealed class MediationClientRecipientsTests
     public async Task The_walker_negotiates_once_for_the_whole_walk()
     {
         var exchange = new FakeMediatorExchange();
-        exchange.Versions = new NegotiatedVersionCache(exchange.Time, capacity: 0); // nothing is remembered
+        exchange.Versions = new NegotiatedVersionCache<CoordinateMediationVersion>(exchange.Time, capacity: 0); // nothing is remembered
         exchange.Mediator.Registered.AddRange(Enumerable.Range(0, 150).Select(i => $"did:example:r{i}"));
 
         (await Collect(exchange.Client().QueryAllRecipientsAsync(Mediator, Me))).Should().HaveCount(150);

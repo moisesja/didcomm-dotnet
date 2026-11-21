@@ -150,6 +150,10 @@ public sealed class HttpRequestBodyReadFailureTests
         }));
 
         abortedWhenRead.Should().BeTrue("precondition: the read's token is the request's, and the abort cancelled it");
+        // The client sees the abort as it happens; the middleware records what escaped the endpoint
+        // as the server's pipeline unwinds, which can be later under load. Wait for that record, the
+        // one asserted (L-065 rule 1); the timeout is only a hang guard.
+        (await ReturnRouteTestHost.WaitUntilAsync(() => !host.Escaped.IsEmpty, TimeSpan.FromSeconds(15))).Should().BeTrue("the server's pipeline recorded what escaped the endpoint");
         host.Escaped.Should().ContainSingle().Which.Should().BeAssignableTo<OperationCanceledException>();
         host.Processed.Should().Be(0);
         host.Logs.Entries.Should().NotContain(e => e.Contains("could not be read", StringComparison.Ordinal),

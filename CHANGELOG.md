@@ -6,6 +6,199 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Message Pickup 4.0 in both roles; the mailbox refuses messages that are not encrypted; a live push that comes back unconfirmed is not pushed again (FR-PICK-12, #100; epic #88)
+
+**Behaviour changes for existing mediator hosts and wallets** (none of these packages is published yet):
+
+- **A mediator now also speaks Message Pickup 4.0.** `AddMessagePickup()`, and so `AddMediator()`,
+  now registers a 4.0 handler beside the 3.0 one, and Discover Features discloses
+  `https://didcomm.org/message-pickup/4.0` (roles `mediator`) as well as
+  `https://didcomm.org/messagepickup/3.0`. Both versions serve the same mailbox. To serve 3.0 only,
+  set `MessagePickupOptions.EnableV4 = false` (`o.Pickup.EnableV4` under `AddMediator()`) in the
+  delegate of every call. The setting is read when the call runs, so a value set another way that
+  disagrees (`Configure<MessagePickupOptions>`, configuration binding, or two calls that differ)
+  fails with `InvalidOperationException` when the pickup handlers are built: at start-up under
+  `AddMediator()`.
+- **The wallet's `PickupClient` now asks the mediator which version it speaks before its first
+  call.** It sends one Discover Features query per mediator and remembers the answer for an hour.
+  It uses 4.0 when the mediator discloses it, as this library's mediator now does, and 3.0
+  otherwise. Under 4.0 a caller sees three differences:
+  - a drained `FetchAsync` returns no `PickupBatch.Status`, so ask with `GetStatusAsync`;
+  - `PickupStatus.LongestWaitedSeconds` is `null`, because 4.0 removed it;
+  - the arrival times are 4.0's milliseconds rounded down to seconds. `PickupStatus` keeps epoch
+    seconds whichever version is spoken.
+
+  Acknowledgements get no answer under 4.0; `AckAsync` still returns the status, which it now asks
+  for with a `status-request`. Over a WebSocket it first sends one `status-request` too, before the
+  acknowledgements: under 4.0 that is the only message that can open the connection's return-route
+  session, because 4.0 dropped `return_route` from `messages-received` (L35). The acknowledgements
+  and the confirming `status-request` then travel on that one connection, which the mediator reads
+  in order, so the status always follows them. It costs one extra round trip per `AckAsync` over a
+  WebSocket (PR #143 review P2-2; before the fix, a first call on a cold WebSocket could return a
+  status from before its acknowledgement).
+- **Pin the version for mediators that cannot answer the question.** A mediator that answers
+  Discover Features but discloses neither pickup version now fails every pickup call with
+  `MediationNotSupportedException`. One that does not answer the query fails it with
+  `TimeoutException`. For either, pin `MediatorClientOptions.MessagePickupVersion = V3`. The
+  Identus mediator 1.2.1 discloses `messagepickup/3.0` and is spoken to in 3.0 with no pin.
+- **The mailbox refuses a message that is not encrypted (owner decision, 2026-11-20).** In the
+  owner's words as put to them: "The mailbox refuses any message that isn't encrypted, whoever
+  supplies it (a sender's forward or the host's own code), stores nothing, and reports a new 'not
+  encrypted' result. The sender already got its 202, as with every mailbox refusal today."
+  - Why: the pickup spec lets a delivery carry only encrypted messages. Message Pickup 3.0 L172:
+    "The ONLY valid type of attachment for this message is a DIDComm v2 Message in encrypted form."
+    4.0 L261: "The ONLY valid type of attachment for this message is a DIDComm v1 or v2 Message in
+    encrypted form." Routing only asks senders to encrypt (DIDComm v2.1 routing.md L57: "This
+    content should be encrypted for the next recipient."). Before this change the mediator stored
+    and delivered such a message in 3.0 too.
+  - What you see: `MessagePickupQueue.DeliverAsync` returns `PickupDeliveryOutcome.NotEncrypted`,
+    and the forward outcome meter records `Dropped-PayloadNotEncrypted`.
+  - Who notices: only senders that do not encrypt. Our client, didcomm-python, didcomm-jvm and
+    Identus all encrypt.
+  - How it is checked (our choice): see Notes.
+- **The wallet client treats an attachment that is not encrypted as a failed item (owner decision,
+  2026-11-20: "OK, as described").** Such an attachment, from any mediator, is reported as a failed
+  `PickupItem` and is not acknowledged, like any attachment that does not decode. Discard it with
+  `AckAsync`, or it ages out of the mailbox.
+- **A live push that comes back unconfirmed is never pushed live again (owner decision,
+  2026-11-20: "Never push it live again"), in 3.0 as well as 4.0.** In the owner's words as put to
+  them: "A message pushed live and returned unconfirmed waits until the recipient asks for it.
+  Same rule for 3.0 and 4.0, since one mailbox serves both. Cost: the mailbox marks such a message
+  (a small addition to the unpublished store contract), plus tests. A recipient that only listens
+  live and never asks would not get it until it does."
+  - Why: Message Pickup 4.0 L302: "_Live Mode_ is the practice of delivering newly arriving
+    messages directly to a connected `recipient`."; L304: "Messages already in the queue are not
+    affected by _Live Mode_; they **MUST** still be requested with `delivery-request` messages.";
+    L308: "If a message is not acknowledged, the message **MUST** be added to the queue for later
+    pickup." 3.0 L203 says the same as L304 with a lowercase "must".
+  - What changes for a 3.0 host: until now (since #95) such a message was pushed live again at the
+    next wake-up of its mailbox (a new message arriving), ahead of the newer one. Now it is
+    delivered only by a `delivery-request`. This library's live stream collects it on its periodic
+    poll (`LivePollInterval`, 1 minute by default).
+  - Unchanged: a message waiting before live mode went on is still never pushed; a push the
+    connection did not take (it answered "not sent": no room, a downgraded or closing session, a
+    failed pack; or "too large", passed over first) is still pushed at a later wake-up, because it
+    never reached the recipient; a message handed out by a `delivery-request` is treated as before.
+  - **A push whose send was attempted and then failed or timed out is delivered through pickup too
+    (owner decision 2026-11-21, OD-5: "Counts as pushed: wait").** In the owner's words as put to
+    them: "One simple rule: only a connection's explicit 'not sent', or no attempt at all, keeps a
+    message eligible for a live push. Safe with any connection type a host writes. Matches the
+    reviewer's expected result. Cost: the PRD's retry rule narrows, failed or timed-out pushes are
+    delivered at the next collection, and 3 older tests change their expectations." Until now (since
+    #95) such a push was tried live again at the next wake-up; PRD FR-PICK-09's "Retries" is
+    narrowed to match.
+  - How it is built (ours; PR #143 review round 1 replaced an earlier version that marked the record
+    when its live-push lease ended, which an id-based give-back could race): the mark is set by the
+    store the moment a live push takes the record (`QueuedMessage.LivePushReturned`, on the take
+    under a `MessageLease.LivePush` lease), and a live push never takes a marked record. The only
+    ways to clear it are `IMessageStore.ReturnUnsentAsync` and a pass-over by the same lease, which
+    the mediator calls only when the session answered "not sent" or "too large" or the send was never
+    attempted; a release by id, the connection's clean-up, an expired lease, a fault or a
+    cancellation never clear it, in any order. An earlier rule of ours (ADV4-1, "a push in hand when
+    its connection closes counts as returned") is gone: the invariant covers that case, and a push a
+    closing connection answered "not sent" stays eligible, because it was never pushed. Counts,
+    quotas and `status` are unchanged. A custom `IMessageStore` must set, keep and clear the mark as
+    the contract says (it remembers which lease set it); one that hands a marked record to a live
+    push is refused by the mediator and the message stays for pickup.
+- **A `status` must repeat the filter the request named, exactly.** A `status` that leaves out the
+  `recipient_did` a filtered request named is now refused with `MediationProtocolException`, as a
+  status about another DID already was. So is a `status` or `delivery` that repeats it as another
+  spelling of the same DID, such as a DID URL of it (before, the two were compared as DID
+  subjects). Both versions ask for "the matching value" (3.0 L116, 4.0 L168: "If a `recipient_did`
+  was specified in the `status-request` message, the matching value **MUST** be specified in the
+  `recipient_did` attribute of the status message."). This applies to 3.0 too.
+- **A problem report must name the request in `pthid`.** The wallet clients (`PickupClient` and
+  `MediationClient`) took a problem report without `pthid` as answering the request its `thid`
+  named, and failed that request with its code. `pthid` is REQUIRED (DIDComm v2.1 problems.md L83:
+  "`pthid` - REQUIRED. The value is the `thid` of the thread in which the problem occurred."), so
+  such a report now completes no request, like any answer without its thread: the request keeps
+  waiting until its timeout (over HTTP it gets no answer at once). This applies to
+  `report-problem/2.0` reports and to every mediator request, not only to 4.0.
+
+**Added** (public API, unpublished packages):
+- `DidComm.Mediator`:
+  - `MessagePickup40Handler`, the 4.0 mediator role, public so a hand-built host can register it
+    over its `MessagePickupQueue`;
+  - `MessagePickupOptions.EnableV4`, default `true`;
+  - `PickupDeliveryOutcome.NotEncrypted`, appended so the other values keep their numbers;
+  - `MessageLease.LivePush` and `QueuedMessage.LivePushReturned` (init-only), and
+    `IMessageStore.ReturnUnsentAsync`, additions to the store contract: a custom `IMessageStore`
+    marks a record when a live-push lease takes it, remembers which lease did, never hands a marked
+    record to a live-push lease, and clears the mark only through `ReturnUnsentAsync` or a pass-over
+    by the lease that set it.
+- `DidComm.Mediator.Client`:
+  - the `MessagePickupVersion` enum (`Negotiate`, `V4`, `V3`);
+  - `MediatorClientOptions.MessagePickupVersion`, default `Negotiate`.
+
+Nothing changes in Core, the transports, `DidComm.AspNetCore` or DI. The 4.0 message codec is
+internal, so 4.0 adds no public message builders.
+
+**What 4.0 changes on the wire**, as built (the 4.0 page at `decentralized-identity/didcomm.org@a26926c`,
+`site/content/protocols/messagepickup/4.0/readme.md`):
+- The limit of a `delivery-request` is named `message_count_limit`, and a `delivery` never carries
+  more than it (L206, L255). A request that carries only 3.0's `limit` is malformed.
+- Times are in UTC epoch milliseconds, and `longest_waited_seconds` is gone (L37, L39, L164).
+- Every `status` carries the request's thread as `thid` (L33).
+- When nothing can be delivered, the answer is a `delivery` with an empty `attachments` array on
+  the request's thread, never a `status` (L210, L259).
+- `messages-received` is applied and never answered. The client sends it one way, without
+  `return_route` (L35). Over a WebSocket it rides the session socket, and it is time-stamped like
+  every mediator request.
+- Live pushes are 4.0 `delivery` messages without `thid`, held until acknowledged and handed back
+  to the queue when the connection closes or the lease runs out (L308); from then on only a
+  `delivery-request` delivers them (L304; owner decision above).
+- The live-mode problem report has the 4.0 type `https://didcomm.org/message-pickup/4.0/problem-report` (L362).
+- A wallet client reading a 4.0 `delivery` refuses one with no `attachments` array, or with more
+  attachments than it asked for, before it opens anything in it.
+- A recipient can switch versions between requests: a message delivered through one version can be
+  acknowledged through the other. A connection's live pushes use the version of its last
+  `live-delivery-change` that turned live delivery on.
+
+**Notes**
+- Spec readings (none needed an owner decision):
+  - L34 and L263 make `delivery.thid` optional, but DIDComm v2.1 threading.md L17 requires `thid`
+    on every later message of a thread. So a delivery that answers a request carries it, and only
+    a live push lacks it. A reply without `thid` still completes no request (the owner's answer "2"
+    from #98).
+  - 4.0's live-mode text (L85, L302–L308) is 3.0's plus the `delivery` / `messages-received`
+    rules. It asks for no push of a delayed message when it falls due, so the polling design
+    stands (owner decision, 2026-11-14).
+  - `messages-received` is not one of the three requests that need `return_route: all`
+    (L59–L63, L69).
+- Implementation choices (ours):
+  - A 4.0 `delivery-request` that arrives without a return-route session is not answered, and
+    nothing is read or leased for it.
+  - There is no switch to serve 4.0 only: register `MessagePickup40Handler` by hand for that.
+  - "Encrypted" is judged on the outermost layer, without decrypting. The bytes must be valid
+    UTF-8 throughout and strict JSON holding an object with a `ciphertext` member. That is the rule the library's unpack
+    uses to recognise a JWE, anoncrypt or authcrypt (v2.1 message_structure.md L65, L71). Plaintext
+    and signed-only messages are refused.
+  - In rewrap mode, and in pass-through mode with an extra routing key, the mailbox stores the
+    mediator's own JWE, so a non-encrypted message inside it is still stored. The recipient's
+    client then opens it.
+- A remembered pickup version is kept for its hour (a documented limit, as for Coordinate
+  Mediation): after a mediator stops serving the version a client negotiated, the client's calls
+  time out until the hour is up or the client restarts; pin the version, or restart, after such a
+  change.
+- The live stream needs a mediator that accepts at least 10 ids per confirmation (a known limit,
+  owner decision 2026-11-21: "Document it as a known limit"). `ReceiveLiveAsync` confirms up to 10
+  messages per `messages-received`. A mediator that accepts fewer (ours with
+  `MessagePickupOptions.MaxAckIds` set below 10; the default is ten times the delivery batch)
+  refuses it, and the messages are delivered again at the stream's next collection (one
+  `LivePollInterval` later) instead of being confirmed. Nothing is lost; no code changed.
+- DIDComm v1 forms of 4.0 are out of scope, as before.
+- The live interop leg's R-2 cell (our wallet against our mediator) now negotiates and asserts 4.0,
+  with a negative-control twin. The Identus cells negotiate 3.0 and are otherwise unchanged.
+
+**Fixed**
+- The encrypted-form check now validates UTF-8 before it parses: a JWE-shaped object whose strings
+  or member names were not valid UTF-8 passed it (the JSON reader does not validate them), and was
+  stored and delivered although no client could open it. Found by the adversarial pass, before
+  release.
+- Tests: `HttpRequestBodyReadFailureTests.A_cancellation_while_the_request_is_aborted_still_propagates`
+  waited for a neighbouring event instead of the escape it asserts, and failed under load; it now
+  waits for the record it reads.
+
 ### Changed — a message whose `id`, `thid` or `pthid` is longer than 512 characters is refused (security hardening, tracked privately; epic #88)
 
 **Behaviour change for released `DidComm.Core`.** A message's `id`, `thid` and `pthid` must now be at
@@ -1948,7 +2141,9 @@ arrival sequence (ADV-6) added `PushDispatcherAdv6Tests` and `MessagePickupStore
   backward step lengthened it by the step; it is now measured on the monotonic clock
   (`TimeProvider.GetTimestamp`), and a step either way changes nothing. Residual: a live push that
   the session did not take, that faulted, or that reached its deadline and was given back is tried
-  again at the grant's next wake-up — at most one failed attempt per wake-up, and nothing reaches
+  again at the grant's next wake-up (since #100, owner decision OD-5 of 2026-11-21: only one the
+  session did not take, or never attempted, is tried again; one whose send was attempted and then
+  faulted or reached its deadline goes to pickup) — at most one failed attempt per wake-up, and nothing reaches
   the connection unless the session takes it. A further break-it pass on the arrival sequence
   (ADV-6) found no defect in live push or the store. Regressions: `PushDispatcherAdv5Tests`
   (`Defect1_…`, `Defect2_…`, `Defect5_…` and `Defect6_…`, each failing before its fix),

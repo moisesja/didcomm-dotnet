@@ -293,7 +293,7 @@ public sealed class MediatorClientChannelAdv3Tests : IAsyncLifetime
             throw new InvalidOperationException("unreachable");
         });
         send.ReturnWith(request => Task.FromResult<UnpackResult?>(Returned(DidComm.Mediator.Pickup.MessagePickup.CreateDelivery(
-            _w.Mediator.Did, _w.Local.Did, new[] { new DidComm.Mediator.Pickup.DeliveredMessage("q1", System.Text.Encoding.UTF8.GetBytes("packed")) }, thid: request.Id))));
+            _w.Mediator.Did, _w.Local.Did, new[] { new DidComm.Mediator.Pickup.DeliveredMessage("q1", System.Text.Encoding.UTF8.GetBytes(FakePickupExchange.Jwe("packed"))) }, thid: request.Id))));
         var pickup = new PickupClient(channel, logger: null);
 
         var fetch = pickup.FetchAsync(_w.Mediator.Did, _w.Local.Did, 10, serviceEndpointOverride: Https);

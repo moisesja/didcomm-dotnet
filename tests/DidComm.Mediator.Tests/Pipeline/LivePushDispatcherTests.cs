@@ -200,7 +200,8 @@ public sealed class LivePushDispatcherTests
         var (grant, session) = await world.LiveGrantAsync("give-back");
         session.OnPush = (_, _) => Task.FromResult(ReturnRouteSendResult.NotSent);
         var fixture = world.Fixture;
-        store.OnRelease = (_, _, _, _) =>
+        // The session refused the push, so it is given back as unsent; that give-back stalls.
+        store.OnReturnUnsent = (_, _, _, _) =>
         {
             entered.TrySetResult();
             return new ValueTask<int>(parked.Task); // ignores the token

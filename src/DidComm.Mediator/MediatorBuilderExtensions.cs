@@ -38,7 +38,8 @@ public static class MediatorBuilderExtensions
     /// Make this agent a complete mediator (FR-MED-07, FR-PICK-09/10): Coordinate Mediation 3.0
     /// and 2.0 (one set of grants; 2.0 is what the Identus and Blocktrust wallets speak, and
     /// <see cref="CoordinateMediationOptions.EnableV2"/> turns it off), the routing mediator that
-    /// relays forwards, Message Pickup 3.0, the built-in protocols (Trust
+    /// relays forwards, Message Pickup 3.0 and 4.0 (one mailbox; 4.0 unless
+    /// <see cref="MessagePickupOptions.EnableV4"/> is <c>false</c>), the built-in protocols (Trust
     /// Ping answers health checks; Discover Features discloses the mediator roles), and the delivery
     /// pipeline that puts each relayed message in the recipient's queue (pushing it live when the
     /// recipient has a live session). Map its endpoints with
@@ -133,7 +134,7 @@ public static class MediatorBuilderExtensions
     /// <returns>The same builder, for chaining.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentException">A setting is invalid (<see cref="MediatorOptions.Validate"/>; every invalid setting is reported this way, including the replay protection and session settings); no routing DID is configured and nothing else can supply one (no registered <see cref="IMediatorIdentity"/> and no other configuration of <see cref="CoordinateMediationOptions"/>); or <see cref="MediatorOptions.RewrapMode"/> is <see cref="RewrapMode.ReanoncryptToNext"/> while the host registered an <see cref="IRecipientRoutingKeyProvider"/>, whose routing keys would then be ignored.</exception>
-    /// <exception cref="InvalidOperationException"><c>AddRoutingMediator()</c> was already called on this collection, an <see cref="IForwardSink"/> is already registered, or another registration conflicts with the mediator's (see <c>AddCoordinateMediation()</c>).</exception>
+    /// <exception cref="InvalidOperationException"><c>AddRoutingMediator()</c> was already called on this collection, an <see cref="IForwardSink"/> is already registered, or another registration conflicts with the mediator's (see <c>AddCoordinateMediation()</c> and <c>AddMessagePickup()</c>).</exception>
     public static DidCommBuilder AddMediator(this DidCommBuilder builder, Action<MediatorOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);

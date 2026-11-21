@@ -71,16 +71,16 @@ public sealed class MessagePickupHandlerLogTests
         var gone = await h.NewDidAsync();
         await h.EnrolAsync(alice, alice, second, gone);
         await h.EnrolAsync(bob, bob);
-        var a1 = await h.QueueAsync(alice, 10, 1);
+        var a1 = await h.QueueAsync(alice, 100, 1);
         // Three for the second DID: the first two will turn out not to fit even alone and be passed
         // over (they stay stored, under the lease of the request that found out); the third is
         // delivered and acknowledged.
-        await h.QueueAsync(second, 20, 2);
-        await h.QueueAsync(second, 21, 3);
-        var s3 = await h.QueueAsync(second, 22, 4);
-        await h.QueueAsync(gone, 30, 5);
-        await h.QueueAsync(alice, 40, 6);
-        await h.QueueAsync(bob, 5, 7);
+        await h.QueueAsync(second, 200, 2);
+        await h.QueueAsync(second, 210, 3);
+        var s3 = await h.QueueAsync(second, 220, 4);
+        await h.QueueAsync(gone, 300, 5);
+        await h.QueueAsync(alice, 400, 6);
+        await h.QueueAsync(bob, 50, 7);
         await h.Mediation.Inner.UpdateRecipientsAsync(alice, new[] { new RecipientUpdate(gone, RecipientUpdateAction.Remove) }, default);
         h.Clock.Advance(TimeSpan.FromSeconds(42));
         var http = h.Http(alice);
@@ -163,7 +163,7 @@ public sealed class MessagePickupHandlerLogTests
         await StepAsync("delivery: the registration check fails", Threaded(h.DeliveryRequest(alice, 10)), http, arm: () => h.Mediation.OnFindGrantByRecipientDid = (_, _) => throw Boom());
         await StepAsync("delivery: the stale records cannot be removed", h.DeliveryRequest(alice, 10), http, arm: () => h.Store.OnAcknowledge = (_, _, _) => throw Boom());
         await StepAsync("delivery: the store hands back another grant's record", h.DeliveryRequest(alice, 10), http,
-            arm: () => h.Store.OnLease = async (request, ct) => (await h.Store.Inner.LeaseAsync(request, ct)).Append(new QueuedMessage("foreign-secret-id", bob, bob, PickupFixture.Payload(3), request.Now)).ToArray());
+            arm: () => h.Store.OnLease = async (request, ct) => (await h.Store.Inner.LeaseAsync(request, ct)).Append(new QueuedMessage("foreign-secret-id", bob, bob, PickupFixture.Payload(30), request.Now)).ToArray());
         run.Secrets.Add("foreign-secret-id");
         await StepAsync("delivery: the store returns no list", h.DeliveryRequest(alice, 10), http,
             arm: () => h.Store.OnLease = (_, _) => new ValueTask<IReadOnlyList<QueuedMessage>>((IReadOnlyList<QueuedMessage>)null!));
@@ -299,7 +299,7 @@ public sealed class MessagePickupHandlerLogTests
         // all three over, one line each. Any enrolled peer can cause it, so only the first is a Warning.
         var passedOver = lines.Where(e => e.Formatted.Contains("even alone; it stays queued and is passed over", StringComparison.Ordinal)).ToArray();
         passedOver.Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug, LogLevel.Debug);
-        passedOver.Select(e => e.State["Bytes"]).Should().Equal(20, 21, 22);
+        passedOver.Select(e => e.State["Bytes"]).Should().Equal(200, 210, 220);
         passedOver.Select(e => e.State["Count"]).Should().Equal(1L, 2L, 3L);
         passedOver.Select(e => e.State["MessageId"]).Distinct().Should().ContainSingle("the second such request found nothing left to try");
         foreach (var line in passedOver)
@@ -329,18 +329,18 @@ public sealed class MessagePickupHandlerLogTests
         // And the run is the one the log test reads: these are its landmarks.
         expected.Should().Contain("anoncrypt status-request: no reply (NoReply); pushed=0; stored=7");
         expected.Should().Contain("live-delivery-change{true} over HTTP: problem-report e.m.live-mode-not-supported; pushed=0; stored=7");
-        expected.Should().Contain("status-request on a session that cannot say whose it is: status count=6 bytes=143 live=False filtered=False times=True threaded=True; pushed=0; stored=7");
-        expected.Should().Contain("delivery-request on a session that cannot say whose it is: status count=6 bytes=143 live=False filtered=False times=True threaded=True; pushed=0; stored=7", "no session, so nothing is leased");
+        expected.Should().Contain("status-request on a session that cannot say whose it is: status count=6 bytes=1430 live=False filtered=False times=True threaded=True; pushed=0; stored=7");
+        expected.Should().Contain("delivery-request on a session that cannot say whose it is: status count=6 bytes=1430 live=False filtered=False times=True threaded=True; pushed=0; stored=7", "no session, so nothing is leased");
         expected.Should().Contain("delivery: the registration check fails: no reply (NoReply); pushed=0; stored=7");
         expected.Should().Contain("delivery: the stale records cannot be removed: no reply (NoReply); pushed=0; stored=7", "the batch fails as a whole and nothing is removed");
         expected.Should().Contain("delivery: the store returns no list: no reply (NoReply); pushed=0; stored=7");
         expected.Should().Contain("delivery: the trim cannot release: no reply (NoReply); pushed=0; stored=7");
-        expected.Should().Contain("delivery: nothing fits the byte budget: status count=3 bytes=63 live=True filtered=True times=True threaded=True; pushed=0; stored=7", "each of the three is passed over in turn and keeps the request's lease; all three are still stored and counted");
-        expected.Should().Contain("delivery: nothing fits, again: status count=3 bytes=63 live=True filtered=True times=True threaded=True; pushed=0; stored=7", "nothing is left to try while that lease runs");
+        expected.Should().Contain("delivery: nothing fits the byte budget: status count=3 bytes=630 live=True filtered=True times=True threaded=True; pushed=0; stored=7", "each of the three is passed over in turn and keeps the request's lease; all three are still stored and counted");
+        expected.Should().Contain("delivery: nothing fits, again: status count=3 bytes=630 live=True filtered=True times=True threaded=True; pushed=0; stored=7", "nothing is left to try while that lease runs");
         expected.Should().Contain("delivery-request: no reply (NoReply); pushed=1; stored=6", "what is queued around the three that were passed over is delivered; the removed DID's leased message is removed");
-        expected.Should().Contain("messages-received: status count=4 bytes=103 live=True filtered=False times=True threaded=True; pushed=0; stored=5");
+        expected.Should().Contain("messages-received: status count=4 bytes=1030 live=True filtered=False times=True threaded=True; pushed=0; stored=5");
         expected.Should().Contain("acknowledgement: the status cannot be read: no reply (NoReply); pushed=0; stored=4", "the acknowledgement itself was applied");
-        expected.Should().Contain("status after the failed live change: status count=3 bytes=81 live=False filtered=False times=True threaded=True; pushed=0; stored=4", "the two that do not fit are still there");
+        expected.Should().Contain("status after the failed live change: status count=3 bytes=810 live=False filtered=False times=True threaded=True; pushed=0; stored=4", "the two that do not fit are still there");
         expected.Should().Contain("status-request whose thread cannot be echoed: threw MalformedMessageException; pushed=0; stored=4", "an invalid thread id is refused before any store work");
         expected.Should().Contain("malformed delivery-request: threw MalformedMessageException; pushed=0; stored=4");
         expected.Should().Contain("the other peer's delivery-request: no reply (NoReply); pushed=1; stored=4");

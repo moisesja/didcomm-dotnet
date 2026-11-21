@@ -67,7 +67,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var otherMediator = await h.NewDidAsync();
         var hasGrant = !situation.StartsWith("no grant", StringComparison.Ordinal);
 
-        // Three messages, ten seconds apart, 10 + 20 + 30 bytes; the request arrives 60 s after the first.
+        // Three messages, ten seconds apart, 100 + 200 + 300 bytes; the request arrives 60 s after the first.
         var ids = new List<string>();
         var payloads = new List<byte[]>();
         if (hasGrant)
@@ -75,7 +75,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
             await h.EnrolAsync(alice, alice);
             for (var i = 0; i < 3; i++)
             {
-                payloads.Add(PickupFixture.Payload(10 * (i + 1), (byte)(i + 1)));
+                payloads.Add(PickupFixture.Payload(100 * (i + 1), (byte)(i + 1)));
                 ids.Add(await h.Fixture.QueueAsync(alice, payloads[i]));
                 h.Clock.Advance(TimeSpan.FromSeconds(10));
             }
@@ -125,7 +125,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
 
         var thid = requestHasThid ? "thread-" + Guid.NewGuid().ToString("N") : null;
         var count = hasGrant ? 3 : 0;
-        var bytes = hasGrant ? 60 : 0;
+        var bytes = hasGrant ? 600 : 0;
         MessagePickupHandlerTimes? times = hasGrant ? new MessagePickupHandlerTimes(60, t0 + 20, t0) : null;
         var statusReads = hasGrant ? new[] { "GetStatusAsync" } : Array.Empty<string>();
         var delivered = false;
@@ -184,7 +184,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
                 var outcome = await h.SendAsync(message, carried);
 
                 if (hasGrant)
-                    outcome.ShouldBeStatus(message, h.Mediator, alice, 2, 50, live: false, times: new MessagePickupHandlerTimes(50, t0 + 20, t0 + 10));
+                    outcome.ShouldBeStatus(message, h.Mediator, alice, 2, 500, live: false, times: new MessagePickupHandlerTimes(50, t0 + 20, t0 + 10));
                 else
                     outcome.ShouldBeStatus(message, h.Mediator, alice, 0, 0, live: false);
                 h.StoreTrace.Should().Equal(new[] { "AcknowledgeAsync" }.Concat(statusReads));
@@ -256,8 +256,8 @@ public sealed class MessagePickupHandlerDecisionTableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
-        await h.QueueAsync(h.Alice, 20);
+        await h.QueueAsync(h.Alice, 100);
+        await h.QueueAsync(h.Alice, 200);
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -265,7 +265,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var outcome = await h.SendAsync(request, session);
 
         var t0 = h.Start.ToUnixTimeSeconds();
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 2, 30, live: false, recipientDid: filtered ? h.Alice : null, times: new MessagePickupHandlerTimes(0, t0, t0));
+        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 2, 300, live: false, recipientDid: filtered ? h.Alice : null, times: new MessagePickupHandlerTimes(0, t0, t0));
         h.StoreTrace.Should().Equal("GetStatusAsync");
         h.Store.LeaseRequests.Should().BeEmpty("limit 0 asks for nothing: the status, not a lease");
         session.Attempts.Should().BeEmpty();
@@ -304,7 +304,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 5; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 8, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 80, (byte)i));
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -328,7 +328,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 12; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 8, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 80, (byte)i));
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -350,7 +350,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         for (var i = 0; i < 4; i++)
-            await h.QueueAsync(h.Alice, 8, (byte)i);
+            await h.QueueAsync(h.Alice, 80, (byte)i);
         var socket = h.Live(h.Alice);
         var otherSocket = h.Live(h.Alice);
         var http = h.Http(h.Alice);
@@ -386,20 +386,20 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var third = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, second, third);
         var t0 = h.Start.ToUnixTimeSeconds();
-        var own1 = await h.QueueAsync(h.Alice, 10, 1);
+        var own1 = await h.QueueAsync(h.Alice, 100, 1);
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        var second1 = await h.QueueAsync(second, 20, 2);
+        var second1 = await h.QueueAsync(second, 200, 2);
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        var own2 = await h.QueueAsync(h.Alice, 30, 3);
+        var own2 = await h.QueueAsync(h.Alice, 300, 3);
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        var second2 = await h.QueueAsync(second, 40, 4);
+        var second2 = await h.QueueAsync(second, 400, 4);
         h.Clock.Advance(TimeSpan.FromSeconds(5));
         var session = h.Http(h.Alice);
 
         // status-request for one DID: only that DID's numbers, and the value comes back (FR-PICK-02).
         h.ResetTraces();
         var status = h.StatusRequest(h.Alice, second);
-        (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 2, 60, live: false, recipientDid: second, times: new MessagePickupHandlerTimes(15, t0 + 15, t0 + 5));
+        (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 2, 600, live: false, recipientDid: second, times: new MessagePickupHandlerTimes(15, t0 + 15, t0 + 5));
         h.Mediation.Reads.Should().Equal(("FindGrantByRecipientDidAsync", second));
         h.Store.StatusRequests.Should().Equal((h.Alice, second));
         h.StoreTrace.Should().Equal("GetStatusAsync");
@@ -434,7 +434,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         await h.EnrolAsync(h.Alice, h.Alice, second, third);
         var ids = new List<string>();
         foreach (var did in new[] { h.Alice, second, h.Alice, third, second, h.Alice, third, third, second })
-            ids.Add(await h.QueueAsync(did, 8, (byte)ids.Count));
+            ids.Add(await h.QueueAsync(did, 80, (byte)ids.Count));
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -458,14 +458,14 @@ public sealed class MessagePickupHandlerDecisionTableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         h.ResetTraces();
 
         var request = h.MessagesReceived(h.Alice, Array.Empty<string>());
         var outcome = await h.SendAsync(request);
 
         var t0 = h.Start.ToUnixTimeSeconds();
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 1, 10, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 1, 100, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
         h.StoreTrace.Should().Equal("GetStatusAsync");
         h.Store.Inner.MessageCount.Should().Be(1);
     }
@@ -477,7 +477,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 4; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 10, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 100, (byte)i));
 
         // Only unknown ids: nothing removed, the status is sent all the same.
         var unknown = h.MessagesReceived(h.Alice, new[] { "no-such-id", Guid.NewGuid().ToString(), new string('z', 2048) });
@@ -493,7 +493,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var status = (await h.SendAsync(request)).Status();
 
         status.MessageCount.Should().Be(2);
-        status.TotalBytes.Should().Be(20);
+        status.TotalBytes.Should().Be(200);
         h.Store.Acknowledged.Should().ContainSingle().Which.Ids.Should().Equal("no-such-id", ids[0], ids[2], ids[0]);
         h.Store.Inner.MessageCount.Should().Be(2);
         (await h.DeliverableAsync(h.Alice)).Should().Equal(new[] { ids[3] }, "ids[1] is still under its lease");
@@ -540,7 +540,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10), await h.QueueAsync(h.Alice, 20) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100), await h.QueueAsync(h.Alice, 200) };
         var socket = h.Live(h.Alice);
         h.ResetTraces();
 
@@ -561,7 +561,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var secondMediator = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
 
         // The same recipient writes to the mediator's other DID: answered from that DID, and the
         // session that counts as hers is the one bound to that (peer, local) pair.
@@ -586,16 +586,16 @@ public sealed class MessagePickupHandlerDecisionTableTests
 
         // First message 0.9 s into a second, second one 100.4 s later, read 3 599.95 s after the first.
         h.Clock.Now = h.Start + TimeSpan.FromMilliseconds(900);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         h.Clock.Now = h.Start + TimeSpan.FromMilliseconds(101_300);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         h.Clock.Now = h.Start + TimeSpan.FromMilliseconds(3_600_850);
 
         var request = h.StatusRequest(h.Alice);
         var outcome = await h.SendAsync(request);
 
         // 3.0 units: seconds (4.0 uses milliseconds). Every member is a JSON integer.
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 2, 20, live: false, times: new MessagePickupHandlerTimes(3599, t0 + 101, t0));
+        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 2, 200, live: false, times: new MessagePickupHandlerTimes(3599, t0 + 101, t0));
         foreach (var member in new[] { "longest_waited_seconds", "newest_received_time", "oldest_received_time", "total_bytes", "message_count" })
             outcome.Reply!.Body![member]!.ToJsonString().Should().MatchRegex("^[0-9]+$", member);
     }
@@ -605,18 +605,18 @@ public sealed class MessagePickupHandlerDecisionTableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         var t0 = h.Start.ToUnixTimeSeconds();
         var times = new MessagePickupHandlerTimes(0, t0, t0);
 
         var noBody = h.Raw("status-request", h.Alice, body: null);
-        (await h.SendAsync(noBody)).ShouldBeStatus(noBody, h.Mediator, h.Alice, 1, 10, live: false, times: times);
+        (await h.SendAsync(noBody)).ShouldBeStatus(noBody, h.Mediator, h.Alice, 1, 100, live: false, times: times);
 
         var explicitNull = h.Raw("status-request", h.Alice, new JsonObject { ["recipient_did"] = null, ["message_count"] = 99, ["extra"] = new JsonObject { ["recipient_did"] = h.Bob } });
-        (await h.SendAsync(explicitNull)).ShouldBeStatus(explicitNull, h.Mediator, h.Alice, 1, 10, live: false, times: times);
+        (await h.SendAsync(explicitNull)).ShouldBeStatus(explicitNull, h.Mediator, h.Alice, 1, 100, live: false, times: times);
 
         var fetch = h.Raw("delivery-request", h.Alice, new JsonObject { ["limit"] = 0, ["recipient_did"] = null, ["live_delivery"] = true });
-        (await h.SendAsync(fetch)).ShouldBeStatus(fetch, h.Mediator, h.Alice, 1, 10, live: false, times: times);
+        (await h.SendAsync(fetch)).ShouldBeStatus(fetch, h.Mediator, h.Alice, 1, 100, live: false, times: times);
     }
 
     [Theory]
@@ -641,7 +641,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var socket = h.Live(h.Alice);
         (await h.SendAsync(h.LiveChange(h.Alice, true), socket)).Status().LiveDelivery.Should().BeTrue();
         h.ResetTraces();
@@ -651,7 +651,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         {
             // The mediator's own messages, sent back at it.
             MessagePickup.CreateStatus(h.Alice, h.Mediator, new PickupStatus(7, LiveDelivery: false), "t"),
-            MessagePickup.CreateDelivery(h.Alice, h.Mediator, new[] { new DeliveredMessage(id, PickupFixture.Payload(4)) }, "t"),
+            MessagePickup.CreateDelivery(h.Alice, h.Mediator, new[] { new DeliveredMessage(id, PickupFixture.Payload(40)) }, "t"),
             // Names 3.0 does not define, carrying what a request would.
             h.Raw("no-such-message", h.Alice, new JsonObject { ["message_id_list"] = new JsonArray(id), ["live_delivery"] = false, ["limit"] = 10 }),
             h.Raw("message-received", h.Alice, new JsonObject { ["message_id_list"] = new JsonArray(id) }),
@@ -690,9 +690,11 @@ public sealed class MessagePickupHandlerDecisionTableTests
     [InlineData("https://didcomm.org/messagepickup/2.0/status-request")]
     public async Task A_type_of_another_major_version_is_not_answered_by_the_3_0_role(string type)
     {
-        await using var h = await MessagePickupHandlerHarness.CreateAsync();
+        // With 4.0 switched off (since #100 it is on by default and answers the 4.x rows itself:
+        // MessagePickup40HandlerTests), nothing serves another major version: the 3.0 role does not claim it.
+        await using var h = await MessagePickupHandlerHarness.CreateAsync(pickup: o => o.EnableV4 = false);
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var socket = h.Live(h.Alice);
         h.ResetTraces();
 
@@ -700,7 +702,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
         var outcome = await h.SendAsync(PickupMessages.Raw(type, h.Alice, h.Mediator, body), socket);
 
         outcome.Reply.Should().BeNull();
-        outcome.Result.Should().Be(DispatchResult.NoHandler, "Message Pickup 4.0 is another protocol (FR-PICK-12); nothing here serves it");
+        outcome.Result.Should().Be(DispatchResult.NoHandler, "Message Pickup 4.0 is another protocol (FR-PICK-12); with it switched off nothing here serves it");
         h.StoreTrace.Should().BeEmpty();
         h.MediationTrace.Should().BeEmpty();
         socket.Attempts.Should().BeEmpty();
@@ -726,7 +728,7 @@ public sealed class MessagePickupHandlerDecisionTableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var handler = (MessagePickupHandler)h.Fixture.Host.Services.GetService(typeof(MessagePickupHandler))!;
         var message = h.MessagesReceived(h.Alice, new[] { id });
         var received = await h.Fixture.ReceiveAsync(message, h.Mediator);

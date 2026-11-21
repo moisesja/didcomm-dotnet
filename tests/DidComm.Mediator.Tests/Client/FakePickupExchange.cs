@@ -15,9 +15,12 @@ using Microsoft.Extensions.Logging;
 
 namespace DidComm.Mediator.Tests.Client;
 
-/// <summary>One request the pickup client handed to <see cref="FakePickupExchange.ExchangeAsync"/>.</summary>
+/// <summary>One request the pickup client handed to <see cref="FakePickupExchange.ExchangeAsync"/> (or, <see cref="OneWay"/>, to <see cref="FakePickupExchange.SendOneWayAsync"/>).</summary>
 internal sealed record SentRequest(MediatorRoute Route, Message Request, MediatorExchangeSpec Spec, string MediatorDid, string LocalDid, CancellationToken Ct)
 {
+    /// <summary>Sent with <see cref="IMediatorExchange.SendOneWayAsync"/>: no answer expected (its <see cref="Spec"/> is a stand-in named after the message).</summary>
+    public bool OneWay { get; init; }
+
     public string Type => Request.Type;
 
     public bool Is(string type) => string.Equals(Request.Type, type, StringComparison.Ordinal);
@@ -28,8 +31,11 @@ internal sealed record SentRequest(MediatorRoute Route, Message Request, Mediato
     /// <summary>The <c>live_delivery</c> of a <c>live-delivery-change</c>.</summary>
     public bool Live => Request.Body![PickupBodies.LiveDelivery]!.GetValue<bool>();
 
-    /// <summary>The <c>limit</c> of a <c>delivery-request</c>.</summary>
+    /// <summary>The <c>limit</c> of a 3.0 <c>delivery-request</c>.</summary>
     public int Limit => Request.Body!["limit"]!.GetValue<int>();
+
+    /// <summary>The <c>message_count_limit</c> of a 4.0 <c>delivery-request</c>.</summary>
+    public int MessageCountLimit => Request.Body![MessagePickup40.MessageCountLimitMember]!.GetValue<int>();
 
     /// <summary>The <c>recipient_did</c> filter, or <c>null</c>.</summary>
     public string? RecipientDid => Request.Body?[PickupBodies.RecipientDid]?.GetValue<string>();
@@ -54,10 +60,22 @@ internal sealed record SentRequest(MediatorRoute Route, Message Request, Mediato
 /// order of calls can be checked.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Payload texts the default unpacker understands: <c>ok:{id}</c> (Alice's authcrypted message
 /// <c>{id}</c>, decrypted for <see cref="Local"/>), <c>to:{did}:{id}</c> (decrypted for
 /// <c>{did}</c>), <c>anon:{text}</c> (anonymous, keyed by its bytes), <c>bad:{text}</c> (a failure).
 /// Anything else is a failure too.
+/// </para>
+/// <para>
+/// A delivered attachment must be a DIDComm message in encrypted form (#100 F-2), so the builders
+/// carry each payload text inside a stand-in JWE (<see cref="Jwe"/>: a JSON object whose
+/// <c>ciphertext</c> is the text), and the unpack takes the text back out of it before reading it.
+/// Raw bytes that are not such an object never reach the unpack: the client fails them first.
+/// </para>
+/// <para>
+/// The options pin <see cref="MessagePickupVersion.V3"/> unless the test's configuration says
+/// otherwise (#100 DC-9), so the 3.0 suites keep testing 3.0 and send no Discover Features query.
+/// </para>
 /// </remarks>
 internal sealed class FakePickupExchange : IMediatorExchange
 {
@@ -78,12 +96,13 @@ internal sealed class FakePickupExchange : IMediatorExchange
 
     public FakePickupExchange(Action<MediatorClientOptions>? configure = null, ManualTimeProvider? time = null)
     {
-        var options = new MediatorClientOptions();
+        var options = new MediatorClientOptions { MessagePickupVersion = MessagePickupVersion.V3 };
         configure?.Invoke(options);
         Options = options.ValidatedCopy();
         Clock = time ?? new ManualTimeProvider();
         Duplicates = new DuplicateFilter(Options.DedupeCapacity);
-        Versions = new NegotiatedVersionCache(Clock);
+        Versions = new NegotiatedVersionCache<CoordinateMediationVersion>(Clock);
+        PickupVersions = new NegotiatedVersionCache<MessagePickupVersion>(Clock);
     }
 
     public MediatorClientOptions Options { get; }
@@ -94,7 +113,12 @@ internal sealed class FakePickupExchange : IMediatorExchange
 
     public DuplicateFilter Duplicates { get; }
 
-    public NegotiatedVersionCache Versions { get; }
+    public NegotiatedVersionCache<CoordinateMediationVersion> Versions { get; }
+
+    public NegotiatedVersionCache<MessagePickupVersion> PickupVersions { get; set; }
+
+    /// <summary>The step of a one-way send (after it is recorded); completes at once by default. A test stalls or fails a send here.</summary>
+    public Func<SentRequest, Task>? OneWay { get; set; }
 
     /// <summary>The route every resolution returns.</summary>
     public MediatorRoute Route { get; set; } = HttpRoute;
@@ -118,8 +142,9 @@ internal sealed class FakePickupExchange : IMediatorExchange
     /// <summary>Open every batch under a real per-delivery budget of <paramref name="budget"/> on <see cref="Clock"/>.</summary>
     public FakePickupExchange UseBudget(TimeSpan budget)
     {
-        Budgeted = new DeliveredMessageUnpacker(async (text, ct) =>
+        Budgeted = new DeliveredMessageUnpacker(async (packed, ct) =>
         {
+            var text = Unwrap(packed);
             lock (_gate)
                 _unpacked.Add(text);
             var outcome = await Unpacker(text, ct);
@@ -144,8 +169,9 @@ internal sealed class FakePickupExchange : IMediatorExchange
     /// <summary>The requests of one type, in order.</summary>
     public IReadOnlyList<SentRequest> SentOf(string type) => Sent.Where(s => s.Is(type)).ToArray();
 
-    /// <summary>The ids of every <c>messages-received</c> sent, flattened in order.</summary>
-    public IReadOnlyList<string> AcknowledgedIds => SentOf(MessagePickup.MessagesReceivedType).SelectMany(s => s.Ids).ToArray();
+    /// <summary>The ids of every <c>messages-received</c> sent, of either version, flattened in order.</summary>
+    public IReadOnlyList<string> AcknowledgedIds
+        => Sent.Where(s => s.Is(MessagePickup.MessagesReceivedType) || s.Is(MessagePickup40.MessagesReceivedType)).SelectMany(s => s.Ids).ToArray();
 
     /// <summary>Every payload text handed to an unpack, in order.</summary>
     public IReadOnlyList<string> Unpacked
@@ -227,6 +253,21 @@ internal sealed class FakePickupExchange : IMediatorExchange
     public Task<InboundMessageSnapshot> ExchangeAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
     {
         var sent = new SentRequest(route, request, spec, mediatorDid, localDid, ct);
+        Record(sent);
+        if (_handlers.TryGetValue(request.Type, out var handler))
+            return handler(sent);
+        return Task.FromResult(DefaultAnswer(sent));
+    }
+
+    public Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct)
+    {
+        var sent = new SentRequest(route, request, new MediatorExchangeSpec(name, Array.Empty<MessageTypeUri>(), ExpectsDelivery: false), mediatorDid, localDid, ct) { OneWay = true };
+        Record(sent);
+        return OneWay?.Invoke(sent) ?? Task.CompletedTask;
+    }
+
+    private void Record(SentRequest sent)
+    {
         TaskCompletionSource signal;
         lock (_gate)
         {
@@ -235,9 +276,6 @@ internal sealed class FakePickupExchange : IMediatorExchange
             _changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         signal.TrySetResult();
-        if (_handlers.TryGetValue(request.Type, out var handler))
-            return handler(sent);
-        return Task.FromResult(DefaultAnswer(sent));
     }
 
     public LiveRegistration RegisterLiveStream(string mediatorDid, string localDid)
@@ -252,7 +290,7 @@ internal sealed class FakePickupExchange : IMediatorExchange
     public async Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var text = Encoding.UTF8.GetString(payload.Span);
+        var text = Unwrap(Encoding.UTF8.GetString(payload.Span));
         lock (_gate)
             _unpacked.Add(text);
         return await Unpacker(text, ct);
@@ -277,24 +315,71 @@ internal sealed class FakePickupExchange : IMediatorExchange
 
     // ---- answers --------------------------------------------------------------------------------
 
-    /// <summary>The default answer: a <c>status</c> with nothing waiting (live delivery as asked for a <c>live-delivery-change</c>).</summary>
+    /// <summary>
+    /// The default answer: a <c>status</c> with nothing waiting (live delivery as asked for a
+    /// <c>live-delivery-change</c>), of the request's version; a 4.0 <c>delivery-request</c> gets an
+    /// empty 4.0 <c>delivery</c> instead (4.0 L210).
+    /// </summary>
     public static InboundMessageSnapshot DefaultAnswer(SentRequest request)
-        => request.Is(MessagePickup.LiveDeliveryChangeType)
-            ? Status(request, live: request.Live)
-            : Status(request);
+    {
+        if (request.Is(MessagePickup40.DeliveryRequestType))
+            return Delivery40(request);
+        var v4 = request.Type.StartsWith(MessagePickup40.ProtocolUri + "/", StringComparison.Ordinal);
+        bool? live = request.Is(MessagePickup.LiveDeliveryChangeType) || request.Is(MessagePickup40.LiveDeliveryChangeType) ? request.Live : null;
+        return v4 ? Status40(request, live: live) : Status(request, live: live);
+    }
 
     /// <summary>A <c>status</c> answering <paramref name="request"/>.</summary>
     public static InboundMessageSnapshot Status(SentRequest request, int count = 0, bool? live = null, string? recipientDid = null)
         => Snapshot(MessagePickup.CreateStatus(M, L, new PickupStatus(count, recipientDid, LiveDelivery: live), thid: request.Request.Id));
 
-    /// <summary>A <c>delivery</c> answering <paramref name="request"/> (or a live push, with <paramref name="request"/> <c>null</c>): one attachment per (id, payload text).</summary>
+    /// <summary>A <c>delivery</c> answering <paramref name="request"/> (or a live push, with <paramref name="request"/> <c>null</c>): one attachment per (id, payload text), each text in a stand-in JWE (<see cref="Jwe"/>).</summary>
     public static InboundMessageSnapshot Delivery(SentRequest? request, params (string Id, string Payload)[] messages)
         => Snapshot(MessagePickup.CreateDelivery(M, L,
-            messages.Select(m => new DeliveredMessage(m.Id, Encoding.UTF8.GetBytes(m.Payload))).ToArray(),
+            messages.Select(m => new DeliveredMessage(m.Id, Encoding.UTF8.GetBytes(Jwe(m.Payload)))).ToArray(),
             thid: request?.Request.Id));
 
     /// <summary>A live push carrying (id, payload text) messages.</summary>
     public static InboundMessageSnapshot Push(params (string Id, string Payload)[] messages) => Delivery(null, messages);
+
+    /// <summary>A Message Pickup 4.0 <c>status</c> answering <paramref name="request"/>; its times in milliseconds.</summary>
+    public static InboundMessageSnapshot Status40(SentRequest request, int count = 0, bool? live = null, string? recipientDid = null, long? newestMs = null, long? oldestMs = null, long? totalBytes = null)
+        => Snapshot(MessagePickup40.CreateStatus(M, L, new PickupStatus40(count, recipientDid, newestMs, oldestMs, totalBytes, live), thid: request.Request.Id));
+
+    /// <summary>A Message Pickup 4.0 <c>delivery</c> answering <paramref name="request"/> (or a live push, with <paramref name="request"/> <c>null</c>); with no messages, the empty delivery (<c>"attachments": []</c>).</summary>
+    public static InboundMessageSnapshot Delivery40(SentRequest? request, params (string Id, string Payload)[] messages)
+        => Snapshot(MessagePickup40.CreateDelivery(M, L,
+            messages.Select(m => new DeliveredMessage(m.Id, Encoding.UTF8.GetBytes(Jwe(m.Payload)))).ToArray(),
+            thid: request?.Request.Id));
+
+    /// <summary>A Message Pickup 4.0 live push carrying (id, payload text) messages.</summary>
+    public static InboundMessageSnapshot Push40(params (string Id, string Payload)[] messages) => Delivery40(null, messages);
+
+    /// <summary>A Message Pickup 4.0 problem report naming <paramref name="request"/> in <c>pthid</c>.</summary>
+    public static InboundMessageSnapshot Problem40(SentRequest request)
+        => Snapshot(MessagePickup40.CreateLiveModeNotSupported(M, L, request.Request.Id));
+
+    /// <summary>
+    /// The stand-in JWE that carries <paramref name="text"/> through the client's encrypted-form
+    /// check (#100 F-2): a JSON object with a <c>ciphertext</c> member (what makes an envelope a
+    /// JWE), which this exchange's unpack reads the text back from.
+    /// </summary>
+    public static string Jwe(string text)
+        => new JsonObject { ["protected"] = "eyJhbGciOiJmYWtlIn0", ["ciphertext"] = text, ["tag"] = "fake" }.ToJsonString();
+
+    // The payload text inside a stand-in JWE; anything else as it is.
+    private static string Unwrap(string packed)
+    {
+        try
+        {
+            if (JsonNode.Parse(packed) is JsonObject envelope && envelope["ciphertext"] is JsonValue value && value.TryGetValue<string>(out var text))
+                return text;
+        }
+        catch (JsonException)
+        {
+        }
+        return packed;
+    }
 
     /// <summary>A <c>delivery</c> with hand-built attachments (ids the builder would refuse, bad data).</summary>
     public static InboundMessageSnapshot RawDelivery(SentRequest? request, IEnumerable<Attachment?> attachments, string? recipientDid = null)
@@ -312,8 +397,12 @@ internal sealed class FakePickupExchange : IMediatorExchange
         return Snapshot(message);
     }
 
-    /// <summary>An attachment carrying <paramref name="payload"/> as base64url.</summary>
+    /// <summary>An attachment carrying <paramref name="payload"/>, in a stand-in JWE (<see cref="Jwe"/>), as base64url.</summary>
     public static Attachment Entry(string? id, string payload)
+        => new() { Id = id, Data = new AttachmentData { Base64 = Base64Url.Encode(Encoding.UTF8.GetBytes(Jwe(payload))) } };
+
+    /// <summary>An attachment carrying <paramref name="payload"/> exactly as given (not in a JWE), as base64url.</summary>
+    public static Attachment RawEntry(string id, string payload)
         => new() { Id = id, Data = new AttachmentData { Base64 = Base64Url.Encode(Encoding.UTF8.GetBytes(payload)) } };
 
     /// <summary>An attachment whose data is not base64 at all.</summary>

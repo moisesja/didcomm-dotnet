@@ -28,10 +28,10 @@ public sealed class PushDispatcherInvariantTests
         var (grant, session) = await world.LiveGrantAsync("inv-d1");
         var fixture = world.Fixture;
         var now = fixture.Time.GetUtcNow();
-        await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(16, seed: 1), new PickupDeliveryOptions(ExpiresTime: now.ToUnixTimeSeconds() + 1, AllowLive: false));
-        var acknowledged = await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(16, seed: 2));
-        var pickedUp = await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(16, seed: 3));
-        var due = await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(16, seed: 4));
+        await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(160, seed: 1), new PickupDeliveryOptions(ExpiresTime: now.ToUnixTimeSeconds() + 1, AllowLive: false));
+        var acknowledged = await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(160, seed: 2));
+        var pickedUp = await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(160, seed: 3));
+        var due = await fixture.StoreAsync(grant.Recipient, PushFixture.Payload(160, seed: 4));
         fixture.Time.Advance(TimeSpan.FromSeconds(2)); // the first one expires
         (await fixture.Queue.RemoveAsync(grant.Peer, acknowledged.MessageId)).Should().BeTrue();
         var at = fixture.Time.GetUtcNow();
@@ -171,6 +171,12 @@ public sealed class PushDispatcherInvariantTests
         {
             Interlocked.Increment(ref gives);
             return store.Inner.ReleaseAsync(grant, ids, lease, ct);
+        };
+        // A give-back of a push that was not sent ends the lease too.
+        store.OnReturnUnsent = (grant, ids, lease, ct) =>
+        {
+            Interlocked.Increment(ref gives);
+            return store.Inner.ReturnUnsentAsync(grant, ids, lease, ct);
         };
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();

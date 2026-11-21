@@ -118,7 +118,7 @@ public sealed class MessagePickupCleanupBoundTests
             var socket = fixture.Session(peer, mediator, live: true);
             (await coordinator.SetLiveDeliveryAsync(peer, true, socket, static (from, to, m) => MessagePickup.CreateDelivery(from, to, new[] { m }), "churn", CancellationToken.None))
                 .Status!.LiveDelivery.Should().BeTrue();
-            var pushed = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(8, (byte)connection));
+            var pushed = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(80, (byte)connection));
             pushed.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
             ids.Add(pushed.MessageId!);
 

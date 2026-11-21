@@ -70,19 +70,29 @@ public sealed class MessagePickupStoreSequenceAdv6Tests
         var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var writing = Writers;
         var seen = new ConcurrentBag<(int Reader, int Order, long Mark, int Count)>();
+        // L-065: real time is only the outer hang guard. The halfway wait has no timeout of its own: a
+        // 10 s one ran out on a loaded windows runner (#100's CI), and the writer that threw never
+        // counted itself out, so the readers spun until the outer guard. A writer now counts itself
+        // out whatever ends it, so a failure surfaces as itself.
         var writers = Enumerable.Range(0, Writers).Select(w => Task.Run(async () =>
         {
-            await start.Task;
-            for (var i = 0; i < PerWriter; i++)
+            try
             {
-                if (i == PerWriter / 2)
+                await start.Task;
+                for (var i = 0; i < PerWriter; i++)
                 {
-                    Interlocked.Increment(ref halfway);
-                    await resume.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                    if (i == PerWriter / 2)
+                    {
+                        Interlocked.Increment(ref halfway);
+                        await resume.Task;
+                    }
+                    await store.AddAsync(Message($"w{w}-{i}", w % 2 == 0 ? Alice : Bob));
                 }
-                await store.AddAsync(Message($"w{w}-{i}", w % 2 == 0 ? Alice : Bob));
             }
-            Interlocked.Decrement(ref writing);
+            finally
+            {
+                Interlocked.Decrement(ref writing);
+            }
         })).ToArray();
         var readers = Enumerable.Range(0, Readers).Select(r => Task.Run(async () =>
         {
@@ -99,8 +109,9 @@ public sealed class MessagePickupStoreSequenceAdv6Tests
                     if (Interlocked.Increment(ref readHalfway) == Readers)
                         resume.TrySetResult();
                 }
-                if (order % 16 == 0)
-                    await Task.Yield();
+                // Every read gives way, so readers spinning on the store's lock cannot starve the
+                // writers on a machine with few cores; the overlap is forced by the barrier above.
+                await Task.Yield();
             }
         })).ToArray();
         start.SetResult();

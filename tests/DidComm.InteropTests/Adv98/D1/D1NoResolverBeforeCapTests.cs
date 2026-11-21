@@ -59,7 +59,7 @@ public sealed class D1NoResolverBeforeCapTests(ITestOutputHelper output)
         (await mediator.Mediation.GrantAsync(new MediationGrant(bob.Did, new[] { mediator.Did }), default)).Should().NotBeNull();
         (await mediator.Mediation.UpdateRecipientsAsync(bob.Did, new[] { new RecipientUpdate(held.Did, RecipientUpdateAction.Add) }, default))
             .Should().Equal(RecipientStoreOutcome.Added);
-        var queued = await mediator.Queue.DeliverAsync(held.Did, Encoding.UTF8.GetBytes("{\"protected\":\"x\"}"));
+        var queued = await mediator.Queue.DeliverAsync(held.Did, Encoding.UTF8.GetBytes("{\"protected\":\"x\",\"ciphertext\":\"x\"}"));
         queued.MessageId.Should().NotBeNull();
 
         // A DID-shaped value with the sentinel up front, so a quoted prefix is caught too.

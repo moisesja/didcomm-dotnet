@@ -187,7 +187,8 @@ public sealed class MediatorClientDiTests
         var client = new DidCommClient(world.Secrets, world.Services.GetRequiredService<Resolution.IDidKeyService>(), world.Services.GetRequiredService<Resolution.IServiceEndpointResolver>(),
             new AcceptingRouter(), new DidCommOptions());
         var logs = new ClientLogCapture();
-        var pickup = new PickupClient(client, logger: new Logger<PickupClient>(logs));
+        // Pinned (#100 DC-9): this test is about the channel's lines, not the version negotiation.
+        var pickup = new PickupClient(client, new MediatorClientOptions { MessagePickupVersion = MessagePickupVersion.V3 }, logger: new Logger<PickupClient>(logs));
         var mediation = new MediationClient(client, logger: new Logger<MediationClient>(logs));
 
         await FluentActions.Awaiting(() => pickup.GetStatusAsync(world.Mediator.Did, world.Local.Did, serviceEndpointOverride: new Uri("https://mediator.example/didcomm")))

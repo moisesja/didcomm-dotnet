@@ -52,7 +52,7 @@ public sealed class ResponseThreadIdPickupHandlerTests
     {
         var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         var request = name switch
         {
             "status-request" => h.StatusRequest(h.Alice),

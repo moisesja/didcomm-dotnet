@@ -8,6 +8,7 @@ using DidComm.Mediator.Tests.Coordination;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Samples.Shared;
+using DidComm.TestSupport;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -139,6 +140,8 @@ internal sealed class PickupFakeStore : IMessageStore
     public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids)> Acknowledged { get; } = new();
     public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids)> Released { get; } = new();
     public ConcurrentQueue<string> ReleasedLeaseIds { get; } = new();
+    /// <summary>Every give-back of a push that was not sent (<see cref="IMessageStore.ReturnUnsentAsync"/>): the grant, the ids and the lease id.</summary>
+    public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids, string LeaseId)> ReturnedUnsent { get; } = new();
     public ConcurrentQueue<(string GrantPeerDid, IReadOnlyList<string> Ids, string LeaseId, DateTimeOffset Until)> PassedOver { get; } = new();
     public ConcurrentQueue<string> ReleasedOwners { get; } = new();
     public ConcurrentQueue<(string GrantPeerDid, string? RecipientDid)> StatusRequests { get; } = new();
@@ -148,6 +151,7 @@ internal sealed class PickupFakeStore : IMessageStore
     public Func<MessageLeaseRequest, CancellationToken, ValueTask<IReadOnlyList<QueuedMessage>>>? OnLease { get; set; }
     public Func<string, IReadOnlyList<string>, CancellationToken, ValueTask<int>>? OnAcknowledge { get; set; }
     public Func<string, IReadOnlyList<string>, string, CancellationToken, ValueTask<int>>? OnRelease { get; set; }
+    public Func<string, IReadOnlyList<string>, string, CancellationToken, ValueTask<int>>? OnReturnUnsent { get; set; }
     public Func<string, CancellationToken, ValueTask<int>>? OnReleaseLeases { get; set; }
     public Func<string, IReadOnlyList<string>, string, DateTimeOffset, CancellationToken, ValueTask<int>>? OnPassOver { get; set; }
     public Func<string, string?, DateTimeOffset, CancellationToken, ValueTask<QueueStatus>>? OnGetStatus { get; set; }
@@ -183,6 +187,13 @@ internal sealed class PickupFakeStore : IMessageStore
         Released.Enqueue((grantPeerDid, messageIds.ToArray()));
         ReleasedLeaseIds.Enqueue(leaseId);
         return OnRelease?.Invoke(grantPeerDid, messageIds, leaseId, ct) ?? Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    }
+
+    public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
+    {
+        Calls.Enqueue(nameof(ReturnUnsentAsync));
+        ReturnedUnsent.Enqueue((grantPeerDid, messageIds.ToArray(), leaseId));
+        return OnReturnUnsent?.Invoke(grantPeerDid, messageIds, leaseId, ct) ?? Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
     }
 
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct)
@@ -332,14 +343,12 @@ internal sealed class PickupFixture : IAsyncDisposable
         }
     }
 
-    /// <summary>A payload of <paramref name="size"/> bytes that looks like nothing in particular (the mediator relays bytes).</summary>
-    public static byte[] Payload(int size, byte seed = 1)
-    {
-        var bytes = new byte[size];
-        for (var i = 0; i < size; i++)
-            bytes[i] = (byte)(seed + i * 31);
-        return bytes;
-    }
+    /// <summary>
+    /// A message of exactly <paramref name="size"/> bytes in encrypted form, the only kind the
+    /// mailbox stores: a stand-in JWE (<see cref="StandInJwe"/>), never decrypted. At least
+    /// <see cref="StandInJwe.MinSize"/> bytes.
+    /// </summary>
+    public static byte[] Payload(int size, byte seed = 1) => StandInJwe.OfSize(size, seed);
 
     /// <summary>Queue a message for <paramref name="recipientDid"/> and require that it was retained.</summary>
     public async Task<string> QueueAsync(string recipientDid, byte[] payload, PickupDeliveryOptions? options = null)

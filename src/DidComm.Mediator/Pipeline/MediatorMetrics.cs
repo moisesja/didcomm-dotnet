@@ -19,8 +19,11 @@ internal static class PushOutcomes
     internal const string PushedLive = "Pushed-Live";
 
     /// <summary>
-    /// A push did not deliver and its record stays queued (always available to pickup; a push that
-    /// was given back is tried again at the grant's next wake-up): the live session did not take it
+    /// A push did not deliver and its record stays queued (always available to pickup; a push the
+    /// session answered "not sent" for, or that never got to the session, is tried again live at the
+    /// grant's next wake-up; one whose send faulted, was cancelled or reached its deadline once the
+    /// session had it counts as pushed and waits for a <c>delivery-request</c>, owner decision
+    /// 2026-11-21, OD-5): the live session did not take it
     /// or it was too large for the session even alone (then passed over), a store or session fault,
     /// or the deadline. At the deadline the worker stops waiting without knowing the result: the push
     /// runs on until its call ends and may still deliver (a live session that reports it sent keeps

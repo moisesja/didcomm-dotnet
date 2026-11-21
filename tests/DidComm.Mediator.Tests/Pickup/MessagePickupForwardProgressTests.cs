@@ -41,9 +41,9 @@ public sealed class MessagePickupForwardProgressTests
             var (mediator, peer) = await fixture.EnrolledAsync();
             var scenario = new Scenario { Fixture = fixture, Mediator = mediator, Peer = peer };
             for (var i = 0; i < blockers; i++)
-                scenario.Unfit.Add(await fixture.QueueAsync(peer, PickupFixture.Payload(40 + i, (byte)i)));
+                scenario.Unfit.Add(await fixture.QueueAsync(peer, PickupFixture.Payload(400 + i, (byte)i)));
             for (var i = 0; i < behind; i++)
-                scenario.Fit.Add(await fixture.QueueAsync(peer, PickupFixture.Payload(10 + i, (byte)(100 + i))));
+                scenario.Fit.Add(await fixture.QueueAsync(peer, PickupFixture.Payload(100 + i, (byte)(100 + i))));
             return scenario;
         }
 

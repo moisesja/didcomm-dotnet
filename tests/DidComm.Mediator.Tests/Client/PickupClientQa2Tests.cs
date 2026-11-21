@@ -426,7 +426,8 @@ public sealed class PickupClientQa2Tests
         public MediatorClientOptions Options => inner.Options;
         public TimeProvider Time => inner.Time;
         public DuplicateFilter Duplicates => inner.Duplicates;
-        public NegotiatedVersionCache Versions => inner.Versions;
+        public NegotiatedVersionCache<CoordinateMediationVersion> Versions => inner.Versions;
+        public NegotiatedVersionCache<MessagePickupVersion> PickupVersions => inner.PickupVersions;
 
         public async Task<MediatorRoute> ResolveRouteAsync(string mediatorDid, Uri? serviceEndpointOverride, bool requireWebSocket, CancellationToken ct)
         {
@@ -438,6 +439,11 @@ public sealed class PickupClientQa2Tests
             => inner.ExchangeAsync(route, request, spec, mediatorDid, localDid, ct);
 
         public LiveRegistration RegisterLiveStream(string mediatorDid, string localDid) => inner.RegisterLiveStream(mediatorDid, localDid);
+
+
+        public Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct)
+
+            => inner.SendOneWayAsync(route, request, name, mediatorDid, localDid, ct);
 
         public Task<DeliveredOutcome> UnpackDeliveredAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => inner.UnpackDeliveredAsync(payload, ct);
 

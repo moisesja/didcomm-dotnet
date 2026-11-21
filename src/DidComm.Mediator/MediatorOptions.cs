@@ -108,8 +108,9 @@ public sealed class MediatorOptions
     public CoordinateMediationOptions CoordinateMediation { get; }
 
     /// <summary>
-    /// Message Pickup settings (FR-PICK-*): batch size and packed delivery size, lease timeout,
-    /// per-grant and store-wide quotas, and the mailbox age limit.
+    /// Message Pickup settings (FR-PICK-*): whether 4.0 is served next to 3.0
+    /// (<see cref="MessagePickupOptions.EnableV4"/>, on by default), batch size and packed delivery
+    /// size, lease timeout, per-grant and store-wide quotas, and the mailbox age limit.
     /// </summary>
     public MessagePickupOptions Pickup { get; }
 

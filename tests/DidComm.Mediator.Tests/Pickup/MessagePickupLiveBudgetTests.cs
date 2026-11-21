@@ -224,17 +224,17 @@ public sealed class MessagePickupLiveBudgetTests
         var socket = fixture.Session(peer, mediator, live: true);
 
         // One delivered by request and not acknowledged, one waiting, one not yet due, one pushed live.
-        var leased = await fixture.QueueAsync(peer, PickupFixture.Payload(10, 1));
+        var leased = await fixture.QueueAsync(peer, PickupFixture.Payload(100, 1));
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle().Which.Id.Should().Be(leased);
-        var waiting = await fixture.QueueAsync(peer, PickupFixture.Payload(10, 2));
-        var later = await fixture.QueueAsync(peer, PickupFixture.Payload(10, 3), new PickupDeliveryOptions(NotBefore: fixture.Clock.Now + TimeSpan.FromHours(1)));
+        var waiting = await fixture.QueueAsync(peer, PickupFixture.Payload(100, 2));
+        var later = await fixture.QueueAsync(peer, PickupFixture.Payload(100, 3), new PickupDeliveryOptions(NotBefore: fixture.Clock.Now + TimeSpan.FromHours(1)));
         await MessagePickupLive.SetLiveAsync(fixture, peer, mediator, socket);
-        var live = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 4));
+        var live = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 4));
         live.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         fixture.Memory.MessageCount.Should().Be(4);
 
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 5))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull, "a live push never bypasses the quota (FR-PICK-10)");
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 5), new PickupDeliveryOptions(AllowLive: false))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 5))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull, "a live push never bypasses the quota (FR-PICK-10)");
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 5), new PickupDeliveryOptions(AllowLive: false))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
         socket.Sent.Should().ContainSingle();
         fixture.Memory.MessageCount.Should().Be(4);
 
@@ -242,7 +242,7 @@ public sealed class MessagePickupLiveBudgetTests
         foreach (var id in new[] { leased, waiting, later, live.MessageId! })
         {
             (await fixture.Queue.RemoveAsync(peer, id)).Should().BeTrue();
-            (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 6), new PickupDeliveryOptions(AllowLive: false))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+            (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 6), new PickupDeliveryOptions(AllowLive: false))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
             fixture.Memory.MessageCount.Should().Be(4);
         }
     }

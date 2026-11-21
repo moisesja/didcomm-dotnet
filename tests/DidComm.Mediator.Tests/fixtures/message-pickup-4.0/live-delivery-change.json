@@ -1,0 +1,1 @@
+{"id":"123456780","type":"https://didcomm.org/message-pickup/4.0/live-delivery-change","typ":"application/didcomm-plain+json","body":{"live_delivery":true}}

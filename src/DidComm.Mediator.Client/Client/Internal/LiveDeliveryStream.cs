@@ -15,11 +15,16 @@ namespace DidComm.Mediator.Client.Internal;
 /// <para>
 /// <strong>Start.</strong> At the first <c>MoveNextAsync</c>: the route, refused before anything is
 /// sent when it is not a WebSocket; then the live-push mailbox of the (mediator, local DID) pair,
-/// refused when one is already open.
+/// refused when one is already open; then the Message Pickup version (#100 DC-6), once for the
+/// stream's life: a version query that fails ends the stream at once, not retried, and closes the
+/// mailbox. Every request the stream sends and every answer it reads goes through
+/// <see cref="PickupWire"/> with that version; a push of the other version is ignored, not
+/// acknowledged.
 /// </para>
 /// <para>
 /// <strong>Cycle.</strong> <c>live-delivery-change{true}</c> → <c>status</c>, then a drain
-/// (<c>delivery-request{10}</c> until a <c>status</c>, at most 50 rounds). Live mode is turned on
+/// (<c>delivery-request{10}</c> until a <c>status</c> — under 4.0 until an empty <c>delivery</c> —
+/// at most 50 rounds). Live mode is turned on
 /// before the drain, so a message that arrives between the two is pushed (it is after the
 /// mediator's arrival mark) or drained, never neither. The cycle runs at the start, one
 /// <see cref="MediatorClientOptions.LivePollInterval"/> after the previous cycle's drain ended, on
@@ -76,7 +81,9 @@ namespace DidComm.Mediator.Client.Internal;
 /// and queued for acknowledgement — when the consumer asks for the next item; taken messages are
 /// acknowledged when 10 are waiting, when nothing is ready, or when the oldest has waited 10 s, in
 /// <c>messages-received</c> messages of at most <see cref="MaxAckIds"/> ids each (several when more
-/// are waiting, as after an acknowledgement outage). When the enumeration ends for any reason the
+/// are waiting, as after an acknowledgement outage); under 4.0 each is sent one way
+/// (<see cref="IMediatorExchange.SendOneWayAsync"/>: nothing answers it, so only the send is
+/// waited for). When the enumeration ends for any reason the
 /// last yielded message is not taken; what was taken is acknowledged, live mode is turned off, both
 /// within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever the caller's token, and
 /// the mailbox is closed. Buffered or drained messages never yielded are never acknowledged.
@@ -137,6 +144,7 @@ internal sealed class LiveDeliveryStream
     private readonly string _mediatorDid;
     private readonly string _localDid;
     private readonly TimeProvider _time;
+    private readonly MessagePickupVersion _version;
 
     private readonly Queue<Opened> _ready = new();
     private readonly HashSet<string> _held = new(StringComparer.Ordinal);
@@ -154,9 +162,10 @@ internal sealed class LiveDeliveryStream
     private bool _liveRequested;
     private bool _warnedNotLive;
 
-    private LiveDeliveryStream(IMediatorExchange exchange, PickupLog log, MediatorRoute route, LiveRegistration registration, string mediatorDid, string localDid)
+    private LiveDeliveryStream(IMediatorExchange exchange, PickupLog log, MediatorRoute route, LiveRegistration registration, string mediatorDid, string localDid, MessagePickupVersion version)
     {
         _exchange = exchange;
+        _version = version;
         _log = log;
         _route = route;
         _registration = registration;
@@ -183,23 +192,41 @@ internal sealed class LiveDeliveryStream
     /// <param name="mediatorDid">The mediator's DID (bare).</param>
     /// <param name="localDid">Our DID (bare).</param>
     /// <param name="serviceEndpointOverride">The caller's endpoint, or <c>null</c>.</param>
+    /// <param name="resolveVersion">The client's version resolution (route, mediator DID, local DID, token): pinned, remembered or negotiated.</param>
     /// <param name="ct">The caller's cancellation; combined with the one given to <c>GetAsyncEnumerator</c>.</param>
-    internal static IAsyncEnumerable<PickupItem> ReceiveAsync(IMediatorExchange exchange, PickupLog log, string mediatorDid, string localDid, Uri? serviceEndpointOverride, CancellationToken ct)
+    internal static IAsyncEnumerable<PickupItem> ReceiveAsync(
+        IMediatorExchange exchange, PickupLog log, string mediatorDid, string localDid, Uri? serviceEndpointOverride,
+        Func<MediatorRoute, string, string, CancellationToken, Task<MessagePickupVersion>> resolveVersion, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(exchange);
         ArgumentNullException.ThrowIfNull(log);
-        return RunAsync(exchange, log, mediatorDid, localDid, serviceEndpointOverride, ct);
+        ArgumentNullException.ThrowIfNull(resolveVersion);
+        return RunAsync(exchange, log, mediatorDid, localDid, serviceEndpointOverride, resolveVersion, ct);
     }
 
     private static async IAsyncEnumerable<PickupItem> RunAsync(
         IMediatorExchange exchange, PickupLog log, string mediatorDid, string localDid, Uri? serviceEndpointOverride,
+        Func<MediatorRoute, string, string, CancellationToken, Task<MessagePickupVersion>> resolveVersion,
         [EnumeratorCancellation] CancellationToken ct)
     {
         // Refused before anything is sent: a route that is not a WebSocket, or a second stream for
         // the pair. Neither has turned live mode on, so neither turns it off.
         var route = await exchange.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket: true, ct).ConfigureAwait(false);
         var registration = exchange.RegisterLiveStream(mediatorDid, localDid);
-        var stream = new LiveDeliveryStream(exchange, log, route, registration, mediatorDid, localDid);
+        // The version, once for the stream's life (#100 DC-6). A query that fails ends the stream
+        // here, not retried; nothing has turned live mode on, and the mailbox is closed, so another
+        // stream for the pair can open.
+        MessagePickupVersion version;
+        try
+        {
+            version = await resolveVersion(route, mediatorDid, localDid, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            registration.Dispose();
+            throw;
+        }
+        var stream = new LiveDeliveryStream(exchange, log, route, registration, mediatorDid, localDid, version);
         log.LiveStarted();
         try
         {
@@ -333,8 +360,7 @@ internal sealed class LiveDeliveryStream
     private async Task CycleAsync(CancellationToken ct)
     {
         _liveRequested = true;
-        var spec = DeliveryReader.LiveDeliveryChangeSpec;
-        var request = MessagePickup.CreateLiveDeliveryChange(_localDid, _mediatorDid, liveDelivery: true, UuidV4MessageIdGenerator.Instance);
+        var (request, spec) = PickupWire.LiveDeliveryChange(_version, _localDid, _mediatorDid, liveDelivery: true);
         InboundMessageSnapshot answer;
         try
         {
@@ -345,7 +371,7 @@ internal sealed class LiveDeliveryStream
             Failed(request.Id, spec, ex);
             return;
         }
-        var status = DeliveryReader.ReadStatus(DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
+        var status = PickupWire.ReadStatus(_version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, checkFilter: false, filter: null);
         if (status.LiveDelivery == false && !_warnedNotLive)
         {
             _warnedNotLive = true;
@@ -364,8 +390,7 @@ internal sealed class LiveDeliveryStream
     {
         // Whatever this round's outcome, a waiting push has the next turn (ADV3-1).
         _pushTurn = true;
-        var spec = DeliveryReader.DeliveryRequestSpec;
-        var request = MessagePickup.CreateDeliveryRequest(_localDid, _mediatorDid, DrainLimit, recipientDid: null, UuidV4MessageIdGenerator.Instance);
+        var (request, spec) = PickupWire.DeliveryRequest(_version, _localDid, _mediatorDid, DrainLimit, recipientDid: null);
         InboundMessageSnapshot answer;
         try
         {
@@ -377,16 +402,16 @@ internal sealed class LiveDeliveryStream
             return;
         }
 
-        var message = DeliveryReader.Open(answer, request.Id, spec);
-        if (DeliveryReader.IsStatus(message))
+        // A 3.0 status (nothing deliverable) ends the drain; so does an empty delivery, the 4.0 way
+        // of saying it (DrainLimit is MaxPerDelivery: what is read is what was asked for). A 4.0
+        // delivery beyond the limit or without attachments is malformed and ends the stream.
+        var read = PickupWire.ReadDeliveryAnswer(_version, DeliveryReader.Open(answer, request.Id, spec), request.Id, spec, DrainLimit, checkFilter: false, filter: null);
+        if (read.Status is not null)
         {
-            DeliveryReader.ReadStatus(message, request.Id, spec, checkFilter: false, filter: null);
             DrainDone();
             return;
         }
-        if (!DeliveryReader.IsDelivery(message))
-            throw DeliveryReader.Unexpected(request.Id, spec);
-        var contents = DeliveryReader.ReadEntries(message.Attachments, MaxPerDelivery);
+        var contents = read.Contents!;
         if (contents.AttachmentCount == 0)
         {
             DrainDone();
@@ -497,9 +522,14 @@ internal sealed class LiveDeliveryStream
             _log.PushIgnored("unreadable");
             return;
         }
-        if (!DeliveryReader.IsDelivery(message))
+        if (!PickupWire.IsDelivery(_version, message))
         {
-            _log.PushIgnored("not a delivery");
+            // Only a delivery of the stream's own version is taken; a push of the other version is
+            // the mediator speaking another protocol on this session, and is let go unacknowledged.
+            if (PickupWire.IsDeliveryOfAnotherVersion(_version, message))
+                _log.PushOfOtherVersion();
+            else
+                _log.PushIgnored("not a delivery");
             return;
         }
         await LoadAsync(DeliveryReader.ReadEntries(message.Attachments, MaxPerDelivery), requestId: null, ct).ConfigureAwait(false);
@@ -611,10 +641,10 @@ internal sealed class LiveDeliveryStream
     {
         var spec = DeliveryReader.MessagesReceivedSpec;
         var ids = TakenBatch();
-        var request = MessagePickup.CreateMessagesReceived(_localDid, _mediatorDid, ids, UuidV4MessageIdGenerator.Instance);
+        var request = PickupWire.MessagesReceived(_version, _localDid, _mediatorDid, ids);
         try
         {
-            await _exchange.ExchangeAsync(_route, request, spec, _mediatorDid, _localDid, ct).ConfigureAwait(false);
+            await AcknowledgeAsync(request, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (Retryable(ex, ct))
         {
@@ -640,10 +670,10 @@ internal sealed class LiveDeliveryStream
             while (_taken.Count > 0 && !budget.Expired)
             {
                 var ids = TakenBatch();
-                var request = MessagePickup.CreateMessagesReceived(_localDid, _mediatorDid, ids, UuidV4MessageIdGenerator.Instance);
+                var request = PickupWire.MessagesReceived(_version, _localDid, _mediatorDid, ids);
                 try
                 {
-                    await _exchange.ExchangeAsync(_route, request, DeliveryReader.MessagesReceivedSpec, _mediatorDid, _localDid, budget.Token).ConfigureAwait(false);
+                    await AcknowledgeAsync(request, budget.Token).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -655,14 +685,14 @@ internal sealed class LiveDeliveryStream
 
             if (_liveRequested)
             {
-                var off = MessagePickup.CreateLiveDeliveryChange(_localDid, _mediatorDid, liveDelivery: false, UuidV4MessageIdGenerator.Instance);
+                var (off, offSpec) = PickupWire.LiveDeliveryChange(_version, _localDid, _mediatorDid, liveDelivery: false);
                 try
                 {
-                    await _exchange.ExchangeAsync(_route, off, DeliveryReader.LiveDeliveryChangeSpec, _mediatorDid, _localDid, budget.Token).ConfigureAwait(false);
+                    await _exchange.ExchangeAsync(_route, off, offSpec, _mediatorDid, _localDid, budget.Token).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    _log.EndFailed(DeliveryReader.LiveDeliveryChangeSpec.Name, ex);
+                    _log.EndFailed(offSpec.Name, ex);
                 }
             }
         }
@@ -677,6 +707,13 @@ internal sealed class LiveDeliveryStream
             _registration.Dispose();
         }
     }
+
+    // One messages-received: under 3.0 an exchange (the mediator SHOULD answer with its status,
+    // which is not read); under 4.0 sent one way, since nothing answers it (L62, L294).
+    private Task AcknowledgeAsync(Message request, CancellationToken ct)
+        => PickupWire.AnswersAcknowledgement(_version)
+            ? _exchange.ExchangeAsync(_route, request, DeliveryReader.MessagesReceivedSpec, _mediatorDid, _localDid, ct)
+            : _exchange.SendOneWayAsync(_route, request, PickupWire.MessagesReceivedName, _mediatorDid, _localDid, ct);
 
     // The oldest taken ids, at most MaxAckIds: one messages-received.
     private string[] TakenBatch()
