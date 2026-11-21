@@ -113,10 +113,10 @@ internal sealed class LetterIdExchange(IMediatorExchange inner, IMessageIdGenera
         return inner.ExchangeAsync(route, request, spec, mediatorDid, localDid, ct);
     }
 
-    public Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
+    public Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, TimeSpan? answerWait, CancellationToken ct)
     {
         request.Id = ids.NewId();
-        return inner.ExchangeAllowingNoAnswerAsync(route, request, spec, mediatorDid, localDid, ct);
+        return inner.ExchangeAllowingNoAnswerAsync(route, request, spec, mediatorDid, localDid, answerWait, ct);
     }
 
     public LiveRegistration RegisterLiveStream(string mediatorDid, string localDid) => inner.RegisterLiveStream(mediatorDid, localDid);

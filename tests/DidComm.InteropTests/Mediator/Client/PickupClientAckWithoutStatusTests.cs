@@ -18,17 +18,21 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// body). The stand-in is this library's mediator on a TestServer with its pickup handler wrapped
 /// (<see cref="ReshapedPickupHandler"/>): every request is handled for real, so the acknowledgement
 /// is applied, and only the answer is reshaped — dropped, so the endpoint answers 202 with an empty
-/// body, or replaced with a problem report. The client must then ask with a <c>status-request</c>
-/// and return that status; a mediator that does send its status must get no extra request.
+/// body, or replaced with a problem report. AckAsync returns only the mediator's own answer to the
+/// last message it sent (owner decision OD-6, PR #143 review round 2): <c>null</c> when that message
+/// got none. It never asks with a <c>status-request</c> of its own, before or after, so the mediator
+/// receives exactly one <c>messages-received</c> per chunk and nothing else. Over HTTP the mediator
+/// handles a POST before it sends the response (<c>MapDidCommEndpointCore</c> awaits the dispatch,
+/// then answers 202 or 200), so once AckAsync has returned, the acknowledgement has been applied:
+/// these tests read the store right after the call.
 /// </summary>
 public sealed class PickupClientAckWithoutStatusTests
 {
     private const string DeliveryRequest = "delivery-request";
     private const string MessagesReceived = "messages-received";
-    private const string StatusRequest = "status-request";
 
     [Fact]
-    public async Task A_mediator_that_answers_messages_received_with_an_empty_202_is_asked_for_its_status_and_that_status_is_returned()
+    public async Task A_mediator_that_answers_messages_received_with_an_empty_202_gets_no_status_request_and_AckAsync_returns_null()
     {
         // The Identus shape: messages-received applied, answered with nothing.
         var observer = new PickupRequestObserver();
@@ -39,25 +43,24 @@ public sealed class PickupClientAckWithoutStatusTests
 
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, failures);
 
-        status.MessageCount.Should().Be(0, "the status the client asked for reports the acknowledgement as applied");
-        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, StatusRequest);
-        mediator.Store.MessageCount.Should().Be(0, "the mediator applied the acknowledgement");
+        status.Should().BeNull("the mediator sent no status, and AckAsync does not ask for one in its place");
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived);
+        mediator.Store.MessageCount.Should().Be(0, "the mediator applied the acknowledgement before it answered the POST");
     }
 
     [Fact]
-    public async Task Two_chunks_neither_answered_are_followed_by_one_status_request_after_the_last()
+    public async Task Two_chunks_neither_answered_get_no_status_request_and_AckAsync_returns_null()
     {
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, SilentOn(MessagePickup.MessagesReceivedType));
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
-        status.MessageCount.Should().Be(0, "both chunks were applied, and the status after the last one says so");
-        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived, StatusRequest);
-        mediator.Store.MessageCount.Should().Be(0);
+        status.Should().BeNull("neither chunk was answered");
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived);
+        mediator.Store.MessageCount.Should().Be(0, "both chunks were applied");
     }
 
     [Fact]
@@ -70,15 +73,14 @@ public sealed class PickupClientAckWithoutStatusTests
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
-        status.MessageCount.Should().Be(0);
+        PickupE2E.Answered(status).MessageCount.Should().Be(0, "the last chunk's own answer counts the queue after both");
         await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived);
     }
 
     [Fact]
-    public async Task When_only_the_last_chunk_is_unanswered_one_status_request_follows_it()
+    public async Task When_only_the_last_chunk_is_unanswered_AckAsync_returns_null_not_the_first_chunks_status_and_asks_for_none()
     {
         var observer = new PickupRequestObserver();
         var acknowledgements = 0;
@@ -87,11 +89,13 @@ public sealed class PickupClientAckWithoutStatusTests
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
-        status.MessageCount.Should().Be(0);
-        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived, StatusRequest);
+        // The first chunk's status was taken before the second chunk was applied (it still counts
+        // the second failure), so it is not returned in place of the missing answer.
+        status.Should().BeNull("the last chunk got no answer, and an earlier chunk's status predates it");
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived);
+        mediator.Store.MessageCount.Should().Be(0, "both chunks were applied");
     }
 
     [Fact]
@@ -103,27 +107,27 @@ public sealed class PickupClientAckWithoutStatusTests
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 2);
 
-
         var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, AcrossTwoChunks(failures));
 
-        status.MessageCount.Should().Be(0);
+        PickupE2E.Answered(status).MessageCount.Should().Be(0);
         await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, MessagesReceived);
     }
 
     [Fact]
-    public async Task When_the_status_request_is_unanswered_too_the_call_fails_with_a_TimeoutException_after_that_one_request()
+    public async Task A_mediator_that_answers_no_status_request_either_does_not_fail_the_call_because_AckAsync_sends_none()
     {
+        // Before OD-6 this mediator made AckAsync fail with a TimeoutException: it asked with a
+        // status-request after the unanswered acknowledgement and waited for an answer that never came.
         var observer = new PickupRequestObserver();
         await using var mediator = await StartAsync(observer, SilentOn(MessagePickup.MessagesReceivedType, MessagePickup.StatusRequestType));
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 1);
 
+        var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, failures);
 
-        var thrown = await Record.ExceptionAsync(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, failures));
-
-        thrown.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(StatusRequest).And.NotContain(bob.Did);
-        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived, StatusRequest);
-        mediator.Store.MessageCount.Should().Be(0, "the acknowledgement was applied; only the confirmation is missing");
+        status.Should().BeNull();
+        await ShouldHaveSentAsync(mediator, observer, bob, before, MessagesReceived);
+        mediator.Store.MessageCount.Should().Be(0, "the acknowledgement was applied");
     }
 
     [Fact]
@@ -135,7 +139,6 @@ public sealed class PickupClientAckWithoutStatusTests
             : reply);
         await using var harness = await MediatorClientHarness.CreateAsync(mediator);
         var (bob, failures, before) = await QueueUnopenableAsync(mediator, harness, observer, count: 1);
-
 
         var thrown = await Record.ExceptionAsync(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, failures));
 

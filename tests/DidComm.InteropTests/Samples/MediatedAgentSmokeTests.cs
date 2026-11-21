@@ -83,7 +83,7 @@ public sealed class MediatedAgentSmokeTests
         //    the operator finds Bob's session, and it closes when Bob goes offline.
         transcript.Should().Contain("[bob] live delivery = True");
         transcript.Should().Contain("[bob] live: Hello again, Bob");
-        transcript.Should().Contain("[bob] acknowledged the last message; status after ack: 0 message(s)");
+        transcript.Should().Contain("[bob] acknowledged the last message; the mediator sent no status in answer", "the wallet speaks 4.0, where nothing answers an acknowledgement");
         transcript.Should().Contain("[mediator] sessions for Bob: 1");
         transcript.Should().Contain("[mediator] session transport = WebSocket");
         transcript.Should().Contain("[mediator] Bob's session closed (its Closed token fired)");

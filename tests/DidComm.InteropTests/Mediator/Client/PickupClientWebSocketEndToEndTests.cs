@@ -169,7 +169,7 @@ public sealed class PickupClientWebSocketEndToEndTests
         batch.Items.Should().HaveCount(2);
         PickupE2E.ShouldBeAlicesNote(batch.Items[0], alice, recipient, note);
         batch.Items[1].Error.Should().NotBeNull();
-        (await pickup.AckAsync(mediator.Did, bob.Did, new[] { batch.Items[1].Id }, ws)).MessageCount.Should().Be(0);
+        PickupE2E.Answered(await pickup.AckAsync(mediator.Did, bob.Did, new[] { batch.Items[1].Id }, ws)).MessageCount.Should().Be(0);
 
         (await pickup.SetLiveDeliveryAsync(mediator.Did, bob.Did, true, ws)).LiveDelivery.Should().BeTrue();
         (await pickup.SetLiveDeliveryAsync(mediator.Did, bob.Did, false, ws)).LiveDelivery.Should().BeFalse();

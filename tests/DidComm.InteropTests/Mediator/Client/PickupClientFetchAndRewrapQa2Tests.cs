@@ -106,7 +106,7 @@ public sealed class PickupClientFetchAndRewrapQa2Tests
         fetches.Should().BeLessThanOrEqualTo(5);
 
         // A caller that gives up on them discards them by id.
-        (await harness.Pickup.AckAsync(mediator.Did, bob.Did, failures)).MessageCount.Should().Be(0);
+        PickupE2E.Answered(await harness.Pickup.AckAsync(mediator.Did, bob.Did, failures)).MessageCount.Should().Be(0);
     }
 
     private static async Task<(List<string> Got, List<string> Failures, int Fetches)> DrainAsync(MediatorClientHarness harness, MediatorTestServer mediator, TestPeer bob, int limit)
@@ -146,7 +146,7 @@ public sealed class PickupClientFetchAndRewrapQa2Tests
 
         // 250 ids: 249 unknown (well-formed queue ids nobody holds) and the real one last.
         var ids = Enumerable.Range(0, 249).Select(i => Guid.NewGuid().ToString("N")).Append(failed.Id).ToArray();
-        var status = await harness.Pickup.AckAsync(mediator.Did, bob.Did, ids);
+        var status = PickupE2E.Answered(await harness.Pickup.AckAsync(mediator.Did, bob.Did, ids));
 
         status.MessageCount.Should().Be(0, "the real id was in the last chunk");
         await observer.WaitForAsync(bob.Did, 4);
@@ -230,7 +230,7 @@ public sealed class PickupClientFetchAndRewrapQa2Tests
         var (bob, _) = await PickupE2E.EnrolAsync(mediator, harness);
         var ids = Enumerable.Range(0, 11).Select(_ => Guid.NewGuid().ToString("N")).ToArray();
 
-        (await harness.Pickup.AckAsync(mediator.Did, bob.Did, ids.Take(10).ToArray())).MessageCount.Should().Be(0);
+        PickupE2E.Answered(await harness.Pickup.AckAsync(mediator.Did, bob.Did, ids.Take(10).ToArray())).MessageCount.Should().Be(0);
         var refused = (await FluentActions.Awaiting(() => harness.Pickup.AckAsync(mediator.Did, bob.Did, ids)).Should().ThrowAsync<DidComm.Exceptions.TransportException>()).Which;
         refused.HttpStatusCode.Should().Be(400);
     }
