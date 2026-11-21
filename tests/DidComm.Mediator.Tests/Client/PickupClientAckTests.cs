@@ -15,8 +15,9 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// The one-shot calls of <see cref="PickupClient"/> against a fake exchange (#96 design §2, §4.3):
-/// <see cref="PickupClient.AckAsync"/> (chunks of 100, the last status, ids checked before anything
-/// is sent and copied so what was checked is what is sent), <see cref="PickupClient.GetStatusAsync"/>
+/// <see cref="PickupClient.AckAsync"/> (chunks of 100, the status answering the last one and no
+/// status-request of its own, ids checked before anything is sent and copied so what was checked is
+/// what is sent), <see cref="PickupClient.GetStatusAsync"/>
 /// (the filter echo) and <see cref="PickupClient.SetLiveDeliveryAsync"/> (refused before sending on
 /// a route that is not a WebSocket; the mediator's problem report surfaces with its code).
 /// </summary>
@@ -38,7 +39,9 @@ public sealed class PickupClientAckTests
         exchange.AcknowledgedIds.Should().Equal(ids);
         sent.Should().OnlyContain(s => s.Spec == DeliveryReader.MessagesReceivedSpec && s.Request.From == L);
         sent.Select(s => s.Request.Id).Should().OnlyHaveUniqueItems();
-        status.MessageCount.Should().Be(997, "the status answering the last message");
+        status.Should().NotBeNull();
+        status!.MessageCount.Should().Be(997, "the status answering the last message");
+        exchange.Sent.Should().HaveCount(3, "one message per chunk and nothing else (OD-6)");
         exchange.RouteCalls.Should().ContainSingle("the route is resolved once per call").Which.RequireWebSocket.Should().BeFalse();
     }
 

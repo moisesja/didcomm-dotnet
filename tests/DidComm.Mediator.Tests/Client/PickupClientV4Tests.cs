@@ -19,7 +19,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <c>delivery</c> as a drained queue without a status, the strict 4.0 delivery (no
 /// <c>attachments</c>, or more than <c>message_count_limit</c>, is refused whole before anything is
 /// opened, L-055), and the acknowledgement sent one way, without <c>return_route</c>, never waited
-/// for. Line numbers are those of the 4.0 page at <c>decentralized-identity/didcomm.org@a26926c</c>.
+/// for, with no status asked for after it (OD-6: <see cref="PickupClient.AckAsync"/> returns
+/// <c>null</c>). Line numbers are those of the 4.0 page at <c>decentralized-identity/didcomm.org@a26926c</c>.
 /// </summary>
 public sealed class PickupClientV4Tests
 {
@@ -239,59 +240,42 @@ public sealed class PickupClientV4Tests
     // ---- messages-received ----------------------------------------------------------------------
 
     [Fact]
-    public async Task Ack_under_4_0_sends_each_100_id_chunk_one_way_then_asks_with_a_4_0_status_request()
+    public async Task Ack_under_4_0_sends_each_100_id_chunk_one_way_asks_for_no_status_and_returns_null()
     {
+        // OD-6: nothing answers a 4.0 messages-received (L62, L294), and the call does not ask for a
+        // status of its own, even from a mediator that would answer one.
         var exchange = V4().On(MessagePickup40.StatusRequestType, r => Status40(r, count: 2, newestMs: ExampleMs));
         var ids = Enumerable.Range(0, 150).Select(i => $"q{i}").ToArray();
 
         var status = await PickupTest.Client(exchange).AckAsync(M, L, ids);
 
+        status.Should().BeNull("under 4.0 the mediator sends no status for an acknowledgement");
         exchange.Sent.Select(s => (s.Type, s.OneWay)).Should().Equal(
-            (MessagePickup40.MessagesReceivedType, true), (MessagePickup40.MessagesReceivedType, true), (MessagePickup40.StatusRequestType, false));
+            (MessagePickup40.MessagesReceivedType, true), (MessagePickup40.MessagesReceivedType, true));
         exchange.Sent[0].Ids.Should().Equal(ids[..100]);
         exchange.Sent[1].Ids.Should().Equal(ids[100..]);
-        exchange.Sent.Take(2).Should().OnlyContain(s => !HasReturnRoute(s.Request));
-        exchange.Sent[2].RecipientDid.Should().BeNull("it asks about all of the mailbox's messages");
-        exchange.Sent[2].Spec.Should().BeSameAs(PickupWire.StatusRequestSpec4);
-        status.MessageCount.Should().Be(2);
-        status.NewestReceivedTime.Should().Be(ExampleSeconds);
+        exchange.Sent.Should().OnlyContain(s => !HasReturnRoute(s.Request));
     }
 
     [Fact]
-    public async Task Ack_under_4_0_gives_the_status_request_what_is_left_of_the_last_messages_RequestTimeout()
+    public async Task Ack_under_4_0_asks_for_nothing_after_a_send_that_takes_most_of_the_RequestTimeout()
     {
-        // The last one-way send takes 20 of its 30 seconds: the status-request waits the other 10.
+        // The one-way send takes 20 of its 30 seconds; nothing follows it, and the call ends there.
         var exchange = V4().On(MessagePickup40.StatusRequestType, Unanswered);
         var clock = exchange.Clock;
+        var started = clock.GetUtcNow();
         exchange.OneWay = _ =>
         {
             clock.Advance(TimeSpan.FromSeconds(20));
             return Task.CompletedTask;
         };
-        var mark = clock.Mark();
 
-        var acking = PickupTest.Client(exchange).AckAsync(M, L, new[] { "q1" });
-        await clock.WaitForTimerAsync(TimeSpan.FromSeconds(10), mark, PickupTest.Timeout);
-        clock.Advance(TimeSpan.FromSeconds(10)).Should().Be(1, "the status-request's deadline is the only timer due");
-        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(acking));
+        var status = await PickupTest.Within(PickupTest.Client(exchange).AckAsync(M, L, new[] { "q1" }));
 
-        thrown.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(exchange.Sent[0].Request.Id).And.Contain(exchange.Sent[1].Request.Id);
-    }
-
-    [Fact]
-    public async Task Ack_under_4_0_with_no_time_left_after_the_send_fails_without_asking()
-    {
-        var exchange = V4();
-        exchange.OneWay = _ =>
-        {
-            exchange.Clock.Advance(exchange.Options.RequestTimeout);
-            return Task.CompletedTask;
-        };
-
-        var act = () => PickupTest.Client(exchange).AckAsync(M, L, new[] { "q1" });
-
-        (await act.Should().ThrowAsync<TimeoutException>()).Which.Message.Should().Contain("no time was left");
-        exchange.Sent.Should().ContainSingle("no status-request without time to wait for it");
+        status.Should().BeNull();
+        exchange.Sent.Should().ContainSingle().Which.OneWay.Should().BeTrue();
+        (clock.GetUtcNow() - started).Should().Be(TimeSpan.FromSeconds(20), "only the send's own time");
+        clock.ScheduledTimers.Should().Be(0);
     }
 
     [Fact]
@@ -304,6 +288,20 @@ public sealed class PickupClientV4Tests
 
         await act.Should().ThrowAsync<TransportException>();
         exchange.Sent.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Ack_under_4_0_a_send_that_was_not_completed_in_time_is_a_TimeoutException_never_null()
+    {
+        // The channel throws this when the send did not complete within RequestTimeout.
+        var timeout = new TimeoutException("not sent within the RequestTimeout");
+        var exchange = V4();
+        exchange.OneWay = _ => Task.FromException(timeout);
+
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(PickupTest.Client(exchange).AckAsync(M, L, Enumerable.Range(0, 150).Select(i => $"q{i}").ToArray())));
+
+        thrown.Should().BeSameAs(timeout);
+        exchange.Sent.Should().ContainSingle("the call stops at the message that was not sent");
     }
 
     // ---- live-delivery-change -------------------------------------------------------------------
