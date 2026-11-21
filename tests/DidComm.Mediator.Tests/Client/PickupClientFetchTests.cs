@@ -684,8 +684,11 @@ public sealed class PickupClientFetchTests
         }
         exchange.SentOf(MessagePickup.MessagesReceivedType).Should().BeEmpty();
 
-        // Discarding them is the caller's decision, through AckAsync.
-        (await client.AckAsync(M, L, new[] { "f1", "f2", "f3" })).MessageCount.Should().Be(1);
+        // Discarding them is the caller's decision, through AckAsync. This mediator answers the
+        // acknowledgement with its status (Message Pickup 3.0), which the call returns.
+        var acknowledged = await client.AckAsync(M, L, new[] { "f1", "f2", "f3" });
+        acknowledged.Should().NotBeNull();
+        acknowledged!.MessageCount.Should().Be(1);
         var next = await client.FetchAsync(M, L, limit: 2);
         next.Items.Should().ContainSingle().Which.Unpacked!.Message.Id.Should().Be("good");
         mailbox.Remaining.Should().BeEmpty();
