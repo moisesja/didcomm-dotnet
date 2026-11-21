@@ -1601,12 +1601,16 @@ instead of naming a record:
   (FR-PICK-06) →
   a take that came back after the caller's deadline sends nothing → unless the session is closed,
   the one-message `delivery` in the session's framing through `TrySendAsync(delivery,
-  MaxDeliveryBytes, ct)`. `Sent` with the session still open → `Sent`: the record stays leased to
-  the session until `messages-received`, its close or `LeaseTimeout`. `TooLarge` → passed over
-  (`PassOverAsync` until `now + LeaseTimeout × 2^PassOvers`), as a pickup does → `PassedOver`.
-  Anything else — not taken, closing, a fault, a cancellation — gives the lease back in a
-  `finally` (`ReleaseAsync` naming the lease, never cancelled) once the send has ended, however
-  long that takes; `NotSent`, or the fault or cancellation propagates after the release.
+  MaxDeliveryBytes, ct)`, under a live-push lease (`MessageLease.LivePush`). `Sent` with the session
+  still open → `Sent`: the record stays leased to the session until `messages-received`, its close or
+  `LeaseTimeout`; a close or a timeout returns it marked, for a `delivery-request` only (see "A live
+  push returned unconfirmed is not pushed again" below). `Sent` by a session that closed meanwhile →
+  the lease is ended the way the close ends it (`ReleaseLeasesInBackground(owner)`, so it is marked),
+  and the step counts as not delivered. `TooLarge` → passed over (`PassOverAsync` until `now +
+  LeaseTimeout × 2^PassOvers`), as a pickup does → `PassedOver`. Anything else — not taken, closing
+  first, a fault, a cancellation — gives the lease back unmarked in a `finally` (`ReleaseAsync`
+  naming the lease, never cancelled) once the send has ended, however long that takes; `NotSent`, or
+  the fault or cancellation propagates after the release.
 - `HasLiveTarget(grantPeerDid)` is the synchronous check the sink makes before waking a grant; its
   answer may be stale by the time the push runs, which is why `PushNextLiveAsync` looks again.
 
@@ -1777,7 +1781,9 @@ handlers use them.
 - **Live framing.** `SetLiveDeliveryAsync` stores the framing per session, so a session's pushes
   follow its last `live-delivery-change(true)`: 4.0's is a `delivery` with one attachment and no
   `thid`. Turning live delivery off in either version turns it off. Unacknowledged pushes go back to
-  the queue when the session closes or the lease runs out (4.0 L308; #94/#95 already did this).
+  the queue when the session closes or the lease runs out (4.0 L308; #94/#95 already did this), and
+  from then on only a `delivery-request` delivers them, never another live push, in either version
+  (owner decision 2026-11-20; see "A live push returned unconfirmed is not pushed again").
 - **The codec.** `MessagePickup40` (internal, `DidComm.Mediator.Client`, both directions) writes
   and reads through `PickupBodies`. It adds `WriteStatus40` / `ReadStatus40` and the internal
   `PickupStatus40` record, which holds milliseconds. A body with only 3.0's `limit` is malformed
@@ -1811,8 +1817,10 @@ whoever supplies it, stores nothing and reports `NotEncrypted`. How it is built 
   own envelope.
 - **Encrypted form** (`EncryptedForm.IsEncrypted`, `DidComm.Mediator.Client`, shared with the
   wallet client's check): the outermost layer is a JWE, anoncrypt or authcrypt (v2.1
-  message_structure.md L65, L71). It is judged structurally and nothing is decrypted: strict UTF-8
-  JSON (`DidCommJson.StrictDocument`: no duplicate member names, nothing after the value) holding
+  message_structure.md L65, L71). It is judged structurally and nothing is decrypted: valid UTF-8
+  throughout, checked first with `Utf8.IsValid` (the JSON reader does not validate the bytes inside
+  strings and member names; ADV2-1), then strict JSON (`DidCommJson.StrictDocument`: no duplicate
+  member names, nothing after the value) holding
   an object that Core's `EnvelopeDetector` classifies as `Encrypted`, that is, one with a
   `ciphertext` member. That is the rule the library's unpack uses (FR-API-03), so the mailbox, the
   wallet and every unpacker agree. Plaintext, a JWS (General or Flattened), any other JSON value and
@@ -1821,6 +1829,54 @@ whoever supplies it, stores nothing and reports `NotEncrypted`. How it is built 
   routing key (`IRecipientRoutingKeyProvider`), the sink stores the mediator's own anoncrypted
   `forward`, a JWE. So a non-encrypted message inside it is stored, and the recipient's client
   opens it.
+- **Cost (measured, accepted).** The check parses each stored payload once, on the forward
+  handler's shared pump (`MediatorForwardSink`). It is linear in the payload: about 0.08 ms for an
+  honest flat JWE of the largest admissible size (564 525 bytes at the defaults) and about 16 ms
+  for a hostile one of many small objects; transient allocation is at most about 3.8 times the
+  payload. A sender would need about 35 MB/s of forwards to keep the pump busy with it (ADV-2, I-1).
+
+### A live push returned unconfirmed is not pushed again (#100, owner decision 2026-11-20)
+
+The owner decided ("Never push it live again"): "A message pushed live and returned unconfirmed
+waits until the recipient asks for it. Same rule for 3.0 and 4.0, since one mailbox serves both."
+Spec basis: 4.0 L302 ("delivering newly arriving messages"), L304 ("Messages already in the queue
+are not affected by _Live Mode_; they **MUST** still be requested with `delivery-request`
+messages."), L308 ("If a message is not acknowledged, the message **MUST** be added to the queue for
+later pickup."); 3.0 L203 says the same as L304 in lower case. Until #100 such a message was pushed
+live again at its grant's next wake-up. How it is built (ours):
+
+- **The lease says it is a live push.** `MessageLease.LivePush` (init-only) is set on every lease
+  the coordinator creates for a live push — `DeliverAsync`'s record admitted already leased to a
+  live target, and `PushNextLiveAsync`'s take — and never on a `delivery-request`'s lease, over
+  HTTP or a WebSocket.
+- **The store marks what comes back.** When a live-push lease ends without the record being
+  acknowledged, the store marks the record (`QueuedMessage.LivePushReturned`, init-only, set by
+  the store only; a value the caller of `EnqueueAsync` sets is ignored, like `Sequence`). Every way a
+  lease ends, and what it does to the mark:
+
+  | Path | Mark |
+  |---|---|
+  | `AcknowledgeAsync`, any purge | the record is removed |
+  | `ReleaseLeasesAsync(owner)` (the session closed; also a push the session took while it closed) | every live-push lease it ends is marked, expired or not; a `delivery-request`'s lease is not |
+  | a live-push lease runs out | marked from that instant, judged lazily: the record counts as marked when the store reads it, and the mark is written when another lease replaces that one or the owner's leases are released |
+  | `ReleaseAsync` by lease id (a push the session did not take, a too-large batch trimmed, a registration gone, a refusal, a cancellation or fault before the send) | not marked: it never reached the connection, so a later wake-up pushes it |
+  | `PassOverAsync` | not marked |
+  | a `delivery-request`'s lease ends, any way | nothing new; an existing mark stays |
+  | the close's clean-up backlog was full | the lease runs out, so it is marked anyway |
+
+- **Who takes a marked record.** A lease request whose lease is a live-push lease never takes one
+  (`IMessageStore.LeaseAsync`); a `delivery-request` takes it in its place, within the same budgets.
+  The mark changes no count, bound or `status`. A custom `IMessageStore` must keep and honour the
+  mark (the contract says so); a marked record a store hands to a live push anyway is refused by
+  `TakeNextAsync` as outside the contract — released, not pushed, still picked up.
+- **What a recipient sees.** A message it let go unconfirmed reaches it again only when it asks
+  (`delivery-request`). This library's live stream asks on every cycle (`LivePollInterval`, 1 minute
+  by default); a recipient that only listens live and never asks would not get it until it does
+  (the cost the owner accepted).
+- **Known edge (ours).** A push abandoned at its deadline whose send stays unresolved past
+  `LeaseTimeout` looks returned during that window: a `delivery-request` in the window takes it and
+  writes the mark, even if the send later reports it was not taken. Nothing is lost; the message
+  only stays pickup-only.
 
 ## Mediator service: pipeline, `AddMediator()`, `MapDidCommMediator` (Phase 7, #95)
 
@@ -1963,8 +2019,9 @@ identity and the monotonic cooldown below are its fixes.
 
 **D-1 The store decides what is pushed.** The dispatcher keeps no per-message state. An operation
 takes, one at a time, the next record the store hands out at that moment
-(`PickupCoordinator.TakeNextAsync`: due, unexpired, unleased, not passed over, oldest first, its
-recipient DID still registered under the grant) and pushes it. An expired, acknowledged, purged or
+(`PickupCoordinator.TakeNextAsync`: due, unexpired, unleased, not passed over, not a live push that
+came back unconfirmed (#100, owner decision 2026-11-20), oldest first, its recipient DID still
+registered under the grant) and pushes it. An expired, acknowledged, purged or
 picked-up record is therefore never pushed and takes no one's place. An operation is step 1 of the
 D6 order, the **live push** (step 2 is the pickup queue, where everything not pushed waits):
 `PickupCoordinator.PushNextLiveAsync` (see "Message Pickup 3.0") — the newest live session of the
@@ -1983,7 +2040,8 @@ A wake-up is a stored message (the sink's) or a session turning live delivery on
 
 **Retries.** A live push the session did not take (`NotSent`: no free push slot, downgraded or
 closing), or that faulted, or that reached its deadline and was then given back, is tried again at
-the grant's next wake-up. That cannot multiply the traffic of what was forwarded: an operation
+the grant's next wake-up: it never reached the recipient. One the session took and that came back
+unconfirmed is not tried again (#100, owner decision 2026-11-20). That cannot multiply the traffic of what was forwarded: an operation
 makes at most one failed attempt (it ends there, and a deadline also pauses the grant), a wake-up
 is a stored message or a session turning live delivery on, and nothing is written to the
 connection unless the session takes it. One too large for the session is passed over instead, for
@@ -2036,7 +2094,8 @@ pushes succeed — whatever the clocks did. A push that fails, a cooldown, satur
 leaves the message queued, for pickup and for the grant's next wake-up. Messages that status
 counted are pickup-only (FR-PICK-06). Delivery is at-least-once: a pushed message stays leased to the
 session until `messages-received`, and goes back to the queue if the session closes or the lease
-times out first.
+times out first; from then on only a `delivery-request` delivers it, never another live push (#100,
+owner decision 2026-11-20), so a live recipient keeps asking for its queue.
 
 **The deadline.** Each step — one take and its push — has its own deadline: a token source linked
 to the dispatcher's shutdown and cancelled by a `TimeProvider` timer at `PushTimeout`, whose
@@ -2063,8 +2122,8 @@ step): its wake-ups meanwhile are skipped with `Push-Skipped-Cooldown` and take 
 messages wait for pickup or the grant's first wake-up after the pause. A peer that stalls on purpose
 therefore holds a worker at most once every three push timeouts, not continuously. Two timeouts, not
 more: an honest recipient whose resolution was slow once (a cold cache) gets its live pushes back
-within a minute, the same order as the lease timeout after which an unacknowledged push is delivered
-again anyway. The pause lives in the grant's entry, keyed by grant like D-3.
+within a minute, the same order as the lease timeout after which an unacknowledged push is back in
+the queue for the recipient's next `delivery-request`. The pause lives in the grant's entry, keyed by grant like D-3.
 
 Outcomes on `didcomm.mediator.push.outcomes` (`PushOutcomes`): one per push attempt — a take and its
 push over the live session (a fault or the deadline while taking counts as a failed attempt) — and
@@ -2072,7 +2131,7 @@ one per wake-up that was skipped or could push nothing it had.
 
 | Outcome | When | The record |
 | --- | --- | --- |
-| `Pushed-Live` | the live session took the `delivery` | leased to the session until `messages-received`, its close or `LeaseTimeout` |
+| `Pushed-Live` | the live session took the `delivery` | leased to the session until `messages-received`, its close or `LeaseTimeout`; after a close or a timeout, back in the queue for a `delivery-request` only (#100) |
 | `Push-Failed` | the session did not take it, or it was too large for the session even alone; a store or session fault; the deadline, in any step | given back (passed over when too large); after the deadline, when the abandoned call ends: given back, passed over or left leased to the session |
 | `Push-Skipped-Unregistered` | the record taken has a recipient DID no longer registered under the grant | removed by id |
 | `Push-Skipped-NoLiveSession` | at the operation's first step, no live session with live delivery on | none taken |
@@ -2296,14 +2355,17 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
   and frees a place. A timed retry is a possible follow-up, not built.
 - **At-least-once.** While a push's lease runs, a push and a pickup never hold the record at the
   same time, but a message a recipient fetched and did not acknowledge before its lease ran out can
-  be pushed to it again, and a push abandoned at its deadline may still reach the recipient later.
+  be pushed to it again (one fetched by a `delivery-request` was never a live push, so it is not
+  marked), and a push abandoned at its deadline may still reach the recipient later. A live push
+  that came back unconfirmed is never pushed again, only delivered by a `delivery-request` (#100).
   The recipient may then see the message twice.
 - **Live pushes are best effort, after storing.** A message whose live push fails or reaches the
   deadline, one stored while the grant's pushes are paused or the push operations are saturated,
   and one stored while the recipient had no live session stay queued — for pickup, and for the
   grant's next wake-up; one counted in the status that answered the session's
-  `live-delivery-change` is never pushed live (FR-PICK-06). A recipient in live mode still asks for
-  queued messages after a reconnect or a slow period.
+  `live-delivery-change` is never pushed live (FR-PICK-06), and neither is one pushed live that came
+  back unconfirmed (#100). A recipient in live mode still asks for queued messages after a
+  reconnect or a slow period.
 - **Stalled grants and the shared workers.** A grant whose push reaches the deadline is paused for
   2 × `PushTimeout`, but with K grants whose every push stalls until it ends at its deadline (a DID
   that resolves slowly on purpose) and W = `PushConcurrency`
@@ -2520,7 +2582,7 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
 6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
    has already completed the request in step 5). It is awaited; then the continuation yields
    (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
-7. **A problem report** answering the request (by `pthid`, or `thid`) → `MediationProtocolException`
+7. **A problem report** answering the request (by `pthid` only, since #100) → `MediationProtocolException`
    with `ProblemCode` sanitized (`MediatorProblemCode`: at most 128 characters of `a`–`z`, `0`–`9`,
    `.`, `_`, `-` that parse as a problem code, else `null`). The body is read on the caller's
    continuation.
@@ -2574,7 +2636,10 @@ request.
    leaves out the decrypting DID (FR-CONSIST-02), so for a real authcrypt answer the warning cannot
    fire; only a crafted verified snapshot reaches it (`MediatorClientChannelAddressingTests`). Before
    C2 such an answer was dropped here.
-4. **Thread.** `pthid`, else `thid`, for a problem report; `thid` otherwise. A thread longer than
+4. **Thread.** `pthid` for a problem report, and only `pthid`: it is REQUIRED (DIDComm v2.1
+   problems.md L83: "`pthid` - REQUIRED. The value is the `thid` of the thread in which the problem
+   occurred."), so a problem report without `pthid` has no thread, whatever its `thid` says (#100,
+   ADV3-1; before, its `thid` was used); `thid` otherwise. A thread longer than
    64 characters is never looked up. The pending map compares it with request ids ignoring case
    (FR-MSG-04, since #141).
 
@@ -2584,7 +2649,7 @@ request.
 | thread = a waiting request P of the same pair; a type P does not expect | dropped (Warning); P keeps waiting | dropped (Warning); R fails as no answer |
 | thread names no waiting request of the pair | dropped (quiet) | dropped; R fails as no answer |
 | no thread, `delivery` | the live stream of (peer, local), never a request; no stream, or its buffer full → dropped, not acknowledged | dropped (Warning), not acknowledged; never a stream (an HTTP exchange is never live); R fails as no answer (since #98) |
-| no thread, problem report | dropped (`pthid` is required) | dropped (Warning); R fails as no answer (since #98) |
+| no thread (no `pthid`, even with a `thid` naming a request), problem report | dropped (`pthid` is required) | dropped (Warning); R fails as no answer (since #98; by `thid` too since #100) |
 | no thread, another answer type | dropped (Warning): it belongs to no request's thread, however many requests of the pair wait (since #98) | dropped (Warning); R fails as no answer (since #98) |
 
 "Warning" and "quiet" are the rate-limited levels under Logging, below. So a thread-less live push
@@ -3178,7 +3243,9 @@ keeps it. A failed query releases the registration and ends the enumeration at i
 - **In both versions:**
   - **Filter echo.** A `status` answering a filtered request must repeat the `recipient_did`
     (`DeliveryReader.RequireStatusFilterEcho`, branch-flat: an absent echo is refused like a wrong
-    one; 3.0 L116, 4.0 L168). A `delivery` may still leave it out.
+    one; 3.0 L116, 4.0 L168). A `delivery` may still leave it out. Where an echo is present it must
+    be "the matching value" itself, compared exactly as DIDs are (ordinal): a DID URL or another
+    spelling of the DID asked about is refused (ADV3-2; before, they were compared as DID subjects).
   - **Encrypted attachments only.** Each decoded attachment is judged by `EncryptedForm.IsEncrypted`
     on its outermost layer, before any unpack. One that is not a JWE is a failed entry, never
     unpacked and never acknowledged (owner decision 2026-11-20, "OK, as described"). A forward the
@@ -3186,10 +3253,16 @@ keeps it. A failed query releases the registration and ends the enumeration at i
 
 ### Documented limits
 
+- **A remembered pickup version is kept for its hour (#100, ADV1-1, declined).** The negotiated
+  version is not asked again within the hour even when requests in it go unanswered, so after a
+  mediator stops serving that version (it is reconfigured or rolled back) the client's calls time
+  out until the hour is up or the process restarts. Coordinate Mediation's cache behaves the same
+  way. Pin the version, or restart, after such a change (`MessagePickupVersion.Negotiate`'s docs).
 - **A push in the old framing after a version switch (#100).** If an application pins different
   pickup versions for the same mediator and DID on one connection, a live push built just before the
   connection's framing changed arrives in the old version. The stream ignores it, so the message
-  stays leased until the connection closes or the lease runs out (60 s at ours), then comes again.
+  stays leased until the connection closes or the lease runs out (60 s at ours); at ours it is then
+  delivered by the stream's next drain, not pushed again (owner decision 2026-11-20).
   With the default `Negotiate` one version is used throughout.
 - **A pinned-4.0 `AckAsync` over a WebSocket before any session socket exists (#100).** The
   header-less acknowledgement then goes over the endpoint's pooled socket, and the `status-request`
