@@ -14,6 +14,12 @@ public sealed class WebSocketTransportOptions
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>Per-send timeout. Defaults to 30 s.</summary>
+    /// <remarks>
+    /// It also bounds <see cref="WebSocketDidCommTransport.DisposeAsync"/>'s close of each socket: the
+    /// close frame, and the wait for the peer's answering close, which every socket waits for at the
+    /// same time. An infinite or non-positive value leaves dispose no time for it: the connection is
+    /// cut off without waiting.
+    /// </remarks>
     public TimeSpan SendTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>Max reconnect attempts after a drop. Defaults to 5 (DD-05).</summary>
