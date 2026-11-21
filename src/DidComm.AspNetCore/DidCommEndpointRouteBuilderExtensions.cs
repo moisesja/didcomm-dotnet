@@ -981,10 +981,24 @@ public static class DidCommEndpointRouteBuilderExtensions
                     SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: inbound {MessageId}: handler bug (FR-THR-04 rule 2, {ExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name);
                     continue;
                 }
+                catch (OperationCanceledException ex) when (!handlingToken.IsCancellationRequested)
+                {
+                    // A cancellation the handler raised from a token of its own (its own timeout: a
+                    // DID-resolution or HTTP timeout arrives as a TaskCanceledException with the
+                    // loop's token NOT cancelled) is a fault of THIS message, not the end of the
+                    // connection: skipped, and the connection and its next message carry on. Warning,
+                    // as on the unpack path above, because a peer can cause it (a DID that resolves
+                    // slowly). It used to escape the loop and end the connection as an unhandled
+                    // exception.
+                    SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: inbound {MessageId}: the handler was cancelled by a token of its own ({ExceptionType}, innermost: {InnerExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
+                    continue;
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // Same posture as above for any other handler-thrown exception: log + keep
-                    // the connection alive. Cancellation propagates so the loop can exit cleanly.
+                    // the connection alive. The cancellation of the message's own token (the close
+                    // grace or the host's shutdown after the connection ended) propagates, so the
+                    // loop exits.
                     SafeLog.Write(logger, LogLevel.Error, "MapDidCommWebSocket: inbound {MessageId}: handler threw {ExceptionType} (innermost: {InnerExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
