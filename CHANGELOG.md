@@ -6,6 +6,118 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Message Pickup 4.0 in both roles; the mailbox refuses messages that are not encrypted (FR-PICK-12, #100; epic #88)
+
+**Behaviour changes for existing mediator hosts and wallets** (none of these packages is published yet):
+
+- **A mediator now also speaks Message Pickup 4.0.** `AddMessagePickup()`, and so `AddMediator()`,
+  now registers a 4.0 handler beside the 3.0 one, and Discover Features discloses
+  `https://didcomm.org/message-pickup/4.0` (roles `mediator`) as well as
+  `https://didcomm.org/messagepickup/3.0`. Both versions serve the same mailbox. To serve 3.0 only,
+  set `MessagePickupOptions.EnableV4 = false` (`o.Pickup.EnableV4` under `AddMediator()`) in the
+  delegate of every call. The setting is read when the call runs, so a value set another way that
+  disagrees (`Configure<MessagePickupOptions>`, configuration binding, or two calls that differ)
+  fails with `InvalidOperationException` when the pickup handlers are built: at start-up under
+  `AddMediator()`.
+- **The wallet's `PickupClient` now asks the mediator which version it speaks before its first
+  call.** It sends one Discover Features query per mediator and remembers the answer for an hour.
+  It uses 4.0 when the mediator discloses it, as this library's mediator now does, and 3.0
+  otherwise. Under 4.0 a caller sees three differences:
+  - a drained `FetchAsync` returns no `PickupBatch.Status`, so ask with `GetStatusAsync`;
+  - `PickupStatus.LongestWaitedSeconds` is `null`, because 4.0 removed it;
+  - the arrival times are 4.0's milliseconds rounded down to seconds. `PickupStatus` keeps epoch
+    seconds whichever version is spoken.
+
+  Acknowledgements get no answer under 4.0; `AckAsync` still returns the status, which it now asks
+  for with a `status-request`.
+- **Pin the version for mediators that cannot answer the question.** A mediator that answers
+  Discover Features but discloses neither pickup version now fails every pickup call with
+  `MediationNotSupportedException`. One that does not answer the query fails it with
+  `TimeoutException`. For either, pin `MediatorClientOptions.MessagePickupVersion = V3`. The
+  Identus mediator 1.2.1 discloses `messagepickup/3.0` and is spoken to in 3.0 with no pin.
+- **The mailbox refuses a message that is not encrypted (owner decision, 2026-11-20).** In the
+  owner's words as put to them: "The mailbox refuses any message that isn't encrypted, whoever
+  supplies it (a sender's forward or the host's own code), stores nothing, and reports a new 'not
+  encrypted' result. The sender already got its 202, as with every mailbox refusal today."
+  - Why: the pickup spec lets a delivery carry only encrypted messages. Message Pickup 3.0 L172:
+    "The ONLY valid type of attachment for this message is a DIDComm v2 Message in encrypted form."
+    4.0 L261: "The ONLY valid type of attachment for this message is a DIDComm v1 or v2 Message in
+    encrypted form." Routing only asks senders to encrypt (DIDComm v2.1 routing.md L57: "This
+    content should be encrypted for the next recipient."). Before this change the mediator stored
+    and delivered such a message in 3.0 too.
+  - What you see: `MessagePickupQueue.DeliverAsync` returns `PickupDeliveryOutcome.NotEncrypted`,
+    and the forward outcome meter records `Dropped-PayloadNotEncrypted`.
+  - Who notices: only senders that do not encrypt. Our client, didcomm-python, didcomm-jvm and
+    Identus all encrypt.
+  - How it is checked (our choice): see Notes.
+- **The wallet client treats an attachment that is not encrypted as a failed item (owner decision,
+  2026-11-20: "OK, as described").** Such an attachment, from any mediator, is reported as a failed
+  `PickupItem` and is not acknowledged, like any attachment that does not decode. Discard it with
+  `AckAsync`, or it ages out of the mailbox.
+- **A `status` must repeat the filter the request named.** A `status` that leaves out the
+  `recipient_did` a filtered request named is now refused with `MediationProtocolException`, as a
+  status about another DID already was. Both versions say the value MUST be repeated (3.0 L116,
+  4.0 L168).
+
+**Added** (public API, unpublished packages):
+- `DidComm.Mediator`:
+  - `MessagePickup40Handler`, the 4.0 mediator role, public so a hand-built host can register it
+    over its `MessagePickupQueue`;
+  - `MessagePickupOptions.EnableV4`, default `true`;
+  - `PickupDeliveryOutcome.NotEncrypted`, appended so the other values keep their numbers.
+- `DidComm.Mediator.Client`:
+  - the `MessagePickupVersion` enum (`Negotiate`, `V4`, `V3`);
+  - `MediatorClientOptions.MessagePickupVersion`, default `Negotiate`.
+
+Nothing changes in Core, the transports, `DidComm.AspNetCore` or DI. The 4.0 message codec is
+internal, so 4.0 adds no public message builders.
+
+**What 4.0 changes on the wire**, as built (the 4.0 page at `decentralized-identity/didcomm.org@a26926c`,
+`site/content/protocols/messagepickup/4.0/readme.md`):
+- The limit of a `delivery-request` is named `message_count_limit`, and a `delivery` never carries
+  more than it (L206, L255). A request that carries only 3.0's `limit` is malformed.
+- Times are in UTC epoch milliseconds, and `longest_waited_seconds` is gone (L37, L39, L164).
+- Every `status` carries the request's thread as `thid` (L33).
+- When nothing can be delivered, the answer is a `delivery` with an empty `attachments` array on
+  the request's thread, never a `status` (L210, L259).
+- `messages-received` is applied and never answered. The client sends it one way, without
+  `return_route` (L35). Over a WebSocket it rides the session socket, and it is time-stamped like
+  every mediator request.
+- Live pushes are 4.0 `delivery` messages without `thid`, held until acknowledged and handed back
+  to the queue when the connection closes or the lease runs out (L308).
+- The live-mode problem report has the 4.0 type `https://didcomm.org/message-pickup/4.0/problem-report` (L362).
+- A wallet client reading a 4.0 `delivery` refuses one with no `attachments` array, or with more
+  attachments than it asked for, before it opens anything in it.
+- A recipient can switch versions between requests: a message delivered through one version can be
+  acknowledged through the other. A connection's live pushes use the version of its last
+  `live-delivery-change` that turned live delivery on.
+
+**Notes**
+- Spec readings (none needed an owner decision):
+  - L34 and L263 make `delivery.thid` optional, but DIDComm v2.1 threading.md L17 requires `thid`
+    on every later message of a thread. So a delivery that answers a request carries it, and only
+    a live push lacks it. A reply without `thid` still completes no request (the owner's answer "2"
+    from #98).
+  - 4.0's live-mode text (L85, L302–L308) is 3.0's plus the `delivery` / `messages-received`
+    rules. It asks for no push of a delayed message when it falls due, so the polling design
+    stands (owner decision, 2026-11-14).
+  - `messages-received` is not one of the three requests that need `return_route: all`
+    (L59–L63, L69).
+- Implementation choices (ours):
+  - A 4.0 `delivery-request` that arrives without a return-route session is not answered, and
+    nothing is read or leased for it.
+  - There is no switch to serve 4.0 only: register `MessagePickup40Handler` by hand for that.
+  - "Encrypted" is judged on the outermost layer, without decrypting. The bytes must be strict
+    UTF-8 JSON holding an object with a `ciphertext` member. That is the rule the library's unpack
+    uses to recognise a JWE, anoncrypt or authcrypt (v2.1 message_structure.md L65, L71). Plaintext
+    and signed-only messages are refused.
+  - In rewrap mode, and in pass-through mode with an extra routing key, the mailbox stores the
+    mediator's own JWE, so a non-encrypted message inside it is still stored. The recipient's
+    client then opens it.
+- DIDComm v1 forms of 4.0 are out of scope, as before.
+- The live interop leg's R-2 cell (our wallet against our mediator) now negotiates and asserts 4.0,
+  with a negative-control twin. The Identus cells negotiate 3.0 and are otherwise unchanged.
+
 ### Changed — a message whose `id`, `thid` or `pthid` is longer than 512 characters is refused (security hardening, tracked privately; epic #88)
 
 **Behaviour change for released `DidComm.Core`.** A message's `id`, `thid` and `pthid` must now be at

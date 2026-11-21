@@ -1467,7 +1467,9 @@ Wiring: `DidCommBuilder.AddMessagePickup(configure?)` (`MessagePickupBuilderExte
   on a scratch instance, so bad settings fail at registration.
 - `TryAddSingleton` for `IMessageStore` (`InMemoryMessageStore`), `MessagePickupQueue` and
   `MessagePickupHandler`, then `AddProtocol<MessagePickupHandler>()`. Discover Features discloses
-  `https://didcomm.org/messagepickup/3.0` with `roles: ["mediator"]`.
+  `https://didcomm.org/messagepickup/3.0` with `roles: ["mediator"]`. Since #100 the same call also registers `MessagePickup40Handler` and
+  discloses `https://didcomm.org/message-pickup/4.0`, unless `EnableV4` is `false` (see "Message
+  Pickup 4.0, mediator role" below).
 - The queue's factory needs an `IMediationStore` (`AddCoordinateMediation()` in either order, or
   the host's own) and throws `InvalidOperationException` naming the fix when there is none. It
   takes the session registry `AddDidComm` registers. Nothing in the graph takes the dispatcher, the
@@ -1745,6 +1747,80 @@ Documented limits:
 - Cookbook FF.2: `AddMessagePickup()` à la carte with a host sink calling `DeliverAsync`
   (`AllowLive: false`, as the library's own sink, so the forward pump never waits on a session), and
   `MessagePickupQueue` / `MessagePickupHandler` built without a container.
+
+### Message Pickup 4.0, mediator role (#100)
+
+Source: the 4.0 page at `decentralized-identity/didcomm.org@a26926c`
+(`site/content/protocols/messagepickup/4.0/readme.md`, PIURI `https://didcomm.org/message-pickup/4.0`);
+PRD FR-PICK-12. `MessagePickup40Handler` (public, `DidComm.Mediator.Pickup`) is the 3.0 handler's
+twin: the same steps (peer gate → session for this pair → parse → coordinator → reply) over the
+**same** `MessagePickupQueue`, so the store, its leases and pass-over marks, the session tracker
+(live flags, the release backlog), the sizing and the log counters are shared by construction. A
+recipient has one mailbox whichever version it speaks: a lease taken by a 3.0 `delivery-request` is
+acknowledged by a 4.0 `messages-received` and the reverse, and a recipient may switch versions
+between requests. The reply-thread check (the 512-character bound on an echoed thread) and the
+reply-build fault boundary moved out of the 3.0 handler into `PickupReplies`, unchanged, and both
+handlers use them.
+
+| Request | Coordinator call | 4.0 reply |
+|---|---|---|
+| `status-request` | `StatusAsync` | `status` with `thid` (DD-11), times in epoch milliseconds when something is waiting, no `longest_waited_seconds` |
+| `delivery-request` | none without a session for this pair; else `DeliverRequestedAsync` with the 4.0 builder | the pushed `delivery`; "nothing deliverable" → a `delivery` with `"attachments": []`, `thid` and the filter repeated |
+| `messages-received` | `AcknowledgeAsync(…, answerWithStatus: false)` | none, with or without `return_route` |
+| `live-delivery-change` | `SetLiveDeliveryAsync` with the 4.0 live framing | `status`, or the 4.0 problem report (`…/message-pickup/4.0/problem-report`, `pthid`) |
+
+- **No session, no answer.** A 4.0 `delivery-request` without a return-route session for the
+  (peer, local) pair returns `null` before the coordinator runs, so nothing is read or leased. 3.0
+  keeps its `status`, which the endpoints never send either. The reason: 4.0 asks for
+  `return_route: all` on every request (L52, L69), and an empty `delivery` sent another way would
+  claim that nothing is waiting.
+- **Live framing.** `SetLiveDeliveryAsync` stores the framing per session, so a session's pushes
+  follow its last `live-delivery-change(true)`: 4.0's is a `delivery` with one attachment and no
+  `thid`. Turning live delivery off in either version turns it off. Unacknowledged pushes go back to
+  the queue when the session closes or the lease runs out (4.0 L308; #94/#95 already did this).
+- **The codec.** `MessagePickup40` (internal, `DidComm.Mediator.Client`, both directions) writes
+  and reads through `PickupBodies`. It adds `WriteStatus40` / `ReadStatus40` and the internal
+  `PickupStatus40` record, which holds milliseconds. A body with only 3.0's `limit` is malformed
+  under 4.0, and so is a `delivery` without an `attachments` array. Types match any 4.x minor;
+  builders write the canonical strings.
+- **Registration.** `AddMessagePickup()` reads `MessagePickupOptions.EnableV4` (default `true`) from
+  its registration probe. When it is on, it registers the 4.0 factory and
+  `AddProtocol<MessagePickup40Handler>()`. Both pickup factories run
+  `VerifyVersion4Registration`, which compares what is registered with the setting in effect and
+  throws `InvalidOperationException` naming the property when they disagree (the `EnableV2`
+  pattern, #99). Discover Features discloses each registered handler's PIURI, so it shows both by
+  default. There is no switch to serve 4.0 only; a host can register `MessagePickup40Handler` itself
+  over a `MessagePickupQueue`. `AddMediator()` projects `o.Pickup` onto it.
+
+### The mailbox accepts only encrypted messages (#100, owner decision 2026-11-20)
+
+Both pickup versions let a `delivery` carry only encrypted messages (3.0 L172: "The ONLY valid
+type of attachment for this message is a DIDComm v2 Message in encrypted form."; 4.0 L261: "…a
+DIDComm v1 or v2 Message in encrypted form."), while routing only asks senders to encrypt (v2.1
+routing.md L57). The owner decided that the mailbox refuses any message that is not encrypted,
+whoever supplies it, stores nothing and reports `NotEncrypted`. How it is built (ours):
+
+- **One door.** The check sits in `PickupCoordinator.DeliverAsync`, behind
+  `MessagePickupQueue.DeliverAsync`, which every path into the mailbox goes through: the forward
+  sink in each mode, a host's own calls, and the live push, which stores before it pushes. Order:
+  the size bound first (an over-size payload is `PayloadTooLarge` and never parsed), then this
+  check, then the expiry, the registration lookup, the live target, any lease and the store. A
+  refusal costs no mediation-store call and no quota, and writes one rate-limited line that quotes
+  nothing of the payload. The sink records it as `Dropped-PayloadNotEncrypted`, with its own
+  counter. That is distinct from the handler's `Dropped-NotEncrypted`, which is about the forward's
+  own envelope.
+- **Encrypted form** (`EncryptedForm.IsEncrypted`, `DidComm.Mediator.Client`, shared with the
+  wallet client's check): the outermost layer is a JWE, anoncrypt or authcrypt (v2.1
+  message_structure.md L65, L71). It is judged structurally and nothing is decrypted: strict UTF-8
+  JSON (`DidCommJson.StrictDocument`: no duplicate member names, nothing after the value) holding
+  an object that Core's `EnvelopeDetector` classifies as `Encrypted`, that is, one with a
+  `ciphertext` member. That is the rule the library's unpack uses (FR-API-03), so the mailbox, the
+  wallet and every unpacker agree. Plaintext, a JWS (General or Flattened), any other JSON value and
+  bytes that are not UTF-8 JSON are refused.
+- **What is judged is what is stored.** In rewrap mode, and in pass-through mode with an extra
+  routing key (`IRecipientRoutingKeyProvider`), the sink stores the mediator's own anoncrypted
+  `forward`, a JWE. So a non-encrypted message inside it is stored, and the recipient's client
+  opens it.
 
 ## Mediator service: pipeline, `AddMediator()`, `MapDidCommMediator` (Phase 7, #95)
 
@@ -2204,6 +2280,11 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
 
 ### Documented limits
 
+- **A store written to directly skips the encrypted-form check (#100).** The check is in
+  `MessagePickupQueue.DeliverAsync`. A host that writes records straight into its `IMessageStore`
+  takes on that duty: the store contract requires payloads in encrypted form, and the 3.0 and 4.0
+  delivery paths do not judge them again. The wallet client still refuses such an attachment as a
+  failed item.
 - **Live pushes are tried again only at the next wake-up.** A message whose live push failed, or
   whose push was skipped (saturation, a cooldown), is tried again only when its recipient next
   receives a message (or one of its sessions turns live delivery on), and a delayed message, never
@@ -3047,8 +3128,75 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
   an unpack that ended as its deadline fired are all observed (`MediatorClientUnobservedTests`,
   `PickupClientUnobservedQa2Tests`).
 
+### Message Pickup 4.0 on the recipient side (#100)
+
+`PickupClient` speaks 4.0 or 3.0 per mediator. Every method resolves the version right after the
+route, in this order:
+
+1. the pin, `MediatorClientOptions.MessagePickupVersion` (`Negotiate` by default, `V4` or `V3`);
+2. the channel's second `NegotiatedVersionCache<MessagePickupVersion>` (64 mediators, one hour);
+3. one Discover Features query on the same route, with its own `RequestTimeout`.
+
+The query (`FeatureNegotiation.CreatePickupQuery`) carries two queries in one message,
+`https://didcomm.org/message-pickup/4.*` then `https://didcomm.org/messagepickup/3.*`. It is read
+through the same bounded reader and role rule as Coordinate Mediation's (owner decision O-1, #99).
+4.0 wins over 3.0. If neither version is disclosed, the call throws
+`MediationNotSupportedException`; if the query goes unanswered, it throws `TimeoutException`. The
+Debug line "Message Pickup version negotiated by query …" is distinct from Coordinate Mediation's,
+which the live wallet counts. A live stream settles the version once, after its registration, and
+keeps it. A failed query releases the registration and ends the enumeration at its first
+`MoveNextAsync`.
+
+- **Per-version wire (`PickupWire`).** It builds each request with its `MediatorExchangeSpec` and
+  reads the answers. Under 4.0:
+  - `status-request` and `live-delivery-change` expect a 4.0 `status`, and `delivery-request`
+    expects only a 4.0 `delivery`: a `status` does not answer it;
+  - a `delivery` without an `attachments` array, or with more attachments than
+    `message_count_limit`, is refused as `MediationProtocolException`. The refusal comes from the
+    count, before any attachment is read or opened (L255, L259);
+  - an empty array is a drained fetch with no `Status`;
+  - the status reader floors milliseconds to seconds, and `LongestWaitedSeconds` is `null`.
+
+  `MediatorAnswerTypes` gains `status (4.0)`, `delivery (4.0)` (kind Delivery: a thread-less one
+  goes only to a live stream) and `problem-report (4.0)` (kind ProblemReport, matched by `pthid`).
+- **One-way send (`IMediatorExchange.SendOneWayAsync`).** This is how a 4.0 `messages-received`
+  goes out: with `SendOptions.ReturnRoute = null`, so no header, nothing registered and nothing
+  awaited, and any HTTP body is ignored. It is bounded by `RequestTimeout` plus the shutdown token
+  and counts against `MaxPendingRequests` while it is being sent. A timeout names the request id.
+  FR-RR-09's PIURI clause stamps `created_time`. Over a WebSocket the transport's session-socket
+  affinity puts it on the session socket of the (endpoint, local, peer) triple, where a header-less
+  message leaves the session as it is (FR-RR-05).
+  - `FetchAsync` acknowledges one way under its own deadline.
+  - `AckAsync` sends each 100-id chunk one way, then its existing `status-request` within what is
+    left of the last chunk's `RequestTimeout`.
+  - The live stream's flush and end acknowledge one way under 4.0.
+- **The live stream** keeps a read-only version. `CycleAsync` and `DrainRoundAsync` build and read
+  through `PickupWire`; an empty 4.0 delivery ends the drain. `LoadPushAsync` takes only a
+  `delivery` of its own version, and a push of the other version is logged at Debug and not
+  acknowledged. **Its scheduling, turn-taking, back-off, flush timing and end are unchanged**
+  (owner decision on #96's live stream, 2026-11-14).
+- **In both versions:**
+  - **Filter echo.** A `status` answering a filtered request must repeat the `recipient_did`
+    (`DeliveryReader.RequireStatusFilterEcho`, branch-flat: an absent echo is refused like a wrong
+    one; 3.0 L116, 4.0 L168). A `delivery` may still leave it out.
+  - **Encrypted attachments only.** Each decoded attachment is judged by `EncryptedForm.IsEncrypted`
+    on its outermost layer, before any unpack. One that is not a JWE is a failed entry, never
+    unpacked and never acknowledged (owner decision 2026-11-20, "OK, as described"). A forward the
+    mediator re-wrapped is a JWE, so a plaintext message inside one is still opened.
+
 ### Documented limits
 
+- **A push in the old framing after a version switch (#100).** If an application pins different
+  pickup versions for the same mediator and DID on one connection, a live push built just before the
+  connection's framing changed arrives in the old version. The stream ignores it, so the message
+  stays leased until the connection closes or the lease runs out (60 s at ours), then comes again.
+  With the default `Negotiate` one version is used throughout.
+- **A pinned-4.0 `AckAsync` over a WebSocket before any session socket exists (#100).** The
+  header-less acknowledgement then goes over the endpoint's pooled socket, and the `status-request`
+  that confirms it opens the session socket. The mediator handles the two connections
+  concurrently, so the returned count may predate the acknowledgement. A repeat is harmless. Under
+  `Negotiate` the Discover Features query opens the session socket first, and a fetch or live
+  stream has opened it already.
 - **At-least-once.** Repeats are recognised while the duplicate filter remembers them; an
   application that must never act twice tracks the message ids it handled.
 - **A fetch is at-most-once to the application** once it returns (above); `ReceiveLiveAsync`, or the
@@ -3194,8 +3342,8 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 
 ## Phase 7: still to build
 
-Open under epic #88: the live interop and adversarial gate (#98); Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; the push to a
-host-registered recipient endpoint, deferred from #95 (#110); and the recipient client's slow-sender
-hardening (#111). Sample 11, cookbook CC–FF and the sample 04 refresh landed with #97, which
-retired every Phase 7 entry of the DX allowlists. Coordinate Mediation 2.0 for the mediator role
-landed with #99.
+Open under epic #88: the push to a host-registered recipient endpoint, deferred from #95 (#110),
+and the recipient client's slow-sender hardening (#111). Sample 11, cookbook CC–FF and the sample
+04 refresh landed with #97, which retired every Phase 7 entry of the DX allowlists. Coordinate
+Mediation 2.0 for the mediator role landed with #99, the live interop and adversarial gate with
+#98, and Message Pickup 4.0 in both roles, with the mailbox's encrypted-form check, with #100.
