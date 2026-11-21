@@ -46,8 +46,8 @@ public sealed class MessagePickupHandlerFaultTests
     private const string None = "none";
 
     /// <summary>
-    /// Alice holds a grant with two registered DIDs and three queued messages — #1 (10 bytes, her
-    /// own DID), #2 (20 bytes, the second DID), #3 (30 bytes, her own DID) — and a live session
+    /// Alice holds a grant with two registered DIDs and three queued messages — #1 (100 bytes, her
+    /// own DID), #2 (200 bytes, the second DID), #3 (300 bytes, her own DID) — and a live session
     /// whose failure mode the row chooses.
     /// </summary>
     private sealed class World : IAsyncDisposable
@@ -71,7 +71,7 @@ public sealed class MessagePickupHandlerFaultTests
             var h = await MessagePickupHandlerHarness.CreateAsync(pickup, throwingLogger: loggerDown);
             var second = await h.NewDidAsync();
             await h.EnrolAsync(h.Alice, h.Alice, second);
-            var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(second, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+            var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(second, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
             var world = new World { H = h, Second = second, Ids = ids, LoggedBefore = 0 };
             if (fault is IsLiveThrows or ClosedThrows)
                 world.Faulty = new MessagePickupHandlerFaultySession(h.Alice, h.Mediator);
@@ -228,11 +228,11 @@ public sealed class MessagePickupHandlerFaultTests
         }
         else if (filtered)
         {
-            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 1, 20, live: false, recipientDid: w.Second, times: new MessagePickupHandlerTimes(0, t0, t0));
+            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 1, 200, live: false, recipientDid: w.Second, times: new MessagePickupHandlerTimes(0, t0, t0));
         }
         else
         {
-            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 60, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 600, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
         }
 
         // A status request never writes: nothing pushed, nothing leased, released, removed or purged.
@@ -420,7 +420,7 @@ public sealed class MessagePickupHandlerFaultTests
         {
             // The status counts what is stored in the scope the request named — a message that was
             // passed over included: it is stored, due and unexpired.
-            var sizes = new Dictionary<string, int> { [w.Ids[0]] = 10, [w.Ids[1]] = 20, [w.Ids[2]] = 30 };
+            var sizes = new Dictionary<string, int> { [w.Ids[0]] = 100, [w.Ids[1]] = 200, [w.Ids[2]] = 300 };
             var scope = variant == Filtered ? storedIds.Where(id => id == w.Ids[1]).ToArray() : storedIds;
             scope.Should().HaveCount(int.Parse(answer["status:".Length..], System.Globalization.CultureInfo.InvariantCulture));
             w.Sent.Should().BeEmpty();
@@ -493,7 +493,7 @@ public sealed class MessagePickupHandlerFaultTests
             var lines = w.LinesOfLastDispatch();
             lines.Should().NotContain(e => e.Formatted.Contains("removed: alone", StringComparison.Ordinal), "nothing is removed for being too large");
             var passedOverLines = lines.Where(e => e.Formatted.Contains("even alone; it stays queued and is passed over", StringComparison.Ordinal)).ToArray();
-            passedOverLines.Select(e => e.State["Bytes"]).Should().Equal(passedOver.Select(n => (object?)(10 * n)));
+            passedOverLines.Select(e => e.State["Bytes"]).Should().Equal(passedOver.Select(n => (object?)(100 * n)));
             passedOverLines.Select(e => e.State["Count"]).Should().Equal(passedOver.Select((_, i) => (object?)(long)(i + 1)));
             passedOverLines.Select(e => e.Level).Should().Equal(passedOver.Select((_, i) => i == 0 ? LogLevel.Warning : LogLevel.Debug));
             foreach (var line in passedOverLines)
@@ -541,7 +541,7 @@ public sealed class MessagePickupHandlerFaultTests
         }
         else
         {
-            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 2, 50, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 2, 500, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
         }
 
         // All or nothing: the named message is gone, or (the acknowledgement itself failed) every message is still there.
@@ -604,7 +604,7 @@ public sealed class MessagePickupHandlerFaultTests
         }
         else
         {
-            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 60, live: turnOn, times: new MessagePickupHandlerTimes(0, t0, t0));
+            outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 600, live: turnOn, times: new MessagePickupHandlerTimes(0, t0, t0));
             (await h.LiveFlagAsync(w.Session)).Should().Be(turnOn);
         }
 
@@ -629,7 +629,7 @@ public sealed class MessagePickupHandlerFaultTests
         var gone = await h.NewDidAsync();
         var kept = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, gone, kept, h.Alice);
-        var ids = new[] { await h.QueueAsync(gone, 10, 1), await h.QueueAsync(kept, 20, 2), await h.QueueAsync(h.Alice, 30, 3), await h.QueueAsync(gone, 40, 4) };
+        var ids = new[] { await h.QueueAsync(gone, 100, 1), await h.QueueAsync(kept, 200, 2), await h.QueueAsync(h.Alice, 300, 3), await h.QueueAsync(gone, 400, 4) };
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(gone, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
         var lookups = 0;
@@ -662,7 +662,7 @@ public sealed class MessagePickupHandlerFaultTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var second = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, second);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(second, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(second, 200, 2) };
         var session = h.Http(h.Alice);
         var unusable = peerDidOfTheGrant switch
         {
@@ -691,7 +691,7 @@ public sealed class MessagePickupHandlerFaultTests
         var gone1 = await h.NewDidAsync();
         var gone2 = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, gone1, gone2);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(gone1, 20, 2), await h.QueueAsync(gone2, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(gone1, 200, 2), await h.QueueAsync(gone2, 300, 3) };
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(gone1, RecipientUpdateAction.Remove), new RecipientUpdate(gone2, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
         h.Store.OnAcknowledge = (_, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker);
@@ -731,7 +731,7 @@ public sealed class MessagePickupHandlerFaultTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 5; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 10 + i, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 100 + i, (byte)i));
         var session = h.Http(h.Alice);
         // The session's verdict on the packed bytes: anything with more than two attachments is too large.
         session.OnSend = (message, _) => message.Attachments!.Count > 2 ? ReturnRouteSendResult.TooLarge : null;
@@ -759,7 +759,7 @@ public sealed class MessagePickupHandlerFaultTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var socket = h.Live(h.Alice);
         (await h.SendAsync(h.LiveChange(h.Alice, true), socket)).Status().LiveDelivery.Should().BeTrue();
         socket.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
@@ -776,7 +776,7 @@ public sealed class MessagePickupHandlerFaultTests
         // is not given back: it keeps this request's lease. The same request then leases again and
         // tries what is behind it — here with the same result, twice more — and when a lease round
         // finds nothing left the peer is told the state, which still counts all three.
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 60, live: true, times: times);
+        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, 3, 600, live: true, times: times);
         socket.Attempts.Select(a => string.Join(",", a.Message.Attachments!.Select(x => Array.IndexOf(ids, x.Id)))).Should().Equal("0,1,2", "0,1", "0", "1,2", "1", "2");
         socket.Sent.Should().BeEmpty();
         h.Store.Released.Select(r => string.Join(",", r.Ids)).Should().Equal(ids[2], ids[1], ids[2]);
@@ -796,7 +796,7 @@ public sealed class MessagePickupHandlerFaultTests
         // line any enrolled peer can cause, so rate-limited.
         var lines = h.Fixture.PickupLogs.Skip(logged).ToArray();
         lines.Select(e => e.Level).Should().Equal(LogLevel.Warning, LogLevel.Debug, LogLevel.Debug);
-        lines.Select(e => e.State["Bytes"]).Should().Equal(10, 20, 30);
+        lines.Select(e => e.State["Bytes"]).Should().Equal(100, 200, 300);
         lines.Select(e => e.State["Count"]).Should().Equal(1L, 2L, 3L);
         foreach (var line in lines)
         {
@@ -810,7 +810,7 @@ public sealed class MessagePickupHandlerFaultTests
         // status and logs nothing.
         h.ResetTraces();
         var second = h.DeliveryRequest(h.Alice, 10);
-        (await h.SendAsync(second, socket)).ShouldBeStatus(second, h.Mediator, h.Alice, 3, 60, live: true, times: times);
+        (await h.SendAsync(second, socket)).ShouldBeStatus(second, h.Mediator, h.Alice, 3, 600, live: true, times: times);
         h.StoreTrace.Should().Equal("LeaseAsync", "GetStatusAsync");
         socket.Attempts.Should().HaveCount(6, "3 + 2 + 1 attempts by the first request, and none by the second");
         h.Fixture.PickupLogs.Skip(logged).Should().HaveCount(3);
@@ -831,7 +831,7 @@ public sealed class MessagePickupHandlerFaultTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var session = h.Http(h.Alice);
         // Too large once, then the session is gone (no free slot, downgraded, closing).
         session.OnSend = (message, _) => message.Attachments!.Count == 3 ? ReturnRouteSendResult.TooLarge : ReturnRouteSendResult.NotSent;
@@ -859,7 +859,7 @@ public sealed class MessagePickupHandlerFaultTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var session = h.Http(h.Alice);
         session.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
         var releases = 0;
@@ -991,7 +991,7 @@ public sealed class MessagePickupHandlerFaultTests
         // clean-up — which does not — releases everything.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var session = h.Http(h.Alice);
         using var cts = new CancellationTokenSource();
         session.OnSend = (_, _) =>
@@ -1092,17 +1092,17 @@ public sealed class MessagePickupHandlerFaultTests
         }
 
         var status = h.StatusRequest(h.Alice);
-        (await SendOnTheBrokenSessionAsync(status)).ShouldBeStatus(status, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        (await SendOnTheBrokenSessionAsync(status)).ShouldBeStatus(status, h.Mediator, h.Alice, 3, 600, live: false, times: times);
         ShouldHaveSaidSoOnce(status);
 
         // No connection to carry a batch on: nothing is leased, the status instead.
         var fetch = h.DeliveryRequest(h.Alice, 10);
-        (await SendOnTheBrokenSessionAsync(fetch)).ShouldBeStatus(fetch, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        (await SendOnTheBrokenSessionAsync(fetch)).ShouldBeStatus(fetch, h.Mediator, h.Alice, 3, 600, live: false, times: times);
         h.Store.LeaseRequests.Should().BeEmpty();
         ShouldHaveSaidSoOnce(fetch);
 
         var ack = h.MessagesReceived(h.Alice, new[] { "no-such-id" });
-        (await SendOnTheBrokenSessionAsync(ack)).ShouldBeStatus(ack, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        (await SendOnTheBrokenSessionAsync(ack)).ShouldBeStatus(ack, h.Mediator, h.Alice, 3, 600, live: false, times: times);
         ShouldHaveSaidSoOnce(ack);
 
         // No connection that could do live delivery: the problem report, and the flag stays off.
@@ -1111,7 +1111,7 @@ public sealed class MessagePickupHandlerFaultTests
         ShouldHaveSaidSoOnce(on);
 
         var off = h.LiveChange(h.Alice, false);
-        (await SendOnTheBrokenSessionAsync(off)).ShouldBeStatus(off, h.Mediator, h.Alice, 3, 60, live: false, times: times);
+        (await SendOnTheBrokenSessionAsync(off)).ShouldBeStatus(off, h.Mediator, h.Alice, 3, 600, live: false, times: times);
         ShouldHaveSaidSoOnce(off);
 
         w.Sent.Should().BeEmpty("a session that cannot say whose it is is never written to");

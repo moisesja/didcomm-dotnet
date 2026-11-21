@@ -106,8 +106,8 @@ public sealed class MessagePickupLiveRemovePurgeTests
         var bob = (await fixture.NewPeerAsync()).Did;
         await fixture.EnrolAsync(alice, mediator, alice);
         await fixture.EnrolAsync(bob, mediator, bob);
-        var alices = await fixture.QueueAsync(alice, PickupFixture.Payload(10, 1));
-        var bobs = await fixture.QueueAsync(bob, PickupFixture.Payload(11, 2));
+        var alices = await fixture.QueueAsync(alice, PickupFixture.Payload(100, 1));
+        var bobs = await fixture.QueueAsync(bob, PickupFixture.Payload(110, 2));
         var (grant, id) = what switch
         {
             "an id nobody holds" => (alice, "no-such-id"),
@@ -135,7 +135,7 @@ public sealed class MessagePickupLiveRemovePurgeTests
     {
         await using var fixture = PickupFixture.Create(fakeStore: true);
         var (mediator, peer) = await fixture.EnrolledAsync();
-        var id = await fixture.QueueAsync(peer, PickupFixture.Payload(10));
+        var id = await fixture.QueueAsync(peer, PickupFixture.Payload(100));
         fixture.FakeStore!.OnAcknowledge = (_, _, _) => how switch
         {
             "throws" => throw new HandlerBoomException(HandlerBoomException.Marker),
@@ -201,14 +201,14 @@ public sealed class MessagePickupLiveRemovePurgeTests
         var later = new PickupDeliveryOptions(ExpiresTime: (fixture.Clock.Now + TimeSpan.FromSeconds(100)).ToUnixTimeSeconds());
         var socket = fixture.Session(alice, mediator, live: true);
 
-        var requested = await fixture.QueueAsync(alice, PickupFixture.Payload(10, 1), soon);        // delivered by request, unacknowledged
+        var requested = await fixture.QueueAsync(alice, PickupFixture.Payload(100, 1), soon);        // delivered by request, unacknowledged
         (await fixture.FetchAsync(alice, mediator, socket, 10))!.Value.Messages.Should().ContainSingle();
-        await fixture.QueueAsync(alice, PickupFixture.Payload(10, 2), soon);                       // waiting
+        await fixture.QueueAsync(alice, PickupFixture.Payload(100, 2), soon);                       // waiting
         await MessagePickupLive.SetLiveAsync(fixture, alice, mediator, socket);
-        (await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(10, 3), soon)).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive); // pushed live, unacknowledged
-        await fixture.QueueAsync(bob, PickupFixture.Payload(10, 4), soon);                         // another grant
-        var keptLater = await fixture.QueueAsync(bob, PickupFixture.Payload(10, 5), later);
-        var keptForever = await fixture.QueueAsync(bob, PickupFixture.Payload(10, 6));
+        (await fixture.Queue.DeliverAsync(alice, PickupFixture.Payload(100, 3), soon)).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive); // pushed live, unacknowledged
+        await fixture.QueueAsync(bob, PickupFixture.Payload(100, 4), soon);                         // another grant
+        var keptLater = await fixture.QueueAsync(bob, PickupFixture.Payload(100, 5), later);
+        var keptForever = await fixture.QueueAsync(bob, PickupFixture.Payload(100, 6));
         fixture.Memory.MessageCount.Should().Be(6);
 
         (await fixture.Queue.PurgeExpiredAsync()).Should().Be(0, "nothing has expired yet");
@@ -219,7 +219,7 @@ public sealed class MessagePickupLiveRemovePurgeTests
         (await fixture.Queue.PurgeExpiredAsync()).Should().Be(4);
 
         fixture.Memory.MessageCount.Should().Be(2);
-        fixture.Memory.TotalBytes.Should().Be(20);
+        fixture.Memory.TotalBytes.Should().Be(200);
         (await fixture.Queue.PurgeExpiredAsync()).Should().Be(0, "a second sweep finds nothing");
         (await MessagePickupLive.AckAsync(fixture, alice, mediator, requested)).MessageCount.Should().Be(0, "acknowledging a purged message is a harmless miss");
         (await MessagePickupLive.FetchNowAsync(fixture, bob, mediator)).Select(m => m.Id).Should().Equal(keptLater, keptForever);
@@ -240,7 +240,7 @@ public sealed class MessagePickupLiveRemovePurgeTests
         // Far from today in either direction, so the two clocks can never agree by accident.
         fixture.Clock.Now = new DateTimeOffset(year, 6, 1, 0, 0, 0, TimeSpan.Zero);
         var expires = fixture.Clock.Now + TimeSpan.FromDays(1);
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10), new PickupDeliveryOptions(ExpiresTime: expires.ToUnixTimeSeconds()))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100), new PickupDeliveryOptions(ExpiresTime: expires.ToUnixTimeSeconds()))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
 
         // By the configured clock it has a day left — in 2015 the system clock would call it long expired.
         (await fixture.Queue.PurgeExpiredAsync()).Should().Be(0);
@@ -260,7 +260,7 @@ public sealed class MessagePickupLiveRemovePurgeTests
         await using var fixture = PickupFixture.Create(didComm: o => o.ExpiresClockSkew = TimeSpan.FromSeconds(30));
         var (_, peer) = await fixture.EnrolledAsync();
         var expires = fixture.Clock.Now + TimeSpan.FromSeconds(10);
-        await fixture.QueueAsync(peer, PickupFixture.Payload(10), new PickupDeliveryOptions(ExpiresTime: expires.ToUnixTimeSeconds()));
+        await fixture.QueueAsync(peer, PickupFixture.Payload(100), new PickupDeliveryOptions(ExpiresTime: expires.ToUnixTimeSeconds()));
 
         fixture.Clock.Now = expires + TimeSpan.FromSeconds(30) + TimeSpan.FromMilliseconds(999);
         (await fixture.Queue.PurgeExpiredAsync()).Should().Be(0, "now − skew is still the expiry second");

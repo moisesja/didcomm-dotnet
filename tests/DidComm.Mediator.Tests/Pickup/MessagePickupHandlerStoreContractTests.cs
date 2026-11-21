@@ -46,11 +46,11 @@ public sealed class MessagePickupHandlerStoreContractTests
         var second = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, second);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var real = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(second, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
-        var bobs = await h.QueueAsync(h.Bob, 5, 4);
+        var real = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(second, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
+        var bobs = await h.QueueAsync(h.Bob, 50, 4);
         var session = h.Http(h.Alice);
         var now = h.Clock.Now;
-        var payload = PickupFixture.Payload(7, 9);
+        var payload = PickupFixture.Payload(70, 9);
 
         // The store really leases the caller's records, then hands back something else.
         string?[] handedOut = Array.Empty<string?>();
@@ -179,9 +179,9 @@ public sealed class MessagePickupHandlerStoreContractTests
         // attachment id (a host that filled the store its own way).
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var good = await h.QueueAsync(h.Alice, 10, 1);
+        var good = await h.QueueAsync(h.Alice, 100, 1);
         var now = h.Clock.Now;
-        (await h.Store.Inner.EnqueueAsync(new QueuedMessage("bad id#1", h.Alice, h.Alice, PickupFixture.Payload(5), now), null, now, default)).Should().Be(EnqueueOutcome.Enqueued);
+        (await h.Store.Inner.EnqueueAsync(new QueuedMessage("bad id#1", h.Alice, h.Alice, PickupFixture.Payload(50), now), null, now, default)).Should().Be(EnqueueOutcome.Enqueued);
         var session = h.Http(h.Alice);
         h.ResetTraces();
 
@@ -206,7 +206,7 @@ public sealed class MessagePickupHandlerStoreContractTests
         // the request is not answered with a status that claims to know the queue.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         var session = h.Http(h.Alice);
         h.Store.OnLease = (_, _) => new ValueTask<IReadOnlyList<QueuedMessage>>((IReadOnlyList<QueuedMessage>)null!);
         h.ResetTraces();
@@ -247,7 +247,7 @@ public sealed class MessagePickupHandlerStoreContractTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var socket = h.Live(h.Alice);
         if (request == "live-delivery-change{false}")
             (await h.SendAsync(h.LiveChange(h.Alice, true), socket)).Status().LiveDelivery.Should().BeTrue();

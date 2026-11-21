@@ -116,7 +116,7 @@ public sealed class MessagePickupAdversarialIdentityTests
         h.MediationTrace.Length.Should().BeLessThanOrEqualTo(2, "at most one lookup per request");
 
         // The sender's side: a forward addressed to the look-alike never lands in the victim's queue…
-        (await h.Fixture.Queue.DeliverAsync(spelling, PickupFixture.Payload(8))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered, what);
+        (await h.Fixture.Queue.DeliverAsync(spelling, PickupFixture.Payload(80))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered, what);
         (await h.StoredAsync(victim)).Should().Be(2);
 
         // …and when Mallory registers the look-alike (it is a different DID, so she may), she gets
@@ -124,10 +124,10 @@ public sealed class MessagePickupAdversarialIdentityTests
         if (BareDid.IsBareDid(spelling))
         {
             (await h.Mediation.Inner.UpdateRecipientsAsync(mallory, Add(spelling), None)).Should().Equal(RecipientStoreOutcome.Added);
-            var planted = await h.Fixture.Queue.DeliverAsync(spelling, PickupFixture.Payload(8, 3));
+            var planted = await h.Fixture.Queue.DeliverAsync(spelling, PickupFixture.Payload(80, 3));
             planted.Outcome.Should().Be(PickupDeliveryOutcome.Queued);
             planted.GrantPeerDid.Should().Be(mallory);
-            (await h.Fixture.Queue.DeliverAsync(VictimsDid, PickupFixture.Payload(8, 4))).GrantPeerDid.Should().Be(victim);
+            (await h.Fixture.Queue.DeliverAsync(VictimsDid, PickupFixture.Payload(80, 4))).GrantPeerDid.Should().Be(victim);
             (await h.StoredAsync(victim)).Should().Be(3);
             (await h.StoredAsync(mallory)).Should().Be(1);
             var hers = await h.Fixture.FetchAsync(mallory, h.Mediator, h.Http(mallory), 10);
@@ -160,9 +160,9 @@ public sealed class MessagePickupAdversarialIdentityTests
             h.StoreTrace.Should().BeEmpty();
             h.MediationTrace.Should().Equal(nameof(IMediationStore.FindGrantByRecipientDidAsync), nameof(IMediationStore.FindGrantByRecipientDidAsync));
         }
-        (await h.Fixture.Queue.DeliverAsync(twin, PickupFixture.Payload(8))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
-        (await h.Fixture.Queue.DeliverAsync(prefix, PickupFixture.Payload(8))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
-        (await h.Fixture.Queue.DeliverAsync(victimsDid + "b", PickupFixture.Payload(8))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered, "an over-long value is never looked up");
+        (await h.Fixture.Queue.DeliverAsync(twin, PickupFixture.Payload(80))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
+        (await h.Fixture.Queue.DeliverAsync(prefix, PickupFixture.Payload(80))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered);
+        (await h.Fixture.Queue.DeliverAsync(victimsDid + "b", PickupFixture.Payload(80))).Outcome.Should().Be(PickupDeliveryOutcome.NotRegistered, "an over-long value is never looked up");
 
         h.ResetTraces();
         var tooLong = await Record.ExceptionAsync(() => h.SendAsync(
@@ -288,10 +288,10 @@ public sealed class MessagePickupAdversarialIdentityTests
         await MessagePickupLive.SetLiveAsync(h.Fixture, mallory, h.Mediator, mallorysSocket);
 
         // Step 1: X is the victim's.
-        var first = await h.Fixture.Queue.DeliverAsync(x, PickupFixture.Payload(10, 1));
+        var first = await h.Fixture.Queue.DeliverAsync(x, PickupFixture.Payload(100, 1));
         first.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         first.GrantPeerDid.Should().Be(victim);
-        var own = await h.Fixture.Queue.DeliverAsync(victim, PickupFixture.Payload(11, 2), new PickupDeliveryOptions(AllowLive: false));
+        var own = await h.Fixture.Queue.DeliverAsync(victim, PickupFixture.Payload(110, 2), new PickupDeliveryOptions(AllowLive: false));
         victimsSocket.Sent.Should().HaveCount(1);
         mallorysSocket.Sent.Should().BeEmpty();
 
@@ -303,7 +303,7 @@ public sealed class MessagePickupAdversarialIdentityTests
         // Step 2: the victim removes X and Mallory registers it.
         (await h.Mediation.Inner.UpdateRecipientsAsync(victim, Remove(x), None)).Should().Equal(RecipientStoreOutcome.Removed);
         (await h.Mediation.Inner.UpdateRecipientsAsync(mallory, Add(x), None)).Should().Equal(RecipientStoreOutcome.Added);
-        var second = await h.Fixture.Queue.DeliverAsync(x, PickupFixture.Payload(12, 3));
+        var second = await h.Fixture.Queue.DeliverAsync(x, PickupFixture.Payload(120, 3));
         second.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         second.GrantPeerDid.Should().Be(mallory);
         victimsSocket.Sent.Should().HaveCount(1, "the victim's socket is still live, but X is no longer its DID");
@@ -335,7 +335,7 @@ public sealed class MessagePickupAdversarialIdentityTests
         // Step 3: Mallory removes X and the victim registers it again.
         (await h.Mediation.Inner.UpdateRecipientsAsync(mallory, Remove(x), None)).Should().Equal(RecipientStoreOutcome.Removed);
         (await h.Mediation.Inner.UpdateRecipientsAsync(victim, Add(x), None)).Should().Equal(RecipientStoreOutcome.Added);
-        var third = await h.Fixture.Queue.DeliverAsync(x, PickupFixture.Payload(13, 4));
+        var third = await h.Fixture.Queue.DeliverAsync(x, PickupFixture.Payload(130, 4));
         third.Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         third.GrantPeerDid.Should().Be(victim);
         mallorysSocket.Sent.Should().HaveCount(1);
@@ -384,17 +384,17 @@ public sealed class MessagePickupAdversarialIdentityTests
         (await coordinator.SetLiveDeliveryAsync(bob, true, bobsOlder, Framing("bob-older"), "m-1", None)).Reply.Should().Be(PickupReply.Status);
         (await coordinator.SetLiveDeliveryAsync(mallory, true, mallorys, Framing("mallory"), "m-2", None)).Reply.Should().Be(PickupReply.Status);
 
-        (await fx.Queue.DeliverAsync(bob, PickupFixture.Payload(8, 1))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
-        (await fx.Queue.DeliverAsync(mallory, PickupFixture.Payload(8, 2))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+        (await fx.Queue.DeliverAsync(bob, PickupFixture.Payload(80, 1))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+        (await fx.Queue.DeliverAsync(mallory, PickupFixture.Payload(80, 2))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         bobsOlder.Sent.Select(FramingOf).Should().Equal("bob-older");
         mallorys.Sent.Select(FramingOf).Should().Equal("mallory");
 
         (await coordinator.SetLiveDeliveryAsync(bob, true, bobsNewer, Framing("bob-newer"), "m-3", None)).Reply.Should().Be(PickupReply.Status);
-        (await fx.Queue.DeliverAsync(bob, PickupFixture.Payload(8, 3))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+        (await fx.Queue.DeliverAsync(bob, PickupFixture.Payload(80, 3))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         bobsNewer.Sent.Select(FramingOf).Should().Equal("bob-newer");
 
         (await coordinator.SetLiveDeliveryAsync(bob, false, bobsNewer, Framing("unused"), "m-4", None)).Reply.Should().Be(PickupReply.Status);
-        (await fx.Queue.DeliverAsync(bob, PickupFixture.Payload(8, 4))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
+        (await fx.Queue.DeliverAsync(bob, PickupFixture.Payload(80, 4))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         bobsOlder.Sent.Select(FramingOf).Should().Equal("bob-older", "bob-older");
         bobsNewer.Sent.Should().HaveCount(1);
         mallorys.Sent.Should().HaveCount(1, "none of Bob's four arrivals reached Mallory's socket");

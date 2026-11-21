@@ -88,12 +88,28 @@ public sealed class MessagePickupQueue
     public int MaxAdmissiblePayloadBytes => Coordinator.Sizing.MaxAdmissiblePayloadBytes;
 
     /// <summary>
-    /// Accept a message for <paramref name="recipientDid"/>. The grant the DID is registered under
-    /// is looked up now; the message is stored under that grant (counting against its quota) and,
-    /// when the recipient has a live connection with live delivery turned on, pushed over it as a
-    /// <c>delivery</c> and held until acknowledged. Otherwise it waits for a <c>delivery-request</c>.
+    /// Accept a message for <paramref name="recipientDid"/>. Only a DIDComm message in encrypted
+    /// form is accepted (its outermost layer a JWE, anoncrypt or authcrypt): anything else is
+    /// refused, <see cref="PickupDeliveryOutcome.NotEncrypted"/>, whoever supplies it. The grant the
+    /// DID is registered under is then looked up; the message is stored under that grant (counting
+    /// against its quota) and, when the recipient has a live connection with live delivery turned
+    /// on, pushed over it as a <c>delivery</c> and held until acknowledged. Otherwise it waits for a
+    /// <c>delivery-request</c>.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// The form is judged on the bytes as given, after the size bound and before anything is looked
+    /// up or stored, and nothing is decrypted: they must be strict UTF-8 JSON holding an object with
+    /// a <c>ciphertext</c> member, the rule the library's unpack uses to classify a JWE (FR-API-03;
+    /// DIDComm v2.1 message_structure.md L65: "A DIDComm encrypted message is an encrypted JWM").
+    /// A plaintext message, a signed-only message (a JWS), any other JSON value and bytes that are
+    /// not UTF-8 JSON are refused: the only valid attachment of a Message Pickup <c>delivery</c> is
+    /// a DIDComm message "in encrypted form" (3.0 L172; 4.0 L261). A refused message is not stored,
+    /// counts against no quota and reaches no live session. The mediator's own forward pipeline
+    /// counts it as a dropped forward; the forward's sender already holds its 202, as with every
+    /// other mailbox refusal.
+    /// </para>
+    /// <para>
     /// After the message is stored, the registration is checked once more: when the recipient DID
     /// no longer belongs to the grant it was stored under (the grant was revoked meanwhile), exactly
     /// that record is removed again and nothing is pushed, so a revoke-and-purge that overlaps the
@@ -104,9 +120,10 @@ public sealed class MessagePickupQueue
     /// memory is kept as given, not copied: do not reuse the buffer, and pass a buffer of the
     /// payload's own size — the quota counts the payload's length, while a slice of a larger array
     /// keeps the whole array alive.
+    /// </para>
     /// </remarks>
     /// <param name="recipientDid">The registered DID the message is for: a bare DID (the DID subject of a forward's <c>next</c>). A DID URL is not normalised; it is simply not registered.</param>
-    /// <param name="payload">The encrypted message, exactly as it is to reach the recipient. Not empty.</param>
+    /// <param name="payload">The encrypted message (a JWE), exactly as it is to reach the recipient. Not empty.</param>
     /// <param name="options">When the message is due and when it expires; <c>null</c> for "now" and "never".</param>
     /// <param name="ct">Cancellation token. A cancellation before the message is stored throws and stores nothing; once the message is stored, the call reports <see cref="PickupDeliveryOutcome.Queued"/> instead of throwing (the message stays queued, under no lease).</param>
     /// <returns>
@@ -117,7 +134,10 @@ public sealed class MessagePickupQueue
     /// acknowledges it, it expires, or the host removes it — and a removal running at the same time
     /// (an acknowledgement, <see cref="RevokeAndPurgeAsync"/>) can take it at any moment, even while
     /// a live push of it is being sent: a push already in flight completes and is reported
-    /// <see cref="PickupDeliveryOutcome.PushedLive"/>. None of this is for the message's sender.
+    /// <see cref="PickupDeliveryOutcome.PushedLive"/>. A message that is not in encrypted form is
+    /// <see cref="PickupDeliveryOutcome.NotEncrypted"/> (one over the size bound is
+    /// <see cref="PickupDeliveryOutcome.PayloadTooLarge"/> first), and nothing is stored. None of
+    /// this is for the message's sender.
     /// </returns>
     /// <exception cref="ArgumentException"><paramref name="payload"/> is empty.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled before the message was stored. Nothing else is thrown: a store, registry or session fault is <see cref="PickupDeliveryOutcome.Faulted"/>, or <see cref="PickupDeliveryOutcome.Queued"/> when the message had already been stored.</exception>
@@ -232,4 +252,7 @@ public enum PickupDeliveryOutcome
 
     /// <summary>Not stored as far as is known: the mediation store or the message store failed (logged by type).</summary>
     Faulted,
+
+    /// <summary>Not stored: the message is not a DIDComm message in encrypted form (its outermost layer is not a JWE), the only kind a Message Pickup delivery may carry.</summary>
+    NotEncrypted,
 }

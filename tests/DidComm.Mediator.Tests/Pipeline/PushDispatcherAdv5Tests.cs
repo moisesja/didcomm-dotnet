@@ -11,6 +11,7 @@ using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.Routing;
 using DidComm.Samples.Shared;
+using DidComm.TestSupport;
 using DidComm.Threading;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
@@ -578,7 +579,7 @@ public sealed class PushDispatcherAdv5Tests
             var now = _inFlight.AddOrUpdate(label, 1, (_, n) => n + 1);
             _maxInFlight.AddOrUpdate(label, now, (_, n) => Math.Max(n, now));
             if (MessagePickup.TryParseDelivery(message, out var delivered, out _) && delivered.Count > 0)
-                Order.Enqueue((label, delivered[0].Payload.Span[0]));
+                Order.Enqueue((label, StandInJwe.SeedOf(delivered[0].Payload.Span)));
             try
             {
                 var park = Array.IndexOf(alwaysPark, label) >= 0 || _armed.TryRemove(label, out _);
