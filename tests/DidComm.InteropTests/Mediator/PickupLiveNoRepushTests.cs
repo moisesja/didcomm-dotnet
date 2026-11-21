@@ -264,7 +264,11 @@ public sealed class PickupLiveNoRepushTests
         return answer.Delivery(request.Id);
     }
 
-    // messages-received as the version sends it, then the count the mediator reports.
+    // messages-received as the version sends it, then the count the mediator reports. This is the
+    // test's own exchange on one raw socket, not PickupClient.AckAsync (which asks for no status,
+    // OD-6): under 4.0 the count comes from a status-request sent after the acknowledgement on the
+    // same socket, and the mediator handles one connection's messages in order, so it counts the
+    // queue after the acknowledgement. Under 3.0 it is the acknowledgement's own answer.
     private static async Task<int> AckAsync(MediatorTestServer mediator, WebSocket socket, TestPeer peer, string version, params string[] ids)
     {
         if (version == "4.0")

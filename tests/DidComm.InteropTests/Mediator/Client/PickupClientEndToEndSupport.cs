@@ -182,6 +182,18 @@ internal static class PickupE2E
     }
 
     /// <summary>
+    /// The status <see cref="PickupClient.AckAsync"/> returned under Message Pickup 3.0 from this
+    /// library's mediator, which answers every <c>messages-received</c> with its status (3.0 says a
+    /// mediator SHOULD). AckAsync returns only that answer, never a status it asked for (OD-6), so
+    /// what it counts already reflects the acknowledgement.
+    /// </summary>
+    public static PickupStatus Answered(PickupStatus? status)
+    {
+        status.Should().NotBeNull("this library's mediator answers a Message Pickup 3.0 messages-received with its status");
+        return status!;
+    }
+
+    /// <summary>
     /// Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in
     /// time. A task that times out is still observed (<see cref="Observed"/>).
     /// </summary>
