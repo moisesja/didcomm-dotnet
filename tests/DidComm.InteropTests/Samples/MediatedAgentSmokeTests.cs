@@ -84,6 +84,7 @@ public sealed class MediatedAgentSmokeTests
         transcript.Should().Contain("[bob] live delivery = True");
         transcript.Should().Contain("[bob] live: Hello again, Bob");
         transcript.Should().Contain("[bob] acknowledged the last message; the mediator sent no status in answer", "the wallet speaks 4.0, where nothing answers an acknowledgement");
+        transcript.Should().Contain("[bob] the mediator applied the acknowledgement (GetStatusAsync counts 0 message(s))", "the wallet waits for it before its connection closes");
         transcript.Should().Contain("[mediator] sessions for Bob: 1");
         transcript.Should().Contain("[mediator] session transport = WebSocket");
         transcript.Should().Contain("[mediator] Bob's session closed (its Closed token fired)");
