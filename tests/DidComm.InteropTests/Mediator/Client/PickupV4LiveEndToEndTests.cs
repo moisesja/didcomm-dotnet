@@ -59,6 +59,8 @@ public sealed class PickupV4LiveEndToEndTests
         mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(1, "it arrived while live delivery was on");
 
         // What reached the client's dispatcher: a 4.0 delivery with one attachment and no thread (L34, L263).
+        // L-065: the stream gets the push before the dispatcher hands it to the observers; wait for that record.
+        await clientSeen.WaitForAsync(mediator.Did, r => r.Kind == "4.0/delivery" && r.Attachments == 1, "the push reached the client's observers");
         await harness.Dispatcher.FlushObserversAsync(MediatorTestServer.Timeout);
         var push = clientSeen.From(mediator.Did).Should().ContainSingle(r => r.Kind == "4.0/delivery" && r.Attachments == 1).Subject;
         push.Thid.Should().BeNull("a live delivery answers no request");

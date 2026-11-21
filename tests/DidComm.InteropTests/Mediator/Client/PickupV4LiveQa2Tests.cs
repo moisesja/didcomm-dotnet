@@ -80,8 +80,12 @@ public sealed class PickupV4LiveQa2Tests
         // acknowledgement would be dispatched at the client before this status.
         var probe = await PickupE2E.Within(harness.Pickup.GetStatusAsync(mediator.Did, bob.Did, serviceEndpointOverride: harness.WebSocketEndpoint));
         probe.MessageCount.Should().Be(0);
-        await harness.Dispatcher.FlushObserversAsync(MediatorTestServer.Timeout);
         await mediator.FlushObserversAsync();
+        // L-065: the client's correlator completes the call before its dispatcher hands the answer to
+        // the observers, so a flush right after the call can miss it: wait for the record asserted.
+        var probeRequestId = observer.From(bob.Did).Last(r => r.Kind == "4.0/status-request").Id;
+        await clientSeen.WaitForAsync(mediator.Did, r => r.Kind == "4.0/status" && string.Equals(r.Thid, probeRequestId, StringComparison.OrdinalIgnoreCase), "the probe's status reached the client's observers");
+        await harness.Dispatcher.FlushObserversAsync(MediatorTestServer.Timeout);
 
         var ack = observer.From(bob.Did).Single(r => r.Kind == "4.0/messages-received");
         ack.ReturnRoute.Should().Be(ReturnRouteMode.None, "4.0 removed return_route from messages-received (L35)");
@@ -414,6 +418,7 @@ public sealed class PickupV4LiveQa2Tests
         var acks = observer.From(bob.Did).Where(r => r.Kind.EndsWith("/messages-received", StringComparison.Ordinal)).ToArray();
         acks.Should().OnlyContain(r => r.Kind == streamVersion + "/messages-received");
         acks.SelectMany(r => r.Body!["message_id_list"]!.AsArray().Select(n => n!.GetValue<string>())).Should().Equal(taken);
+        await clientSeen.WaitForAsync(mediator.Did, r => r.Kind == streamVersion + "/delivery" && r.Attachments == 1, "the delivery reached the client's observers (L-065)");
         await harness.Dispatcher.FlushObserversAsync(MediatorTestServer.Timeout);
         clientSeen.From(mediator.Did).Where(r => r.Kind == streamVersion + "/delivery" && r.Attachments == 1).Should().ContainSingle("the message reached the stream once in its own version")
             .Which.Thid.Should().NotBeNull("the cycle's delivery-request drained it: it was not pushed live again");
@@ -511,6 +516,7 @@ public sealed class PickupV4LiveQa2Tests
         var next = PickupE2E.MoveNext(stream);
         await Qa2.StoreHoldsAsync(mediator, 0, "the encrypted one was acknowledged");
         await PickupE2E.StopAsync(stream, next, cts);
+        await clientSeen.WaitForAsync(mediator.Did, r => r.Thid is null && r.Kind == version + "/delivery", "the push reached the client's observers (L-065)");
         await harness.Dispatcher.FlushObserversAsync(MediatorTestServer.Timeout);
         clientSeen.From(mediator.Did).Where(r => r.Thid is null).Select(r => r.Kind).Should().Equal(new[] { version + "/delivery" }, "the only push was the encrypted message");
     }
