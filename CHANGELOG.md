@@ -75,18 +75,31 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     next wake-up of its mailbox (a new message arriving), ahead of the newer one. Now it is
     delivered only by a `delivery-request`. This library's live stream collects it on its periodic
     poll (`LivePollInterval`, 1 minute by default).
-  - Unchanged: a message waiting before live mode went on is still never pushed; a push an open
-    connection did not take (no room, a downgraded session) is still pushed at a later wake-up,
-    because it never reached the recipient; a message handed out by a `delivery-request` is treated
-    as before. A push in hand when its connection closes (before, during or after the send) counts
-    as returned, because whether it reached the recipient cannot be told (ours; found by the
-    red-team pass, ADV4-1: before the fix the outcome depended on which of two clean-ups ran first).
-  - How it is built (ours): the lease of a live push says so (`MessageLease.LivePush`); when such a
-    lease ends without an acknowledgement — the connection closed, or the lease ran out — the store
-    marks the record (`QueuedMessage.LivePushReturned`), and a live push never takes a marked
-    record. Counts, quotas and `status` are unchanged. A custom `IMessageStore` must keep and honour
-    the mark (the contract says how); one that hands a marked record to a live push is refused by
-    the mediator and the message stays for pickup.
+  - Unchanged: a message waiting before live mode went on is still never pushed; a push the
+    connection did not take (it answered "not sent": no room, a downgraded or closing session, a
+    failed pack; or "too large", passed over first) is still pushed at a later wake-up, because it
+    never reached the recipient; a message handed out by a `delivery-request` is treated as before.
+  - **A push whose send was attempted and then failed or timed out is delivered through pickup too
+    (owner decision 2026-11-21, OD-5: "Counts as pushed: wait").** In the owner's words as put to
+    them: "One simple rule: only a connection's explicit 'not sent', or no attempt at all, keeps a
+    message eligible for a live push. Safe with any connection type a host writes. Matches the
+    reviewer's expected result. Cost: the PRD's retry rule narrows, failed or timed-out pushes are
+    delivered at the next collection, and 3 older tests change their expectations." Until now (since
+    #95) such a push was tried live again at the next wake-up; PRD FR-PICK-09's "Retries" is
+    narrowed to match.
+  - How it is built (ours; PR #143 review round 1 replaced an earlier version that marked the record
+    when its live-push lease ended, which an id-based give-back could race): the mark is set by the
+    store the moment a live push takes the record (`QueuedMessage.LivePushReturned`, on the take
+    under a `MessageLease.LivePush` lease), and a live push never takes a marked record. The only
+    ways to clear it are `IMessageStore.ReturnUnsentAsync` and a pass-over by the same lease, which
+    the mediator calls only when the session answered "not sent" or "too large" or the send was never
+    attempted; a release by id, the connection's clean-up, an expired lease, a fault or a
+    cancellation never clear it, in any order. An earlier rule of ours (ADV4-1, "a push in hand when
+    its connection closes counts as returned") is gone: the invariant covers that case, and a push a
+    closing connection answered "not sent" stays eligible, because it was never pushed. Counts,
+    quotas and `status` are unchanged. A custom `IMessageStore` must set, keep and clear the mark as
+    the contract says (it remembers which lease set it); one that hands a marked record to a live
+    push is refused by the mediator and the message stays for pickup.
 - **A `status` must repeat the filter the request named, exactly.** A `status` that leaves out the
   `recipient_did` a filtered request named is now refused with `MediationProtocolException`, as a
   status about another DID already was. So is a `status` or `delivery` that repeats it as another
@@ -108,9 +121,11 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     over its `MessagePickupQueue`;
   - `MessagePickupOptions.EnableV4`, default `true`;
   - `PickupDeliveryOutcome.NotEncrypted`, appended so the other values keep their numbers;
-  - `MessageLease.LivePush` and `QueuedMessage.LivePushReturned` (init-only), additions to the
-    store contract: a custom `IMessageStore` must keep the mark and never hand a marked record to a
-    live-push lease.
+  - `MessageLease.LivePush` and `QueuedMessage.LivePushReturned` (init-only), and
+    `IMessageStore.ReturnUnsentAsync`, additions to the store contract: a custom `IMessageStore`
+    marks a record when a live-push lease takes it, remembers which lease did, never hands a marked
+    record to a live-push lease, and clears the mark only through `ReturnUnsentAsync` or a pass-over
+    by the lease that set it.
 - `DidComm.Mediator.Client`:
   - the `MessagePickupVersion` enum (`Negotiate`, `V4`, `V3`);
   - `MediatorClientOptions.MessagePickupVersion`, default `Negotiate`.
@@ -2126,7 +2141,9 @@ arrival sequence (ADV-6) added `PushDispatcherAdv6Tests` and `MessagePickupStore
   backward step lengthened it by the step; it is now measured on the monotonic clock
   (`TimeProvider.GetTimestamp`), and a step either way changes nothing. Residual: a live push that
   the session did not take, that faulted, or that reached its deadline and was given back is tried
-  again at the grant's next wake-up — at most one failed attempt per wake-up, and nothing reaches
+  again at the grant's next wake-up (since #100, owner decision OD-5 of 2026-11-21: only one the
+  session did not take, or never attempted, is tried again; one whose send was attempted and then
+  faulted or reached its deadline goes to pickup) — at most one failed attempt per wake-up, and nothing reaches
   the connection unless the session takes it. A further break-it pass on the arrival sequence
   (ADV-6) found no defect in live push or the store. Regressions: `PushDispatcherAdv5Tests`
   (`Defect1_…`, `Defect2_…`, `Defect5_…` and `Defect6_…`, each failing before its fix),

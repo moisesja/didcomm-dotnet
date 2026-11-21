@@ -1601,19 +1601,18 @@ instead of naming a record:
   (FR-PICK-06) →
   a take that came back after the caller's deadline sends nothing → unless the session is closed,
   the one-message `delivery` in the session's framing through `TrySendAsync(delivery,
-  MaxDeliveryBytes, ct)`, under a live-push lease (`MessageLease.LivePush`). `Sent` with the session
-  still open → `Sent`: the record stays leased to the session until `messages-received`, its close or
-  `LeaseTimeout`; a close or a timeout returns it marked, for a `delivery-request` only (see "A live
-  push returned unconfirmed is not pushed again" below). A session that closed while the push was in
-  hand — before the send, during it or after it took it, whatever the send reported → the lease is
-  ended the way the close ends it (`ReleaseLeasesInBackground(owner)`, so it is marked), and the
-  step counts as not delivered: whether the push reached the connection cannot be told, and the
-  outcome no longer depends on whether the close's clean-up or the coordinator's give-back lands
-  first (ADV4-1). `TooLarge` → passed over (`PassOverAsync` until `now +
-  LeaseTimeout × 2^PassOvers`), as a pickup does → `PassedOver`. Anything else — not taken, closing
-  first, a fault, a cancellation — gives the lease back unmarked in a `finally` (`ReleaseAsync`
-  naming the lease, never cancelled) once the send has ended, however long that takes; `NotSent`, or
-  the fault or cancellation propagates after the release.
+  MaxDeliveryBytes, ct)`, under a live-push lease (`MessageLease.LivePush`; the take marks the record,
+  see "A live push returned unconfirmed is not pushed again" below). `Sent` with the session still
+  open → `Sent`: the record stays leased to the session until `messages-received`, its close or
+  `LeaseTimeout`, and stays marked: only a `delivery-request` gets it if it comes back. `Sent` with
+  the session found closed, or a fault, cancellation or deadline after the send was attempted → the
+  lease is released by id and the record stays marked (owner decision OD-5, 2026-11-21) → `NotSent`,
+  or the fault or cancellation propagates. `TooLarge` → passed over (`PassOverAsync` until `now +
+  LeaseTimeout × 2^PassOvers`, which also clears this lease's mark), as a pickup does →
+  `PassedOver`. `NotSent` from the session (open or closing), or no attempt (the session closed or
+  the deadline hit before the send) → `ReturnUnsentAsync`: the lease ends and the mark is cleared,
+  so a later wake-up pushes it. Every give-back runs in a `finally`, never cancelled, once the send
+  has ended, however long that takes.
 - `HasLiveTarget(grantPeerDid)` is the synchronous check the sink makes before waking a grant; its
   answer may be stale by the time the push runs, which is why `PushNextLiveAsync` looks again.
 
@@ -1852,21 +1851,33 @@ live again at its grant's next wake-up. How it is built (ours):
   the coordinator creates for a live push — `DeliverAsync`'s record admitted already leased to a
   live target, and `PushNextLiveAsync`'s take — and never on a `delivery-request`'s lease, over
   HTTP or a WebSocket.
-- **The store marks what comes back.** When a live-push lease ends without the record being
-  acknowledged, the store marks the record (`QueuedMessage.LivePushReturned`, init-only, set by
-  the store only; a value the caller of `EnqueueAsync` sets is ignored, like `Sequence`). Every way a
-  lease ends, and what it does to the mark:
+- **Marked from the moment a live push takes the record, cleared only on a definite "not sent"**
+  (the invariant since PR #143 review round 1, P2-1; ours). The store sets
+  `QueuedMessage.LivePushReturned` atomically when a live-push lease takes the record
+  (`LeaseAsync`, or `EnqueueAsync` admitting it already leased to a live target), and remembers which
+  lease set it. The records it hands back describe them as they were before the take. The only ways
+  to clear the mark are `IMessageStore.ReturnUnsentAsync(grant, ids, leaseId)` and a pass-over by
+  that lease, each only for a mark set by `leaseId` (even after that lease ended), and the coordinator
+  calls them only when the session answered `NotSent` or `TooLarge` (open or closing) or the send
+  was never attempted. Owner decision 2026-11-21 (OD-5, "Counts as pushed: wait"): "only a
+  connection's explicit 'not sent', or no attempt at all, keeps a message eligible for a live push",
+  so a send that was attempted and then faulted, was cancelled or reached its deadline stays marked.
+  Every way a lease ends, and what it does to the mark:
 
   | Path | Mark |
   |---|---|
+  | a live-push lease takes the record (`LeaseAsync`, `EnqueueAsync` leased) | set, remembering that lease |
+  | `ReturnUnsentAsync(leaseId)` (the session answered `NotSent`; or the send was never attempted: registration unconfirmed, the session closed or the deadline hit before the send) | cleared if `leaseId` set it, even after that lease ended; the lease ends if the record still carries it |
+  | `PassOverAsync(leaseId)` (`TooLarge` in the push workers' path) | cleared if `leaseId` set it |
+  | `ReleaseAsync` by id (`Sent` with the session found closed; a fault, cancellation or deadline after the send was attempted), `ReleaseLeasesAsync(owner)` (the connection's clean-up), lease expiry, a `delivery-request`'s lease ending | never cleared |
   | `AcknowledgeAsync`, any purge | the record is removed |
-  | `ReleaseLeasesAsync(owner)` (the session closed; also, from the coordinator, any push in hand when its session closed, whatever the send reported — ADV4-1) | every live-push lease it ends is marked, expired or not; a `delivery-request`'s lease is not |
-  | a live-push lease runs out | marked from that instant, judged lazily: the record counts as marked when the store reads it, and the mark is written when another lease replaces that one or the owner's leases are released |
-  | `ReleaseAsync` by lease id (a push an open session did not take, a too-large batch trimmed, a registration gone, a refusal, a cancellation or fault before the send with the session open) | not marked: it never reached the connection, so a later wake-up pushes it. Should the session close before this give-back lands, the close's clean-up ends the lease first and the record comes back marked (pickup only; nothing lost) |
-  | `PassOverAsync` | not marked |
-  | a `delivery-request`'s lease ends, any way | nothing new; an existing mark stays |
-  | the close's clean-up backlog was full | the lease runs out, so it is marked anyway |
 
+  So the outcome does not depend on the order in which a connection's clean-up and the
+  coordinator's give-back run. An earlier version marked the record when its live-push lease ended
+  by the clean-up or by running out, and an id-based give-back after a fault could end it unmarked
+  first (the review's P2-1); and ADV4-1's rule of ours ("a push in hand when its session closes
+  counts as returned") is gone: the invariant covers that case, and a push a closing session
+  answered `NotSent` stays eligible, because it was never pushed.
 - **Who takes a marked record.** A lease request whose lease is a live-push lease never takes one
   (`IMessageStore.LeaseAsync`); a `delivery-request` takes it in its place, within the same budgets.
   The mark changes no count, bound or `status`. A custom `IMessageStore` must keep and honour the
@@ -1876,10 +1887,11 @@ live again at its grant's next wake-up. How it is built (ours):
   (`delivery-request`). This library's live stream asks on every cycle (`LivePollInterval`, 1 minute
   by default); a recipient that only listens live and never asks would not get it until it does
   (the cost the owner accepted).
-- **Known edge (ours).** A push abandoned at its deadline whose send stays unresolved past
-  `LeaseTimeout` looks returned during that window: a `delivery-request` in the window takes it and
-  writes the mark, even if the send later reports it was not taken. Nothing is lost; the message
-  only stays pickup-only.
+- **A send that outlasts its lease.** If a live push's send is still running when its lease runs
+  out, a `delivery-request` can take the record meanwhile (it is still marked). Should the send
+  then answer `NotSent`, `ReturnUnsentAsync` clears the mark set by that push's lease and leaves the
+  delivery-request's lease alone, so the record becomes eligible for a live push again once that
+  lease ends: it was never pushed.
 
 ## Mediator service: pipeline, `AddMediator()`, `MapDidCommMediator` (Phase 7, #95)
 
@@ -2041,10 +2053,13 @@ by an operation that was running, or taken by a pickup) is no outcome.
 A wake-up is a stored message (the sink's) or a session turning live delivery on
 (`LiveDeliveryStarted`).
 
-**Retries.** A live push the session did not take (`NotSent`: no free push slot, downgraded or
-closing), or that faulted, or that reached its deadline and was then given back, is tried again at
-the grant's next wake-up: it never reached the recipient. One the session took and that came back
-unconfirmed is not tried again (#100, owner decision 2026-11-20). That cannot multiply the traffic of what was forwarded: an operation
+**Retries.** A live push the session did not take (`NotSent`: no free push slot, a downgraded or
+closing session, a failed pack; or `TooLarge`, passed over first), or that was never attempted, is
+tried again at the grant's next wake-up: it never reached the recipient. One the session took and
+that came back unconfirmed is not tried again (#100, owner decision 2026-11-20), and neither is one
+whose send was attempted and then faulted or reached its deadline: it stays marked and is delivered
+only through pickup (owner decision 2026-11-21, OD-5: "only a connection's explicit 'not sent', or
+no attempt at all, keeps a message eligible for a live push"). That cannot multiply the traffic of what was forwarded: an operation
 makes at most one failed attempt (it ends there, and a deadline also pauses the grant), a wake-up
 is a stored message or a session turning live delivery on, and nothing is written to the
 connection unless the session takes it. One too large for the session is passed over instead, for
