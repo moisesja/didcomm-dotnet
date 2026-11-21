@@ -69,10 +69,12 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     next wake-up of its mailbox (a new message arriving), ahead of the newer one. Now it is
     delivered only by a `delivery-request`. This library's live stream collects it on its periodic
     poll (`LivePollInterval`, 1 minute by default).
-  - Unchanged: a message waiting before live mode went on is still never pushed; a push the
-    connection did not take (no room, a closing or downgraded session) is still pushed at a later
-    wake-up, because it never reached the recipient; a message handed out by a `delivery-request`
-    is treated as before.
+  - Unchanged: a message waiting before live mode went on is still never pushed; a push an open
+    connection did not take (no room, a downgraded session) is still pushed at a later wake-up,
+    because it never reached the recipient; a message handed out by a `delivery-request` is treated
+    as before. A push in hand when its connection closes (before, during or after the send) counts
+    as returned, because whether it reached the recipient cannot be told (ours; found by the
+    red-team pass, ADV4-1: before the fix the outcome depended on which of two clean-ups ran first).
   - How it is built (ours): the lease of a live push says so (`MessageLease.LivePush`); when such a
     lease ends without an acknowledgement — the connection closed, or the lease ran out — the store
     marks the record (`QueuedMessage.LivePushReturned`), and a live push never takes a marked
