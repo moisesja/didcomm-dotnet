@@ -31,7 +31,7 @@ internal sealed class AckDelayingStore(InMemoryMessageStore inner) : IMessageSto
     public static readonly TimeSpan Delay = TimeSpan.FromMilliseconds(500);
 
     private readonly object _lock = new();
-    private (string Id, DelayedAcknowledgement Ack)? _armed;
+    private (string? Id, DelayedAcknowledgement Ack)? _armed;
 
     public InMemoryMessageStore Inner { get; } = inner;
 
@@ -44,13 +44,25 @@ internal sealed class AckDelayingStore(InMemoryMessageStore inner) : IMessageSto
         });
 
     /// <summary>Slow the next acknowledgement whose ids include <paramref name="id"/> by <see cref="Delay"/>.</summary>
-    public DelayedAcknowledgement DelayNextAcknowledgementOf(string id)
+    public DelayedAcknowledgement DelayNextAcknowledgementOf(string id) => Arm(id, hold: false);
+
+    /// <summary>Slow the next acknowledgement, whatever ids it names, by <see cref="Delay"/>.</summary>
+    public DelayedAcknowledgement DelayNextAcknowledgement() => Arm(null, hold: false);
+
+    /// <summary>
+    /// #100 OD-8: hold the next acknowledgement whose ids include <paramref name="id"/> (any
+    /// acknowledgement when <c>null</c>) until <see cref="DelayedAcknowledgement.Release"/>, instead of
+    /// a fixed delay. The hold honours the request's token, as the delay does.
+    /// </summary>
+    public DelayedAcknowledgement HoldNextAcknowledgementOf(string? id) => Arm(id, hold: true);
+
+    private DelayedAcknowledgement Arm(string? id, bool hold)
     {
         lock (_lock)
         {
             if (_armed is not null)
                 throw new InvalidOperationException("One delayed acknowledgement at a time.");
-            var ack = new DelayedAcknowledgement();
+            var ack = new DelayedAcknowledgement(hold);
             _armed = (id, ack);
             return ack;
         }
@@ -61,7 +73,7 @@ internal sealed class AckDelayingStore(InMemoryMessageStore inner) : IMessageSto
         DelayedAcknowledgement? ack = null;
         lock (_lock)
         {
-            if (_armed is { } armed && messageIds.Contains(armed.Id, StringComparer.Ordinal))
+            if (_armed is { } armed && (armed.Id is null || messageIds.Contains(armed.Id, StringComparer.Ordinal)))
             {
                 ack = armed.Ack;
                 _armed = null;
@@ -73,7 +85,10 @@ internal sealed class AckDelayingStore(InMemoryMessageStore inner) : IMessageSto
         ack.Started.TrySetResult();
         try
         {
-            await Task.Delay(Delay, ct);
+            if (ack.IsHold)
+                await ack.Released.WaitAsync(ct);
+            else
+                await Task.Delay(Delay, ct);
         }
         catch (OperationCanceledException)
         {
@@ -98,8 +113,19 @@ internal sealed class AckDelayingStore(InMemoryMessageStore inner) : IMessageSto
 }
 
 /// <summary>What became of one acknowledgement <see cref="AckDelayingStore"/> slowed.</summary>
-internal sealed class DelayedAcknowledgement
+internal sealed class DelayedAcknowledgement(bool hold = false)
 {
+    private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Whether it is held until <see cref="Release"/> rather than slowed by the fixed delay.</summary>
+    public bool IsHold { get; } = hold;
+
+    /// <summary>Completes once <see cref="Release"/> was called.</summary>
+    public Task Released => _released.Task;
+
+    /// <summary>Let a held acknowledgement go on (it is then applied unless its token was cancelled first).</summary>
+    public void Release() => _released.TrySetResult();
+
     /// <summary>The mediator started applying it (the delay is running).</summary>
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 

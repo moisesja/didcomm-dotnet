@@ -158,8 +158,9 @@ public sealed class WebSocketDisposeAcknowledgementEndToEndTests
     // ---- steps ------------------------------------------------------------------------------------
 
     // Bob, enrolled, with one forward from a sender queued for him and leased by a 4.0 delivery-request
-    // on a socket of its own (closed again): its id is what the acknowledgement names.
-    private static async Task<(TestPeer Bob, string Id)> QueueAndLeaseOneAsync(DeadlineKestrelHost host)
+    // on a socket of its own (closed again): its id is what the acknowledgement names. Also used by
+    // the OD-8 tests (WebSocketMessageFinishTests).
+    internal static async Task<(TestPeer Bob, string Id)> QueueAndLeaseOneAsync(DeadlineKestrelHost host)
     {
         var bob = await host.EnrolAsync();
         (await host.PostForwardAsync(bob)).Should().Be(HttpStatusCode.Accepted);
@@ -174,15 +175,22 @@ public sealed class WebSocketDisposeAcknowledgementEndToEndTests
     }
 
     // A 4.0 messages-received as the client sends it: stamped, without return_route (L35), authcrypted.
-    private static async Task SendAcknowledgementAsync(DeadlineKestrelHost host, ClientWebSocket socket, TestPeer bob, string id)
+    internal static async Task SendAcknowledgementAsync(DeadlineKestrelHost host, ClientWebSocket socket, TestPeer bob, string id)
+    {
+        var packed = await PackAcknowledgementAsync(host, bob, id);
+        using var guard = new CancellationTokenSource(DeadlineKestrelHost.Guard);
+        await socket.SendAsync(packed, WebSocketMessageType.Text, endOfMessage: true, guard.Token);
+    }
+
+    // The same messages-received, packed, as UTF-8 bytes.
+    internal static async Task<byte[]> PackAcknowledgementAsync(DeadlineKestrelHost host, TestPeer bob, string id)
     {
         var message = MessagePickup40.CreateMessagesReceived(bob.Did, host.Did, new[] { id });
         message.CreatedTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var packed = await bob.Client.PackEncryptedAsync(message, new PackEncryptedOptions(Recipients: new[] { host.Did }, From: bob.Did, Forward: false));
-        using var guard = new CancellationTokenSource(DeadlineKestrelHost.Guard);
-        await socket.SendAsync(Encoding.UTF8.GetBytes(packed.Message), WebSocketMessageType.Text, endOfMessage: true, guard.Token);
+        return Encoding.UTF8.GetBytes(packed.Message);
     }
 
-    private static int StoreCount(DeadlineKestrelHost host)
+    internal static int StoreCount(DeadlineKestrelHost host)
         => ((IQa2WrappingStore)host.App.Services.GetRequiredService<IMessageStore>()).Inner.MessageCount;
 }
