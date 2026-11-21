@@ -282,6 +282,8 @@ def s_o9(v):
         result = f"failed ({_exception(ack)})"
     elif outcome == "status":
         result = f"returned a status counting {_g(ack, 'message_count', default='?')}"
+    elif outcome == "no-status":
+        result = "returned no status (the mediator sent none in answer)"
     else:
         result = str(outcome)
     return (f"A raw messages-received got HTTP {_g(v, 'raw_messages_received', 'http_status', default='?')} after "

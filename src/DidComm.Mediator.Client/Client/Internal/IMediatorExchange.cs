@@ -70,21 +70,42 @@ internal interface IMediatorExchange
     /// Pickup 3.0 says a mediator SHOULD answer <c>messages-received</c> with a <c>status</c>, not
     /// that it must (the Identus mediator sends none). Over HTTP, a response that carried no answer
     /// to the request returns <c>null</c> at once, where <see cref="ExchangeAsync"/> throws
-    /// <see cref="TimeoutException"/>. Everything else is as for <see cref="ExchangeAsync"/>: the
-    /// deadline, the matcher, a problem report, a transport failure, and on any other route the wait
-    /// (silence there cannot be told from a slow answer, so it never returns <c>null</c>). The
-    /// default implementation, for test exchanges that do not model an empty HTTP response, never
-    /// returns <c>null</c>.
+    /// <see cref="TimeoutException"/>. On any other route (a WebSocket) silence cannot be told from a
+    /// slow answer: with <paramref name="answerWait"/>, the answer is waited for that long once the
+    /// request is sent, within the request's own deadline, and none by then returns <c>null</c>;
+    /// without it, the wait is as for <see cref="ExchangeAsync"/> and never returns <c>null</c>. A
+    /// request whose send did not complete never returns <c>null</c>: that is a
+    /// <see cref="TimeoutException"/> or a transport failure, as for <see cref="ExchangeAsync"/>.
+    /// Everything else is as for <see cref="ExchangeAsync"/>: the deadline, the matcher, a problem
+    /// report, a transport failure. The default implementation, for test exchanges that send at once
+    /// and do not model an empty HTTP response, starts <paramref name="answerWait"/> at the call.
     /// </summary>
     /// <param name="route">The operation's route, from <see cref="ResolveRouteAsync"/>.</param>
     /// <param name="request">The request (as for <see cref="ExchangeAsync"/>).</param>
     /// <param name="spec">What the request expects back.</param>
     /// <param name="mediatorDid">The mediator's DID.</param>
     /// <param name="localDid">Our DID.</param>
+    /// <param name="answerWait">On a route that is not HTTP, how long to wait for the answer once the request is sent (greater than zero); <c>null</c> to wait as <see cref="ExchangeAsync"/> does. Ignored over HTTP.</param>
     /// <param name="ct">The caller's cancellation.</param>
-    /// <returns>The answer's snapshot, or <c>null</c> when the HTTP response carried none.</returns>
-    async Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
-        => await ExchangeAsync(route, request, spec, mediatorDid, localDid, ct).ConfigureAwait(false);
+    /// <returns>The answer's snapshot, or <c>null</c> when the HTTP response carried none or, with <paramref name="answerWait"/>, none came within it after the send.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="answerWait"/> is zero or negative; nothing was sent.</exception>
+    async Task<InboundMessageSnapshot?> ExchangeAllowingNoAnswerAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, TimeSpan? answerWait, CancellationToken ct)
+    {
+        if (answerWait is { } positive)
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(positive, TimeSpan.Zero, nameof(answerWait));
+        if (route.IsHttp || answerWait is not { } wait)
+            return await ExchangeAsync(route, request, spec, mediatorDid, localDid, ct).ConfigureAwait(false);
+
+        using var window = new GuardedDeadline(Time, wait, ct);
+        try
+        {
+            return await ExchangeAsync(route, request, spec, mediatorDid, localDid, window.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && window.TimedOut)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Send <paramref name="request"/> to the mediator on <paramref name="route"/> and expect no

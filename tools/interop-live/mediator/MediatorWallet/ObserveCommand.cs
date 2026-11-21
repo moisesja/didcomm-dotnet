@@ -617,7 +617,9 @@ internal static class ObserveCommand
             try
             {
                 var status = await host.Pickup.AckAsync(state.MediatorDid, state.WalletDid, ids, state.Override, ct).ConfigureAwait(false);
-                value["ack_async"] = new JsonObject { ["outcome"] = "status", ["message_count"] = status.MessageCount, ["elapsed_ms"] = watch.ElapsedMilliseconds };
+                value["ack_async"] = status is null
+                    ? new JsonObject { ["outcome"] = "no-status", ["elapsed_ms"] = watch.ElapsedMilliseconds }
+                    : new JsonObject { ["outcome"] = "status", ["message_count"] = status.MessageCount, ["elapsed_ms"] = watch.ElapsedMilliseconds };
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {

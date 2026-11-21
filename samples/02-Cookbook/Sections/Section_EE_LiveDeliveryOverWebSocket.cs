@@ -326,11 +326,13 @@ public static class Section_EE_LiveDeliveryOverWebSocket
         }
 
         // To discard the last item, acknowledge it yourself.
-        var left = await pickup.AckAsync(mediatorDid, ctx.Bob.Did, new[] { last.Id });
-        narrator.Value("[bob] Messages left after discarding the last one", left.MessageCount);
+        // Under Message Pickup 4.0 the mediator sends no answer to an acknowledgement, so AckAsync
+        // returns null: there is no status to return.
+        var answer = await pickup.AckAsync(mediatorDid, ctx.Bob.Did, new[] { last.Id });
+        narrator.Value("[bob] discarded the last one; the mediator's answer", answer is null ? "none" : $"status, {answer.MessageCount} message(s)");
 
         narrator.Note("A live item is acknowledged when you ask for the next one; AckAsync(item.Id) discards the last one.");
-        narrator.Note("This stream spoke Message Pickup 4.0, which the client chose after asking the mediator: every live message came in a delivery, and each acknowledgement (messages-received) got no answer: under 4.0 the client sends it and does not wait. AckAsync then asks for the status, which is what it returns.");
+        narrator.Note("This stream spoke Message Pickup 4.0, which the client chose after asking the mediator: every live message came in a delivery, and each acknowledgement (messages-received) got no answer: under 4.0 the client sends it and does not wait. So AckAsync returned null, and it does not ask for a status in its place.");
         narrator.Note("Delivery is at-least-once: a message can come twice (after a dropped connection or an expired lease). The stream skips repeats it remembers; de-duplicate by message id too.");
         narrator.Note("Polling in live mode is permanent: the next poll comes one LivePollInterval after the previous drain ends. A delayed message that becomes due is not pushed; the next poll picks it up.");
         narrator.Note("So keep LivePollInterval at or below the longest delay your senders ask for (this library's mediator caps a delay at 1 hour by default).");

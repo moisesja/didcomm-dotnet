@@ -26,9 +26,11 @@ namespace MediatorWallet;
 /// the mediator's status, which must count 0; under 4.0 it carries none (the mediator answers an
 /// empty queue with an empty <c>delivery</c>), and that is checked instead. Either way a separate
 /// <c>GetStatusAsync</c> must count 0.</item>
-/// <item>With <c>--explicit-ack</c>, <c>AckAsync</c> with the fetched ids must answer a status of 0
-/// (works against our mediator; against Identus see O-9). <c>FetchAsync</c> has acknowledged those
-/// ids already, so this proves AckAsync's answer, not its effect on the queue.</item>
+/// <item>With <c>--explicit-ack</c>, <c>AckAsync</c> with the fetched ids must return only the
+/// mediator's own answer to the acknowledgement (OD-6): under Message Pickup 4.0 nothing answers it,
+/// so <c>null</c>; under 3.0 a status the mediator chose to send, which counts 0 (<c>FetchAsync</c>
+/// has acknowledged those ids already), or <c>null</c> when it sent none (Identus; see O-9). This
+/// proves AckAsync's answer, not its effect on the queue.</item>
 /// </list>
 /// Each item goes to <c>D/item-N.unpacked.json</c> in <c>InteropCli unpack</c>'s
 /// <c>{message, metadata}</c> schema; <c>D/fetch.json</c> lists them.
@@ -175,11 +177,16 @@ internal static class FetchCommand
                 throw new ExpectationException("--explicit-ack: nothing was fetched to acknowledge.");
             var acked = await result.StepAsync("explicit-ack",
                 () => host.Pickup.AckAsync(state.MediatorDid, state.WalletDid, ids, endpoint),
-                s => s.MessageCount);
-            explicitAckOutcome = new JsonObject { ["ids"] = ids.Length, ["status_count"] = acked.MessageCount };
-            // FetchAsync has already acknowledged these ids, so this proves AckAsync's answer (a
-            // status counting 0), not its effect on the queue.
-            result.Check("explicit-ack-status-counts-zero", acked.MessageCount == 0, acked.MessageCount);
+                s => s?.MessageCount);
+            explicitAckOutcome = new JsonObject { ["ids"] = ids.Length, ["status_count"] = acked?.MessageCount };
+            // AckAsync returns only the mediator's own answer to the acknowledgement (OD-6). Under
+            // 4.0 nothing answers messages-received, so there is none; under 3.0 the mediator may
+            // answer with a status, which counts 0 because FetchAsync has already acknowledged these
+            // ids, or send none. This proves AckAsync's answer, not its effect on the queue.
+            var onlyItsAnswer = pickupVersion == nameof(MessagePickupVersion.V4)
+                ? acked is null
+                : acked is null || acked.MessageCount == 0;
+            result.Check("explicit-ack-returns-only-the-mediators-answer", onlyItsAnswer, acked?.MessageCount);
         }
 
         var summary = new JsonObject

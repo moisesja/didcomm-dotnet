@@ -79,8 +79,12 @@ public sealed class LiveConnection : IAsyncDisposable
             _stream = null;
             await stream.DisposeAsync().ConfigureAwait(false); // the stream turns live delivery off
         }
-        var status = await _pickup.AckAsync(_mediatorDid, _did, new[] { last.Id }, _endpoint, ct).ConfigureAwait(false);
-        _narrator.Step($"[{_name}] acknowledged the last message; status after ack: {status.MessageCount} message(s)");
+        // The mediator's status comes back only when it answers the acknowledgement with one. Under
+        // Message Pickup 4.0 it never does, so the answer is null.
+        var answer = await _pickup.AckAsync(_mediatorDid, _did, new[] { last.Id }, _endpoint, ct).ConfigureAwait(false);
+        _narrator.Step(answer is null
+            ? $"[{_name}] acknowledged the last message; the mediator sent no status in answer"
+            : $"[{_name}] acknowledged the last message; status in answer: {answer.MessageCount} message(s)");
     }
 
     /// <summary>Close the connection.</summary>
