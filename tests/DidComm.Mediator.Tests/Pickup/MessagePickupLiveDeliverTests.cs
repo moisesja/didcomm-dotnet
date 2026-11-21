@@ -822,7 +822,14 @@ public sealed class MessagePickupLiveDeliverTests
         // Its lease is gone: a delivery-request gets it at once, with the clock where it was.
         var held = (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Should().ContainSingle().Subject;
         held.Payload.ToArray().Should().Equal(payload);
-        var released = fixture.FakeStore.Released.Should().ContainSingle().Subject;
+        // Given back as unsent when the push never reached the session; by id once the session had
+        // it and its send threw (it counts as pushed: owner decision 2026-11-21, OD-5).
+        var beforeTheSend = how == "the token is cancelled as the store accepts the record";
+        var store = fixture.FakeStore;
+        var released = beforeTheSend
+            ? store.ReturnedUnsent.Select(r => (r.GrantPeerDid, r.Ids)).Should().ContainSingle().Subject
+            : store.Released.Should().ContainSingle().Subject;
+        (beforeTheSend ? store.Released.Count : store.ReturnedUnsent.Count).Should().Be(0, "one give-back, of one kind");
         released.GrantPeerDid.Should().Be(peer);
         released.Ids.Should().Equal(held.Id);
         result.MessageId.Should().Be(held.Id);

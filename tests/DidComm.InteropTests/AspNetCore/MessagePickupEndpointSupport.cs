@@ -707,6 +707,16 @@ internal sealed class PickupParkingStore : IMessageStore
         }
     }
 
+    /// <summary>Every id the mediator gave back as an unsent live push through <see cref="ReturnUnsentAsync"/>.</summary>
+    public ConcurrentQueue<string> ReturnedUnsent { get; } = new();
+
+    public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
+    {
+        foreach (var id in messageIds)
+            ReturnedUnsent.Enqueue(id);
+        return Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
+    }
+
     /// <summary>How many times the leases of a closed session have been released by owner, to completion.</summary>
     public int OwnerReleases => Volatile.Read(ref _ownerReleases);
 

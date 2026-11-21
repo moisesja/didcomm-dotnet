@@ -411,6 +411,10 @@ internal sealed class ScriptedMessageStore : IMessageStore
         => OnAcknowledge is { } hook ? hook(grantPeerDid, messageIds, ct) : Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
     public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
         => OnRelease is { } hook ? hook(grantPeerDid, messageIds, leaseId, ct) : Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    /// <summary>Replaces the give-back of a push that was not sent; the default gives back in the inner store.</summary>
+    public Func<string, IReadOnlyList<string>, string, CancellationToken, ValueTask<int>>? OnReturnUnsent { get; set; }
+    public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct)
+        => OnReturnUnsent is { } hook ? hook(grantPeerDid, messageIds, leaseId, ct) : Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
     /// <summary>Replaces the status read; the default reads the inner store.</summary>

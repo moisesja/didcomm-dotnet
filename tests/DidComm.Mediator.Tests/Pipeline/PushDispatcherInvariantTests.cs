@@ -172,6 +172,12 @@ public sealed class PushDispatcherInvariantTests
             Interlocked.Increment(ref gives);
             return store.Inner.ReleaseAsync(grant, ids, lease, ct);
         };
+        // A give-back of a push that was not sent ends the lease too.
+        store.OnReturnUnsent = (grant, ids, lease, ct) =>
+        {
+            Interlocked.Increment(ref gives);
+            return store.Inner.ReturnUnsentAsync(grant, ids, lease, ct);
+        };
         await using var peers = new PipelinePeers();
         var mediator = await peers.NewAsync();
         var peer = await peers.NewAsync();
