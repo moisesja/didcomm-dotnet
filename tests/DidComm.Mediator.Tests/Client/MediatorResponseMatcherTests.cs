@@ -240,11 +240,9 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public async Task Row1_a_problem_report_by_pthid_or_by_thid_fails_the_request_with_its_sanitized_code(bool bound, bool inThid)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Row1_a_problem_report_by_pthid_fails_the_request_with_its_sanitized_code(bool bound)
     {
         Task<InboundMessageSnapshot> exchange;
         string requestId;
@@ -252,7 +250,7 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
         {
             var request = _w.Request();
             requestId = request.Id;
-            _send.ReturnWith(async m => await _w.ReceiveAsync(_w.Problem(m.Id, MessagePickup.LiveModeNotSupportedCode, inThid)));
+            _send.ReturnWith(async m => await _w.ReceiveAsync(_w.Problem(m.Id, MessagePickup.LiveModeNotSupportedCode)));
             exchange = _channel.ExchangeAsync(HttpRoute, request, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
         }
         else
@@ -260,13 +258,38 @@ public sealed class MediatorResponseMatcherTests : IAsyncLifetime
             var started = Start(ClientSpecs.StatusRequest);
             requestId = started.Request.Id;
             exchange = started.Exchange;
-            _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Problem(requestId, MessagePickup.LiveModeNotSupportedCode, inThid))).Should().BeTrue();
+            _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Problem(requestId, MessagePickup.LiveModeNotSupportedCode))).Should().BeTrue();
         }
 
         var thrown = (await FluentActions.Awaiting(() => exchange).Should().ThrowAsync<MediationProtocolException>()).Which;
         thrown.RequestId.Should().Be(requestId);
         thrown.ProblemCode.Should().Be(MessagePickup.LiveModeNotSupportedCode);
         thrown.Message.Should().Contain(requestId).And.NotContain(_w.Mediator.Did).And.NotContain(_w.Local.Did);
+    }
+
+    // #100 ADV3-1: pthid is REQUIRED on a problem report (DIDComm v2.1 problems.md L83), so one that
+    // names the request only in thid answers nothing: through the correlator it is not claimed and
+    // the request keeps waiting; in the HTTP response the request gets no answer.
+    [Fact]
+    public async Task Row1_unbound_a_problem_report_without_pthid_whose_thid_names_the_request_completes_nothing()
+    {
+        var (request, exchange) = Start(ClientSpecs.StatusRequest);
+
+        _channel.AsCorrelator().OnInbound(await _w.SnapshotAsync(_w.Problem(request.Id, MessagePickup.LiveModeNotSupportedCode, inThid: true))).Should().BeFalse();
+
+        exchange.IsCompleted.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Row1_bound_a_problem_report_without_pthid_in_the_HTTP_response_is_no_answer()
+    {
+        _send.ReturnWith(async m => await _w.ReceiveAsync(_w.Problem(m.Id, MessagePickup.LiveModeNotSupportedCode, inThid: true)));
+        var request = _w.Request();
+
+        var act = () => _channel.ExchangeAsync(HttpRoute, request, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, default);
+
+        var thrown = (await act.Should().ThrowAsync<TimeoutException>()).Which;
+        thrown.Message.Should().Contain(request.Id).And.NotContain(_w.Mediator.Did).And.NotContain(_w.Local.Did);
     }
 
     // ---- row 2: a thread that names no pending request ----

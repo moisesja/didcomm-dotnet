@@ -582,8 +582,11 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         if (!addressed)
             LogNotAddressed(name);
 
-        // 3. The thread: a problem report names the request in pthid (else thid).
-        var thread = kind == MediatorAnswerKind.ProblemReport && !string.IsNullOrEmpty(received.Pthid) ? received.Pthid : received.Thid;
+        // 3. The thread: a problem report names the request in pthid, which is REQUIRED (DIDComm v2.1
+        //    problems.md L83, "pthid - REQUIRED. The value is the thid of the thread in which the
+        //    problem occurred."); one without pthid names no request, whatever its thid says
+        //    (#100 ADV3-1). Any other answer names it in thid (owner answer "2", #98).
+        var thread = kind == MediatorAnswerKind.ProblemReport ? received.Pthid : received.Thid;
         return !string.IsNullOrEmpty(thread)
             ? OfferThreaded(received, type!, name, kind, thread, peer, local)
             : OfferUnthreaded(received, name, kind, peer, local, inHttpResponse);

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Unicode;
 using DidComm.Exceptions;
 using DidComm.Jose;
 using DidComm.Json;
@@ -17,7 +18,7 @@ namespace DidComm.Mediator.Pickup;
 /// A message is in encrypted form when its outermost layer is a JWE, anoncrypt or authcrypt: "A
 /// DIDComm encrypted message is an encrypted JWM" (DIDComm v2.1 message_structure.md L65), whose
 /// media type goes in "the <c>typ</c> property of the JWE" (L71). The judgement is structural and
-/// nothing is decrypted: the bytes must be strict UTF-8 JSON (no duplicate member names, nothing
+/// nothing is decrypted: the bytes must be valid UTF-8 throughout and strict JSON (no duplicate member names, nothing
 /// after the value) holding an object that <see cref="EnvelopeDetector"/> classifies as
 /// <see cref="EnvelopeKind.Encrypted"/>, which means it has a <c>ciphertext</c> member. That is the
 /// rule the library's unpack uses to classify a JWE (FR-API-03), so the mailbox, the pickup client
@@ -34,6 +35,10 @@ internal static class EncryptedForm
     /// <returns><c>true</c> for a JWE; <c>false</c> for anything else, including bytes that do not parse.</returns>
     internal static bool IsEncrypted(ReadOnlyMemory<byte> payload)
     {
+        // JSON between systems is UTF-8 (RFC 8259 §8.1), and the JSON reader does not validate the
+        // bytes inside strings and member names, so they are checked first, in one pass (#100 ADV2-1).
+        if (!Utf8.IsValid(payload.Span))
+            return false;
         try
         {
             using var document = JsonDocument.Parse(payload, DidCommJson.StrictDocument);

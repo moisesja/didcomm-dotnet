@@ -83,7 +83,8 @@ public sealed class PickupClientStrictnessTests
     {
         var spec = DeliveryReader.StatusRequestSpec;
         FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho(null, null, "r", spec)).Should().NotThrow("nothing asked, nothing echoed");
-        FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho(Carol, Carol + "#key-1", "r", spec)).Should().NotThrow("compared as DID subjects");
+        FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho(Carol, Carol, "r", spec)).Should().NotThrow("the matching value");
+        FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho(Carol + "#key-1", Carol, "r", spec)).Should().Throw<MediationProtocolException>("a DID URL of the DID asked about is not the matching value (#100 ADV3-2)").WithMessage("*another DID*");
         FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho(null, Carol, "r", spec)).Should().Throw<MediationProtocolException>().WithMessage("*does not repeat*");
         FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho(Carol, null, "r", spec)).Should().Throw<MediationProtocolException>().WithMessage("*another DID*");
         FluentActions.Invoking(() => DeliveryReader.RequireStatusFilterEcho("did:example:dave", Carol, "r", spec)).Should().Throw<MediationProtocolException>().WithMessage("*another DID*");

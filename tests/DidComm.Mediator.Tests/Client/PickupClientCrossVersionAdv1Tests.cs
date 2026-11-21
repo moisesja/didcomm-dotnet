@@ -228,7 +228,7 @@ public sealed class PickupClientCrossVersionAdv1Tests : IAsyncLifetime
     /// a request under it goes unanswered. Every pickup call to that mediator then times out, and a
     /// live stream ends at once, until the entry ages out after an hour; nothing re-negotiates.
     /// </summary>
-    [Fact(Skip = "ADV1-1: a remembered pickup version the mediator no longer answers is kept for the hour; every call times out until it expires")]
+    [Fact(Skip = "ADV1-1, declined in #100 (a documented limit, the same as Coordinate Mediation's cache on main): a remembered pickup version the mediator no longer answers is kept for the hour; every call times out until it expires or the process restarts")]
     public async Task A_remembered_version_whose_requests_go_unanswered_is_forgotten_so_the_next_call_negotiates_again()
     {
         var exchange = PickupClientNegotiationTests.Negotiating(PickupClientNegotiationTests.Protocol(MessagePickup40.ProtocolUri, "mediator"));

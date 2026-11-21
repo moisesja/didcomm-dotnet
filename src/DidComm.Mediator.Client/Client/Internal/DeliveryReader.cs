@@ -105,8 +105,10 @@ internal static class DeliveryReader
     /// <exception cref="MediationProtocolException">The echo is absent while a DID was asked about, or names another DID.</exception>
     internal static void RequireStatusFilterEcho(string? echo, string? filter, string requestId, MediatorExchangeSpec spec)
     {
+        // "the matching value MUST be specified" (3.0 L116, 4.0 L168): the value itself, compared
+        // exactly as DIDs are, never another spelling of its DID subject (#100 ADV3-2).
         var missing = echo is null & filter is not null;
-        var another = echo is not null & !DidSubject.SameDidSubject(echo, filter);
+        var another = echo is not null & !string.Equals(echo, filter, StringComparison.Ordinal);
         if (missing)
             throw new MediationProtocolException($"The mediator answered request '{requestId}' ({spec.Name}) with a status that does not repeat the recipient_did asked about.", requestId);
         if (another)
@@ -204,8 +206,9 @@ internal static class DeliveryReader
 
     private static void RequireFilterEcho(string? echo, string? filter, string requestId, MediatorExchangeSpec spec)
     {
-        // Both values evaluated, no short circuit: present, and not the DID asked about.
-        var mismatch = echo is not null & !DidSubject.SameDidSubject(echo, filter);
+        // Both values evaluated, no short circuit: present, and not exactly the DID asked about
+        // (#100 ADV3-2: a DID URL of it is not the matching value).
+        var mismatch = echo is not null & !string.Equals(echo, filter, StringComparison.Ordinal);
         if (mismatch)
             throw AboutAnotherDid(requestId, spec);
     }

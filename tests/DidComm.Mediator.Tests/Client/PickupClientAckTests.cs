@@ -181,12 +181,14 @@ public sealed class PickupClientAckTests
     }
 
     [Fact]
-    public async Task GetStatus_accepts_the_filter_echoed_as_a_DID_URL_of_the_same_DID()
+    public async Task GetStatus_refuses_the_filter_echoed_as_a_DID_URL_of_the_same_DID()
     {
-        // Compared as DID subjects (PRD §4.3), never as raw strings.
+        // "the matching value MUST be specified" (3.0 L116, 4.0 L168): the value itself, compared
+        // exactly as DIDs are, not another spelling of its DID subject (#100 ADV3-2).
         const string carol = "did:example:carol";
         var exchange = new FakePickupExchange().On(MessagePickup.StatusRequestType, r => Status(r, count: 1, recipientDid: carol + "#key-1"));
-        (await PickupTest.Client(exchange).GetStatusAsync(M, L, recipientDid: carol)).MessageCount.Should().Be(1);
+        var act = () => PickupTest.Client(exchange).GetStatusAsync(M, L, recipientDid: carol);
+        (await act.Should().ThrowAsync<MediationProtocolException>()).Which.Message.Should().Contain("another DID").And.NotContain(carol);
     }
 
     [Fact]

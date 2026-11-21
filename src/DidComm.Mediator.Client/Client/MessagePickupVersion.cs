@@ -9,7 +9,10 @@ public enum MessagePickupVersion
     /// <summary>
     /// Ask the mediator first, with Discover Features, and use 4.0 when it discloses it, 3.0
     /// otherwise (a disclosure whose roles name <c>recipient</c> without <c>mediator</c> does not
-    /// count). The answer is remembered per mediator for an hour. A mediator that discloses neither
+    /// count). The answer is remembered per mediator for an hour, and is not asked again within
+    /// that hour even when requests in that version go unanswered: after a mediator stops serving a
+    /// version (it is reconfigured or rolled back), calls to it time out until the hour is up or the
+    /// process restarts, so pin the version, or restart the client, after such a change. A mediator that discloses neither
     /// version fails the call with <see cref="MediationNotSupportedException"/>; one that does not
     /// answer the query at all fails it with <see cref="TimeoutException"/> — pin a version for such
     /// a mediator.

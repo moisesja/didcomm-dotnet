@@ -41,14 +41,13 @@ public sealed class MediatorClientIdCaseQaTests : IAsyncLifetime
         return upper;
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task In_the_HTTP_response_a_problem_report_naming_the_request_id_in_upper_case_fails_the_request_with_its_code(bool inThid)
+    // By pthid only: a problem report must name its thread there (problems.md L83; #100 ADV3-1).
+    [Fact]
+    public async Task In_the_HTTP_response_a_problem_report_naming_the_request_id_in_upper_case_fails_the_request_with_its_code()
     {
         await using var channel = Create(_w, _send, time: _time);
         var request = _w.Request(ids: new LetterIds("request")); // an id certain to hold letters
-        _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Problem(Upper(request.Id), code: "e.p.req.not-enrolled", inThid: inThid)));
+        _send.ReturnWith(async _ => await _w.ReceiveAsync(_w.Problem(Upper(request.Id), code: "e.p.req.not-enrolled")));
 
         var thrown = await Record.ExceptionAsync(() => channel.ExchangeAsync(HttpRoute, request, ClientSpecs.StatusRequest, M, L, default));
 

@@ -88,7 +88,7 @@ public sealed class MessagePickup40Adv2BoundsTests(ITestOutputHelper output)
     /// parse in <c>EncryptedForm.IsEncrypted</c> (one vectorised pass, bounded by the size check
     /// that runs first).
     /// </summary>
-    [Fact(Skip = "ADV2-1: bytes that are not UTF-8 inside a JWE-shaped object pass the mailbox's encrypted-form check")]
+    [Fact]
     public async Task Adv2_1_a_JWE_shaped_object_whose_bytes_are_not_UTF_8_is_not_stored()
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();

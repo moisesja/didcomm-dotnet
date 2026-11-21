@@ -134,7 +134,7 @@ public sealed class MediatorClientChannelV4AdversarialTests : IAsyncLifetime
         (await PickupTest.Within(waiting)).Type.Should().Be(MessagePickup40.StatusType);
     }
 
-    [Fact(Skip = "ADV3-1: a problem report without pthid fails the request its thid names; pthid is REQUIRED (problems.md L83)")]
+    [Fact]
     public async Task A_4_0_problem_report_without_pthid_completes_no_request_even_when_its_thid_names_one()
     {
         // FINDING (Low, pre-existing on main 3c797eb for report-problem/2.0; DidComm.Mediator.Client).
@@ -157,7 +157,7 @@ public sealed class MediatorClientChannelV4AdversarialTests : IAsyncLifetime
         exchange.IsCompleted.Should().BeFalse();
     }
 
-    [Theory(Skip = "ADV3-2: a recipient_did echo that is a DID URL of the DID asked about is accepted; 4.0 L168 asks for the matching value")]
+    [Theory]
     [InlineData("#key-1")]
     [InlineData("?versionId=1")]
     [InlineData("/path")]
