@@ -79,6 +79,82 @@ public sealed class MediatorClientChannelAnswerWaitTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task On_a_WebSocket_a_window_the_request_deadline_cuts_short_is_null_at_the_deadline_not_a_timeout()
+    {
+        // (k) The send completes at 25 s, so the 10 s window would end at 35 s, after the 30 s
+        // deadline. The message was sent: no answer by the deadline is null, not a TimeoutException.
+        await using var channel = Create(_w, _send, time: _time);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _send.Respond = async (_, options, _) =>
+        {
+            await release.Task;
+            return FakeSend.Accepted(options.ServiceEndpointOverride!);
+        };
+        var timeout = channel.Options.RequestTimeout;
+        var lateSend = timeout - TimeSpan.FromSeconds(5);
+        var started = _time.GetUtcNow();
+
+        var call = Exchange(channel, WebSocketRoute, Acknowledgement(), Wait).Observed();
+        await _send.FirstCall.WaitAsync(PickupTest.Timeout);
+        _time.Advance(lateSend).Should().Be(0, "the send takes 25 s and nothing ends it");
+        var afterSend = _time.Mark();
+        release.SetResult();
+        await _time.WaitForTimerAsync(Wait, afterSend, PickupTest.Timeout);
+        _time.Advance(timeout - lateSend - Tick).Should().Be(0, "nothing comes due before the deadline");
+        call.IsCompleted.Should().BeFalse();
+        _time.Advance(Tick).Should().Be(1, "the request's deadline, before the window would end");
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(call));
+
+        thrown.Should().BeNull("a request that was sent and got no answer is not a timeout");
+        (await call).Should().BeNull("the message was sent and no answer came");
+        (_time.GetUtcNow() - started).Should().Be(timeout);
+        channel.PendingCount.Should().Be(0);
+        _time.ScheduledTimers.Should().Be(0, "the window and the deadline were both released");
+    }
+
+    [Fact]
+    public async Task On_a_WebSocket_an_answer_that_arrives_just_before_the_deadline_cuts_the_window_short_still_holds()
+    {
+        // (l) As in (k), the deadline ends the window; here the answer arrives a tick before it.
+        // Whichever runs first, the wait seeing the answer or the deadline ending the wait, the
+        // answer that arrived first is returned: the deadline gives up only on a request still
+        // waiting. Repeated so that the order in which those two run is varied.
+        for (var round = 0; round < 20; round++)
+        {
+            var time = new ManualTimeProvider();
+            var send = new FakeSend();
+            await using var channel = Create(_w, send, time: time);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            send.Respond = async (_, options, _) =>
+            {
+                await release.Task;
+                return FakeSend.Accepted(options.ServiceEndpointOverride!);
+            };
+            var timeout = channel.Options.RequestTimeout;
+            var lateSend = timeout - TimeSpan.FromSeconds(5);
+            var request = Acknowledgement();
+
+            var call = Exchange(channel, WebSocketRoute, request, Wait).Observed();
+            await send.FirstCall.WaitAsync(PickupTest.Timeout);
+            time.Advance(lateSend).Should().Be(0);
+            var afterSend = time.Mark();
+            release.SetResult();
+            await time.WaitForTimerAsync(Wait, afterSend, PickupTest.Timeout);
+            time.Advance(timeout - lateSend - Tick).Should().Be(0);
+            var status = await _w.SnapshotAsync(_w.Status(request.Id, count: 4));
+            // The answer and then the deadline, back to back.
+            var taken = channel.AsCorrelator().OnInbound(status);
+            time.Advance(Tick);
+            var answer = await PickupTest.Within(call);
+
+            taken.Should().BeTrue("round {0}: the request was still waiting", round);
+            answer.Should().NotBeNull("round {0}: the answer came before the deadline", round);
+            answer!.Thid.Should().Be(request.Id);
+            channel.PendingCount.Should().Be(0);
+        }
+    }
+
+    [Fact]
     public async Task On_a_WebSocket_a_send_that_never_completes_is_a_TimeoutException_at_the_RequestTimeout_never_null()
     {
         // (b)

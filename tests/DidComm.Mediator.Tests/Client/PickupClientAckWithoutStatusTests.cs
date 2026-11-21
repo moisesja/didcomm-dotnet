@@ -110,10 +110,11 @@ public sealed class PickupClientAckWithoutStatusTests
     }
 
     [Fact]
-    public async Task Over_a_WebSocket_the_callers_cancellation_while_waiting_for_the_status_is_an_OperationCanceledException()
+    public async Task Over_a_WebSocket_the_callers_cancellation_while_waiting_for_the_status_is_an_OperationCanceledException_with_the_callers_token()
     {
-        // The token the exception carries is the channel's business: over the real channel it is the
-        // caller's (MediatorClientChannelAnswerWaitTests).
+        // The fake leaves the wait to IMediatorExchange's default ExchangeAllowingNoAnswerAsync,
+        // which gives the caller's cancellation back with the caller's token, as the real channel
+        // does (MediatorClientChannelAnswerWaitTests).
         var exchange = new FakePickupExchange { Route = WebSocketRoute }.On(MessagePickup.MessagesReceivedType, Unanswered);
         using var cts = new CancellationTokenSource();
 
@@ -122,7 +123,8 @@ public sealed class PickupClientAckWithoutStatusTests
         await cts.CancelAsync();
         var thrown = await Record.ExceptionAsync(() => PickupTest.Within(acking));
 
-        thrown.Should().BeAssignableTo<OperationCanceledException>("a cancellation is not a missing status");
+        thrown.Should().BeAssignableTo<OperationCanceledException>("a cancellation is not a missing status")
+            .Which.CancellationToken.Should().Be(cts.Token);
         exchange.Sent.Should().ContainSingle("nothing is sent after a cancellation");
     }
 

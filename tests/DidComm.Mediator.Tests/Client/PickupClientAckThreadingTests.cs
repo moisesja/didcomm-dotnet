@@ -335,6 +335,40 @@ public sealed class PickupClientAckThreadingTests : IAsyncLifetime
         channel.PendingCount.Should().Be(0);
     }
 
+    [Fact]
+    public async Task Over_a_WebSocket_a_message_sent_late_in_its_RequestTimeout_with_no_status_is_null_at_the_deadline_not_a_timeout()
+    {
+        // The send completes at 20 s, so half a RequestTimeout of waiting would end at 35 s; the
+        // message's own 30 s deadline ends the wait first. The message was sent, so no status by
+        // then is null, as AckAsync promises, not a TimeoutException.
+        var time = new ManualTimeProvider();
+        var send = new FakeSend();
+        await using var channel = Create(_w, send, time: time);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        send.Respond = async (_, options, _) =>
+        {
+            await release.Task;
+            return FakeSend.Accepted(options.ServiceEndpointOverride!);
+        };
+        var lateSend = TimeSpan.FromSeconds(20);
+        var started = time.GetUtcNow();
+
+        var acking = Observed(new PickupClient(channel, logger: null).AckAsync(_w.Mediator.Did, _w.Local.Did, Ids(1), serviceEndpointOverride: Wss));
+        await send.FirstCall.WaitAsync(PickupTest.Timeout);
+        time.Advance(lateSend).Should().Be(0);
+        var afterSend = time.Mark();
+        release.SetResult();
+        await time.WaitForTimerAsync(Half, afterSend, PickupTest.Timeout);
+        time.Advance(Budget - lateSend).Should().Be(1, "the message's deadline");
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(acking));
+
+        thrown.Should().BeNull("the message was sent; a status that did not come is null");
+        (await acking).Should().BeNull();
+        (time.GetUtcNow() - started).Should().Be(Budget);
+        send.Count.Should().Be(1, "no status-request follows");
+        channel.PendingCount.Should().Be(0);
+    }
+
     // ---- helpers ------------------------------------------------------------------------------
 
     private static string[] Ids(int count) => Enumerable.Range(0, count).Select(i => $"q{i}").ToArray();
