@@ -361,9 +361,11 @@ public sealed class WebSocketMessageFinishTests
         await AbortAndWaitUntilTheServerSawItAsync(host, socket);
         var mark = host.Time.Mark();
         gate.Release();
-        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // CONNECT is handled with the connection already ended
 
+        // Nothing holds the CONNECT's handling, so its close grace's timer is created and disposed at
+        // once: count the timers created once the connection ended, never wait for one to be scheduled.
         await host.WaitEndedWebSocketsAsync(1);
+        host.TimersCreatedSince(mark).Should().Be(1, "CONNECT was handled with the connection already ended: its close grace started at once");
         Loud(host).Should().BeEmpty("a write into a connection the peer dropped is not an application error");
         host.Logs.Records.Should().NotContain(r => r.Text.Contains("unhandled", StringComparison.OrdinalIgnoreCase));
     }
@@ -594,9 +596,23 @@ internal sealed class GatedDisposeClock(QaManualTimeProvider inner) : TimeProvid
     /// <summary>The armed timer's dispose is blocking.</summary>
     public Task Held => _held.Task;
 
+    // The armed dispose parks a thread-pool thread (the receive loop's): raise the pool's floor (never
+    // lower it) first, so parking it cannot starve tests running alongside (L-065 corollary).
+    private static readonly bool PoolFloorRaised = RaisePoolFloor();
+
+    private static bool RaisePoolFloor()
+    {
+        ThreadPool.GetMinThreads(out var worker, out var io);
+        var needed = Environment.ProcessorCount + 4;
+        if (worker < needed)
+            ThreadPool.SetMinThreads(needed, io);
+        return true;
+    }
+
     /// <summary>Wrap the clock <c>DeadlineKestrelHost</c> registered and register the wrapper in its place.</summary>
     public static GatedDisposeClock Install(WebApplicationBuilder builder)
     {
+        _ = PoolFloorRaised;
         var manual = (QaManualTimeProvider)builder.Services.Last(d => d.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
         var gated = new GatedDisposeClock(manual);
         builder.Services.AddSingleton<TimeProvider>(gated);
