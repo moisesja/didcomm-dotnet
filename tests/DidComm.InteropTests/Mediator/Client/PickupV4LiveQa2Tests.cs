@@ -641,47 +641,55 @@ public sealed class PickupV4LiveQa2Tests
         status.MessageCount.Should().Be(0, "read in order on one socket, the status-request sees the acknowledgement applied");
         harness.Connects.Should().Be(1);
         sockets.Count.Should().Be(1);
-        sockets.All[0].MessagesReceived.Should().Be(4, "the delivery-request, both acknowledgements and the status-request rode the session socket (FR-RR-07)");
+        sockets.All[0].MessagesReceived.Should().Be(5, "the delivery-request and the fetch's acknowledgement, then AckAsync's first status-request, its acknowledgement and the status-request after it rode the session socket (FR-RR-07)");
         await mediator.FlushObserversAsync();
-        observer.PickupKindsFrom(bob.Did).Should().Equal("4.0/delivery-request", "4.0/messages-received", "4.0/messages-received", "4.0/status-request");
+        observer.PickupKindsFrom(bob.Did).Should().Equal("4.0/delivery-request", "4.0/messages-received", "4.0/status-request", "4.0/messages-received", "4.0/status-request");
         observer.From(bob.Did).Where(r => r.Kind == "4.0/messages-received").Should().OnlyContain(r => r.ReturnRoute == ReturnRouteMode.None && r.CreatedTime == mediator.Clock.Now.ToUnixTimeSeconds());
         Qa2.MessageCount(mediator).Should().Be(0);
     }
 
     [Fact]
-    public async Task Qa2_AckAsync_under_4_0_as_the_first_WebSocket_call_sends_the_acknowledgement_on_a_socket_of_its_own_so_its_status_can_predate_it()
+    public async Task Qa2_AckAsync_under_4_0_as_the_first_WebSocket_call_opens_the_session_socket_first_so_its_status_follows_the_acknowledgement()
     {
-        // What happens when no session socket exists yet (documented, not a confirmation): the
-        // header-less acknowledgement goes one way on the endpoint's pooled socket, the
-        // status-request (return_route: all) opens the session socket, and the mediator reads the two
-        // sockets independently. Holding the first socket's reads shows the order the mediator may
-        // take: the status is answered before the acknowledgement is read, so AckAsync returns a
-        // status that still counts the message. AckAsync's contract makes only a status that no
-        // longer counts it a confirmation; the acknowledgement is applied once read.
+        // No session socket exists yet (PR #143 review P2-2). AckAsync first sends a status-request
+        // (return_route all), which opens the session socket; the header-less acknowledgement and the
+        // status-request after it then ride that socket, never the endpoint's pooled one, and the
+        // mediator reads one socket's messages in order. Holding that socket's reads holds AckAsync:
+        // nothing is answered and no other socket is opened until they are released, and the status
+        // it returns no longer counts the acknowledged message.
         var sockets = new CountingSockets();
         sockets.HoldReceivesOf(0);
+        var client = new ClientSockets();
         var observer = new PickupWireObserver();
         await using var mediator = await PickupV4E2E.StartMediatorAsync(observer, o => o.ConfigurePipeline = sockets.Install);
-        await using var harness = await PickupV4E2E.HarnessAsync(mediator, MessagePickupVersion.V4, webSocket: true);
+        await using var harness = await PickupV4E2E.HarnessAsync(mediator, MessagePickupVersion.V4, webSocket: true, o => o.WebSocket = client.Install);
         var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
         var alice = await harness.NewAliceAsync();
         await PickupE2E.SendAsync(mediator, alice, recipient, "leased by a fetch over HTTP");
         var delivered = (await PickupV4Qa2.Fetch40Async(mediator, bob)).Should().ContainSingle().Subject;
 
-        var status = await PickupE2E.Within(harness.Pickup.AckAsync(mediator.Did, bob.Did, new[] { delivered.Id }, harness.WebSocketEndpoint));
+        var acking = PickupV4AckOrder.Observed(harness.Pickup.AckAsync(mediator.Did, bob.Did, new[] { delivered.Id }, harness.WebSocketEndpoint));
+        var held = await sockets.AcceptedAsync(0);
+        await MediatorTestServer.WaitUntilAsync(() => acking.IsCompleted || client.SentOn(0) >= 1, "the client sent its first message on the session socket (or AckAsync returned)");
+        acking.IsCompleted.Should().BeFalse("with the session socket's reads held, the status-request AckAsync sends first is not answered");
+        held.MessagesReceived.Should().Be(0, "precondition: the mediator reads nothing from the held socket");
+        sockets.Count.Should().Be(1, "nothing went on another socket");
+        Qa2.MessageCount(mediator).Should().Be(1, "nothing is acknowledged yet");
+        held.ReleaseReceives();
+        var status = await PickupE2E.Within(acking);
 
-        status.MessageCount.Should().Be(1, "the status was read on the session socket before the acknowledgement on the other socket");
-        harness.Connects.Should().Be(2, "the pooled socket for the header-less acknowledgement, then the session socket for the status-request");
-        sockets.Count.Should().Be(2);
-        sockets.All[0].MessagesReceived.Should().Be(0, "precondition: the acknowledgement waits on its own socket");
-        sockets.All[1].MessagesReceived.Should().Be(1, "the status-request");
-        sockets.All[0].ReleaseReceives();
-        await Qa2.StoreHoldsAsync(mediator, 0, "the acknowledgement is applied once the mediator reads it");
-        await observer.WaitForAsync(bob.Did, r => r.Kind == "4.0/messages-received", "the acknowledgement was dispatched");
+        status.MessageCount.Should().Be(0, "the status-request after the acknowledgement was read after it, on the same socket");
+        harness.Connects.Should().Be(1, "the session socket only: no pooled socket for the header-less acknowledgement");
+        sockets.Count.Should().Be(1);
+        held.MessagesReceived.Should().Be(3, "the first status-request, the acknowledgement and the status-request after it");
+        client.All.Should().ContainSingle().Which.MessagesSent.Should().Be(3);
+        await mediator.FlushObserversAsync();
+        observer.PickupKindsFrom(bob.Did).Should().Equal("4.0/delivery-request", "4.0/status-request", "4.0/messages-received", "4.0/status-request");
         var ack = observer.From(bob.Did).Single(r => r.Kind == "4.0/messages-received");
-        ack.ReturnRoute.Should().Be(ReturnRouteMode.None);
-        ack.CreatedTime.Should().Be(mediator.Clock.Now.ToUnixTimeSeconds(), "stamped although it went on a socket with no session (FR-RR-09)");
-        sockets.All[0].MessagesReceived.Should().Be(1);
-        (await PickupE2E.Within(harness.Pickup.GetStatusAsync(mediator.Did, bob.Did, serviceEndpointOverride: harness.WebSocketEndpoint))).MessageCount.Should().Be(0, "asked again, the status confirms it");
+        ack.ReturnRoute.Should().Be(ReturnRouteMode.None, "one way, without return_route (L35)");
+        ack.CreatedTime.Should().Be(mediator.Clock.Now.ToUnixTimeSeconds(), "stamped (FR-RR-09)");
+        ack.Body!["message_id_list"]!.AsArray().Select(n => n!.GetValue<string>()).Should().Equal(delivered.Id);
+        observer.From(bob.Did).Where(r => r.Kind == "4.0/status-request").Should().HaveCount(2).And.OnlyContain(r => r.ReturnRoute == ReturnRouteMode.All);
+        Qa2.MessageCount(mediator).Should().Be(0);
     }
 }
