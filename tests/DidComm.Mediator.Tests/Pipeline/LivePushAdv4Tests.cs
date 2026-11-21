@@ -123,6 +123,9 @@ public sealed class LivePushAdv4Tests
         await MessagePickupLive.UntilAsync(() => Task.FromResult(tracker.PendingReleases == 0), "the close-time release ran before the lease exists");
         proceed.SetResult();
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
+        // Since #100 ADV4-1 the push ends a lease taken for a session found closed the way the close
+        // ends it (the tracker's release worker, ReleaseLeasesAsync by owner): wait for that record.
+        await MessagePickupLive.UntilAsync(() => Task.FromResult(tracker.PendingReleases == 0), "the push's own release by owner ran");
 
         world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
         LivePushWorld.Deliveries(session).Should().BeEmpty("a closed session is sent nothing");
