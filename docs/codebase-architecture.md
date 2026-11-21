@@ -3236,7 +3236,16 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   message leaves the session as it is (FR-RR-05).
   - `FetchAsync` acknowledges one way under its own deadline.
   - `AckAsync` sends each 100-id chunk one way, then its existing `status-request` within what is
-    left of the last chunk's `RequestTimeout`.
+    left of the last chunk's `RequestTimeout`. On a route that is not HTTP it first sends one 4.0
+    `status-request` as an ordinary exchange (`return_route: all`, its own `RequestTimeout`, the
+    answer checked and dropped). Under 4.0 that is the only message that can open the return-route
+    session, since `messages-received` carries no `return_route` (L35). It opens the session socket
+    if none is open, or reuses the open one, so the header-less acknowledgements and the confirming
+    `status-request` ride that one socket, and the mediator handles them in order (FR-RR-05
+    affinity in the WebSocket transport). If the opening request fails, nothing is acknowledged.
+    Cost: one extra round trip per `AckAsync` off HTTP. Residual: a connection that drops after the
+    opening status and before an acknowledgement is sent puts that acknowledgement on another
+    connection; a repeat is harmless (PR #143 review P2-2, `3890622`).
   - The live stream's flush and end acknowledge one way under 4.0.
 - **The live stream** keeps a read-only version. `CycleAsync` and `DrainRoundAsync` build and read
   through `PickupWire`; an empty 4.0 delivery ends the drain. `LoadPushAsync` takes only a
@@ -3278,12 +3287,6 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   ran out is marked and goes only to that collection) and recognised as repeats. Nothing is lost;
   delivery is late. The stream is left untouched under the owner's live-stream rule (no more
   patches to its scheduling).
-- **A pinned-4.0 `AckAsync` over a WebSocket before any session socket exists (#100).** The
-  header-less acknowledgement then goes over the endpoint's pooled socket, and the `status-request`
-  that confirms it opens the session socket. The mediator handles the two connections
-  concurrently, so the returned count may predate the acknowledgement. A repeat is harmless. Under
-  `Negotiate` the Discover Features query opens the session socket first, and a fetch or live
-  stream has opened it already.
 - **At-least-once.** Repeats are recognised while the duplicate filter remembers them; an
   application that must never act twice tracks the message ids it handled.
 - **A fetch is at-most-once to the application** once it returns (above); `ReceiveLiveAsync`, or the

@@ -29,7 +29,13 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     seconds whichever version is spoken.
 
   Acknowledgements get no answer under 4.0; `AckAsync` still returns the status, which it now asks
-  for with a `status-request`.
+  for with a `status-request`. Over a WebSocket it first sends one `status-request` too, before the
+  acknowledgements: under 4.0 that is the only message that can open the connection's return-route
+  session, because 4.0 dropped `return_route` from `messages-received` (L35). The acknowledgements
+  and the confirming `status-request` then travel on that one connection, which the mediator reads
+  in order, so the status always follows them. It costs one extra round trip per `AckAsync` over a
+  WebSocket (PR #143 review P2-2; before the fix, a first call on a cold WebSocket could return a
+  status from before its acknowledgement).
 - **Pin the version for mediators that cannot answer the question.** A mediator that answers
   Discover Features but discloses neither pickup version now fails every pickup call with
   `MediationNotSupportedException`. One that does not answer the query fails it with
