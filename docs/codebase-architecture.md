@@ -1281,7 +1281,7 @@ Session sockets (`WebSocketDidCommTransport`):
     answer; its write has ended the connection.
   - Dispose never throws and never leaves a socket behind (owner decision OD-9, "Fix forward").
     The pooled disposals are guarded, and lifecycle-handler faults are logged through the guarded
-    log. Phases 1–3 run under a catch. A `finally` releases every drained gate, then seals the
+    log, with the handler's own exception (round 5). Phases 1–3 run under a catch. A `finally` releases every drained gate, then seals the
     pool and runs both sweeps. A session socket opened by a send while dispose is under way gets
     `DiscardInbound` as it is published.
   - Why: this library's mediator answers a close only after it has handled the messages before it,

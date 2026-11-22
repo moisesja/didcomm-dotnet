@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using DidComm.Exceptions;
 using DidComm.Facade;
@@ -135,6 +136,51 @@ public sealed class WebSocketTransportBehaviorTests
         kinds.Should().Contain(WebSocketLifecycleEventKind.SendFailed);
         kinds.Should().Contain(WebSocketLifecycleEventKind.Connected);
         kinds.Should().Contain(WebSocketLifecycleEventKind.Reconnected);
+    }
+
+    [Fact]
+    public async Task A_lifecycle_handler_that_throws_is_logged_at_Warning_with_its_own_exception()
+    {
+        // A throwing Lifecycle handler never breaks the transport, and the host gets its own handler's
+        // exception back on the Warning line, as in the released transport (PR #143 review round 5).
+        var logger = new RecordingTransportLogger();
+        var thrown = new InvalidOperationException("the host's handler failed");
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 0,
+            WebSocketFactory = () => new TrackingWebSocket(),
+            Connect = (_, _, _) => Task.CompletedTask,
+        });
+        var transport = new WebSocketDidCommTransport(options, logger);
+        transport.Lifecycle += (_, _) => throw thrown;
+
+        await transport.SendAsync(NewRequest(), default);
+        await transport.DisposeAsync();
+
+        var warnings = logger.Lines.Where(l => l.Level == Microsoft.Extensions.Logging.LogLevel.Warning).ToList();
+        warnings.Should().NotBeEmpty("each Connected and Disconnected raise hits the throwing handler");
+        warnings.Should().OnlyContain(l => ReferenceEquals(l.Exception, thrown), "the line carries the handler's own exception, not just its type name");
+    }
+
+    [Fact]
+    public async Task A_throwing_lifecycle_handler_and_a_throwing_logger_still_let_send_and_dispose_finish()
+    {
+        var options = Options.Create(new WebSocketTransportOptions
+        {
+            AllowedSchemes = new[] { "ws" },
+            MaxReconnectAttempts = 0,
+            WebSocketFactory = () => new TrackingWebSocket(),
+            Connect = (_, _, _) => Task.CompletedTask,
+        });
+        var transport = new WebSocketDidCommTransport(options, new RecordingTransportLogger { Throw = true });
+        transport.Lifecycle += (_, _) => throw new InvalidOperationException("handler");
+
+        var send = await Record.ExceptionAsync(() => transport.SendAsync(NewRequest(), default));
+        var dispose = await Record.ExceptionAsync(() => transport.DisposeAsync().AsTask());
+
+        send.Should().BeNull("neither a lifecycle handler nor a logging provider may break a send");
+        dispose.Should().BeNull("nor dispose");
     }
 
     [Fact]
@@ -1126,6 +1172,27 @@ public sealed class WebSocketTransportBehaviorTests
     }
 
     /// <summary>A minimal in-memory <see cref="WebSocket"/> that records disposal and accepts sends.</summary>
+    // Records each line's level and exception; with Throw set, every call throws (a faulty provider).
+    private sealed class RecordingTransportLogger : Microsoft.Extensions.Logging.ILogger<WebSocketDidCommTransport>
+    {
+        private readonly ConcurrentQueue<(Microsoft.Extensions.Logging.LogLevel Level, Exception? Exception)> _lines = new();
+
+        public bool Throw { get; init; }
+
+        public IReadOnlyCollection<(Microsoft.Extensions.Logging.LogLevel Level, Exception? Exception)> Lines => _lines;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (Throw)
+                throw new InvalidOperationException("logging provider failed");
+            _lines.Enqueue((logLevel, exception));
+        }
+    }
+
     private sealed class TrackingWebSocket : System.Net.WebSockets.WebSocket
     {
         public bool Disposed { get; private set; }
