@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using AwesomeAssertions;
@@ -11,6 +12,7 @@ using DidComm.Protocols;
 using DidComm.Transports.ReturnRoute;
 using DidComm.Transports.Stomp;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -262,6 +264,70 @@ public sealed class WebSocketMessageFinishTests
     }
 
     [Fact]
+    public async Task A_host_already_stopping_when_the_connection_ends_with_a_message_in_hand_cancels_the_handling_at_once()
+    {
+        // The other order: the host starts to stop while a handler that ignores the host's stopping
+        // token holds the message, and only then does the connection end. Arming the bound finds the
+        // stopping token already cancelled, so the handling is cancelled there and then: no clock
+        // move, and no later stopping event to wait for. Registering on a token already cancelled runs
+        // the callback inline and keeps no registration, so the bound's timer is all there is to leave.
+        var (host, _, holding) = await StartAsync();
+        await using var _host = host;
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard); // it honours its own token only, not ApplicationStopping
+        var fired = host.Time.TimersFired;
+
+        host.App.Lifetime.StopApplication(); // the connection still lives
+        host.App.Lifetime.ApplicationStopping.IsCancellationRequested.Should().BeTrue();
+        holding.Cancelled.Task.IsCompleted.Should().BeFalse("the handler still holds the message when the connection ends");
+        host.EndedWebSockets.Should().Be(0);
+        var mark = host.Time.Mark();
+        socket.Abort(); // the connection ends with the message in hand
+
+        await holding.Cancelled.Task.WaitAsync(Guard); // the clock never moves
+        await host.WaitEndedWebSocketsAsync(1);
+        holding.Handled.Task.IsCompleted.Should().BeFalse("the handling was cancelled, not finished");
+        host.Time.TimersFired.Should().Be(fired, "no timer fired: the host's shutdown ended the handling, not the bound");
+        host.TimersCreatedSince(mark).Should().Be(1, "the bound's timer, created when the end was seen with the message in hand");
+        host.Time.UndisposedTimersSince(mark).Should().Be(0, "the bound's timer was disposed when the loop ended: no timer is left behind");
+        host.Logs.Records.Where(r => r.Text.Contains("received in full", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be((LogLevel.Debug,
+                "MapDidCommWebSocket: the connection ended while a message it had received in full was being handled, and the host is stopping; the handling is cancelled."));
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_clock_that_cannot_create_the_bounds_timer_ends_the_handling_at_once_rather_than_leaving_it_unbounded()
+    {
+        FaultingTimerClock clock = null!;
+        var (host, _, holding) = await StartAsync(o => o.Builder = b => clock = FaultingTimerClock.Install(b));
+        await using var _host = host;
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard); // it honours its token, so only a cancellation ends it
+        var fired = host.Time.TimersFired;
+        var mark = host.Time.Mark();
+        clock.FailNext(Grace);
+        socket.Abort(); // the connection ends with the message in hand: the bound's timer is asked for
+
+        await holding.Cancelled.Task.WaitAsync(Guard); // the clock never moves and the host is not stopping
+        await host.WaitEndedWebSocketsAsync(1);
+        clock.Failures.Should().Be(1, "the bound's timer was asked for once, and refused");
+        holding.Handled.Task.IsCompleted.Should().BeFalse("the handling was cancelled, not finished");
+        host.App.Lifetime.ApplicationStopping.IsCancellationRequested.Should().BeFalse("the clock's fault ended the handling, not the host");
+        host.Time.TimersFired.Should().Be(fired);
+        host.TimersCreatedSince(mark).Should().Be(0, "no timer exists to fire or to dispose");
+        host.Time.UndisposedTimersSince(mark).Should().Be(0);
+        // One Debug line, with the exception's type name only.
+        host.Logs.Records.Where(r => r.Text.Contains("received in full", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be((LogLevel.Debug,
+                "MapDidCommWebSocket: the connection ended while a message it had received in full was being handled, and the clock could not time the rest (ClockFaultException); the handling is cancelled."));
+        host.Logs.Entries.Should().NotContain(e => e.Contains(ClockFaultException.Text, StringComparison.Ordinal), "the fault is logged by type only");
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task The_close_grace_ends_a_finish_that_outlasts_it_and_not_a_tick_before()
     {
         var (host, store, _) = await StartAsync();
@@ -320,6 +386,54 @@ public sealed class WebSocketMessageFinishTests
     }
 
     // ---- (g) a reply and a push after the drop fail quietly: see WebSocketMessageFinishQuietTests ----
+
+    // ---- (h) a finish keeps its connection counted by the server's limits -----------------------------
+
+    [Fact]
+    public async Task A_finish_after_the_drop_keeps_its_upgraded_connection_counted_by_Kestrel_until_it_ends()
+    {
+        // SECURITY.md: the server's connection limits bound how many finishes run at once. They do
+        // because the finish runs inside the request: the endpoint delegate awaits the loop and the
+        // loop awaits the dispatch, so Kestrel counts the upgraded connection until the finish ends.
+        var (host, _, holding) = await StartAsync(o => o.Builder = b =>
+            b.WebHost.ConfigureKestrel(k => k.Limits.MaxConcurrentUpgradedConnections = 1));
+        await using var _host = host;
+
+        using var first = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(first, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard);
+        var mark = host.Time.Mark();
+        await AbortAndWaitUntilTheServerSawItAsync(host, first);
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // the peer is gone and the finish is under way
+        var firstConnection = host.WebSocketConnectionIds.Should().ContainSingle().Subject;
+
+        // While the finish runs, a second upgrade is refused: the first connection still counts.
+        using (var refused = new ClientWebSocket())
+        {
+            refused.Options.CollectHttpResponseDetails = true;
+            using var guard = new CancellationTokenSource(Guard);
+            await ((Func<Task>)(() => refused.ConnectAsync(host.UriOf(DeadlineEndpoint.Dispatch), guard.Token))).Should().ThrowAsync<WebSocketException>();
+            refused.HttpStatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        }
+        Loud(host).Should().ContainSingle("Kestrel refused the upgrade, at its limit")
+            .Which.Should().Contain("Request cannot be upgraded because the server has already opened the maximum number of upgraded connections.");
+        host.EndedWebSockets.Should().Be(1, "only the refused request ended: the first one's request is still running its finish");
+        KestrelStopped(host, firstConnection).Should().BeFalse("Kestrel has not ended the first connection");
+        holding.Cancelled.Task.IsCompleted.Should().BeFalse("the finish is held, not cancelled");
+
+        holding.Release();
+        (await holding.Handled.Task.WaitAsync(Guard)).Should().BeNull("the message in hand is still handled");
+        await host.WaitEndedWebSocketsAsync(2);
+        // Kestrel frees the connection's place when its request is over (Http1Connection.OnRequestProcessingEnded),
+        // before it logs the connection's end.
+        (await ReturnRouteTestHost.WaitUntilAsync(() => KestrelStopped(host, firstConnection), Guard)).Should().BeTrue("Kestrel ends the first connection once its finish is over");
+
+        using var next = await host.ConnectAsync(DeadlineEndpoint.Dispatch); // accepted now
+        var probe = host.Probe();
+        await DeadlinePeer.SendAsync(next, await host.PackAsync(probe), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, probe.Id);
+        Loud(host).Should().ContainSingle("nothing but the refused upgrade");
+    }
 
     // ---- STOMP ---------------------------------------------------------------------------------------
 
@@ -586,6 +700,11 @@ public sealed class WebSocketMessageFinishTests
                                                             && r.Text.Contains($":{host.Port}{path} ", StringComparison.Ordinal)),
                 Guard))
             .Should().BeTrue($"the request to {path} finished");
+
+    /// <summary>Whether Kestrel logged the end of its connection <paramref name="connectionId"/>.</summary>
+    private static bool KestrelStopped(DeadlineKestrelHost host, string connectionId)
+        => host.Logs.CategorizedRecords.Any(r => r.Category == "Microsoft.AspNetCore.Server.Kestrel.Connections"
+                                                 && r.Text == $"Connection id \"{connectionId}\" stopped.");
 
     /// <summary>Lines at Error or above, from any category.</summary>
     internal static IReadOnlyList<string> Loud(DeadlineKestrelHost host)
@@ -984,4 +1103,63 @@ internal sealed class GatedDisposeClock(QaManualTimeProvider inner) : TimeProvid
             return ValueTask.CompletedTask;
         }
     }
+}
+
+/// <summary>
+/// The host's <see cref="QaManualTimeProvider"/>, made to fail once: the next timer asked for with the
+/// due time given to <see cref="FailNext"/> is refused with a <see cref="ClockFaultException"/>, as a
+/// host clock that cannot create a timer would. Every other timer is the manual clock's.
+/// </summary>
+internal sealed class FaultingTimerClock(QaManualTimeProvider inner) : TimeProvider
+{
+    private readonly object _lock = new();
+    private TimeSpan? _failNext;
+    private int _failures;
+
+    /// <summary>How many timers this clock refused.</summary>
+    public int Failures => Volatile.Read(ref _failures);
+
+    /// <summary>Wrap the clock <c>DeadlineKestrelHost</c> registered and register the wrapper in its place.</summary>
+    public static FaultingTimerClock Install(WebApplicationBuilder builder)
+    {
+        var manual = (QaManualTimeProvider)builder.Services.Last(d => d.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
+        var faulting = new FaultingTimerClock(manual);
+        builder.Services.AddSingleton<TimeProvider>(faulting);
+        return faulting;
+    }
+
+    /// <summary>Refuse the next timer asked for with <paramref name="dueTime"/>.</summary>
+    public void FailNext(TimeSpan dueTime)
+    {
+        lock (_lock)
+            _failNext = dueTime;
+    }
+
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+
+    public override long TimestampFrequency => inner.TimestampFrequency;
+
+    public override long GetTimestamp() => inner.GetTimestamp();
+
+    public override TimeZoneInfo LocalTimeZone => inner.LocalTimeZone;
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        lock (_lock)
+        {
+            if (_failNext == dueTime)
+            {
+                _failNext = null;
+                Interlocked.Increment(ref _failures);
+                throw new ClockFaultException();
+            }
+        }
+        return inner.CreateTimer(callback, state, dueTime, period);
+    }
+}
+
+/// <summary>What <see cref="FaultingTimerClock"/> throws.</summary>
+internal sealed class ClockFaultException() : Exception(Text)
+{
+    public const string Text = "The test clock refuses this timer.";
 }

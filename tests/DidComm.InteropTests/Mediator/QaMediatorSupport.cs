@@ -260,6 +260,17 @@ internal sealed class QaManualTimeProvider : TimeProvider
             return _timers.Count(t => t.Sequence > mark && t.DueAt is not null);
     }
 
+    /// <summary>
+    /// How many timers created after <paramref name="mark"/> are not disposed yet, scheduled or not (a
+    /// timer that fired, or was changed to never fire, still counts until it is disposed).
+    /// </summary>
+    /// <param name="mark">A value <see cref="Mark"/> returned earlier.</param>
+    public int UndisposedTimersSince(long mark)
+    {
+        lock (_gate)
+            return _timers.Count(t => t.Sequence > mark);
+    }
+
     public async Task WaitForScheduledTimersAsync(int count, TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource(timeout);
