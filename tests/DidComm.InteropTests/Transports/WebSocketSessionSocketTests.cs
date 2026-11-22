@@ -440,7 +440,12 @@ public sealed class WebSocketSessionSocketTests
         public static Harness Create(Action<WebSocketTransportOptions>? configure = null, int maxReceiveBytes = 256 * 1024)
             => new(configure, maxReceiveBytes);
 
-        public ValueTask DisposeAsync() => Transport.DisposeAsync();
+        public ValueTask DisposeAsync()
+        {
+            // Some tests set the peers never to answer a close; dispose waits for a session socket's.
+            Sockets.AnswerClosesFromNowOn();
+            return Transport.DisposeAsync();
+        }
 
         /// <summary>The lifecycle kinds recorded so far (clearable).</summary>
         public sealed class EventLog : IEnumerable<WebSocketLifecycleEventKind>

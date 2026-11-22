@@ -19,9 +19,11 @@ namespace DidComm.InteropTests.Transports;
 
 /// <summary>
 /// #100 OD-7: <see cref="WebSocketDidCommTransport.DisposeAsync"/> closes each open pooled and
-/// active session socket with <see cref="WebSocket.CloseAsync"/>: it sends its close frame and waits
-/// for the peer's, bounded by the close budget (one <see cref="WebSocketTransportOptions.SendTimeout"/>;
-/// zero when that is infinite or not positive), every socket at once. A peer that answers at once
+/// active session socket by sending its close frame and waiting for the peer's, bounded by the close
+/// budget (one <see cref="WebSocketTransportOptions.SendTimeout"/>; zero when that is infinite or not
+/// positive), every socket at once. A pooled socket waits in <see cref="WebSocket.CloseAsync"/>; a
+/// session socket sends with <see cref="WebSocket.CloseOutputAsync"/> and uses its own receive loop
+/// as its only reader, which reads the peer's close. A peer that answers at once
 /// lets dispose return at once; a peer that never answers costs one budget in total, however many
 /// sockets it holds, and is then cut off. <see cref="WebSocketDidCommTransport.DisposeAsync"/> takes no
 /// <see cref="CancellationToken"/>: the budget is its only bound, and these tests add none.
@@ -138,7 +140,7 @@ public sealed class WebSocketDisposeCloseWaitTests
     public async Task When_a_session_sockets_peer_closes_just_before_dispose_the_close_is_answered_once_and_reported_once()
     {
         // The peer's close races dispose: the receive loop reads it and answers it unless dispose has
-        // begun, and dispose answers it (CloseAsync in CloseReceived only sends) when it finds the
+        // begun, and dispose answers it (its close frame, then the loop's end) when it finds the
         // socket there first. Whichever does, the answer goes out once, nothing waits for a second
         // close, and Disconnected is raised once.
         await using var t = await Live.StartAsync();
@@ -505,13 +507,13 @@ public sealed class WebSocketDisposeCloseWaitTests
 }
 
 /// <summary>
-/// #100 OD-7: on real sockets, dispose's close of a return-route session socket shares the socket with
-/// the socket's receive loop, which always has a receive outstanding. A <see cref="ClientWebSocket"/>
-/// runs one receive at a time, so <see cref="WebSocket.CloseAsync"/> waits for the loop's receive
-/// rather than failing with <see cref="InvalidOperationException"/>, and no task the transport or the
-/// socket started ends with an exception nobody observed: neither when the peer answers, nor when the
-/// close budget cuts a silent peer off (the socket is aborted under the loop's receive). Serial,
-/// because <see cref="TaskScheduler.UnobservedTaskException"/> is process-wide.
+/// #100 OD-7: on real sockets, dispose's close of a return-route session socket uses the socket's own
+/// receive loop, which always has a receive outstanding, as its only reader: dispose sends its close
+/// frame while that receive is pending and waits for the loop to read the peer's close. No
+/// <see cref="InvalidOperationException"/>, and no task the transport or the socket started ends with
+/// an exception nobody observed: neither when the peer answers, nor when the close budget cuts a
+/// silent peer off (the socket is aborted under the loop's receive). Serial, because
+/// <see cref="TaskScheduler.UnobservedTaskException"/> is process-wide.
 /// </summary>
 [Collection(QaSerialTiming.Name)]
 public sealed class WebSocketDisposeCloseWaitUnobservedTests

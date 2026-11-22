@@ -335,6 +335,17 @@ internal sealed class ScriptedSocketFactory
     /// <summary>How many sockets were created.</summary>
     public int Count => Volatile.Read(ref _count);
 
+    /// <summary>
+    /// Every socket created so far answers our close output from now on: a test's teardown, when its
+    /// peers were set never to answer one. Dispose waits, up to one <c>SendTimeout</c>, for a session
+    /// socket's peer to answer its close (#100 OD-7); this keeps a teardown from waiting that out.
+    /// </summary>
+    public void AnswerClosesFromNowOn()
+    {
+        foreach (var socket in _created)
+            socket.AnswerCloseOutput = true;
+    }
+
     /// <summary>The delegate for <c>WebSocketTransportOptions.WebSocketFactory</c>.</summary>
     public WebSocket Create()
     {
