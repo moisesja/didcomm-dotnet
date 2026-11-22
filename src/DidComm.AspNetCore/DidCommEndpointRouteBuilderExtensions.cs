@@ -565,6 +565,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// connection, also while the callback handles a message received in full. (The registry-aware
     /// overload instead finishes such a message, within a bound; see there.)
     /// </para>
+    /// <para>
+    /// <b>A refused handshake.</b> When the WebSocket handshake fails before the connection is
+    /// accepted, most often because a server limit such as Kestrel's
+    /// <c>Limits.MaxConcurrentUpgradedConnections</c> is reached, the request is answered
+    /// <c>503 Service Unavailable</c>. The refusal is logged by exception type only, rate-limited (the
+    /// first and every 1000th at Warning, the others at Debug), so a client retrying cannot flood the
+    /// logs. A client that goes away during the handshake gets nothing, and one Debug line.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -578,8 +586,9 @@ public static class DidCommEndpointRouteBuilderExtensions
         ArgumentException.ThrowIfNullOrEmpty(pattern);
         ArgumentNullException.ThrowIfNull(onReceive);
 
-        // Per mapped endpoint: the receive-timeout line's rate limiter.
+        // Per mapped endpoint: the receive-timeout and handshake-refusal lines' rate limiters.
         var timeoutLog = new MessageReceiveTimeoutLog();
+        var refusals = new WebSocketRefusalLog();
 
         return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
         {
@@ -592,12 +601,15 @@ public static class DidCommEndpointRouteBuilderExtensions
             var receiveOptions = httpContext.RequestServices.GetService<IOptions<DidCommReceiveOptions>>()?.Value
                                  ?? new DidCommReceiveOptions();
             var time = Clock(httpContext.RequestServices);
-            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            var loggerFactory = httpContext.RequestServices.GetService<ILoggerFactory>();
+            var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket");
+            // A handshake that fails (a server limit reached) is refused with 503, quietly.
+            using var socket = await WebSocketAccepting.AcceptAsync(httpContext, refusals, logger).ConfigureAwait(false);
+            if (socket is null)
+                return;
             using var deadline = WebSocketMessageDeadline.StartAtAccept(time, receiveOptions.MessageReceiveTimeout, timeoutLog);
             var client = httpContext.RequestServices.GetRequiredService<DidCommClient>();
             var coreOptions = httpContext.RequestServices.GetRequiredService<IOptions<DidCommOptions>>().Value;
-            var loggerFactory = httpContext.RequestServices.GetService<ILoggerFactory>();
-            var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket");
 
             await ReceiveLoopAsync(socket, client, coreOptions, receiveOptions, onReceive, deadline, logger, httpContext.RequestAborted).ConfigureAwait(false);
         });
@@ -665,6 +677,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// is already complete and a handler that defers past the acknowledgement — the mediator's
     /// <c>ForwardHandler</c> — proceeds as soon as it has admitted the message.
     /// </para>
+    /// <para>
+    /// <b>A refused handshake.</b> When the WebSocket handshake fails before the connection is
+    /// accepted, most often because a server limit such as Kestrel's
+    /// <c>Limits.MaxConcurrentUpgradedConnections</c> is reached, the request is answered
+    /// <c>503 Service Unavailable</c>. The refusal is logged by exception type only, rate-limited (the
+    /// first and every 1000th at Warning, the others at Debug), so a client retrying cannot flood the
+    /// logs. A client that goes away during the handshake gets nothing, and one Debug line.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/ws/didcomm"</c>).</param>
@@ -698,6 +718,7 @@ public static class DidCommEndpointRouteBuilderExtensions
         // Per mapped endpoint: the log rate limiters (JC-22); the JC-17 defaults are per application.
         var admissionEndpoint = new InboundAdmissionEndpoint(endpoints.ServiceProvider);
         var timeoutLog = new MessageReceiveTimeoutLog();
+        var refusals = new WebSocketRefusalLog();
 
         return endpoints.MapGet(pattern, async (HttpContext httpContext) =>
         {
@@ -715,13 +736,16 @@ public static class DidCommEndpointRouteBuilderExtensions
             // OD-8: a message received in full is still handled when its connection ends, until the
             // close grace runs out or the host starts to stop.
             var stopping = sp.GetService<IHostApplicationLifetime>()?.ApplicationStopping ?? CancellationToken.None;
-            using var socket = await httpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            var loggerFactory = sp.GetService<ILoggerFactory>();
+            var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
+            // A handshake that fails (a server limit reached) is refused with 503, quietly.
+            using var socket = await WebSocketAccepting.AcceptAsync(httpContext, refusals, logger).ConfigureAwait(false);
+            if (socket is null)
+                return;
             using var deadline = WebSocketMessageDeadline.StartAtAccept(time, receiveOptions.MessageReceiveTimeout, timeoutLog);
             var client = sp.GetRequiredService<DidCommClient>();
             var coreOptions = sp.GetRequiredService<IOptions<DidCommOptions>>().Value;
             var dispatcher = sp.GetRequiredService<ProtocolDispatcher>();
-            var loggerFactory = sp.GetService<ILoggerFactory>();
-            var logger = loggerFactory?.CreateLogger("DidComm.AspNetCore.WebSocket.Dispatch");
             var returnRoute = new WebSocketReturnRoute(
                 admissionEndpoint,
                 admissionEndpoint.ResolveGuard(sp, logger),

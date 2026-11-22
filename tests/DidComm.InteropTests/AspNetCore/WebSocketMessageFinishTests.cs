@@ -413,10 +413,11 @@ public sealed class WebSocketMessageFinishTests
             refused.Options.CollectHttpResponseDetails = true;
             using var guard = new CancellationTokenSource(Guard);
             await ((Func<Task>)(() => refused.ConnectAsync(host.UriOf(DeadlineEndpoint.Dispatch), guard.Token))).Should().ThrowAsync<WebSocketException>();
-            refused.HttpStatusCode.Should().Be(HttpStatusCode.InternalServerError);
+            refused.HttpStatusCode.Should().Be(HttpStatusCode.ServiceUnavailable, "the endpoint refuses a handshake that Kestrel's limit failed");
         }
-        Loud(host).Should().ContainSingle("Kestrel refused the upgrade, at its limit")
-            .Which.Should().Contain("Request cannot be upgraded because the server has already opened the maximum number of upgraded connections.");
+        WebSocketHandshakeRefusalTests.RefusalLines(host).Should().ContainSingle()
+            .Which.Should().Be(("DidComm.AspNetCore.WebSocket.Dispatch", LogLevel.Warning, WebSocketHandshakeRefusalTests.Refused(1)));
+        Loud(host).Should().BeEmpty("a refused handshake is not an application error, for the endpoint nor for Kestrel");
         host.EndedWebSockets.Should().Be(1, "only the refused request ended: the first one's request is still running its finish");
         KestrelStopped(host, firstConnection).Should().BeFalse("Kestrel has not ended the first connection");
         holding.Cancelled.Task.IsCompleted.Should().BeFalse("the finish is held, not cancelled");
@@ -432,7 +433,7 @@ public sealed class WebSocketMessageFinishTests
         var probe = host.Probe();
         await DeadlinePeer.SendAsync(next, await host.PackAsync(probe), endOfMessage: true);
         await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, probe.Id);
-        Loud(host).Should().ContainSingle("nothing but the refused upgrade");
+        Loud(host).Should().BeEmpty();
     }
 
     // ---- STOMP ---------------------------------------------------------------------------------------
@@ -557,7 +558,9 @@ public sealed class WebSocketMessageFinishTests
             b.Services.AddSingleton<IProtocolHandler, StoppingHandler>();
         });
         await using var _host = host;
-        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        // `using` keeps the client alive to the end: a ClientWebSocket nothing references any more can
+        // be collected, and its socket reset, before the host stops (the connection must still live).
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
         await DeadlinePeer.SendAsync(socket, await host.PackAsync(StoppingHandler.Message(host)), endOfMessage: true);
         await state.Entered.Task.WaitAsync(Guard); // waiting on the host's stopping token
         await DeadlinePeer.SendAsync(socket, await host.PackAsync(host.Probe()), endOfMessage: true); // behind it, whole
@@ -580,7 +583,9 @@ public sealed class WebSocketMessageFinishTests
             b.Services.AddSingleton<IProtocolHandler, StoppingHandler>();
         });
         await using var _host = host;
-        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        // `using` keeps the client alive to the end: a ClientWebSocket nothing references any more can
+        // be collected, and its socket reset, before the host stops (the connection must still live).
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
         await DeadlinePeer.SendAsync(socket, await host.PackAsync(StoppingHandler.Message(host)), endOfMessage: true);
         await state.Entered.Task.WaitAsync(Guard); // the handler waits on the host's stopping token
 
