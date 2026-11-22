@@ -57,8 +57,9 @@ namespace DidComm.Transports.WebSocket;
 /// A message not finished within <see cref="WebSocketTransportOptions.MessageReceiveTimeout"/> of its
 /// first part closes S with status 1008 and is dropped; the wait for the next message is never timed.
 /// The loop never sends anything but close frames. Once <see cref="DisposeAsync"/> begins, the
-/// messages pushed on a session socket are read and dropped, never handed to the consumer, and the
-/// consumer's token is cancelled. Pooled sockets are never read. Under
+/// messages pushed on a session socket are read and dropped, never handed to the consumer; the
+/// consumer's token is cancelled once the drain is done (see <see cref="DisposeAsync"/>). Pooled
+/// sockets are never read. Under
 /// <see cref="WebSocketTransportOptions.UseStomp"/> no session socket is opened.
 /// </para>
 /// <para>
@@ -1534,10 +1535,13 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <see cref="WebSocketTransportOptions.SendTimeout"/> the budget is zero and nothing is waited
     /// for. A retiring session socket has already sent its close: it is not closed again, only
     /// stopped and disposed (below).</item>
-    /// <item>From the moment this call begins, nothing more reaches the inbound consumer: every
+    /// <item>From the moment this call begins, nothing new reaches the inbound consumer: every
     /// message a peer pushes on a session socket, active or retiring, is read and dropped whole
-    /// (the rest of one being read included), and a consumer call in progress has its token
-    /// cancelled.</item>
+    /// (the rest of one being read included). A consumer call already in progress keeps its token
+    /// until the drain is done, so a reply it is sending is drained like any other send: an active
+    /// session socket's consumer has its token cancelled when that socket's close frame is sent
+    /// (it then no longer holds the loop from the peer's close), a retiring one's when the socket
+    /// is stopped below.</item>
     /// <item>Every session socket's receive loop is cancelled and awaited for at most
     /// <see cref="CloseBudget"/>. A loop held by an inbound consumer that ignores cancellation is
     /// abandoned; its socket is already disposed, and the loop raises nothing more when it ends.
@@ -1567,11 +1571,13 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
         try
         {
-            // Nothing more reaches the inbound consumer once dispose has begun: every session socket,
-            // active or retiring, drops what it reads from here on, and a consumer call in progress
-            // has its token cancelled. Outside every send gate: those callbacks are host code.
+            // Nothing new reaches the inbound consumer once dispose has begun: every session socket,
+            // active or retiring, drops what it reads from here on. A consumer call in progress keeps
+            // its token for now: a reply it is sending must be drained, not cancelled (its token is
+            // linked into that send). It is cancelled at its socket's close (CloseEndpointAsync) or
+            // when the socket is stopped below.
             foreach (var live in _liveSessionSockets.Keys)
-                live.StopSurfacing();
+                live.DiscardInbound = true;
             // Every endpoint with a gate (a send is, or was, running), a pooled socket or an active
             // session socket (session keys share the gate dictionary, JC-21).
             var keys = new HashSet<string>(_sendLocks.Keys, StringComparer.Ordinal);
@@ -1686,7 +1692,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                 // wait for the loop to read the peer's close and end. The loop then answers nothing
                 // and waits on no send gate (both skipped once dispose began), so it ends without
                 // this gate. Both steps share one CloseBudget; on expiry the finally disposes the
-                // socket under the loop, which ends it.
+                // socket under the loop, which ends it. The drain is done (this gate is held), so a
+                // consumer call in progress is cancelled now, letting the loop get back to reading;
+                // on a pool thread, since its token's callbacks are host code and this gate is held.
+                session.StopConsumerSoon();
                 using var closeCts = new CancellationTokenSource(CloseBudget);
                 await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
                 await session.LoopDone.WaitAsync(closeCts.Token).ConfigureAwait(false);
@@ -1796,7 +1805,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <para>
     /// The loop's <see cref="CancellationTokenSource"/> is cancelled only through
     /// <see cref="StopLoop"/>, and the consumer's (linked to it) only through it or
-    /// <see cref="StopSurfacing"/>; both contain whatever the callbacks registered on the tokens
+    /// <see cref="StopConsumerSoon"/>; both contain whatever the callbacks registered on the tokens
     /// throw. The consumer's token is the one the inbound consumer gets, so host code (the consumer,
     /// the dispatcher, every handler) can register callbacks on it; a callback that throws must not
     /// escape on a thread the transport does not own. That is why the backstop is a timer of its own
@@ -1818,7 +1827,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         private static readonly TimerCallback s_backstop = static state => ((SessionSocket)state!).StopLoop();
 
         private readonly CancellationTokenSource _loop = new();
-        // The consumer's token: cancelled with the loop's, or on its own by StopSurfacing (dispose), so
+        // The consumer's token: cancelled with the loop's, or on its own by StopConsumerSoon (dispose), so
         // the loop can go on reading to the peer's close once the consumer was told to stop.
         private readonly CancellationTokenSource _consumer;
         private readonly TaskCompletionSource _loopDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1863,7 +1872,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         /// <summary>Cancels the receive loop: its receives, and with them the consumer (<see cref="ConsumerToken"/>).</summary>
         public CancellationToken LoopToken { get; }
 
-        /// <summary>The token the inbound consumer gets: cancelled with <see cref="LoopToken"/>, or on its own by <see cref="StopSurfacing"/>.</summary>
+        /// <summary>The token the inbound consumer gets: cancelled with <see cref="LoopToken"/>, or on its own by <see cref="StopConsumerSoon"/>.</summary>
         public CancellationToken ConsumerToken { get; }
 
         /// <summary>Completes when the receive loop has fully ended (or never started).</summary>
@@ -1880,13 +1889,17 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         public bool TryEnd() => Interlocked.Exchange(ref _ended, 1) == 0;
 
         /// <summary>
-        /// Dispose began: drop every message read from now on, the rest of the one being read
-        /// included, and cancel the consumer's token, but not the loop's (the loop goes on reading to
-        /// the peer's close). Never throws, as <see cref="StopLoop"/> does not.
+        /// Cancel the consumer's token, but not the loop's (the loop goes on reading to the peer's
+        /// close), on a thread-pool thread without the caller's <see cref="ExecutionContext"/>: the
+        /// caller holds a send gate, and the callbacks registered on that token are host code, which
+        /// never runs under one. Never throws, and neither does the work item (see
+        /// <see cref="StopLoop"/>).
         /// </summary>
-        public void StopSurfacing()
+        public void StopConsumerSoon()
+            => ThreadPool.UnsafeQueueUserWorkItem(static socket => socket.StopConsumer(), this, preferLocal: false);
+
+        private void StopConsumer()
         {
-            DiscardInbound = true;
             try
             {
                 _consumer.Cancel();

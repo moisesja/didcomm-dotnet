@@ -76,8 +76,10 @@ public sealed class WebSocketDisposeSessionCloseTests
     public async Task A_consumer_call_in_progress_when_dispose_begins_has_its_token_cancelled_and_does_not_hold_the_close()
     {
         // The default SendTimeout (a 30 s budget). The consumer is inside a push and waits until it is
-        // cancelled. Dispose cancels it at once (the loop's own receives go on), so the loop gets back
-        // to reading, reads the peer's close, and dispose returns at that close, not at the budget.
+        // cancelled. Nothing is in flight, so the drain is over at once, and dispose cancels the
+        // consumer when the socket's close frame goes out (the loop's own receives go on): the loop
+        // gets back to reading, reads the peer's close, and dispose returns at that close, not at the
+        // budget. (A reply the consumer is sending is drained first: WebSocketDisposeConsumerReplyTests.)
         await using var t = await Live.StartAsync();
         var peer = await t.OpenAsync(Kind.Session);
         var inside = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
