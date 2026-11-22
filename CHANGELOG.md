@@ -24,10 +24,13 @@ went away, and the messages came back. Both ends now finish properly:
     that large too.
   - Why: this library's mediator answers a close only after it has handled the messages before it,
     so the acknowledgement is applied before dispose returns.
-  - What reaches your code: messages that arrive on a return-route session while dispose waits are
-    dropped, not handed to your code, as before. The session close uses the session's own receive
-    loop as its only reader. A 4.0 live push dropped this way is not acknowledged, and the mediator
-    delivers it again later.
+  - What reaches your code: dispose stops handing messages to the inbound consumer the moment it
+    begins. A session socket reads whatever the peer pushes after that and drops it, using the
+    session's own receive loop as the socket's only reader. A consumer call already running keeps
+    its cancellation token until dispose has drained the sends in flight, so a reply it is sending
+    still goes out whole and its socket is closed normally. The call is cancelled when its session
+    socket's close is sent or, if that socket was already retiring, when the socket is stopped. A
+    4.0 live push dropped this way is not acknowledged, and the mediator delivers it again later.
   - In the owner's words as put to them: "Change the released WebSocket transport so shutting down
     waits a bounded time for the mediator to answer the close, which it does only after handling
     earlier messages. Reverses a deliberate design that refuses to wait on hostile peers, in a
