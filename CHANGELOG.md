@@ -31,6 +31,18 @@ went away, and the messages came back. Both ends now finish properly:
     sending, to any endpoint, still goes out whole. Only then are all such calls cancelled, on
     active and retiring session sockets alike, before the sockets are closed. A 4.0 live push
     dropped this way is not acknowledged, and the mediator delivers it again later.
+  - A close the peer starts is always answered (review round 4; RFC 6455 §5.5.1). Disposing
+    the transport now answers a close the peer started on a return-route session socket exactly
+    once, before the socket is disposed. Before, a peer whose close arrived just as dispose began
+    could be left without an answer. A send that finds its session socket already closed by the
+    peer now only stops using it, and leaves the answer to the socket's own receive loop, or to
+    dispose once dispose has begun. Since every endpoint closes only once all of them have drained
+    their sends in flight, a fast endpoint's close waits for the slowest one.
+  - Dispose finishes even when host code throws (round 4, owner decision OD-9, "Fix forward").
+    It no longer stops part-way when a socket supplied through `WebSocketFactory`, or a logging
+    provider, throws: it always seals, sweeps and releases every connection. A session socket that
+    a send opens while dispose is under way drops whatever the peer pushes on it, like every other
+    session socket from the moment dispose begins.
   - In the owner's words as put to them: "Change the released WebSocket transport so shutting down
     waits a bounded time for the mediator to answer the close, which it does only after handling
     earlier messages. Reverses a deliberate design that refuses to wait on hostile peers, in a

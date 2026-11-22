@@ -1266,7 +1266,24 @@ Session sockets (`WebSocketDidCommTransport`):
     at once and runs the sweep. A reply a consumer is sending, to any endpoint, has been drained
     before its token can be cancelled (`WebSocketDisposeConsumerReplyTests`). No send holds one
     endpoint's gate while it waits for another's, so holding gates across the barrier cannot
-    deadlock.
+    deadlock. Since every endpoint closes only once all have drained, a fast endpoint's close
+    waits for the slowest drain.
+  - A close the peer starts is answered exactly once, before the socket is disposed (review
+    round 4; RFC 6455 §5.5.1). The single winner of `SessionSocket.TryEnd()` owns the socket's
+    end. Before dispose, the session's loop answers and ends it, as before. Once dispose has
+    begun, the loop never claims, disposes or raises `Disconnected`: it marks `LoopDone`, and the
+    socket stays in `_liveSessionSockets`. Phase 3's close is the answer for a socket the drain
+    took. For anything left, the sweep (`FinishSessionForDisposeAsync`, under one `CloseBudget`)
+    stops the loop, waits for `LoopDone`, answers a `CloseReceived` socket under its key's send
+    gate (rechecked under the gate), then disposes it. A send that finds its socket already
+    closed by the peer only takes it out of `_sessions`: it writes nothing, so its hold stays
+    connect + send, and the loop or the sweep answers. A send that fails on such a socket cannot
+    answer; its write has ended the connection.
+  - Dispose never throws and never leaves a socket behind (owner decision OD-9, "Fix forward").
+    The pooled disposals are guarded, and lifecycle-handler faults are logged through the guarded
+    log. Phases 1–3 run under a catch. A `finally` releases every drained gate, then seals the
+    pool and runs both sweeps. A session socket opened by a send while dispose is under way gets
+    `DiscardInbound` as it is published.
   - Why: this library's mediator answers a close only after it has handled the messages before it,
     so a one-way message sent just before dispose (a Message Pickup 4.0 acknowledgement) is applied
     before dispose returns. A 4.0 live push dropped during the wait is not acknowledged, and the
