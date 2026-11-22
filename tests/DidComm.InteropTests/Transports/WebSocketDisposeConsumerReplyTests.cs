@@ -14,9 +14,9 @@ namespace DidComm.InteropTests.Transports;
 /// #100 OD-7: a reply the inbound consumer is sending when dispose begins is drained, not cut off.
 /// The consumer replies with the token it was given (as a handler under <c>UseInboundDispatch()</c>
 /// does), and that token is linked into the reply's send. Dispose stops new messages reaching the
-/// consumer at once, but cancels a consumer call in progress only once the drain is done: an active
-/// session socket's consumer when that socket's close frame goes out, a retiring one's at the final
-/// sweep. So the reply reaches the peer whole and the socket it went on is closed politely. Real
+/// consumer at once, but cancels a consumer call in progress, on active and retiring session
+/// sockets alike, only once every endpoint has drained, whichever endpoint the reply goes to. So
+/// the reply reaches the peer whole and the socket it went on is closed politely. Real
 /// Kestrel peer writing raw frames; the transport's sockets are real <see cref="ClientWebSocket"/>s
 /// behind a wrapper that holds the reply's send at a gate, and aborts the socket, as a cancelled
 /// <see cref="ClientWebSocket"/> send does, if the send's token is cancelled while it is held.
@@ -93,6 +93,59 @@ public sealed class WebSocketDisposeConsumerReplyTests
         t.Consumer.Calls.Should().Be(1);
     }
 
+    [Fact]
+    public async Task A_reply_to_another_endpoint_that_is_still_draining_when_dispose_begins_reaches_it_whole_and_every_close_is_polite()
+    {
+        // The consumer of session socket A replies to another endpoint, B (a pooled socket of its
+        // own), with its own token. The reply is on a slow link: it holds B's send gate for
+        // SlowLink. A's drain has nothing to wait for, B's waits for the reply: no consumer token may
+        // be cancelled until every endpoint has drained, or this reply, still in flight on B, is cut
+        // off. The only real time is the link's speed; the correct order does not depend on it.
+        var held = new HeldReply(SlowLink);
+        await using var t = await Live.StartAsync(o =>
+        {
+            var factory = o.WebSocketFactory!;
+            o.WebSocketFactory = () => new HeldReplyWebSocket((ClientWebSocket)factory(), held);
+            o.Connect = (socket, uri, ct) => ((HeldReplyWebSocket)socket).Inner.ConnectAsync(uri, ct);
+        });
+        var a = await t.OpenAsync(Kind.Session);
+        var endpointB = new Uri(t.Peer.Endpoint + "?endpoint=b");
+
+        Task<TransportResult>? replying = null;
+        t.Consumer.Behavior = (frame, _, ct) =>
+        {
+            if (Encoding.UTF8.GetString(frame.Payload.Span) != "request")
+                return ValueTask.CompletedTask;
+            replying = t.Transport.SendAsync(new TransportRequest(endpointB, Encoding.UTF8.GetBytes(Reply), MediaTypes.Encrypted), ct);
+            return new ValueTask(replying);
+        };
+        await a.SendTextAsync(Encoding.UTF8.GetBytes("request"), endOfMessage: true);
+        var b = await t.Peer.NextConnectionAsync(Guard);
+        await held.Entered.WaitAsync(Guard);
+
+        var dispose = t.Transport.DisposeAsync().AsTask();
+
+        Encoding.UTF8.GetString(await b.NextMessageAsync(Guard)).Should().Be(Reply, "B's drain let the reply finish: nothing cancelled it while it was in flight");
+        var closeB = await WebSocketDisposeCloseWaitTests.NextCloseAsync(b);
+        closeB.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure, "B is closed politely, not aborted");
+        var closeA = await WebSocketDisposeCloseWaitTests.NextCloseAsync(a);
+        closeA.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure, "A is closed politely");
+        foreach (var peer in new[] { a, b })
+        {
+            await peer.SendCloseAsync(WebSocketCloseStatus.NormalClosure, "bye");
+            peer.End();
+        }
+
+        await dispose.WaitAsync(Guard);
+        (await replying!.WaitAsync(Guard)).Accepted.Should().BeTrue("the consumer's reply send completed");
+        held.CancelledWhileHeld.Should().BeFalse();
+        t.Sockets.Should().HaveCount(2).And.OnlyContain(s => s.State == WebSocketState.Closed, "both close handshakes completed");
+        t.Events.Count(e => e == DidComm.Transports.WebSocket.WebSocketLifecycleEventKind.Disconnected).Should().Be(2, "one Disconnected per socket");
+    }
+
+    // The reply's link speed in the cross-endpoint test: the reply holds B's gate this long.
+    private static readonly TimeSpan SlowLink = TimeSpan.FromMilliseconds(500);
+
     // To the peer, between the DIDs the session socket was opened for (Live.OpenAsync's).
     private static TransportRequest Request(Live t, string text, ReturnRouteMode? mode)
         => new(t.Peer.Endpoint, Encoding.UTF8.GetBytes(text), MediaTypes.Encrypted)
@@ -103,7 +156,7 @@ public sealed class WebSocketDisposeConsumerReplyTests
         };
 
     /// <summary>The held reply's gate, shared by every socket the transport opens.</summary>
-    private sealed class HeldReply
+    private sealed class HeldReply(TimeSpan? slowLink = null)
     {
         private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -121,7 +174,10 @@ public sealed class WebSocketDisposeConsumerReplyTests
             _entered.TrySetResult();
             try
             {
-                await _release.Task.WaitAsync(ct).ConfigureAwait(false);
+                if (slowLink is { } delay)
+                    await Task.Delay(delay, ct).ConfigureAwait(false);
+                else
+                    await _release.Task.WaitAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
