@@ -54,6 +54,7 @@ public sealed class WebSocketDisposeCloseWaitRedTeamTests
                 $"'{Encoding.UTF8.GetString(payload, Math.Max(0, payload.Length - 8), Math.Min(8, payload.Length))}'; " +
                 $"the peer sent {string.Join(", ", sent.Select(m => m.Length))} bytes)");
         }
+        t.Consumer.Calls.Should().Be(0, "once dispose began the consumer gets no message at all: every push is dropped whole");
     }
 
     [Fact]

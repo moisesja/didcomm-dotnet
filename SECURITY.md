@@ -85,7 +85,9 @@ needs these limits on top of the library's own:
   `Limits.MaxConcurrentConnections` (an upgraded connection no longer counts against the second),
   and put a concurrency limiter partitioned by client in front of the WebSocket endpoint: a
   WebSocket holds its permit for its whole life, while a fixed-window limiter counts connection
-  attempts, not open sockets. Lower `Limits.MaxRequestBufferSize` (for example to 64 KiB): after a
+  attempts, not open sockets. A client refused at the upgrade limit gets `503 Service Unavailable`,
+  and the library logs the refusal by exception type only, rate-limited (the first and every 1000th
+  at Warning, the rest at Debug). Lower `Limits.MaxRequestBufferSize` (for example to 64 KiB): after a
   connection's first message the library no longer times it, so a peer that stops reading what the
   server sends can leave up to that much of its input buffered per connection, for as long as the
   connection lives.
