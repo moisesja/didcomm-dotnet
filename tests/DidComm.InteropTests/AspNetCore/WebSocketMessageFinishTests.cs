@@ -12,6 +12,7 @@ using DidComm.Transports.ReturnRoute;
 using DidComm.Transports.Stomp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -385,7 +386,8 @@ public sealed class WebSocketMessageFinishTests
         var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
 
         var mark = host.Time.Mark();
-        await DeadlinePeer.SendAsync(socket, await host.PackAsync(TimingOutHandler.Message(host)), endOfMessage: true);
+        var timingOut = TimingOutHandler.Message(host);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(timingOut), endOfMessage: true);
         await host.Time.WaitForTimerAsync(mark, TimingOutHandler.OwnTimeout, Guard); // the handler's own timeout runs
         await state.Entered.Task.WaitAsync(Guard);
         var fired = host.Time.TimersFired;
@@ -398,12 +400,60 @@ public sealed class WebSocketMessageFinishTests
         await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, next.Id);
         socket.State.Should().Be(WebSocketState.Open, "a handler's own cancellation does not end the connection");
         host.EndedWebSockets.Should().Be(0);
-        host.Logs.Records.Should().ContainSingle(r => r.Level == LogLevel.Warning && r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal));
+        // Exactly what the line carries: the message id (LogValues.Id) and two exception type names.
+        host.Logs.Records.Where(r => r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be((LogLevel.Warning,
+                $"MapDidCommWebSocket: inbound {timingOut.Id}: the handler was cancelled by a token of its own (TaskCanceledException, innermost: TaskCanceledException); dropping inbound and continuing."));
         using (var guard = new CancellationTokenSource(Guard))
             await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", guard.Token);
         socket.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure, "the connection still answers a close");
         await host.WaitEndedWebSocketsAsync(1);
         Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_client_abort_during_a_handler_that_then_throws_a_cancellation_ends_the_loop_and_is_not_reported_as_the_handlers_own()
+    {
+        var (host, _, holding) = await StartAsync();
+        await using var _host = host;
+        holding.ThrowOwnCancellation = true;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(host.Probe()), endOfMessage: true); // behind it, whole
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // the finish is under way
+        holding.Release(); // the handler now throws an OperationCanceledException of its own
+
+        await host.WaitEndedWebSocketsAsync(1);
+        host.Recorder.Invocations.Should().Be(0, "the loop ended: nothing more was read");
+        host.Logs.Records.Should().NotContain(r => r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal),
+            "once the peer left, a handler's cancellation ends the loop as before; it is not skipped as the handler's own fault");
+        Loud(host).Should().BeEmpty("after a client abort the cancellation is the request's: Debug, as before");
+    }
+
+    [Fact]
+    public async Task A_host_shutdown_during_a_handler_that_throws_its_cancellation_ends_the_loop()
+    {
+        var state = new StoppingState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, StoppingHandler>();
+        });
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(StoppingHandler.Message(host)), endOfMessage: true);
+        await state.Entered.Task.WaitAsync(Guard); // waiting on the host's stopping token
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(host.Probe()), endOfMessage: true); // behind it, whole
+
+        host.App.Lifetime.StopApplication(); // the connection is still open
+        await state.Cancelled.Task.WaitAsync(Guard);
+        await host.WaitEndedWebSocketsAsync(1);
+        host.Recorder.Invocations.Should().Be(0, "the loop ended: nothing more was read");
+        host.Logs.Records.Should().NotContain(r => r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal),
+            "while the host stops, a handler's cancellation ends the loop as before; it is not skipped as the handler's own fault");
     }
 
     // ---- the handling token outlives each message and ends with the connection (I4) ------------------
@@ -640,6 +690,9 @@ internal sealed class HoldingHandler : IProtocolHandler
 
     public int Invocations => Volatile.Read(ref _invocations);
 
+    /// <summary>Once released, throw an <see cref="OperationCanceledException"/> of its own (tied to none of the loop's tokens).</summary>
+    public bool ThrowOwnCancellation { get; set; }
+
     public void Release() => _release.TrySetResult();
 
     public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
@@ -655,12 +708,56 @@ internal sealed class HoldingHandler : IProtocolHandler
             Cancelled.TrySetResult();
             throw;
         }
+        if (ThrowOwnCancellation)
+            throw new OperationCanceledException("The handler's own cancellation.");
         var (push, reply) = Behavior?.Invoke(context) ?? (null, null);
         bool? pushed = null;
         if (push is not null && context.Session is not null)
             pushed = await context.Session.TrySendAsync(push, ct);
         Handled.TrySetResult(pushed);
         return reply;
+    }
+}
+
+/// <summary>What the <see cref="StoppingHandler"/> did.</summary>
+internal sealed class StoppingState
+{
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+/// <summary>
+/// A protocol handler that waits on the host's stopping token (as a handler that stops its own work
+/// when the host stops does) and lets that cancellation escape.
+/// </summary>
+internal sealed class StoppingHandler(StoppingState state, IHostApplicationLifetime lifetime) : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8-stopping/1.0";
+
+    public string ProtocolUri => Piuri;
+
+    public static Message Message(DeadlineKestrelHost host)
+        => new MessageBuilder()
+            .WithType(Piuri + "/wait")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+
+    public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        state.Entered.TrySetResult();
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, lifetime.ApplicationStopping);
+        }
+        catch (OperationCanceledException)
+        {
+            state.Cancelled.TrySetResult();
+            throw;
+        }
+        return null;
     }
 }
 

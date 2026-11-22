@@ -986,7 +986,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                     SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: inbound {MessageId}: handler bug (FR-THR-04 rule 2, {ExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name);
                     continue;
                 }
-                catch (OperationCanceledException ex) when (!handlingToken.IsCancellationRequested)
+                catch (OperationCanceledException ex) when (!handlingToken.IsCancellationRequested
+                                                            && !ct.IsCancellationRequested
+                                                            && !stopping.IsCancellationRequested)
                 {
                     // A cancellation the handler raised from a token of its own (its own timeout: a
                     // DID-resolution or HTTP timeout arrives as a TaskCanceledException with the
@@ -994,7 +996,10 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // connection: skipped, and the connection and its next message carry on. Warning,
                     // as on the unpack path above, because a peer can cause it (a DID that resolves
                     // slowly). It used to escape the loop and end the connection as an unhandled
-                    // exception.
+                    // exception. Only while the connection lives and the host is not stopping: once
+                    // the connection ended (the peer left, or the session ended it) or the host is
+                    // stopping, a handler's cancellation is about that, and it propagates and ends the
+                    // loop as before.
                     SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: inbound {MessageId}: the handler was cancelled by a token of its own ({ExceptionType}, innermost: {InnerExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
