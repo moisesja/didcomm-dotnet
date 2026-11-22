@@ -64,6 +64,17 @@ went away, and the messages came back. Both ends now finish properly:
   quietly** (found in review round 3; no issue covered it). A handler that stops with the host
   throws its cancellation. Before, that escaped as an unhandled-exception Error from the server.
   Now it is one Debug line.
+- **`DidComm.AspNetCore`: a WebSocket handshake refused at a server limit now answers `503`,
+  quietly** (found in review round 4; no issue covered it).
+  - When: the handshake fails before the connection is accepted, most often because Kestrel's
+    `Limits.MaxConcurrentUpgradedConnections` is reached.
+  - Where: both `MapDidCommWebSocket` overloads and `MapDidCommMediator`'s WebSocket endpoint.
+  - What the client gets: `503 Service Unavailable`, without the handshake's headers. Before, the
+    exception escaped, and Kestrel answered `500` and logged an Error with a stack trace on every
+    attempt.
+  - Logging: the refusal is logged by exception type only, the first and every 1000th at Warning
+    and the rest at Debug. A client that goes away during the handshake gets no response and one
+    Debug line.
 - **What is still exposed:** an abrupt drop before the message is complete, or a mediator slower
   than these bounds, can still mean the messages come back (delivery is at-least-once). The same
   applies to a mediator that drops the work of a closed connection.
