@@ -695,33 +695,26 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
                     {
                         session = current;
                     }
+                    else if (current.Socket.State == WebSocketState.CloseReceived)
+                    {
+                        // The peer's close was read (a receiver eviction, say) and the loop has not
+                        // answered it yet: never send on it again. Only routing changes here. The
+                        // socket's end, the answer to that close included (RFC 6455 §5.5.1), stays
+                        // with its own loop, which reads that close and answers it under this gate
+                        // once it is free, or with dispose's sweep once dispose has begun (TryEnd
+                        // decides). This send writes nothing on it, so its hold stays connect + send,
+                        // inside DrainBudget.
+                        _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, current));
+                    }
                     else
                     {
-                        // Closed under us (the peer's close frame, e.g. a receiver eviction, not yet
-                        // handled by the loop; or a dead connection): never send on it again. When this
-                        // send ends the socket (TryEnd) and the peer's close was read, it answers that
-                        // close before it disposes the socket, under the gate it already holds, so the
-                        // answer overlaps no send (RFC 6455 §5.5.1); the loop, which then finds the
-                        // socket closed, answers nothing.
+                        // A dead connection (aborted under us): never send on it again. Nothing can be
+                        // answered on it, so it ends now.
                         _sessions.TryRemove(new KeyValuePair<string, SessionSocket>(sessionKey, current));
+                        current.DisposeSocket();
                         (toStop ??= new()).Add(current);
                         if (current.TryEnd())
-                        {
-                            if (current.Socket.State == WebSocketState.CloseReceived)
-                            {
-                                try
-                                {
-                                    using var closeCts = new CancellationTokenSource(CloseGrace);
-                                    await current.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "return-route session closed", closeCts.Token).ConfigureAwait(false);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log(LogLevel.Debug, "WebSocketDidCommTransport: answering a return-route session socket's close failed ({ExceptionType}).", ex.GetType().Name);
-                                }
-                            }
-                            current.DisposeSocket();
                             (pending ??= new()).Add((WebSocketLifecycleEventKind.Disconnected, null));
-                        }
                     }
                 }
 
@@ -819,6 +812,12 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             session.MarkLoopDone();
             throw new ObjectDisposedException(nameof(WebSocketDidCommTransport));
         }
+        // A send past the entry check can still open a socket once dispose has begun (it held its
+        // gate). Published BEFORE this read, and dispose sets the flag BEFORE it marks every live
+        // socket as dropping: at least one side sees the other, so nothing this socket reads reaches
+        // the consumer either way.
+        if (_disposed)
+            session.DiscardInbound = true;
 
         StartReceiveLoop(session);
         if (!_receiveInbound && Interlocked.Exchange(ref _discardNotice, 1) == 0)
@@ -1185,9 +1184,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         finally
         {
             // Read once, after the answer attempt: before dispose the loop ends the socket unless
-            // another party already did (a send that found it closed or failed on it); once dispose
-            // has begun the socket is dispose's, so a close the peer started is answered before the
-            // socket is disposed, by exactly one party (TryEnd).
+            // another party already did (a send that failed on it or found the connection dead);
+            // once dispose has begun the socket is dispose's, so a close the peer started is answered
+            // before the socket is disposed, by exactly one party (TryEnd).
             var disposing = _disposed;
             try
             {
@@ -1498,8 +1497,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             catch (Exception ex)
             {
                 // Lifecycle handlers must never break the transport. Swallow + log so the host's
-                // observability defect can't cascade into a delivery failure.
-                _logger.LogWarning(ex, "WebSocketDidCommTransport: lifecycle handler threw {Kind}", kind);
+                // observability defect can't cascade into a delivery failure; through the guarded Log,
+                // by type name, since a logging provider is host code too.
+                Log(LogLevel.Warning, "WebSocketDidCommTransport: a lifecycle handler threw {ExceptionType} ({Kind}).", ex.GetType().Name, kind);
             }
         }
     }
@@ -1592,9 +1592,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// any socket is closed: it then no longer keeps its loop from the peer's close.</item>
     /// <item>A close the peer started on a session socket is answered exactly once, and the socket
     /// is disposed only after that answer was written, unless its budget ran out first (or a failed
-    /// send had already ended the connection): by the receive loop before this call began, by a
-    /// send that finds the socket closed, or by this call (its close phase for a socket it drained,
-    /// its sweep for one the loop took).</item>
+    /// send had already ended the connection): by the receive loop before this call began, or by
+    /// this call (its close phase for a socket it drained, its sweep for one the loop, or a send that
+    /// found the socket closed, took out of routing). A send that finds the socket closed by the peer
+    /// writes nothing on it: it only stops routing to it.</item>
     /// <item>Every session socket's receive loop is cancelled and awaited for at most
     /// <see cref="CloseBudget"/>. A loop held by an inbound consumer that ignores cancellation is
     /// abandoned; its socket is disposed when the budget runs out, and the loop touches nothing
@@ -1606,6 +1607,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// once) or how unresponsive the peers are (every network write here, and every wait for a
     /// peer's close, is cancellation-bounded). Since every endpoint closes only once all have
     /// drained, a fast endpoint's close waits for the slowest drain.</item>
+    /// <item>It never throws, and it always ends with the seal and the sweeps: a socket (a host's
+    /// <see cref="WebSocketTransportOptions.WebSocketFactory"/>) or a logging provider that throws
+    /// does not stop the teardown, and a gate an endpoint drained is always released.</item>
     /// <item>It is idempotent and concurrency-safe: the first caller tears down, the rest wait.</item>
     /// </list>
     /// </summary>
@@ -1624,88 +1628,150 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             return;
         }
 
+        EndpointTeardown[]? drained = null;
         try
         {
-            // Nothing new reaches the inbound consumer once dispose has begun: every session socket,
-            // active or retiring, drops what it reads from here on. A consumer call in progress keeps
-            // its token for now: a reply it is sending, to any endpoint, must be drained, not
-            // cancelled (its token is linked into that send).
-            foreach (var live in _liveSessionSockets.Keys)
-                live.DiscardInbound = true;
-            // Every endpoint with a gate (a send is, or was, running), a pooled socket or an active
-            // session socket (session keys share the gate dictionary, JC-21).
-            var keys = new HashSet<string>(_sendLocks.Keys, StringComparer.Ordinal);
-            keys.UnionWith(_pool.Keys);
-            keys.UnionWith(_sessions.Keys);
-            // Phase 1, every endpoint at once (a serial drain made N unresponsive endpoints cost
-            // N × budget): drain its in-flight send and take its socket. Each keeps its gate, once it
-            // has it, until its socket's close. No send holds one gate while it waits for another,
-            // and one that starts now fails at the entry check, so holding gates across the phases
-            // cannot deadlock.
-            var drained = await Task.WhenAll(keys.Select(DrainEndpointAsync)).ConfigureAwait(false);
-            // Phase 2, once every drain has finished or used up its budget: cancel every consumer call
-            // in progress, on active and retiring session sockets alike. Until now none was, so a
-            // reply a consumer was sending, to whichever endpoint, has been drained. Its token's
-            // callbacks are host code and the drained gates are held: on pool threads.
-            foreach (var live in _liveSessionSockets.Keys)
-                live.StopConsumerSoon();
-            // Phase 3, every endpoint at once: close its socket and release its gate.
-            var disconnected = await Task.WhenAll(drained.Select(CloseEndpointAsync)).ConfigureAwait(false);
-            // Raised here, not inside the per-endpoint tasks, so handlers are never invoked
-            // concurrently (or under a send gate) — the guarantee the serial loop gave for free.
-            foreach (var endpoint in disconnected)
+            await TearDownEndpointsAsync(teardowns => drained = teardowns).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The phases never throw by design (every per-endpoint step catches what it throws, host
+            // sockets and logging included); should one, dispose itself still does not throw.
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: ignoring a teardown exception during dispose ({ExceptionType}).", ex.GetType().Name);
+        }
+        finally
+        {
+            try
+            {
+                // A gate an endpoint drained is released by its close; one whose close never ran (a
+                // phase that threw) is released here, so no gate stays held.
+                if (drained is not null)
+                {
+                    foreach (var teardown in drained)
+                        teardown.ReleaseGate();
+                }
+                // Whatever the phases did: the seal and the sweeps run, so no socket is left behind.
+                await SweepAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _disposeCompleted.TrySetResult();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Dispose's three phases over every endpoint: drain, cancel the consumers, close. Each
+    /// per-endpoint step catches what it throws; <paramref name="onDrained"/> receives the drained
+    /// endpoints as soon as phase 1 is over, so the caller can release any gate a later phase did not.
+    /// </summary>
+    /// <param name="onDrained">Receives phase 1's result.</param>
+    private async Task TearDownEndpointsAsync(Action<EndpointTeardown[]> onDrained)
+    {
+        // Nothing new reaches the inbound consumer once dispose has begun: every session socket,
+        // active or retiring, drops what it reads from here on. A consumer call in progress keeps
+        // its token for now: a reply it is sending, to any endpoint, must be drained, not
+        // cancelled (its token is linked into that send).
+        foreach (var live in _liveSessionSockets.Keys)
+            live.DiscardInbound = true;
+        // Every endpoint with a gate (a send is, or was, running), a pooled socket or an active
+        // session socket (session keys share the gate dictionary, JC-21).
+        var keys = new HashSet<string>(_sendLocks.Keys, StringComparer.Ordinal);
+        keys.UnionWith(_pool.Keys);
+        keys.UnionWith(_sessions.Keys);
+        // Phase 1, every endpoint at once (a serial drain made N unresponsive endpoints cost
+        // N × budget): drain its in-flight send and take its socket. Each keeps its gate, once it
+        // has it, until its socket's close. No send holds one gate while it waits for another,
+        // and one that starts now fails at the entry check, so holding gates across the phases
+        // cannot deadlock.
+        var drained = await Task.WhenAll(keys.Select(DrainEndpointAsync)).ConfigureAwait(false);
+        onDrained(drained);
+        // Phase 2, once every drain has finished or used up its budget: cancel every consumer call
+        // in progress, on active and retiring session sockets alike. Until now none was, so a
+        // reply a consumer was sending, to whichever endpoint, has been drained. Its token's
+        // callbacks are host code and the drained gates are held: on pool threads.
+        foreach (var live in _liveSessionSockets.Keys)
+            live.StopConsumerSoon();
+        // Phase 3, every endpoint at once: close its socket and release its gate.
+        var disconnected = await Task.WhenAll(drained.Select(CloseEndpointAsync)).ConfigureAwait(false);
+        // Raised here, not inside the per-endpoint tasks, so handlers are never invoked
+        // concurrently (or under a send gate) — the guarantee the serial loop gave for free.
+        foreach (var endpoint in disconnected)
+        {
+            if (endpoint is not null)
+                RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, endpoint);
+        }
+    }
+
+    /// <summary>
+    /// The end of dispose, whatever its phases did: seal, sweep the pool and the session sockets
+    /// still left, and release the idle gates. Never throws.
+    /// </summary>
+    private async Task SweepAsync()
+    {
+        // Seal BEFORE the sweep: a send whose drain budget expired publishes its socket and
+        // then reads this flag, so ordering the seal first makes it impossible for both the
+        // sweep and the late writer to miss the entry (see GetOrConnectAsync).
+        _poolSealed = true;
+        foreach (var key in _pool.Keys)
+        {
+            if (_pool.TryRemove(key, out var leftover))
+                DisposeQuietly(leftover);
+        }
+
+        // The sweep, after the seal like the pool's: every session socket still left. An active
+        // one the drain could not reach; a retiring one (no longer in _sessions, still reading);
+        // and one whose loop took it out of _sessions once dispose had begun (it reads the peer's
+        // close and leaves the socket here, unanswered, for dispose). Each is stopped, its loop
+        // awaited, a close the peer started answered under the key's send gate, and the socket
+        // disposed, all within one CloseBudget: a loop held by a consumer that ignores
+        // cancellation is abandoned, its socket disposed at the budget.
+        var leftovers = new HashSet<SessionSocket>();
+        foreach (var key in _sessions.Keys)
+        {
+            if (_sessions.TryRemove(key, out var active))
+                leftovers.Add(active);
+        }
+        foreach (var live in _liveSessionSockets.Keys)
+            leftovers.Add(live);
+        if (leftovers.Count > 0)
+        {
+            using var sweep = new CancellationTokenSource(CloseBudget);
+            var ended = await Task.WhenAll(leftovers.Select(s => FinishSessionForDisposeAsync(s, sweep.Token))).ConfigureAwait(false);
+            // Raised here, with no gate held and one at a time, as for the close phase.
+            foreach (var endpoint in ended)
             {
                 if (endpoint is not null)
                     RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, endpoint);
             }
+            var abandoned = leftovers.Count(s => !s.LoopDone.IsCompleted);
+            if (abandoned > 0)
+                Log(LogLevel.Debug, "WebSocketDidCommTransport: {Count} return-route session receive loop(s) did not end within the close budget; abandoned.", abandoned);
+        }
 
-            // Seal BEFORE the sweep: a send whose drain budget expired publishes its socket and
-            // then reads this flag, so ordering the seal first makes it impossible for both the
-            // sweep and the late writer to miss the entry (see GetOrConnectAsync).
-            _poolSealed = true;
-            foreach (var key in _pool.Keys)
-            {
-                if (_pool.TryRemove(key, out var leftover))
-                    leftover.Dispose();
-            }
-
-            // The sweep, after the seal like the pool's: every session socket still left. An active
-            // one the drain could not reach; a retiring one (no longer in _sessions, still reading);
-            // and one whose loop took it out of _sessions once dispose had begun (it reads the peer's
-            // close and leaves the socket here, unanswered, for dispose). Each is stopped, its loop
-            // awaited, a close the peer started answered under the key's send gate, and the socket
-            // disposed, all within one CloseBudget: a loop held by a consumer that ignores
-            // cancellation is abandoned, its socket disposed at the budget.
-            var leftovers = new HashSet<SessionSocket>();
-            foreach (var key in _sessions.Keys)
-            {
-                if (_sessions.TryRemove(key, out var active))
-                    leftovers.Add(active);
-            }
-            foreach (var live in _liveSessionSockets.Keys)
-                leftovers.Add(live);
-            if (leftovers.Count > 0)
-            {
-                using var sweep = new CancellationTokenSource(CloseBudget);
-                var ended = await Task.WhenAll(leftovers.Select(s => FinishSessionForDisposeAsync(s, sweep.Token))).ConfigureAwait(false);
-                // Raised here, with no gate held and one at a time, as for the close phase.
-                foreach (var endpoint in ended)
-                {
-                    if (endpoint is not null)
-                        RaiseLifecycle(WebSocketLifecycleEventKind.Disconnected, endpoint);
-                }
-                var abandoned = leftovers.Count(s => !s.LoopDone.IsCompleted);
-                if (abandoned > 0)
-                    Log(LogLevel.Debug, "WebSocketDidCommTransport: {Count} return-route session receive loop(s) did not end within the close budget; abandoned.", abandoned);
-            }
-
+        try
+        {
             DisposeIdleGates(_connectLocks);
             DisposeIdleGates(_sendLocks);
             _pinnedInvoker.Dispose();
         }
-        finally
+        catch (Exception ex)
         {
-            _disposeCompleted.TrySetResult();
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: ignoring a cleanup exception during dispose ({ExceptionType}).", ex.GetType().Name);
+        }
+    }
+
+    /// <summary>Dispose a pooled socket. Never throws: a socket implementation (a host's <c>WebSocketFactory</c>) that throws on dispose is closed as far as we are concerned.</summary>
+    /// <param name="socket">The socket.</param>
+    private static void DisposeQuietly(System.Net.WebSockets.WebSocket socket)
+    {
+        try
+        {
+            socket.Dispose();
+        }
+        catch
+        {
+            // See the summary.
         }
     }
 
@@ -1732,6 +1798,15 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
         /// <summary>Whether this teardown claimed the session socket's end (and so reports it).</summary>
         public bool SessionEnded { get; set; }
+
+        private int _gateReleased;
+
+        /// <summary>Release <see cref="Gate"/> when the drain acquired it and it has not been released yet (idempotent).</summary>
+        public void ReleaseGate()
+        {
+            if (GateHeld && Interlocked.Exchange(ref _gateReleased, 1) == 0)
+                Gate!.Release();
+        }
     }
 
     /// <summary>
@@ -1851,10 +1926,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
         finally
         {
-            socket?.Dispose();
+            if (socket is not null)
+                DisposeQuietly(socket);
             session?.DisposeSocket();
-            if (teardown.GateHeld)
-                teardown.Gate!.Release();
+            teardown.ReleaseGate();
             // After the release: stopping the loop runs the consumer's cancellation callbacks, which
             // never run under a send gate.
             session?.StopLoop();
