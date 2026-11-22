@@ -406,6 +406,56 @@ public sealed class WebSocketMessageFinishTests
         Loud(host).Should().BeEmpty();
     }
 
+    // ---- the handling token outlives each message and ends with the connection (I4) ------------------
+
+    public enum ConnectionEnd
+    {
+        /// <summary>The peer closes the connection normally (a close frame, answered).</summary>
+        NormalClose,
+
+        /// <summary>The peer drops the connection without a close frame.</summary>
+        Abort,
+    }
+
+    public static TheoryData<ConnectionEnd> Ends => new() { ConnectionEnd.NormalClose, ConnectionEnd.Abort };
+
+    [Theory]
+    [MemberData(nameof(Ends))]
+    public async Task Work_a_handler_leaves_running_with_its_token_is_cancelled_when_the_connection_ends_and_not_when_its_dispatch_returns(ConnectionEnd end)
+    {
+        var state = new BackgroundWorkState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, BackgroundWorkHandler>();
+        });
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(BackgroundWorkHandler.Message(host)), endOfMessage: true);
+        var token = await state.Started.Task.WaitAsync(Guard);
+
+        // The dispatch returned and the loop went on to the next message: the work's token is not cancelled.
+        var next = host.Probe();
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(next), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, next.Id);
+        token.IsCancellationRequested.Should().BeFalse("a message's work is not cut off when its dispatch returns");
+        state.Cancelled.Task.IsCompleted.Should().BeFalse();
+
+        if (end == ConnectionEnd.NormalClose)
+        {
+            using var guard = new CancellationTokenSource(Guard);
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", guard.Token);
+        }
+        else
+        {
+            socket.Abort();
+        }
+        await host.WaitEndedWebSocketsAsync(1);
+        await state.Cancelled.Task.WaitAsync(Guard); // the work saw its token cancelled
+        token.IsCancellationRequested.Should().BeTrue("the handling token ends with the connection's receive loop");
+        Loud(host).Should().BeEmpty();
+    }
+
     // ---- harness -------------------------------------------------------------------------------------
 
     internal static async Task<(DeadlineKestrelHost Host, AckDelayingStore Store, HoldingHandler Holding)> StartAsync(Action<DeadlineKestrelHostOptions>? configure = null)
@@ -611,6 +661,52 @@ internal sealed class HoldingHandler : IProtocolHandler
             pushed = await context.Session.TrySendAsync(push, ct);
         Handled.TrySetResult(pushed);
         return reply;
+    }
+}
+
+/// <summary>What the <see cref="BackgroundWorkHandler"/> started.</summary>
+internal sealed class BackgroundWorkState
+{
+    /// <summary>The work started; the value is the token it was given (the handler's).</summary>
+    public TaskCompletionSource<CancellationToken> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>The work saw its token cancelled.</summary>
+    public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+/// <summary>
+/// A protocol handler that starts work with its token, leaves it running and returns at once: the
+/// work ends only when that token is cancelled.
+/// </summary>
+internal sealed class BackgroundWorkHandler(BackgroundWorkState state) : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8-background/1.0";
+
+    public string ProtocolUri => Piuri;
+
+    public static Message Message(DeadlineKestrelHost host)
+        => new MessageBuilder()
+            .WithType(Piuri + "/start")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+
+    public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                state.Cancelled.TrySetResult();
+            }
+        });
+        state.Started.TrySetResult(ct);
+        return Task.FromResult<Message?>(null);
     }
 }
 

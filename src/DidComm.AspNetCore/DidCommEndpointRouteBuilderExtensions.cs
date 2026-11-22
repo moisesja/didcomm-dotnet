@@ -643,9 +643,11 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// </para>
     /// <para>
     /// <b>A message received in full is handled even when the connection ends.</b> Once a message's
-    /// last frame has been read, its unpack, admission, dispatch and reply run under a token of their
-    /// own, not the request's abort. While the connection lives nothing cancels that token: a handler
-    /// has no time limit of its own. When the connection ends with the message in hand (the peer
+    /// last frame has been read, its unpack, admission, dispatch and reply run under the connection's
+    /// handling token, not the request's abort. It is one token per connection: work a handler starts
+    /// with it and leaves running is cancelled when the connection's receive loop ends, however the
+    /// connection ended (a normal close too). While the connection lives nothing cancels that token: a
+    /// handler has no time limit of its own. When the connection ends with the message in hand (the peer
     /// dropped it, or the server ended it: a broken socket, or an evicted peer that did not answer the
     /// close frame), the message is still handled, for at most the close grace (5 s, timed on the
     /// container's <see cref="TimeProvider"/>) and only until the host starts to stop
@@ -756,11 +758,14 @@ public static class DidCommEndpointRouteBuilderExtensions
     {
         // The connection's own token: cancelled by a client abort, or by the session when the socket
         // is broken (writer fault) or an evicted peer never answers the close frame (JC-21). Reads use
-        // it, so once it is cancelled nothing more is read. A message already received in full is
-        // handled under a token of its own (WebSocketMessageHandling, #100 OD-8), which any of these
-        // ends does not cancel: from then on its handling has the close grace, or until the host stops.
+        // it, so once it is cancelled nothing more is read. The messages are handled under the
+        // connection's handling token (WebSocketMessageHandling, #100 OD-8), which none of these ends
+        // cancels: a message in hand when the connection ends still has the close grace, or until the
+        // host stops. The loop's finally cancels it first thing, so no handler work outlives the loop.
         using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
         var ct = connectionCts.Token;
+        var handling = WebSocketMessageHandling.Start(ct, time, WebSocketReturnRouteSession.DefaultCloseGrace, stopping, logger);
+        var handlingToken = handling.Token;
         var maxBytes = coreOptions.MaxReceiveBytes;
         // FR-TRN-12: opt-in STOMP session for this connection. The MaxReceiveBytes 1009 close
         // below still applies to the whole (framed) message BEFORE any STOMP decoding.
@@ -846,12 +851,12 @@ public static class DidCommEndpointRouteBuilderExtensions
                 deadline.MessageReceived();
 
                 // #100 OD-8: everything done for this message from here — its STOMP frame, unpack,
-                // admission, dispatch and reply — runs under its own token, not the connection's. If
-                // the connection ends now (the peer dropped it, or the session ended it), the message is
-                // still handled: from that moment it has the close grace (5 s, on the container's clock),
-                // or until the host starts to stop. While the connection lives nothing cancels it.
-                using var handling = WebSocketMessageHandling.Start(ct, time, WebSocketReturnRouteSession.DefaultCloseGrace, stopping, logger);
-                var handlingToken = handling.Token;
+                // admission, dispatch and reply — runs under the handling token, not the connection's.
+                // If the connection ends while the message is in hand (the peer dropped it, or the
+                // session ended it), the message is still handled: from that moment it has the close
+                // grace (5 s, on the container's clock), or until the host starts to stop. While the
+                // connection lives nothing cancels the token.
+                using var inHand = handling.BeginMessage();
 
                 string packed;
                 if (stomp is not null)
@@ -1033,6 +1038,9 @@ public static class DidCommEndpointRouteBuilderExtensions
         }
         finally
         {
+            // The connection's work is over: whatever handler work is still running under the
+            // handling token is cancelled now, however the connection ended (OD-8).
+            handling.Dispose();
             deadline.Dispose();
             var mayClose = true;
             if (session is not null)
