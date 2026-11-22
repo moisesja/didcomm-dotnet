@@ -286,6 +286,54 @@ public sealed class WebSocketSessionReceiveDeadlineTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_push_in_progress_when_dispose_takes_the_socket_is_no_longer_kept_or_timed_and_is_dropped(bool anotherPartArrives)
+    {
+        // #100 OD-7: dispose switches the session socket to discarding before its close frame. A
+        // message whose first part was read before that is dropped whole: the next part read stops
+        // its timer and nothing more of it is kept; and if no part comes, its time running out during
+        // the close wait closes nothing (dispose's close is the socket's close) and logs nothing.
+        var t = await Live.StartAsync();
+        try
+        {
+            var s = await t.OpenSessionAsync();
+            var mark = t.Clock.Mark();
+            await s.SendTextAsync(new byte[100], endOfMessage: false);
+            await t.Clock.WaitForTimerAsync(mark, Limit, Guard);
+
+            var dispose = t.Transport.DisposeAsync().AsTask();
+            (await NextCloseAsync(s)).CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure);
+            if (anotherPartArrives)
+            {
+                await s.SendContinuationAsync(Utf8("more"), endOfMessage: false);
+                // The pong comes from the reader's next receive, so the part was handled before it.
+                (await s.PingAsync(Guard)).Should().BeEmpty();
+                t.Clock.ScheduledTimersSince(mark).Should().Be(0, "the part read once dispose took the socket stopped the message's timer");
+            }
+            else
+            {
+                t.Clock.Advance(Limit);
+                t.Clock.TimersFired.Should().Be(1, "the message's time ran out during the close wait");
+            }
+            await s.SendContinuationAsync(Utf8("last"), endOfMessage: true);
+            await s.SendCloseAsync(WebSocketCloseStatus.NormalClosure, "bye");
+            s.End();
+            await dispose.WaitAsync(Guard);
+
+            t.Consumer!.Calls.Should().Be(0, "nothing reaches the consumer once dispose took the socket");
+            t.Transport.InboundMessagesDropped.Should().Be(1, "the message was read to its end and dropped whole");
+            t.Clock.ScheduledTimersSince(mark).Should().Be(0);
+            t.Logs.Records.Should().NotContain(r => r.Text.Contains(TimeoutLine, StringComparison.Ordinal),
+                "no 1008: a socket dispose is closing is not closed for a message's time");
+        }
+        finally
+        {
+            await t.DisposeAsync();
+        }
+    }
+
+    [Theory]
     [InlineData("the peer closes")]
     [InlineData("the transport is disposed")]
     public async Task A_socket_that_ends_mid_message_stops_the_messages_timer(string end)
@@ -305,7 +353,14 @@ public sealed class WebSocketSessionReceiveDeadlineTests
             }
             else
             {
-                await t.Transport.DisposeAsync().AsTask().WaitAsync(Guard);
+                // Dispose sends its close and waits (bounded) for the peer's (#100 OD-7): the peer
+                // answers it, so the socket ends by dispose's close handshake while the loop is
+                // still inside the message.
+                var dispose = t.Transport.DisposeAsync().AsTask();
+                (await NextCloseAsync(s)).CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure);
+                await s.SendCloseAsync(WebSocketCloseStatus.NormalClosure, "bye");
+                s.End();
+                await dispose.WaitAsync(Guard);
             }
 
             (await WaitUntilAsync(() => t.Transport.LiveSessionSocketCount == 0)).Should().BeTrue();
@@ -661,8 +716,11 @@ public sealed class WebSocketSessionReceiveDeadlineTests
 
         public async ValueTask DisposeAsync()
         {
-            await Transport.DisposeAsync();
+            // The peer first: it ends every connection. The transport's dispose waits (up to one
+            // SendTimeout, 2 minutes here) for a peer that is still connected to answer its close
+            // (#100 OD-7), and this peer never answers one on its own.
             await Peer.DisposeAsync();
+            await Transport.DisposeAsync();
         }
     }
 
@@ -712,7 +770,12 @@ public sealed class WebSocketSessionReceiveDeadlineTests
             return Sockets.Sockets.Single();
         }
 
-        public ValueTask DisposeAsync() => Transport.DisposeAsync();
+        public ValueTask DisposeAsync()
+        {
+            // The peers never answer a close on their own; dispose waits for a session socket's.
+            Sockets.AnswerClosesFromNowOn();
+            return Transport.DisposeAsync();
+        }
     }
 
     /// <summary>A host clock whose timers cannot be created.</summary>

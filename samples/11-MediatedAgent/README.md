@@ -40,9 +40,16 @@ and no routing code. **Carol**, who is not on the operator's allow-list, is refu
    `AddMediatorClient()` — shows the live switch (`SetLiveDeliveryAsync`), then
    `ReceiveLiveAsync`: Alice sends again and Bob receives it (pushed, or collected by the stream
    if it was stored first — either way it arrives). The stream acknowledges an item when the next
-   one is asked for, so the last one is acknowledged with `AckAsync(item.Id)`. The operator finds
-   Bob's session (`Find`), and when Bob goes offline, the session's `Closed` token fires. The
-   registry's open/close notifications are best effort; the token is what to rely on.
+   one is asked for, so the last one is acknowledged with `AckAsync(item.Id)`. It returns `null`
+   ("the mediator sent no status in answer"): the wallet speaks Message Pickup 4.0, where nothing
+   answers an acknowledgement. The operator finds Bob's session (`Find`). Then Bob goes offline:
+   disposing the connection's container waits, up to `WebSocketTransportOptions.SendTimeout`, for
+   the mediator to answer the close, which this library's mediator does only after it has handled
+   what it received. So the acknowledgement is applied first, and when the operator ends Bob's
+   mediation in section 7, only the message Alice sends later is left (`Purged = 1`). After an
+   abrupt drop, or with a slower mediator, the message can still come back later (delivery is
+   at-least-once). When the connection closes, the session's `Closed` token fires. The registry's
+   open/close notifications are best effort; the token is what to rely on.
 6. **A refusal.** Carol never signed up, so the allow-list policy denies her: `mediate-deny`,
    which the client reports as `null` — a deny is an answer, not an exception.
 7. **The operator's console.** Reading the mediation store (`IMediationStore`: the grant, who
@@ -151,9 +158,12 @@ Ports, DIDs and ids change every run; the structure is stable:
 
 == Section 5 — Bob goes live over a WebSocket: Alice sends again, Bob receives it ==
   • [bob] live delivery = True
+  • [bob] live delivery = False again (ReceiveLiveAsync turns it on and off itself)
+  • [mediator] stored Alice's message "Hello again, Bob" for pickup
   • [bob] live: Hello again, Bob
-  • [bob] acknowledged the last message; status after ack: 0 message(s)
+  • [bob] acknowledged the last message; the mediator sent no status in answer
   • [mediator] sessions for Bob: 1
+    [mediator] session transport = WebSocket
   • [mediator] Bob's session closed (its Closed token fired)
 
 == Section 6 — Carol is refused: mediate-deny from the allow-list policy ==

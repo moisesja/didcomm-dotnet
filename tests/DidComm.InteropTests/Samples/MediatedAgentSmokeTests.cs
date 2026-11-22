@@ -79,12 +79,12 @@ public sealed class MediatedAgentSmokeTests
         transcript.Should().Contain("[bob] Message Pickup version negotiated with the mediator = 4.0", "the wallet asks and the mediator serves 4.0 (#100)");
         transcript.Should().Contain("[bob] status after fetch: 0 message(s)");
 
-        // 5. Live over the WebSocket: the switch, the message received, the last one acknowledged,
-        //    the operator finds Bob's session, and it closes when Bob goes offline.
+        // 5. Live over the WebSocket: the switch, the message received, the last one acknowledged
+        //    (nothing answers it under 4.0), the operator finds Bob's session, and it closes when Bob
+        //    goes offline.
         transcript.Should().Contain("[bob] live delivery = True");
         transcript.Should().Contain("[bob] live: Hello again, Bob");
         transcript.Should().Contain("[bob] acknowledged the last message; the mediator sent no status in answer", "the wallet speaks 4.0, where nothing answers an acknowledgement");
-        transcript.Should().Contain("[bob] the mediator applied the acknowledgement (GetStatusAsync counts 0 message(s))", "the wallet waits for it before its connection closes");
         transcript.Should().Contain("[mediator] sessions for Bob: 1");
         transcript.Should().Contain("[mediator] session transport = WebSocket");
         transcript.Should().Contain("[mediator] Bob's session closed (its Closed token fired)");
@@ -102,7 +102,8 @@ public sealed class MediatedAgentSmokeTests
         transcript.Should().Contain("[operator] pre-provisioned a grant for Carol: True");
         transcript.Should().Contain("[carol] granted: routing DIDs = 1");
         transcript.Should().Contain("[operator] Carol's grant revoked: True");
-        transcript.Should().Contain("[operator] Bob's mediation ended: Revoked = True, Purged = 1");
+        transcript.Should().Contain("[operator] Bob's mediation ended: Revoked = True, Purged = 1",
+            "only \"See you soon\" is left: the acknowledgement of the last live message reached the mediator before Bob's connection closed (its close waits for the mediator's answer)");
         transcript.Should().Contain("[operator] grants left = 0");
 
         // Consumers copy samples: no whole DID is ever printed (they are cut to 48 characters).
