@@ -43,8 +43,9 @@ namespace DidComm.Mediator.Client;
 /// </para>
 /// <para>
 /// <strong>Delivery is at-least-once.</strong> A message can reach you more than once: when an
-/// acknowledgement is lost, when a connection drops, when the mediator's lease on a delivered
-/// message runs out. The clients remember recent messages
+/// acknowledgement is lost (under Message Pickup 4.0 nothing confirms one, from
+/// <see cref="AckAsync"/> or <see cref="FetchAsync"/>, so a connection that drops right behind it can
+/// lose it), when a connection drops, when the mediator's lease on a delivered message runs out. The clients remember recent messages
 /// (<see cref="MediatorClientOptions.DedupeCapacity"/>) and do not return one twice while they
 /// remember it, but an application that must never act twice on a message should also keep track
 /// of the message ids it has handled. They remember a message per mailbox, the <c>from</c> of the
@@ -98,7 +99,10 @@ namespace DidComm.Mediator.Client;
 /// none (always under 4.0); it never asks for one, because a status asked for separately is not
 /// ordered after an acknowledgement that got no answer. The acknowledgement a fetch sends is not
 /// confirmed to you either: if the mediator did not apply it, the messages come back and are
-/// recognised as repeats.
+/// recognised as repeats. Under 4.0, closing the connection right after <see cref="AckAsync"/> or a
+/// <see cref="FetchAsync"/> relies on the close: disposing waits, bounded, for the mediator to
+/// finish what it received (see <see cref="AckAsync"/>'s "Before you close the connection"), but an
+/// abrupt drop can still lose the acknowledgement, and the messages then come back.
 /// </para>
 /// <para>
 /// <strong>Clocks.</strong> Every request carries the time from <c>DidCommOptions.Clock</c>
@@ -234,7 +238,10 @@ public sealed class PickupClient
     /// silence from a slow answer, so there it is still logged as failed after
     /// <see cref="MediatorClientOptions.RequestTimeout"/>. Under Message Pickup 4.0 the
     /// acknowledgement is sent one way (nothing answers it), so only a failure to send it within
-    /// <see cref="MediatorClientOptions.RequestTimeout"/> is logged. A message that failed stays leased to you for the
+    /// <see cref="MediatorClientOptions.RequestTimeout"/> is logged, and nothing confirms it was
+    /// applied: a single fetch followed at once by closing the connection relies on the close (see
+    /// <see cref="AckAsync"/>'s "Before you close the connection"); after an abrupt drop the messages
+    /// can come back. A message that failed stays leased to you for the
     /// mediator's lease, so a loop that fetches until drained gets past failures to what is behind
     /// them (for messages that are slow to open, only so many: see the known limits below); one that
     /// polls more slowly than the lease, with more failures than <paramref name="limit"/>, keeps
@@ -493,13 +500,15 @@ public sealed class PickupClient
     /// </para>
     /// <para>
     /// <strong>Before you close the connection.</strong> When no status came, nothing tells you the
-    /// mediator has applied the acknowledgement yet. A mediator may drop the work of a connection
-    /// that closes (this library's does), so closing your container or connection right after this
-    /// call can lose the acknowledgement; the messages then come back, as for a fetch whose
-    /// acknowledgement was lost. If you need it applied before you go offline, keep the connection
-    /// open and call <see cref="GetStatusAsync"/> until its count drops by the messages you
-    /// acknowledged, with a bound of your own (acknowledge again if it does not; that is harmless).
-    /// A count says how many are left, not which: messages that arrive meanwhile are counted too.
+    /// mediator has applied the acknowledgement. Disposing this agent's container closes its
+    /// WebSocket connections politely: each sends its close and waits, up to
+    /// <c>WebSocketTransportOptions.SendTimeout</c>, for the mediator to answer it, and this
+    /// library's mediator answers only after it has handled what it received before the close. It
+    /// also finishes a message it received in full when the connection drops behind it, for a few
+    /// seconds. An abrupt drop before the message is through, a mediator slower than that, or one
+    /// that drops the work of a closed connection can still lose the acknowledgement; the messages
+    /// then come back (delivery is at-least-once). The same holds for the acknowledgement a
+    /// <see cref="FetchAsync"/> sends under Message Pickup 4.0.
     /// </para>
     /// <para>
     /// <strong>A failure is never <c>null</c>.</strong> A message that could not be sent ends the

@@ -8,6 +8,59 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ### Added — Message Pickup 4.0 in both roles; the mailbox refuses messages that are not encrypted; a live push that comes back unconfirmed is not pushed again (FR-PICK-12, #100; epic #88)
 
+**Behaviour changes in two published packages** (owner decisions OD-7 and OD-8, PR #143 review
+round 3). Under Message Pickup 4.0 nothing answers an acknowledgement (`AckAsync`, and the one a
+`FetchAsync` sends). A wallet that acknowledged and then closed its connection at once could lose
+the acknowledgement, because this library's mediator cancelled its handling when the connection
+went away, and the messages came back. Both ends now finish properly:
+
+- **`DidComm.Transports.WebSocket`: `DisposeAsync` can now take up to
+  `WebSocketTransportOptions.SendTimeout` (30 s by default) (owner decision OD-7, 2026-11-21).**
+  - What changes: dispose sends its close on each open connection and waits for the peer to answer
+    it. It used to send the close and drop the connection at once. All connections wait at the same
+    time, so a peer that never answers costs one `SendTimeout`, however many connections are open.
+    The documented worst case of `DrainBudget` + 2 × `SendTimeout` is unchanged. An infinite or
+    non-positive `SendTimeout` still means no wait. A very large `SendTimeout` makes the worst case
+    that large too.
+  - Why: this library's mediator answers a close only after it has handled the messages before it,
+    so the acknowledgement is applied before dispose returns.
+  - What reaches your code: messages that arrive on a return-route session while dispose waits are
+    dropped, not handed to your code, as before. The session close uses the session's own receive
+    loop as its only reader. A 4.0 live push dropped this way is not acknowledged, and the mediator
+    delivers it again later.
+  - In the owner's words as put to them: "Change the released WebSocket transport so shutting down
+    waits a bounded time for the mediator to answer the close, which it does only after handling
+    earlier messages. Reverses a deliberate design that refuses to wait on hostile peers, in a
+    published package." The owner picked "Also: client waits for the close".
+- **`DidComm.AspNetCore`: a WebSocket message received in full is finished after its connection
+  ends (owner decision OD-8, 2026-11-21).**
+  - Where it applies: the WebSocket loop behind the registry-aware `MapDidCommWebSocket(pattern)`
+    and `MapDidCommMediator`.
+  - What changes: once a message's last frame is in, it is unpacked and dispatched even if the peer
+    drops right behind it. The finish ends 5 seconds after the drop (the server's close grace), or
+    when the host starts to stop (`IHostApplicationLifetime.ApplicationStopping`), whichever comes
+    first.
+  - What does not change: nothing more is read from that connection, so there is at most one such
+    finish per connection. Replies and pushes to the gone peer are refused quietly. A connection
+    that already ended opens no return-route session. While the peer is connected nothing changes,
+    and handlers get no new time limit.
+  - Not covered: the HTTP endpoints and the callback overload `MapDidCommWebSocket(pattern,
+    onReceive)` are unchanged, and that overload's token still means the request's abort.
+  - Why: this covers wallets we did not write, and an abrupt drop that sends no close.
+  - The coordinator's question to the owner: "If you also want the server-side fix the reviewer
+    recommends, a change to released `DidComm.AspNetCore` that lets the mediator finish any message
+    it fully received, say so and it goes in this same round." The owner answered "same round".
+- **`DidComm.AspNetCore`: a handler's own timeout no longer ends the WebSocket connection** (found
+  while building OD-8; no issue covered it).
+  - Before: in the same loop, a handler that hit a timeout of its own (a slow DID lookup or HTTP
+    call, for example) threw a cancellation the loop did not raise. That ended the whole connection
+    and was logged as an unhandled error.
+  - Now: the message is dropped with one Warning line and the connection serves the next message.
+    A cancellation from the connection or the host still ends the loop.
+- **What is still exposed:** an abrupt drop before the message is complete, or a mediator slower
+  than these bounds, can still mean the messages come back (delivery is at-least-once). The same
+  applies to a mediator that drops the work of a closed connection.
+
 **Behaviour changes for existing mediator hosts and wallets** (none of these packages is published yet):
 
 - **A mediator now also speaks Message Pickup 4.0.** `AddMessagePickup()`, and so `AddMediator()`,
@@ -29,7 +82,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     seconds whichever version is spoken.
 
   Acknowledgements get no answer under 4.0, so `AckAsync` returns `null` under 4.0: see the next
-  entry.
+  entry. The acknowledgement a 4.0 `FetchAsync` sends is unanswered too. For both, closing the
+  connection right after the call relies on the close, as the published-package changes above
+  describe.
 - **`AckAsync` returns only the mediator's own status, and `null` when it sent none (owner decision
   OD-6, 2026-11-21: "Stop promising a status").** In the owner's words as put to them: "AckAsync
   returns the mediator's own status when it sends one (3.0's optional answer), and nothing (null)
@@ -54,12 +109,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     of `RequestTimeout` once the message is sent (our fix, PR #143 review round 2: the wait used to
     include the send, so a slow connect could pass for "no status").
   - Before you close the connection: when no status came, nothing says the mediator has applied the
-    acknowledgement yet. This library's mediator drops the work of a WebSocket connection that
-    closes, so closing your container right after `AckAsync` can lose the acknowledgement, and the
-    messages then come back. If it must be applied before you go offline, keep the connection open
-    and call `GetStatusAsync` until its count drops, with a bound of your own (acknowledge again if
-    it does not); the cookbook's section EE and sample 11 now do. A
-    `GetStatusAsync` is not ordered after an acknowledgement that got no answer.
+    acknowledgement. Closing the connection relies on the close (OD-7 and OD-8 above). Cookbook
+    section EE and sample 11 acknowledge and then close, with no polling. A `GetStatusAsync` is not
+    ordered after an acknowledgement that got no answer.
   - Tests: `PickupV4AckOrderEndToEndTests` (the round-2 reproduction, rewritten: under 4.0, with the
     acknowledgement held at the mailbox and the connection dropped at each point that matters,
     `AckAsync` returns `null` and the mediator sees no `status-request`; under 3.0 the status
@@ -68,8 +120,16 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     `MediatorClientChannelAnswerWaitTests` for the channel's wait after the send. The red-team pass
     found two edges, fixed here: a `RequestTimeout` of one tick made the half-wait zero and refused
     (OD6-ADV-1), and a send that completed just before the deadline, resumed after it, was reported
-    as a `TimeoutException` (OD6-ADV-2) (`PickupClientAckOd6AdversarialTests`). Sample 11 used to
-    lose its last acknowledgement when it closed at once; `MediatedAgentSmokeTests` pins the wait.
+    as a `TimeoutException` (OD6-ADV-2) (`PickupClientAckOd6AdversarialTests`). Review round 3's
+    P3s pin three more exits of that wait: a send that honours its token, a timer racing the
+    caller's cancellation, and a timer racing disposal. One case is left unpinned, the disposal
+    guard of the window's filter, and its test file explains why.
+  - Closing right after (PR #143 review round 3). Over a real Kestrel WebSocket, with the
+    mediator's handling held, three cases are tested. A 4.0 `AckAsync` followed by an immediate
+    dispose, and a single `FetchAsync` followed by dispose, both leave the mailbox empty when
+    dispose returns (OD-7). A connection aborted without a close leaves it empty soon after
+    (OD-8). Sample 11 printed `Purged = 2` in 33 of 72 parallel runs on the old transport and
+    `Purged = 1` in 72 of 72 with OD-7.
 - **Pin the version for mediators that cannot answer the question.** A mediator that answers
   Discover Features but discloses neither pickup version now fails every pickup call with
   `MediationNotSupportedException`. One that does not answer the query fails it with
