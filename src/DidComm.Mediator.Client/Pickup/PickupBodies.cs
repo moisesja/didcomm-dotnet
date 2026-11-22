@@ -9,22 +9,15 @@ using DidComm.Messages;
 
 namespace DidComm.Mediator.Pickup;
 
-/// <summary>The unit of the <c>…_received_time</c> members of a <c>status</c>: seconds in Message Pickup 3.0, milliseconds in 4.0.</summary>
-internal enum PickupTimeUnit
-{
-    /// <summary>UTC epoch seconds (3.0).</summary>
-    Seconds,
-
-    /// <summary>UTC epoch milliseconds (4.0).</summary>
-    Milliseconds,
-}
-
 /// <summary>
 /// Reads and writes the message bodies and attachments of Message Pickup, independent of the
 /// protocol version: 3.0 and 4.0 share the member shapes (<c>recipient_did</c>,
 /// <c>message_count</c>, <c>message_id_list</c>, <c>live_delivery</c>, the attachment descriptor)
 /// and differ in message names, in the name of the batch limit (<c>limit</c> /
-/// <c>message_count_limit</c>, passed in by the caller) and in the time unit.
+/// <c>message_count_limit</c>, passed in by the caller), in the time unit of a <c>status</c>
+/// (epoch seconds in 3.0, milliseconds in 4.0) and in 4.0 dropping
+/// <c>longest_waited_seconds</c>: <see cref="WriteStatus"/> / <see cref="ReadStatus"/> are 3.0's,
+/// <see cref="WriteStatus40"/> / <see cref="ReadStatus40"/> are 4.0's.
 /// </summary>
 /// <remarks>
 /// Every reader throws <see cref="MalformedMessageException"/> for a wrong shape and never quotes a
@@ -70,6 +63,28 @@ internal static class PickupBodies
         if (status.NewestReceivedTime is { } newest)
             body[NewestReceivedTime] = newest;
         if (status.OldestReceivedTime is { } oldest)
+            body[OldestReceivedTime] = oldest;
+        if (status.TotalBytes is { } bytes)
+            body[TotalBytes] = bytes;
+        if (status.LiveDelivery is { } live)
+            body[LiveDelivery] = live;
+        return body;
+    }
+
+    /// <summary>
+    /// A Message Pickup 4.0 <c>status</c> body, members in the order of the protocol page
+    /// (4.0 L152-L157): no <c>longest_waited_seconds</c> (removed in 4.0, L37), times in UTC epoch
+    /// milliseconds (L164); <c>null</c> members are left out.
+    /// </summary>
+    public static JsonObject WriteStatus40(PickupStatus40 status)
+    {
+        var body = new JsonObject();
+        if (status.RecipientDid is not null)
+            body[RecipientDid] = status.RecipientDid;
+        body[MessageCount] = status.MessageCount;
+        if (status.NewestReceivedTimeMs is { } newest)
+            body[NewestReceivedTime] = newest;
+        if (status.OldestReceivedTimeMs is { } oldest)
             body[OldestReceivedTime] = oldest;
         if (status.TotalBytes is { } bytes)
             body[TotalBytes] = bytes;
@@ -136,6 +151,33 @@ internal static class PickupBodies
             messageCount,
             ReadRecipientDid(body, message),
             ReadOptionalCount(body, LongestWaitedSeconds, message),
+            ReadOptionalCount(body, NewestReceivedTime, message),
+            ReadOptionalCount(body, OldestReceivedTime, message),
+            ReadOptionalCount(body, TotalBytes, message),
+            live);
+    }
+
+    /// <summary>
+    /// A Message Pickup 4.0 <c>status</c> body. <c>message_count</c> is REQUIRED; no member may be
+    /// negative. The times are UTC epoch milliseconds, read as they are. A
+    /// <c>longest_waited_seconds</c> member is not part of 4.0 (L37), so it is an unknown member
+    /// and ignored, whatever its value.
+    /// </summary>
+    public static PickupStatus40 ReadStatus40(JsonElement body, string message)
+    {
+        if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty(MessageCount, out var count))
+            throw new MalformedMessageException($"{message} body is missing the REQUIRED '{MessageCount}' member.");
+        var messageCount = WireJson.ReadInteger(count, MessageCount, message);
+        if (messageCount < 0)
+            throw NotNegative(MessageCount, message);
+
+        bool? live = null;
+        if (body.TryGetProperty(LiveDelivery, out var liveValue) && liveValue.ValueKind != JsonValueKind.Null)
+            live = ReadBoolean(liveValue, LiveDelivery, message);
+
+        return new PickupStatus40(
+            messageCount,
+            ReadRecipientDid(body, message),
             ReadOptionalCount(body, NewestReceivedTime, message),
             ReadOptionalCount(body, OldestReceivedTime, message),
             ReadOptionalCount(body, TotalBytes, message),
@@ -250,7 +292,9 @@ internal static class PickupBodies
     /// characters (FR-ATT-04). An attachment without a usable id has a <c>null</c>
     /// <see cref="DeliveredAttachment.Id"/> and its data is not decoded. Otherwise the data is
     /// decoded as <see cref="ReadAttachments"/> decodes it, and a failure is the reading's
-    /// <see cref="DeliveredAttachment.Error"/>. Error texts never quote a wire value.
+    /// <see cref="DeliveredAttachment.Error"/>. The decoded bytes are not inspected here; the
+    /// client's reader fails those that are not a DIDComm message in encrypted form
+    /// (<c>DeliveryReader.ReadEntries</c>). Error texts never quote a wire value.
     /// </summary>
     /// <param name="attachments">The delivery's attachments, or <c>null</c>.</param>
     /// <param name="max">How many attachments, from the first, to read; zero or more.</param>

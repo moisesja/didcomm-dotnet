@@ -91,7 +91,7 @@ public sealed class MessagePickupAdversarialResourceBoundsTests
         var (mediator, peer) = await fixture.EnrolledAsync();
         for (var i = 0; i < 5; i++)
             await fixture.QueueAsync(peer, PickupFixture.Payload(1000, (byte)i));
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 9))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 9))).Outcome.Should().Be(PickupDeliveryOutcome.QueueFull);
 
         var status = await MessagePickupAdversarialResource.StatusAsync(fixture, peer, mediator);
         status.MessageCount.Should().Be(5);
@@ -100,7 +100,7 @@ public sealed class MessagePickupAdversarialResourceBoundsTests
         var ids = await MessagePickupAdversarialResource.FetchIdsAsync(fixture, peer, mediator);
         ids.Should().HaveCount(5);
         await fixture.SendAsync(MessagePickup.CreateMessagesReceived(peer, mediator, ids), mediator, fixture.Session(peer, mediator));
-        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 9))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
+        (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 9))).Outcome.Should().Be(PickupDeliveryOutcome.Queued);
     }
 
     // ---- what one small request can cost -----------------------------------------------------------
@@ -235,7 +235,7 @@ public sealed class MessagePickupAdversarialResourceBoundsTests
         await using var fixture = PickupFixture.Create();
         var (mediator, peer) = await fixture.EnrolledAsync();
 
-        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(10, 1), new PickupDeliveryOptions(NotBefore: DateTimeOffset.MinValue, ExpiresTime: expiresTime));
+        var result = await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(100, 1), new PickupDeliveryOptions(NotBefore: DateTimeOffset.MinValue, ExpiresTime: expiresTime));
 
         result.Outcome.Should().Be(expected);
         (await MessagePickupAdversarialResource.FetchIdsAsync(fixture, peer, mediator)).Should().HaveCount(expected == PickupDeliveryOutcome.Queued ? 1 : 0);

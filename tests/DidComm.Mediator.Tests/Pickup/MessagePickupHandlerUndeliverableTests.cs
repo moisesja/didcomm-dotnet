@@ -5,6 +5,7 @@ using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Mediator.Tests.Coordination;
 using DidComm.Messages;
+using DidComm.TestSupport;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.Logging;
 using Xunit;
@@ -37,7 +38,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3), await h.QueueAsync(h.Alice, 40, 4) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3), await h.QueueAsync(h.Alice, 400, 4) };
         var session = h.Http(h.Alice);
         session.OnSend = TooLargeWith(ids[0]);
         var t0 = h.Start.ToUnixTimeSeconds();
@@ -57,12 +58,12 @@ public sealed class MessagePickupHandlerUndeliverableTests
         h.StoreTrace.Should().Equal("LeaseAsync", "ReleaseAsync", "ReleaseAsync", "ReleaseAsync", "PassOverAsync", "LeaseAsync");
         var lease = h.Store.LeaseRequests.Select(r => r.Lease).Distinct().Should().ContainSingle("both rounds are under the request's one lease").Subject;
         h.Store.ReleasedLeaseIds.Should().OnlyContain(id => id == lease.Id);
-        PassedOverLines(h, logged).Should().ContainSingle().Which.State["Bytes"].Should().Be(10);
+        PassedOverLines(h, logged).Should().ContainSingle().Which.State["Bytes"].Should().Be(100);
 
         // Still stored and still counted.
         h.Store.Inner.MessageCount.Should().Be(4);
         var status = h.StatusRequest(h.Alice);
-        (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 4, 100, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+        (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 4, 1000, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
 
         // It was given up under the request's lease and is under no lease now: the mark that
         // keeps it out is the record's own, for one lease timeout the first time, and nothing but
@@ -91,7 +92,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         // is passed over by exactly one request, and is still stored at the end.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         var stuck = ids[position];
         var session = h.Http(h.Alice);
         session.OnSend = TooLargeWith(stuck);
@@ -122,7 +123,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         session.Sent.Should().OnlyContain(m => m.Attachments!.All(a => a.Id != stuck), "it is never delivered");
         h.Store.Acknowledged.SelectMany(a => a.Ids).Should().NotContain(stuck, "and never removed");
         h.Store.Inner.MessageCount.Should().Be(1);
-        PassedOverLines(h, logged).Should().ContainSingle().Which.State["Bytes"].Should().Be(10 * (position + 1));
+        PassedOverLines(h, logged).Should().ContainSingle().Which.State["Bytes"].Should().Be(100 * (position + 1));
 
         // One more request, the clock still not moved: there is nothing to try, and nothing is said.
         var attempts = session.Attempts.Count;
@@ -153,8 +154,8 @@ public sealed class MessagePickupHandlerUndeliverableTests
         // message first in line again. The request that meets it looks further itself.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var stuck = await h.QueueAsync(h.Alice, 50, 1);
-        var behind = new[] { await h.QueueAsync(h.Alice, 10, 2), await h.QueueAsync(h.Alice, 20, 3) };
+        var stuck = await h.QueueAsync(h.Alice, 500, 1);
+        var behind = new[] { await h.QueueAsync(h.Alice, 100, 2), await h.QueueAsync(h.Alice, 200, 3) };
         var session = h.Http(h.Alice);
         session.OnSend = TooLargeWith(stuck);
 
@@ -166,7 +167,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         for (var poll = 0; poll < 3; poll++)
         {
             h.Clock.Advance(TimeSpan.FromSeconds(61));
-            var arrival = await h.QueueAsync(h.Alice, 5, (byte)(10 + poll));
+            var arrival = await h.QueueAsync(h.Alice, 50, (byte)(10 + poll));
             (await h.Fixture.FetchAsync(h.Alice, h.Mediator, session, 10))!.Value.Messages.Select(m => m.Id).Should().Equal(new[] { arrival }, "the message that does not fit is first in line again, and the same request delivers what is behind it");
             (await h.SendAsync(h.MessagesReceived(h.Alice, new[] { arrival }), session)).Status().MessageCount.Should().Be(1);
         }
@@ -185,11 +186,11 @@ public sealed class MessagePickupHandlerUndeliverableTests
         // comes to the next one, until a round finds nothing.
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new List<string> { await h.QueueAsync(h.Alice, 10, 1) };
+        var ids = new List<string> { await h.QueueAsync(h.Alice, 100, 1) };
         if (limit == 1)
         {
-            ids.Add(await h.QueueAsync(h.Alice, 20, 2));
-            ids.Add(await h.QueueAsync(h.Alice, 30, 3));
+            ids.Add(await h.QueueAsync(h.Alice, 200, 2));
+            ids.Add(await h.QueueAsync(h.Alice, 300, 3));
         }
         var session = h.Http(h.Alice);
         session.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
@@ -199,7 +200,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         var request = h.DeliveryRequest(h.Alice, limit);
         var outcome = await h.SendAsync(request, session);
 
-        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, ids.Count, limit == 1 ? 60 : 10, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+        outcome.ShouldBeStatus(request, h.Mediator, h.Alice, ids.Count, limit == 1 ? 600 : 100, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
         session.Attempts.Select(a => string.Join(",", a.Message.Attachments!.Select(x => x.Id))).Should().Equal(ids, "each is tried alone, in order");
         h.StoreTrace.Should().Equal(Enumerable.Range(0, ids.Count).SelectMany(_ => new[] { "LeaseAsync", "PassOverAsync" }).Append("LeaseAsync").Append("GetStatusAsync"));
         h.Store.Released.Should().BeEmpty("a message that does not fit alone keeps the lease");
@@ -220,7 +221,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         var now = h.Clock.Now;
         for (var i = 0; i < 1001; i++)
         {
-            var record = new QueuedMessage("queued-secret-" + i, h.Alice, h.Alice, PickupFixture.Payload(1 + i % 7), now);
+            var record = new QueuedMessage("queued-secret-" + i, h.Alice, h.Alice, PickupFixture.Payload(StandInJwe.MinSize + i % 7), now);
             (await h.Store.Inner.EnqueueAsync(record, null, now, default)).Should().Be(EnqueueOutcome.Enqueued);
         }
         var session = h.Http(h.Alice);
@@ -252,7 +253,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         lines[999].Level.Should().Be(LogLevel.Warning);
         lines[1000].Level.Should().Be(LogLevel.Debug);
         lines.Select(e => e.State["Count"]).Should().Equal(Enumerable.Range(1, 1001).Select(n => (object?)(long)n));
-        lines.Select(e => e.State["Bytes"]).Should().Equal(Enumerable.Range(0, 1001).Select(i => (object?)(1 + i % 7)));
+        lines.Select(e => e.State["Bytes"]).Should().Equal(Enumerable.Range(0, 1001).Select(i => (object?)(StandInJwe.MinSize + i % 7)));
         lines.Should().OnlyContain(e => Equals(e.State["MessageId"], request.Id) && e.State.Count == 4 && e.Exception == null);
         lines.Should().OnlyContain(e => !e.Everything.Contains("did:") && !e.Everything.Contains("queued-secret-"));
     }
@@ -268,7 +269,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         await h.EnrolAsync(h.Alice, h.Alice);
         var ids = new List<string>();
         for (var i = 0; i < 10; i++)
-            ids.Add(await h.QueueAsync(h.Alice, 10 + i, (byte)i));
+            ids.Add(await h.QueueAsync(h.Alice, 100 + i, (byte)i));
         var session = h.Http(h.Alice);
         session.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
         var t0 = h.Start.ToUnixTimeSeconds();
@@ -277,7 +278,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         h.ResetTraces();
 
         var request = h.DeliveryRequest(h.Alice, 10);
-        (await h.SendAsync(request, session)).ShouldBeStatus(request, h.Mediator, h.Alice, 10, 145, live: false, times: times);
+        (await h.SendAsync(request, session)).ShouldBeStatus(request, h.Mediator, h.Alice, 10, 1045, live: false, times: times);
 
         // Two full trims — #0 and #1 passed over — and the third batch is leased when the send
         // budget is found spent: it goes back whole, under the request's lease, and the answer is
@@ -290,7 +291,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
         h.Store.LeaseRequests.Should().OnlyContain(r => r.MaxMessages == 3);
         h.Store.Acknowledged.Should().BeEmpty();
         (await h.DeliverableAsync(h.Alice)).Should().Equal(ids.Skip(2), "what the request still held when it stopped is deliverable at once");
-        PassedOverLines(h, logged).Select(e => e.State["Bytes"]).Should().Equal(10, 11);
+        PassedOverLines(h, logged).Select(e => e.State["Bytes"]).Should().Equal(100, 101);
 
         // The next requests continue where it stopped: two more each, six sends each. The fifth
         // finds only two left (three sends) and a round with nothing; the sixth has nothing to try.
@@ -322,15 +323,15 @@ public sealed class MessagePickupHandlerUndeliverableTests
         await h.EnrolAsync(h.Alice, h.Alice, gone);
         var stale = new List<string>();
         for (var i = 0; i < 6; i++)
-            stale.Add(await h.QueueAsync(gone, 10, (byte)i));
-        var kept = await h.QueueAsync(h.Alice, 30, 9);
+            stale.Add(await h.QueueAsync(gone, 100, (byte)i));
+        var kept = await h.QueueAsync(h.Alice, 300, 9);
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(gone, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
         var t0 = h.Start.ToUnixTimeSeconds();
         h.ResetTraces();
 
         var first = h.DeliveryRequest(h.Alice, 1);
-        (await h.SendAsync(first, session)).ShouldBeStatus(first, h.Mediator, h.Alice, 3, 50, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+        (await h.SendAsync(first, session)).ShouldBeStatus(first, h.Mediator, h.Alice, 3, 500, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
 
         h.StoreTrace.Should().Equal("LeaseAsync", "AcknowledgeAsync", "LeaseAsync", "AcknowledgeAsync", "LeaseAsync", "AcknowledgeAsync", "LeaseAsync", "AcknowledgeAsync", "GetStatusAsync");
         h.Store.Acknowledged.Select(a => string.Join(",", a.Ids)).Should().Equal(stale.Take(4), "each round removes exactly the one leftover it leased");
@@ -431,11 +432,11 @@ public sealed class MessagePickupHandlerUndeliverableTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync(o =>
         {
             o.MaxQueueMessages = 3;
-            o.MaxQueueBytes = 100;
+            o.MaxQueueBytes = 1000;
         });
         await h.EnrolAsync(h.Alice, h.Alice);
-        var stuck = await h.QueueAsync(h.Alice, 60, 1);
-        var behind = new[] { await h.QueueAsync(h.Alice, 10, 2), await h.QueueAsync(h.Alice, 10, 3) };
+        var stuck = await h.QueueAsync(h.Alice, 600, 1);
+        var behind = new[] { await h.QueueAsync(h.Alice, 100, 2), await h.QueueAsync(h.Alice, 100, 3) };
         var session = h.Http(h.Alice);
         session.OnSend = TooLargeWith(stuck);
         var t0 = h.Start.ToUnixTimeSeconds();
@@ -443,18 +444,18 @@ public sealed class MessagePickupHandlerUndeliverableTests
         async Task<PickupDeliveryOutcome> ArrivesAsync(int size) => (await h.Fixture.Queue.DeliverAsync(h.Alice, PickupFixture.Payload(size, 9))).Outcome;
 
         // Passed over, the other two delivered by the same request and acknowledged: one message,
-        // 60 bytes, still held.
+        // 600 bytes, still held.
         (await h.Fixture.FetchAsync(h.Alice, h.Mediator, session, 10))!.Value.Messages.Select(m => m.Id).Should().Equal(behind);
         var ack = h.MessagesReceived(h.Alice, behind);
-        (await h.SendAsync(ack, session)).ShouldBeStatus(ack, h.Mediator, h.Alice, 1, 60, live: false, times: times);
+        (await h.SendAsync(ack, session)).ShouldBeStatus(ack, h.Mediator, h.Alice, 1, 600, live: false, times: times);
 
-        // The grant has room for two more messages and 40 more bytes — not three, and not 100.
-        (await ArrivesAsync(30)).Should().Be(PickupDeliveryOutcome.Queued);
-        (await ArrivesAsync(20)).Should().Be(PickupDeliveryOutcome.QueueFull, "60 + 30 + 20 bytes is over max_queue_bytes");
-        (await ArrivesAsync(10)).Should().Be(PickupDeliveryOutcome.Queued);
-        (await ArrivesAsync(1)).Should().Be(PickupDeliveryOutcome.QueueFull, "the passed-over message is one of the three max_queue_messages allows");
+        // The grant has room for two more messages and 400 more bytes — not three, and not 1000.
+        (await ArrivesAsync(300)).Should().Be(PickupDeliveryOutcome.Queued);
+        (await ArrivesAsync(200)).Should().Be(PickupDeliveryOutcome.QueueFull, "600 + 300 + 200 bytes is over max_queue_bytes");
+        (await ArrivesAsync(100)).Should().Be(PickupDeliveryOutcome.Queued);
+        (await ArrivesAsync(StandInJwe.MinSize)).Should().Be(PickupDeliveryOutcome.QueueFull, "the passed-over message is one of the three max_queue_messages allows");
         var status = h.StatusRequest(h.Alice);
-        (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 3, 100, live: false, times: times);
+        (await h.SendAsync(status, session)).ShouldBeStatus(status, h.Mediator, h.Alice, 3, 1000, live: false, times: times);
     }
 
     [Theory]
@@ -467,8 +468,8 @@ public sealed class MessagePickupHandlerUndeliverableTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         var expires = clearedBy == "the message expires" ? new PickupDeliveryOptions(ExpiresTime: h.Clock.Now.ToUnixTimeSeconds() + 3600) : null;
-        var stuck = await h.Fixture.QueueAsync(h.Alice, PickupFixture.Payload(50, 1), expires);
-        var behind = await h.QueueAsync(h.Alice, 10, 2);
+        var stuck = await h.Fixture.QueueAsync(h.Alice, PickupFixture.Payload(500, 1), expires);
+        var behind = await h.QueueAsync(h.Alice, 100, 2);
         var session = h.Http(h.Alice);
         session.OnSend = TooLargeWith(stuck);
         var replies = new List<Message>();
@@ -522,7 +523,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var session = h.Http(h.Alice);
         session.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
         h.Store.OnGetStatus = (_, _, _, _) => throw new HandlerBoomException(HandlerBoomException.Marker + " " + h.Alice);
@@ -552,7 +553,7 @@ public sealed class MessagePickupHandlerUndeliverableTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var session = h.Http(h.Alice);
         using var cts = new CancellationTokenSource();
         var atTheVerdict = how.StartsWith("the token is cancelled", StringComparison.Ordinal);
@@ -615,15 +616,15 @@ public sealed class MessagePickupHandlerUndeliverableTests
         await h.EnrolAsync(h.Alice, h.Alice);
         await h.EnrolAsync(h.Bob, h.Bob);
         var now = h.Clock.Now;
-        await h.Store.Inner.EnqueueAsync(new QueuedMessage("same-id", h.Alice, h.Alice, PickupFixture.Payload(11, 1), now), null, now, default);
-        await h.Store.Inner.EnqueueAsync(new QueuedMessage("same-id", h.Bob, h.Bob, PickupFixture.Payload(22, 2), now), null, now, default);
+        await h.Store.Inner.EnqueueAsync(new QueuedMessage("same-id", h.Alice, h.Alice, PickupFixture.Payload(110, 1), now), null, now, default);
+        await h.Store.Inner.EnqueueAsync(new QueuedMessage("same-id", h.Bob, h.Bob, PickupFixture.Payload(220, 2), now), null, now, default);
         var bobSession = h.Http(h.Bob);
         bobSession.OnSend = (_, _) => ReturnRouteSendResult.TooLarge;
         var t0 = h.Start.ToUnixTimeSeconds();
         h.ResetTraces();
 
         var request = h.DeliveryRequest(h.Bob, 10);
-        (await h.SendAsync(request, bobSession)).ShouldBeStatus(request, h.Mediator, h.Bob, 1, 22, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+        (await h.SendAsync(request, bobSession)).ShouldBeStatus(request, h.Mediator, h.Bob, 1, 220, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
 
         h.Store.Acknowledged.Should().BeEmpty();
         h.Store.LeaseRequests.Should().HaveCount(2).And.OnlyContain(r => r.GrantPeerDid == h.Bob);

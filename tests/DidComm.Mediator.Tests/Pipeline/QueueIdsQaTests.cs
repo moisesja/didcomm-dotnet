@@ -121,7 +121,7 @@ public sealed class QueueIdsQaTests
 
         var ids = new List<string>();
         for (var i = 0; i < 200; i++)
-            ids.Add((await fixture.Queue.DeliverAsync(Recipient, PushFixture.Payload(5, (byte)i))).MessageId!);
+            ids.Add((await fixture.Queue.DeliverAsync(Recipient, PushFixture.Payload(50, (byte)i))).MessageId!);
 
         generator.Calls.Should().Be(0);
         ids.Should().OnlyHaveUniqueItems().And.AllSatisfy(id => id.Should().MatchRegex("^[0-9a-f]{32}$"));

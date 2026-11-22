@@ -108,7 +108,7 @@ public sealed class PickupClientHttpEndToEndTests
 
         // Within the lease the failure is not delivered again; discarding it is the application's call.
         (await harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 10)).Drained.Should().BeTrue();
-        (await harness.Pickup.AckAsync(mediator.Did, bob.Did, new[] { batch.Items[1].Id })).MessageCount.Should().Be(0);
+        PickupE2E.Answered(await harness.Pickup.AckAsync(mediator.Did, bob.Did, new[] { batch.Items[1].Id })).MessageCount.Should().Be(0);
         mediator.LeakingLogLines(recipient.Did).Should().BeEmpty();
     }
 

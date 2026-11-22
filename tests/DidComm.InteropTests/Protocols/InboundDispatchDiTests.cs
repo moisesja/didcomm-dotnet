@@ -112,7 +112,10 @@ public sealed class InboundDispatchDiTests
             var sockets = new ScriptedSocketFactory();
             sockets.OnCreate = s => s.AnswerCloseOutput = false;
             WebSocketDidCommTransport transport;
-            await using (var sp = Build(sockets, b => b.AddBuiltInProtocols()))
+            // The peers never answer the close, so each loop ends when dispose's close budget (one
+            // SendTimeout, short here) runs out and the socket is aborted under it (#100 OD-7).
+            await using (var sp = Build(sockets, b => b.AddBuiltInProtocols(),
+                s => s.Configure<WebSocketTransportOptions>(o => o.SendTimeout = TimeSpan.FromMilliseconds(500))))
             {
                 transport = sp.GetRequiredService<WebSocketDidCommTransport>();
                 // Two session sockets, one of them with a frame the built-in consumer drops (not a DIDComm envelope).

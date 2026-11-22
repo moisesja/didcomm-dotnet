@@ -79,11 +79,27 @@ public sealed class LiveConnection : IAsyncDisposable
             _stream = null;
             await stream.DisposeAsync().ConfigureAwait(false); // the stream turns live delivery off
         }
-        var status = await _pickup.AckAsync(_mediatorDid, _did, new[] { last.Id }, _endpoint, ct).ConfigureAwait(false);
-        _narrator.Step($"[{_name}] acknowledged the last message; status after ack: {status.MessageCount} message(s)");
+
+        // The mediator's status comes back only when it answers the acknowledgement with one. Under
+        // Message Pickup 4.0 it never does, so the answer is null.
+        var answer = await _pickup.AckAsync(_mediatorDid, _did, new[] { last.Id }, _endpoint, ct).ConfigureAwait(false);
+        _narrator.Step(answer is null
+            ? $"[{_name}] acknowledged the last message; the mediator sent no status in answer"
+            : $"[{_name}] acknowledged the last message; status in answer: {answer.MessageCount} message(s)");
+
+        // With no answer, AckAsync returns once the acknowledgement is sent, and nothing more is
+        // needed before going offline: closing the connection (DisposeAsync) waits, up to
+        // WebSocketTransportOptions.SendTimeout, for the mediator to answer the close, and this
+        // library's mediator answers it only after it has handled what it received before it, this
+        // acknowledgement included. If the connection drops abruptly instead, or the mediator takes
+        // longer than that, the acknowledgement can be lost and the message comes back later:
+        // delivery is at-least-once, so de-duplicate by message id.
     }
 
-    /// <summary>Close the connection.</summary>
+    /// <summary>
+    /// Close the connection. Closing waits, up to <c>WebSocketTransportOptions.SendTimeout</c>, for
+    /// the mediator to answer the close.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         if (_stream is { } stream)

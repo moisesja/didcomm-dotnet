@@ -14,10 +14,10 @@ listed here names a folder or type that exists in `src/`, `tests/`, `tools/` or 
 | `DidComm.Core/Protocols` | `ProtocolDispatcher`, `ProtocolHandlerRegistry`, `IProtocolHandler`, `IProtocolHandlerRoles`, `IProtocolObserver`, `ObserverDelivery`, `IInboundCorrelator`, `ProtocolContext`, `MessageTypeUri` (internal: `IInboundCorrelator`, whose `OnInbound` reports whether it claimed the message, and `InboundMessageSnapshot`, with `Pthid` and `Verified` since #96, and `Detach` / `Detached` since #98); built-in protocols under `DiscoverFeatures`, `Empty`, `OutOfBand`, `ProblemReport`, `Rotation` (`from_prior`), `Routing` (`ForwardMessage`, `ForwardProcessor` / `ForwardProcessorOptions` / `ForwardProcessingResult`, `ForwardHandler`, `IForwardSink` / `NullForwardSink`, `IForwardRecipientRegistry` / `InMemoryForwardRecipientRegistry`, `IRecipientRoutingKeyProvider` / `StaticRecipientRoutingKeyProvider`; internal `ForwardMetrics` / `ForwardOutcomes` (the `didcomm.forward.outcomes` counter), `RateLimitedLog` and `HeldForward` (what a waiting forward keeps, #98)), `Trace`, `TrustPing`. |
 | `DidComm.Core/Transports` | `IDidCommTransport`, `ITransportRouter` / `TransportRouter`, `TransportRequest` / `TransportResult`, `SendOptions` / `SendResult`, `OutboundEndpointGuard` + `OutboundEndpointPolicy`, `Stomp` (`StompFrame`, `StompFrameCodec`), and `ReturnRoute` — public: `ReturnRouteMode`, `ReturnRouteHeader`, `ReturnRouteTransport`, `IReturnRouteSession`, `IReturnRouteSessionRegistry` / `InMemoryReturnRouteSessionRegistry`, `SessionRegistration` / `SessionRegistrationOutcome`, `ReturnRouteSessionEventArgs` / `SessionCloseReason`, `ReturnRouteSessionOptions`, `IInboundReplayGuard` / `InMemoryReplayGuard`, `ReplayAdmission`, `ReplayProtectionOptions`, `MediatorServiceProtocols`, `QueueTransport`, `IInboundFrameConsumer` / `InboundFrame` (the client's inbound seam); internal: `ReturnRouteEligibility` (over an `UnpackResult` or an `InboundMessageSnapshot`, one shared core), `ReturnRouteAddressing`, `ReturnRouteHeaderWriter`, `OutgoingCreatedTime`, `ReturnRouteIdentity`, `InboundReplayGate`, `IInboundReceivingTransport` (a transport says whether pushes reach the inbound consumer; #96), `TransportRouter.Select` (the one transport selection for a send and for questions about it), and `ReceiveDeadline` (the per-message receive timer both WebSocket sides use, and the setter rule of their `MessageReceiveTimeout`; FR-TRN-14). |
 | `DidComm.Adapters.NetDid` | `NetDidKeyStoreSecretsResolver`: optional bridge from a NetDid key store to `ISecretsResolver`. |
-| `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options), `MapDidCommEndpointCore` (the registry-aware HTTP endpoint, optionally with a deadline for a returned `200`) and `DidCommReceiveOptions.ForMediatorEndpoint()`; internal response deadlines: `HttpResponseAcknowledgement`, `ResponseDeadlineLog`; internal WebSocket receive time limit (FR-TRN-14): `WebSocketMessageDeadline`, `MessageReceiveTimeoutLog` and `WebSocketClosing` (the close step of both receive loops). |
+| `DidComm.AspNetCore` | Minimal-API receive side: `DidCommEndpointRouteBuilderExtensions` (`MapDidCommEndpoint` — callback, registry-aware and session-aware callback overloads — `MapDidCommWebSocket`, `MapDidCommOobEndpoint`), `DidCommReceiveOptions`, `DidCommMediaTypes`, `StompServerSession`; internal return-route receive side: `InboundAdmission` (with `InboundAdmissionEndpoint`, `InboundAdmissionDefaults`, `SessionOutbound`, `SafeLog`), `HttpReturnRouteSession`, `WebSocketReturnRouteSession`; internal for `DidComm.Mediator.AspNetCore`: `MapDidCommWebSocketCore` (the registry-aware WebSocket endpoint, optionally with the mediator's receive options), `MapDidCommEndpointCore` (the registry-aware HTTP endpoint, optionally with a deadline for a returned `200`) and `DidCommReceiveOptions.ForMediatorEndpoint()`; internal response deadlines: `HttpResponseAcknowledgement`, `ResponseDeadlineLog`; internal WebSocket receive time limit (FR-TRN-14): `WebSocketMessageDeadline`, `MessageReceiveTimeoutLog` and `WebSocketClosing` (the close step of both receive loops); internal `WebSocketAccepting` and `WebSocketRefusalLog` (the handshake step of both WebSocket endpoints: a handshake that fails is answered 503, on a rate-limited line); internal `WebSocketMessageHandling` (the token under which the registry-aware WebSocket loop handles a message it received in full, #100 OD-8). |
 | `DidComm.Extensions.DependencyInjection` | `AddDidComm(...)` (`DidCommServiceCollectionExtensions`; also registers the return-route session registry and replay guard) and `DidCommBuilder` (`UseNetDidResolver`, `UseSecretsResolver`, `AddBuiltInProtocols`, `AddRoutingMediator` — which also registers the shared `ForwardMetrics` and a cycle-guarded `ForwardHandler` factory — `UseInboundDispatch`, ...); internal `DependencyCycleGuard` and `InboundDispatchConsumer` (the built-in `IInboundFrameConsumer`). |
 | `DidComm.Transports.Http` | `HttpDidCommTransport` (HTTPS sender; reads a capped, time-bounded `200` DIDComm response body only for a return-route send), `HttpTransportOptions` (including `TrustedProxy`), `HttpResiliencePipelineFactory`, `UseHttpTransport()`; internal `TrustedProxyRoute` (the checked copy of the named proxy and the test that recognises its socket) and `TrustedProxySnapshot` (one reading per container). |
-| `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound` and `TrustedProxy`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
+| `DidComm.Transports.WebSocket` | `WebSocketDidCommTransport` (WebSocket sender: one pooled socket per endpoint, never read except while dispose closes it, plus return-route session sockets per (endpoint, local DID, peer DID), each read by its own loop), `WebSocketTransportOptions` (including `ReceiveInbound` and `TrustedProxy`), `WebSocketLifecycleEventArgs`, `UseWebSocketTransport()`. The transport implements Core's internal `IInboundReceivingTransport` (`ReceiveInbound` on and STOMP off) through `InternalsVisibleTo` (#96), so it ships in lockstep with `DidComm.Core`. |
 | `DidComm.Mediator.Client` | The recipient side of the mediator service and the message helpers both roles share (Phase 7; split out of `DidComm.Mediator` by #113 before either was published, namespaces unchanged). A wallet references this package only. **The recipient-side client** (#96), namespace `DidComm.Mediator.Client` — public: `MediationClient`, `PickupClient`, `MediatorClientOptions`, `CoordinateMediationVersion`, `PickupBatch`, `PickupItem`, `RecipientQueryResult`, `MediationProtocolException`, `MediationNotSupportedException`, `AddMediatorClient()` (`MediatorClientBuilderExtensions`) and `DidCommServiceBuilder.ForMediation(grant)` (`MediationServiceBuilderExtensions`, a C# 14 static extension member); internal, namespace `DidComm.Mediator.Client.Internal`: `MediatorClientChannel` (the correlator: pending map, matcher, routes, live-stream registry) behind `IMediatorExchange`, with `PendingRequest`, `MediatorAnswerTypes`, `MediatorExchangeSpec`, `MediatorRoute`, `GuardedDeadline`, `OwnDeadline`, `MediatorBusyException`, `MediatorProblemCode`, `SingleLoggerFactory`; `FeatureNegotiation`, `NegotiatedVersionCache` and `CoordinateMediationWire` (Coordinate Mediation); `DeliveryReader`, `LiveRegistration`, `LiveDeliveryStream` and `PickupLog` (pickup); `DeliveredMessageUnpacker`, `DeliveredOutcome` and `DuplicateFilter`. **Shared by both roles** — namespace `DidComm.Mediator.Coordination`, public: `CoordinateMediation` (type URIs, `Create…` builders, `TryParse…` parsers), `MediationGrant`, `RecipientUpdate` / `RecipientUpdateResult` / `RecipientQueryPaging` / `RecipientPagination` and their enums; internal: `MediationBodies` (body codecs), `BareDid`, and the 2.0 codec `CoordinateMediation20` (both directions since #99: the client's requests and the mediator's answers). Namespace `DidComm.Mediator.Pickup`, public: `MessagePickup` (type URIs, `Create…` builders, `TryParse…` parsers), `PickupStatus`, `DeliveredMessage`; internal: `PickupBodies` (body and attachment codecs, with `ReadAttachmentsEach` / `DeliveredAttachment` for the client). Namespace `DidComm.Mediator.Internal`, internal: `MediatorLog` (safe logging, bounded ids, the fault-boundary cancellation rule), `WireJson` (strict body readers). Its package depends on `DidComm.Core`, `DidComm.Extensions.DependencyInjection`, `Microsoft.Extensions.DependencyInjection.Abstractions` and `Microsoft.Extensions.Logging.Abstractions` only (`Microsoft.Extensions.Options`, which `AddMediatorClient()` uses, arrives through Core and the DI package) — never `DidComm.Mediator`, `Microsoft.Extensions.Hosting.Abstractions` or ASP.NET Core (pinned by `ClientPackageReferencesTests`). Calls Core internals (`IInboundCorrelator`, `InboundMessageSnapshot`, `DidCommClient.UnpackDeliveredAsync`, …) through `InternalsVisibleTo`, and grants its own to `DidComm.Mediator` and the two test projects, so it ships in lockstep with both. |
 | `DidComm.Mediator` | The mediator service (Phase 7): two mediator roles and the pipeline that joins them. **Coordinate Mediation 3.0 and 2.0**, namespace `DidComm.Mediator.Coordination` — public: `IMediationStore` / `InMemoryMediationStore`, `RecipientPage`, `RecipientStoreOutcome`, `IMediationPolicy` / `DefaultMediationPolicy` / `MediationDecision`, `IMediatorIdentity` / `MediatorIdentity`, `CoordinateMediationOptions`, `CoordinateMediationHandler` (3.0), `CoordinateMediation20Handler` (2.0, #99), `AddCoordinateMediation()`; internal: `MediationCoordinator` (the role's logic without the wire format, one instance per handler), `MediationForwardRecipientRegistry`, `ConfiguredMediatorIdentity`. **Message Pickup 3.0**, namespace `DidComm.Mediator.Pickup` — public: `IMessageStore` / `InMemoryMessageStore` with `QueuedMessage`, `MessageLease`, `MessageLeaseRequest`, `QueueStatus`, `EnqueueOutcome`, `MessagePickupOptions`, `MessagePickupQueue` with `PickupDeliveryOptions` / `PickupDeliveryResult` / `PickupDeliveryOutcome` / `GrantRevocation`, `MessagePickupHandler`, `AddMessagePickup()`; internal: `PickupCoordinator` (the role's logic without the wire format), `PickupSessionTracker` (live mode with its arrival mark, and lease owner, per live session), `PickupSizing` (the delivery byte budget), `PickupIds` (random queue ids) and `PickupIdSource` (the test seam for them). **The mediator service**, namespace `DidComm.Mediator` — public: `AddMediator()` (`MediatorBuilderExtensions`), `MediatorOptions`; internal, namespace `DidComm.Mediator.Pipeline`: `MediatorForwardSink`, `PushDispatcher` (the live-push workers: a wake-up flag and at most one operation per grant, no per-message state), `MediatorHostedService`, `RoutingDidValidator`, `MediatorMetrics` (with `PushOutcomes`), `MediatorMarker`, `MediatorInvitationHolder`, `NoRecipientRoutingKeys` (the mediator's default routing-key provider, a type of its own so start-up can tell it from a host's). Internal, namespace `DidComm.Mediator.Internal`: `MediatorPeer` (the authcrypt peer rule). The builders, parsers and wire records the roles speak, and the recipient-side client, come from `DidComm.Mediator.Client` (row above); the roles use its internals `MediatorLog`, `BareDid`, `PickupBodies.MaxIdLength` and the bounded parser overloads through `InternalsVisibleTo`. References `DidComm.Mediator.Client`, `DidComm.Core`, `DidComm.Extensions.DependencyInjection` and `Microsoft.Extensions.Hosting.Abstractions`; no ASP.NET Core. A mediator references this package and gets the client with it. |
 | `DidComm.Mediator.AspNetCore` | The mediator's endpoints: `MediatorEndpointRouteBuilderExtensions` (`MapDidCommMediator`, `InvitationOobId`); internal `CompositeEndpointConventionBuilder` and `MediatorInvitationStore`. References `DidComm.Mediator` and `DidComm.AspNetCore`, and calls internals of both, so they ship in lockstep. |
@@ -126,7 +126,15 @@ that every grantee references its granter directly (pack pins direct references 
   with a manual clock, and a raw-frame peer for fragments and pings), and
   `Transports/WebSocketSessionReceiveDeadlineTests` the client's session sockets against
   `RawFrameWebSocketPeer` (a raw-frame Kestrel peer) and `ScriptedSessionWebSocket`; the manual clock
-  (`QaManualTimeProvider`) waits for a timer created after a mark before a test moves it.
+  (`QaManualTimeProvider`) waits for a timer created after a mark before a test moves it. What
+  happens to a message when its connection closes or drops (#100, OD-7 and OD-8):
+  `AspNetCore/WebSocketMessageFinishTests` runs the registry-aware and mediator endpoints on real
+  Kestrel with the manual clock (a message received in full is finished after the drop, within the
+  close grace or until the host stops); `Transports/WebSocketDisposeCloseWaitTests` (with
+  `WebSocketDisposeCloseWaitSupport`) checks the transport's bounded close wait on real sockets
+  against `RawFrameWebSocketPeer`; `Transports/WebSocketDisposeAcknowledgementEndToEndTests` and
+  `WebSocketAcknowledgementMailboxTests` check that a 4.0 acknowledgement followed at once by
+  dispose, or by an abrupt drop, is applied at the mediator.
 - `tests/DidComm.Mediator.Tests`: the `DidComm.Mediator` suites (`Coordination`: fixtures, parsers,
   builders, store, handler, DI, adversarial, and for 2.0 (#99) `CoordinateMediation20HandlerTests`,
   `CoordinateMediationCrossVersionTests`, `CoordinateMediation20InteropVectorTests` (request
@@ -234,7 +242,10 @@ that every grantee references its granter directly (pack pins direct references 
    to requests compare message ids, `thid`s and `pthid`s ignoring case (FR-MSG-04, since #141);
    `ThreadState.Thid` keeps the casing that created the state.
 6. A reply with a session becomes the HTTP `200` body or a WebSocket push; without one it is
-   logged, not sent (a reply to anyone else travels out of band, FR-TRN-10).
+   logged, not sent (a reply to anyone else travels out of band, FR-TRN-10). On the registry-aware
+   WebSocket endpoint, steps 3–6 of a message received in full run under a token of their own, so
+   they finish, within 5 s, when the connection drops behind it ("Finishing a message after its
+   connection ends", below).
 7. `IProtocolObserver` instances get a read-only, best-effort copy off the reply path for every
    outcome (`ObserverDelivery` runs the bounded background pumps). The legacy `onReceive`-callback
    overloads skip steps 4–6 and hand the `UnpackResult` straight to the application; the
@@ -272,7 +283,8 @@ The setting defaults to 60 s; `Timeout.InfiniteTimeSpan` turns it off and no tim
 setter applies Core's `ReceiveDeadline.Validate` (greater than zero and at most `int.MaxValue` ms,
 or infinite; otherwise `ArgumentOutOfRangeException`), the same rule as
 `WebSocketTransportOptions.MessageReceiveTimeout` on the client ("Return-route client side" below).
-The HTTP endpoints are not timed by it.
+The HTTP endpoints are not timed by it. What the registry-aware loop does with a message it has
+received in full when the connection ends is the next section.
 
 - **Where the time starts and stops.** Right after `AcceptWebSocketAsync` the endpoint creates the
   connection's `WebSocketMessageDeadline` (`StartAtAccept`) on the container's `TimeProvider` (the
@@ -322,6 +334,63 @@ is under "Documented limits" in the mediator service section below. Cookbook HH
 (`Section_HH_LimitHowLongAWebSocketMessageMayTake`) runs the callback endpoint on a TestServer with
 a 1 s limit (a silent connection and an unfinished message closed with 1008, an idle connection
 still served) and sets the client's value through `UseWebSocketTransport`.
+
+### Finishing a message after its connection ends (#100, OD-8)
+
+Owner decision OD-8 (2026-11-21), in `ReceiveLoopWithDispatchAsync` only: the loop behind the
+registry-aware `MapDidCommWebSocket(pattern)` and `MapDidCommMediator`'s WebSocket endpoint. Before
+it, everything done for a message ran on the connection's token, so a peer that sent a one-way
+message and went away at once (a Message Pickup 4.0 `messages-received`, which nothing answers)
+could have its message cancelled half-handled. The loop now uses two tokens:
+
+- **The connection token** (`connectionCts`, linked to `RequestAborted`). It is cancelled by the
+  peer's abort, or by the session when its writer finds the socket broken or an evicted peer never
+  answers the close (the eviction backstop, JC-21). Reads use it, and the loop stops once it is
+  cancelled, so nothing more is read after the drop: a connection has at most one finish.
+- **The handling token** (`WebSocketMessageHandling`, internal). Once a message's last frame is
+  read, everything done for it runs under this token: the STOMP frame
+  (`StompServerSession.ProcessAsync`), `UnpackAsync`, admission, `DispatchAsync` and the reply's
+  `TrySendAsync`. While the connection lives nothing cancels it, so a handler has no time limit of
+  its own, as before. When the connection token is cancelled with a message in hand, a bound
+  starts: `WebSocketReturnRouteSession.DefaultCloseGrace` (5 s), timed on the container's
+  `TimeProvider` (the `Clock` the receive deadline uses), or the host's
+  `IHostApplicationLifetime.ApplicationStopping`, whichever comes first (no stopping token when the
+  container has no `IHostApplicationLifetime`). The handling token is also cancelled when the loop
+  ends, so work a handler left running with it is cancelled then. Nothing is timed while the
+  connection lives: the bound's timer is created, and the stopping token watched, only once the
+  connection ended with a message in hand. A clock whose `CreateTimer` throws ends the handling at
+  once rather than leaving it unbounded. The cancellation is requested with `CancelAsync`, so
+  callbacks that handler code registered on the token run on the thread pool, never on the timer's
+  or the host's stopping thread; a fault in one is logged by type. A finish that the bound or the
+  host ends writes one Debug line with no wire value. A finish cut short by the bound after
+  admission still uses up that message id in the replay guard (FR-RR-08), so the same message sent
+  again is refused; releasing the id on cancellation would reopen a replay window.
+
+Around it:
+
+- **The session.** It closes (`SessionCloseReason.Unregistered`, unless it closed already) the
+  moment the connection token is cancelled, so a reply or a push made during the finish is refused
+  quietly (`false`) and nothing is written ("Return-route receive side" below). A connection whose
+  token is already cancelled opens no session: one registered then would only take a place in the
+  registry, or evict a live session of the same peer.
+- **STOMP.** A complete `SEND` only hands over its envelope, so it is dispatched after the drop
+  too. A `CONNECT` complete when the connection ended writes its `CONNECTED` into the dead socket,
+  which fails quietly (one Debug line).
+- **A handler's own cancellation** (found while building OD-8; no issue covered it). A handler that
+  throws an `OperationCanceledException` the loop did not raise (its own timeout: a slow DID lookup
+  or HTTP call arrives as a `TaskCanceledException`) drops that message with one Warning line (the
+  bounded id and exception type names) and the loop serves the next message. Before, it escaped the
+  loop, ended the connection and was logged as an unhandled error. A cancellation from the
+  connection or the host still ends the loop.
+- **The loop's exit.** After a server-initiated end (the connection token cancelled, the request
+  not aborted), a cancellation or socket fault, the end of a finish included, is swallowed as
+  before; after a client abort it propagates, as before. The close step in `finally` is unchanged.
+
+Not covered: the HTTP endpoints, whose acknowledgement gate is deliberate (#90: a forward whose
+request is aborted before its 202 is committed is never relayed; "Mediator routing core" below),
+and the callback overload `MapDidCommWebSocket(pattern, onReceive)`, whose token is still the
+request's abort. What a disconnecting peer can still cause is under "Documented limits" in the
+mediator service section.
 
 ## Outbound flow
 
@@ -840,7 +909,14 @@ WebSocket session (`WebSocketReturnRouteSession`; at most one per connection):
   `CloseOutputAsync(NormalClosure, "return-route session evicted")`.
 - The receive loop keeps reading in `Open` and `CloseSent` — an evicted connection dispatches,
   without a session, what the peer sent before it saw the close — until the peer's close frame or
-  the backstop. A closed session is never reopened on that socket.
+  the backstop. A closed session is never reopened on that socket. Once the connection token is
+  cancelled the loop reads nothing more; a message it had received in full is still finished, within
+  the close grace (#100, OD-8; "Finishing a message after its connection ends" above).
+- The session never outlives its connection (#100, OD-8). `Start` registers on the connection
+  token: when it is cancelled (the peer's abort, a writer fault, the eviction backstop) the session
+  closes with `Unregistered`, unless it closed already (the first reason wins), so a reply or a
+  push made while the loop finishes its message in hand is refused quietly (`false`). A connection
+  whose token is already cancelled opens no session.
 - Loop exit (`finally`): `Unregister` (it never runs or waits for a subscriber — the registry's
   notifier delivers `SessionClosed(Unregistered)` later — so no subscriber delays this path; a
   no-op after an eviction), then `StopAsync` — waits up
@@ -1157,7 +1233,8 @@ Session sockets (`WebSocketDidCommTransport`):
 - Close grace versus dispose budget: `CloseGrace` is `SendTimeout` when finite and positive
   (clamped), else 30 seconds, and bounds the retire close, the `1009` and `1008` closes, the close
   answer and the backstop — an infinite `SendTimeout` must not stop a retiring loop at once (QA-F01).
-  `CloseBudget` (`SendTimeout`, infinite or negative → 0) is for dispose only.
+  `CloseBudget` (`SendTimeout`, infinite or negative → 0) is for dispose only: it bounds the close
+  of each socket, the wait for the peer's close included, every socket at the same time.
 - Backstop: `SessionSocket.ArmBackstop` starts a `Timer` of its own (no flowed `ExecutionContext`)
   whose callback calls `StopLoop`, never `CancellationTokenSource.CancelAfter`: the loop token is the
   consumer's, and the source's own timer would rethrow a throwing registered callback on a pool
@@ -1165,17 +1242,57 @@ Session sockets (`WebSocketDidCommTransport`):
   S or found it no longer open, and by dispose — swallows what callbacks throw. The loop's
   `CancellationTokenSource` is never disposed, because any of those may cancel it at any time.
 - Dispose: set `_disposed`; `CloseEndpointAsync` concurrently for every key in
-  `_sendLocks ∪ _pool ∪ _sessions` — for a session key, inside the gate it removes S, sends
-  `CloseOutputAsync(NormalClosure, "transport disposed")` bounded by `CloseBudget` while `Open` or
-  `CloseReceived`, disposes S and stops its loop after the release; seal; sweep `_pool`, `_sessions`
-  and `_liveSessionSockets` (stop, dispose, `Disconnected` once each); await every loop with
+  `_sendLocks ∪ _pool ∪ _sessions`, inside each key's gate; seal; sweep `_pool`, `_sessions` and
+  `_liveSessionSockets` (stop, dispose, `Disconnected` once each); await every loop with
   `WaitAsync(CloseBudget)` (a loop held by a consumer that ignores cancellation is abandoned, its
   socket already disposed); dispose idle gates. Bound: `DrainBudget + 2 × CloseBudget`. No open
   socket survives — pooled, session or retiring — and a loop never waits on a gate once `_disposed`
   is set.
+- Dispose's close waits for the peer's (#100, owner decision OD-7, 2026-11-21). Each close sends
+  a `NormalClosure` close frame (`"transport disposed"`) and waits for the peer's answering close
+  within `CloseBudget`; the endpoints close concurrently, so a peer that never answers costs one
+  `CloseBudget` in total, however many sockets are open. On expiry the socket is aborted, as
+  before. An infinite or non-positive `SendTimeout` makes the budget zero: nothing is waited for.
+  - A pooled socket in `Open` gets the STOMP `DISCONNECT` (under STOMP), then `CloseAsync`. Nothing
+    else reads it, so `CloseAsync` reads, and drops, what arrives before the peer's close.
+  - A session key's S, in `Open` or `CloseReceived`, is removed, and its close uses the session's
+    own receive loop as its only reader (one reader per socket): what arrives meanwhile is dropped,
+    not handed to the consumer. S is disposed and its loop stopped after the release. A
+    retiring session socket has already sent its close and is not closed again.
+  - From dispose's start every session socket, active or retiring, drops what arrives. Dispose then
+    runs in three phases: it drains every endpoint at once, each keeping its send gate once it has
+    it; once every drain has finished or used up its budget, it cancels every consumer call in
+    progress, on active and retiring sockets alike, on pool threads; then it closes every endpoint
+    at once and runs the sweep. A reply a consumer is sending, to any endpoint, has been drained
+    before its token can be cancelled (`WebSocketDisposeConsumerReplyTests`). No send holds one
+    endpoint's gate while it waits for another's, so holding gates across the barrier cannot
+    deadlock. Since every endpoint closes only once all have drained, a fast endpoint's close
+    waits for the slowest drain.
+  - A close the peer starts is answered exactly once, before the socket is disposed (review
+    round 4; RFC 6455 §5.5.1). The single winner of `SessionSocket.TryEnd()` owns the socket's
+    end. Before dispose, the session's loop answers and ends it, as before. Once dispose has
+    begun, the loop never claims, disposes or raises `Disconnected`: it marks `LoopDone`, and the
+    socket stays in `_liveSessionSockets`. Phase 3's close is the answer for a socket the drain
+    took. For anything left, the sweep (`FinishSessionForDisposeAsync`, under one `CloseBudget`)
+    stops the loop, waits for `LoopDone`, answers a `CloseReceived` socket under its key's send
+    gate (rechecked under the gate), then disposes it. A send that finds its socket already
+    closed by the peer only takes it out of `_sessions`: it writes nothing, so its hold stays
+    connect + send, and the loop or the sweep answers. A send that fails on such a socket cannot
+    answer; its write has ended the connection.
+  - Dispose never throws and never leaves a socket behind (owner decision OD-9, "Fix forward").
+    The pooled disposals are guarded, and lifecycle-handler faults are logged through the guarded
+    log, with the handler's own exception (round 5). Phases 1–3 run under a catch. A `finally` releases every drained gate, then seals the
+    pool and runs both sweeps. A session socket opened by a send while dispose is under way gets
+    `DiscardInbound` as it is published.
+  - Why: this library's mediator answers a close only after it has handled the messages before it,
+    so a one-way message sent just before dispose (a Message Pickup 4.0 acknowledgement) is applied
+    before dispose returns. A 4.0 live push dropped during the wait is not acknowledged, and the
+    mediator delivers it again. Before, dispose sent its close (`CloseOutputAsync`) and dropped the
+    connection at once.
 - Guarantee, from the caller's side: a send that starts after an `all` / `thread` send to (E, L, P)
   returned uses S while S exists; one that starts after a `none` send returned uses the pool;
-  concurrent sends are not ordered. Pooled sockets are never read. Under STOMP an `all` / `thread`
+  concurrent sends are not ordered. Pooled sockets are never read, except by dispose's close,
+  which drops what arrives before the peer's close. Under STOMP an `all` / `thread`
   send uses the pool (one Information line).
 
 Inbound consumer and admission (`InboundDispatchConsumer.ConsumeAsync`, one frame at a time per
@@ -1467,7 +1584,9 @@ Wiring: `DidCommBuilder.AddMessagePickup(configure?)` (`MessagePickupBuilderExte
   on a scratch instance, so bad settings fail at registration.
 - `TryAddSingleton` for `IMessageStore` (`InMemoryMessageStore`), `MessagePickupQueue` and
   `MessagePickupHandler`, then `AddProtocol<MessagePickupHandler>()`. Discover Features discloses
-  `https://didcomm.org/messagepickup/3.0` with `roles: ["mediator"]`.
+  `https://didcomm.org/messagepickup/3.0` with `roles: ["mediator"]`. Since #100 the same call also registers `MessagePickup40Handler` and
+  discloses `https://didcomm.org/message-pickup/4.0`, unless `EnableV4` is `false` (see "Message
+  Pickup 4.0, mediator role" below).
 - The queue's factory needs an `IMediationStore` (`AddCoordinateMediation()` in either order, or
   the host's own) and throws `InvalidOperationException` naming the fix when there is none. It
   takes the session registry `AddDidComm` registers. Nothing in the graph takes the dispatcher, the
@@ -1599,12 +1718,18 @@ instead of naming a record:
   (FR-PICK-06) →
   a take that came back after the caller's deadline sends nothing → unless the session is closed,
   the one-message `delivery` in the session's framing through `TrySendAsync(delivery,
-  MaxDeliveryBytes, ct)`. `Sent` with the session still open → `Sent`: the record stays leased to
-  the session until `messages-received`, its close or `LeaseTimeout`. `TooLarge` → passed over
-  (`PassOverAsync` until `now + LeaseTimeout × 2^PassOvers`), as a pickup does → `PassedOver`.
-  Anything else — not taken, closing, a fault, a cancellation — gives the lease back in a
-  `finally` (`ReleaseAsync` naming the lease, never cancelled) once the send has ended, however
-  long that takes; `NotSent`, or the fault or cancellation propagates after the release.
+  MaxDeliveryBytes, ct)`, under a live-push lease (`MessageLease.LivePush`; the take marks the record,
+  see "A live push returned unconfirmed is not pushed again" below). `Sent` with the session still
+  open → `Sent`: the record stays leased to the session until `messages-received`, its close or
+  `LeaseTimeout`, and stays marked: only a `delivery-request` gets it if it comes back. `Sent` with
+  the session found closed, or a fault, cancellation or deadline after the send was attempted → the
+  lease is released by id and the record stays marked (owner decision OD-5, 2026-11-21) → `NotSent`,
+  or the fault or cancellation propagates. `TooLarge` → passed over (`PassOverAsync` until `now +
+  LeaseTimeout × 2^PassOvers`, which also clears this lease's mark), as a pickup does →
+  `PassedOver`. `NotSent` from the session (open or closing), or no attempt (the session closed or
+  the deadline hit before the send) → `ReturnUnsentAsync`: the lease ends and the mark is cleared,
+  so a later wake-up pushes it. Every give-back runs in a `finally`, never cancelled, once the send
+  has ended, however long that takes.
 - `HasLiveTarget(grantPeerDid)` is the synchronous check the sink makes before waking a grant; its
   answer may be stale by the time the push runs, which is why `PushNextLiveAsync` looks again.
 
@@ -1745,6 +1870,145 @@ Documented limits:
 - Cookbook FF.2: `AddMessagePickup()` à la carte with a host sink calling `DeliverAsync`
   (`AllowLive: false`, as the library's own sink, so the forward pump never waits on a session), and
   `MessagePickupQueue` / `MessagePickupHandler` built without a container.
+
+### Message Pickup 4.0, mediator role (#100)
+
+Source: the 4.0 page at `decentralized-identity/didcomm.org@a26926c`
+(`site/content/protocols/messagepickup/4.0/readme.md`, PIURI `https://didcomm.org/message-pickup/4.0`);
+PRD FR-PICK-12. `MessagePickup40Handler` (public, `DidComm.Mediator.Pickup`) is the 3.0 handler's
+twin: the same steps (peer gate → session for this pair → parse → coordinator → reply) over the
+**same** `MessagePickupQueue`, so the store, its leases and pass-over marks, the session tracker
+(live flags, the release backlog), the sizing and the log counters are shared by construction. A
+recipient has one mailbox whichever version it speaks: a lease taken by a 3.0 `delivery-request` is
+acknowledged by a 4.0 `messages-received` and the reverse, and a recipient may switch versions
+between requests. The reply-thread check (the 512-character bound on an echoed thread) and the
+reply-build fault boundary moved out of the 3.0 handler into `PickupReplies`, unchanged, and both
+handlers use them.
+
+| Request | Coordinator call | 4.0 reply |
+|---|---|---|
+| `status-request` | `StatusAsync` | `status` with `thid` (DD-11), times in epoch milliseconds when something is waiting, no `longest_waited_seconds` |
+| `delivery-request` | none without a session for this pair; else `DeliverRequestedAsync` with the 4.0 builder | the pushed `delivery`; "nothing deliverable" → a `delivery` with `"attachments": []`, `thid` and the filter repeated |
+| `messages-received` | `AcknowledgeAsync(…, answerWithStatus: false)` | none, with or without `return_route` |
+| `live-delivery-change` | `SetLiveDeliveryAsync` with the 4.0 live framing | `status`, or the 4.0 problem report (`…/message-pickup/4.0/problem-report`, `pthid`) |
+
+- **No session, no answer.** A 4.0 `delivery-request` without a return-route session for the
+  (peer, local) pair returns `null` before the coordinator runs, so nothing is read or leased. 3.0
+  keeps its `status`, which the endpoints never send either. The reason: 4.0 asks for
+  `return_route: all` on every request (L52, L69), and an empty `delivery` sent another way would
+  claim that nothing is waiting.
+- **Live framing.** `SetLiveDeliveryAsync` stores the framing per session, so a session's pushes
+  follow its last `live-delivery-change(true)`: 4.0's is a `delivery` with one attachment and no
+  `thid`. Turning live delivery off in either version turns it off. Unacknowledged pushes go back to
+  the queue when the session closes or the lease runs out (4.0 L308; #94/#95 already did this), and
+  from then on only a `delivery-request` delivers them, never another live push, in either version
+  (owner decision 2026-11-20; see "A live push returned unconfirmed is not pushed again").
+- **The codec.** `MessagePickup40` (internal, `DidComm.Mediator.Client`, both directions) writes
+  and reads through `PickupBodies`. It adds `WriteStatus40` / `ReadStatus40` and the internal
+  `PickupStatus40` record, which holds milliseconds. A body with only 3.0's `limit` is malformed
+  under 4.0, and so is a `delivery` without an `attachments` array. Types match any 4.x minor;
+  builders write the canonical strings.
+- **Registration.** `AddMessagePickup()` reads `MessagePickupOptions.EnableV4` (default `true`) from
+  its registration probe. When it is on, it registers the 4.0 factory and
+  `AddProtocol<MessagePickup40Handler>()`. Both pickup factories run
+  `VerifyVersion4Registration`, which compares what is registered with the setting in effect and
+  throws `InvalidOperationException` naming the property when they disagree (the `EnableV2`
+  pattern, #99). Discover Features discloses each registered handler's PIURI, so it shows both by
+  default. There is no switch to serve 4.0 only; a host can register `MessagePickup40Handler` itself
+  over a `MessagePickupQueue`. `AddMediator()` projects `o.Pickup` onto it.
+
+### The mailbox accepts only encrypted messages (#100, owner decision 2026-11-20)
+
+Both pickup versions let a `delivery` carry only encrypted messages (3.0 L172: "The ONLY valid
+type of attachment for this message is a DIDComm v2 Message in encrypted form."; 4.0 L261: "…a
+DIDComm v1 or v2 Message in encrypted form."), while routing only asks senders to encrypt (v2.1
+routing.md L57). The owner decided that the mailbox refuses any message that is not encrypted,
+whoever supplies it, stores nothing and reports `NotEncrypted`. How it is built (ours):
+
+- **One door.** The check sits in `PickupCoordinator.DeliverAsync`, behind
+  `MessagePickupQueue.DeliverAsync`, which every path into the mailbox goes through: the forward
+  sink in each mode, a host's own calls, and the live push, which stores before it pushes. Order:
+  the size bound first (an over-size payload is `PayloadTooLarge` and never parsed), then this
+  check, then the expiry, the registration lookup, the live target, any lease and the store. A
+  refusal costs no mediation-store call and no quota, and writes one rate-limited line that quotes
+  nothing of the payload. The sink records it as `Dropped-PayloadNotEncrypted`, with its own
+  counter. That is distinct from the handler's `Dropped-NotEncrypted`, which is about the forward's
+  own envelope.
+- **Encrypted form** (`EncryptedForm.IsEncrypted`, `DidComm.Mediator.Client`, shared with the
+  wallet client's check): the outermost layer is a JWE, anoncrypt or authcrypt (v2.1
+  message_structure.md L65, L71). It is judged structurally and nothing is decrypted: valid UTF-8
+  throughout, checked first with `Utf8.IsValid` (the JSON reader does not validate the bytes inside
+  strings and member names; ADV2-1), then strict JSON (`DidCommJson.StrictDocument`: no duplicate
+  member names, nothing after the value) holding
+  an object that Core's `EnvelopeDetector` classifies as `Encrypted`, that is, one with a
+  `ciphertext` member. That is the rule the library's unpack uses (FR-API-03), so the mailbox, the
+  wallet and every unpacker agree. Plaintext, a JWS (General or Flattened), any other JSON value and
+  bytes that are not UTF-8 JSON are refused.
+- **What is judged is what is stored.** In rewrap mode, and in pass-through mode with an extra
+  routing key (`IRecipientRoutingKeyProvider`), the sink stores the mediator's own anoncrypted
+  `forward`, a JWE. So a non-encrypted message inside it is stored, and the recipient's client
+  opens it.
+- **Cost (measured, accepted).** The check parses each stored payload once, on the forward
+  handler's shared pump (`MediatorForwardSink`). It is linear in the payload: about 0.08 ms for an
+  honest flat JWE of the largest admissible size (564 525 bytes at the defaults) and about 16 ms
+  for a hostile one of many small objects; transient allocation is at most about 3.8 times the
+  payload. A sender would need about 35 MB/s of forwards to keep the pump busy with it (ADV-2, I-1).
+
+### A live push returned unconfirmed is not pushed again (#100, owner decision 2026-11-20)
+
+The owner decided ("Never push it live again"): "A message pushed live and returned unconfirmed
+waits until the recipient asks for it. Same rule for 3.0 and 4.0, since one mailbox serves both."
+Spec basis: 4.0 L302 ("delivering newly arriving messages"), L304 ("Messages already in the queue
+are not affected by _Live Mode_; they **MUST** still be requested with `delivery-request`
+messages."), L308 ("If a message is not acknowledged, the message **MUST** be added to the queue for
+later pickup."); 3.0 L203 says the same as L304 in lower case. Until #100 such a message was pushed
+live again at its grant's next wake-up. How it is built (ours):
+
+- **The lease says it is a live push.** `MessageLease.LivePush` (init-only) is set on every lease
+  the coordinator creates for a live push — `DeliverAsync`'s record admitted already leased to a
+  live target, and `PushNextLiveAsync`'s take — and never on a `delivery-request`'s lease, over
+  HTTP or a WebSocket.
+- **Marked from the moment a live push takes the record, cleared only on a definite "not sent"**
+  (the invariant since PR #143 review round 1, P2-1; ours). The store sets
+  `QueuedMessage.LivePushReturned` atomically when a live-push lease takes the record
+  (`LeaseAsync`, or `EnqueueAsync` admitting it already leased to a live target), and remembers which
+  lease set it. The records it hands back describe them as they were before the take. The only ways
+  to clear the mark are `IMessageStore.ReturnUnsentAsync(grant, ids, leaseId)` and a pass-over by
+  that lease, each only for a mark set by `leaseId` (even after that lease ended), and the coordinator
+  calls them only when the session answered `NotSent` or `TooLarge` (open or closing) or the send
+  was never attempted. Owner decision 2026-11-21 (OD-5, "Counts as pushed: wait"): "only a
+  connection's explicit 'not sent', or no attempt at all, keeps a message eligible for a live push",
+  so a send that was attempted and then faulted, was cancelled or reached its deadline stays marked.
+  Every way a lease ends, and what it does to the mark:
+
+  | Path | Mark |
+  |---|---|
+  | a live-push lease takes the record (`LeaseAsync`, `EnqueueAsync` leased) | set, remembering that lease |
+  | `ReturnUnsentAsync(leaseId)` (the session answered `NotSent`; or the send was never attempted: registration unconfirmed, the session closed or the deadline hit before the send) | cleared if `leaseId` set it, even after that lease ended; the lease ends if the record still carries it |
+  | `PassOverAsync(leaseId)` (`TooLarge` in the push workers' path) | cleared if `leaseId` set it |
+  | `ReleaseAsync` by id (`Sent` with the session found closed; a fault, cancellation or deadline after the send was attempted), `ReleaseLeasesAsync(owner)` (the connection's clean-up), lease expiry, a `delivery-request`'s lease ending | never cleared |
+  | `AcknowledgeAsync`, any purge | the record is removed |
+
+  So the outcome does not depend on the order in which a connection's clean-up and the
+  coordinator's give-back run. An earlier version marked the record when its live-push lease ended
+  by the clean-up or by running out, and an id-based give-back after a fault could end it unmarked
+  first (the review's P2-1); and ADV4-1's rule of ours ("a push in hand when its session closes
+  counts as returned") is gone: the invariant covers that case, and a push a closing session
+  answered `NotSent` stays eligible, because it was never pushed.
+- **Who takes a marked record.** A lease request whose lease is a live-push lease never takes one
+  (`IMessageStore.LeaseAsync`); a `delivery-request` takes it in its place, within the same budgets.
+  The mark changes no count, bound or `status`. A custom `IMessageStore` must keep and honour the
+  mark (the contract says so); a marked record a store hands to a live push anyway is refused by
+  `TakeNextAsync` as outside the contract — released, not pushed, still picked up.
+- **What a recipient sees.** A message it let go unconfirmed reaches it again only when it asks
+  (`delivery-request`). This library's live stream asks on every cycle (`LivePollInterval`, 1 minute
+  by default); a recipient that only listens live and never asks would not get it until it does
+  (the cost the owner accepted).
+- **A send that outlasts its lease.** If a live push's send is still running when its lease runs
+  out, a `delivery-request` can take the record meanwhile (it is still marked). Should the send
+  then answer `NotSent`, `ReturnUnsentAsync` clears the mark set by that push's lease and leaves the
+  delivery-request's lease alone, so the record becomes eligible for a live push again once that
+  lease ends: it was never pushed.
 
 ## Mediator service: pipeline, `AddMediator()`, `MapDidCommMediator` (Phase 7, #95)
 
@@ -1887,8 +2151,9 @@ identity and the monotonic cooldown below are its fixes.
 
 **D-1 The store decides what is pushed.** The dispatcher keeps no per-message state. An operation
 takes, one at a time, the next record the store hands out at that moment
-(`PickupCoordinator.TakeNextAsync`: due, unexpired, unleased, not passed over, oldest first, its
-recipient DID still registered under the grant) and pushes it. An expired, acknowledged, purged or
+(`PickupCoordinator.TakeNextAsync`: due, unexpired, unleased, not passed over, not a live push that
+came back unconfirmed (#100, owner decision 2026-11-20), oldest first, its recipient DID still
+registered under the grant) and pushes it. An expired, acknowledged, purged or
 picked-up record is therefore never pushed and takes no one's place. An operation is step 1 of the
 D6 order, the **live push** (step 2 is the pickup queue, where everything not pushed waits):
 `PickupCoordinator.PushNextLiveAsync` (see "Message Pickup 3.0") — the newest live session of the
@@ -1905,9 +2170,13 @@ by an operation that was running, or taken by a pickup) is no outcome.
 A wake-up is a stored message (the sink's) or a session turning live delivery on
 (`LiveDeliveryStarted`).
 
-**Retries.** A live push the session did not take (`NotSent`: no free push slot, downgraded or
-closing), or that faulted, or that reached its deadline and was then given back, is tried again at
-the grant's next wake-up. That cannot multiply the traffic of what was forwarded: an operation
+**Retries.** A live push the session did not take (`NotSent`: no free push slot, a downgraded or
+closing session, a failed pack; or `TooLarge`, passed over first), or that was never attempted, is
+tried again at the grant's next wake-up: it never reached the recipient. One the session took and
+that came back unconfirmed is not tried again (#100, owner decision 2026-11-20), and neither is one
+whose send was attempted and then faulted or reached its deadline: it stays marked and is delivered
+only through pickup (owner decision 2026-11-21, OD-5: "only a connection's explicit 'not sent', or
+no attempt at all, keeps a message eligible for a live push"). That cannot multiply the traffic of what was forwarded: an operation
 makes at most one failed attempt (it ends there, and a deadline also pauses the grant), a wake-up
 is a stored message or a session turning live delivery on, and nothing is written to the
 connection unless the session takes it. One too large for the session is passed over instead, for
@@ -1960,7 +2229,8 @@ pushes succeed — whatever the clocks did. A push that fails, a cooldown, satur
 leaves the message queued, for pickup and for the grant's next wake-up. Messages that status
 counted are pickup-only (FR-PICK-06). Delivery is at-least-once: a pushed message stays leased to the
 session until `messages-received`, and goes back to the queue if the session closes or the lease
-times out first.
+times out first; from then on only a `delivery-request` delivers it, never another live push (#100,
+owner decision 2026-11-20), so a live recipient keeps asking for its queue.
 
 **The deadline.** Each step — one take and its push — has its own deadline: a token source linked
 to the dispatcher's shutdown and cancelled by a `TimeProvider` timer at `PushTimeout`, whose
@@ -1987,8 +2257,8 @@ step): its wake-ups meanwhile are skipped with `Push-Skipped-Cooldown` and take 
 messages wait for pickup or the grant's first wake-up after the pause. A peer that stalls on purpose
 therefore holds a worker at most once every three push timeouts, not continuously. Two timeouts, not
 more: an honest recipient whose resolution was slow once (a cold cache) gets its live pushes back
-within a minute, the same order as the lease timeout after which an unacknowledged push is delivered
-again anyway. The pause lives in the grant's entry, keyed by grant like D-3.
+within a minute, the same order as the lease timeout after which an unacknowledged push is back in
+the queue for the recipient's next `delivery-request`. The pause lives in the grant's entry, keyed by grant like D-3.
 
 Outcomes on `didcomm.mediator.push.outcomes` (`PushOutcomes`): one per push attempt — a take and its
 push over the live session (a fault or the deadline while taking counts as a failed attempt) — and
@@ -1996,7 +2266,7 @@ one per wake-up that was skipped or could push nothing it had.
 
 | Outcome | When | The record |
 | --- | --- | --- |
-| `Pushed-Live` | the live session took the `delivery` | leased to the session until `messages-received`, its close or `LeaseTimeout` |
+| `Pushed-Live` | the live session took the `delivery` | leased to the session until `messages-received`, its close or `LeaseTimeout`; after a close or a timeout, back in the queue for a `delivery-request` only (#100) |
 | `Push-Failed` | the session did not take it, or it was too large for the session even alone; a store or session fault; the deadline, in any step | given back (passed over when too large); after the deadline, when the abandoned call ends: given back, passed over or left leased to the session |
 | `Push-Skipped-Unregistered` | the record taken has a recipient DID no longer registered under the grant | removed by id |
 | `Push-Skipped-NoLiveSession` | at the operation's first step, no live session with live delivery on | none taken |
@@ -2182,7 +2452,12 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
   `MaxConcurrentConnections` (an upgraded connection stops counting against the second). Put a
   concurrency limiter partitioned by client in front of the WebSocket endpoint: a WebSocket holds
   its permit for its whole life, while a fixed-window limiter counts connection attempts, not open
-  sockets. Raise Kestrel's `Limits.MinRequestBodyDataRate`, which bounds how slowly the HTTP
+  sockets. A handshake that fails before the connection is accepted (most often that limit reached)
+  is answered `503 Service Unavailable`, without the handshake's headers, and logged by type name
+  on a rate-limited line (first and every 1000th at Warning); a client that goes away during the
+  handshake gets nothing and one Debug line (`WebSocketAccepting`, both `MapDidCommWebSocket`
+  overloads and so the mediator's WebSocket endpoint). Raise Kestrel's
+  `Limits.MinRequestBodyDataRate`, which bounds how slowly the HTTP
   endpoint's request bodies may arrive, for example
   `new MinDataRate(bytesPerSecond: 16 * 1024, gracePeriod: TimeSpan.FromSeconds(5))`, about the floor
   the 60 s WebSocket limit sets for a full 1 MiB message (about 17 KB/s); Kestrel's default of 240
@@ -2204,6 +2479,11 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
 
 ### Documented limits
 
+- **A store written to directly skips the encrypted-form check (#100).** The check is in
+  `MessagePickupQueue.DeliverAsync`. A host that writes records straight into its `IMessageStore`
+  takes on that duty: the store contract requires payloads in encrypted form, and the 3.0 and 4.0
+  delivery paths do not judge them again. The wallet client still refuses such an attachment as a
+  failed item.
 - **Live pushes are tried again only at the next wake-up.** A message whose live push failed, or
   whose push was skipped (saturation, a cooldown), is tried again only when its recipient next
   receives a message (or one of its sessions turns live delivery on), and a delayed message, never
@@ -2215,14 +2495,17 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
   and frees a place. A timed retry is a possible follow-up, not built.
 - **At-least-once.** While a push's lease runs, a push and a pickup never hold the record at the
   same time, but a message a recipient fetched and did not acknowledge before its lease ran out can
-  be pushed to it again, and a push abandoned at its deadline may still reach the recipient later.
+  be pushed to it again (one fetched by a `delivery-request` was never a live push, so it is not
+  marked), and a push abandoned at its deadline may still reach the recipient later. A live push
+  that came back unconfirmed is never pushed again, only delivered by a `delivery-request` (#100).
   The recipient may then see the message twice.
 - **Live pushes are best effort, after storing.** A message whose live push fails or reaches the
   deadline, one stored while the grant's pushes are paused or the push operations are saturated,
   and one stored while the recipient had no live session stay queued — for pickup, and for the
   grant's next wake-up; one counted in the status that answered the session's
-  `live-delivery-change` is never pushed live (FR-PICK-06). A recipient in live mode still asks for
-  queued messages after a reconnect or a slow period.
+  `live-delivery-change` is never pushed live (FR-PICK-06), and neither is one pushed live that came
+  back unconfirmed (#100). A recipient in live mode still asks for queued messages after a
+  reconnect or a slow period.
 - **Stalled grants and the shared workers.** A grant whose push reaches the deadline is paused for
   2 × `PushTimeout`, but with K grants whose every push stalls until it ends at its deadline (a DID
   that resolves slowly on purpose) and W = `PushConcurrency`
@@ -2292,6 +2575,12 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
 - **Nothing remembers a slow peer across connections.** A peer whose connection was closed for a
   message that ran out of time can connect again and gets a fresh limit; a limiter per client in
   front of the endpoint is what bounds repeats.
+- **A peer that drops its connection still has one message finished (#100, OD-8).** A WebSocket
+  message received in full is unpacked, admitted and dispatched after its connection ends, for at
+  most the 5 s close grace and only until the host starts to stop. Nothing more is read from that
+  connection, so this is one bounded finish per connection. An evicted connection with a message in
+  hand can live up to the 5 s eviction backstop plus the 5 s finish. A limiter per client in front
+  of the endpoint bounds how many connections, and so finishes, one client has.
 - **A message's in-memory form can be several times its size on the wire**, depending on its shape
   (many small JSON values cost the most), for as long as the host keeps the unpacked message.
   `MaxReceiveBytes` counts wire bytes, so budget memory as the messages handled at once ×
@@ -2436,10 +2725,15 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    `PickupClient.AckAsync` and `FetchAsync`'s own acknowledgement for `messages-received` (whose
    `status` is a SHOULD): there the waiting request is abandoned through the same compare-and-swap
    (`TryAbandon`) and the call returns `null`. An answer that won the race still holds.
+   On a route that is not HTTP, `ExchangeAllowingNoAnswerAsync` takes an `answerWait` (#100 OD-6):
+   once the send has completed, the answer is waited for that long and never past the request's
+   deadline; when either ends the wait it is `null` through the same CAS. A send that did not
+   complete never gets there: it is a `TimeoutException` or its transport failure. With
+   `answerWait: null` (`FetchAsync`'s acknowledgement) the wait is as for any request.
 6. **Awaiting the answer.** Over a WebSocket the answer arrives through the correlator (over HTTP it
    has already completed the request in step 5). It is awaited; then the continuation yields
    (`ForceYielding`), so parsing never runs on the dispatcher's receive path.
-7. **A problem report** answering the request (by `pthid`, or `thid`) → `MediationProtocolException`
+7. **A problem report** answering the request (by `pthid` only, since #100) → `MediationProtocolException`
    with `ProblemCode` sanitized (`MediatorProblemCode`: at most 128 characters of `a`–`z`, `0`–`9`,
    `.`, `_`, `-` that parse as a problem code, else `null`). The body is read on the caller's
    continuation.
@@ -2493,7 +2787,10 @@ request.
    leaves out the decrypting DID (FR-CONSIST-02), so for a real authcrypt answer the warning cannot
    fire; only a crafted verified snapshot reaches it (`MediatorClientChannelAddressingTests`). Before
    C2 such an answer was dropped here.
-4. **Thread.** `pthid`, else `thid`, for a problem report; `thid` otherwise. A thread longer than
+4. **Thread.** `pthid` for a problem report, and only `pthid`: it is REQUIRED (DIDComm v2.1
+   problems.md L83: "`pthid` - REQUIRED. The value is the `thid` of the thread in which the problem
+   occurred."), so a problem report without `pthid` has no thread, whatever its `thid` says (#100,
+   ADV3-1; before, its `thid` was used); `thid` otherwise. A thread longer than
    64 characters is never looked up. The pending map compares it with request ids ignoring case
    (FR-MSG-04, since #141).
 
@@ -2503,7 +2800,7 @@ request.
 | thread = a waiting request P of the same pair; a type P does not expect | dropped (Warning); P keeps waiting | dropped (Warning); R fails as no answer |
 | thread names no waiting request of the pair | dropped (quiet) | dropped; R fails as no answer |
 | no thread, `delivery` | the live stream of (peer, local), never a request; no stream, or its buffer full → dropped, not acknowledged | dropped (Warning), not acknowledged; never a stream (an HTTP exchange is never live); R fails as no answer (since #98) |
-| no thread, problem report | dropped (`pthid` is required) | dropped (Warning); R fails as no answer (since #98) |
+| no thread (no `pthid`, even with a `thid` naming a request), problem report | dropped (`pthid` is required) | dropped (Warning); R fails as no answer (since #98; by `thid` too since #100) |
 | no thread, another answer type | dropped (Warning): it belongs to no request's thread, however many requests of the pair wait (since #98) | dropped (Warning); R fails as no answer (since #98) |
 
 "Warning" and "quiet" are the rate-limited levels under Logging, below. So a thread-less live push
@@ -2701,48 +2998,67 @@ does not set fetched messages aside delivers a failing message first on every fe
 host's `AckAsync` gets past it; the budget does not.
 
 `AckAsync(ids)` takes 1 to 10 000 ids (the count first, then a copy; each non-empty, at most 2048
-characters and unreserved URI characters). It sends 100 per `messages-received` and returns the
-`status` after the last one; a failing chunk ends the call after the earlier chunks were sent. A
-mediator configured to accept fewer ids per message refuses a longer one as malformed, so call it
-with at most as many.
+characters and unreserved URI characters). It sends 100 per `messages-received` and returns
+`Task<PickupStatus?>`: the `status` that answered the last one, or `null`; a failing chunk ends the
+call after the earlier chunks were sent. A mediator configured to accept fewer ids per message
+refuses a longer one as malformed, so call it with at most as many.
 
-Only that status confirms the acknowledgement (#98 F-1). Message Pickup 3.0 says the mediator
-SHOULD answer `messages-received` with an updated `status`, not that it must, and the Identus
-mediator v1.2.1 sends none (its `PickupExecuter` returns `NoReply`; over HTTP a 202 with an empty
-body). So a chunk left without a status is not an error: the next chunk goes out, and when the last
-one is left without a status the client sends one `status-request` (no `recipient_did`; a status
-that names one DID does not answer it) and returns its status, whose count is the confirmation. A
-mediator that does answer gets exactly one request per chunk. A problem report or a malformed status
-is still a `MediationProtocolException`. How "no status" is known:
+Only the mediator's own answer confirms an acknowledgement, and `AckAsync` returns only that (owner
+decision OD-6, #100). Message Pickup 3.0 says the mediator SHOULD answer `messages-received` with an
+updated `status` (3.0 L193), not that it must, and the Identus mediator v1.2.1 sends none (its
+`PickupExecuter` returns `NoReply`; over HTTP a 202 with an empty body). Message Pickup 4.0 dropped
+that answer (L294) and `return_route` from `messages-received` (L35). `AckAsync` never sends a
+`status-request`: one asked for separately is not ordered after an acknowledgement nothing answered
+(PR #143 review round 2 showed such a status counting a message whose acknowledgement had not been
+applied yet). So:
 
-- **Over HTTP, at once.** The chunk goes through `IMediatorExchange.ExchangeAllowingNoAnswerAsync`:
-  the channel's HTTP no-answer branch, which for every other request throws `TimeoutException`
-  ("got no answer in the HTTP response"), settles the pending request with the same terminal CAS
-  (`TryAbandon`) and returns `null`. A real timeout (no response within `RequestTimeout`) is still a
-  `TimeoutException` and ends the call.
-- **On a WebSocket (any route that is not HTTP), after half of `RequestTimeout`.** Silence cannot be
-  told from a slow answer there, so the chunk's `ExchangeAsync` runs under a `GuardedDeadline` of
-  `RequestTimeout / 2` linked to the caller's token; when that deadline (not the caller) ends the
-  wait, the chunk counts as left without a status. Its late status completes nothing: with its
-  `thid` it finds no waiting request (dropped, quiet), and without one it belongs to no request's
-  thread (dropped, Warning; see "No thread-less correlation" above), so it can answer neither the
-  next chunk, the `status-request`, nor a later call. The Message Pickup 3.0 `status` example
-  leaves `thid` out; a mediator that does so over a WebSocket is treated as one that sends no
-  status, and its thread-less answer to the `status-request` is not taken either, so the call ends
-  with `TimeoutException` (before #98 such a mediator worked over a WebSocket through the
-  fallback). The same holds over HTTP: the response answers the `status-request` only with its
-  `thid` (before #98 it was the answer with or without one).
+- **Under 4.0** each chunk goes one way (`SendOneWayAsync`, below) and the call returns `null`.
+- **Under 3.0** each chunk goes through `IMediatorExchange.ExchangeAllowingNoAnswerAsync` with
+  `answerWait: RequestTimeout / 2`, and the call returns the last chunk's answer, or `null` when the
+  last chunk got none, even if an earlier one did (that status predates the later chunks). A chunk
+  without a status does not stop the call. A mediator that does answer gets exactly one request per
+  chunk. A problem report or a malformed status is still a `MediationProtocolException`.
 
-The budget rule: a `messages-received` and the `status-request` that may follow it share one
-`RequestTimeout`, counted from when the `messages-received` is sent. The `status-request` runs under
-a `GuardedDeadline` of what is left (over HTTP, the rest; on a WebSocket, the other half); with
-nothing left it is not sent. When it gets no answer (that deadline, or over HTTP an empty response)
-the call fails with a `TimeoutException` naming the request ids, never a DID; it never waits a second
-full `RequestTimeout`. `FetchAsync`'s acknowledgement (step 10 above) shares only the HTTP half of
-this: it asks for no status, and on a WebSocket it still waits its `RequestTimeout` and logs a
-missing status as a failed acknowledgement. The live stream does not take this path: it sends
-through `ExchangeAsync`, treats a missing status as a failed acknowledgement, keeps the ids and sends
-them again after its back-off.
+How "no status" is known under 3.0:
+
+- **Over HTTP, at once.** The channel's HTTP no-answer branch, which for every other request throws
+  `TimeoutException` ("got no answer in the HTTP response"), settles the pending request with the
+  same terminal CAS (`TryAbandon`) and returns `null`. A real timeout (no response within
+  `RequestTimeout`) is still a `TimeoutException` and ends the call.
+- **On a WebSocket (any route that is not HTTP), half of `RequestTimeout` after the send.** Silence
+  cannot be told from a slow answer there, so the channel waits `answerWait` once the send has
+  completed, and never past the chunk's `RequestTimeout`; then the chunk counts as left without a
+  status. A send or connect that does not complete within `RequestTimeout` is a `TimeoutException`,
+  never `null` (before PR #143 review round 2 the half-timeout wait included the send). A late status
+  completes nothing: with its `thid` it finds no waiting request (dropped, quiet), and without one it
+  belongs to no request's thread (dropped, Warning; see "No thread-less correlation" above), so it
+  can answer neither the next chunk nor a later call. The Message Pickup 3.0 `status` example leaves
+  `thid` out; a mediator that does so is treated as one that sends no status, over a WebSocket and
+  in the HTTP response alike, and the call returns `null`.
+
+A transport failure is never `null`. `null` says only that no status came, not whether the
+acknowledgement was applied, and `GetStatusAsync` is not ordered after such an acknowledgement.
+Closing the connection right after it relies on the close (#100, owner decisions OD-7 and OD-8):
+disposing the container waits, up to `WebSocketTransportOptions.SendTimeout`, for the mediator to
+answer the transport's close ("Return-route client side", dispose), which this library's mediator
+does only after it has handled what it received before the close; and this library's mediator
+finishes a message it received in full when the connection drops behind it, within the 5 s close
+grace ("Finishing a message after its connection ends"). An abrupt drop before the message is
+complete, a mediator slower than those bounds, or one that drops the work of a closed connection
+can still mean the messages come back (at-least-once). Cookbook section EE and sample 11
+acknowledge, then dispose, with no polling.
+
+Two edges of the 3.0 window (red-team pass OD6-ADV, PR #143 review round 2): the wait is half of
+`RequestTimeout` but at least one tick, since a `RequestTimeout` of one tick is valid (OD6-ADV-1);
+and a send that completed before the deadline is sent even when the channel resumes only after the
+deadline fired, so it is `null`, not a `TimeoutException` (OD6-ADV-2: the send's own catch lets a
+completed send through, and a request the deadline gave up on after its send is `null`).
+
+`FetchAsync`'s acknowledgement (step 10 above) passes `answerWait: null`: it asks for no status,
+an empty HTTP response is not a failure, and on a WebSocket it still waits its `RequestTimeout` and
+logs a missing status as a failed acknowledgement. The live stream does not take this path: under
+3.0 it sends through `ExchangeAsync`, treats a missing status as a failed acknowledgement, keeps the
+ids and sends them again after its back-off; under 4.0 it sends one way.
 
 `SetLiveDeliveryAsync` needs a WebSocket route, sends `live-delivery-change` and returns the
 `status`; a problem report is a `MediationProtocolException` with `ProblemCode`, for example
@@ -3047,10 +3363,101 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
   an unpack that ended as its deadline fired are all observed (`MediatorClientUnobservedTests`,
   `PickupClientUnobservedQa2Tests`).
 
+### Message Pickup 4.0 on the recipient side (#100)
+
+`PickupClient` speaks 4.0 or 3.0 per mediator. Every method resolves the version right after the
+route, in this order:
+
+1. the pin, `MediatorClientOptions.MessagePickupVersion` (`Negotiate` by default, `V4` or `V3`);
+2. the channel's second `NegotiatedVersionCache<MessagePickupVersion>` (64 mediators, one hour);
+3. one Discover Features query on the same route, with its own `RequestTimeout`.
+
+The query (`FeatureNegotiation.CreatePickupQuery`) carries two queries in one message,
+`https://didcomm.org/message-pickup/4.*` then `https://didcomm.org/messagepickup/3.*`. It is read
+through the same bounded reader and role rule as Coordinate Mediation's (owner decision O-1, #99).
+4.0 wins over 3.0. If neither version is disclosed, the call throws
+`MediationNotSupportedException`; if the query goes unanswered, it throws `TimeoutException`. The
+Debug line "Message Pickup version negotiated by query …" is distinct from Coordinate Mediation's,
+which the live wallet counts. A live stream settles the version once, after its registration, and
+keeps it. A failed query releases the registration and ends the enumeration at its first
+`MoveNextAsync`.
+
+- **Per-version wire (`PickupWire`).** It builds each request with its `MediatorExchangeSpec` and
+  reads the answers. Under 4.0:
+  - `status-request` and `live-delivery-change` expect a 4.0 `status`, and `delivery-request`
+    expects only a 4.0 `delivery`: a `status` does not answer it;
+  - a `delivery` without an `attachments` array, or with more attachments than
+    `message_count_limit`, is refused as `MediationProtocolException`. The refusal comes from the
+    count, before any attachment is read or opened (L255, L259);
+  - an empty array is a drained fetch with no `Status`;
+  - the status reader floors milliseconds to seconds, and `LongestWaitedSeconds` is `null`.
+
+  `MediatorAnswerTypes` gains `status (4.0)`, `delivery (4.0)` (kind Delivery: a thread-less one
+  goes only to a live stream) and `problem-report (4.0)` (kind ProblemReport, matched by `pthid`).
+- **One-way send (`IMediatorExchange.SendOneWayAsync`).** This is how a 4.0 `messages-received`
+  goes out: with `SendOptions.ReturnRoute = null`, so no header, nothing registered and nothing
+  awaited, and any HTTP body is ignored. It is bounded by `RequestTimeout` plus the shutdown token
+  and counts against `MaxPendingRequests` while it is being sent. A timeout names the request id.
+  FR-RR-09's PIURI clause stamps `created_time`. Over a WebSocket the transport's session-socket
+  affinity puts it on the session socket of the (endpoint, local, peer) triple, where a header-less
+  message leaves the session as it is (FR-RR-05).
+  - `FetchAsync` acknowledges one way under its own deadline.
+  - `AckAsync` sends each 100-id chunk one way and returns `null`; it sends no `status-request`
+    (owner decision OD-6, PR #143 review round 2). Round 1's opening and confirming
+    `status-request`s are gone: nothing in 4.0 orders a separately requested status after a one-way
+    acknowledgement (a connection that dropped mid-call put them on two connections).
+  - The live stream's flush and end acknowledge one way under 4.0.
+  - Nothing confirms a one-way acknowledgement, from `AckAsync` or a `FetchAsync`, so closing the
+    connection right after it relies on the close (OD-7 and OD-8; see "Status, fetch and
+    acknowledgement" above).
+- **The live stream** keeps a read-only version. `CycleAsync` and `DrainRoundAsync` build and read
+  through `PickupWire`; an empty 4.0 delivery ends the drain. `LoadPushAsync` takes only a
+  `delivery` of its own version, and a push of the other version is logged at Debug and not
+  acknowledged. **Its scheduling, turn-taking, back-off, flush timing and end are unchanged**
+  (owner decision on #96's live stream, 2026-11-14).
+- **In both versions:**
+  - **Filter echo.** A `status` answering a filtered request must repeat the `recipient_did`
+    (`DeliveryReader.RequireStatusFilterEcho`, branch-flat: an absent echo is refused like a wrong
+    one; 3.0 L116, 4.0 L168). A `delivery` may still leave it out. Where an echo is present it must
+    be "the matching value" itself, compared exactly as DIDs are (ordinal): a DID URL or another
+    spelling of the DID asked about is refused (ADV3-2; before, they were compared as DID subjects).
+  - **Encrypted attachments only.** Each decoded attachment is judged by `EncryptedForm.IsEncrypted`
+    on its outermost layer, before any unpack. One that is not a JWE is a failed entry, never
+    unpacked and never acknowledged (owner decision 2026-11-20, "OK, as described"). A forward the
+    mediator re-wrapped is a JWE, so a plaintext message inside one is still opened.
+
 ### Documented limits
 
+- **A remembered pickup version is kept for its hour (#100, ADV1-1, declined).** The negotiated
+  version is not asked again within the hour even when requests in it go unanswered, so after a
+  mediator stops serving that version (it is reconfigured or rolled back) the client's calls time
+  out until the hour is up or the process restarts. Coordinate Mediation's cache behaves the same
+  way. Pin the version, or restart, after such a change (`MessagePickupVersion.Negotiate`'s docs).
+- **A push in the old framing after a version switch (#100).** If an application pins different
+  pickup versions for the same mediator and DID on one connection, a live push built just before the
+  connection's framing changed arrives in the old version. The stream ignores it, so the message
+  stays leased until the connection closes or the lease runs out (60 s at ours); at ours it is then
+  delivered by the stream's next drain, not pushed again (owner decision 2026-11-20).
+  With the default `Negotiate` one version is used throughout.
+- **A live stream needs a mediator that accepts at least 10 ids per confirmation (#100, owner
+  decision 2026-11-21: documented, not changed).** `LiveDeliveryStream` confirms up to 10 taken items
+  per `messages-received` (`MaxAckIds`, a constant). A mediator that accepts fewer refuses such a list
+  as malformed: this library's with `MessagePickupOptions.MaxAckIds` set below 10 (allowed when
+  `MaxDeliveryBatch` is below 10; the default is the batch × 10). Under 4.0 the refusal is silent
+  (nothing answers a `messages-received`); under 3.0 the confirmation times out and is retried after
+  the back-off. Either way the messages it named stay leased until the lease ends, and are delivered
+  again at the stream's next collection (`LivePollInterval`, 1 minute by default; a live push that
+  ran out is marked and goes only to that collection) and recognised as repeats. Nothing is lost;
+  delivery is late. The stream is left untouched under the owner's live-stream rule (no more
+  patches to its scheduling).
 - **At-least-once.** Repeats are recognised while the duplicate filter remembers them; an
   application that must never act twice tracks the message ids it handled.
+- **A close right after an unconfirmed acknowledgement (#100).** Under 4.0 nothing answers
+  `messages-received`, from `AckAsync` or a `FetchAsync`. Disposing right after relies on the
+  close: the transport's dispose waits up to `SendTimeout` for the mediator's close (OD-7), and
+  this library's mediator finishes a message it received in full after a drop, for at most 5 s
+  (OD-8). An abrupt drop before the message is complete, or a mediator slower than those bounds,
+  means the messages come back and are recognised as repeats.
 - **A fetch is at-most-once to the application** once it returns (above); `ReceiveLiveAsync`, or the
   caller's own `AckAsync`, gives at-least-once to the application.
 - **The last item of a live stream is not acknowledged** when the enumeration ends; it comes back.
@@ -3194,8 +3601,8 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 
 ## Phase 7: still to build
 
-Open under epic #88: the live interop and adversarial gate (#98); Message Pickup 4.0 (#100), a second thin handler over the same `MessagePickupQueue`; the push to a
-host-registered recipient endpoint, deferred from #95 (#110); and the recipient client's slow-sender
-hardening (#111). Sample 11, cookbook CC–FF and the sample 04 refresh landed with #97, which
-retired every Phase 7 entry of the DX allowlists. Coordinate Mediation 2.0 for the mediator role
-landed with #99.
+Open under epic #88: the push to a host-registered recipient endpoint, deferred from #95 (#110),
+and the recipient client's slow-sender hardening (#111). Sample 11, cookbook CC–FF and the sample
+04 refresh landed with #97, which retired every Phase 7 entry of the DX allowlists. Coordinate
+Mediation 2.0 for the mediator role landed with #99, the live interop and adversarial gate with
+#98, and Message Pickup 4.0 in both roles, with the mailbox's encrypted-form check, with #100.

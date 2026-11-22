@@ -82,6 +82,8 @@ public sealed class MessagePickupStoreSizingTests(ITestOutputHelper output)
     [InlineData(MiB, 100, 558_045L)]
     [InlineData(4 * MiB, 10, 2_333_997L)]
     [InlineData(44_992, 10, 9L)]             // the smallest value that carries anything for a batch of 10
+    [InlineData(45_015, 10, 9L)]
+    [InlineData(45_016, 10, 21L)]            // the smallest that carries a message in encrypted form (the next step up from 9)
     [InlineData(44_991, 10, 0L)]
     public void The_budget_follows_the_documented_steps(int maxDeliveryBytes, int batch, long expected)
     {
@@ -262,7 +264,7 @@ public sealed class MessagePickupStoreSizingTests(ITestOutputHelper output)
     [InlineData(null, 10)]          // the defaults: MaxReceiveBytes (1 MiB), batches of 10
     [InlineData(null, 1)]           // a batch of one: the largest payload a 1 MiB delivery ever admits
     [InlineData(64 * KiB, 10)]      // a small custom budget
-    [InlineData(44_992, 10)]        // the smallest budget that carries anything
+    [InlineData(45_016, 10)]        // the smallest budget that carries a message in encrypted form (21 bytes)
     public async Task A_payload_of_exactly_the_admission_bound_packs_within_MaxDeliveryBytes_in_the_largest_legal_delivery(int? maxDeliveryBytes, int batch)
     {
         var worst = await WorstCaseAsync(maxDeliveryBytes, batch);
@@ -445,7 +447,7 @@ public sealed class MessagePickupStoreSizingTests(ITestOutputHelper output)
         // Three DIDs at the 2048-character bound, a thread id at its bound, a full batch of
         // attachments with the longest ids, and a created_time with every digit it can have.
         string Did(char fill) => "did:example:" + new string(fill, MaxDidLength - "did:example:".Length);
-        var payloads = new[] { 1, 2, 3, 4, 5, 6, 100, 1_000, 10_000, 56_452 };
+        var payloads = new[] { 17, 18, 19, 20, 21, 22, 100, 1_000, 10_000, 56_452 }; // the smallest stand-ins: each remainder of base64's 3-byte groups twice
         var messages = payloads.Select((size, i) => new DeliveredMessage(new string((char)('a' + i), PickupSizing.MaxMintedIdLength), PickupFixture.Payload(size))).ToArray();
         var delivery = MessagePickup.CreateDelivery(Did('f'), Did('t'), messages, new string('h', PickupSizing.MaxThreadIdLength), Did('r'));
         delivery.CreatedTime = 9_999_999_999;

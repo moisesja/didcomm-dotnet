@@ -15,8 +15,9 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// The one-shot calls of <see cref="PickupClient"/> against a fake exchange (#96 design §2, §4.3):
-/// <see cref="PickupClient.AckAsync"/> (chunks of 100, the last status, ids checked before anything
-/// is sent and copied so what was checked is what is sent), <see cref="PickupClient.GetStatusAsync"/>
+/// <see cref="PickupClient.AckAsync"/> (chunks of 100, the status answering the last one and no
+/// status-request of its own, ids checked before anything is sent and copied so what was checked is
+/// what is sent), <see cref="PickupClient.GetStatusAsync"/>
 /// (the filter echo) and <see cref="PickupClient.SetLiveDeliveryAsync"/> (refused before sending on
 /// a route that is not a WebSocket; the mediator's problem report surfaces with its code).
 /// </summary>
@@ -38,7 +39,9 @@ public sealed class PickupClientAckTests
         exchange.AcknowledgedIds.Should().Equal(ids);
         sent.Should().OnlyContain(s => s.Spec == DeliveryReader.MessagesReceivedSpec && s.Request.From == L);
         sent.Select(s => s.Request.Id).Should().OnlyHaveUniqueItems();
-        status.MessageCount.Should().Be(997, "the status answering the last message");
+        status.Should().NotBeNull();
+        status!.MessageCount.Should().Be(997, "the status answering the last message");
+        exchange.Sent.Should().HaveCount(3, "one message per chunk and nothing else (OD-6)");
         exchange.RouteCalls.Should().ContainSingle("the route is resolved once per call").Which.RequireWebSocket.Should().BeFalse();
     }
 
@@ -153,11 +156,18 @@ public sealed class PickupClientAckTests
         request.Request.CreatedTime.Should().BeNull();
     }
 
+    /// <summary>
+    /// #100 F-1 (this test said the opposite before): when the request names a DID, the status MUST
+    /// repeat it (Message Pickup 3.0 L116), so one that leaves it out does not answer the request.
+    /// </summary>
     [Fact]
-    public async Task GetStatus_accepts_a_status_that_leaves_the_filter_out()
+    public async Task GetStatus_refuses_a_status_that_leaves_the_filter_out()
     {
         var exchange = new FakePickupExchange().On(MessagePickup.StatusRequestType, r => Status(r, count: 2));
-        (await PickupTest.Client(exchange).GetStatusAsync(M, L, recipientDid: "did:example:carol")).MessageCount.Should().Be(2);
+        var act = () => PickupTest.Client(exchange).GetStatusAsync(M, L, recipientDid: "did:example:carol");
+
+        var thrown = (await act.Should().ThrowAsync<MediationProtocolException>()).Which;
+        thrown.Message.Should().Contain("does not repeat the recipient_did").And.NotContain("did:example:carol");
     }
 
     [Theory]
@@ -174,12 +184,14 @@ public sealed class PickupClientAckTests
     }
 
     [Fact]
-    public async Task GetStatus_accepts_the_filter_echoed_as_a_DID_URL_of_the_same_DID()
+    public async Task GetStatus_refuses_the_filter_echoed_as_a_DID_URL_of_the_same_DID()
     {
-        // Compared as DID subjects (PRD §4.3), never as raw strings.
+        // "the matching value MUST be specified" (3.0 L116, 4.0 L168): the value itself, compared
+        // exactly as DIDs are, not another spelling of its DID subject (#100 ADV3-2).
         const string carol = "did:example:carol";
         var exchange = new FakePickupExchange().On(MessagePickup.StatusRequestType, r => Status(r, count: 1, recipientDid: carol + "#key-1"));
-        (await PickupTest.Client(exchange).GetStatusAsync(M, L, recipientDid: carol)).MessageCount.Should().Be(1);
+        var act = () => PickupTest.Client(exchange).GetStatusAsync(M, L, recipientDid: carol);
+        (await act.Should().ThrowAsync<MediationProtocolException>()).Which.Message.Should().Contain("another DID").And.NotContain(carol);
     }
 
     [Fact]

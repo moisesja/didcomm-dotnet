@@ -48,7 +48,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         // The best case for the sender: a live session of the right pair is offered with the request.
         var socket = h.Live(h.Alice);
         // For "turn it off" the flag must be on beforehand, so a flip would show.
@@ -98,7 +98,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
         // Neither the type nor the body is read for an unauthenticated message, so no shape of it can throw.
         await using var h = await MessagePickupHandlerHarness.CreateAsync(o => o.MaxDeliveryBatch = 1);
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         var socket = h.Live(h.Alice);
         h.ResetTraces();
         var longValue = new string('x', 5000);
@@ -145,7 +145,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var socket = h.Live(h.Alice);
         var t0 = h.Start.ToUnixTimeSeconds();
         var times = new MessagePickupHandlerTimes(0, t0, t0);
@@ -155,7 +155,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
             case StatusRequest:
             {
                 var message = h.StatusRequest(h.Alice);
-                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 2, 30, live: false, times: times);
+                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 2, 300, live: false, times: times);
                 break;
             }
             case DeliveryRequest:
@@ -168,21 +168,21 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
             case MessagesReceived:
             {
                 var message = h.MessagesReceived(h.Alice, new[] { ids[0] });
-                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 1, 20, live: false, times: times);
+                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 1, 200, live: false, times: times);
                 h.Store.Inner.MessageCount.Should().Be(1);
                 break;
             }
             case LiveOn:
             {
                 var message = h.LiveChange(h.Alice, true);
-                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 2, 30, live: true, times: times);
+                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 2, 300, live: true, times: times);
                 break;
             }
             default:
             {
                 (await h.SendAsync(h.LiveChange(h.Alice, true), socket)).Status().LiveDelivery.Should().BeTrue();
                 var message = h.LiveChange(h.Alice, false);
-                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 2, 30, live: false, times: times);
+                (await h.SendAsync(message, socket, shape)).ShouldBeStatus(message, h.Mediator, h.Alice, 2, 300, live: false, times: times);
                 (await h.LiveFlagAsync(socket)).Should().BeFalse();
                 break;
             }
@@ -196,7 +196,7 @@ public sealed class MessagePickupHandlerUnauthenticatedTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
 
         // Sixteen different unauthenticated messages, dispatched in turn: one counter for all of them.
         var received = new List<UnpackResult>();

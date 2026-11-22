@@ -677,7 +677,8 @@ public sealed class PickupClientLiveCycleTests
         public MediatorClientOptions Options => inner.Options;
         public TimeProvider Time => time;
         public DuplicateFilter Duplicates => inner.Duplicates;
-        public NegotiatedVersionCache Versions => inner.Versions;
+        public NegotiatedVersionCache<CoordinateMediationVersion> Versions => inner.Versions;
+        public NegotiatedVersionCache<MessagePickupVersion> PickupVersions => inner.PickupVersions;
 
         public Task<MediatorRoute> ResolveRouteAsync(string mediatorDid, Uri? serviceEndpointOverride, bool requireWebSocket, CancellationToken ct)
             => inner.ResolveRouteAsync(mediatorDid, serviceEndpointOverride, requireWebSocket, ct);
@@ -686,6 +687,11 @@ public sealed class PickupClientLiveCycleTests
             => inner.ExchangeAsync(route, request, spec, mediatorDid, localDid, ct);
 
         public LiveRegistration RegisterLiveStream(string mediatorDid, string localDid) => inner.RegisterLiveStream(mediatorDid, localDid);
+
+
+        public Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct)
+
+            => inner.SendOneWayAsync(route, request, name, mediatorDid, localDid, ct);
 
         public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
             => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);

@@ -1,0 +1,1 @@
+{"id":"123456780","type":"https://didcomm.org/message-pickup/4.0/delivery","typ":"application/didcomm-plain+json","thid":"123456780","body":{"recipient_did":"did:example:alice"},"attachments":[]}

@@ -2,6 +2,7 @@ using System.Text.Json;
 using DidComm.Exceptions;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Internal;
+using DidComm.Mediator.Pickup;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
@@ -9,9 +10,11 @@ using DidComm.Protocols.DiscoverFeatures;
 namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
-/// Which Coordinate Mediation version to speak to a mediator, from its Discover Features answer
-/// (design §4.4, D-10, D-11): the query <see cref="MediationClient"/> sends, and the reading of the
-/// <c>disclose</c> that answers it. Owner: engineer B.
+/// Which version of a mediator-service protocol to speak to a mediator, from its Discover Features
+/// answer: Coordinate Mediation for <see cref="MediationClient"/> (design §4.4, D-10, D-11) and
+/// Message Pickup for <see cref="PickupClient"/> (#100 DC-6). Each has its query and its reading of
+/// the <c>disclose</c> that answers it; both share one bounded reader and one role rule. Owner:
+/// engineer B.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,11 +24,14 @@ namespace DidComm.Mediator.Client.Internal;
 /// read per disclosure.
 /// </para>
 /// <para>
-/// <strong>The question</strong> is two queries, <see cref="QueryMatch3"/> and
-/// <see cref="QueryMatch2"/>: each one matches its version however the mediator reads <c>match</c>
-/// — as the spec's wildcard (a trailing <c>*</c>), as a regular expression that must match the
-/// whole id (the Identus mediator), or as a prefix once <c>.*</c> is removed (the Blocktrust
-/// mediator). One <c>coordinate-mediation/*</c> query matches nothing under the other two readings.
+/// <strong>The question</strong> is two queries per protocol, the newer version first:
+/// <see cref="QueryMatch3"/> and <see cref="QueryMatch2"/> for Coordinate Mediation,
+/// <see cref="PickupQueryMatch4"/> and <see cref="PickupQueryMatch3"/> for Message Pickup. Each one
+/// matches its version however the mediator reads <c>match</c> — as the spec's wildcard (a trailing
+/// <c>*</c>), as a regular expression that must match the whole id (the Identus mediator), or as a
+/// prefix once <c>.*</c> is removed (the Blocktrust mediator). One <c>coordinate-mediation/*</c>
+/// query matches nothing under the other two readings; and Message Pickup's two versions do not
+/// even share a name (<c>messagepickup</c> in 3.0, <c>message-pickup</c> in 4.0).
 /// </para>
 /// <para>
 /// <strong>The answer.</strong> A disclosure counts when its <c>feature-type</c> is
@@ -35,12 +41,13 @@ namespace DidComm.Mediator.Client.Internal;
 /// <c>mediator</c>, the peer has said it is the other side, and the entry does not count; when it
 /// names neither (empty, or only names this protocol does not define, such as the Identus
 /// mediator's <c>responder</c>), it says nothing about this protocol's roles, like an absent list,
-/// and the entry counts (owner decision 2026-11-18, #99). Roles are compared ignoring case; a
-/// <c>roles</c> member that is not an array does not count. Coordinate Mediation 3.x and 2.x are
-/// recognised by major version; 3 wins over 2. Neither is
-/// <see cref="MediationNotSupportedException"/>, whose text quotes no wire value and whose
-/// <see cref="MediationNotSupportedException.DisclosedProtocols"/> lists the protocol disclosures
-/// inspected, cleaned (every <c>protocol</c> entry, whatever its roles).
+/// and the entry counts (owner decision 2026-11-18, #99). Both protocols name their roles
+/// <c>mediator</c> and <c>recipient</c>. Roles are compared ignoring case; a <c>roles</c> member
+/// that is not an array does not count. Versions are recognised by protocol name and major version
+/// (FR-PROTO-01/02); the newer wins (Coordinate Mediation 3 over 2, Message Pickup 4 over 3).
+/// Neither is <see cref="MediationNotSupportedException"/>, whose text quotes no wire value and
+/// whose <see cref="MediationNotSupportedException.DisclosedProtocols"/> lists the protocol
+/// disclosures inspected, cleaned (every <c>protocol</c> entry, whatever its roles).
 /// </para>
 /// </remarks>
 internal static class FeatureNegotiation
@@ -50,6 +57,12 @@ internal static class FeatureNegotiation
 
     /// <summary>The <c>match</c> of the second query: Coordinate Mediation 2.x.</summary>
     internal const string QueryMatch2 = "https://didcomm.org/coordinate-mediation/2.*";
+
+    /// <summary>The <c>match</c> of the first Message Pickup query: Message Pickup 4.x.</summary>
+    internal const string PickupQueryMatch4 = "https://didcomm.org/message-pickup/4.*";
+
+    /// <summary>The <c>match</c> of the second Message Pickup query: Message Pickup 3.x.</summary>
+    internal const string PickupQueryMatch3 = "https://didcomm.org/messagepickup/3.*";
 
     /// <summary>The most disclosures inspected; the rest are never read.</summary>
     internal const int MaxInspected = 256;
@@ -77,6 +90,8 @@ internal static class FeatureNegotiation
     private static readonly MessageTypeUri DiscloseUri = MessageTypeUri.Parse(DiscoverFeatures.DiscloseType);
     private static readonly ProtocolIdentifier Version3 = ProtocolIdentifier.Parse(CoordinateMediation.ProtocolUri);
     private static readonly ProtocolIdentifier Version2 = ProtocolIdentifier.Parse(CoordinateMediation20.ProtocolUri);
+    private static readonly ProtocolIdentifier Pickup4 = ProtocolIdentifier.Parse(MessagePickup40.ProtocolUri);
+    private static readonly ProtocolIdentifier Pickup3 = ProtocolIdentifier.Parse(MessagePickup.ProtocolUri);
 
     /// <summary>
     /// The Discover Features question for the two Coordinate Mediation versions, from
@@ -94,8 +109,8 @@ internal static class FeatureNegotiation
             new FeatureQuery { FeatureType = DiscoverFeatures.FeatureTypeProtocol, Match = QueryMatch2 });
 
     /// <summary>
-    /// Choose the version from <paramref name="disclose"/>, the answer to our query
-    /// <paramref name="requestId"/>.
+    /// Choose the Coordinate Mediation version from <paramref name="disclose"/>, the answer to our
+    /// query <paramref name="requestId"/>.
     /// </summary>
     /// <param name="disclose">The mediator's answer.</param>
     /// <param name="requestId">The id of our query (for the exception).</param>
@@ -103,6 +118,60 @@ internal static class FeatureNegotiation
     /// <exception cref="MediationNotSupportedException">No usable Coordinate Mediation disclosure in the mediator role.</exception>
     /// <exception cref="MediationProtocolException">The answer is not a <c>disclose</c>, or its body cannot be read.</exception>
     internal static CoordinateMediationVersion Choose(Message disclose, string requestId)
+    {
+        var reported = Read(disclose, requestId, Version3, Version2, CoordinateMediation.MediatorRole, CoordinateMediation.RecipientRole, out var has3, out var has2);
+        if (has3)
+            return CoordinateMediationVersion.V3;
+        if (has2)
+            return CoordinateMediationVersion.V2;
+        throw new MediationNotSupportedException(
+            $"The mediator disclosed {reported.Count} protocol(s), none of them Coordinate Mediation 3.0 or 2.0 in the mediator role (request '{requestId}'); see DisclosedProtocols.",
+            requestId,
+            reported.AsReadOnly());
+    }
+
+    /// <summary>
+    /// The Discover Features question for the two Message Pickup versions, from
+    /// <paramref name="from"/> to <paramref name="mediatorDid"/>: one message with two queries,
+    /// <see cref="PickupQueryMatch4"/> then <see cref="PickupQueryMatch3"/>. Its id is a fresh UUID v4.
+    /// </summary>
+    /// <param name="from">Our DID.</param>
+    /// <param name="mediatorDid">The mediator's DID.</param>
+    internal static Message CreatePickupQuery(string from, string mediatorDid)
+        => DiscoverFeatures.CreateQuery(
+            from,
+            mediatorDid,
+            new FeatureQuery { FeatureType = DiscoverFeatures.FeatureTypeProtocol, Match = PickupQueryMatch4 },
+            new FeatureQuery { FeatureType = DiscoverFeatures.FeatureTypeProtocol, Match = PickupQueryMatch3 });
+
+    /// <summary>
+    /// Choose the Message Pickup version from <paramref name="disclose"/>, the answer to our query
+    /// <paramref name="requestId"/>: 4.0 when a 4.x disclosure counts, else 3.0 when a 3.x one does.
+    /// </summary>
+    /// <param name="disclose">The mediator's answer.</param>
+    /// <param name="requestId">The id of our query (for the exception).</param>
+    /// <returns><see cref="MessagePickupVersion.V4"/> or <see cref="MessagePickupVersion.V3"/>.</returns>
+    /// <exception cref="MediationNotSupportedException">No usable Message Pickup disclosure in the mediator role.</exception>
+    /// <exception cref="MediationProtocolException">The answer is not a <c>disclose</c>, or its body cannot be read.</exception>
+    internal static MessagePickupVersion ChoosePickup(Message disclose, string requestId)
+    {
+        var reported = Read(disclose, requestId, Pickup4, Pickup3, MessagePickup.MediatorRole, MessagePickup.RecipientRole, out var has4, out var has3);
+        if (has4)
+            return MessagePickupVersion.V4;
+        if (has3)
+            return MessagePickupVersion.V3;
+        throw new MediationNotSupportedException(
+            $"The mediator disclosed {reported.Count} protocol(s), none of them Message Pickup 4.0 or 3.0 in the mediator role (request '{requestId}'); see DisclosedProtocols.",
+            requestId,
+            reported.AsReadOnly());
+    }
+
+    // The one bounded reading of a disclose: whether a disclosure of `newer` and one of `older`
+    // (same protocol name and major version) count in the mediator role, and the cleaned protocol
+    // ids inspected (every protocol entry, whatever its roles) for the exception.
+    private static List<string> Read(
+        Message disclose, string requestId, ProtocolIdentifier newer, ProtocolIdentifier older, string mediatorRole, string recipientRole,
+        out bool hasNewer, out bool hasOlder)
     {
         ArgumentNullException.ThrowIfNull(disclose);
         if (!WireJson.IsType(disclose, DiscloseUri))
@@ -122,8 +191,8 @@ internal static class FeatureNegotiation
                 $"The mediator's answer to the Discover Features query '{requestId}' is malformed; see the inner exception.", requestId, innerException: ex);
         }
 
-        var has3 = false;
-        var has2 = false;
+        hasNewer = false;
+        hasOlder = false;
         var reported = new List<string>();
         // Discover Features is permissive (FR-PROTO-05): a body without a disclosures array, or an
         // entry of the wrong shape, discloses nothing rather than failing the answer.
@@ -140,21 +209,13 @@ internal static class FeatureNegotiation
                     continue;
                 if (reported.Count < MaxReported && !reported.Contains(id, StringComparer.Ordinal))
                     reported.Add(id);
-                if (!PlaysMediator(entry))
+                if (!PlaysMediator(entry, mediatorRole, recipientRole))
                     continue;
-                has3 |= protocol.MatchesProtocolAndMajor(Version3);
-                has2 |= protocol.MatchesProtocolAndMajor(Version2);
+                hasNewer |= protocol.MatchesProtocolAndMajor(newer);
+                hasOlder |= protocol.MatchesProtocolAndMajor(older);
             }
         }
-
-        if (has3)
-            return CoordinateMediationVersion.V3;
-        if (has2)
-            return CoordinateMediationVersion.V2;
-        throw new MediationNotSupportedException(
-            $"The mediator disclosed {reported.Count} protocol(s), none of them Coordinate Mediation 3.0 or 2.0 in the mediator role (request '{requestId}'); see DisclosedProtocols.",
-            requestId,
-            reported.AsReadOnly());
+        return reported;
     }
 
     // A protocol disclosure whose id is a clean protocol identifier URI: at most MaxIdLength
@@ -194,8 +255,9 @@ internal static class FeatureNegotiation
     // first MaxRolesInspected entries: naming mediator counts; naming recipient and not mediator is
     // the peer saying it is the other side, so it does not; naming neither (empty, or only roles
     // this protocol does not define, such as "responder") says nothing about this protocol's roles,
-    // like an absent list, so it counts. Entries that are not strings name no role.
-    private static bool PlaysMediator(JsonElement entry)
+    // like an absent list, so it counts. Entries that are not strings name no role. Both protocols
+    // name their roles "mediator" and "recipient"; each passes its own constants.
+    private static bool PlaysMediator(JsonElement entry, string mediatorRole, string recipientRole)
     {
         if (!entry.TryGetProperty(RolesMember, out var roles) || roles.ValueKind == JsonValueKind.Null)
             return true;
@@ -212,8 +274,8 @@ internal static class FeatureNegotiation
             if (role.ValueKind != JsonValueKind.String)
                 continue;
             var name = role.GetString();
-            mediator |= string.Equals(name, CoordinateMediation.MediatorRole, StringComparison.OrdinalIgnoreCase);
-            recipient |= string.Equals(name, CoordinateMediation.RecipientRole, StringComparison.OrdinalIgnoreCase);
+            mediator |= string.Equals(name, mediatorRole, StringComparison.OrdinalIgnoreCase);
+            recipient |= string.Equals(name, recipientRole, StringComparison.OrdinalIgnoreCase);
         }
         return mediator || !recipient;
     }

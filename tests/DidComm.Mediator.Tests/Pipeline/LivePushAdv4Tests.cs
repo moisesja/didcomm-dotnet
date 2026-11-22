@@ -4,6 +4,7 @@ using DidComm.Mediator.Pipeline;
 using DidComm.Mediator.Tests.Coordination;
 using DidComm.Mediator.Tests.Pickup;
 using DidComm.Protocols.Routing;
+using DidComm.TestSupport;
 using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -121,6 +122,8 @@ public sealed class LivePushAdv4Tests
         var tracker = world.Fixture.Queue.Coordinator.Tracker;
         await MessagePickupLive.UntilAsync(() => Task.FromResult(tracker.PendingReleases == 0), "the close-time release ran before the lease exists");
         proceed.SetResult();
+        // The push finds its session closed before the send and gives the record back itself, as
+        // unsent (PR #143 review P2-1), inside the push: the dispatcher's idle is that give-back's end.
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         world.Fixture.PushOutcomeLog.Should().Equal(PushOutcomes.Failed);
@@ -393,7 +396,7 @@ public sealed class LivePushAdv4Tests
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
 
         // Order: the pushes go out in the order the forwards arrived, all twenty.
-        LivePushWorld.Deliveries(session).Select(d => d.Payload.Span[0]).Should().Equal(Enumerable.Range(0, 20).Select(i => LivePushWorld.Seed(i)));
+        LivePushWorld.Deliveries(session).Select(d => StandInJwe.SeedOf(d.Payload.Span)).Should().Equal(Enumerable.Range(0, 20).Select(i => LivePushWorld.Seed(i)));
         // Accounting: one forward outcome and one push outcome per message.
         world.Fixture.ForwardOutcomeLog.Should().HaveCount(20).And.OnlyContain(o => o == ForwardOutcomes.Queued);
         world.Fixture.Pushes(PushOutcomes.PushedLive).Should().Be(20);
@@ -407,7 +410,7 @@ public sealed class LivePushAdv4Tests
         await world.ForwardAsync(a.Recipient, 50);
         await world.Fixture.Dispatcher.WaitForIdleAsync(Wait);
         LivePushWorld.Deliveries(session).Should().HaveCount(21);
-        LivePushWorld.Deliveries(session)[^1].Payload.Span[0].Should().Be(LivePushWorld.Seed(50));
+        StandInJwe.SeedOf(LivePushWorld.Deliveries(session)[^1].Payload.Span).Should().Be(LivePushWorld.Seed(50));
     }
 
     [Fact]

@@ -35,6 +35,21 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
     private long _bytesAtCloseOutput = -1;
     private WebSocketCloseStatus? _closeStatus;
     private string? _closeStatusDescription;
+    // #100 OD-7, round 4 seams: the order of what happened to the socket, and holds on its close read
+    // and close output (N1-N3), a signal at the first State read after the peer's close was returned
+    // (the receive loop's next step), and a send hold that ignores its token (a send that outlives
+    // dispose's drain budget).
+    private readonly ConcurrentQueue<string> _operations = new();
+    private int _closeOutputAttempts;
+    private TaskCompletionSource? _closeReadGate;
+    private readonly TaskCompletionSource _closeRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _closeReadCancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource? _closeOutputGate;
+    private readonly TaskCompletionSource _closeOutputEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private volatile bool _closeReturned;
+    private TaskCompletionSource? _stateReadAfterClose;
+    private volatile bool _holdSendsIgnoringToken;
+    private int _closeOutputsDuringSend;
 
     /// <summary>The order the factory created this socket in (0-based).</summary>
     public int Index { get; init; }
@@ -99,7 +114,92 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
     /// <inheritdoc />
     public override WebSocketState State
     {
-        get { lock (_sync) return _state; }
+        get
+        {
+            if (_closeReturned && Interlocked.Exchange(ref _stateReadAfterClose, null) is { } signal)
+                signal.TrySetResult();
+            lock (_sync)
+                return _state;
+        }
+    }
+
+    /// <summary>
+    /// What happened to the socket, in order: <c>close-received</c> (the peer's close was read),
+    /// <c>close-output:&lt;status&gt;:&lt;description&gt;</c> (a close output began) and
+    /// <c>dispose</c> (the first <see cref="Dispose"/>).
+    /// </summary>
+    public IReadOnlyList<string> Operations => _operations.ToArray();
+
+    /// <summary>How many close outputs began, whatever became of them.</summary>
+    public int CloseOutputAttempts => Volatile.Read(ref _closeOutputAttempts);
+
+    /// <summary>How many close outputs began while a send was in progress on this socket (never more than 0 on a correct transport).</summary>
+    public int CloseOutputsDuringSend => Volatile.Read(ref _closeOutputsDuringSend);
+
+    /// <summary>
+    /// Hold the receive that reads the peer's close: the socket is in <see cref="WebSocketState.CloseReceived"/>
+    /// and <see cref="CloseRead"/> completes, but the close is returned to the reader only on
+    /// <see cref="ReleaseCloseRead"/>. The hold ignores the receive's token and reports it
+    /// (<see cref="CloseReadCancelled"/>): the close is in the socket either way.
+    /// </summary>
+    public void HoldCloseRead()
+    {
+        lock (_sync)
+            _closeReadGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>The held receive read the peer's close (the socket is in CloseReceived).</summary>
+    public Task CloseRead => _closeRead.Task;
+
+    /// <summary>The held close read's token was cancelled while it was held.</summary>
+    public Task CloseReadCancelled => _closeReadCancelled.Task;
+
+    /// <summary>Return the held close to the reader.</summary>
+    public void ReleaseCloseRead()
+    {
+        TaskCompletionSource? gate;
+        lock (_sync)
+            gate = _closeReadGate;
+        gate?.TrySetResult();
+    }
+
+    /// <summary>Hold the next close output once it began (its token is honoured); <see cref="CloseOutputEntered"/> completes then.</summary>
+    public void HoldCloseOutput()
+    {
+        lock (_sync)
+            _closeOutputGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>A held close output began.</summary>
+    public Task CloseOutputEntered => _closeOutputEntered.Task;
+
+    /// <summary>Let the held close output complete.</summary>
+    public void ReleaseCloseOutput()
+    {
+        TaskCompletionSource? gate;
+        lock (_sync)
+            gate = _closeOutputGate;
+        gate?.TrySetResult();
+    }
+
+    /// <summary>
+    /// Completes at the first read of <see cref="State"/> after a receive returned the peer's close.
+    /// The receive loop's next step after that receive reads the state only when it is going to
+    /// answer the close itself (it reads the dispose flag first), so this marks the loop committed
+    /// to waiting for the send gate.
+    /// </summary>
+    public Task StateReadAfterCloseReturned()
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Volatile.Write(ref _stateReadAfterClose, signal);
+        return signal.Task;
+    }
+
+    /// <summary>Make <see cref="HoldSends"/> ignore the send's token: a held send then outlives any budget until <see cref="ReleaseSends"/>.</summary>
+    public void HoldSendsIgnoringToken()
+    {
+        _holdSendsIgnoringToken = true;
+        HoldSends();
     }
 
     /// <inheritdoc />
@@ -196,6 +296,7 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
         if (item.Close is { } close)
         {
             _current = null;
+            TaskCompletionSource? hold;
             lock (_sync)
             {
                 _closeStatus = close.Status;
@@ -204,7 +305,16 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
                     _state = WebSocketState.CloseReceived;
                 else if (_state == WebSocketState.CloseSent)
                     _state = WebSocketState.Closed;
+                hold = _closeReadGate;
             }
+            _operations.Enqueue("close-received");
+            _closeRead.TrySetResult();
+            if (hold is not null)
+            {
+                using (cancellationToken.Register(static s => ((TaskCompletionSource)s!).TrySetResult(), _closeReadCancelled))
+                    await hold.Task.ConfigureAwait(false);
+            }
+            _closeReturned = true;
             return new WebSocketReceiveResult(0, WebSocketMessageType.Close, true, close.Status, close.Description);
         }
 
@@ -249,7 +359,10 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
             if (gate is not null)
             {
                 entered.TrySetResult();
-                await gate.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (_holdSendsIgnoringToken)
+                    await gate.Task.ConfigureAwait(false);
+                else
+                    await gate.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
             lock (_sync)
                 ObjectDisposedException.ThrowIf(_state is WebSocketState.Closed or WebSocketState.Aborted, this);
@@ -272,6 +385,18 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
             _closeOutputStatus = closeStatus;
             _closeOutputDescription = statusDescription;
             Interlocked.Exchange(ref _bytesAtCloseOutput, Interlocked.Read(ref _bytesDelivered));
+        }
+        Interlocked.Increment(ref _closeOutputAttempts);
+        if (Volatile.Read(ref _sendsInFlight) > 0)
+            Interlocked.Increment(ref _closeOutputsDuringSend);
+        _operations.Enqueue($"close-output:{(int)closeStatus}:{statusDescription}");
+        TaskCompletionSource? closeHold;
+        lock (_sync)
+            closeHold = _closeOutputGate;
+        if (closeHold is not null)
+        {
+            _closeOutputEntered.TrySetResult();
+            await closeHold.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         if (CloseOutputHangs)
             await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
@@ -307,6 +432,8 @@ internal sealed class ScriptedSessionWebSocket : WebSocket
     {
         lock (_sync)
         {
+            if (!Disposed)
+                _operations.Enqueue("dispose");
             Disposed = true;
             if (_state is not (WebSocketState.Closed or WebSocketState.Aborted))
                 _state = WebSocketState.Closed;
@@ -334,6 +461,17 @@ internal sealed class ScriptedSocketFactory
 
     /// <summary>How many sockets were created.</summary>
     public int Count => Volatile.Read(ref _count);
+
+    /// <summary>
+    /// Every socket created so far answers our close output from now on: a test's teardown, when its
+    /// peers were set never to answer one. Dispose waits, up to one <c>SendTimeout</c>, for a session
+    /// socket's peer to answer its close (#100 OD-7); this keeps a teardown from waiting that out.
+    /// </summary>
+    public void AnswerClosesFromNowOn()
+    {
+        foreach (var socket in _created)
+            socket.AnswerCloseOutput = true;
+    }
 
     /// <summary>The delegate for <c>WebSocketTransportOptions.WebSocketFactory</c>.</summary>
     public WebSocket Create()

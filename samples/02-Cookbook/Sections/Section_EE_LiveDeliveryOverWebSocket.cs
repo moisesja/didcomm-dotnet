@@ -36,9 +36,11 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// <item><description>On the client, by hand: a WebSocket transport with an inbound consumer of your
 /// own that sees every message pushed back on the connection.</description></item>
 /// <item><description>On the client, the usual way: three set-up calls, then
-/// <c>PickupClient.ReceiveLiveAsync</c> receives a mediator's messages as they arrive.</description></item>
+/// <c>PickupClient.ReceiveLiveAsync</c> receives a mediator's messages as they arrive. The client
+/// asks the mediator which Message Pickup version to speak; this one offers 4.0, under which each
+/// acknowledgement is sent without waiting for an answer.</description></item>
 /// </list>
-/// Maps to PRD §14.2 task EE (FR-RR-03..07, FR-PICK-06..08, FR-PICK-11).
+/// Maps to PRD §14.2 task EE (FR-RR-03..07, FR-PICK-06..08, FR-PICK-11, FR-PICK-12).
 /// </summary>
 public static class Section_EE_LiveDeliveryOverWebSocket
 {
@@ -249,7 +251,9 @@ public static class Section_EE_LiveDeliveryOverWebSocket
             //    mediator to Bob, applies replay protection and dispatches it...
             .UseInboundDispatch()
             // 3. ...to the mediator clients, which match answers and pushes to what Bob is waiting for.
-            //    A short poll interval suits this demo (see the note on polling below).
+            //    A short poll interval suits this demo (see the note on polling below). No Message
+            //    Pickup version is pinned: the client asks this mediator, which offers 4.0, so the
+            //    stream below speaks 4.0.
             .AddMediatorClient(o => o.LivePollInterval = TimeSpan.FromSeconds(10))
             .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")));
         await using var wallet = walletServices.BuildServiceProvider();
@@ -321,11 +325,20 @@ public static class Section_EE_LiveDeliveryOverWebSocket
             // handled it, so the mediator would deliver it again later.
         }
 
-        // To discard the last item, acknowledge it yourself.
-        var left = await pickup.AckAsync(mediatorDid, ctx.Bob.Did, new[] { last.Id });
-        narrator.Value("[bob] Messages left after discarding the last one", left.MessageCount);
+        // To discard the last item, acknowledge it yourself. Under Message Pickup 4.0 the mediator
+        // sends no answer to an acknowledgement, so AckAsync returns null: there is no status to
+        // return.
+        var answer = await pickup.AckAsync(mediatorDid, ctx.Bob.Did, new[] { last.Id });
+        narrator.Value("[bob] discarded the last one; the mediator's answer", answer is null ? "none" : $"status, {answer.MessageCount} message(s)");
+        // Nothing more is needed before Bob goes offline (his container is disposed when this
+        // section ends). Disposing it closes the connection and waits, up to
+        // WebSocketTransportOptions.SendTimeout, for the mediator to answer the close, which this
+        // library's mediator does only after it has handled what it received before it, this
+        // acknowledgement included.
 
         narrator.Note("A live item is acknowledged when you ask for the next one; AckAsync(item.Id) discards the last one.");
+        narrator.Note("This stream spoke Message Pickup 4.0, which the client chose after asking the mediator: every live message came in a delivery, and each acknowledgement (messages-received) got no answer: under 4.0 the client sends it and does not wait. So AckAsync returned null, and it does not ask for a status in its place.");
+        narrator.Note("Nothing answers a 4.0 acknowledgement, but disposing the container waits, up to WebSocketTransportOptions.SendTimeout, for the mediator to answer the close, which this library's mediator does only after it has handled what it received. After an abrupt drop, or with a slower mediator, the message can still come back later (delivery is at-least-once).");
         narrator.Note("Delivery is at-least-once: a message can come twice (after a dropped connection or an expired lease). The stream skips repeats it remembers; de-duplicate by message id too.");
         narrator.Note("Polling in live mode is permanent: the next poll comes one LivePollInterval after the previous drain ends. A delayed message that becomes due is not pushed; the next poll picks it up.");
         narrator.Note("So keep LivePollInterval at or below the longest delay your senders ask for (this library's mediator caps a delay at 1 hour by default).");

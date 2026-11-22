@@ -32,8 +32,8 @@ public sealed class MessagePickupHandlerBoundsTests
             o.MaxAckIds = maxAckIds;
         });
         await h.EnrolAsync(h.Alice, h.Alice);
-        var first = await h.QueueAsync(h.Alice, 10, 1);
-        var second = await h.QueueAsync(h.Alice, 20, 2);
+        var first = await h.QueueAsync(h.Alice, 100, 1);
+        var second = await h.QueueAsync(h.Alice, 200, 2);
         h.Fixture.Queue.Coordinator.MaxAckIds.Should().Be(bound);
 
         // Exactly the bound, the real id last: answered, and the message is gone.
@@ -75,7 +75,7 @@ public sealed class MessagePickupHandlerBoundsTests
         // not even one inside the bound — was read first.
         await using var h = await MessagePickupHandlerHarness.CreateAsync(o => o.MaxDeliveryBatch = 1);
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var poison = poisonJson == "<LONG>" ? "\"" + new string('S', 2049) + "\"" : poisonJson;
         h.ResetTraces();
 
@@ -103,7 +103,7 @@ public sealed class MessagePickupHandlerBoundsTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var id = await h.QueueAsync(h.Alice, 10);
+        var id = await h.QueueAsync(h.Alice, 100);
         var ids = Enumerable.Range(0, 20_000).Select(i => i == 0 ? id : "x").ToArray();
         h.ResetTraces();
 
@@ -149,7 +149,7 @@ public sealed class MessagePickupHandlerBoundsTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var http = h.Http(h.Alice);
         var t0 = h.Start.ToUnixTimeSeconds();
         var times = new MessagePickupHandlerTimes(0, t0, t0);
@@ -200,7 +200,7 @@ public sealed class MessagePickupHandlerBoundsTests
         switch (request)
         {
             case "status-request":
-                outcome.ShouldBeStatus(message, h.Mediator, h.Alice, 2, 30, live: false, times: times);
+                outcome.ShouldBeStatus(message, h.Mediator, h.Alice, 2, 300, live: false, times: times);
                 break;
             case "delivery-request":
                 outcome.ShouldBeNoReply();
@@ -208,14 +208,14 @@ public sealed class MessagePickupHandlerBoundsTests
                 http.Sent.Single().Thid.Should().Be(longest);
                 break;
             case "messages-received":
-                outcome.ShouldBeStatus(message, h.Mediator, h.Alice, 1, 10, live: false, times: times);
+                outcome.ShouldBeStatus(message, h.Mediator, h.Alice, 1, 100, live: false, times: times);
                 break;
             case "live-delivery-change{true}":
                 outcome.ShouldBeLiveModeNotSupported(message, h.Mediator, h.Alice);
                 outcome.Reply!.Pthid.Should().Be(longest);
                 break;
             default:
-                outcome.ShouldBeStatus(message, h.Mediator, h.Alice, 2, 30, live: false, times: times);
+                outcome.ShouldBeStatus(message, h.Mediator, h.Alice, 2, 300, live: false, times: times);
                 break;
         }
         if (outcome.Reply is { Thid: not null } reply)
@@ -299,7 +299,7 @@ public sealed class MessagePickupHandlerBoundsTests
     {
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var socket = h.Live(h.Alice);
         var body = bodyJson is null ? null : JsonNode.Parse(bodyJson.Replace("<LONG>", new string('S', 2049), StringComparison.Ordinal))!.AsObject();
         h.ResetTraces();

@@ -54,7 +54,7 @@ public static class DidCommDiagnostics
     /// <c>Queued</c>, <c>Dropped-Malformed</c>, <c>Dropped-NotEncrypted</c>,
     /// <c>Dropped-Expired</c>, <c>Dropped-Unknown</c>, <c>Dropped-Saturated</c>,
     /// <c>Dropped-Unacknowledged</c>, <c>Dropped-Shutdown</c>, <c>Dropped-TooLarge</c>,
-    /// <c>Dropped-Quota</c> or <c>Faulted</c>.</description></item>
+    /// <c>Dropped-Quota</c>, <c>Dropped-PayloadNotEncrypted</c> or <c>Faulted</c>.</description></item>
     /// <item><description><c>didcomm.mediator.push.outcomes</c> (counter): one count per stored message a
     /// mediator hands to its push workers, tagged <c>didcomm.push.outcome</c> with how the push
     /// ended (<c>Pushed-Live</c> over the recipient's live connection, <c>Pushed</c> to its endpoint,

@@ -30,8 +30,8 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var aliceIds = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
-        var bobId = await h.QueueAsync(h.Bob, 5, 3);
+        var aliceIds = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
+        var bobId = await h.QueueAsync(h.Bob, 50, 3);
         var t0 = h.Start.ToUnixTimeSeconds();
         var bobTimes = new MessagePickupHandlerTimes(0, t0, t0);
         var aliceSocket = h.Live(h.Alice);
@@ -39,7 +39,7 @@ public sealed class MessagePickupHandlerIdentityTests
 
         // A message that names no `from` at all is attributed to the key that authcrypted it.
         var anonymous = new MessageBuilder().WithType(MessagePickup.StatusRequestType).WithTo(h.Mediator).WithBody(new JsonObject()).Build();
-        (await h.SendAsync(anonymous, sender: h.Bob)).ShouldBeStatus(anonymous, h.Mediator, h.Bob, 1, 5, live: false, times: bobTimes);
+        (await h.SendAsync(anonymous, sender: h.Bob)).ShouldBeStatus(anonymous, h.Mediator, h.Bob, 1, 50, live: false, times: bobTimes);
 
         // Unpack results whose plaintext says "Alice" while the sender key is Bob's. The real
         // unpack refuses that pairing; these are handed to the dispatcher directly, so the rule
@@ -53,12 +53,12 @@ public sealed class MessagePickupHandlerIdentityTests
 
         // status-request: Bob's queue, addressed to Bob.
         var status = h.StatusRequest(h.Bob);
-        (await ForgedAsync(status, bobSession)).ShouldBeStatus(status, h.Mediator, h.Bob, 1, 5, live: false, times: bobTimes);
+        (await ForgedAsync(status, bobSession)).ShouldBeStatus(status, h.Mediator, h.Bob, 1, 50, live: false, times: bobTimes);
 
         // messages-received naming Alice's ids: applied under Bob's key, where they match nothing.
         h.ResetTraces();
         var ack = h.MessagesReceived(h.Bob, aliceIds);
-        (await ForgedAsync(ack, bobSession)).ShouldBeStatus(ack, h.Mediator, h.Bob, 1, 5, live: false, times: bobTimes);
+        (await ForgedAsync(ack, bobSession)).ShouldBeStatus(ack, h.Mediator, h.Bob, 1, 50, live: false, times: bobTimes);
         h.Store.Acknowledged.Should().ContainSingle().Which.GrantPeerDid.Should().Be(h.Bob);
         (await h.StoredAsync(h.Alice)).Should().Be(2);
 
@@ -70,7 +70,7 @@ public sealed class MessagePickupHandlerIdentityTests
 
         // delivery-request carried with Alice's session: nothing is pushed to her, nothing of hers is leased.
         var viaAlice = h.DeliveryRequest(h.Bob, 10);
-        (await ForgedAsync(viaAlice, aliceSocket)).ShouldBeStatus(viaAlice, h.Mediator, h.Bob, 1, 5, live: false, times: bobTimes);
+        (await ForgedAsync(viaAlice, aliceSocket)).ShouldBeStatus(viaAlice, h.Mediator, h.Bob, 1, 50, live: false, times: bobTimes);
         aliceSocket.Attempts.Should().BeEmpty();
 
         // delivery-request on Bob's own session: Bob's message, to Bob.
@@ -87,7 +87,7 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var aliceIds = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
+        var aliceIds = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
         var aliceSocket = h.Live(h.Alice);
 
         // Every byte validly authcrypted by Bob; the plaintext claims to be from Alice.
@@ -126,8 +126,8 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var aliceIds = new[] { await h.QueueAsync(h.Alice, 10, 1) };
-        var bobIds = new[] { await h.QueueAsync(h.Bob, 5, 2) };
+        var aliceIds = new[] { await h.QueueAsync(h.Alice, 100, 1) };
+        var bobIds = new[] { await h.QueueAsync(h.Bob, 50, 2) };
         h.ResetTraces();
 
         var builder = new MessageBuilder().WithType(MessagePickup.MessagesReceivedType).WithTo(h.Mediator)
@@ -161,7 +161,7 @@ public sealed class MessagePickupHandlerIdentityTests
         var victim = await h.Fixture.NewPeerAsync();
         await h.EnrolAsync(victim.Did, victim.Did);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var victimIds = new[] { await h.QueueAsync(victim.Did, 10, 1), await h.QueueAsync(victim.Did, 20, 2) };
+        var victimIds = new[] { await h.QueueAsync(victim.Did, 100, 1), await h.QueueAsync(victim.Did, 200, 2) };
         var victimSocket = h.Live(victim.Did);
         var victimKid = victim.Privates.First(j => j.Crv == "X25519").Kid!;
         var client = h.Fixture.Host.Client;
@@ -228,8 +228,8 @@ public sealed class MessagePickupHandlerIdentityTests
         var aliceSecond = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, aliceSecond);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var aliceIds = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(aliceSecond, 20, 2) };
-        var bobId = await h.QueueAsync(h.Bob, 5, 3);
+        var aliceIds = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(aliceSecond, 200, 2) };
+        var bobId = await h.QueueAsync(h.Bob, 50, 3);
         var session = h.Http(h.Bob);
         var value = what switch
         {
@@ -279,7 +279,7 @@ public sealed class MessagePickupHandlerIdentityTests
         await h.EnrolAsync(h.Alice, h.Alice);
         if (askerHasGrant)
             await h.EnrolAsync(h.Bob, h.Bob);
-        await h.QueueAsync(h.Alice, 10);
+        await h.QueueAsync(h.Alice, 100);
         h.Clock.Advance(TimeSpan.FromSeconds(90));
         var session = h.Http(h.Bob);
 
@@ -313,8 +313,8 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var aliceIds = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
-        var bobId = await h.QueueAsync(h.Bob, 5, 4);
+        var aliceIds = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
+        var bobId = await h.QueueAsync(h.Bob, 50, 4);
         // One of Alice's is out for delivery (leased): that state must not make it reachable either.
         var aliceSession = h.Http(h.Alice);
         (await h.Fixture.FetchAsync(h.Alice, h.Mediator, aliceSession, 1))!.Value.Messages.Should().ContainSingle(m => m.Id == aliceIds[0]);
@@ -326,7 +326,7 @@ public sealed class MessagePickupHandlerIdentityTests
         var outcome = await h.SendAsync(request, bobSession);
 
         // Bob's status is the ordinary one: his own message, nothing about the ids he named.
-        outcome.ShouldBeStatus(request, h.Mediator, h.Bob, 1, 5, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
+        outcome.ShouldBeStatus(request, h.Mediator, h.Bob, 1, 50, live: false, times: new MessagePickupHandlerTimes(0, t0, t0));
         var call = h.Store.Acknowledged.Should().ContainSingle().Subject;
         call.GrantPeerDid.Should().Be(h.Bob, "the acknowledgement is confined to the caller's own key");
         call.Ids.Should().Equal(aliceIds);
@@ -360,9 +360,9 @@ public sealed class MessagePickupHandlerIdentityTests
         await h.EnrolAsync(h.Bob, h.Bob);
         const string shared = "did:example:shared";
         var now = h.Clock.Now;
-        var alicePayload = PickupFixture.Payload(11, 1);
-        var bobPayload = PickupFixture.Payload(22, 2);
-        var aliceOnly = PickupFixture.Payload(33, 3);
+        var alicePayload = PickupFixture.Payload(110, 1);
+        var bobPayload = PickupFixture.Payload(220, 2);
+        var aliceOnly = PickupFixture.Payload(330, 3);
         var store = h.Store.Inner;
         (await store.EnqueueAsync(new QueuedMessage("same-id", h.Alice, shared, alicePayload, now), null, now, default)).Should().Be(EnqueueOutcome.Enqueued);
         (await store.EnqueueAsync(new QueuedMessage("same-id", h.Bob, shared, bobPayload, now), null, now, default)).Should().Be(EnqueueOutcome.Enqueued);
@@ -378,7 +378,7 @@ public sealed class MessagePickupHandlerIdentityTests
         // Alice, filtered by the shared DID: her two records.
         var aliceSession = h.Http(h.Alice);
         var aliceStatus = h.StatusRequest(h.Alice, shared);
-        (await h.SendAsync(aliceStatus, aliceSession)).ShouldBeStatus(aliceStatus, h.Mediator, h.Alice, 2, 44, live: false, recipientDid: shared, times: times);
+        (await h.SendAsync(aliceStatus, aliceSession)).ShouldBeStatus(aliceStatus, h.Mediator, h.Alice, 2, 440, live: false, recipientDid: shared, times: times);
         var aliceFetch = h.DeliveryRequest(h.Alice, 10, shared);
         (await h.SendAsync(aliceFetch, aliceSession)).ShouldBeNoReply();
         aliceSession.Sent.Should().ContainSingle().Which.ShouldBeDelivery(aliceFetch, h.Mediator, h.Alice, shared, new[] { "same-id", "alice-only" }, new[] { alicePayload, aliceOnly });
@@ -387,7 +387,7 @@ public sealed class MessagePickupHandlerIdentityTests
         asking = h.Bob;
         var bobSession = h.Http(h.Bob);
         var bobStatus = h.StatusRequest(h.Bob, shared);
-        (await h.SendAsync(bobStatus, bobSession)).ShouldBeStatus(bobStatus, h.Mediator, h.Bob, 1, 22, live: false, recipientDid: shared, times: times);
+        (await h.SendAsync(bobStatus, bobSession)).ShouldBeStatus(bobStatus, h.Mediator, h.Bob, 1, 220, live: false, recipientDid: shared, times: times);
         var bobFetch = h.DeliveryRequest(h.Bob, 10);
         (await h.SendAsync(bobFetch, bobSession)).ShouldBeNoReply();
         bobSession.Sent.Should().ContainSingle().Which.ShouldBeDelivery(bobFetch, h.Mediator, h.Bob, null, new[] { "same-id" }, new[] { bobPayload });
@@ -400,7 +400,7 @@ public sealed class MessagePickupHandlerIdentityTests
         // Alice acknowledges hers: gone, one by one.
         asking = h.Alice;
         var aliceAck = h.MessagesReceived(h.Alice, new[] { "same-id" });
-        (await h.SendAsync(aliceAck, aliceSession)).ShouldBeStatus(aliceAck, h.Mediator, h.Alice, 1, 33, live: false, times: times);
+        (await h.SendAsync(aliceAck, aliceSession)).ShouldBeStatus(aliceAck, h.Mediator, h.Alice, 1, 330, live: false, times: times);
         store.MessageCount.Should().Be(1);
     }
 
@@ -415,9 +415,9 @@ public sealed class MessagePickupHandlerIdentityTests
         await h.EnrolAsync(h.Bob, h.Bob);
         var now = h.Clock.Now;
         var store = h.Store.Inner;
-        await store.EnqueueAsync(new QueuedMessage("alice-1", h.Alice, shared, PickupFixture.Payload(11, 1), now), null, now, default);
-        await store.EnqueueAsync(new QueuedMessage("bob-stray", h.Bob, shared, PickupFixture.Payload(22, 2), now), null, now, default);
-        var bobOwn = await h.QueueAsync(h.Bob, 5, 3);
+        await store.EnqueueAsync(new QueuedMessage("alice-1", h.Alice, shared, PickupFixture.Payload(110, 1), now), null, now, default);
+        await store.EnqueueAsync(new QueuedMessage("bob-stray", h.Bob, shared, PickupFixture.Payload(220, 2), now), null, now, default);
+        var bobOwn = await h.QueueAsync(h.Bob, 50, 3);
         var bobSession = h.Http(h.Bob);
 
         // Filtered: Bob does not hold the DID, so the message store is not asked.
@@ -448,8 +448,8 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var registered = await h.NewDidAsync();
         await h.EnrolAsync(h.Bob, registered);
-        await h.QueueAsync(registered, 10, 1);
-        await h.QueueAsync(registered, 20, 2);
+        await h.QueueAsync(registered, 100, 1);
+        await h.QueueAsync(registered, 200, 2);
         var session = h.Http(h.Bob);
         var t0 = h.Start.ToUnixTimeSeconds();
 
@@ -466,9 +466,9 @@ public sealed class MessagePickupHandlerIdentityTests
         // Unfiltered, and filtered by the DID he did register: the two messages.
         var times = new MessagePickupHandlerTimes(0, t0, t0);
         var all = h.StatusRequest(h.Bob);
-        (await h.SendAsync(all, session)).ShouldBeStatus(all, h.Mediator, h.Bob, 2, 30, live: false, times: times);
+        (await h.SendAsync(all, session)).ShouldBeStatus(all, h.Mediator, h.Bob, 2, 300, live: false, times: times);
         var byRegistered = h.StatusRequest(h.Bob, registered);
-        (await h.SendAsync(byRegistered, session)).ShouldBeStatus(byRegistered, h.Mediator, h.Bob, 2, 30, live: false, recipientDid: registered, times: times);
+        (await h.SendAsync(byRegistered, session)).ShouldBeStatus(byRegistered, h.Mediator, h.Bob, 2, 300, live: false, recipientDid: registered, times: times);
 
         // Once registered, his own DID is a filter like any other (and still empty).
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Bob, new[] { new RecipientUpdate(h.Bob, RecipientUpdateAction.Add) }, default);
@@ -486,9 +486,9 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var removed = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, removed);
-        var kept1 = await h.QueueAsync(h.Alice, 10, 1);
-        var stale = new[] { await h.QueueAsync(removed, 20, 2), await h.QueueAsync(removed, 30, 3) };
-        var kept2 = await h.QueueAsync(h.Alice, 40, 4);
+        var kept1 = await h.QueueAsync(h.Alice, 100, 1);
+        var stale = new[] { await h.QueueAsync(removed, 200, 2), await h.QueueAsync(removed, 300, 3) };
+        var kept2 = await h.QueueAsync(h.Alice, 400, 4);
         (await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(removed, RecipientUpdateAction.Remove) }, default))
             .Should().Equal(RecipientStoreOutcome.Removed);
         var session = h.Http(h.Alice);
@@ -539,11 +539,11 @@ public sealed class MessagePickupHandlerIdentityTests
         var gone2 = await h.NewDidAsync();
         var kept = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, gone1, kept, gone2);
-        var stale1 = await h.QueueAsync(gone1, 10, 1);
-        var keptId1 = await h.QueueAsync(kept, 10, 2);
-        var stale2 = await h.QueueAsync(gone2, 10, 3);
-        var stale3 = await h.QueueAsync(gone1, 10, 4);
-        var keptId2 = await h.QueueAsync(kept, 10, 5);
+        var stale1 = await h.QueueAsync(gone1, 100, 1);
+        var keptId1 = await h.QueueAsync(kept, 100, 2);
+        var stale2 = await h.QueueAsync(gone2, 100, 3);
+        var stale3 = await h.QueueAsync(gone1, 100, 4);
+        var keptId2 = await h.QueueAsync(kept, 100, 5);
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(gone1, RecipientUpdateAction.Remove), new RecipientUpdate(gone2, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
         h.ResetTraces();
@@ -581,8 +581,8 @@ public sealed class MessagePickupHandlerIdentityTests
         await h.EnrolAsync(h.Alice, h.Alice, removed);
         var stale = new List<string>();
         for (var i = 0; i < staleCount; i++)
-            stale.Add(await h.QueueAsync(removed, 10 + i, (byte)i));
-        var kept = await h.QueueAsync(h.Alice, 30, 9);
+            stale.Add(await h.QueueAsync(removed, 100 + i, (byte)i));
+        var kept = await h.QueueAsync(h.Alice, 300, 9);
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(removed, RecipientUpdateAction.Remove) }, default);
         var session = h.Http(h.Alice);
         h.ResetTraces();
@@ -609,13 +609,13 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var moved = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, moved);
-        var aliceOwn = await h.QueueAsync(h.Alice, 10, 1);
-        var old = new[] { await h.QueueAsync(moved, 20, 2), await h.QueueAsync(moved, 30, 3) };
+        var aliceOwn = await h.QueueAsync(h.Alice, 100, 1);
+        var old = new[] { await h.QueueAsync(moved, 200, 2), await h.QueueAsync(moved, 300, 3) };
 
         // Alice drops the DID; Bob registers it; a new message for it arrives.
         await h.Mediation.Inner.UpdateRecipientsAsync(h.Alice, new[] { new RecipientUpdate(moved, RecipientUpdateAction.Remove) }, default);
         await h.EnrolAsync(h.Bob, h.Bob, moved);
-        var fresh = await h.QueueAsync(moved, 40, 4);
+        var fresh = await h.QueueAsync(moved, 400, 4);
         h.Store.Enqueued.Last().Message.GrantPeerDid.Should().Be(h.Bob, "a message is filed under the grant that holds its recipient DID when it arrives");
         var aliceSession = h.Http(h.Alice);
         var bobSession = h.Http(h.Bob);
@@ -644,7 +644,7 @@ public sealed class MessagePickupHandlerIdentityTests
         // Bob: his own queue for the DID is separate and untouched by all of the above. The
         // messages queued while the DID was Alice's never reach him.
         var bobStatus = h.StatusRequest(h.Bob, moved);
-        (await h.SendAsync(bobStatus, bobSession)).ShouldBeStatus(bobStatus, h.Mediator, h.Bob, 1, 40, live: false, recipientDid: moved, times: new MessagePickupHandlerTimes(0, t0, t0));
+        (await h.SendAsync(bobStatus, bobSession)).ShouldBeStatus(bobStatus, h.Mediator, h.Bob, 1, 400, live: false, recipientDid: moved, times: new MessagePickupHandlerTimes(0, t0, t0));
         var bobFetch = h.DeliveryRequest(h.Bob, 10, moved);
         (await h.SendAsync(bobFetch, bobSession)).ShouldBeNoReply();
         bobSession.Sent.Should().ContainSingle().Which.ShouldBeDelivery(bobFetch, h.Mediator, h.Bob, moved, new[] { fresh });
@@ -660,7 +660,7 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         var second = await h.NewDidAsync();
         await h.EnrolAsync(h.Alice, h.Alice, second);
-        var ids = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(second, 20, 2), await h.QueueAsync(h.Alice, 30, 3) };
+        var ids = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(second, 200, 2), await h.QueueAsync(h.Alice, 300, 3) };
         (await h.Mediation.Inner.RevokeAsync(h.Alice, default)).Should().BeTrue();
         var http = h.Http(h.Alice);
         var socket = h.Live(h.Alice);
@@ -697,8 +697,8 @@ public sealed class MessagePickupHandlerIdentityTests
         await using var h = await MessagePickupHandlerHarness.CreateAsync();
         await h.EnrolAsync(h.Alice, h.Alice);
         await h.EnrolAsync(h.Bob, h.Bob);
-        var aliceIds = new[] { await h.QueueAsync(h.Alice, 10, 1), await h.QueueAsync(h.Alice, 20, 2) };
-        var bobIds = new[] { await h.QueueAsync(h.Bob, 5, 3) };
+        var aliceIds = new[] { await h.QueueAsync(h.Alice, 100, 1), await h.QueueAsync(h.Alice, 200, 2) };
+        var bobIds = new[] { await h.QueueAsync(h.Bob, 50, 3) };
         await h.Mediation.Inner.RevokeAsync(h.Alice, default);
         h.ResetTraces();
 

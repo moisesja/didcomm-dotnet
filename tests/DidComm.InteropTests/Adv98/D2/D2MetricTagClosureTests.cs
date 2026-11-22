@@ -24,7 +24,7 @@ public sealed class D2MetricTagClosureTests
     private static readonly HashSet<string> ForwardValues = new(StringComparer.Ordinal)
     {
         "Queued", "Dropped-Malformed", "Dropped-NotEncrypted", "Dropped-Expired", "Dropped-Unknown", "Dropped-Saturated",
-        "Dropped-Unacknowledged", "Dropped-Shutdown", "Dropped-TooLarge", "Dropped-Quota", "Faulted",
+        "Dropped-Unacknowledged", "Dropped-Shutdown", "Dropped-TooLarge", "Dropped-Quota", "Dropped-PayloadNotEncrypted", "Faulted",
     };
 
     private static readonly HashSet<string> PushValues = new(StringComparer.Ordinal)

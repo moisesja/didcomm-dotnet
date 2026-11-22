@@ -162,7 +162,7 @@ public sealed class PickupClientAcceptanceQa2Tests
         failures.Should().HaveCount(3).And.OnlyContain(i => i.Error != null && MediatorRecipient.IsRandomQueueId(i.Id));
         (await mediator.StatusAsync(bob)).MessageCount.Should().Be(3, "the three bad ones are never acknowledged and still counted");
 
-        var discarded = await PickupE2E.Within(harness.Pickup.AckAsync(mediator.Did, bob.Did, failures.Select(f => f.Id).ToArray(), endpoint));
+        var discarded = PickupE2E.Answered(await PickupE2E.Within(harness.Pickup.AckAsync(mediator.Did, bob.Did, failures.Select(f => f.Id).ToArray(), endpoint)));
         discarded.MessageCount.Should().Be(0, "the caller discards the failures with their ids");
         mediator.Store.MessageCount.Should().Be(0);
         mediator.LeakingLogLines(recipient.Did).Should().BeEmpty();
@@ -190,7 +190,7 @@ public sealed class PickupClientAcceptanceQa2Tests
         }
 
         // Without DI a WebSocket route cannot receive: refused before sending too.
-        var bare = new PickupClient(harness.Client);
+        var bare = new PickupClient(harness.Client, new MediatorClientOptions { MessagePickupVersion = MessagePickupVersion.V3 });
         await FluentActions.Awaiting(() => bare.SetLiveDeliveryAsync(mediator.Did, bob.Did, true, harness.WebSocketEndpoint)).Should().ThrowAsync<InvalidOperationException>();
         await FluentActions.Awaiting(() => bare.FetchAsync(mediator.Did, bob.Did, 1, serviceEndpointOverride: harness.WebSocketEndpoint)).Should().ThrowAsync<InvalidOperationException>();
         await using (var stream = bare.ReceiveLiveAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint).GetAsyncEnumerator())

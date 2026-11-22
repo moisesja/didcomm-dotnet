@@ -61,14 +61,14 @@ internal static class Qa
             s(m);
     };
 
-    /// <summary>A JSON object whose compact serialisation is exactly <paramref name="bytes"/> ASCII bytes (an opaque onward payload).</summary>
+    /// <summary>
+    /// An opaque onward payload in encrypted form, the only kind the mailbox stores: a JSON object
+    /// with a <c>ciphertext</c> member (a stand-in JWE, <see cref="StandInJwe"/>) whose compact
+    /// serialisation is exactly <paramref name="bytes"/> ASCII bytes.
+    /// </summary>
     public static string JsonPayloadOfSize(int bytes)
     {
-        const string Prefix = "{\"protected\":\"";
-        const string Suffix = "\"}";
-        var fill = bytes - Prefix.Length - Suffix.Length;
-        fill.Should().BeGreaterThan(0);
-        var text = Prefix + new string('a', fill) + Suffix;
+        var text = Encoding.ASCII.GetString(StandInJwe.OfSize(bytes));
         Encoding.UTF8.GetByteCount(text).Should().Be(bytes);
         return text;
     }
@@ -260,6 +260,17 @@ internal sealed class QaManualTimeProvider : TimeProvider
             return _timers.Count(t => t.Sequence > mark && t.DueAt is not null);
     }
 
+    /// <summary>
+    /// How many timers created after <paramref name="mark"/> are not disposed yet, scheduled or not (a
+    /// timer that fired, or was changed to never fire, still counts until it is disposed).
+    /// </summary>
+    /// <param name="mark">A value <see cref="Mark"/> returned earlier.</param>
+    public int UndisposedTimersSince(long mark)
+    {
+        lock (_gate)
+            return _timers.Count(t => t.Sequence > mark);
+    }
+
     public async Task WaitForScheduledTimersAsync(int count, TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource(timeout);
@@ -396,6 +407,7 @@ internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
     public ValueTask<IReadOnlyList<DidComm.Mediator.Pickup.QueuedMessage>> LeaseAsync(DidComm.Mediator.Pickup.MessageLeaseRequest request, CancellationToken ct) => Inner.LeaseAsync(request, ct);
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
     public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
     public ValueTask<DidComm.Mediator.Pickup.QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct) => Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);

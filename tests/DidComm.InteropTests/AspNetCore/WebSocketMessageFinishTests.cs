@@ -1,0 +1,1170 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.WebSockets;
+using AwesomeAssertions;
+using DidComm.AspNetCore;
+using DidComm.InteropTests.Mediator;
+using DidComm.InteropTests.Transports;
+using DidComm.Mediator.Pickup;
+using DidComm.Messages;
+using DidComm.Protocols;
+using DidComm.Transports.ReturnRoute;
+using DidComm.Transports.Stomp;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Xunit;
+using E2E = DidComm.InteropTests.Transports.WebSocketDisposeAcknowledgementEndToEndTests;
+
+namespace DidComm.InteropTests.AspNetCore;
+
+/// <summary>
+/// #100 OD-8, on real Kestrel (a TestServer hides a client's abort): the registry-aware WebSocket
+/// loop (<c>MapDidCommWebSocket(pattern)</c>, and through it <c>MapDidCommMediator</c>'s WebSocket
+/// endpoint) handles a message it has received in full under a token of its own. When the connection
+/// ends with the message in hand the message is still handled, for at most the close grace
+/// (<see cref="WebSocketReturnRouteSession.DefaultCloseGrace"/>, on the container's clock, which here is
+/// the manual <see cref="QaManualTimeProvider"/>) and only until the host starts to stop; nothing more
+/// is read from that connection.
+/// <para>
+/// Most cases hold the mediator's own Message Pickup 4.0 <c>messages-received</c> at its store
+/// (<see cref="AckDelayingStore.HoldNextAcknowledgementOf"/>, a hold that honours the handler's token):
+/// "applied" is the store removing the message, "cancelled" is the handler's token firing first. Each
+/// waits for the bound's timer to be created (L-065 rule 3), which is the server having seen the end
+/// with the message in hand, before it moves anything.
+/// </para>
+/// </summary>
+public sealed class WebSocketMessageFinishTests
+{
+    private static readonly TimeSpan Guard = DeadlineKestrelHost.Guard;
+    private static readonly TimeSpan Grace = WebSocketReturnRouteSession.DefaultCloseGrace;
+
+    // ---- (a) a message received in full is applied after an abrupt drop ------------------------------
+
+    [Fact]
+    public async Task A_messages_received_whose_sender_aborts_the_connection_while_it_is_being_applied_is_still_applied()
+    {
+        var (host, store, _) = await StartAsync();
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+        var ack = store.HoldNextAcknowledgementOf(id);
+
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await E2E.SendAcknowledgementAsync(host, socket, bob, id);
+        await ack.Started.Task.WaitAsync(Guard);
+        var mark = host.Time.Mark();
+        socket.Abort(); // no close frame
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard);
+        ack.Release();
+
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Applied.Task.IsCompletedSuccessfully.Should().BeTrue("the message was received in full before the drop, so it is still applied");
+        ack.Cancelled.Task.IsCompleted.Should().BeFalse();
+        E2E.StoreCount(host).Should().Be(0);
+        await host.WaitEndedWebSocketsAsync(2);
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_messages_received_whose_last_frame_was_read_just_before_the_connection_ended_is_still_applied()
+    {
+        // The end is seen before the handling starts: the loop is held right after the last frame,
+        // inside the receive deadline's stop, until the server's abort token fired.
+        GatedDisposeClock gate = null!;
+        var (host, store, _) = await StartAsync(o => o.Builder = b => gate = GatedDisposeClock.Install(b));
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+        var ack = store.HoldNextAcknowledgementOf(id);
+
+        gate.Arm(DeadlineKestrelHost.Limit);
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await E2E.SendAcknowledgementAsync(host, socket, bob, id);
+        await gate.Held.WaitAsync(Guard);
+        await AbortAndWaitUntilTheServerSawItAsync(host, socket);
+        var mark = host.Time.Mark();
+        gate.Release();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // the handling started with the connection already ended
+
+        await ack.Started.Task.WaitAsync(Guard);
+        ack.Release();
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Applied.Task.IsCompletedSuccessfully.Should().BeTrue("the message was complete before the connection ended");
+        E2E.StoreCount(host).Should().Be(0);
+        await host.WaitEndedWebSocketsAsync(2);
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_connection_that_ended_opens_no_session_so_its_message_in_hand_cannot_evict_the_peers_live_session()
+    {
+        GatedDisposeClock gate = null!;
+        var (host, _, holding) = await StartAsync(o => o.Builder = b =>
+        {
+            gate = GatedDisposeClock.Install(b);
+            b.Services.AddOptions<ReturnRouteSessionOptions>().Configure(s => s.MaxSessionsPerPeer = 1);
+        });
+        await using var _host = host;
+
+        // Alice's live session, on a connection of its own.
+        using var live = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        var opener = host.Probe(returnRoute: true);
+        await DeadlinePeer.SendAsync(live, await host.PackAsync(opener), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Mediator, opener.Id);
+        var liveSession = (WebSocketReturnRouteSession)host.Registry.Find(host.Alice.Did).Should().ContainSingle().Subject;
+
+        // Another connection of Alice's ends with an eligible message (return_route: all) in hand.
+        gate.Arm(DeadlineKestrelHost.Limit);
+        var ended = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await DeadlinePeer.SendAsync(ended, await host.PackAsync(Hold(host, returnRoute: true)), endOfMessage: true);
+        await gate.Held.WaitAsync(Guard);
+        await AbortAndWaitUntilTheServerSawItAsync(host, ended);
+        var mark = host.Time.Mark();
+        gate.Release();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard);
+
+        var context = await holding.Entered.Task.WaitAsync(Guard);
+        context.Session.Should().BeNull("a connection that already ended opens no session");
+        holding.Release();
+        (await holding.Handled.Task.WaitAsync(Guard)).Should().BeNull("the message in hand is still handled (it had no session to push on)");
+        await host.WaitEndedWebSocketsAsync(1);
+
+        liveSession.IsClosed.Should().BeFalse("the ended connection never registered a session, so the per-peer bound evicted nothing");
+        host.Registry.Find(host.Alice.Did).Should().ContainSingle().Which.Should().BeSameAs(liveSession);
+        live.State.Should().Be(WebSocketState.Open);
+        Loud(host).Should().BeEmpty();
+    }
+
+    // ---- (b) a message not received in full is never applied ----------------------------------------
+
+    [Fact]
+    public async Task A_messages_received_of_which_only_the_first_fragment_arrived_before_the_abort_is_never_applied()
+    {
+        var (host, store, _) = await StartAsync();
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+        var ack = store.HoldNextAcknowledgementOf(id);
+        var packed = await E2E.PackAcknowledgementAsync(host, bob, id);
+
+        var mark = host.Time.Mark();
+        var peer = await host.ConnectRawAsync(DeadlineEndpoint.Mediator);
+        await host.Time.WaitForTimerAsync(mark, DeadlineKestrelHost.Limit, Guard); // the first message's time, from the accept
+        await peer.SendFrameAsync(RawFrame.Text, fin: false, packed.AsMemory(0, packed.Length / 2));
+        await peer.PingAsync("first-fragment-read"); // the server has read the fragment
+        await peer.DisposeAsync(); // abort: no close frame, the message unfinished
+        await host.WaitEndedWebSocketsAsync(2);
+
+        ack.Started.Task.IsCompleted.Should().BeFalse("half a message is never unpacked or dispatched");
+        E2E.StoreCount(host).Should().Be(1);
+        host.TimersCreatedSince(mark).Should().Be(1, "only the receive deadline: no message was in hand, so no close grace was started");
+        Loud(host).Should().BeEmpty();
+    }
+
+    // ---- (c) one finish per connection ---------------------------------------------------------------
+
+    [Fact]
+    public async Task After_an_abort_the_message_in_hand_is_applied_and_the_message_behind_it_is_never_read()
+    {
+        var (host, store, _) = await StartAsync();
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+        var ack = store.HoldNextAcknowledgementOf(id);
+
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await E2E.SendAcknowledgementAsync(host, socket, bob, id); // message 1, held
+        await ack.Started.Task.WaitAsync(Guard);
+        var behind = host.Probe(); // message 2, sent whole behind it
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(behind), endOfMessage: true);
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard);
+        ack.Release();
+
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Applied.Task.IsCompletedSuccessfully.Should().BeTrue();
+        await host.WaitEndedWebSocketsAsync(2);
+        host.Recorder.Invocations.Should().Be(0, "nothing is read after the end: message 2 was never dispatched");
+        host.TimersCreatedSince(mark).Should().Be(1, "one finish for the connection");
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task After_the_eviction_backstop_ends_a_connection_the_message_in_hand_is_applied_and_the_message_behind_it_is_never_read()
+    {
+        // A session-initiated end (JC-21: the evicted peer never answers the close frame, and after the
+        // close grace the session cancels the connection) leaves the socket readable, so here only the
+        // loop's own rule keeps message 2 unread. Takes the real 5 s of the backstop.
+        var (host, store, _) = await StartAsync(o => o.Builder = b =>
+            b.Services.AddOptions<ReturnRouteSessionOptions>().Configure(s => s.MaxSessionsPerPeer = 1));
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+
+        using var first = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await host.AskAsync(first, bob, MessagePickup40.CreateStatusRequest(bob.Did, host.Did)); // Bob's session on it
+        var evicted = (WebSocketReturnRouteSession)host.Registry.Find(bob.Did).Should().ContainSingle().Subject;
+        var ack = store.HoldNextAcknowledgementOf(id);
+        await E2E.SendAcknowledgementAsync(host, first, bob, id); // message 1, held
+        await ack.Started.Task.WaitAsync(Guard);
+        var behind = host.Probe(); // message 2
+        await DeadlinePeer.SendAsync(first, await host.PackAsync(behind), endOfMessage: true);
+
+        var mark = host.Time.Mark();
+        using var second = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await host.AskAsync(second, bob, MessagePickup40.CreateStatusRequest(bob.Did, host.Did)); // evicts the first session
+        evicted.CloseReason.Should().Be(SessionCloseReason.Evicted);
+        // The first peer never reads, so it never answers the close frame: the backstop ends the connection.
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard);
+        ack.Release();
+
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Applied.Task.IsCompletedSuccessfully.Should().BeTrue("a message received in full before the server ended the connection is still applied");
+        await host.WaitEndedWebSocketsAsync(2);
+        host.Recorder.Invocations.Should().Be(0, "nothing is read after the end, although the socket could still be read");
+        second.State.Should().Be(WebSocketState.Open);
+        Loud(host).Should().BeEmpty();
+    }
+
+    // ---- (d) the host's shutdown, (e) the bound ------------------------------------------------------
+
+    [Fact]
+    public async Task The_hosts_shutdown_ends_a_finish_before_its_bound()
+    {
+        var (host, store, _) = await StartAsync();
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+        var ack = store.HoldNextAcknowledgementOf(id);
+
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await E2E.SendAcknowledgementAsync(host, socket, bob, id);
+        await ack.Started.Task.WaitAsync(Guard);
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard);
+        var fired = host.Time.TimersFired;
+
+        host.App.Lifetime.StopApplication(); // ApplicationStopping; the clock never moves
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Cancelled.Task.IsCompleted.Should().BeTrue("the host's shutdown ends the finish");
+        ack.Applied.Task.IsCompleted.Should().BeFalse();
+        host.Time.TimersFired.Should().Be(fired, "the bound did not fire: the shutdown came first");
+        E2E.StoreCount(host).Should().Be(1, "the message stays queued and is delivered again (at-least-once)");
+        await host.WaitEndedWebSocketsAsync(2);
+        host.Logs.Records.Should().Contain(r => r.Level == LogLevel.Debug && r.Text.Contains("the host is stopping; the handling is cancelled", StringComparison.Ordinal));
+        Loud(host).Should().BeEmpty();
+        NoWireValues(host, bob, id);
+    }
+
+    [Fact]
+    public async Task A_host_already_stopping_when_the_connection_ends_with_a_message_in_hand_cancels_the_handling_at_once()
+    {
+        // The other order: the host starts to stop while a handler that ignores the host's stopping
+        // token holds the message, and only then does the connection end. Arming the bound finds the
+        // stopping token already cancelled, so the handling is cancelled there and then: no clock
+        // move, and no later stopping event to wait for. Registering on a token already cancelled runs
+        // the callback inline and keeps no registration, so the bound's timer is all there is to leave.
+        var (host, _, holding) = await StartAsync();
+        await using var _host = host;
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard); // it honours its own token only, not ApplicationStopping
+        var fired = host.Time.TimersFired;
+
+        host.App.Lifetime.StopApplication(); // the connection still lives
+        host.App.Lifetime.ApplicationStopping.IsCancellationRequested.Should().BeTrue();
+        holding.Cancelled.Task.IsCompleted.Should().BeFalse("the handler still holds the message when the connection ends");
+        host.EndedWebSockets.Should().Be(0);
+        var mark = host.Time.Mark();
+        socket.Abort(); // the connection ends with the message in hand
+
+        await holding.Cancelled.Task.WaitAsync(Guard); // the clock never moves
+        await host.WaitEndedWebSocketsAsync(1);
+        holding.Handled.Task.IsCompleted.Should().BeFalse("the handling was cancelled, not finished");
+        host.Time.TimersFired.Should().Be(fired, "no timer fired: the host's shutdown ended the handling, not the bound");
+        host.TimersCreatedSince(mark).Should().Be(1, "the bound's timer, created when the end was seen with the message in hand");
+        host.Time.UndisposedTimersSince(mark).Should().Be(0, "the bound's timer was disposed when the loop ended: no timer is left behind");
+        host.Logs.Records.Where(r => r.Text.Contains("received in full", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be((LogLevel.Debug,
+                "MapDidCommWebSocket: the connection ended while a message it had received in full was being handled, and the host is stopping; the handling is cancelled."));
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_clock_that_cannot_create_the_bounds_timer_ends_the_handling_at_once_rather_than_leaving_it_unbounded()
+    {
+        FaultingTimerClock clock = null!;
+        var (host, _, holding) = await StartAsync(o => o.Builder = b => clock = FaultingTimerClock.Install(b));
+        await using var _host = host;
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard); // it honours its token, so only a cancellation ends it
+        var fired = host.Time.TimersFired;
+        var mark = host.Time.Mark();
+        clock.FailNext(Grace);
+        socket.Abort(); // the connection ends with the message in hand: the bound's timer is asked for
+
+        await holding.Cancelled.Task.WaitAsync(Guard); // the clock never moves and the host is not stopping
+        await host.WaitEndedWebSocketsAsync(1);
+        clock.Failures.Should().Be(1, "the bound's timer was asked for once, and refused");
+        holding.Handled.Task.IsCompleted.Should().BeFalse("the handling was cancelled, not finished");
+        host.App.Lifetime.ApplicationStopping.IsCancellationRequested.Should().BeFalse("the clock's fault ended the handling, not the host");
+        host.Time.TimersFired.Should().Be(fired);
+        host.TimersCreatedSince(mark).Should().Be(0, "no timer exists to fire or to dispose");
+        host.Time.UndisposedTimersSince(mark).Should().Be(0);
+        // One Debug line, with the exception's type name only.
+        host.Logs.Records.Where(r => r.Text.Contains("received in full", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be((LogLevel.Debug,
+                "MapDidCommWebSocket: the connection ended while a message it had received in full was being handled, and the clock could not time the rest (ClockFaultException); the handling is cancelled."));
+        host.Logs.Entries.Should().NotContain(e => e.Contains(ClockFaultException.Text, StringComparison.Ordinal), "the fault is logged by type only");
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_close_grace_ends_a_finish_that_outlasts_it_and_not_a_tick_before()
+    {
+        var (host, store, _) = await StartAsync();
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        await host.WaitEndedWebSocketsAsync(1);
+        var ack = store.HoldNextAcknowledgementOf(id); // never released
+
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await E2E.SendAcknowledgementAsync(host, socket, bob, id);
+        await ack.Started.Task.WaitAsync(Guard);
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // the grace runs from the drop
+        var fired = host.Time.TimersFired;
+
+        host.Time.Advance(Grace - DeadlineKestrelHost.Tick);
+        host.Time.TimersFired.Should().Be(fired, "just inside the grace nothing fires");
+        ack.Cancelled.Task.IsCompleted.Should().BeFalse();
+        host.Time.Advance(DeadlineKestrelHost.Tick);
+        host.Time.TimersFired.Should().Be(fired + 1, "the grace's timer fires at the bound");
+
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Cancelled.Task.IsCompleted.Should().BeTrue("the bound ends a finish that outlasts it");
+        ack.Applied.Task.IsCompleted.Should().BeFalse();
+        E2E.StoreCount(host).Should().Be(1);
+        await host.WaitEndedWebSocketsAsync(2);
+        host.Logs.Records.Should().Contain(r => r.Level == LogLevel.Debug && r.Text.Contains("did not finish within 5 s; it is cancelled", StringComparison.Ordinal));
+        Loud(host).Should().BeEmpty();
+        NoWireValues(host, bob, id);
+    }
+
+    // ---- (f) HTTP is unchanged -----------------------------------------------------------------------
+
+    [Fact]
+    public async Task Over_HTTP_a_client_that_aborts_its_request_still_cancels_the_handling()
+    {
+        var (host, store, _) = await StartAsync();
+        await using var _host = host;
+        var (bob, id) = await E2E.QueueAndLeaseOneAsync(host);
+        var ack = store.HoldNextAcknowledgementOf(id);
+
+        using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        using var content = new ByteArrayContent(await E2E.PackAcknowledgementAsync(host, bob, id));
+        content.Headers.ContentType = MediaTypeHeaderValue.Parse(MediaTypes.Encrypted);
+        using var abort = new CancellationTokenSource();
+        var post = http.PostAsync($"http://127.0.0.1:{host.Port}{DeadlineKestrelHost.MediatorPath}", content, abort.Token);
+        await ack.Started.Task.WaitAsync(Guard);
+        abort.Cancel(); // the client gives up: its connection is closed under the request
+
+        await Task.WhenAny(ack.Applied.Task, ack.Cancelled.Task).WaitAsync(Guard);
+        ack.Cancelled.Task.IsCompleted.Should().BeTrue("over HTTP the request's abort still cancels the handling (#90: abort before commit never relays)");
+        ack.Applied.Task.IsCompleted.Should().BeFalse();
+        E2E.StoreCount(host).Should().Be(1);
+        await ((Func<Task>)(() => post)).Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // ---- (g) a reply and a push after the drop fail quietly: see WebSocketMessageFinishQuietTests ----
+
+    // ---- (h) a finish keeps its connection counted by the server's limits -----------------------------
+
+    [Fact]
+    public async Task A_finish_after_the_drop_keeps_its_upgraded_connection_counted_by_Kestrel_until_it_ends()
+    {
+        // SECURITY.md: the server's connection limits bound how many finishes run at once. They do
+        // because the finish runs inside the request: the endpoint delegate awaits the loop and the
+        // loop awaits the dispatch, so Kestrel counts the upgraded connection until the finish ends.
+        var (host, _, holding) = await StartAsync(o => o.Builder = b =>
+            b.WebHost.ConfigureKestrel(k => k.Limits.MaxConcurrentUpgradedConnections = 1));
+        await using var _host = host;
+
+        using var first = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(first, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard);
+        var mark = host.Time.Mark();
+        await AbortAndWaitUntilTheServerSawItAsync(host, first);
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // the peer is gone and the finish is under way
+        var firstConnection = host.WebSocketConnectionIds.Should().ContainSingle().Subject;
+
+        // While the finish runs, a second upgrade is refused: the first connection still counts.
+        using (var refused = new ClientWebSocket())
+        {
+            refused.Options.CollectHttpResponseDetails = true;
+            using var guard = new CancellationTokenSource(Guard);
+            await ((Func<Task>)(() => refused.ConnectAsync(host.UriOf(DeadlineEndpoint.Dispatch), guard.Token))).Should().ThrowAsync<WebSocketException>();
+            refused.HttpStatusCode.Should().Be(HttpStatusCode.ServiceUnavailable, "the endpoint refuses a handshake that Kestrel's limit failed");
+        }
+        WebSocketHandshakeRefusalTests.RefusalLines(host).Should().ContainSingle()
+            .Which.Should().Be(("DidComm.AspNetCore.WebSocket.Dispatch", LogLevel.Warning, WebSocketHandshakeRefusalTests.Refused(1)));
+        Loud(host).Should().BeEmpty("a refused handshake is not an application error, for the endpoint nor for Kestrel");
+        host.EndedWebSockets.Should().Be(1, "only the refused request ended: the first one's request is still running its finish");
+        KestrelStopped(host, firstConnection).Should().BeFalse("Kestrel has not ended the first connection");
+        holding.Cancelled.Task.IsCompleted.Should().BeFalse("the finish is held, not cancelled");
+
+        holding.Release();
+        (await holding.Handled.Task.WaitAsync(Guard)).Should().BeNull("the message in hand is still handled");
+        await host.WaitEndedWebSocketsAsync(2);
+        // Kestrel frees the connection's place when its request is over (Http1Connection.OnRequestProcessingEnded),
+        // before it logs the connection's end.
+        (await ReturnRouteTestHost.WaitUntilAsync(() => KestrelStopped(host, firstConnection), Guard)).Should().BeTrue("Kestrel ends the first connection once its finish is over");
+
+        using var next = await host.ConnectAsync(DeadlineEndpoint.Dispatch); // accepted now
+        var probe = host.Probe();
+        await DeadlinePeer.SendAsync(next, await host.PackAsync(probe), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, probe.Id);
+        Loud(host).Should().BeEmpty();
+    }
+
+    // ---- STOMP ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Under_STOMP_a_complete_SEND_whose_sender_aborts_while_it_is_handled_is_still_dispatched()
+    {
+        var (host, _, holding) = await StartAsync(o => o.Receive = Stomp);
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await ConnectStompAsync(socket);
+
+        await SendStompAsync(socket, SendFrame(await host.PackAsync(Hold(host))));
+        await holding.Entered.Task.WaitAsync(Guard);
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard);
+        holding.Release();
+
+        await Task.WhenAny(holding.Handled.Task, holding.Cancelled.Task).WaitAsync(Guard);
+        holding.Handled.Task.IsCompletedSuccessfully.Should().BeTrue("the SEND was received in full before the drop");
+        await host.WaitEndedWebSocketsAsync(1);
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Under_STOMP_a_CONNECT_complete_when_the_connection_ended_writes_its_CONNECTED_into_the_dead_socket_quietly()
+    {
+        GatedDisposeClock gate = null!;
+        var (host, _, _) = await StartAsync(o =>
+        {
+            o.Receive = Stomp;
+            o.Builder = b => gate = GatedDisposeClock.Install(b);
+        });
+        await using var _host = host;
+
+        gate.Arm(DeadlineKestrelHost.Limit);
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await SendStompAsync(socket, ConnectFrame());
+        await gate.Held.WaitAsync(Guard); // CONNECT read in full; the loop is held before it handles it
+        await AbortAndWaitUntilTheServerSawItAsync(host, socket);
+        var mark = host.Time.Mark();
+        gate.Release();
+
+        // Nothing holds the CONNECT's handling, so its close grace's timer is created and disposed at
+        // once: count the timers created once the connection ended, never wait for one to be scheduled.
+        await host.WaitEndedWebSocketsAsync(1);
+        host.TimersCreatedSince(mark).Should().Be(1, "CONNECT was handled with the connection already ended: its close grace started at once");
+        Loud(host).Should().BeEmpty("a write into a connection the peer dropped is not an application error");
+        host.Logs.Records.Should().NotContain(r => r.Text.Contains("unhandled", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ---- a handler's own cancellation is a fault of its message, not the end of the connection --------
+
+    [Fact]
+    public async Task A_handler_that_throws_the_cancellation_of_its_own_timeout_leaves_the_connection_serving_the_next_message()
+    {
+        var state = new TimingOutState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, TimingOutHandler>();
+        });
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+
+        var mark = host.Time.Mark();
+        var timingOut = TimingOutHandler.Message(host);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(timingOut), endOfMessage: true);
+        await host.Time.WaitForTimerAsync(mark, TimingOutHandler.OwnTimeout, Guard); // the handler's own timeout runs
+        await state.Entered.Task.WaitAsync(Guard);
+        var fired = host.Time.TimersFired;
+        host.Time.Advance(TimingOutHandler.OwnTimeout);
+        host.Time.TimersFired.Should().Be(fired + 1, "only the handler's own timeout fires");
+        await state.TimedOut.Task.WaitAsync(Guard); // it threw a TaskCanceledException of its own token
+
+        var next = host.Probe();
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(next), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, next.Id);
+        socket.State.Should().Be(WebSocketState.Open, "a handler's own cancellation does not end the connection");
+        host.EndedWebSockets.Should().Be(0);
+        // Exactly what the line carries: the message id (LogValues.Id) and two exception type names.
+        host.Logs.Records.Where(r => r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be((LogLevel.Warning,
+                $"MapDidCommWebSocket: inbound {timingOut.Id}: the handler was cancelled by a token of its own (TaskCanceledException, innermost: TaskCanceledException); dropping inbound and continuing."));
+        using (var guard = new CancellationTokenSource(Guard))
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", guard.Token);
+        socket.CloseStatus.Should().Be(WebSocketCloseStatus.NormalClosure, "the connection still answers a close");
+        await host.WaitEndedWebSocketsAsync(1);
+        Loud(host).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_client_abort_during_a_handler_that_then_throws_a_cancellation_ends_the_loop_and_is_not_reported_as_the_handlers_own()
+    {
+        var (host, _, holding) = await StartAsync();
+        await using var _host = host;
+        holding.ThrowOwnCancellation = true;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(Hold(host)), endOfMessage: true);
+        await holding.Entered.Task.WaitAsync(Guard);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(host.Probe()), endOfMessage: true); // behind it, whole
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, Grace, Guard); // the finish is under way
+        holding.Release(); // the handler now throws an OperationCanceledException of its own
+
+        await host.WaitEndedWebSocketsAsync(1);
+        host.Recorder.Invocations.Should().Be(0, "the loop ended: nothing more was read");
+        host.Logs.Records.Should().NotContain(r => r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal),
+            "once the peer left, a handler's cancellation ends the loop as before; it is not skipped as the handler's own fault");
+        Loud(host).Should().BeEmpty("after a client abort the cancellation is the request's: Debug, as before");
+    }
+
+    [Fact]
+    public async Task A_host_shutdown_during_a_handler_that_throws_its_cancellation_ends_the_loop()
+    {
+        var state = new StoppingState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, StoppingHandler>();
+        });
+        await using var _host = host;
+        // `using` keeps the client alive to the end: a ClientWebSocket nothing references any more can
+        // be collected, and its socket reset, before the host stops (the connection must still live).
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(StoppingHandler.Message(host)), endOfMessage: true);
+        await state.Entered.Task.WaitAsync(Guard); // waiting on the host's stopping token
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(host.Probe()), endOfMessage: true); // behind it, whole
+
+        host.App.Lifetime.StopApplication(); // the connection is still open
+        await state.Cancelled.Task.WaitAsync(Guard);
+        await host.WaitEndedWebSocketsAsync(1);
+        host.Recorder.Invocations.Should().Be(0, "the loop ended: nothing more was read");
+        host.Logs.Records.Should().NotContain(r => r.Text.Contains("cancelled by a token of its own", StringComparison.Ordinal),
+            "while the host stops, a handler's cancellation ends the loop as before; it is not skipped as the handler's own fault");
+    }
+
+    [Fact]
+    public async Task A_host_shutdown_during_a_handler_ends_the_connection_quietly_with_nothing_at_Error_from_the_endpoint_or_Kestrel()
+    {
+        var state = new StoppingState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, StoppingHandler>();
+        });
+        await using var _host = host;
+        // `using` keeps the client alive to the end: a ClientWebSocket nothing references any more can
+        // be collected, and its socket reset, before the host stops (the connection must still live).
+        using var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(StoppingHandler.Message(host)), endOfMessage: true);
+        await state.Entered.Task.WaitAsync(Guard); // the handler waits on the host's stopping token
+
+        host.App.Lifetime.StopApplication(); // the peer is still connected
+        await state.Cancelled.Task.WaitAsync(Guard);
+        await host.WaitEndedWebSocketsAsync(1);
+        // Kestrel reports an exception the endpoint let escape before the hosting layer's end-of-request
+        // line: wait for that line, then read every logger the host captured (Kestrel's included).
+        await WaitRequestFinishedAsync(host, DeadlineKestrelHost.DispatchPath);
+
+        Loud(host).Should().BeEmpty("a connection the host's shutdown ends is not an application error, for this endpoint nor for Kestrel");
+        host.Logs.CategorizedRecords.Where(r => r.Text.Contains("a cancellation that came of it ended the connection", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be(("DidComm.AspNetCore.WebSocket.Dispatch", LogLevel.Debug,
+                "MapDidCommWebSocket: the host is stopping, and a cancellation that came of it ended the connection (TaskCanceledException); it is closed."));
+    }
+
+    // ---- the handling token outlives each message and ends with the connection (I4) ------------------
+
+    public enum ConnectionEnd
+    {
+        /// <summary>The peer closes the connection normally (a close frame, answered).</summary>
+        NormalClose,
+
+        /// <summary>The peer drops the connection without a close frame.</summary>
+        Abort,
+    }
+
+    public static TheoryData<ConnectionEnd> Ends => new() { ConnectionEnd.NormalClose, ConnectionEnd.Abort };
+
+    [Theory]
+    [MemberData(nameof(Ends))]
+    public async Task Work_a_handler_leaves_running_with_its_token_is_cancelled_when_the_connection_ends_and_not_when_its_dispatch_returns(ConnectionEnd end)
+    {
+        var state = new BackgroundWorkState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, BackgroundWorkHandler>();
+        });
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(BackgroundWorkHandler.Message(host)), endOfMessage: true);
+        var token = await state.Started.Task.WaitAsync(Guard);
+
+        // The dispatch returned and the loop went on to the next message: the work's token is not cancelled.
+        var next = host.Probe();
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(next), endOfMessage: true);
+        await host.WaitDispatchedAsync(DeadlineEndpoint.Dispatch, next.Id);
+        token.IsCancellationRequested.Should().BeFalse("a message's work is not cut off when its dispatch returns");
+        state.Cancelled.Task.IsCompleted.Should().BeFalse();
+
+        if (end == ConnectionEnd.NormalClose)
+        {
+            using var guard = new CancellationTokenSource(Guard);
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", guard.Token);
+        }
+        else
+        {
+            socket.Abort();
+        }
+        await host.WaitEndedWebSocketsAsync(1);
+        await state.Cancelled.Task.WaitAsync(Guard); // the work saw its token cancelled
+        token.IsCancellationRequested.Should().BeTrue("the handling token ends with the connection's receive loop");
+        Loud(host).Should().BeEmpty();
+    }
+
+    // ---- harness -------------------------------------------------------------------------------------
+
+    internal static async Task<(DeadlineKestrelHost Host, AckDelayingStore Store, HoldingHandler Holding)> StartAsync(Action<DeadlineKestrelHostOptions>? configure = null)
+    {
+        AckDelayingStore store = null!;
+        var holding = new HoldingHandler();
+        var host = await DeadlineKestrelHost.StartAsync(o =>
+        {
+            configure?.Invoke(o);
+            var builder = o.Builder;
+            o.Builder = b =>
+            {
+                builder?.Invoke(b);
+                AckDelayingStore.Register(b.Services, x => store = x);
+                b.Services.AddSingleton<IProtocolHandler>(holding);
+            };
+        });
+        return (host, store, holding);
+    }
+
+    /// <summary>A message of the holding protocol from Alice to the host, stamped now; with <c>return_route: all</c> when asked.</summary>
+    internal static Message Hold(DeadlineKestrelHost host, bool returnRoute = false)
+    {
+        var builder = new MessageBuilder()
+            .WithType(HoldingHandler.Piuri + "/hold")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        if (returnRoute)
+            builder = builder.WithReturnRoute(ReturnRouteMode.All);
+        return builder.Build();
+    }
+
+    /// <summary>Abort <paramref name="socket"/> (no close frame) and wait until the server's abort token for it fired.</summary>
+    internal static async Task AbortAndWaitUntilTheServerSawItAsync(DeadlineKestrelHost host, ClientWebSocket socket)
+    {
+        var aborted = host.WebSocketRequestAborts[^1];
+        socket.Abort();
+        (await ReturnRouteTestHost.WaitUntilAsync(() => aborted.IsCancellationRequested, Guard)).Should().BeTrue("the server sees the drop");
+    }
+
+    /// <summary>
+    /// Wait (real-time hang guard) for the hosting layer's end-of-request line of a request to
+    /// <paramref name="path"/>. Kestrel logs an exception the endpoint let escape before this line, so
+    /// once it is there every line about the request has been written.
+    /// </summary>
+    internal static async Task WaitRequestFinishedAsync(DeadlineKestrelHost host, string path)
+        => (await ReturnRouteTestHost.WaitUntilAsync(
+                () => host.Logs.CategorizedRecords.Any(r => r.Category == "Microsoft.AspNetCore.Hosting.Diagnostics"
+                                                            && r.Text.StartsWith("Request finished", StringComparison.Ordinal)
+                                                            && r.Text.Contains($":{host.Port}{path} ", StringComparison.Ordinal)),
+                Guard))
+            .Should().BeTrue($"the request to {path} finished");
+
+    /// <summary>Whether Kestrel logged the end of its connection <paramref name="connectionId"/>.</summary>
+    private static bool KestrelStopped(DeadlineKestrelHost host, string connectionId)
+        => host.Logs.CategorizedRecords.Any(r => r.Category == "Microsoft.AspNetCore.Server.Kestrel.Connections"
+                                                 && r.Text == $"Connection id \"{connectionId}\" stopped.");
+
+    /// <summary>Lines at Error or above, from any category.</summary>
+    internal static IReadOnlyList<string> Loud(DeadlineKestrelHost host)
+        => host.Logs.CategorizedRecords.Where(r => r.Level >= LogLevel.Error).Select(r => $"{r.Category} [{r.Level}] {r.Text}").ToList();
+
+    // D7: the finish's lines carry no wire value.
+    private static void NoWireValues(DeadlineKestrelHost host, TestPeer bob, string id)
+    {
+        var lines = host.Logs.Records.Where(r => r.Text.Contains("received in full", StringComparison.Ordinal)).Select(r => r.Text).ToList();
+        lines.Should().NotBeEmpty();
+        lines.Should().OnlyContain(l => !l.Contains(bob.Did, StringComparison.Ordinal) && !l.Contains(host.Did, StringComparison.Ordinal) && !l.Contains(id, StringComparison.Ordinal));
+    }
+
+    private static void Stomp(DidCommReceiveOptions r)
+    {
+        r.MessageReceiveTimeout = DeadlineKestrelHost.Limit;
+        r.UseStomp = true;
+    }
+
+    private static StompFrame ConnectFrame() => new("CONNECT", new[]
+    {
+        KeyValuePair.Create("accept-version", "1.2"),
+        KeyValuePair.Create("host", "localhost"),
+    }, ReadOnlyMemory<byte>.Empty);
+
+    private static StompFrame SendFrame(byte[] envelope) => new("SEND", new[]
+    {
+        KeyValuePair.Create("destination", DeadlineKestrelHost.DispatchPath),
+        KeyValuePair.Create("content-type", "application/didcomm-encrypted+json"),
+    }, envelope);
+
+    private static async Task ConnectStompAsync(ClientWebSocket socket)
+    {
+        await SendStompAsync(socket, ConnectFrame());
+        var (_, connected) = await ReturnRouteTestHost.ReceiveAsync(socket, Guard);
+        connected.Should().StartWith("CONNECTED");
+    }
+
+    private static async Task SendStompAsync(WebSocket socket, StompFrame frame)
+    {
+        using var cts = new CancellationTokenSource(Guard);
+        await socket.SendAsync(StompFrameCodec.Encode(frame), WebSocketMessageType.Binary, endOfMessage: true, cts.Token);
+    }
+}
+
+/// <summary>
+/// #100 OD-8 (g): once the connection ended, the session is closed, so a push the handler makes and the
+/// reply it returns while the loop finishes the message are refused (<c>false</c>), quietly: no Error
+/// line, and no task of the library ends with an exception nobody observed. Serial, because
+/// <see cref="TaskScheduler.UnobservedTaskException"/> is process-wide.
+/// </summary>
+[Collection(QaSerialTiming.Name)]
+public sealed class WebSocketMessageFinishQuietTests
+{
+    private static readonly TimeSpan Guard = DeadlineKestrelHost.Guard;
+
+    [Fact]
+    public async Task A_push_and_a_reply_made_after_the_drop_are_refused_quietly()
+    {
+        var unobserved = new ConcurrentQueue<Exception>();
+        void OnUnobserved(object? sender, UnobservedTaskExceptionEventArgs e)
+        {
+            foreach (var inner in e.Exception.Flatten().InnerExceptions)
+                if (inner.ToString().Contains("DidComm.AspNetCore", StringComparison.Ordinal))
+                    unobserved.Enqueue(inner);
+        }
+        TaskScheduler.UnobservedTaskException += OnUnobserved;
+        try
+        {
+            await PushAndReplyAfterTheDropAsync();
+            for (var i = 0; i < 3; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+            unobserved.Should().BeEmpty("no library task ends with an unobserved exception");
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= OnUnobserved;
+        }
+    }
+
+    private static async Task PushAndReplyAfterTheDropAsync()
+    {
+        var (host, _, holding) = await WebSocketMessageFinishTests.StartAsync();
+        await using var _host = host;
+        holding.Behavior = _ => (Push(host, "push"), Push(host, "reply"));
+
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Mediator);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(WebSocketMessageFinishTests.Hold(host, returnRoute: true)), endOfMessage: true);
+        var context = await holding.Entered.Task.WaitAsync(Guard);
+        var session = context.Session.Should().BeOfType<WebSocketReturnRouteSession>().Subject; // the message opened Alice's session
+        var mark = host.Time.Mark();
+        socket.Abort();
+        await host.Time.WaitForTimerAsync(mark, WebSocketReturnRouteSession.DefaultCloseGrace, Guard);
+        session.IsClosed.Should().BeTrue("the session closes as soon as its connection ends");
+        session.CloseReason.Should().Be(SessionCloseReason.Unregistered);
+        holding.Release();
+
+        (await holding.Handled.Task.WaitAsync(Guard)).Should().BeFalse("the push after the drop is refused");
+        await host.WaitEndedWebSocketsAsync(1);
+        host.Logs.Records.Should().Contain(r => r.Text.Contains("produced a reply", StringComparison.Ordinal) && r.Text.Contains("returned-on-session=False", StringComparison.Ordinal),
+            "the reply after the drop is refused, and only logged");
+        WebSocketMessageFinishTests.Loud(host).Should().BeEmpty();
+        host.Registry.Count.Should().Be(0);
+    }
+
+    private static Message Push(DeadlineKestrelHost host, string what)
+        => new MessageBuilder()
+            .WithType(HoldingHandler.Piuri + "/" + what)
+            .WithFrom(host.Did)
+            .WithTo(host.Alice.Did)
+            .Build();
+}
+
+/// <summary>
+/// A protocol handler for the OD-8 tests: it holds each message until <see cref="Release"/>, honouring
+/// its token, then makes the push <see cref="Behavior"/> asks for through the session (if any) and
+/// returns the reply. One message at a time.
+/// </summary>
+internal sealed class HoldingHandler : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8/1.0";
+
+    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _invocations;
+
+    public string ProtocolUri => Piuri;
+
+    /// <summary>The handler has the message (and its context) and is holding it.</summary>
+    public TaskCompletionSource<ProtocolContext> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>The handler's token fired while it held the message.</summary>
+    public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>The handler finished; the value is the push's result, or <c>null</c> when it made none.</summary>
+    public TaskCompletionSource<bool?> Handled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>What to push and what to return once released.</summary>
+    public Func<ProtocolContext, (Message? Push, Message? Reply)>? Behavior { get; set; }
+
+    public int Invocations => Volatile.Read(ref _invocations);
+
+    /// <summary>Once released, throw an <see cref="OperationCanceledException"/> of its own (tied to none of the loop's tokens).</summary>
+    public bool ThrowOwnCancellation { get; set; }
+
+    public void Release() => _release.TrySetResult();
+
+    public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _invocations);
+        Entered.TrySetResult(context);
+        try
+        {
+            await _release.Task.WaitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            Cancelled.TrySetResult();
+            throw;
+        }
+        if (ThrowOwnCancellation)
+            throw new OperationCanceledException("The handler's own cancellation.");
+        var (push, reply) = Behavior?.Invoke(context) ?? (null, null);
+        bool? pushed = null;
+        if (push is not null && context.Session is not null)
+            pushed = await context.Session.TrySendAsync(push, ct);
+        Handled.TrySetResult(pushed);
+        return reply;
+    }
+}
+
+/// <summary>What the <see cref="StoppingHandler"/> did.</summary>
+internal sealed class StoppingState
+{
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+/// <summary>
+/// A protocol handler that waits on the host's stopping token (as a handler that stops its own work
+/// when the host stops does) and lets that cancellation escape.
+/// </summary>
+internal sealed class StoppingHandler(StoppingState state, IHostApplicationLifetime lifetime) : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8-stopping/1.0";
+
+    public string ProtocolUri => Piuri;
+
+    public static Message Message(DeadlineKestrelHost host)
+        => new MessageBuilder()
+            .WithType(Piuri + "/wait")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+
+    public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        state.Entered.TrySetResult();
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, lifetime.ApplicationStopping);
+        }
+        catch (OperationCanceledException)
+        {
+            state.Cancelled.TrySetResult();
+            throw;
+        }
+        return null;
+    }
+}
+
+/// <summary>What the <see cref="BackgroundWorkHandler"/> started.</summary>
+internal sealed class BackgroundWorkState
+{
+    /// <summary>The work started; the value is the token it was given (the handler's).</summary>
+    public TaskCompletionSource<CancellationToken> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>The work saw its token cancelled.</summary>
+    public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+/// <summary>
+/// A protocol handler that starts work with its token, leaves it running and returns at once: the
+/// work ends only when that token is cancelled.
+/// </summary>
+internal sealed class BackgroundWorkHandler(BackgroundWorkState state) : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8-background/1.0";
+
+    public string ProtocolUri => Piuri;
+
+    public static Message Message(DeadlineKestrelHost host)
+        => new MessageBuilder()
+            .WithType(Piuri + "/start")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+
+    public Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                state.Cancelled.TrySetResult();
+            }
+        });
+        state.Started.TrySetResult(ct);
+        return Task.FromResult<Message?>(null);
+    }
+}
+
+/// <summary>What the <see cref="TimingOutHandler"/> did.</summary>
+internal sealed class TimingOutState
+{
+    /// <summary>The handler has the message and its own timeout is running.</summary>
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>The handler's own timeout fired and it threw its cancellation.</summary>
+    public TaskCompletionSource TimedOut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+/// <summary>
+/// A protocol handler that waits on a timeout of its own, timed on the container's clock (as a handler
+/// whose DID resolution or HTTP call times out does), and lets that timeout's
+/// <see cref="TaskCanceledException"/> escape: a cancellation that is not the receive loop's.
+/// </summary>
+internal sealed class TimingOutHandler(TimingOutState state, TimeProvider time) : IProtocolHandler
+{
+    public const string Piuri = "https://didcomm.org/test-od8-timeout/1.0";
+
+    /// <summary>The handler's own timeout: a value no other timer of these tests has.</summary>
+    public static readonly TimeSpan OwnTimeout = TimeSpan.FromSeconds(11);
+
+    public string ProtocolUri => Piuri;
+
+    /// <summary>A message of this protocol from Alice to the host, stamped now.</summary>
+    public static Message Message(DeadlineKestrelHost host)
+        => new MessageBuilder()
+            .WithType(Piuri + "/wait")
+            .WithFrom(host.Alice.Did)
+            .WithTo(host.Did)
+            .WithCreatedTime(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+            .Build();
+
+    public async Task<Message?> HandleAsync(Message message, ProtocolContext context, CancellationToken ct)
+    {
+        using var own = new CancellationTokenSource(OwnTimeout, time);
+        state.Entered.TrySetResult();
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, own.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            state.TimedOut.TrySetResult();
+            throw;
+        }
+        return null;
+    }
+}
+
+/// <summary>
+/// The host's <see cref="QaManualTimeProvider"/>, able to hold the receive loop inside the stop of a
+/// message's receive deadline: the first timer created after <see cref="Arm"/> with the armed due
+/// time blocks in its <see cref="ITimer.Dispose"/> until <see cref="Release"/>. The loop stops a
+/// message's deadline right after its last frame, before it handles it, so a test can end the
+/// connection while a complete message waits there (L-065 rule 6: the product parked at the point the
+/// claim is about).
+/// </summary>
+internal sealed class GatedDisposeClock(QaManualTimeProvider inner) : TimeProvider
+{
+    private readonly object _lock = new();
+    private readonly ManualResetEventSlim _release = new(false);
+    private readonly TaskCompletionSource _held = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TimeSpan? _armed;
+
+    /// <summary>The armed timer's dispose is blocking.</summary>
+    public Task Held => _held.Task;
+
+    // The armed dispose parks a thread-pool thread (the receive loop's): raise the pool's floor (never
+    // lower it) first, so parking it cannot starve tests running alongside (L-065 corollary).
+    private static readonly bool PoolFloorRaised = RaisePoolFloor();
+
+    private static bool RaisePoolFloor()
+    {
+        ThreadPool.GetMinThreads(out var worker, out var io);
+        var needed = Environment.ProcessorCount + 4;
+        if (worker < needed)
+            ThreadPool.SetMinThreads(needed, io);
+        return true;
+    }
+
+    /// <summary>Wrap the clock <c>DeadlineKestrelHost</c> registered and register the wrapper in its place.</summary>
+    public static GatedDisposeClock Install(WebApplicationBuilder builder)
+    {
+        _ = PoolFloorRaised;
+        var manual = (QaManualTimeProvider)builder.Services.Last(d => d.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
+        var gated = new GatedDisposeClock(manual);
+        builder.Services.AddSingleton<TimeProvider>(gated);
+        return gated;
+    }
+
+    /// <summary>Gate the next timer created with <paramref name="dueTime"/>.</summary>
+    public void Arm(TimeSpan dueTime)
+    {
+        lock (_lock)
+            _armed = dueTime;
+    }
+
+    public void Release() => _release.Set();
+
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+
+    public override long TimestampFrequency => inner.TimestampFrequency;
+
+    public override long GetTimestamp() => inner.GetTimestamp();
+
+    public override TimeZoneInfo LocalTimeZone => inner.LocalTimeZone;
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        var timer = inner.CreateTimer(callback, state, dueTime, period);
+        lock (_lock)
+        {
+            if (_armed != dueTime)
+                return timer;
+            _armed = null;
+        }
+        return new GatedTimer(timer, this);
+    }
+
+    private sealed class GatedTimer(ITimer timer, GatedDisposeClock owner) : ITimer
+    {
+        public bool Change(TimeSpan dueTime, TimeSpan period) => timer.Change(dueTime, period);
+
+        public void Dispose()
+        {
+            owner._held.TrySetResult();
+            owner._release.Wait(DeadlineKestrelHost.Guard);
+            timer.Dispose();
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Dispose();
+            return ValueTask.CompletedTask;
+        }
+    }
+}
+
+/// <summary>
+/// The host's <see cref="QaManualTimeProvider"/>, made to fail once: the next timer asked for with the
+/// due time given to <see cref="FailNext"/> is refused with a <see cref="ClockFaultException"/>, as a
+/// host clock that cannot create a timer would. Every other timer is the manual clock's.
+/// </summary>
+internal sealed class FaultingTimerClock(QaManualTimeProvider inner) : TimeProvider
+{
+    private readonly object _lock = new();
+    private TimeSpan? _failNext;
+    private int _failures;
+
+    /// <summary>How many timers this clock refused.</summary>
+    public int Failures => Volatile.Read(ref _failures);
+
+    /// <summary>Wrap the clock <c>DeadlineKestrelHost</c> registered and register the wrapper in its place.</summary>
+    public static FaultingTimerClock Install(WebApplicationBuilder builder)
+    {
+        var manual = (QaManualTimeProvider)builder.Services.Last(d => d.ServiceType == typeof(TimeProvider)).ImplementationInstance!;
+        var faulting = new FaultingTimerClock(manual);
+        builder.Services.AddSingleton<TimeProvider>(faulting);
+        return faulting;
+    }
+
+    /// <summary>Refuse the next timer asked for with <paramref name="dueTime"/>.</summary>
+    public void FailNext(TimeSpan dueTime)
+    {
+        lock (_lock)
+            _failNext = dueTime;
+    }
+
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+
+    public override long TimestampFrequency => inner.TimestampFrequency;
+
+    public override long GetTimestamp() => inner.GetTimestamp();
+
+    public override TimeZoneInfo LocalTimeZone => inner.LocalTimeZone;
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        lock (_lock)
+        {
+            if (_failNext == dueTime)
+            {
+                _failNext = null;
+                Interlocked.Increment(ref _failures);
+                throw new ClockFaultException();
+            }
+        }
+        return inner.CreateTimer(callback, state, dueTime, period);
+    }
+}
+
+/// <summary>What <see cref="FaultingTimerClock"/> throws.</summary>
+internal sealed class ClockFaultException() : Exception(Text)
+{
+    public const string Text = "The test clock refuses this timer.";
+}

@@ -182,6 +182,18 @@ internal static class PickupE2E
     }
 
     /// <summary>
+    /// The status <see cref="PickupClient.AckAsync"/> returned under Message Pickup 3.0 from this
+    /// library's mediator, which answers every <c>messages-received</c> with its status (3.0 says a
+    /// mediator SHOULD). AckAsync returns only that answer, never a status it asked for (OD-6), so
+    /// what it counts already reflects the acknowledgement.
+    /// </summary>
+    public static PickupStatus Answered(PickupStatus? status)
+    {
+        status.Should().NotBeNull("this library's mediator answers a Message Pickup 3.0 messages-received with its status");
+        return status!;
+    }
+
+    /// <summary>
     /// Await <paramref name="task"/>, failing the test instead of hanging when it does not finish in
     /// time. A task that times out is still observed (<see cref="Observed"/>).
     /// </summary>
@@ -240,6 +252,7 @@ internal sealed class AckLosingStore(InMemoryMessageStore inner) : IMessageStore
     public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct) => Inner.EnqueueAsync(message, lease, now, ct);
     public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => Inner.LeaseAsync(request, ct);
     public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
     public ValueTask<QueueStatus> GetStatusAsync(string grantPeerDid, string? recipientDid, DateTimeOffset now, CancellationToken ct) => Inner.GetStatusAsync(grantPeerDid, recipientDid, now, ct);
@@ -277,6 +290,7 @@ internal sealed class StatusParkingStore(InMemoryMessageStore inner) : IMessageS
     public ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct) => Inner.LeaseAsync(request, ct);
     public ValueTask<int> AcknowledgeAsync(string grantPeerDid, IReadOnlyList<string> messageIds, CancellationToken ct) => Inner.AcknowledgeAsync(grantPeerDid, messageIds, ct);
     public ValueTask<int> ReleaseAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
+    public ValueTask<int> ReturnUnsentAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, CancellationToken ct) => Inner.ReturnUnsentAsync(grantPeerDid, messageIds, leaseId, ct);
     public ValueTask<int> PassOverAsync(string grantPeerDid, IReadOnlyList<string> messageIds, string leaseId, DateTimeOffset until, CancellationToken ct) => Inner.PassOverAsync(grantPeerDid, messageIds, leaseId, until, ct);
     public ValueTask<int> ReleaseLeasesAsync(string leaseOwner, CancellationToken ct) => Inner.ReleaseLeasesAsync(leaseOwner, ct);
     public ValueTask<int> PurgeRecipientAsync(string grantPeerDid, string recipientDid, CancellationToken ct) => Inner.PurgeRecipientAsync(grantPeerDid, recipientDid, ct);
@@ -371,7 +385,8 @@ internal sealed class MediatorAndRecipientHost : IAsyncDisposable
             });
             b.UseInboundDispatch();
             b.AddMediator(m => m.CoordinateMediation.RoutingDids.Add(identity.Did));
-            b.AddMediatorClient();
+            // The acceptance tests are Message Pickup 3.0's (#100 DC-9).
+            b.AddMediatorClient(c => c.MessagePickupVersion = MessagePickupVersion.V3);
             b.Configure(o =>
             {
                 o.Clock = () => clock.Now;

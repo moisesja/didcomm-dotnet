@@ -124,7 +124,7 @@ public sealed class MessagePickupAdversarialResourceHammerTests
                 for (var i = 0; i < 400 && !stop.IsCancellationRequested; i++)
                 {
                     var (peer, dids) = peers[random.Next(peers.Count)];
-                    var size = random.Next(20) == 0 ? PoisonSize : random.Next(10, 150);
+                    var size = random.Next(20) == 0 ? PoisonSize : random.Next(20, 150);
                     var result = await fixture.Queue.DeliverAsync(dids[random.Next(dids.Length)], PickupFixture.Payload(size, (byte)i));
                     CheckBounds();
                     if (result.Outcome is PickupDeliveryOutcome.Queued or PickupDeliveryOutcome.PushedLive)

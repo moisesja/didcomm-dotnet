@@ -176,6 +176,11 @@ public sealed class WebSocketSessionReceiveDeadlineBindingTests
             return Sockets.Sockets.Single();
         }
 
-        public async ValueTask DisposeAsync() => await _provider.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            // The peers never answer a close on their own; dispose waits for a session socket's.
+            Sockets.AnswerClosesFromNowOn();
+            await _provider.DisposeAsync();
+        }
     }
 }
