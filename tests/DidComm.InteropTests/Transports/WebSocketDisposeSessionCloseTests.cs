@@ -41,6 +41,7 @@ public sealed class WebSocketDisposeSessionCloseTests
             sent.Any(m => m.AsSpan().SequenceEqual(frame.Payload.Span)).Should().BeTrue(
                 $"the consumer only ever gets a message exactly as the peer sent it (got {frame.Payload.Length} bytes)");
         }
+        t.Consumer.Calls.Should().Be(0, "and once dispose began it gets none at all: every push is dropped whole");
     }
 
     [Fact]
