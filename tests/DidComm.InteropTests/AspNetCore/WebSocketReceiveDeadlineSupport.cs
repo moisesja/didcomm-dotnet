@@ -23,6 +23,8 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -57,6 +59,12 @@ internal sealed class DeadlineKestrelHostOptions
 
     /// <summary>Runs on the host's builder after its own services (for example to bind options from its configuration).</summary>
     public Action<WebApplicationBuilder>? Builder { get; set; }
+
+    /// <summary>
+    /// Runs inside every WebSocket request's handshake (<c>AcceptWebSocketAsync</c>), before the real
+    /// one: a seam to hold the handshake or make it fail the way the server's would.
+    /// </summary>
+    public Func<HttpContext, Task>? Handshake { get; set; }
 }
 
 /// <summary>
@@ -188,6 +196,8 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
                     ended.Aborts.Enqueue(context.RequestAborted);
                     ended.ConnectionIds.Enqueue(context.Connection.Id);
                 }
+                if (options.Handshake is { } handshake)
+                    context.Features.Set<IHttpWebSocketFeature>(new HookedHandshake(context.Features.Get<IHttpWebSocketFeature>()!, context, handshake));
             }
             try
             {
@@ -354,6 +364,18 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         await App.DisposeAsync();
         foreach (var owned in _owned)
             await owned.DisposeAsync();
+    }
+}
+
+/// <summary>The WebSocket handshake feature with <see cref="DeadlineKestrelHostOptions.Handshake"/> run before the real one.</summary>
+internal sealed class HookedHandshake(IHttpWebSocketFeature inner, HttpContext context, Func<HttpContext, Task> hook) : IHttpWebSocketFeature
+{
+    public bool IsWebSocketRequest => inner.IsWebSocketRequest;
+
+    public async Task<WebSocket> AcceptAsync(WebSocketAcceptContext acceptContext)
+    {
+        await hook(context);
+        return await inner.AcceptAsync(acceptContext);
     }
 }
 
