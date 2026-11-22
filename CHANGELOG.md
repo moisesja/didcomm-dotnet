@@ -27,10 +27,10 @@ went away, and the messages came back. Both ends now finish properly:
   - What reaches your code: dispose stops handing messages to the inbound consumer the moment it
     begins. A session socket reads whatever the peer pushes after that and drops it, using the
     session's own receive loop as the socket's only reader. A consumer call already running keeps
-    its cancellation token until dispose has drained the sends in flight, so a reply it is sending
-    still goes out whole and its socket is closed normally. The call is cancelled when its session
-    socket's close is sent or, if that socket was already retiring, when the socket is stopped. A
-    4.0 live push dropped this way is not acknowledged, and the mediator delivers it again later.
+    its cancellation token until every endpoint has drained its sends in flight, so a reply it is
+    sending, to any endpoint, still goes out whole. Only then are all such calls cancelled, on
+    active and retiring session sockets alike, before the sockets are closed. A 4.0 live push
+    dropped this way is not acknowledged, and the mediator delivers it again later.
   - In the owner's words as put to them: "Change the released WebSocket transport so shutting down
     waits a bounded time for the mediator to answer the close, which it does only after handling
     earlier messages. Reverses a deliberate design that refuses to wait on hostile peers, in a
@@ -60,6 +60,10 @@ went away, and the messages came back. Both ends now finish properly:
     and was logged as an unhandled error.
   - Now: the message is dropped with one Warning line and the connection serves the next message.
     A cancellation from the connection or the host still ends the loop.
+- **`DidComm.AspNetCore`: a WebSocket connection that the host's shutdown ends now closes
+  quietly** (found in review round 3; no issue covered it). A handler that stops with the host
+  throws its cancellation. Before, that escaped as an unhandled-exception Error from the server.
+  Now it is one Debug line.
 - **What is still exposed:** an abrupt drop before the message is complete, or a mediator slower
   than these bounds, can still mean the messages come back (delivery is at-least-once). The same
   applies to a mediator that drops the work of a closed connection.

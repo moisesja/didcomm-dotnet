@@ -1259,11 +1259,14 @@ Session sockets (`WebSocketDidCommTransport`):
     own receive loop as its only reader (one reader per socket): what arrives meanwhile is dropped,
     not handed to the consumer. S is disposed and its loop stopped after the release. A
     retiring session socket has already sent its close and is not closed again.
-  - From dispose's start every session socket, active or retiring, drops what arrives. A
-    consumer call already running keeps its token until the drain is done, so a reply it is
-    sending goes out whole and its socket still closes normally. It is cancelled at its socket's
-    close point, once the send gate is held and on a pool thread, or, for a retiring socket,
-    at the final sweep (`WebSocketDisposeConsumerReplyTests`).
+  - From dispose's start every session socket, active or retiring, drops what arrives. Dispose then
+    runs in three phases: it drains every endpoint at once, each keeping its send gate once it has
+    it; once every drain has finished or used up its budget, it cancels every consumer call in
+    progress, on active and retiring sockets alike, on pool threads; then it closes every endpoint
+    at once and runs the sweep. A reply a consumer is sending, to any endpoint, has been drained
+    before its token can be cancelled (`WebSocketDisposeConsumerReplyTests`). No send holds one
+    endpoint's gate while it waits for another's, so holding gates across the barrier cannot
+    deadlock.
   - Why: this library's mediator answers a close only after it has handled the messages before it,
     so a one-way message sent just before dispose (a Message Pickup 4.0 acknowledgement) is applied
     before dispose returns. A 4.0 live push dropped during the wait is not acknowledged, and the
