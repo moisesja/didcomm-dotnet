@@ -1255,6 +1255,23 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         }
     }
 
+    /// <summary>Write one log line with the host's own exception; never throws (a logging provider is host code).</summary>
+    /// <param name="level">The level.</param>
+    /// <param name="exception">An exception host code threw (a lifecycle handler's), handed back to the host's logger as it is.</param>
+    /// <param name="message">The message template.</param>
+    /// <param name="args">The template arguments: type, enum and count values only — never a DID, endpoint or body.</param>
+    private void Log(LogLevel level, Exception exception, string message, params object?[] args)
+    {
+        try
+        {
+            _logger.Log(level, exception, message, args);
+        }
+        catch
+        {
+            // Logging must never change what the transport does.
+        }
+    }
+
     /// <summary>
     /// Write a line a peer could make the transport repeat: the first and every 1000th at Warning
     /// (with the running count), every other one at Debug.
@@ -1497,9 +1514,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             catch (Exception ex)
             {
                 // Lifecycle handlers must never break the transport. Swallow + log so the host's
-                // observability defect can't cascade into a delivery failure; through the guarded Log,
-                // by type name, since a logging provider is host code too.
-                Log(LogLevel.Warning, "WebSocketDidCommTransport: a lifecycle handler threw {ExceptionType} ({Kind}).", ex.GetType().Name, kind);
+                // observability defect can't cascade into a delivery failure. The host gets its own
+                // handler's exception back, as before; the line goes through the guarded Log, since a
+                // logging provider is host code too.
+                Log(LogLevel.Warning, ex, "WebSocketDidCommTransport: a lifecycle handler threw {ExceptionType} ({Kind}).", ex.GetType().Name, kind);
             }
         }
     }
@@ -1840,11 +1858,10 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             teardown.Session = session;
             if (session is not null)
             {
-                // Nothing the peer pushes reaches the consumer (DisposeAsync already said so to every
-                // socket it found; this covers one a send opened since): the loop reads each message
-                // and drops it whole. And dispose, not the loop, reports the socket's end, after the
-                // gate is released.
-                session.DiscardInbound = true;
+                // Nothing the peer pushes reaches the consumer: DisposeAsync marked every socket it
+                // found as dropping, and OpenSessionAsync marks one a send opened since, as it is
+                // published. Dispose, not the loop, reports the socket's end, after the gate is
+                // released.
                 teardown.SessionEnded = session.TryEnd();
             }
         }
