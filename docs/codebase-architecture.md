@@ -362,7 +362,9 @@ could have its message cancelled half-handled. The loop now uses two tokens:
   once rather than leaving it unbounded. The cancellation is requested with `CancelAsync`, so
   callbacks that handler code registered on the token run on the thread pool, never on the timer's
   or the host's stopping thread; a fault in one is logged by type. A finish that the bound or the
-  host ends writes one Debug line with no wire value.
+  host ends writes one Debug line with no wire value. A finish cut short by the bound after
+  admission still uses up that message id in the replay guard (FR-RR-08), so the same message sent
+  again is refused; releasing the id on cancellation would reopen a replay window.
 
 Around it:
 
