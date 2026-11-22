@@ -656,6 +656,8 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// Pickup 4.0 <c>messages-received</c>, is still applied. Nothing more is read from a connection
     /// that ended, so a message it had not received in full is never handled; and its session closes
     /// at once, so a reply or a push made meanwhile is refused (<c>false</c>) and nothing is written.
+    /// While the host is stopping, a cancellation that comes of the shutdown (a handler that stops with
+    /// the host) ends the connection quietly: one Debug line, nothing at Error.
     /// </para>
     /// <para>
     /// There is no per-message wire acknowledgement on a WebSocket (nothing is written back for an
@@ -999,7 +1001,7 @@ public static class DidCommEndpointRouteBuilderExtensions
                     // exception. Only while the connection lives and the host is not stopping: once
                     // the connection ended (the peer left, or the session ended it) or the host is
                     // stopping, a handler's cancellation is about that, and it propagates and ends the
-                    // loop as before.
+                    // loop (quietly while the host stops: see the loop's catch below).
                     SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: inbound {MessageId}: the handler was cancelled by a token of its own ({ExceptionType}, innermost: {InnerExceptionType}); dropping inbound and continuing.", LogValues.Id(unpacked.Message.Id), ex.GetType().Name, LogValues.InnermostTypeName(ex));
                     continue;
                 }
@@ -1030,6 +1032,16 @@ public static class DidCommEndpointRouteBuilderExtensions
             // or the session's writer found the socket broken; or, after such an end, the close grace
             // or the host's shutdown ended the handling of the message in hand (OD-8). Nothing more
             // to read or write. After a client abort a cancellation propagates, as before.
+        }
+        catch (OperationCanceledException ex) when (stopping.IsCancellationRequested && !requestAborted.IsCancellationRequested)
+        {
+            // The host is stopping, and a cancellation that came of it ended the loop: a handler that
+            // stops with the host threw its cancellation (the dispatch step lets it through while the
+            // host stops). That is the host's shutdown, not an application error: one Debug line by
+            // type name, and nothing escapes for the server to log as an unhandled exception. After a
+            // client abort the cancellation still propagates (the server logs that at Debug), and a
+            // handler fault that is not a cancellation is still logged by the dispatch step.
+            SafeLog.Write(logger, LogLevel.Debug, "MapDidCommWebSocket: the host is stopping, and a cancellation that came of it ended the connection ({ExceptionType}); it is closed.", ex.GetType().Name);
         }
         catch (WebSocketException ex)
         {

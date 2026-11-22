@@ -456,6 +456,33 @@ public sealed class WebSocketMessageFinishTests
             "while the host stops, a handler's cancellation ends the loop as before; it is not skipped as the handler's own fault");
     }
 
+    [Fact]
+    public async Task A_host_shutdown_during_a_handler_ends_the_connection_quietly_with_nothing_at_Error_from_the_endpoint_or_Kestrel()
+    {
+        var state = new StoppingState();
+        var (host, _, _) = await StartAsync(o => o.Builder = b =>
+        {
+            b.Services.AddSingleton(state);
+            b.Services.AddSingleton<IProtocolHandler, StoppingHandler>();
+        });
+        await using var _host = host;
+        var socket = await host.ConnectAsync(DeadlineEndpoint.Dispatch);
+        await DeadlinePeer.SendAsync(socket, await host.PackAsync(StoppingHandler.Message(host)), endOfMessage: true);
+        await state.Entered.Task.WaitAsync(Guard); // the handler waits on the host's stopping token
+
+        host.App.Lifetime.StopApplication(); // the peer is still connected
+        await state.Cancelled.Task.WaitAsync(Guard);
+        await host.WaitEndedWebSocketsAsync(1);
+        // Kestrel reports an exception the endpoint let escape before the hosting layer's end-of-request
+        // line: wait for that line, then read every logger the host captured (Kestrel's included).
+        await WaitRequestFinishedAsync(host, DeadlineKestrelHost.DispatchPath);
+
+        Loud(host).Should().BeEmpty("a connection the host's shutdown ends is not an application error, for this endpoint nor for Kestrel");
+        host.Logs.CategorizedRecords.Where(r => r.Text.Contains("a cancellation that came of it ended the connection", StringComparison.Ordinal)).Should().ContainSingle()
+            .Which.Should().Be(("DidComm.AspNetCore.WebSocket.Dispatch", LogLevel.Debug,
+                "MapDidCommWebSocket: the host is stopping, and a cancellation that came of it ended the connection (TaskCanceledException); it is closed."));
+    }
+
     // ---- the handling token outlives each message and ends with the connection (I4) ------------------
 
     public enum ConnectionEnd
@@ -546,6 +573,19 @@ public sealed class WebSocketMessageFinishTests
         socket.Abort();
         (await ReturnRouteTestHost.WaitUntilAsync(() => aborted.IsCancellationRequested, Guard)).Should().BeTrue("the server sees the drop");
     }
+
+    /// <summary>
+    /// Wait (real-time hang guard) for the hosting layer's end-of-request line of a request to
+    /// <paramref name="path"/>. Kestrel logs an exception the endpoint let escape before this line, so
+    /// once it is there every line about the request has been written.
+    /// </summary>
+    internal static async Task WaitRequestFinishedAsync(DeadlineKestrelHost host, string path)
+        => (await ReturnRouteTestHost.WaitUntilAsync(
+                () => host.Logs.CategorizedRecords.Any(r => r.Category == "Microsoft.AspNetCore.Hosting.Diagnostics"
+                                                            && r.Text.StartsWith("Request finished", StringComparison.Ordinal)
+                                                            && r.Text.Contains($":{host.Port}{path} ", StringComparison.Ordinal)),
+                Guard))
+            .Should().BeTrue($"the request to {path} finished");
 
     /// <summary>Lines at Error or above, from any category.</summary>
     internal static IReadOnlyList<string> Loud(DeadlineKestrelHost host)

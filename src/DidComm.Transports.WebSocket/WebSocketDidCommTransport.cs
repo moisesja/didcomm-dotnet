@@ -1538,19 +1538,19 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     /// <item>From the moment this call begins, nothing new reaches the inbound consumer: every
     /// message a peer pushes on a session socket, active or retiring, is read and dropped whole
     /// (the rest of one being read included). A consumer call already in progress keeps its token
-    /// until the drain is done, so a reply it is sending is drained like any other send: an active
-    /// session socket's consumer has its token cancelled when that socket's close frame is sent
-    /// (it then no longer holds the loop from the peer's close), a retiring one's when the socket
-    /// is stopped below.</item>
+    /// until every endpoint has drained (or used up its drain budget), so a reply it is sending, to
+    /// any endpoint, is drained like any other send. Only then does every consumer call in
+    /// progress, on active and retiring session sockets alike, have its token cancelled, before
+    /// any socket is closed: it then no longer keeps its loop from the peer's close.</item>
     /// <item>Every session socket's receive loop is cancelled and awaited for at most
     /// <see cref="CloseBudget"/>. A loop held by an inbound consumer that ignores cancellation is
     /// abandoned; its socket is already disposed, and the loop raises nothing more when it ends.
     /// A loop never waits on a send gate once this call has begun.</item>
     /// <item><c>Disconnected</c> is raised once per socket that was connected, naming its endpoint.</item>
     /// <item>The call is bounded: at most <see cref="DrainBudget"/> + 2 × <see cref="CloseBudget"/>
-    /// in total, no matter how many endpoints are wedged (they drain and close concurrently) or how
-    /// unresponsive the peers are (every network write here, and every wait for a peer's close, is
-    /// cancellation-bounded).</item>
+    /// in total, no matter how many endpoints are wedged (they all drain at once, then all close at
+    /// once) or how unresponsive the peers are (every network write here, and every wait for a
+    /// peer's close, is cancellation-bounded).</item>
     /// <item>It is idempotent and concurrency-safe: the first caller tears down, the rest wait.</item>
     /// </list>
     /// </summary>
@@ -1573,9 +1573,8 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         {
             // Nothing new reaches the inbound consumer once dispose has begun: every session socket,
             // active or retiring, drops what it reads from here on. A consumer call in progress keeps
-            // its token for now: a reply it is sending must be drained, not cancelled (its token is
-            // linked into that send). It is cancelled at its socket's close (CloseEndpointAsync) or
-            // when the socket is stopped below.
+            // its token for now: a reply it is sending, to any endpoint, must be drained, not
+            // cancelled (its token is linked into that send).
             foreach (var live in _liveSessionSockets.Keys)
                 live.DiscardInbound = true;
             // Every endpoint with a gate (a send is, or was, running), a pooled socket or an active
@@ -1583,8 +1582,20 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
             var keys = new HashSet<string>(_sendLocks.Keys, StringComparer.Ordinal);
             keys.UnionWith(_pool.Keys);
             keys.UnionWith(_sessions.Keys);
-            // Concurrently: the drain was serial, so N unresponsive endpoints cost N × budget.
-            var disconnected = await Task.WhenAll(keys.Select(CloseEndpointAsync)).ConfigureAwait(false);
+            // Phase 1, every endpoint at once (a serial drain made N unresponsive endpoints cost
+            // N × budget): drain its in-flight send and take its socket. Each keeps its gate, once it
+            // has it, until its socket's close. No send holds one gate while it waits for another,
+            // and one that starts now fails at the entry check, so holding gates across the phases
+            // cannot deadlock.
+            var drained = await Task.WhenAll(keys.Select(DrainEndpointAsync)).ConfigureAwait(false);
+            // Phase 2, once every drain has finished or used up its budget: cancel every consumer call
+            // in progress, on active and retiring session sockets alike. Until now none was, so a
+            // reply a consumer was sending, to whichever endpoint, has been drained. Its token's
+            // callbacks are host code and the drained gates are held: on pool threads.
+            foreach (var live in _liveSessionSockets.Keys)
+                live.StopConsumerSoon();
+            // Phase 3, every endpoint at once: close its socket and release its gate.
+            var disconnected = await Task.WhenAll(drained.Select(CloseEndpointAsync)).ConfigureAwait(false);
             // Raised here, not inside the per-endpoint tasks, so handlers are never invoked
             // concurrently (or under a send gate) — the guarantee the serial loop gave for free.
             foreach (var endpoint in disconnected)
@@ -1644,63 +1655,109 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
     }
 
     /// <summary>
-    /// Drain one endpoint's (or session's) in-flight send and close its pooled (or active session)
-    /// socket. Never throws: a close is best effort, and one bad endpoint must not abort the
+    /// One endpoint's (or session's) teardown, across dispose's phases: drained by
+    /// <see cref="DrainEndpointAsync"/>, closed by <see cref="CloseEndpointAsync"/>.
+    /// </summary>
+    private sealed class EndpointTeardown(string key, SemaphoreSlim? gate)
+    {
+        /// <summary>Pool key of the endpoint, or session key of a session socket.</summary>
+        public string Key { get; } = key;
+
+        /// <summary>The key's send gate, if one was ever minted.</summary>
+        public SemaphoreSlim? Gate { get; } = gate;
+
+        /// <summary>Whether the drain acquired <see cref="Gate"/>: held from then until the socket's close.</summary>
+        public bool GateHeld { get; set; }
+
+        /// <summary>The pooled socket taken for this key, if any.</summary>
+        public System.Net.WebSockets.WebSocket? Socket { get; set; }
+
+        /// <summary>The active session socket taken for this key, if any.</summary>
+        public SessionSocket? Session { get; set; }
+
+        /// <summary>Whether this teardown claimed the session socket's end (and so reports it).</summary>
+        public bool SessionEnded { get; set; }
+    }
+
+    /// <summary>
+    /// Phase 1 of dispose for one endpoint (or session): drain its in-flight send, then take its
+    /// pooled (or active session) socket. The gate, once acquired, stays held until the socket's
+    /// close (<see cref="CloseEndpointAsync"/>). Never throws: one bad endpoint must not abort the
     /// teardown of the others.
     /// </summary>
-    /// <param name="key">Pool key of the endpoint, or session key of a session socket, to close.</param>
+    /// <param name="key">Pool key of the endpoint, or session key of a session socket.</param>
+    /// <returns>What the close needs.</returns>
+    private async Task<EndpointTeardown> DrainEndpointAsync(string key)
+    {
+        // TryGetValue, never GetOrAdd: dispose must not mint gates.
+        _sendLocks.TryGetValue(key, out var sendGate);
+        var teardown = new EndpointTeardown(key, sendGate);
+        try
+        {
+            // Bounded by the worst case for a HEALTHY hold — the gate spans connect + STOMP
+            // handshake + send — so an in-flight send always finishes inside it. On expiry the
+            // polite shutdown is skipped and the hard Dispose of the close phase unblocks the stuck
+            // send with a socket-level error instead. Inside the try: the wait is part of the
+            // guarded region, so nothing it could throw can strand the rest of this teardown.
+            teardown.GateHeld = sendGate is not null && await sendGate.WaitAsync(DrainBudget).ConfigureAwait(false);
+            // Read the pool INSIDE the gate: a send that was still connecting when dispose began
+            // has published its socket by now, and every pool write happens under this same gate.
+            _pool.TryRemove(key, out var socket);
+            teardown.Socket = socket;
+            // The same for the session sockets. A key names a pooled socket or a session socket,
+            // never both, so at most one of these is non-null.
+            _sessions.TryRemove(key, out var session);
+            teardown.Session = session;
+            if (session is not null)
+            {
+                // Nothing the peer pushes reaches the consumer (DisposeAsync already said so to every
+                // socket it found; this covers one a send opened since): the loop reads each message
+                // and drops it whole. And dispose, not the loop, reports the socket's end, after the
+                // gate is released.
+                session.DiscardInbound = true;
+                teardown.SessionEnded = session.TryEnd();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Debug, "WebSocketDidCommTransport: ignoring drain exception during dispose ({ExceptionType}).", ex.GetType().Name);
+        }
+        return teardown;
+    }
+
+    /// <summary>
+    /// Phase 3 of dispose for one endpoint (or session): close its pooled (or active session)
+    /// socket, when the drain got its gate and the socket is open, then dispose the socket and
+    /// release the gate. Never throws: a close is best effort, and one bad endpoint must not abort
+    /// the teardown of the others.
+    /// </summary>
+    /// <param name="teardown">What the drain took.</param>
     /// <returns>
     /// The endpoint to report as <c>Disconnected</c>, or <c>null</c> when there was no connection
     /// to close (a gate exists, but no pooled or active session socket), or when the session socket
     /// already reported its end.
     /// </returns>
-    private async Task<Uri?> CloseEndpointAsync(string key)
+    private async Task<Uri?> CloseEndpointAsync(EndpointTeardown teardown)
     {
-        // TryGetValue, never GetOrAdd: dispose must not mint gates.
-        _sendLocks.TryGetValue(key, out var sendGate);
-        var gateHeld = false;
-        System.Net.WebSockets.WebSocket? socket = null;
-        SessionSocket? session = null;
-        var sessionEnded = false;
+        var socket = teardown.Socket;
+        var session = teardown.Session;
         try
         {
-            // Bounded by the worst case for a HEALTHY hold — the gate spans connect + STOMP
-            // handshake + send — so an in-flight send always finishes inside it. On expiry the
-            // polite shutdown is skipped and the hard Dispose below unblocks the stuck send with a
-            // socket-level error instead. Inside the try: the wait is part of the guarded region,
-            // so nothing it could throw can strand the rest of this endpoint's cleanup.
-            gateHeld = sendGate is not null && await sendGate.WaitAsync(DrainBudget).ConfigureAwait(false);
-            // Read the pool INSIDE the gate: a send that was still connecting when dispose began
-            // has published its socket by now, and every pool write happens under this same gate.
-            _pool.TryRemove(key, out socket);
-            // The same for the session sockets. A key names a pooled socket or a session socket,
-            // never both, so at most one of these is non-null.
-            _sessions.TryRemove(key, out session);
-            if (session is not null)
-            {
-                // Nothing the peer pushes reaches the consumer (DisposeAsync already said so to every
-                // socket it found; this covers one a send opened since): the loop reads each message
-                // and drops it whole. And this call, not the loop, reports the socket's end, after
-                // the gate is released.
-                session.DiscardInbound = true;
-                sessionEnded = session.TryEnd();
-            }
-            if (gateHeld && session is not null && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            if (teardown.GateHeld && session is not null && session.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
                 // The same bounded wait for the peer's close as the pooled socket's below, with the
                 // session's own receive loop as the socket's only reader: send our close frame, then
                 // wait for the loop to read the peer's close and end. The loop then answers nothing
                 // and waits on no send gate (both skipped once dispose began), so it ends without
-                // this gate. Both steps share one CloseBudget; on expiry the finally disposes the
-                // socket under the loop, which ends it. The drain is done (this gate is held), so a
-                // consumer call in progress is cancelled now, letting the loop get back to reading;
-                // on a pool thread, since its token's callbacks are host code and this gate is held.
-                session.StopConsumerSoon();
+                // this gate. A consumer call in progress was cancelled once every endpoint had
+                // drained (DisposeAsync), so it does not keep the loop from the peer's close. Both
+                // steps share one CloseBudget; on expiry the finally disposes the socket under the
+                // loop, which ends it.
                 using var closeCts = new CancellationTokenSource(CloseBudget);
                 await session.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "transport disposed", closeCts.Token).ConfigureAwait(false);
                 await session.LoopDone.WaitAsync(closeCts.Token).ConfigureAwait(false);
             }
-            if (gateHeld && socket is not null && socket.State == WebSocketState.Open)
+            if (teardown.GateHeld && socket is not null && socket.State == WebSocketState.Open)
             {
                 // The shutdown writes and the wait for the peer's close share one budget: a peer that
                 // stopped reading (TCP backpressure on the DISCONNECT) or never answers the close
@@ -1740,17 +1797,17 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         {
             socket?.Dispose();
             session?.DisposeSocket();
-            if (gateHeld)
-                sendGate!.Release();
+            if (teardown.GateHeld)
+                teardown.Gate!.Release();
             // After the release: stopping the loop runs the consumer's cancellation callbacks, which
             // never run under a send gate.
             session?.StopLoop();
         }
         if (session is not null)
-            return sessionEnded ? session.Endpoint : null;
+            return teardown.SessionEnded ? session.Endpoint : null;
         // The pool key is a well-formed absolute URI string (see PoolKey); reconstruct it so
         // observers see which endpoint just disconnected on a clean close.
-        return socket is not null && Uri.TryCreate(key, UriKind.Absolute, out var endpoint) ? endpoint : null;
+        return socket is not null && Uri.TryCreate(teardown.Key, UriKind.Absolute, out var endpoint) ? endpoint : null;
     }
 
     /// <summary>
@@ -1890,9 +1947,9 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
 
         /// <summary>
         /// Cancel the consumer's token, but not the loop's (the loop goes on reading to the peer's
-        /// close), on a thread-pool thread without the caller's <see cref="ExecutionContext"/>: the
-        /// caller holds a send gate, and the callbacks registered on that token are host code, which
-        /// never runs under one. Never throws, and neither does the work item (see
+        /// close), on a thread-pool thread without the caller's <see cref="ExecutionContext"/>: dispose
+        /// calls it while it holds the drained send gates, and the callbacks registered on that token
+        /// are host code, which never runs under one. Never throws, and neither does the work item (see
         /// <see cref="StopLoop"/>).
         /// </summary>
         public void StopConsumerSoon()
