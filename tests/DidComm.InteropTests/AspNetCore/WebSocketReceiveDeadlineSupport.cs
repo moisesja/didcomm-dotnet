@@ -124,6 +124,9 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
     /// <summary>The abort token of every WebSocket request so far, in arrival order.</summary>
     public IReadOnlyList<CancellationToken> WebSocketRequestAborts => _ended.Aborts.ToArray();
 
+    /// <summary>Kestrel's connection id of every WebSocket request so far, in the same order as <see cref="WebSocketRequestAborts"/>.</summary>
+    public IReadOnlyList<string> WebSocketConnectionIds => _ended.ConnectionIds.ToArray();
+
     /// <summary>Wait (real-time hang guard) until <paramref name="count"/> WebSocket requests have ended.</summary>
     public async Task WaitEndedWebSocketsAsync(int count)
         => (await ReturnRouteTestHost.WaitUntilAsync(() => EndedWebSockets >= count, Guard)).Should().BeTrue($"{count} WebSocket connections ended");
@@ -176,9 +179,16 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         {
             // #100 OD-8: observe when a WebSocket request's endpoint delegate returns, which is after
             // its receive loop and the loop's finally ran (nothing more is read or handled), and keep
-            // each WebSocket request's abort token, so a test can wait until the server saw a drop.
+            // each WebSocket request's abort token, so a test can wait until the server saw a drop,
+            // and its Kestrel connection id, so a test can wait until Kestrel ended that connection.
             if (context.WebSockets.IsWebSocketRequest)
-                ended.Aborts.Enqueue(context.RequestAborted);
+            {
+                lock (ended)
+                {
+                    ended.Aborts.Enqueue(context.RequestAborted);
+                    ended.ConnectionIds.Enqueue(context.Connection.Id);
+                }
+            }
             try
             {
                 await next(context);
@@ -326,6 +336,8 @@ internal sealed class DeadlineKestrelHost : IAsyncDisposable
         public int Count;
 
         public ConcurrentQueue<CancellationToken> Aborts { get; } = new();
+
+        public ConcurrentQueue<string> ConnectionIds { get; } = new();
     }
 
     public async ValueTask DisposeAsync()
