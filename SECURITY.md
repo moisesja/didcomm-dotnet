@@ -102,6 +102,20 @@ needs these limits on top of the library's own:
   `HttpContext.RequestAborted`, and cancelling that token ends live WebSocket sessions.
 - **Memory.** An unpacked message can take several times its size on the wire: budget memory per
   message being handled at once, not per byte received.
+- **Disconnecting peers.** A WebSocket message that has arrived whole is still handled after its
+  connection drops, for at most 5 s (the close grace), and less when the host starts to stop.
+  Nothing more is read from that connection, so a peer that disconnects can cause one such finish
+  per connection. An evicted connection with a message in hand can live up to 10 s: 5 s for the
+  peer to answer the eviction, then 5 s to finish. The connection limits above bound how many run
+  at once.
+
+An agent that connects out over WebSocket (`DidComm.Transports.WebSocket`, a wallet for example)
+waits for its peers when it shuts down. Disposing the transport, or the container that holds it,
+sends a close on each open connection and waits for the peer's answer, up to
+`WebSocketTransportOptions.SendTimeout` (30 s by default). It is one wait for all connections at
+once, not one per connection, and a peer that has not answered by then is cut off. So a peer that
+never answers can delay your shutdown by that much, and a very large `SendTimeout` makes the delay
+as large. With an infinite or non-positive `SendTimeout`, dispose does not wait.
 
 ## Out of scope
 
