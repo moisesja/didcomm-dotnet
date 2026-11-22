@@ -192,7 +192,7 @@ public sealed class WebSocketDisposePeerCloseOrderTests
     // ---- a send finds the socket closed (eviction) ----------------------------------------------
 
     [Fact]
-    public async Task Order_e_a_send_that_finds_the_peers_close_already_read_answers_it_before_it_disposes_the_socket()
+    public async Task Order_e_a_send_that_finds_the_peers_close_already_read_writes_nothing_on_it_and_the_loop_answers()
     {
         await using var t = Harness.Create();
         var s = await t.OpenSessionAsync();
@@ -201,6 +201,11 @@ public sealed class WebSocketDisposePeerCloseOrderTests
         s.PushClose(WebSocketCloseStatus.PolicyViolation, "evicted");
         await s.CloseRead.WaitAsync(Timeout); // the socket is in CloseReceived; the loop has not seen it
         (await t.Transport.SendAsync(Request("after the eviction"), default).WaitAsync(Timeout)).Accepted.Should().BeTrue("it went on a pooled socket");
+        // The send only stopped routing to the socket: it wrote nothing on it and ended nothing, so its
+        // gate hold stayed connect + send.
+        s.CloseOutputAttempts.Should().Be(0, "the send leaves the answer to the socket's loop");
+        s.Disposed.Should().BeFalse();
+        t.DisconnectedFor(Endpoint).Should().Be(0);
         s.ReleaseCloseRead();
         await WaitAsync(() => t.Transport.LiveSessionSocketCount == 0);
 
@@ -209,24 +214,25 @@ public sealed class WebSocketDisposePeerCloseOrderTests
     }
 
     [Fact]
-    public async Task Order_e_with_dispose_beginning_while_the_send_writes_its_answer()
+    public async Task Order_e_with_dispose_beginning_before_the_loop_sees_the_peers_close_the_sweep_answers()
     {
+        // The send took the socket out of routing; dispose's drain then finds nothing for it, and its
+        // loop, once dispose has begun, leaves it to the sweep, which answers.
         await using var t = Harness.Create();
         var s = await t.OpenSessionAsync();
         s.HoldCloseRead();
-        s.HoldCloseOutput();
 
         s.PushClose(WebSocketCloseStatus.PolicyViolation, "evicted");
         await s.CloseRead.WaitAsync(Timeout);
-        var send = Observed(t.Transport.SendAsync(Request("after the eviction"), default));
-        await s.CloseOutputEntered.WaitAsync(Timeout); // the send is answering, under the socket's gate
+        (await t.Transport.SendAsync(Request("after the eviction"), default).WaitAsync(Timeout)).Accepted.Should().BeTrue("it went on a pooled socket");
+        t.Transport.ActiveSessionSocketCount.Should().Be(0, "precondition: the send took the socket out of routing");
         var dispose = t.Transport.DisposeAsync().AsTask();
-        s.ReleaseCloseOutput();
-        await ((Func<Task>)(() => send.WaitAsync(Timeout))).Should().ThrowAsync<ObjectDisposedException>("its pooled retry met the disposed transport");
+        await s.CloseReadCancelled.WaitAsync(Timeout); // the sweep stopped the loop: dispose owns the socket
+        s.CloseOutputAttempts.Should().Be(0);
         s.ReleaseCloseRead();
         await dispose.WaitAsync(Timeout);
 
-        ShouldBeAnsweredOnce(t, s, LoopAnswer);
+        ShouldBeAnsweredOnce(t, s, DisposeAnswer, disconnected: 2); // the session socket, and the pooled socket the send went on
     }
 
     // ---- retire, and a 1008 close suppressed by dispose ------------------------------------------
@@ -379,7 +385,7 @@ public sealed class WebSocketDisposePeerCloseOrderTests
 
     // One close output, the expected one; the socket disposed, after the answer when the peer's close
     // came first; one Disconnected for the session's endpoint.
-    private static void ShouldBeAnsweredOnce(Harness t, ScriptedSessionWebSocket s, string answer)
+    private static void ShouldBeAnsweredOnce(Harness t, ScriptedSessionWebSocket s, string answer, int disconnected = 1)
     {
         var operations = s.Operations;
         var trail = string.Join(", ", operations);
@@ -391,7 +397,7 @@ public sealed class WebSocketDisposePeerCloseOrderTests
         var output = IndexOf(operations, "close-output:");
         if (received < output)
             output.Should().BeLessThan(IndexOf(operations, "dispose"), "the socket is disposed only after its answer ({0})", trail);
-        t.DisconnectedFor(Endpoint).Should().Be(1, "Disconnected once for the session socket");
+        t.DisconnectedFor(Endpoint).Should().Be(disconnected, "Disconnected once for the session socket (and once for any pooled socket on the same endpoint)");
     }
 
     private static int IndexOf(IReadOnlyList<string> operations, string prefix)

@@ -95,39 +95,37 @@ public sealed class WebSocketDisposePeerCloseRedTeamTests
     // ---- RT4-3: the eviction answer lengthens a healthy send past the drain budget ------------------
 
     [Fact]
-    public async Task RT4_3_a_return_route_send_that_answers_an_eviction_and_then_reopens_is_drained_not_abandoned()
+    public async Task RT4_3_a_return_route_send_that_finds_its_socket_closed_by_the_peer_reopens_without_writing_on_it()
     {
-        // DrainBudget = ConnectTimeout + SendTimeout is "the worst case for a HEALTHY hold". Since
-        // 18d4002 a send that finds the socket evicted writes the answer under its gate first, for up
-        // to CloseGrace (= SendTimeout), before it connects and sends: a hold of up to
-        // CloseGrace + ConnectTimeout + SendTimeout. A peer that does not read the answer, and a send
-        // whose every step stays inside its own timeout, then outlives the drain: dispose disposes
-        // the fresh socket under it and the send fails, though it was past the entry check.
-        await using var t = Harness.Create(o =>
-        {
-            o.ConnectTimeout = TimeSpan.FromMilliseconds(200);
-            o.SendTimeout = TimeSpan.FromMilliseconds(1000); // DrainBudget 1.2 s, CloseGrace 1 s
-        });
+        // DrainBudget = ConnectTimeout + SendTimeout is "the worst case for a HEALTHY hold". A send
+        // that finds the socket closed by the peer (an eviction) must therefore not write the answer
+        // under its gate first (up to CloseGrace more): it only stops routing to the old socket and
+        // reopens; the old socket's own loop answers. With the old socket's close output held, the
+        // send completes before any close output on it begins.
+        await using var t = Harness.Create();
         var s1 = await t.OpenSessionAsync();
         s1.HoldCloseRead();
-        s1.HoldCloseOutput(); // never released: the peer does not read our answer (honours its token)
+        s1.HoldCloseOutput();
         s1.PushClose(WebSocketCloseStatus.PolicyViolation, "evicted");
         await s1.CloseRead.WaitAsync(Timeout);
-        t.Sockets.OnCreate = s => s.HoldSends();
 
         var reopen = Observed(t.Transport.SendAsync(Request("reopen", ReturnRouteMode.All), default));
-        await s1.CloseOutputEntered.WaitAsync(Timeout); // the send answers the eviction under its gate
-        var dispose = t.Transport.DisposeAsync().AsTask();
-        s1.ReleaseCloseRead();
-        await WaitAsync(() => t.Sockets.Count == 2); // the answer ran out at CloseGrace; the send reconnects
-        var s2 = t.Sockets.Sockets[1];
-        await s2.SendEntered.WaitAsync(Timeout);
-        await Task.Delay(TimeSpan.FromMilliseconds(600)); // well inside the send's own 1 s SendTimeout
-        s2.ReleaseSends();
+        var first = await Task.WhenAny(reopen, s1.CloseOutputEntered).WaitAsync(Timeout);
 
-        var outcome = await Record.ExceptionAsync(() => reopen.WaitAsync(Timeout));
-        outcome.Should().BeNull("every step of the send stayed inside its own timeout, so the drain must wait for it");
-        await dispose.WaitAsync(Timeout);
+        first.Should().BeSameAs(reopen, "the send wrote nothing on the evicted socket: its hold is connect + send");
+        (await reopen).Accepted.Should().BeTrue();
+        s1.CloseOutputAttempts.Should().Be(0);
+        t.Sockets.Count.Should().Be(2, "the send opened a fresh session socket");
+        t.Transport.ActiveSessionSocketCount.Should().Be(1);
+        // The old socket's loop answers the peer's close, once, then ends it.
+        s1.ReleaseCloseRead();
+        await s1.CloseOutputEntered.WaitAsync(Timeout);
+        s1.ReleaseCloseOutput();
+        await WaitAsync(() => t.Transport.LiveSessionSocketCount == 1);
+        s1.CloseOutputAttempts.Should().Be(1);
+        s1.CloseOutputDescription.Should().Be("return-route session closed");
+        s1.Disposed.Should().BeTrue();
+        t.DisconnectedFor(Endpoint).Should().Be(1, "the evicted socket's end, once");
     }
 
     // ---- what held: a peer that closes every session socket at once, on real sockets -------------------
