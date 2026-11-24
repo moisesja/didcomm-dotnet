@@ -332,7 +332,7 @@ internal sealed class LeaseRecordingStore(InMemoryMessageStore inner) : IMessage
     public async ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct)
     {
         var taken = await Inner.LeaseAsync(request, ct);
-        _leases.Enqueue(new LeaseRecord(request.MaxMessages, request.MaxPayloadBytes, Live: request.AfterSequence is not null, taken.Count));
+        _leases.Enqueue(new LeaseRecord(request.MaxMessages, request.MaxPayloadBytes, Live: request.AfterSequence is not null, taken.Count) { Ids = taken.Select(m => m.Id).ToArray() });
         return taken;
     }
 
@@ -355,4 +355,8 @@ internal sealed class LeaseRecordingStore(InMemoryMessageStore inner) : IMessage
 }
 
 /// <summary>One lease as <see cref="LeaseRecordingStore"/> saw it: the bounds asked for, whether it was a live push's, and how many records came back.</summary>
-internal sealed record LeaseRecord(int MaxMessages, long MaxPayloadBytes, bool Live, int Taken);
+internal sealed record LeaseRecord(int MaxMessages, long MaxPayloadBytes, bool Live, int Taken)
+{
+    /// <summary>The ids of the records that came back, in order (#111: a test that drives a delivery reads how many messages it carries).</summary>
+    public IReadOnlyList<string> Ids { get; init; } = Array.Empty<string>();
+}

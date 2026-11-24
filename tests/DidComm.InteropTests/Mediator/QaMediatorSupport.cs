@@ -252,6 +252,28 @@ internal sealed class QaManualTimeProvider : TimeProvider
         }
     }
 
+    /// <summary>
+    /// The earliest instant any scheduled timer is due at, or <c>null</c> when none is scheduled: for
+    /// a test that moves the clock one firing at a time (<see cref="Advance"/> by the difference from
+    /// <see cref="TimeProvider.GetUtcNow"/>).
+    /// </summary>
+    public DateTimeOffset? NextDueAt
+    {
+        get
+        {
+            lock (_gate)
+            {
+                DateTimeOffset? next = null;
+                foreach (var timer in _timers)
+                {
+                    if (timer.DueAt is { } due && (next is null || due < next))
+                        next = due;
+                }
+                return next;
+            }
+        }
+    }
+
     /// <summary>How many timers created after <paramref name="mark"/> are scheduled now.</summary>
     /// <param name="mark">A value <see cref="Mark"/> returned earlier.</param>
     public int ScheduledTimersSince(long mark)
