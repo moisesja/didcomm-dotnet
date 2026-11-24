@@ -204,7 +204,7 @@ public sealed class DeliveredUnpackAdv2Tests
         {
             var label = TestJwe.LabelOf(packed);
             calls.Enter(label, ct);
-            return label.StartsWith("sybil", StringComparison.Ordinal) ? never.Task : Task.FromResult(UnpackFakes.Opened(label));
+            return label.StartsWith("sender", StringComparison.Ordinal) ? never.Task : Task.FromResult(UnpackFakes.Opened(label));
         }, UnpackTimeout, time);
         var scope = new DeliveryScope(FakePickupExchange.M, FakePickupExchange.L);
         const int senders = UnpackReservations.MaxReserved / UnpackReservations.MaxPerSender;
@@ -212,7 +212,7 @@ public sealed class DeliveredUnpackAdv2Tests
         {
             var stalled = Enumerable.Range(0, senders)
                 .Select(s => unpacker.UnpackAllAsync(scope,
-                    Enumerable.Range(0, UnpackReservations.MaxPerSender).Select(i => Message(TestJwe.Authcrypt($"did:example:sybil-{s}#key-1", $"sybil-{s}-{i}"), $"sybil-{s}-{i}")).ToArray(),
+                    Enumerable.Range(0, UnpackReservations.MaxPerSender).Select(i => Message(TestJwe.Authcrypt($"did:example:sender-{s}#key-1", $"sender-{s}-{i}"), $"sender-{s}-{i}")).ToArray(),
                     "request-" + s, default))
                 .ToArray();
             await calls.WaitForAsync(UnpackReservations.MaxReserved, RealTime);

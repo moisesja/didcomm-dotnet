@@ -569,12 +569,18 @@ internal sealed class DeliveredMessageUnpacker
                     _ending = Ending.AllEnded;
                 _writing++;
             }
-            if (write == MemoryWrite.Strike)
-                _owner.Memory.Strike(_scope, _messages[index].Id);
-            else if (write == MemoryWrite.Forget)
-                _owner.Memory.Forget(_scope, _messages[index].Id);
-            Interlocked.Increment(ref _owner._settled);
-            Written();
+            try
+            {
+                if (write == MemoryWrite.Strike)
+                    _owner.Memory.Strike(_scope, _messages[index].Id);
+                else if (write == MemoryWrite.Forget)
+                    _owner.Memory.Forget(_scope, _messages[index].Id);
+            }
+            finally
+            {
+                Interlocked.Increment(ref _owner._settled);
+                Written(); // the result is set even if the host's clock threw in the write
+            }
             return true;
         }
 
@@ -585,7 +591,16 @@ internal sealed class DeliveredMessageUnpacker
         // reservations until they end. After a cancellation or the shutdown the result is cancelled.
         private void OnBudgetEnded()
         {
-            var ended = _owner.Time.GetTimestamp();
+            // A clock that throws here strikes nothing (fail open) and never keeps the result unset (I-5).
+            long ended;
+            try
+            {
+                ended = _owner.Time.GetTimestamp();
+            }
+            catch
+            {
+                ended = long.MinValue;
+            }
             List<string?>? slow = null;
             lock (_gate)
             {
@@ -604,12 +619,18 @@ internal sealed class DeliveredMessageUnpacker
                 }
                 _writing++;
             }
-            if (slow is not null)
+            try
             {
-                foreach (var id in slow)
-                    _owner.Memory.Strike(_scope, id);
+                if (slow is not null)
+                {
+                    foreach (var id in slow)
+                        _owner.Memory.Strike(_scope, id);
+                }
             }
-            Written();
+            finally
+            {
+                Written();
+            }
         }
 
         // One recorder has made its write. The last one, once the delivery is closed, sets the

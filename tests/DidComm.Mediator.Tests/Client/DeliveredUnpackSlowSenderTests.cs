@@ -230,6 +230,29 @@ public sealed class DeliveredUnpackSlowSenderTests
         byBudget.Memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeTrue("still running when the budget ended, it was slow");
     }
 
+    /// <summary>
+    /// I-5 with the memory's clock readings: a host clock whose readings throw from the moment the
+    /// budget ends still lets the budget end the delivery (nothing is remembered: a reading that
+    /// failed strikes nothing).
+    /// </summary>
+    [Fact]
+    public async Task A_clock_whose_readings_throw_when_the_budget_ends_still_ends_the_delivery()
+    {
+        var manual = new ManualTimeProvider();
+        var time = new ReadingsThrowWhenArmed(manual);
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(Stall(calls), Budget, time);
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message(TestJwe.Anoncrypt("q1"), "q1") }, "request-1", default);
+        await calls.WaitForAsync(1, RealTime);
+        time.Armed = true;
+        manual.Advance(Budget);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes.Single().Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("while it was being opened");
+        unpacker.Memory.Count.Should().Be(0);
+    }
+
     // ---- held back (I-13) --------------------------------------------------------------------
 
     /// <summary>
@@ -596,6 +619,20 @@ public sealed class DeliveredUnpackSlowSenderTests
                 Volatile.Write(ref _armed, 1);
             return timer;
         }
+    }
+
+    /// <summary>A manual clock whose readings throw once armed; its timers still fire.</summary>
+    private sealed class ReadingsThrowWhenArmed(ManualTimeProvider inner) : TimeProvider
+    {
+        public volatile bool Armed;
+
+        public override long TimestampFrequency => inner.TimestampFrequency;
+
+        public override long GetTimestamp()
+            => Armed ? throw new InvalidOperationException("the host's clock failed") : inner.GetTimestamp();
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+            => inner.CreateTimer(callback, state, dueTime, period);
     }
 
     private static DeliveredInput Message(string packed, string id) => new(id, TestJwe.Bytes(packed));
