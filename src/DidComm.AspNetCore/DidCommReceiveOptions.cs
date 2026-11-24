@@ -11,8 +11,14 @@ public sealed class DidCommReceiveOptions
 {
     /// <summary>
     /// Media types accepted by the endpoint. The HTTP receive path returns 415 when the request
-    /// <c>Content-Type</c> does not match any of these. Defaults cover the three DIDComm v2.1
-    /// envelope flavors.
+    /// <c>Content-Type</c> does not match any of these, or when the declared type is not the media
+    /// type of the body's own envelope (classified by its structure; a STOMP <c>SEND</c> is then
+    /// discarded); a bare WebSocket message, which declares no type, is discarded when its envelope's
+    /// media type is not in this list. Defaults cover the three DIDComm v2.1 envelope flavors. A
+    /// message opened out of forward layers re-wrapped for this agent is held to
+    /// the same list by the media type of its own outermost envelope, not the wrapper's: one that is
+    /// not accepted is refused like a layer that cannot be opened (400 over HTTP, discarded on a
+    /// WebSocket).
     /// </summary>
     public IReadOnlyList<string> AcceptedMediaTypes { get; set; } = new[]
     {
