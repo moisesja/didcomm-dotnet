@@ -102,8 +102,10 @@ public sealed class DeliveredUnpackAdv2Tests
     /// <summary>
     /// ADV2-1 follow-on (found by fix round 2's engineer: same-delivery starvation). Four senders
     /// whose DIDs never resolve are first in a delivery of ten; the six honest messages behind them
-    /// are opened once the four have used up their shares, inside the budget — they are not starved
-    /// at every redelivery while the four stay at the front of the queue.
+    /// are opened once the first two have used up their shares (10 s), inside the budget — they are
+    /// not starved at every redelivery while the four stay at the front of the queue. The other two
+    /// stalling messages reach the end of their shares (15 s) with nothing left waiting, so they keep
+    /// the rest of the budget (#111, owner decision A1) and fail when it ends.
     /// </summary>
     [Fact]
     public async Task ADV2_1_four_stalling_senders_first_in_a_delivery_do_not_starve_the_six_behind_them()
@@ -115,15 +117,20 @@ public sealed class DeliveredUnpackAdv2Tests
             time);
         var payloads = Enumerable.Range(0, 4).Select(i => "stall-" + i).Concat(Enumerable.Range(0, 6).Select(i => "ok-" + i))
             .Select(t => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(t)).ToArray();
-        // The four stalling messages get 10, 10, 15 and 15 s (#111, I-7): the clock passes the last.
-        var lastOfTheFour = unpacker.ShareAt(payloads.Length, DeliveredMessageUnpacker.FetchConcurrency - 1, TimeSpan.Zero);
+        var first = unpacker.ShareAt(payloads.Length, 0, TimeSpan.Zero); // 10 s for the first two, 15 s for the next two
+        var settled = unpacker.Settled;
 
         var batch = unpacker.UnpackAllAsync(payloads, "request-7", default);
         await time.WaitForScheduledTimersAsync(1 + DeliveredMessageUnpacker.FetchConcurrency, RealTime); // the budget and the four stalling shares
-        time.Advance(lastOfTheFour);
+        time.Advance(first);
+        SpinWait.SpinUntil(() => unpacker.Settled == settled + 8, RealTime).Should().BeTrue("the first two were cut and the six behind them opened");
+        time.Advance(unpacker.ShareAt(payloads.Length, 2, TimeSpan.Zero) - first);
+        batch.IsCompleted.Should().BeFalse("with nothing waiting, the other two keep the rest of the budget");
+        time.Advance(UnpackTimeout);
         var outcomes = await batch.WaitAsync(RealTime);
 
-        outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("its share"));
+        outcomes.Take(2).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("its share"));
+        outcomes.Skip(2).Take(2).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
         outcomes.Skip(4).Should().OnlyContain(o => o.Succeeded, "the honest messages behind the stalling ones are opened in the same delivery");
         SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
     }

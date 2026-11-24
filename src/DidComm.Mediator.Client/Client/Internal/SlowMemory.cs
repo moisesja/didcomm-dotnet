@@ -165,8 +165,9 @@ internal sealed class SlowMemory
 
     /// <summary>
     /// Remember that the message <paramref name="id"/> was slow: a new entry with one strike, or one
-    /// more strike on the entry it has, stamped with the clock's reading now. Does nothing for a
-    /// <c>null</c> id.
+    /// more strike on the entry it has, stamped with the clock's reading now. An entry still inside its
+    /// pause gets no further strike: deliveries of the same message that ran at the same time saw one
+    /// slow episode (RT1B-2). Does nothing for a <c>null</c> id.
     /// </summary>
     /// <param name="scope">The mediator and mailbox the message came from.</param>
     /// <param name="id">Its attachment id.</param>
@@ -188,6 +189,11 @@ internal sealed class SlowMemory
             }
             partition.Used = ++_seq;
             ref var entry = ref CollectionsMarshal.GetValueRefOrAddDefault(partition.Entries, key, out var existed);
+            if (existed && IsPaused(entry, now))
+            {
+                entry.Seen = ++_seq;
+                return;
+            }
             entry.Strikes = existed ? (entry.Strikes == int.MaxValue ? int.MaxValue : entry.Strikes + 1) : 1;
             entry.StruckAt = now;
             entry.Seen = ++_seq;

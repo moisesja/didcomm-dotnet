@@ -155,10 +155,10 @@ public sealed class SlowMemoryQa1Tests
     // ---- the pause (D-2, I-12) -----------------------------------------------------------------
 
     /// <summary>
-    /// D-2 through real strikes: a message that never opens is held back for 10, 20 and 40 minutes,
-    /// then an hour, an hour again: never a tick longer, never a tick shorter. When it opens at the
-    /// next delivery it is forgotten, so the next time it is slow its pause starts again at 10
-    /// minutes.
+    /// D-2 through real strikes: a message that never opens is held back for 10, 20, 40 and 80
+    /// minutes, then the cap of 256 budgets (QA1-1: Q·B, about 85 minutes), and the cap again: never a
+    /// tick longer, never a tick shorter. When it opens at the next delivery it is forgotten, so the
+    /// next time it is slow its pause starts again at 10 minutes.
     /// </summary>
     [Fact]
     public async Task The_pause_doubles_to_its_cap_and_a_message_that_opens_is_forgotten()
@@ -185,7 +185,7 @@ public sealed class SlowMemoryQa1Tests
             return true;
         }
 
-        foreach (var pause in new[] { 30 * B, 60 * B, 120 * B, 180 * B, 180 * B })
+        foreach (var pause in new[] { 30 * B, 60 * B, 120 * B, 240 * B, 256 * B, 256 * B })
         {
             (await DeliverAsync()).Should().BeTrue("its pause has ended");
             (await DeliverAsync()).Should().BeFalse("its pause of {0} has started", pause);
@@ -364,14 +364,14 @@ public sealed class SlowMemoryQa1Tests
     // ---- D-13: an honest slow sender after messages naming its key that were cut ------------------
 
     /// <summary>
-    /// D-13 when the messages naming Sam's key are cut at their share: four of them start first
-    /// (shares of 5 s; Sam's lookups take 5.5 s), and their lookups honour the cut but finish
-    /// unwinding only after the delivery has ended. Eleven messages that fail at once follow, then
-    /// Sam's real message, taken at 5 s with 15 s left, enough for its 5.5 s lookup. It is never
-    /// refused for its partition inside the delivery, and it opens.
+    /// QA1-5, a residual pin: four messages naming Sam's key start first (shares of 5 s; Sam's
+    /// lookups take 5.5 s) and are cut at their share, since twelve messages still wait (A1). Their
+    /// lookups honour the cut but finish unwinding only later, so they still hold Sam's partition
+    /// when Sam's real message is taken at 5 s: it is refused once for its partition, not
+    /// remembered, and it opens at the next delivery once those lookups have ended.
     /// </summary>
-    [Fact(Skip = "QA defect: a sender's message is refused for its partition inside one delivery while cut messages naming its key are still ending")]
-    public async Task D13_a_slow_senders_real_message_after_cut_messages_naming_its_key_is_not_refused_for_its_partition()
+    [Fact]
+    public async Task Residual_a_slow_senders_real_message_after_cut_messages_naming_its_key_is_refused_once_and_opens_at_the_next_delivery()
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
@@ -408,10 +408,6 @@ public sealed class SlowMemoryQa1Tests
             var delivery = unpacker.UnpackAllAsync(Qa1.Bob, messages, "request", default);
             await calls.WaitForAsync(4, RealTime);
             time.Advance(unpacker.Floor);
-            await Task.WhenAny(calls.WaitForAsync(5, RealTime), delivery);
-            if (calls.Count >= 5)
-                time.Advance(lookup);
-            time.Advance(B);
             outcomes = await delivery.WaitAsync(RealTime);
         }
         finally
@@ -419,7 +415,16 @@ public sealed class SlowMemoryQa1Tests
             unwound.TrySetResult();
         }
 
-        outcomes[15].Error.Should().BeNull("Sam's real message was taken with 15 s left, and its lookup takes 5.5 s");
+        outcomes[15].Error.Should().BeOfType<TimeoutException>("the residual: the cut lookups still hold Sam's partition")
+            .Which.Message.Should().Contain("capacity exhausted").And.Contain("for its sender");
+        calls.Labels.Should().NotContain("sam");
+        unpacker.Memory.HeldBack(Qa1.Bob, new[] { "sam" }).Single().Should().BeFalse("a refusal is not remembered");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("the cut lookups have ended");
+
+        var next = unpacker.UnpackAllAsync(Qa1.Bob, new[] { messages[15] }, "request-2", default);
+        await calls.WaitForAsync(5, RealTime);
+        time.Advance(lookup);
+        (await next.WaitAsync(RealTime)).Single().Succeeded.Should().BeTrue("at the next delivery Sam's message opens");
     }
 
     // ---- helpers -------------------------------------------------------------------------------

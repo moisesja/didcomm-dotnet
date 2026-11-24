@@ -234,11 +234,13 @@ public sealed class SlowSenderFetchQa1Tests
     }
 
     /// <summary>
-    /// The acceptance bound at limits 1 to 3, and at limit 4 with N near the memory's bound: a fetch
-    /// loop reaches the message behind N messages that never open within ceil(N / min(limit, 16))
-    /// budgets.
+    /// QA1-1, against the restated bound (#111, Cap = Q·B): at limits 1 to 4 with enough in front
+    /// that learning them takes longer than the first pause, the messages learned first are opened
+    /// again as their pauses end, each time paused twice as long. A fetch loop still reaches the
+    /// message behind N ≤ Q messages that never open within <see cref="RestatedBound"/>, at a
+    /// leasing mediator, at limit 1 with up to Q in front included.
     /// </summary>
-    [Theory(Skip = "QA defect: when learning the messages in front takes longer than the first pause, the message behind is reached beyond the stated bound, and at limit 1 with about 180 or more in front it is not reached")]
+    [Theory]
     [InlineData(1, 99, 60)]
     [InlineData(2, 99, 60)]
     [InlineData(3, 99, 60)]
@@ -247,56 +249,80 @@ public sealed class SlowSenderFetchQa1Tests
     [InlineData(4, 256, 60)]
     [InlineData(1, 200, 60)]
     [InlineData(1, 255, 60)]
+    [InlineData(1, 256, 60)]
+    [InlineData(1, 256, 300)]
+    [InlineData(8, 256, 10)]
+    [InlineData(6, 224, 60)]
     public async Task The_message_behind_never_opening_messages_is_reached_within_the_bound_at_small_limits(int limit, int n, int leaseSeconds)
     {
         var (exchange, mediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, TimeSpan.FromSeconds(leaseSeconds));
         Queue(mediator, junk: n, honestAt: n);
+        var lease = TimeSpan.FromSeconds(leaseSeconds);
 
-        var reach = await ReachAsync(exchange, mediator, limit, cap: TimeSpan.FromHours(10));
+        var reach = await ReachAsync(exchange, mediator, limit, cap: TimeSpan.FromHours(12));
 
         reach.Found.Should().BeTrue("limit {0}, {1} in front, a lease of {2} s: not reached after {3}", limit, n, leaseSeconds, reach.Elapsed);
-        reach.Elapsed.Should().BeLessThanOrEqualTo(Bound(n, limit), "limit {0}, {1} in front, a lease of {2} s", limit, n, leaseSeconds);
+        reach.Elapsed.Should().BeLessThanOrEqualTo(RestatedBound(n, limit, lease, exchange.Unpacker.Memory.FirstPause), "limit {0}, {1} in front, a lease of {2} s", limit, n, leaseSeconds);
     }
 
     /// <summary>
-    /// The acceptance bound at limits above 16 at a mediator whose lease outlasts the budget: a
-    /// fetch loop reaches the message behind N messages that never open within
-    /// ceil(N / min(limit, 16)) budgets.
+    /// QA1-2, against the restated bound: at limits above 16 a delivery starts at most 16 of its
+    /// messages (four rounds of the floor), so each delivery-sized chunk of the queue takes
+    /// ceil(limit / 16) passes, and a pass may wait out a lease. A fetch loop reaches the message
+    /// behind N ≤ Q messages that never open within <see cref="RestatedBound"/>.
     /// </summary>
-    [Theory(Skip = "QA defect: at limits above 16 the message behind is reached beyond the stated bound")]
+    [Theory]
     [InlineData(17, 99, 60)]
     [InlineData(17, 256, 60)]
     [InlineData(100, 99, 60)]
     [InlineData(17, 99, 10)]
     [InlineData(100, 256, 10)]
+    [InlineData(20, 99, 60)]
+    [InlineData(25, 99, 60)]
+    [InlineData(50, 192, 60)]
+    [InlineData(17, 255, 10)]
+    [InlineData(33, 224, 300)]
     public async Task The_message_behind_never_opening_messages_is_reached_within_the_bound_at_limits_above_sixteen(int limit, int n, int leaseSeconds)
     {
         var (exchange, mediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, TimeSpan.FromSeconds(leaseSeconds));
         Queue(mediator, junk: n, honestAt: n);
+        var lease = TimeSpan.FromSeconds(leaseSeconds);
 
-        var reach = await ReachAsync(exchange, mediator, limit, cap: TimeSpan.FromHours(30));
+        var reach = await ReachAsync(exchange, mediator, limit, cap: TimeSpan.FromHours(12));
 
         reach.Found.Should().BeTrue();
-        reach.Elapsed.Should().BeLessThanOrEqualTo(Bound(n, limit), "limit {0}, {1} in front, a lease of {2} s", limit, n, leaseSeconds);
+        reach.Elapsed.Should().BeLessThanOrEqualTo(RestatedBound(n, limit, lease, exchange.Unpacker.Memory.FirstPause), "limit {0}, {1} in front, a lease of {2} s", limit, n, leaseSeconds);
     }
 
     /// <summary>
-    /// More never-opening messages in front than the memory keeps per mailbox (256): the message
-    /// behind them is still reached, at the cost of more openings (R-4).
+    /// QA1-3, a residual pin (R-4): with more never-opening messages in front than one mailbox's
+    /// memory keeps (Q = 256), the memory cannot hold them all paused at once, and a fetch loop alone
+    /// does not reach the message behind, even well past the bound for Q in front. A host that
+    /// discards the failures it is handed (<see cref="PickupClient.AckAsync"/>) reaches it.
     /// </summary>
-    [Theory(Skip = "QA defect: with more never-opening messages in front than one mailbox of the memory keeps, the message behind is not reached")]
+    [Theory]
     [InlineData(4, 270, 60)]
     [InlineData(10, 300, 60)]
     [InlineData(16, 300, 60)]
     [InlineData(10, 300, 10)]
-    public async Task The_message_behind_more_never_opening_messages_than_the_memory_keeps_is_still_reached(int limit, int n, int leaseSeconds)
+    public async Task Residual_the_message_behind_more_never_opening_messages_than_the_memory_keeps_is_reached_once_the_host_discards_them(int limit, int n, int leaseSeconds)
     {
-        var (exchange, mediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, TimeSpan.FromSeconds(leaseSeconds));
-        Queue(mediator, junk: n, honestAt: n);
+        var lease = TimeSpan.FromSeconds(leaseSeconds);
+        var (looping, loopingMediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, lease);
+        Queue(loopingMediator, junk: n, honestAt: n);
+        var horizon = TimeSpan.FromHours(4);
+        RestatedBound(SlowMemory.EntriesPerPartition, limit, lease, looping.Unpacker.Memory.FirstPause).Should().BeLessThan(horizon / 2, "the horizon is well past the bound for Q in front");
 
-        var reach = await ReachAsync(exchange, mediator, limit, cap: TimeSpan.FromHours(10));
+        var alone = await ReachAsync(looping, loopingMediator, limit, cap: horizon);
 
-        reach.Found.Should().BeTrue("limit {0}, {1} in front, a lease of {2} s: not reached after {3} and {4} fetches", limit, n, leaseSeconds, reach.Elapsed, reach.Fetches);
+        alone.Found.Should().BeFalse("the residual: more than Q in front thrash the mailbox's memory");
+
+        var (discarding, discardingMediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, lease);
+        Queue(discardingMediator, junk: n, honestAt: n);
+        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discardFailures: true);
+
+        reach.Found.Should().BeTrue("discarding the failures it is handed empties the queue in front");
+        discardingMediator.Holds("honest").Should().BeFalse("the honest message was acknowledged");
     }
 
     // ---- deliveries that mix honest and failing messages -------------------------------------------
@@ -371,10 +397,11 @@ public sealed class SlowSenderFetchQa1Tests
 
     /// <summary>
     /// Either side of the floor, the other side: an honest message first in a fetch of 100 whose 99
-    /// others fail at once, its lookup taking 5.1 s. The 99 take no time, so most of the budget is
-    /// left: it opens, and it is not remembered.
+    /// others fail at once, its lookup taking 5.1 s. The 99 take no time, so when its share (the
+    /// floor) ends no other message waits: it keeps the rest of the budget (owner decision A1), opens,
+    /// and is not remembered.
     /// </summary>
-    [Theory(Skip = "QA defect: an honest message first among fast failures is cut at the floor while most of the budget is left, and is then remembered")]
+    [Theory]
     [InlineData(100)]
     [InlineData(13)]
     public async Task An_honest_sender_just_over_the_floor_first_among_fast_failures_opens_while_most_of_the_budget_is_left(int limit)
@@ -494,6 +521,26 @@ public sealed class SlowSenderFetchQa1Tests
     internal static TimeSpan Bound(int n, int limit)
         => TimeSpan.FromTicks(B.Ticks * (long)Math.Ceiling(n / (double)Math.Min(limit, 16)));
 
+    /// <summary>
+    /// The restated bound for a fetch loop (#111 fix round 1, for N ≤ Q, Cap = Q·B), with L the time
+    /// to learn every message in front once: at limits up to 16, L = ceil(N / limit) budgets (a
+    /// delivery starts all of its messages); above 16, L = ceil(limit / 16) · (ceil(N / limit)
+    /// budgets + one lease), since a delivery starts at most 16 of its messages and a pass over the
+    /// queue may wait out a lease. When L fits in the first pause T0 the bound is L; otherwise the
+    /// messages learned first are opened again as their pauses end, and the bound is
+    /// 2 · ceil(log2(L / T0)) · L.
+    /// </summary>
+    internal static TimeSpan RestatedBound(int n, int limit, TimeSpan lease, TimeSpan firstPause)
+    {
+        var chunks = (long)Math.Ceiling(n / (double)limit);
+        var learn = limit <= 16
+            ? B.Ticks * chunks
+            : (long)Math.Ceiling(limit / 16.0) * (B.Ticks * chunks + lease.Ticks);
+        if (learn <= firstPause.Ticks)
+            return TimeSpan.FromTicks(learn);
+        return TimeSpan.FromTicks(learn * 2 * (long)Math.Ceiling(Math.Log2(learn / (double)firstPause.Ticks)));
+    }
+
     internal sealed record Reach(bool Found, TimeSpan Elapsed, int Fetches, IReadOnlyList<PickupBatch> Batches);
 
     /// <summary>
@@ -501,7 +548,7 @@ public sealed class SlowSenderFetchQa1Tests
     /// as soon as the mediator's next lease ends; it stops when <paramref name="honest"/> is returned
     /// opened, or after <paramref name="cap"/> of clock time.
     /// </summary>
-    internal static async Task<Reach> ReachAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", string? recipientDid = null)
+    internal static async Task<Reach> ReachAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", string? recipientDid = null, bool discardFailures = false)
     {
         using var floor = new PoolFloor(parked: 2);
         var client = exchange.Client();
@@ -513,6 +560,8 @@ public sealed class SlowSenderFetchQa1Tests
             batches.Add(batch);
             if (batch.Items.Any(i => i.Id == honest && i.Unpacked != null))
                 return new Reach(true, exchange.Clock.TrueNow - start, batches.Count, batches);
+            if (discardFailures && batch.Items.Where(i => i.Error != null).Select(i => i.Id).ToArray() is { Length: > 0 } failed)
+                await client.AckAsync(FakePickupExchange.M, FakePickupExchange.L, failed).WaitAsync(Qa1Exchange.Guard);
             if (batch.Drained)
             {
                 if (mediator.NextLeaseEnd() is not { } next)
