@@ -151,11 +151,13 @@ internal interface IMediatorExchange
     /// Open the messages of one delivery — a fetch's answer, a live drain round's answer, or a live
     /// push — under one budget (<see cref="MediatorClientOptions.UnpackTimeout"/>, owner decision 2-A),
     /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> at a time (design D-19), each
-    /// with a share of the time left and every host unpack call reserved before it starts
+    /// with a share of the time left, cut at its share only while another message waits (owner
+    /// decision A1), and every host unpack call reserved before it starts
     /// (<see cref="DeliveredMessageUnpacker"/>, #111). A message remembered as slow to open in
     /// <paramref name="scope"/> fails at once without being opened (<see cref="SlowMemory"/>). A
-    /// message the budget, its share or a bound refuses is a <see cref="TimeoutException"/> failure
-    /// naming <paramref name="requestId"/>. Outcomes are in the order of <paramref name="messages"/>.
+    /// message held back, refused for a bound, cut, or still being opened when the budget ends is a
+    /// <see cref="TimeoutException"/> failure naming <paramref name="requestId"/>. Outcomes are in the
+    /// order of <paramref name="messages"/>.
     /// </summary>
     /// <param name="scope">The mediator and the mailbox the delivery came from, as the host's call named them (#111).</param>
     /// <param name="messages">The delivered messages (attachment id and bytes), in delivery order.</param>
