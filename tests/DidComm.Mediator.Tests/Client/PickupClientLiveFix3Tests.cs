@@ -32,7 +32,16 @@ public sealed class PickupClientLiveFix3Tests
         exchange.UseBudget(Budget);
         // Nothing is queued at the start; one interval later a delayed message is due; then nothing.
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Status(r), r => Delivery(r, ("late", "ok:late")), r => Status(r));
-        exchange.Unpacker = StallsUntilCancelled;
+        // Each slow push signals once its opening has started: its budget and its share exist then.
+        // That is the rendezvous, not a count of scheduled timers: the next cycle's alarm and the
+        // flush age are scheduled meanwhile (#111).
+        var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        exchange.Unpacker = (text, ct) =>
+        {
+            if (text.StartsWith("stall:", StringComparison.Ordinal))
+                Volatile.Read(ref stalled[0]).TrySetResult();
+            return StallsUntilCancelled(text, ct);
+        };
         exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
         {
             if (r.Live && exchange.SentOf(MessagePickup.LiveDeliveryChangeType).Count == 1)
@@ -42,26 +51,31 @@ public sealed class PickupClientLiveFix3Tests
 
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
-        var move = stream.MoveNextAsync().AsTask();
+        Task<bool> NextMove()
+        {
+            Volatile.Write(ref stalled[0], new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+            return stream.MoveNextAsync().AsTask();
+        }
+        var move = NextMove();
         var perInterval = (int)(exchange.Options.LivePollInterval.Ticks / Budget.Ticks);
         var items = new List<PickupItem>();
         try
         {
             for (var i = 0; i < 3 * perInterval; i++)
             {
-                // A slow push is being opened (its budget and its share); the next one is waiting.
-                await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout);
+                // A slow push is being opened (its budget and its share exist); the next one is waiting.
+                await Volatile.Read(ref stalled[0]).Task.WaitAsync(PickupTest.Timeout);
                 exchange.Registration!.TryPush(Push(($"s{i + 1}", $"stall:s{i + 1}"))).Should().BeTrue();
                 exchange.Clock.Advance(Budget);
                 (await PickupTest.Within(move)).Should().BeTrue();
                 items.Add(stream.Current);
-                move = stream.MoveNextAsync().AsTask();
+                move = NextMove();
                 if (i == perInterval - 1)
                 {
                     // The second cycle came due: its drain round runs before the waiting push.
                     (await PickupTest.Within(move)).Should().BeTrue();
                     items.Add(stream.Current);
-                    move = stream.MoveNextAsync().AsTask();
+                    move = NextMove();
                 }
             }
 

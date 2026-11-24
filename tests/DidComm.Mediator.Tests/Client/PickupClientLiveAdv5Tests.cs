@@ -71,21 +71,23 @@ public sealed class PickupClientLiveAdv5Tests
         Types(exchange).Should().Equal(LiveOn);
 
         // t0 + 1 s: the recovery cycle turns live mode on and drains (nothing queued); its drain ended
-        // at t0 + 1 s, so the next cycle is due at t0 + 61 s, and the stream waits for it.
+        // at t0 + 1 s, so the next cycle's alarm is armed then for t0 + 61 s, and the stream waits for
+        // it (the rendezvous is that alarm: the give-up alarm, of the same length, was armed before).
+        var mark = stepping.Inner.Mark();
         stepping.Inner.Advance(LiveDeliveryStream.FirstBackoff);
-        await exchange.WaitForSentAsync(3);
-        await stepping.Inner.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await stepping.Inner.WaitForTimerAsync(exchange.Options.LivePollInterval, mark, PickupTest.Timeout);
         Types(exchange).Should().Equal(LiveOn, LiveOn, Drain);
 
         // The host clock steps back half a second (to t0 + 0.5 s: below the drain's end, inside the old
-        // back-off). A push wakes the stream: the step's one early cycle runs, then the push is yielded.
+        // back-off). A push wakes the stream and is yielded.
         stepping.StepBack(TimeSpan.FromMilliseconds(500));
         exchange.Registration!.TryPush(Push(("q1", "ok:m1"))).Should().BeTrue();
         (await PickupTest.Within(first)).Should().BeTrue();
         stream.Current.Id.Should().Be("q1");
-        // Aligned with the ADV5-1 fix: the early cycle is a whole cycle — live-on and its drain round
-        // (before the fix its drain stayed gated by the old back-off, which is what made the loop spin).
-        Types(exchange).Should().Equal(new[] { LiveOn, LiveOn, Drain, LiveOn, Drain }, "the step costs one early cycle (ADV3-5), its drain included");
+        // Updated in #111: the stream decides "due" by alarms, never by comparing clock readings, so
+        // the step costs no early cycle (with the ADV5-1 fix it cost one whole cycle, live-on and its
+        // drain round; before that fix its drain stayed gated by the old back-off and the loop spun).
+        Types(exchange).Should().Equal(new[] { LiveOn, LiveOn, Drain }, "a step of the clock costs no cycle");
         var sentBefore = exchange.Sent.Count;
 
         // The consumer asks for the next item. Nothing is due but the drain round after the back-off:
@@ -209,27 +211,19 @@ public sealed class PickupClientLiveAdv5Tests
     }
 
     /// <summary>
-    /// ADV5-3 (known limit deferred to #111 by owner decision; Low; pre-existing in #96, unchanged by the R1-1 fix). Property broken —
-    /// <see cref="PickupClient.ReceiveLiveAsync"/>: "Five failures in a row end the stream with the
-    /// last exception"; <c>&lt;exception cref="TimeoutException"&gt;</c>: "five steps in a row got no
-    /// answer"; <see cref="LiveDeliveryStream"/> remarks: "five in a row end the stream".
+    /// ADV5-3 (was a known limit deferred to #111 by owner decision; Low; fixed in #111: progress
+    /// ends the run of failures). Property checked — <see cref="LiveDeliveryStream"/> remarks: "Progress
+    /// ends the run ... a delivery ... that brings at least one message this stream neither holds nor
+    /// has yielded as a failure in the current drain, or an acknowledgement the mediator accepted. So
+    /// failures separated by progress never add up to a give-up, however many there are."
     /// <para>
-    /// Attack: the failure count is reset only by <c>DrainDone</c> (a drain that ran to its end), never
-    /// by a step that succeeded. A drain that makes progress and then has one step time out — a long
-    /// backlog over a lossy link, a mediator whose second round of a large queue is slow — fails its
-    /// cycle every time, so the count climbs across cycles in which live mode was turned on, a
-    /// delivery was received and yielded, and its acknowledgement was accepted. Here each cycle
-    /// yields one new message and acknowledges it, then its next round times out: after five such
-    /// cycles (five messages delivered, fifteen successful exchanges) the stream ends with a
-    /// <see cref="TimeoutException"/>, although no two failures were in a row. With 5 % loss and a
-    /// backlog of a few hundred messages a drain rarely completes, so the stream ends after about five
-    /// lost requests spread over hundreds of successful ones.
+    /// Each cycle turns live mode on, receives one new message, yields it and has it acknowledged,
+    /// then its next drain round times out. Checked: twelve such cycles, more than RequestTimeout +
+    /// 30 s of failures apart from the progress between them, do not end the stream, and every
+    /// message arrives and is acknowledged.
     /// </para>
     /// </summary>
-    // Aligned with the ADV5-2 fix (time-based give-up): the run of failures is still reset only by a
-    // completed drain, so scattered failures across delivering cycles end the stream once the run is
-    // older than RequestTimeout + 30 s (here at the seventh such cycle, about 61 s), not at the fifth.
-    [Fact(Skip = "Known limit, deferred to #111: the run of failures is reset only when a drain completes, so failures separated by successful steps still end the stream once the run is older than RequestTimeout + 30 s (ADV5-3).")]
+    [Fact]
     public async Task ADV5_3_failures_separated_by_successful_steps_and_delivered_messages_still_end_the_stream_as_five_in_a_row()
     {
         var (exchange, client) = Live(o => o.LivePollInterval = TimeSpan.FromSeconds(60));
@@ -279,25 +273,20 @@ public sealed class PickupClientLiveAdv5Tests
     }
 
     /// <summary>
-    /// ADV5-4 (known limit deferred to #111 by owner decision; Low; pre-existing in #96, unchanged by the R1-1 fix). Property broken —
-    /// <see cref="PickupClient.ReceiveLiveAsync"/>: "A mediator that does not set delivered messages
-    /// aside delivers it on every drain", and the drain is the poll that runs "one
-    /// <see cref="MediatorClientOptions.LivePollInterval"/> after each such round ends" — a request
-    /// rate per interval, not a burst.
+    /// ADV5-4 (was a known limit deferred to #111 by owner decision; Low; fixed in #111: a drain round
+    /// that brings nothing new ends the drain). Property checked — <see cref="LiveDeliveryStream"/>
+    /// remarks: "A mediator that does not set delivered messages aside answers every round with the
+    /// head of its queue, so a message there that never opens is yielded once per cycle, at a cost of
+    /// two delivery requests per cycle".
     /// <para>
-    /// Attack: Message Pickup 3.0 does not require a mediator to set delivered messages aside: a
+    /// Message Pickup 3.0 does not require a mediator to set delivered messages aside: a
     /// spec-conformant mediator answers every <c>delivery-request</c> with the head of the queue until
-    /// it is acknowledged. A drain ends only at a <c>status</c>, an empty delivery, a failure or 50
-    /// rounds, and a round whose messages all fail to open is none of those. So one message no
-    /// agent can open (junk from anyone who can send a forward to the recipient, or a sender whose
-    /// DID never resolves) at the head of such a mediator's queue turns every cycle into 50
-    /// back-to-back <c>delivery-request</c>s, each answered with the same message, which the stream
-    /// yields as the same failed item 50 times per cycle — 50 requests per second at the 1 s
-    /// interval, for as long as the host has not discarded it. Ten such messages yield 500 failed
-    /// items per cycle and block every message behind them.
+    /// it is acknowledged. Here every round is answered with the same message, which never opens.
+    /// Checked: one cycle sends at most two delivery requests, and the stream then waits for its next
+    /// cycle (the first timer it arms after the drain ends is that cycle's alarm).
     /// </para>
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111: at a mediator that does not set delivered messages aside, one message that never opens makes every drain send 50 requests and yield it 50 times (ADV5-4).")]
+    [Fact]
     public async Task ADV5_4_one_failing_message_at_a_mediator_that_does_not_lease_makes_every_drain_send_fifty_requests_and_yield_it_fifty_times()
     {
         var (exchange, client) = Live(o => o.LivePollInterval = TimeSpan.FromSeconds(60));
@@ -375,11 +364,14 @@ public sealed class PickupClientLiveAdv5Tests
         });
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
 
-        for (var i = 1; i <= LiveDeliveryStream.MaxDrainRounds; i++)
+        for (var i = 1; i < LiveDeliveryStream.MaxDrainRounds; i++)
             (await Next(stream)).Id.Should().Be($"q{i}");
+        // The fiftieth round ends the drain, and the next cycle's alarm is armed with its answer
+        // (#111): the mark is taken before that round.
         var mark = exchange.Clock.Mark();
+        (await Next(stream)).Id.Should().Be($"q{LiveDeliveryStream.MaxDrainRounds}");
         var next = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout); // the wait for the next cycle, one interval after the fiftieth answer
+        await exchange.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout); // the next cycle's alarm, one interval after the fiftieth answer
 
         var types = Types(exchange);
         types.Count(t => t == LiveOn).Should().Be(1, "a started cycle is never pre-empted: {0}", string.Join(", ", types));
@@ -472,14 +464,16 @@ public sealed class PickupClientLiveAdv5Tests
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
 
         (await Next(stream)).Id.Should().Be("q1");
+        var mark = exchange.Clock.Mark();
         var second = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout); // the back-off after the failed acknowledgement
+        await exchange.Clock.WaitForTimerAsync(LiveDeliveryStream.FirstBackoff, mark, PickupTest.Timeout); // the back-off's alarm after the failed acknowledgement
         Types(exchange).Should().Equal(LiveOn, Drain, Ack);
         exchange.Clock.Advance(LiveDeliveryStream.FirstBackoff);
         (await PickupTest.Within(second)).Should().BeTrue();
         stream.Current.Id.Should().Be("q2");
+        mark = exchange.Clock.Mark();
         var third = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await exchange.Clock.WaitForTimerAsync(Interval, mark, PickupTest.Timeout); // the drain ended: the next cycle's alarm
 
         Types(exchange).Should().Equal(LiveOn, Drain, Ack, Ack, LiveOn, Drain, Ack, Drain);
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q1", "q2" }, "q1 is kept after the failed attempt and sent again once; q2 follows");
@@ -608,14 +602,10 @@ public sealed class PickupClientLiveAdv5Tests
         var first = stream.MoveNextAsync().AsTask();
         // Aligned with the ADV5-2 fix (PR #112): the stream now gives up on time, once its steps have
         // kept failing for longer than RequestTimeout + 30 s, not at the fifth failure. Each failure
-        // here costs a whole RequestTimeout, so fewer attempts fit in that time.
-        for (var pause = 1; pause <= 64 && !first.IsCompleted; pause *= 2)
-        {
-            var timer = exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-            if (await Task.WhenAny(first, timer).WaitAsync(PickupTest.Timeout) == first)
-                break;
-            exchange.Clock.Advance(TimeSpan.FromSeconds(Math.Min(pause, 30)));
-        }
+        // here costs a whole RequestTimeout, so fewer attempts fit in that time. The clock moves to
+        // the end of each back-off once its alarm exists (#111: the give-up alarm, armed at the first
+        // failure, is scheduled meanwhile, so "a timer is scheduled" is no rendezvous).
+        await AdvanceUntilAsync(exchange, first, maxSeconds: 120);
 
         await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TimeoutException>();
         await PickupTest.Within(stream.DisposeAsync());
@@ -687,16 +677,21 @@ public sealed class PickupClientLiveAdv5Tests
         return DefaultOutcome(text);
     }
 
-    // Move the clock one second at a time while the stream waits on a timer, until `move` finishes
-    // (or `maxSeconds` have passed on the clock).
+    // While the stream backs off, move the clock to the end of each back-off, until `move` finishes
+    // (or `maxSeconds` have passed on the clock): wait for the back-off's alarm — a scheduled timer
+    // of one of the back-off lengths — and move the clock by exactly its length, never before it
+    // exists (L-065 rule 3). Neither the give-up alarm nor the flush age has one of these lengths
+    // here, and both stay scheduled while the stream works, so "a timer is scheduled" would be a
+    // neighbour of the event.
     private static async Task AdvanceUntilAsync(FakePickupExchange exchange, Task move, int maxSeconds)
     {
-        for (var i = 0; i < maxSeconds && !move.IsCompleted; i++)
+        var moved = TimeSpan.Zero;
+        while (!move.IsCompleted && moved < TimeSpan.FromSeconds(maxSeconds))
         {
-            await Adv5Wait.MoveOrTimerAsync(exchange.Clock, move);
-            if (move.IsCompleted)
+            if (await Adv5Wait.BackoffAlarmAsync(exchange.Clock, move) is not { } backoff)
                 return;
-            exchange.Clock.Advance(TimeSpan.FromSeconds(1));
+            exchange.Clock.Advance(backoff);
+            moved += backoff;
         }
     }
 

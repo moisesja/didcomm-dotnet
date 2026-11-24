@@ -65,4 +65,28 @@ internal static class Adv5Wait
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         await Task.WhenAny(move, timer);
     }
+
+    private static readonly TimeSpan[] BackoffLengths = Enumerable.Range(1, 6).Select(DidComm.Mediator.Client.Internal.LiveDeliveryStream.Backoff).ToArray();
+
+    /// <summary>
+    /// Wait (bounded, in real time) until <paramref name="move"/> finishes, or a live stream's
+    /// back-off alarm is armed on <paramref name="clock"/>: a scheduled timer of one of the back-off
+    /// lengths (1, 2, 4, 8, 16 or 30 s). Returns that length, or <c>null</c> when the move finished
+    /// first. Several waits are raced, one per length; those that lose end on their own, and their
+    /// time-outs are observed here. Fails (the hang guard) when neither comes.
+    /// </summary>
+    public static async Task<TimeSpan?> BackoffAlarmAsync(Pipeline.ManualTimeProvider clock, Task move)
+    {
+        var waits = BackoffLengths.Select(length => clock.WaitForTimerAsync(length, createdAfter: 0, PickupTest.Timeout)).ToArray();
+        foreach (var wait in waits)
+        {
+            _ = wait.ContinueWith(static t => _ = t.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+        var first = await Task.WhenAny(waits.Append(move));
+        if (first == move)
+            return null;
+        await first; // a time-out here is the hang guard: no back-off alarm and no item
+        return BackoffLengths[Array.IndexOf(waits, first)];
+    }
 }
