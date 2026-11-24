@@ -448,7 +448,10 @@ public sealed class PickupClientLiveSchedulingTests
             exchange.Clock.Advance(LiveDeliveryStream.MaxBackoff);
         }
 
-        var thrown = (await FluentActions.Awaiting(() => PickupTest.Within(move)).Should().ThrowAsync<TimeoutException>()).Which;
+        // Only the move is captured (L-067); a stream that did not end is stopped before it is disposed.
+        var thrown = await Record.ExceptionAsync(() => PickupTest.Within(move));
+        await cts.CancelAsync();
+        _ = await Record.ExceptionAsync(() => move.WaitAsync(PickupTest.Timeout));
         await PickupTest.Within(stream.DisposeAsync());
         TimeoutException expected;
         lock (failures)
