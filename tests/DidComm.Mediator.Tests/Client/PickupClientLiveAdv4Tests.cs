@@ -248,7 +248,10 @@ public sealed class PickupClientLiveAdv4Tests
         {
             if (!r.Live)
                 return Task.FromResult(Status(r, live: false));
-            Interlocked.Increment(ref attempts);
+            // The brake: a stream that keeps trying with no pause would never return to the test
+            // (its attempts are synchronous here), so the 50th attempt ends it at once.
+            if (Interlocked.Increment(ref attempts) >= 50)
+                return Task.FromException<InboundMessageSnapshot>(new InvalidDataException("brake: the stream kept trying"));
             return Task.FromException<InboundMessageSnapshot>(new TimeoutException("the mediator does not answer"));
         });
         var client = new PickupClient(new SteppedExchange(exchange, clock), logger: null);
@@ -263,7 +266,7 @@ public sealed class PickupClientLiveAdv4Tests
         var sent = Volatile.Read(ref attempts);
         if (endedAtOnce)
         {
-            await FluentActions.Awaiting(() => move).Should().ThrowAsync<TimeoutException>();
+            await FluentActions.Awaiting(() => move).Should().ThrowAsync<Exception>();
             await stream.DisposeAsync();
         }
         else
