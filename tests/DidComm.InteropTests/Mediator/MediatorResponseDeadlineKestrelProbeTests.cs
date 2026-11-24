@@ -53,7 +53,7 @@ public sealed class MediatorResponseDeadlineKestrelProbeTests
     [Adv98ProbeFact]
     public async Task On_Kestrel_a_pipelining_client_that_never_reads_loses_its_reservation_at_the_forward_deadline_and_its_connection()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var requests = new ProbeRequestTracker();
         await using var host = await ProbeKestrel.StartAsync(requests);
         var handler = host.App.Services.GetRequiredService<ForwardHandler>();
@@ -99,7 +99,7 @@ public sealed class MediatorResponseDeadlineKestrelProbeTests
     [Adv98ProbeFact]
     public async Task On_Kestrel_a_delivery_that_is_never_read_is_aborted_at_the_lease_and_its_records_stay_queued()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var lease = TimeSpan.FromSeconds(5);
         var requests = new ProbeRequestTracker();
         await using var host = await ProbeKestrel.StartAsync(requests, m => m.Pickup.LeaseTimeout = lease);

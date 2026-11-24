@@ -16,9 +16,12 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// (but the caller's own cancellation), nothing delivered that should not be, nothing deleted on a
 /// garbage answer, and no lease left behind.
 /// </summary>
-public sealed class MessagePickupAdversarialResourceSeamTests
+public sealed class MessagePickupAdversarialResourceSeamTests : IDisposable
 {
-    public MessagePickupAdversarialResourceSeamTests() => MessagePickupAdversarialResource.RaiseThreadPoolFloor();
+    // Held for each test and put back when it ends (xunit disposes the instance after its test).
+    private readonly IDisposable _floor = MessagePickupAdversarialResource.RaiseThreadPoolFloor();
+
+    public void Dispose() => _floor.Dispose();
 
     // ---- the mediation registry answers with something that is not a grant -------------------------
 

@@ -36,13 +36,12 @@ public sealed class QaSerialTiming
 /// </summary>
 internal static class Qa
 {
-    /// <summary>The thread-pool floor the QA tests raise to before blocking threads (CI runners have 2 cores).</summary>
-    public static void RaiseThreadPoolFloor(int minimum = 64)
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        if (worker < minimum || io < minimum)
-            ThreadPool.SetMinThreads(Math.Max(worker, minimum), Math.Max(io, minimum));
-    }
+    /// <summary>
+    /// The thread-pool floor the QA tests raise to before blocking threads (CI runners have 2 cores),
+    /// worker and I/O, until the result is disposed (<see cref="DidComm.TestSupport.ThreadPoolFloor"/>,
+    /// counted: never lowered while another test holds a raise). Hold it for the whole test.
+    /// </summary>
+    public static IDisposable RaiseThreadPoolFloor(int minimum = 64) => DidComm.TestSupport.ThreadPoolFloor.Raise(minimum, minimum);
 
     /// <summary>Set a raw <c>delay_milli</c> header value on a forward.</summary>
     public static Action<Message> DelayRaw(JsonElement value)

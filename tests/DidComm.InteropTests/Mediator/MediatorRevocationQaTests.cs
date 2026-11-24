@@ -89,7 +89,7 @@ public sealed class MediatorRevocationQaTests
         // Invariant for every interleaving (L-044): once the revoke has returned and every admitted
         // forward has been relayed, nothing is held for the revoked grant, and each forward ended
         // with exactly one outcome — Queued (stored before the purge, then purged) or Dropped-Unknown.
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);

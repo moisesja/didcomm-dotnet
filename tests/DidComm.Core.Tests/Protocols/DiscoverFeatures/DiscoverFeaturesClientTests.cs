@@ -561,7 +561,7 @@ public sealed class DiscoverFeaturesClientTests
     [Fact]
     public async Task Disclosure_parsing_runs_after_the_inline_correlator_returns()
     {
-        ThreadPoolFloor.Raise(1); // the parser below parks a pool thread until the test lets it go
+        using var floor = DidComm.TestSupport.ThreadPoolFloor.ForParked(1); // the parser below parks a pool thread until the test lets it go
         var sent = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
         var parserStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseParser = new ManualResetEventSlim();

@@ -233,7 +233,7 @@ public sealed class ForwardPeelAdvTests
     [Fact]
     public async Task ADV1_D1_A_self_addressed_forward_whose_inner_layer_resolves_a_slow_DID_does_not_hold_up_other_recipients_forwards()
     {
-        RaiseThreadPoolFloor();
+        using var floor = RaiseThreadPoolFloor();
         await using var f = await Fixture.CreateAsync(capacity: 2);
         var poisoned = f.SelfAddressed(await f.SignedByTarpitAsync(Forward(Bob)));
 
@@ -307,14 +307,10 @@ public sealed class ForwardPeelAdvTests
 
     /// <summary>
     /// The signer lookup is sync-over-async (the JWS verifier's contract), so a parked resolution
-    /// holds a thread-pool thread: raise the floor so the rest of the test never waits for injection.
+    /// holds a thread-pool thread: raise the floor so the rest of the test never waits for injection,
+    /// until the result is disposed (<see cref="DidComm.TestSupport.ThreadPoolFloor"/>, counted).
     /// </summary>
-    private static void RaiseThreadPoolFloor(int minimum = 64)
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        if (worker < minimum || io < minimum)
-            ThreadPool.SetMinThreads(Math.Max(worker, minimum), Math.Max(io, minimum));
-    }
+    private static IDisposable RaiseThreadPoolFloor(int minimum = 64) => DidComm.TestSupport.ThreadPoolFloor.Raise(minimum, minimum);
 
     private static async Task<bool> PollAsync(Func<bool> condition, TimeSpan timeout)
     {

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using DidComm.Mediator.Coordination;
 using DidComm.Mediator.Pickup;
 using DidComm.Messages;
+using DidComm.TestSupport;
 
 namespace DidComm.Mediator.Tests.Pickup;
 
@@ -104,14 +105,10 @@ internal static class MessagePickupAdversarialResource
 
     /// <summary>
     /// Tests that park a call on a rendezvous keep a thread-pool thread per parked call; CI runners
-    /// have two cores, so the floor is raised once (never lowered).
+    /// have two cores, so the floor is raised until the result is disposed (<see cref="ThreadPoolFloor"/>,
+    /// counted: never lowered while another test holds a raise). Hold it for the whole test.
     /// </summary>
-    public static void RaiseThreadPoolFloor(int needed = 32)
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        if (worker < needed)
-            ThreadPool.SetMinThreads(needed, io);
-    }
+    public static IDisposable RaiseThreadPoolFloor(int needed = 32) => ThreadPoolFloor.Raise(needed);
 
     /// <summary>Poll <paramref name="condition"/> until it holds; fail at the deadline. Only for effects the product produces on the thread pool with nothing to rendezvous with.</summary>
     public static async Task UntilAsync(Func<Task<bool>> condition, string because)

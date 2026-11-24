@@ -116,7 +116,7 @@ public sealed class MediatorMatrixQaTests
     [Fact]
     public async Task Many_senders_many_grants_and_several_recipient_DIDs_per_grant_concurrently_lose_nothing_duplicate_nothing_and_cross_nothing()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         const int Grants = 4;
         const int DidsPerGrant = 2;
         const int Senders = 3;

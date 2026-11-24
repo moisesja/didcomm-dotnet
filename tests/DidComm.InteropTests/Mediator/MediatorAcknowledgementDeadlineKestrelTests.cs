@@ -41,11 +41,14 @@ namespace DidComm.InteropTests.Mediator;
 /// "past the deadline" needs no real waiting; the slow cleanup is held by the test, not slept.
 /// </summary>
 [Collection(QaSerialTiming.Name)]
-public sealed class MediatorAcknowledgementDeadlineKestrelTests
+public sealed class MediatorAcknowledgementDeadlineKestrelTests : IDisposable
 {
     private const string DeadlineLine = "was not committed within its deadline";
 
-    public MediatorAcknowledgementDeadlineKestrelTests() => Qa.RaiseThreadPoolFloor();
+    // Held for each test and put back when it ends (xunit disposes the instance after its test).
+    private readonly IDisposable _floor = Qa.RaiseThreadPoolFloor();
+
+    public void Dispose() => _floor.Dispose();
 
     [Theory]
     [InlineData(false)]

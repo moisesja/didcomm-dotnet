@@ -33,7 +33,7 @@ public sealed class MediatorAcknowledgementDeadlineTests
     [Fact]
     public async Task A_stranger_holding_1024_uncommitted_202s_loses_every_reservation_at_the_deadline_and_another_tenants_forward_is_queued()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var time = new QaManualTimeProvider();
         var responses = new DeadlineResponseTracker(HttpMethods.Post);
         await using var mediator = await StartAsync(time, responses);
@@ -87,7 +87,7 @@ public sealed class MediatorAcknowledgementDeadlineTests
     [Fact]
     public async Task A_stranger_filling_the_64_MiB_budget_with_uncommitted_202s_denies_other_tenants_only_until_the_deadline()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var time = new QaManualTimeProvider();
         var responses = new DeadlineResponseTracker(HttpMethods.Post);
         await using var mediator = await StartAsync(time, responses);

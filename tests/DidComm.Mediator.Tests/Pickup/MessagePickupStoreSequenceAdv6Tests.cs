@@ -20,7 +20,7 @@ public sealed class MessagePickupStoreSequenceAdv6Tests
     {
         const int Writers = 16;
         const int PerWriter = 200;
-        RaiseThreadPoolFloor(Writers);
+        using var floor = RaiseThreadPoolFloor(Writers);
         // Bob's quota is small: most of its enqueues are refused while the others succeed around them.
         var store = NewStore(queueMessages: 100);
         var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -60,7 +60,7 @@ public sealed class MessagePickupStoreSequenceAdv6Tests
         const int Writers = 8;
         const int PerWriter = 150;
         const int Readers = 4;
-        RaiseThreadPoolFloor(Writers + Readers);
+        using var floor = RaiseThreadPoolFloor(Writers + Readers);
         var store = NewStore();
         var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         // L-044: the overlap is forced, not hoped for. Every writer stops halfway until every reader
@@ -153,7 +153,7 @@ public sealed class MessagePickupStoreSequenceAdv6Tests
         const int Writers = 6;
         const int PerWriter = 100;
         const int Takers = 6;
-        RaiseThreadPoolFloor(Writers + Takers);
+        using var floor = RaiseThreadPoolFloor(Writers + Takers);
         var store = NewStore();
         for (var i = 0; i < 50; i++)
             await store.AddAsync(Message($"before-{i}"));
