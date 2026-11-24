@@ -372,15 +372,17 @@ public sealed class DeliveredUnpackSlowSenderTests
     /// <summary>
     /// T11 (I-1, I-2): thousands of deliveries over three mailboxes, with named and anonymous senders
     /// and every kind of message — opens, fails at once, fails after a second, honours its share,
-    /// ignores its token and ends later, held back — and callers that cancel mid-delivery. Once the
-    /// late lookups end, nothing is reserved and no partition is left (no release is missed or
-    /// doubled), and no timer is scheduled.
+    /// ignores its token and ends later, held back — and callers that cancel mid-delivery. After every
+    /// round the reservations held are exactly the lookups still running (no release missed or
+    /// doubled); once the late lookups end, nothing is reserved, no partition is left and no timer is
+    /// scheduled.
     /// </summary>
     [Fact]
     public async Task Thousands_of_mixed_deliveries_over_mailboxes_and_senders_end_with_nothing_reserved()
     {
         var time = new ManualTimeProvider();
         var late = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lateRunning = 0;
         var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
@@ -392,7 +394,17 @@ public sealed class DeliveredUnpackSlowSenderTests
                     await Task.Delay(TimeSpan.FromSeconds(1), time, ct);
                     throw new CryptoException("JWE could not be decrypted.");
                 case 's': return await UnpackFakes.StallUntilCancelled(ct);
-                case 'l': return await late.Task; // ignores its token, ends when released
+                case 'l':
+                    // Ignores its token, ends when released; counted while it runs.
+                    Interlocked.Increment(ref lateRunning);
+                    try
+                    {
+                        return await late.Task;
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref lateRunning);
+                    }
             }
             return UnpackFakes.Opened(label);
         }, Budget, time);
@@ -438,6 +450,9 @@ public sealed class DeliveredUnpackSlowSenderTests
             }
             maxReserved = Math.Max(maxReserved, unpacker.Reserved);
             unpacker.Reserved.Should().BeLessThanOrEqualTo(UnpackReservations.MaxReserved);
+            // Every other lookup of the round ends on its own (on the pool); the late ones still run.
+            unpacker.Reserved.Should().BeGreaterThanOrEqualTo(Volatile.Read(ref lateRunning), "a running lookup keeps its reservation");
+            SpinWait.SpinUntil(() => unpacker.Reserved == Volatile.Read(ref lateRunning), RealTime).Should().BeTrue("the reservations held are exactly the lookups still running (round {0})", round);
             if (round % 50 == 49)
             {
                 late.TrySetResult(UnpackFakes.Opened("late"));
