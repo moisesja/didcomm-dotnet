@@ -37,12 +37,13 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// live delivery — is <c>AddMediator()</c> plus <c>MapDidCommMediator(...)</c>. Then the same roles
 /// composed by hand: with a container, behind the library's endpoint, which runs replay protection
 /// for you; and without one, where your own receive path must run that check before it dispatches.
-/// Last, the replay protection itself and the clock rule it implies. The mediator serves both
+/// Then the replay protection itself and the clock rule it implies. Last, the optional push of a
+/// stored message to the recipient's own endpoint (<c>DirectPush</c>, off by default). The mediator serves both
 /// versions of Message Pickup, 3.0 and 4.0, over one mailbox per recipient (<c>Pickup.EnableV4</c>
 /// turns 4.0 off). The mediator references the <c>DidComm.Mediator</c> and
 /// <c>DidComm.Mediator.AspNetCore</c> packages; a wallet references <c>DidComm.Mediator.Client</c>
 /// and a transport.
-/// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-MED-10, FR-PICK-01..10, FR-PICK-12, FR-ROUTE-09..11, FR-RR-08).
+/// Maps to PRD §14.2 task FF (FR-MED-01..08, FR-MED-10, FR-PICK-01..10, FR-PICK-12, FR-ROUTE-09..11, FR-RR-08; FF.4: FR-PICK-09 step 3, FR-ROUTE-06 receiver side).
 /// </summary>
 public static class Section_FF_MinimalMediator
 {
@@ -67,6 +68,7 @@ public static class Section_FF_MinimalMediator
         await RunWithContainerAsync(ctx, wallet, walletSecrets, alice);
         await RunWithoutContainerAsync(ctx);
         RunReplayGuard(ctx);
+        await RunDirectPushAsync(ctx);
     }
 
     // ── FF.1 The 20 lines ─────────────────────────────────────────────────────────────────────────
@@ -505,6 +507,135 @@ public static class Section_FF_MinimalMediator
             MediatorServiceProtocols.IsReplayExempt("https://didcomm.org/routing/2.0/forward"));
     }
 
+    // ── FF.4 Push to the recipient's own endpoint (DirectPush) ───────────────────────────────────
+    private static async Task RunDirectPushAsync(CookbookContext ctx)
+    {
+        var narrator = ctx.Narrator;
+        narrator.Step("FF.4 Optional: push each stored message to the recipient's own endpoint (DirectPush).");
+
+        // A recipient with no live connection normally collects its messages itself (pickup). With
+        // DirectPush on, the mediator also posts each stored message to the recipient's own
+        // endpoint: the one your directory names for that recipient, never one a message carries.
+        // It is off by default.
+        narrator.Value("MediatorOptions.DirectPush by default", new MediatorOptions().DirectPush);
+
+        var mediatorDid = (await MintAsync(ctx, service: null)).Did; // nothing is started: no address needed
+        var services = new ServiceCollection();
+        // Yours, registered before AddMediator(): your operator fills it when a recipient enrols,
+        // keyed by the DID the recipient enrolled with.
+        services.AddSingleton<IRecipientEndpointDirectory>(new EndpointDirectory(new Dictionary<string, Uri>(StringComparer.Ordinal)
+        {
+            [ctx.Bob.Did] = new Uri("https://bob.example/didcomm"),
+        }));
+        services.AddDidComm(b => b
+            .UseNetDidResolver()
+            .UseSecretsResolver(new InMemorySecretsResolver())
+            .UseHttpTransport() // the push goes out over HTTP, through the outbound guard
+            .AddMediator(o =>
+            {
+                o.CoordinateMediation.RoutingDids.Add(mediatorDid);
+                o.DirectPush = true;
+            }));
+        narrator.Value("AddMediator() with DirectPush and a directory", "accepted");
+        narrator.Note("One attempt per message, never retried: a 2xx removes it from the mailbox; anything else leaves it there for pickup. A 307 redirect is followed a few hops, each new address checked by the outbound guard; 301, 302, 303 and 308 are not followed.");
+
+        // Together with re-wrapping too. With RewrapMode.ReanoncryptToNext the mediator wraps each
+        // message once more, in a forward of its own addressed to the recipient itself, and that is
+        // what it stores and pushes. The DIDComm spec tells receivers to expect such a
+        // double-packaged message, and your recipients' ordinary MapDidCommEndpoint opens it.
+        new ServiceCollection().AddDidComm(b => b
+            .UseNetDidResolver()
+            .UseSecretsResolver(new InMemorySecretsResolver())
+            .UseHttpTransport()
+            .AddMediator(o =>
+            {
+                o.CoordinateMediation.RoutingDids.Add(mediatorDid);
+                o.RewrapMode = RewrapMode.ReanoncryptToNext;
+                o.DirectPush = true;
+            }));
+        narrator.Value("DirectPush with RewrapMode.ReanoncryptToNext", "accepted");
+        await RunRewrappedPushAsync(ctx);
+    }
+
+    // What the recipient's end does with a re-wrapped push. Bob's inbox is an ordinary
+    // MapDidCommEndpoint. The mediator's side is done by hand here: its re-wrapping step (the
+    // ForwardProcessor that AddMediator() builds, in ReanoncryptToNext), then one POST of what it
+    // stored, as a direct push sends it.
+    private static async Task RunRewrappedPushAsync(CookbookContext ctx)
+    {
+        var narrator = ctx.Narrator;
+        var received = new TaskCompletionSource<UnpackResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inbox = await LoopbackPort.StartAsync(async port =>
+        {
+            var builder = WebApplication.CreateBuilder();
+            builder.Logging.ClearProviders();
+            builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+            builder.Services.AddDidComm(b => b
+                .UseNetDidResolver()
+                .UseSecretsResolver(new InMemorySecretsResolver(ctx.Bob.Privates)));
+            var app = builder.Build();
+            // Nothing to configure: the endpoint opens a forward addressed to Bob himself (at most
+            // 8 layers) and hands the callback the message inside.
+            app.MapDidCommEndpoint("/didcomm", (unpacked, _) =>
+            {
+                received.TrySetResult(unpacked);
+                return Task.CompletedTask;
+            });
+            try
+            {
+                await app.StartAsync();
+            }
+            catch
+            {
+                await app.DisposeAsync();
+                throw;
+            }
+            return app;
+        });
+        try
+        {
+            var mediatorSecrets = new InMemorySecretsResolver();
+            var mediatorIdentity = await MintAsync(ctx, service: null);
+            foreach (var jwk in mediatorIdentity.Privates) mediatorSecrets.Add(jwk);
+            await using var mediator = BuildHttpAgent(mediatorSecrets, more: null);
+            var mediatorClient = mediator.GetRequiredService<DidCommClient>();
+            var rewrapping = new ForwardProcessor(
+                mediatorClient,
+                mediator.GetRequiredService<IDidKeyService>(),
+                new ForwardProcessorOptions(RewrapMode.ReanoncryptToNext),
+                new StaticRecipientRoutingKeyProvider(null),
+                mediator.GetRequiredService<IOptions<DidCommOptions>>().Value);
+
+            // Alice's message for Bob, in a forward for the mediator (what SendAsync builds).
+            await using var alice = BuildHttpAgent(new InMemorySecretsResolver(ctx.Alice.Privates), more: null);
+            var aliceClient = alice.GetRequiredService<DidCommClient>();
+            var note = new MessageBuilder()
+                .WithType("https://didcomm.org/basicmessage/2.0/message")
+                .WithFrom(ctx.Alice.Did)
+                .WithTo(ctx.Bob.Did)
+                .WithBody(new JsonObject { ["content"] = "Hello Bob, wrapped once more by the mediator" })
+                .Build();
+            var forBob = await aliceClient.PackEncryptedAsync(note, new PackEncryptedOptions(Recipients: new[] { ctx.Bob.Did }, From: ctx.Alice.Did));
+            var forward = await aliceClient.PackEncryptedAsync(
+                ForwardMessage.Create(mediatorIdentity.Did, ctx.Bob.Did, new[] { forBob.Message }),
+                new PackEncryptedOptions(Recipients: new[] { mediatorIdentity.Did }));
+
+            // The mediator's re-wrap: a fresh forward to Bob, with Bob as its next.
+            var stored = await rewrapping.ProcessAsync(forward.Message);
+            var pushed = await mediatorClient.SendPackedAsync(stored.OnwardPacked, new Uri(inbox.Urls.Single() + "/didcomm"), MediaTypes.Encrypted);
+            narrator.Value("[bob] his inbox answered the push with HTTP", pushed.HttpStatusCode);
+
+            var opened = await AwaitOrFailAsync(received.Task, "Bob's inbox");
+            narrator.Value("[bob] his callback got", opened.Message.Body?["content"]?.GetValue<string>());
+            narrator.Value("[bob] authcrypted by Alice, as she sent it", DidSubject(opened.SenderKid ?? string.Empty) == ctx.Alice.Did);
+        }
+        finally
+        {
+            await inbox.StopAsync();
+            await inbox.DisposeAsync();
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A DIDComm container that sends over HTTP to loopback only.</summary>
@@ -609,6 +740,17 @@ public static class Section_FF_MinimalMediator
         // The protocol asks for no proof of ownership, so the first peer to register a DID gets it.
         public ValueTask<bool> MayRegisterAsync(string peerDid, string recipientDid, ProtocolContext context, CancellationToken ct)
             => _inner.MayRegisterAsync(peerDid, recipientDid, context, ct);
+    }
+
+    /// <summary>
+    /// Where each recipient's own endpoint is, for <c>DirectPush</c>: filled only by your operator,
+    /// from what a recipient agreed with you when it enrolled, never from a message or a DID
+    /// document. The key is the DID the recipient enrolled with (the grant's peer DID).
+    /// </summary>
+    private sealed class EndpointDirectory(IReadOnlyDictionary<string, Uri> endpoints) : IRecipientEndpointDirectory
+    {
+        public ValueTask<Uri?> FindAsync(string grantPeerDid, CancellationToken ct)
+            => ValueTask.FromResult(endpoints.TryGetValue(grantPeerDid, out var endpoint) ? endpoint : null);
     }
 
     /// <summary>Lets the section wait for the sink's first delivery.</summary>
