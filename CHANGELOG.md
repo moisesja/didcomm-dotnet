@@ -6,6 +6,253 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — the mediator can push a stored message to the recipient's own endpoint (`MediatorOptions.DirectPush`, FR-PICK-09 step 3, #110; epic #88); the plain receiving endpoints open a message a mediator re-wrapped
+
+**Published packages: behaviour changes in `DidComm.AspNetCore` (three) and `DidComm.Core`, a docs fix, and `DidComm.Transports.Http` now requires exactly its own version of `DidComm.Core` (see "Consumer impact" below).**
+
+- **`DidComm.AspNetCore`: the plain receiving endpoints open a message a mediator re-wrapped for this
+  agent (behaviour change).** `MapDidCommEndpoint` (all three overloads) and `MapDidCommWebSocket`
+  (both) open a `forward` addressed to the receiver itself (anoncrypted plaintext, one attachment,
+  `next` the DID that decrypted it), up to 8 layers, and hand on the message inside, authenticated by
+  its own envelope, with replay admission, `created_time` and the 512-character id cap applied to it
+  (FR-ROUTE-06 receiver side; owner decision OD-3 on #110, 2026-11-22). It never gets a return-route
+  session (return_route.md: only between the immediate sender and the agent it connects to), so a
+  reply goes out of band or not at all. Until now such a forward was answered `202` and the message
+  inside was never read. Every other forward is handed on as before. A registry-aware endpoint with a
+  handler for forwards (`AddRoutingMediator()`, `AddMediator()`) leaves a forward for the next hop to
+  it, as before. A ninth layer, or anything inside that is neither the message nor another
+  such layer, is refused like an envelope that does not unpack (`400` over HTTP, discarded on a
+  WebSocket) where it used to be `202`. A message opened out of layers must also be in an envelope
+  the endpoint accepts (`DidCommReceiveOptions.AcceptedMediaTypes`), judged by its own outermost
+  envelope, not the wrapper's. One that is not is refused like a layer that cannot be opened (the
+  uniform 400 over HTTP, a discard on a WebSocket), on the plain endpoints and on the mediator's for
+  its own opened messages (O-3, red-team pass 2, the coordinator's call under the churn rule, L-063, not an owner decision).
+  - OD-3, in the owner's words as put to them: "#110: in "rewrap" mode, the mediator wraps each message one extra time, addressed to the recipient. The spec (routing.md L71) says receivers must expect this. Our published plain receiving endpoint (MapDidCommEndpoint in DidComm.AspNetCore) doesn't unwrap it: it answers 202 and the message is never read. So a direct push in rewrap mode would get a message deleted unread. The same happens today with any rewrap-mode mediator delivering to our endpoint. What should #110 do?" The owner picked "Fix the endpoint in this PR (Recommended)".
+  - On an endpoint with the routing role (`MapDidCommMediator`, or a registry-aware
+    `MapDidCommEndpoint`/`MapDidCommWebSocket` with `AddRoutingMediator()`), a forward re-wrapped for
+    the mediator itself around a message that is not a forward is opened and that message is handled
+    as the mediator's own (owner decision OD-6 on #110, 2026-11-23; until now it was dropped). It
+    costs one lookup of the sender's DID, as a direct message does, and gets the replay check.
+    One-way messages (`recipient-update`, `messages-received`) apply; an answer (a `mediate-grant`, a
+    pickup `status` or `delivery`) is not delivered, because return route is valid only between the
+    immediate sender and the agent it connects to (return_route.md L9). A forward for the next hop
+    inside still goes to the forward handler as it arrived. A self-addressed layer that does not
+    decrypt is tried once by the mediator endpoint's opening, then left to the forward handler; only
+    a layer refused for its shape gets the full unpack (red-team 1c-2, an L-075 fix). The forward
+    handler takes the endpoint's opening of each layer instead of opening it again, so each layer
+    is opened once per request and a forward for the next hop costs what it did before.
+  - OD-6, in the owner's words as put to them: "#110, G-2: a mediator that is itself reached through another mediator that re-wraps loses the messages meant for it." It went on to say that the reply still could not reach the requester, so "one-way messages (recipient updates, pickup acknowledgements) would work, and a mediation request would be applied but its grant not delivered." The option as put: "The mediator's endpoint opens the wrapper, and the message inside goes through normal admission and dispatch as if it had arrived directly: the replay check applies and there's no return route. Forwards for the next hop are unchanged. Cost: about 1–2 days on an issue that has already churned. It relaxes #95's rule to one lookup of the sender's DID per request, the same as a direct message costs. Two adversarial tests get rewritten to show that the replay check now covers that attack." The owner picked "Fix it in this PR (Recommended)".
+- **`DidComm.Core`: the outbound endpoint guard refuses a host name it cannot normalise or look up
+  with a `TransportException`** (a defect found during #110 and fixed here, L-075).
+  `OutboundEndpointGuard.Validate` now refuses a destination host name that it cannot put in its wire
+  form or that the name lookup cannot take (longer than 255 characters, for example) with a
+  `TransportException`, as it already refused a name that does not resolve. `DidCommClient.SendAsync`,
+  `SendPackedAsync` and the mediator client's sends used to throw another exception type for such an
+  endpoint. The refusal's message names no host.
+- **`DidComm.Core`:** The outbound endpoint check looks host names up asynchronously and honours the
+  send's cancellation token (`DidCommClient.SendAsync`, `SendPackedAsync`, the mediator client's
+  sends, the HTTP transport's per-hop check through a `TrustedProxy`, the WebSocket transport's
+  pre-send check). The public `OutboundEndpointGuard.Validate` is unchanged.
+- **`DidComm.Core`: a forward's `data.json` attachment is written within the receive limit** (a defect
+  found during #110 and fixed here, red-team 1c-1, L-075; no wire change). Opening a forward's
+  `data.json` attachment (the mediator's relay, peel and intake check, and the receive-side opening
+  of a re-wrapped delivery) writes it straight to UTF-8 with the library's relaxed JSON encoder, and
+  refuses it as an oversized message (FR-API-06) once it is longer than `MaxReceiveBytes`: what is
+  kept never passes the receive limit; the JSON writer's escape scratch can reach about eight times
+  the limit, briefly (red-team 2c-1). Before, it
+  was written as a string with the HTML-escaping encoder and checked only at the next unpack, so a
+  padded layer took many times its size in memory. A relayed `data.json` payload is written as this
+  library writes messages: byte for byte for one it packed, equivalent JSON otherwise. A `base64`
+  payload is relayed unchanged.
+- **`DidComm.AspNetCore`: the receive paths check that a message's declared media type matches its
+  envelope (behaviour change).** `MapDidCommEndpoint` (all overloads), `MapDidCommWebSocket` and the
+  mediator's endpoints now classify each received message by its structure before unpacking it. A
+  message whose declared media type is not the one of its envelope is refused: `415` over HTTP, and a
+  STOMP `SEND` is discarded as one with an unaccepted `content-type` (transports.md L66: "The IANA
+  media type for the POST request MUST be set to the corresponding media type"; L79 for STOMP). A
+  bare WebSocket message, which declares no media type, is dropped when its envelope's media type is
+  not in `DidCommReceiveOptions.AcceptedMediaTypes`. A body that cannot be classified is refused by
+  the unpack as before. A sender that labels each message with its own envelope's media type, and
+  every host using the default accepted list, see no change; a host that lists a non-DIDComm alias
+  (such as `application/json`) in `AcceptedMediaTypes` now refuses bodies declared with it.
+- **`DidComm.AspNetCore`: the receive paths accept the spec's short media-type form (behaviour
+  change).** `MapDidCommEndpoint` (all overloads), `MapDidCommWebSocket` in STOMP mode and the
+  mediator's endpoints now read a declared media type without a `/` as having the `application/`
+  prefix (message_structure.md L27: "IANA types for DIDComm messages MAY omit the `application/`
+  prefix; the recipient MUST treat media types not containing `/` as having the `application/` prefix
+  present"; FR-MSG-06). A message sent with `Content-Type: didcomm-encrypted+json` (or a STOMP `SEND`
+  with that `content-type`) is now accepted; it used to be refused with `415`, or the `SEND` discarded.
+  Entries of `DidCommReceiveOptions.AcceptedMediaTypes` are read the same way, so a list may name the
+  short form. A value with more than one `/`, one naming no type, and an unknown type are still
+  refused. (A defect found during #110 and fixed here, L-075.)
+- **`DidComm.Transports.Http`: the docs say where the connection guarantees come from (docs only).**
+  `HttpDidCommTransport`'s summary and its public constructor now say that following 307 redirects
+  only, checking every connection's address and never using the environment's proxy are properties
+  of the `"didcomm"` client that `UseHttpTransport()` configures. A transport built by hand with the
+  public constructor gets whatever its client does: over a client set up another way (for example
+  `AddHttpClient()` with its default handler) 301, 302 and 308 redirects are followed and no address is
+  checked when a connection opens. Nothing changes in behaviour. The cookbook's section P said its
+  `MaxRedirectHops` capped 301/302/307/308 hops; only 307 is ever followed (FR-TRN-06).
+  - Owner decision OD-5 on #110 (2026-11-22). The owner's answer: "Docs fix (Recommended)".
+
+**For a mediator host nothing changes until it turns direct push on: it is off by default.** A
+mediator built with `AddMediator()` keeps delivering as before — over the recipient's live
+connection, otherwise by pickup — until the host sets `DirectPush`.
+
+**What it is.** The DIDComm spec's mediator delivers a forwarded message to the endpoint "pre-configured
+by recipient" (routing.md, "Mediator Process"); until now this library's mediator only kept it for
+pickup or pushed it over a live connection. With `o.DirectPush = true`, a recipient that has no live
+connection gets each stored message posted, unchanged, to the endpoint the host registered for it:
+
+- **The endpoint comes only from the host.** The host registers an `IRecipientEndpointDirectory`
+  before `AddMediator()`; the mediator asks it, keyed by the DID the recipient enrolled with (the
+  grant's peer DID), just before each push. It never sends to an address a message carries. An
+  endpoint that is not an absolute `http`/`https` address the transport accepts counts as no
+  endpoint, and nothing is taken. Direct push checks the recipient's endpoint before taking a
+  message with the same outbound check as the host's own sends, host names included, looked up
+  asynchronously under the push deadline; an endpoint it refuses pauses that recipient's direct
+  pushes (red-team pass 2, the coordinator's call under the churn rule, L-063, not an owner decision). The directory may be asked about a DID that holds no grant, or no
+  longer does, and may answer `null` or anything: nothing is sent for such a DID (nothing to take;
+  a message still held under a revoked grant is removed as unregistered).
+- **One attempt per message, kept on the message.** The mailbox marks a message in the same step as
+  the push takes it, so it is posted at most once, also across many recipients, a host store and a
+  restart. A `2xx` removes it from the mailbox. Anything else leaves it there for the recipient to
+  pick up, and it is not pushed again (owner decision OD-2, 2026-11-22: "Yes, pickup is later
+  delivery").
+- **A push the endpoint refuses moves on; any other failure pauses that recipient's direct
+  pushes** (the coordinator's call under the churn rule, L-063, not an owner decision; the `4xx` rule from red-team 1a-4). Every direct push that
+  does not deliver counts `Push-Failed`. An answered `4xx` other than `408` and `429` — the
+  endpoint's "not this message" — moves on to the next message with no pause, so messages anyone
+  stored ahead of a real one cannot hold it back. Anything else — a `5xx`, `408` or `429`, a `3xx` at the end
+  of the chain or past the hop bound, no answer, a timeout (the transport's or the HTTP client's own
+  included), an endpoint the outbound check refused before the take, a fault, or the push deadline — ends that recipient's run there and pauses its direct
+  pushes for 2 × `PushTimeout` (one minute at the defaults), timed on the monotonic clock. Wake-ups
+  during the pause still push over a live connection if one appears; only the direct push is
+  skipped, counted `Push-Skipped-Cooldown` once per run. A message found expired at the moment of
+  sending ends the run too, with no pause. So a refused message never holds up later ones (a `4xx`)
+  or holds them only for the pause (anything else), and is never sent again; after a pause those
+  behind it go at the first wake-up after the pause, until the next push that does not deliver (one
+  run per pause; under an endpoint that keeps failing, part of them go only by pickup), or by
+  pickup. A run yields unless it met a refusal and delivered nothing, live or direct, so a real message waits
+  behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row)
+  delivers nothing; then until the next wake-up, or pickup (red-team 2b-1). A host store that loses
+  the push mark gets a `4xx`-refused message posted up to 2 × `MaxDeliveryBatch` − 1 times per wake-up (a run that delivered something ahead of it yields once more), and
+  any other failed one at most once per pause. An endpoint answering each push just before the
+  deadline can hold one worker for up to `MaxDeliveryBatch` × `PushTimeout` per wake-up, as a slow
+  accepting one always could (red-team 2a-3).
+- **No retry and no shared circuit breaker.** The push sends through the mediator's own instance of
+  the HTTP transport — no retry, a breaker that never opens — so one failing endpoint can neither
+  multiply a message's POSTs nor stop other recipients' pushes or the host's own sends. A direct
+  push sends through an `HttpClient` of the mediator's own over the innermost (primary) handler of
+  the host's named `"didcomm"` client, taken from `IHttpClientFactory` for each push and kept until
+  the send ends, with that client's own timeout (red-team 1a-1, the coordinator's call under the churn rule, L-063, not an owner decision). Handlers in
+  front of it — `ConfigureHttpClientDefaults` (for example .NET Aspire's standard resilience
+  handler, with its retries and breaker), or the client's own retry, breaker, authentication or
+  logging handlers, and the framework's request logging — do not apply to direct pushes. That
+  innermost handler is the one `UseHttpTransport()` configures: the outbound guard's connect-time
+  check, no automatic redirects, a `TrustedProxy` only if the host names one.
+- **Redirects.** A `307` is followed up to `HttpTransportOptions.MaxRedirectHops` (default 5), every
+  new address checked by the outbound guard; the whole chain is the one attempt. `301`, `302`, `303`
+  and `308` are not followed (owner decision OD-1, 2026-11-22: "Follow 307, tightly bounded").
+- **Live wins.** Each push looks for a live connection first, and the direct push looks again right
+  before it takes a message (the endpoint lookup is the host's code and can take a while): a
+  recipient that turned live delivery on meanwhile gets the message live. "Live" means a session
+  held by the process running the push: with two mediator processes over one store, a process with
+  no live session for a recipient may post a message the other process's live session would have
+  taken (FR-PICK-06 applies per process; red-team 1b-3); the push mark still prevents duplicates
+  and loss. One that turns it on after
+  the take finds that push already on its way, and may get the message twice (delivery is
+  at-least-once; recipients drop duplicates by message id). The push workers' fairness and deadline
+  (`PushTimeout`) rules apply to direct pushes unchanged; a direct push that reaches the deadline
+  starts the direct pause above, while a live push's deadline keeps pausing all of that recipient's
+  pushes, as before.
+- **Start-up checks.** With direct push on, the mediator refuses to start without an
+  `IRecipientEndpointDirectory`; when the `"didcomm"` HTTP client's innermost (primary) handler,
+  which the start-up check looks at, would undo what the push relies on — an `HttpClientHandler`, or a `SocketsHttpHandler` that follows redirects, has
+  no connect callback, or uses a proxy other than `TrustedProxy` (which is what a host without
+  `UseHttpTransport()` has); with an invalid `TrustedProxy`; or with
+  `DidCommOptions.OutboundEndpointPolicy` set to `null`. A host that wraps the HTTP transport in a
+  decorator of its own keeps `UseHttpTransport()`'s client and is accepted; a custom primary handler
+  is the host's own connection path. Outside a generic host the same refusals
+  come later: a missing directory when the push workers are first built (with the first relayed
+  message), the rest at each direct push, which then fails and leaves the message for pickup.
+  While direct push is off, none of this is built or checked.
+  - On a host whose own connection code replaced the library's (a connect callback that checks
+    nothing, or its own primary handler), the check before a push is a name check only and the
+    name is looked up again at connect, so the host's connection code must check addresses at
+    connect itself, as OD-5 says for a transport built by hand. The default `UseHttpTransport()`
+    path checks every address when the connection opens. Owner decision OD-7 on #110 (2026-11-23):
+    the question as put began "#110, direct push's address check has now broken for the third time
+    (unpublished DidComm.Mediator)." and explained that only hosts that replaced the library's
+    connection path are affected; the option as put: "Consistent with your OD-5 answer.
+    DirectPush's docs say that on a host with its own connection code, the check before a push is a
+    name check only, and the host's connection code must check addresses at connect time itself. No
+    code change."; the owner picked "Document it (Recommended)".
+- **Works with re-wrapping.** With `RewrapMode.ReanoncryptToNext` the mailbox holds the mediator's
+  own forward addressed to the recipient, and the push posts that; the recipient's endpoint opens it
+  (this library's plain endpoints do now, above).
+- **Logs.** The mediator's own lines about a push name no endpoint, DID, record id or exception
+  message. The framework's `IHttpClientFactory` request logging (categories
+  `System.Net.Http.HttpClient.didcomm.*`) sits in front of the innermost handler, so it does not see
+  direct pushes; the host's own sends through the named client still write their addresses there.
+
+**New public members (`DidComm.Mediator`, unpublished):** `MediatorOptions.DirectPush` and
+`IRecipientEndpointDirectory` (`FindAsync(grantPeerDid, ct)`). Two new values on the
+`didcomm.mediator.push.outcomes` counter (tag `didcomm.push.outcome`): `Pushed-Direct` (the endpoint
+answered `2xx`) and `Push-Skipped-NoEndpoint` (no usable endpoint; nothing was sent). A failed direct
+push counts `Push-Failed`, as a failed live push does, and `Push-Skipped-Cooldown` now also counts a
+wake-up whose direct push was skipped because that recipient's direct pushes are paused.
+
+**Packaging: `DidComm.Mediator` now depends on `DidComm.Transports.Http`** (a minimum version, like
+every dependency that does not call another package's internals: the mediator uses the transport's
+public API only). A mediator host therefore also gets `DidComm.Transports.Http` and Polly 8.9.0
+(with Polly.Core 8.9.0). `Microsoft.Extensions.Http` is not new: it already came with
+`DidComm.Extensions.DependencyInjection`, through its NetDid dependency.
+
+**Consumer impact: `DidComm.Transports.Http` now requires exactly its own version of
+`DidComm.Core`** (a new internals edge, pinned exactly at pack time; mixing versions now gets
+NU1608/NU1107, as for the other pinned edges).
+
+**Consumer impact: a relay's label.** A host relay that labels every onward payload as encrypted
+(as sample 04 did) must label it by the payload's own envelope: a plaintext or signed payload
+labelled encrypted is now refused (415) by a didcomm-dotnet receiver. Sample 04's `InboxRelaySink`
+now labels each payload with `RelayMediaType.Of` (the receivers' structural rule), and
+`InboxRelaySinkTests` relays a plaintext payload to a `MapDidCommEndpoint` inbox.
+
+**Mailbox contract.** No change in behaviour for a host `IMessageStore` that implements the #100
+contract: the push mark (`QueuedMessage.PushTaken`, set by a `MessageLease.ForPush` lease) now also
+covers a direct push, whose lease has no owner; the docs of both members and of `IMessageStore` say
+so. The two members are renamed from #100's `QueuedMessage.LivePushReturned` and
+`MessageLease.LivePush` (owner decision OD-4 on #110, 2026-11-22), before `DidComm.Mediator` is first
+published: a store written against the unreleased #100 names renames them. In the owner's words as
+put to them: "#110: the "already tried" mark on each stored message now covers both live push and direct push. But its public member names in the mediator package's store interface still say "LivePush". That package hasn't been published yet, so renaming now is free. After the first release, a rename is a breaking change. Rename now?" The owner picked "Rename now (Recommended)".
+
+**Samples and docs.** `samples/04-MediatorAgent` gains section 9, "The library's own push":
+a second mediator with `AddMediator(o => o.DirectPush = true)`, an operator-filled directory
+(`InboxDirectory.cs`), Bob and Carol enrolled by the operator through `IMediationStore`, Alice's
+message posted to Bob's inbox (`Pushed-Direct`, his mailbox empty afterwards) and Carol's, who has no
+inbox registered, kept in her mailbox (`Push-Skipped-NoEndpoint`); its smoke test asserts them.
+Cookbook FF.4 shows the setting, the registration, the combination with re-wrapping, and a
+re-wrapped push opened by Bob's plain `MapDidCommEndpoint`. Tests: `DirectPushStepTests`,
+`DirectPushSenderTests`, `DirectPushDispatcherTests`, `DirectPushWiringTests` and two new
+`MessagePickupStoreLivePushReturnTests` rows (unit), `DirectPushEgressTests`,
+`DirectPushProcessProxyTests`, `DirectPushEndToEndTests` and `DirectPushRewrapEndToEndTests` (over
+HTTP); for the receiving endpoints `OpenReceivedRewrapTests` (unit), `RewrappedReceiveTests` and
+`RewrappedReceiveQaTests` (over HTTP and WebSocket); for the guard
+`OutboundEndpointGuardLookupRefusalTests` and `MediatorClientGuardLookupRefusalTests`; for a
+mediator's own message through a rewrapping mediator `MediatorOwnMessageThroughRewrapTests` and
+`SelfAddressedPeelOnceTests`; the
+direct pause `DirectPushPauseTests` and `DirectPushPauseQaTests`; a run that mixes a direct refusal
+and live pushes `DirectPushMixedRunTests`; the red-team pass
+`DirectPushAmplificationAdv110Tests`, `DirectPushStateAdv110Tests`,
+`DirectPushStarvationAdv110Tests` and `OpenReceivedRewrapAdv110Tests`; red-team pass 2
+`DirectPushDispatcherAdv110Pass2Tests`, `DirectPushTransportAdv110Pass2Tests`,
+`MediatorOpenedPickupAdv110Pass2Tests`, `ForwardAttachmentWriterAdv110Pass2Tests` and
+`RewrappedReceiveMediaTypeTests`. The PRD
+(FR-ROUTE-06, FR-RR-02, FR-PICK-09, FR-TRN-06..09, §3.1, §12, §14.2 FF, §14.3, §14.4) and
+`docs/codebase-architecture.md` (the inbound flow, the return-route receive side, the push
+invariants D-1..D-7, the direct step, its outcomes and residuals) describe what is built.
+
 ### Added — Message Pickup 4.0 in both roles; the mailbox refuses messages that are not encrypted; a live push that comes back unconfirmed is not pushed again (FR-PICK-12, #100; epic #88)
 
 **Behaviour changes in two published packages** (owner decisions OD-7 and OD-8, PR #143 review
@@ -212,9 +459,9 @@ went away, and the messages came back. Both ends now finish properly:
     #95) such a push was tried live again at the next wake-up; PRD FR-PICK-09's "Retries" is
     narrowed to match.
   - How it is built (ours; PR #143 review round 1 replaced an earlier version that marked the record
-    when its live-push lease ended, which an id-based give-back could race): the mark is set by the
-    store the moment a live push takes the record (`QueuedMessage.LivePushReturned`, on the take
-    under a `MessageLease.LivePush` lease), and a live push never takes a marked record. The only
+    when its push lease ended, which an id-based give-back could race): the mark is set by the
+    store the moment a live push takes the record (`QueuedMessage.PushTaken`, on the take
+    under a `MessageLease.ForPush` lease), and a live push never takes a marked record. The only
     ways to clear it are `IMessageStore.ReturnUnsentAsync` and a pass-over by the same lease, which
     the mediator calls only when the session answered "not sent" or "too large" or the send was never
     attempted; a release by id, the connection's clean-up, an expired lease, a fault or a
@@ -245,10 +492,10 @@ went away, and the messages came back. Both ends now finish properly:
     over its `MessagePickupQueue`;
   - `MessagePickupOptions.EnableV4`, default `true`;
   - `PickupDeliveryOutcome.NotEncrypted`, appended so the other values keep their numbers;
-  - `MessageLease.LivePush` and `QueuedMessage.LivePushReturned` (init-only), and
+  - `MessageLease.ForPush` and `QueuedMessage.PushTaken` (init-only), and
     `IMessageStore.ReturnUnsentAsync`, additions to the store contract: a custom `IMessageStore`
-    marks a record when a live-push lease takes it, remembers which lease did, never hands a marked
-    record to a live-push lease, and clears the mark only through `ReturnUnsentAsync` or a pass-over
+    marks a record when a push lease takes it, remembers which lease did, never hands a marked
+    record to a push lease, and clears the mark only through `ReturnUnsentAsync` or a pass-over
     by the lease that set it.
 - `DidComm.Mediator.Client`:
   - the `MessagePickupVersion` enum (`Negotiate`, `V4`, `V3`);
@@ -1150,9 +1397,10 @@ already on nuget.org: **`DidComm.Transports.WebSocket`, `DidComm.AspNetCore` and
 (The owner's decision named `DidComm.Transports.WebSocket`; the grants show the other two call Core's
 internals as well.) The new packages are pinned the same way: `DidComm.Mediator.Client` → Core,
 `DidComm.Mediator` → Core and `DidComm.Mediator.Client`, `DidComm.Mediator.AspNetCore` →
-`DidComm.AspNetCore` and `DidComm.Mediator`. `DidComm.Transports.Http` and `DidComm.Adapters.NetDid`
-keep minimum dependencies: neither calls Core's internals (`DidComm.Core` no longer grants them to the
-adapter, which never used them; no API change).
+`DidComm.AspNetCore` and `DidComm.Mediator`. `DidComm.Adapters.NetDid` keeps a minimum dependency: it
+does not call Core's internals (`DidComm.Core` no longer grants them to the adapter, which never used
+them; no API change). (`DidComm.Transports.Http` kept a minimum dependency here too; since #110 it calls
+a Core internal and is pinned exactly — see the #110 entry.)
 - **What a mixed install sees now.** An app that references, for example, `DidComm.Mediator` 1.6.0
   and `DidComm.Core` 1.6.1 directly gets **NU1608** at restore ("requires DidComm.Core (= 1.6.0) but
   version 1.6.1 was resolved") instead of a `MissingMethodException` at run time. Two of our packages

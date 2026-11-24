@@ -180,7 +180,7 @@ public sealed class MessagePickupLivePushExitMatrixTests
             store.OnLease = async (request, ct) =>
             {
                 var leased = await store.Inner.LeaseAsync(request, ct);
-                if (request.Lease.LivePush && leased.Count > 0)
+                if (request.Lease.ForPush && leased.Count > 0)
                     BeforeTheSend();
                 return leased;
             };
@@ -252,7 +252,7 @@ public sealed class MessagePickupLivePushExitMatrixTests
         var now = fixture.Clock.Now;
         var peek = await store.Inner.LeaseAsync(new MessageLeaseRequest(peer, null, 10, long.MaxValue, now, new MessageLease(null, now)), None);
         var expectMarked = CountsAsPushed(exit);
-        peek.Should().ContainSingle().Which.LivePushReturned.Should().Be(expectMarked, "marked exactly when the push was handed to the session and not answered NotSent or TooLarge ({0}, {1}, {2})", path, exit, order);
+        peek.Should().ContainSingle().Which.PushTaken.Should().Be(expectMarked, "marked exactly when the push was handed to the session and not answered NotSent or TooLarge ({0}, {1}, {2})", path, exit, order);
 
         // A delivery-request always delivers it.
         (await MessagePickupLive.FetchNowAsync(fixture, peer, mediator)).Select(m => m.Id).Should().Equal(new[] { id }, "a delivery-request always delivers it");
@@ -295,7 +295,7 @@ public sealed class MessagePickupLivePushExitMatrixTests
             var store = new InMemoryMessageStore();
             var record = new QueuedMessage("m", Grant, Grant, PickupFixture.Payload(40, 1), t0, null, t0.AddDays(1));
             (await store.EnqueueAsync(record, null, t0, None)).Should().Be(EnqueueOutcome.Enqueued);
-            var lease = new MessageLease("socket", t0 + LeaseFor) { LivePush = true };
+            var lease = new MessageLease("socket", t0 + LeaseFor) { ForPush = true };
             (await store.LeaseAsync(new MessageLeaseRequest(Grant, null, 1, long.MaxValue, t0, lease), None)).Should().ContainSingle();
 
             using var start = new Barrier(2);
@@ -317,7 +317,7 @@ public sealed class MessagePickupLivePushExitMatrixTests
             await Task.WhenAll(close, own).WaitAsync(MessagePickupLive.Deadline);
 
             var peek = await store.LeaseAsync(new MessageLeaseRequest(Grant, null, 1, long.MaxValue, t0, new MessageLease(null, t0)), None);
-            peek.Should().ContainSingle("round {0}: no lease is left on the record", round).Which.LivePushReturned.Should().Be(marked, "round {0}", round);
+            peek.Should().ContainSingle("round {0}: no lease is left on the record", round).Which.PushTaken.Should().Be(marked, "round {0}", round);
             store.MessageCount.Should().Be(1);
         }
     }

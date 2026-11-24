@@ -1,7 +1,10 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json.Nodes;
 using AwesomeAssertions;
+using DidComm.AspNetCore;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
 using DidComm.Jose;
@@ -12,7 +15,10 @@ using DidComm.Samples.MediatorAgent;
 using DidComm.TestSupport;
 using DidComm.Threading;
 using DidComm.Transports.Http;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Xunit;
 
@@ -24,7 +30,10 @@ namespace DidComm.InteropTests.Samples;
 /// <see cref="InboxRelaySink.RelayTimeout"/> (the sink runs on the forward handler's one pump, so an
 /// unbounded wait would stall every relay behind it); every failure, of any exception type, is
 /// recorded as <see cref="RelayOutcome.Failed"/> and rethrown; and the host's shutdown is not a
-/// failed relay.
+/// failed relay. Also its label: each onward payload is sent under its own envelope's media type
+/// (<see cref="RelayMediaType"/>), because a receiver checks the declared type against the envelope
+/// (transports.md) and this library's endpoints answer 415 on a mismatch; a plaintext payload a
+/// sender wrapped must reach the next hop's inbox.
 /// </summary>
 public sealed class InboxRelaySinkTests
 {
@@ -101,6 +110,35 @@ public sealed class InboxRelaySinkTests
         }
     }
 
+    [Fact]
+    public async Task A_plaintext_payload_relayed_by_the_sample_relay_reaches_a_MapDidCommEndpoint_inbox()
+    {
+        var received = new ConcurrentQueue<UnpackResult>();
+        await using var inbox = await PlainInbox.StartAsync(received);
+        await using var relay = BuildRelay();
+        var sink = new InboxRelaySink(relay.Client);
+        sink.TryAddInbox(Bob, inbox.Uri).Should().BeTrue();
+        var onward = Encoding.UTF8.GetBytes(
+            """{"id":"relay-plain-1","typ":"application/didcomm-plain+json","type":"https://didcomm.org/basicmessage/2.0/message","body":{"content":"plain"}}""");
+
+        await sink.AcceptAsync(new ForwardProcessingResult(Bob, onward, ExpiresTime: null, Delay: null), relay.Context(), CancellationToken.None)
+            .WaitAsync(HangGuard);
+
+        sink.Records.TryRead(out var record).Should().BeTrue("the relay records every forward it handles");
+        record!.Outcome.Should().Be(RelayOutcome.Relayed);
+        record.HttpStatus.Should().Be(202);
+        received.Should().ContainSingle().Which.Message.Id.Should().Be("relay-plain-1");
+    }
+
+    [Theory]
+    [InlineData("""{"protected":"e30","recipients":[{"header":{"kid":"did:example:x#k"},"encrypted_key":"AA"}],"iv":"AA","ciphertext":"AA","tag":"AA"}""", MediaTypes.Encrypted)]
+    [InlineData("""{"payload":"e30","signatures":[{"protected":"e30","signature":"AA"}]}""", MediaTypes.Signed)]
+    [InlineData("""{"payload":"e30","protected":"e30","signature":"AA"}""", MediaTypes.Signed)]
+    [InlineData("""{"id":"1","type":"https://didcomm.org/basicmessage/2.0/message","body":{}}""", MediaTypes.Plaintext)]
+    [InlineData("""{"id":"1","type":"t","body":{"ciphertext":"AA"}}""", MediaTypes.Plaintext)]
+    public void The_relay_labels_a_payload_by_its_own_envelope(string payload, string expected)
+        => RelayMediaType.Of(Encoding.UTF8.GetBytes(payload)).Should().Be(expected);
+
     private static Uri InboxAt(TcpListener listener)
         => new($"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/inbox");
 
@@ -131,6 +169,34 @@ public sealed class InboxRelaySinkTests
             })
             .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1")));
         return new RelayHost(services.BuildServiceProvider());
+    }
+
+    /// <summary>A plain <c>MapDidCommEndpoint</c> inbox on a loopback port, recording what it receives.</summary>
+    private sealed class PlainInbox(WebApplication app, Uri uri) : IAsyncDisposable
+    {
+        public Uri Uri => uri;
+
+        public static async Task<PlainInbox> StartAsync(ConcurrentQueue<UnpackResult> received)
+        {
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            builder.Logging.ClearProviders();
+            builder.Services.AddDidComm(b => b.UseNetDidResolver().UseSecretsResolver(new InMemorySecretsResolver()));
+            var app = builder.Build();
+            app.MapDidCommEndpoint("/inbox", (unpacked, _) =>
+            {
+                received.Enqueue(unpacked);
+                return Task.CompletedTask;
+            });
+            await app.StartAsync();
+            return new PlainInbox(app, new Uri(app.Urls.First().TrimEnd('/') + "/inbox"));
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
     }
 
     private sealed class RelayHost(ServiceProvider services) : IAsyncDisposable

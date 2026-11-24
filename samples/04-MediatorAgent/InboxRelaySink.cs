@@ -60,10 +60,11 @@ public sealed record RelayRecord(
 /// <c>AddRoutingMediator()</c> receives forwards, checks them, answers the sender with a 202 and
 /// only then hands each one to the registered <see cref="IForwardSink"/>, on a background queue.
 /// The library's default sink, <see cref="NullForwardSink"/>, drops everything; a complete
-/// mediator (<c>AddMediator()</c> in <c>DidComm.Mediator</c>) queues for pickup and pushes to live
-/// connections. This sink is the third option: the host keeps its own directory of recipient
-/// inboxes and relays to them. The library's built-in push to a recipient's endpoint is a planned
-/// feature (#110); until then a relay like this one is the host's own code.
+/// mediator (<c>AddMediator()</c> in <c>DidComm.Mediator</c>) keeps each message for pickup, pushes
+/// it to a live connection and, with <c>MediatorOptions.DirectPush</c>, to the inbox the host
+/// registered for the recipient (section 9 of this sample). This sink is the option for a host
+/// that keeps the routing role only: it keeps its own directory of recipient inboxes and relays to
+/// them itself.
 /// </para>
 /// <para>
 /// The directory is bounded (<see cref="MaxInboxes"/> entries) and keyed by DID subject — the DID
@@ -89,7 +90,8 @@ public sealed record RelayRecord(
 /// workers, so a slow recipient only delays its own messages. That protects other recipients from a
 /// slow one, not from a failing one: the HTTP transport has one circuit breaker for every
 /// destination, so repeated failed attempts at one inbox (retries included) can open it, and while
-/// it is open every recipient's relay fails.
+/// it is open every recipient's relay fails. (The complete mediator's push avoids this: it sends
+/// through its own copy of the transport, with no retry and a circuit breaker that never opens.)
 /// </para>
 /// </remarks>
 public sealed class InboxRelaySink : IForwardSink
@@ -204,10 +206,13 @@ public sealed class InboxRelaySink : IForwardSink
         bounded.CancelAfter(RelayTimeout);
         try
         {
-            // The onward bytes are already packed for the recipient: send them as they are. The
-            // facade applies the mediator's outbound-endpoint (SSRF) policy to the inbox URL and
-            // never reads a response body on this path.
-            var sent = await _relay.SendPackedAsync(result.OnwardPacked, inbox, ForwardConstants.PayloadMediaType, bounded.Token)
+            // The onward bytes are already packed for the recipient: send them as they are, under
+            // the media type of their own envelope (RelayMediaType.cs). Usually that is encrypted,
+            // but a sender may have wrapped a signed or plaintext message, and the receiver checks
+            // the declared type against the envelope (transports.md): labelled wrongly, it would be
+            // refused with 415. The facade applies the mediator's outbound-endpoint (SSRF) policy to
+            // the inbox URL and never reads a response body on this path.
+            var sent = await _relay.SendPackedAsync(result.OnwardPacked, inbox, RelayMediaType.Of(result.OnwardPacked), bounded.Token)
                 .ConfigureAwait(false);
             Write(Base(RelayOutcome.Relayed) with
             {

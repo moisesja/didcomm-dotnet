@@ -403,22 +403,22 @@ public static class Section_DD_PickUpQueuedMessages
         // (ReleaseLeasesAsync), it ran out, or it was given back by id — the mark stays, and from
         // then on only a delivery-request takes the record: a message pushed live and returned
         // unconfirmed is never pushed live again, it waits until the recipient asks for it.
-        var pushLease = new MessageLease(Owner: "connection-2", ExpiresAt: now.AddSeconds(60)) { LivePush = true };
+        var pushLease = new MessageLease(Owner: "connection-2", ExpiresAt: now.AddSeconds(60)) { ForPush = true };
         var pushed = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 1, 64 * 1024, now, pushLease), ct);
-        ctx.Narrator.Value("LeaseAsync for a live push over connection-2", $"{Ids(pushed)}; a live push's lease: {pushLease.LivePush}");
+        ctx.Narrator.Value("LeaseAsync for a live push over connection-2", $"{Ids(pushed)}; a live push's lease: {pushLease.ForPush}");
         await small.ReleaseLeasesAsync("connection-2", ct);
-        var nextLease = new MessageLease("connection-3", now.AddSeconds(60)) { LivePush = true };
+        var nextLease = new MessageLease("connection-3", now.AddSeconds(60)) { ForPush = true };
         var nextPush = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 10, 64 * 1024, now, nextLease), ct);
         ctx.Narrator.Value("connection-2 closed unacknowledged; the next live push takes", Ids(nextPush));
         var asked = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 10, 64 * 1024, now, new MessageLease(null, now.AddSeconds(60))), ct);
-        ctx.Narrator.Value("A delivery-request takes", string.Join(", ", asked.Select(m => $"{m.Id} (came back from a live push: {m.LivePushReturned})")));
+        ctx.Narrator.Value("A delivery-request takes", string.Join(", ", asked.Select(m => $"{m.Id} (came back from a live push: {m.PushTaken})")));
 
         // ReturnUnsentAsync: how a live push that was not sent (connection-3 had no room for it)
         // gives its record back. Only the lease that set the mark can clear it — this way, or by
         // passing the record over as too large — even after that lease ended; a later live push
         // may then take the record.
         ctx.Narrator.Value("ReturnUnsentAsync(b2, connection-3's lease)", await small.ReturnUnsentAsync(bob, ["b2"], nextLease.Id, ct));
-        var retried = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 10, 64 * 1024, now, new MessageLease("connection-4", now.AddSeconds(60)) { LivePush = true }), ct);
+        var retried = await small.LeaseAsync(new MessageLeaseRequest(bob, null, 10, 64 * 1024, now, new MessageLease("connection-4", now.AddSeconds(60)) { ForPush = true }), ct);
         ctx.Narrator.Value("The next live push takes", Ids(retried));
     }
 

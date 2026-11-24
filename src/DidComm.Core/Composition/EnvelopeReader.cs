@@ -135,7 +135,10 @@ internal static class EnvelopeReader
             {
                 throw new MalformedMessageException(depth == 0
                     ? "This layer must be an anoncrypt envelope; a plaintext or signed layer is not accepted here."
-                    : "This anoncrypt layer must carry a plaintext message; a signature or another envelope inside it is not accepted here.");
+                    : "This anoncrypt layer must carry a plaintext message; a signature or another envelope inside it is not accepted here.")
+                {
+                    RefusedShape = true,
+                };
             }
             stack.Add(kind);
 
@@ -424,6 +427,12 @@ internal static class EnvelopeReader
                         var peek = DpEnc.JweParser.PeekRecipients(current);
                         envelopeKids = peek.RecipientKids;
 
+                        // The restricted shape refuses an authcrypt layer from its protected header
+                        // alone, before any key is selected or anything decrypted: it names a sender
+                        // whose key would have to be looked up.
+                        if (anoncryptOfPlaintextOnly && (peek.Skid is not null || IsAuthcryptAlgorithm(peek.Algorithm)))
+                            throw new MalformedMessageException("This layer must be anoncrypted; an authcrypt layer is not accepted here.") { RefusedShape = true };
+
                         // FR-API-09 (#80): a recipient kid over the identifier limits is treated as not
                         // held. It is dropped from the candidates before key selection, so the consumer's
                         // ISecretsResolver never sees it and no key can be selected for it; every other
@@ -531,7 +540,7 @@ internal static class EnvelopeReader
                     {
                         // Unreachable without a sender lookup (ECDH-1PU needs the sender's key); asserted
                         // so the restriction never depends on the parser's handling of a null lookup.
-                        throw new MalformedMessageException("This layer must be anoncrypted; an authcrypt layer is not accepted here.");
+                        throw new MalformedMessageException("This layer must be anoncrypted; an authcrypt layer is not accepted here.") { RefusedShape = true };
                     }
 
                     if (jweResult.IsAuthenticated)
@@ -636,6 +645,11 @@ internal static class EnvelopeReader
         if (kid is not null && !IdentifierLimits.IsWithinKeyIdLimits(kid))
             throw new MalformedMessageException(IdentifierLimits.KeyIdLimitMessage(field, kid));
     }
+
+    /// <summary>Whether a JWE's protected-header <c>alg</c> is an authcrypt key agreement (ECDH-1PU).</summary>
+    /// <param name="algorithm">The <c>alg</c>, or <c>null</c>.</param>
+    private static bool IsAuthcryptAlgorithm(string? algorithm)
+        => algorithm is not null && algorithm.StartsWith("ECDH-1PU", StringComparison.Ordinal);
 
     /// <summary>
     /// A copy of a General JSON JWE whose <c>recipients</c> entries are reordered: those whose kid

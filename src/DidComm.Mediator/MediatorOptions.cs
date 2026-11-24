@@ -54,7 +54,7 @@ namespace DidComm.Mediator;
 /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>; size <see cref="Sessions"/> with that in
 /// mind.</description></item>
 /// <item><description>A forwarded message is always stored first; a recipient with live delivery
-/// on gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
+/// on (or, with <see cref="DirectPush"/>, any recipient) gets it pushed afterwards, by the push workers (<see cref="PushConcurrency"/>,
 /// <see cref="PushTimeout"/>), so a recipient that is slow to take a push holds up no one else's
 /// messages. A push takes what the queue holds when it runs: each recipient's messages go one at a
 /// time, oldest first, and a live session is pushed only those that arrive after the status that
@@ -68,10 +68,13 @@ namespace DidComm.Mediator;
 /// <item><description>Whether a forward has expired, when it is relayed and while it waits in the
 /// queue, is judged with <c>DidCommOptions.ExpiresClockSkew</c>, never with the replay
 /// <see cref="ReplayProtectionOptions.ClockSkew"/>.</description></item>
-/// <item><description>The mediator pushes only over live sessions. A built-in direct push to a
-/// recipient's own endpoint is tracked in #110; until then a host that needs one pushes forwarded
-/// messages itself through its own <see cref="IForwardSink"/> (the #90 seam), with
-/// <c>AddRoutingMediator()</c> rather than <c>AddMediator()</c>.</description></item>
+/// <item><description>By default the mediator pushes only over live sessions, and every other
+/// message waits for pickup. With <see cref="DirectPush"/> on, a message for a recipient without a
+/// live session is pushed, once, to the endpoint the host registered for that recipient in its
+/// <see cref="IRecipientEndpointDirectory"/>; a push that is not answered with a 2xx leaves the
+/// message for pickup. The host owns that directory: the mediator never sends to an address a
+/// message carries, and a recipient's registered server can only move a push on with a temporary
+/// (307) redirect, each hop checked by the outbound endpoint guard.</description></item>
 /// </list>
 /// <para>
 /// <c>AddMediator()</c> describes what to put in front of the mediator's endpoint and how to set
@@ -156,7 +159,8 @@ public sealed class MediatorOptions
     public TimeSpan PurgeInterval { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// How many push workers run: live pushes over a recipient's WebSocket connection. Default 4;
+    /// How many push workers run: live pushes over a recipient's WebSocket connection, and, with
+    /// <see cref="DirectPush"/> on, pushes to a recipient's registered endpoint. Default 4;
     /// from 1 to 64. Pushes run in the background, never on the forward pump, so a recipient that is
     /// slow to take a push (a DID that is slow to resolve, a connection that is slow to read) never
     /// holds up the storing of other recipients' messages. Recipients take turns, with at most one push in flight per mediation
@@ -166,7 +170,11 @@ public sealed class MediatorOptions
     /// no push and waits for pickup or its recipient's next message. A host collaborator (session,
     /// DID resolver or store) that never completes a cancelled call
     /// keeps its push unfinished, so twice this many such calls stop every push until one of them
-    /// completes; pickup keeps working.
+    /// completes; pickup keeps working. A name lookup for a recipient's endpoint (<see cref="DirectPush"/>)
+    /// is not counted among those: at the deadline the push stops waiting for it, settles, and pauses
+    /// that recipient's direct pushes, while the lookup may run on until the system's resolver gives
+    /// up. At most about this many × ceil(resolver
+    /// timeout ÷ <see cref="PushTimeout"/>) such lookups run at once.
     /// </summary>
     public int PushConcurrency { get; set; } = 4;
 
@@ -174,12 +182,99 @@ public sealed class MediatorOptions
     /// How long a push worker waits for one push before it gives up on it and serves other
     /// recipients; the message stays queued. Default 30 seconds; greater than zero and at most 5
     /// minutes. The abandoned call runs on until it ends, holding the message under its lease
-    /// meanwhile (as any live delivery), and its recipient gets no other push before it ends. A recipient whose push
-    /// reaches the deadline has its pushes paused for twice as long, measured on the monotonic clock
-    /// so a step of the wall clock does not change it (its messages wait for pickup meanwhile), so a
-    /// recipient that stalls its own pushes cannot hold a push worker continuously.
+    /// meanwhile (as any live delivery), and its recipient gets no other push before it ends. A recipient whose live push
+    /// reaches the deadline has its pushes paused for twice as long, and one whose direct push fails
+    /// (<see cref="DirectPush"/>: no answer, a 5xx, 408 or 429, a fault, the deadline, or an endpoint
+    /// the address check refuses) has its direct pushes paused for twice as long, measured on the
+    /// monotonic clock so a step of the wall clock does not change it (its messages wait meanwhile),
+    /// so a recipient that stalls its own pushes cannot hold a push worker continuously. A direct push
+    /// the endpoint refuses with any other 4xx does not pause: the next message is pushed at once. An
+    /// endpoint that answers each push just before the deadline can therefore hold one worker for up
+    /// to <see cref="MessagePickupOptions.MaxDeliveryBatch"/> × this per wake-up, as a slow but
+    /// accepting endpoint always could.
     /// </summary>
     public TimeSpan PushTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Whether the mediator pushes a stored message to the recipient's own endpoint when the
+    /// recipient has no live session (step 3 of the delivery order, FR-PICK-09). Off by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>What it does.</strong> Every relayed message is stored first. A push then looks for the
+    /// recipient's live session, and when there is none, asks the host's
+    /// <see cref="IRecipientEndpointDirectory"/> for the endpoint registered for the recipient's
+    /// mediation grant and POSTs the stored message there, unchanged, as the HTTP transport sends any
+    /// encrypted message. A 2xx answer delivers it, and the mediator removes it from the queue. A
+    /// grant the directory has no endpoint for keeps its messages for pickup.
+    /// </para>
+    /// <para>
+    /// <strong>Where the endpoint comes from.</strong> Only from the directory, which the operator
+    /// fills (the DIDComm specification leaves this coordination between a recipient and its mediator
+    /// out of its scope, routing.md "Mediator Process"); never from anything a message carries. It
+    /// must be an absolute <c>http</c> or <c>https</c> URI that the HTTP transport accepts; anything
+    /// else counts as no endpoint. Before a message is taken, the endpoint goes through the outbound
+    /// endpoint check the host's own sends use (<c>DidCommOptions.OutboundEndpointPolicy</c>), with a
+    /// host name looked up asynchronously, under <see cref="PushTimeout"/>. An endpoint it refuses (a
+    /// private, loopback, link-local or metadata address, or a name that resolves to one or does not
+    /// resolve) gets no POST, and that recipient's direct pushes pause as for a push that fails. The
+    /// redirect hops a push follows are checked by the HTTP transport's own handler (when each
+    /// connection opens, or through a <c>TrustedProxy</c> before each hop); on a host whose primary
+    /// handler is its own, or whose connect callback does not check addresses, they are that
+    /// handler's job, as for a transport the host builds itself (owner decision OD-5 on #110). On
+    /// such a host — one whose own connection code (a connect callback that checks nothing, or a
+    /// primary handler of its own) replaced the library's — the check before a push is a name check
+    /// only: the name is looked up again at connect, and the push connects wherever that second
+    /// answer points, so the host's connection code must check addresses at connect itself (owner
+    /// decision OD-7 on #110). With <c>UseHttpTransport()</c>'s own handler every connection is
+    /// checked when it opens.
+    /// </para>
+    /// <para>
+    /// <strong>One attempt per message.</strong> A message is pushed at most once, live or direct:
+    /// there is no retry. A temporary redirect (307) from the recipient's server is followed up to the
+    /// HTTP transport's <c>MaxRedirectHops</c>, every hop checked by the outbound endpoint guard, and
+    /// the whole chain is that one attempt; no other redirect is followed (owner decision OD-1 on
+    /// #110). A push that is not answered with a 2xx at the end of the chain, or that fails, leaves the
+    /// message queued for the recipient's next <c>delivery-request</c>: pickup is the later delivery
+    /// (owner decision OD-2 on #110). The push has the same deadline as a live push
+    /// (<see cref="PushTimeout"/>). Delivery is at-least-once: a recipient de-duplicates by message id.
+    /// </para>
+    /// <para>
+    /// <strong>A push that does not deliver.</strong> Its message is never pushed again; the
+    /// recipient's next <c>delivery-request</c> gets it. When the endpoint answered a 4xx other than
+    /// 408 and 429 — its definite "not this message" — the next message goes on at once, with no
+    /// pause, so messages anyone stored ahead of a real one cannot hold it back; a real message waits
+    /// behind refused ones only when a worker's whole run of them delivers nothing (more than
+    /// <see cref="MessagePickupOptions.MaxDeliveryBatch"/> in a row), and then until the next relayed
+    /// message, or for pickup. Anything else that does not deliver — a 5xx, 408
+    /// or 429, a redirect that is not followed, no answer, a timeout of the transport or the HTTP
+    /// client, or the deadline — ends the worker's run and pauses that recipient's direct pushes for
+    /// twice <see cref="PushTimeout"/>. Its live pushes go on: a recipient that connects live during
+    /// the pause gets its messages over that session. So such a message never holds up later ones
+    /// beyond the pause, and is never sent again: the messages behind it go at the first relayed
+    /// message (or live-delivery change) after the pause, until the next push that fails — one run
+    /// per pause, so under an endpoint that keeps failing, part of them go only by pickup.
+    /// </para>
+    /// <para>
+    /// <strong>What it needs.</strong> <c>UseHttpTransport()</c> on the same builder (the push uses the
+    /// mediator's own single-attempt instance of the HTTP transport, over the host's HTTP client
+    /// settings and outbound endpoint policy, never the host's own transport) and an
+    /// <see cref="IRecipientEndpointDirectory"/> registered before <c>AddMediator()</c>. Without
+    /// either, or with an invalid <c>HttpTransportOptions.TrustedProxy</c>, the mediator refuses to
+    /// start. Outside a generic host the same refusals come later: a missing directory when the push
+    /// workers are first built (with the first relayed message), and the rest at each direct push,
+    /// which then fails and leaves the message for pickup.
+    /// </para>
+    /// <para>
+    /// <strong>With re-wrapping.</strong> With <see cref="RewrapMode.ReanoncryptToNext"/> the stored
+    /// message is the mediator's own anoncrypted <c>forward</c> addressed to the recipient itself,
+    /// and that is what is pushed. The recipient's endpoint opens it: the DIDComm specification
+    /// expects receivers to (routing.md, "Rewrapping": "Receivers also need to know about it, because
+    /// it causes them to receive a double-packaged message"), and the library's own
+    /// <c>MapDidCommEndpoint</c> and <c>MapDidCommWebSocket</c> do (owner decision OD-3 on #110).
+    /// </para>
+    /// </remarks>
+    public bool DirectPush { get; set; }
 
     /// <summary>
     /// Check every setting: each role's own checks, the ranges listed on the pipeline settings, and
@@ -207,7 +302,7 @@ public sealed class MediatorOptions
     }
 
     /// <summary>
-    /// The pipeline's own checks: the ranges of its settings and the rule between the mailbox age
+    /// The pipeline's own checks: the ranges of its settings, and the rule between the mailbox age
     /// limit and <see cref="MaxForwardDelay"/>. Messages name the setting, never its value.
     /// </summary>
     /// <exception cref="ArgumentException">A pipeline setting is out of range, <see cref="RewrapMode"/> is not a defined value, or the mailbox age limit is not longer than <see cref="MaxForwardDelay"/>.</exception>
@@ -224,10 +319,11 @@ public sealed class MediatorOptions
     }
 
     /// <summary>
-    /// The ranges of the pipeline settings alone, for a part that reads only those (the sub-objects
-    /// of the registered <c>IOptions&lt;MediatorOptions&gt;</c> are not the roles' settings in effect).
+    /// The checks of the pipeline settings alone — their ranges — for a part that reads only those
+    /// (the sub-objects of the registered <c>IOptions&lt;MediatorOptions&gt;</c> are not the roles'
+    /// settings in effect).
     /// </summary>
-    /// <exception cref="ArgumentException">A pipeline setting is out of range or <see cref="RewrapMode"/> is not a defined value.</exception>
+    /// <exception cref="ArgumentException">A pipeline setting is out of range, or <see cref="RewrapMode"/> is not a defined value.</exception>
     internal void ValidatePipelineRanges()
     {
         if (!Enum.IsDefined(RewrapMode))
@@ -292,6 +388,7 @@ public sealed class MediatorOptions
             PurgeInterval = pipeline.PurgeInterval,
             PushConcurrency = pipeline.PushConcurrency,
             PushTimeout = pipeline.PushTimeout,
+            DirectPush = pipeline.DirectPush,
         };
     }
 }

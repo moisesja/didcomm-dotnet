@@ -291,8 +291,10 @@ public sealed class MapDidCommMediatorTests
         // And the host filter is in force on each of them.
         (await mediator.GetAsync("/didcomm/oob?_oobid=mediator")).Status.Should().Be(HttpStatusCode.NotFound, "mediator.test is not the mediator's host here");
         (await mediator.GetAsync("http://mediator.example/didcomm/oob?_oobid=mediator")).Status.Should().Be(HttpStatusCode.OK);
-        (await mediator.PostAsync("{}")).Status.Should().Be(HttpStatusCode.NotFound);
-        (await mediator.PostAsync("{}", "http://mediator.example/didcomm")).Status.Should().Be(HttpStatusCode.BadRequest, "the HTTP endpoint is reached on the mediator's host");
+        // A body shaped as the encrypted envelope it is declared as, which does not unpack.
+        const string NotAJwe = "{\"ciphertext\":\"x\"}";
+        (await mediator.PostAsync(NotAJwe)).Status.Should().Be(HttpStatusCode.NotFound);
+        (await mediator.PostAsync(NotAJwe, "http://mediator.example/didcomm")).Status.Should().Be(HttpStatusCode.BadRequest, "the HTTP endpoint is reached on the mediator's host");
         (await mediator.GetAsync("/didcomm")).Status.Should().Be(HttpStatusCode.NotFound);
         (await mediator.GetAsync("http://mediator.example/didcomm")).Status.Should().Be(HttpStatusCode.BadRequest, "the WebSocket endpoint is reached on the mediator's host");
     }

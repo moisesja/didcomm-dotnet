@@ -49,9 +49,13 @@ public static class Section_P_SendOverTransport
             RetryBaseDelay = TimeSpan.FromMilliseconds(200),  // exponential backoff base (when retries are on)
             CircuitBreakerFailureThreshold = 5,               // open the breaker after 5 straight failures...
             CircuitBreakerOpenDuration = TimeSpan.FromSeconds(30), // ...and probe again after 30 s
-            MaxRedirectHops = 2,                              // 301/302/307/308 follow-cap (FR-TRN-07)
+            MaxRedirectHops = 2,                              // at most 2 307 hops; only 307 is followed (FR-TRN-06)
             OutboundEndpointPolicy = new OutboundEndpointPolicy(), // the default SSRF stance, made visible
         };
+        // Built by hand here only to reach the in-process test server. A real host registers the
+        // transport with UseHttpTransport(): its "didcomm" client is what follows 307 redirects
+        // only, checks every connection's address and never uses the environment's proxy. A
+        // transport built by hand gets whatever its client does.
         var transportServices = new ServiceCollection();
         transportServices.AddHttpClient(HttpDidCommTransport.HttpClientName)
             .ConfigurePrimaryHttpMessageHandler(_ => bobServer.CreateHandler());

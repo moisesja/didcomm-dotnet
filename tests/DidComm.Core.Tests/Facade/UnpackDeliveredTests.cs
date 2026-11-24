@@ -316,15 +316,16 @@ public sealed class UnpackDeliveredTests
     [Fact]
     public async Task An_opened_layer_over_MaxReceiveBytes_is_refused()
     {
-        // data.json is re-serialized when it is extracted, with the default encoder, which escapes
-        // every 'é' as é (six bytes for two): the opened layer is larger than the one it came
-        // out of, so the size rule must run on each layer, not only on the delivered text.
-        var bulky = new JsonObject { ["protected"] = new string('é', 20_000), ["ciphertext"] = "x", ["iv"] = "", ["tag"] = "", ["recipients"] = new JsonArray() };
-        var attachment = new Attachment { Id = "a1", MediaType = ForwardConstants.PayloadMediaType, Data = new AttachmentData { Json = bulky } };
-        var packed = await _world.AnoncryptAsync(Forward(Bob, Bob, attachment));
-        _world.BobOptions.MaxReceiveBytes = 90_000;
-        Encoding.UTF8.GetByteCount(packed).Should().BeLessThan(90_000, "the delivered layer itself fits");
-        Encoding.UTF8.GetByteCount(bulky.ToJsonString()).Should().BeGreaterThan(90_000, "the opened layer does not");
+        // data.json is written back when it is extracted. A packed message this library wrote comes
+        // back as it was, but a peer may write characters raw that the library's writer escapes
+        // longer (a DEL is one byte raw, six escaped): the opened layer is then larger than the one it
+        // came out of, so the size rule must run on each layer, not only on the delivered text, and
+        // the writing itself stops at the limit (ADV-110-1c-1).
+        var attachment = "{\"protected\":\"" + RawDel(12_000) + "\",\"ciphertext\":\"x\",\"iv\":\"\",\"tag\":\"\",\"recipients\":[]}";
+        var packed = _world.RawAnoncryptToBob(RawForwardToBob(attachment));
+        _world.BobOptions.MaxReceiveBytes = 50_000;
+        Encoding.UTF8.GetByteCount(packed).Should().BeLessThan(50_000, "the delivered layer itself fits");
+        (6 * 12_000).Should().BeGreaterThan(50_000, "the opened layer, written back, does not");
 
         var act = () => _world.BobClient().UnpackDeliveredAsync(packed, CancellationToken.None);
 

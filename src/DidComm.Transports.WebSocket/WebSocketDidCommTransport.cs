@@ -487,7 +487,7 @@ public sealed class WebSocketDidCommTransport : IDidCommTransport, IAsyncDisposa
         // so both layers are skipped there, unless a TrustedProxy is set (FR-TRN-13): then this check
         // is the destination's only one and runs on every send.
         if (_options.Connect is null || _proxied)
-            _guard.Validate(request.Endpoint);
+            await _guard.ValidateAsync(request.Endpoint, ct).ConfigureAwait(false);
 
         var key = PoolKey(request.Endpoint);
         var attempt = 0;

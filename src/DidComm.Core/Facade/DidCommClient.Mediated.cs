@@ -10,9 +10,10 @@ using DidComm.Transports.ReturnRoute;
 
 namespace DidComm.Facade;
 
-// The recipient-side mediator client's two entry points into the facade (#96). Both are internal:
-// DidComm.Mediator.Client (the client's package since #113) reaches them through InternalsVisibleTo,
-// and nothing here changes a released member.
+// The recipient-side mediator client's two entry points into the facade (#96), and the plain
+// receiving endpoints' opening of a re-wrapped delivery (#110, OD-3). All are internal:
+// DidComm.Mediator.Client (the client's package since #113) and DidComm.AspNetCore reach them through
+// InternalsVisibleTo, and nothing here changes a released member.
 public sealed partial class DidCommClient
 {
     /// <summary>
@@ -66,7 +67,7 @@ public sealed partial class DidCommClient
 
         // The guard SendAsync applies to a resolved endpoint, applied to the URI the override will
         // carry: it came from the peer's DID document.
-        new OutboundEndpointGuard(_options.OutboundEndpointPolicy).Validate(endpoint);
+        await new OutboundEndpointGuard(_options.OutboundEndpointPolicy).ValidateAsync(endpoint, ct).ConfigureAwait(false);
         return endpoint;
     }
 
@@ -109,7 +110,7 @@ public sealed partial class DidCommClient
     /// Every layer is unpacked with <see cref="UnpackAsync"/>, not with the mediator's restricted
     /// unpack, because what a layer carries may legitimately be the innermost message in any
     /// envelope (authcrypt included). The shape is judged after the unpack, on what the envelope
-    /// layer established (<see cref="IsRewrapLayerForThisAgent"/>). Only the DID that decrypted a
+    /// layer established (<see cref="IsRewrapLayerForThisAgent(UnpackResult, string, IReadOnlyList{Attachment})"/>). Only the DID that decrypted a
     /// layer counts as this agent, as on the mediator (<c>ForwardHandler</c>): a forward naming
     /// another DID — another DID this agent holds included — is not opened.
     /// </remarks>
@@ -122,8 +123,193 @@ public sealed partial class DidCommClient
     internal async Task<DeliveredUnpack> UnpackDeliveredAsync(string packed, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(packed);
+        var result = await UnpackAsync(packed, ct).ConfigureAwait(false);
+        return await OpenRewrapLayersAsync(result, packed, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Go on from a message a plain receiving endpoint has already unpacked (DidComm.AspNetCore,
+    /// owner decision OD-3 on #110): when it is a <c>forward</c> re-wrapped for this agent, open it
+    /// and every such layer inside it, with the rule and the bound of
+    /// <see cref="UnpackDeliveredAsync"/> (FR-ROUTE-06, receiver side: "The outer envelope is a
+    /// forward message where to is the receiver itself", routing.md "Rewrapping"); otherwise return
+    /// <paramref name="received"/> as it is, with no layer opened. The received layer is not
+    /// unpacked again: only the layers inside it are.
+    /// </summary>
+    /// <remarks>
+    /// The received message is opened only when it has the shape <see cref="IsRewrapLayerForThisAgent(UnpackResult)"/>
+    /// requires. Anything else — not a forward, a forward that names another DID as <c>next</c>
+    /// (another DID this agent holds included), one that is signed, authcrypted or carries
+    /// <c>from_prior</c>, one without exactly one attachment, or a forward too broken to read — is
+    /// returned unchanged: a plain receiver is not a mediator and relays nothing. Once a layer is
+    /// opened, what is inside must be the message itself or another such layer: a forward of any
+    /// other shape inside, a layer past the bound, an attachment that does not decode, or a layer
+    /// that fails to unpack fails the whole message, as <see cref="UnpackDeliveredAsync"/> fails it.
+    /// The innermost message is the result of its own unpack, so its sender, signer and anonymity
+    /// are its own envelope's; nothing is taken from a layer around it.
+    /// </remarks>
+    /// <param name="received">The unpack result of the received message.</param>
+    /// <param name="packed">The packed text <paramref name="received"/> was unpacked from.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The innermost unpack result (<paramref name="received"/> itself when no layer was opened), the packed text it came from, and how many layers were opened.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="received"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="packed"/> is <c>null</c> or empty.</exception>
+    /// <exception cref="ConsistencyException">An opened layer holds a <c>forward</c> that is not a delivery re-wrapped for this agent, or an attachment with no data.</exception>
+    /// <exception cref="MalformedMessageException">More than the maximum number of layers, an attachment that is not valid base64url, decodes to nothing or is not a UTF-8 JSON object, or a layer inside that fails to unpack (FR-API-05 expiry and FR-API-06 size included).</exception>
+    /// <exception cref="DidCommException">Any other refusal of the unpack of a layer inside.</exception>
+    internal Task<DeliveredUnpack> OpenReceivedRewrapAsync(UnpackResult received, string packed, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(received);
+        ArgumentException.ThrowIfNullOrEmpty(packed);
+        return IsRewrapLayerForThisAgent(received)
+            ? OpenRewrapLayersAsync(received, packed, ct)
+            : Task.FromResult(new DeliveredUnpack(received, packed, 0));
+    }
+
+    /// <summary>
+    /// For a receiver with the routing role, a registered handler for forwards (the mediator's
+    /// <see cref="ForwardHandler"/>; owner decision OD-6 on #110): when <paramref name="received"/> is
+    /// a <c>forward</c> re-wrapped for this agent whose layers end in a message that is not a forward,
+    /// return that message, for this agent to handle as its own. A mediator reached through a
+    /// rewrapping mediator gets every message sent to it that way (routing.md "Rewrapping": "The
+    /// outer envelope is a forward message where to is the receiver itself"). Returns <c>null</c> in
+    /// every other case, and the forward is then left to the forward handler as it arrived: a forward
+    /// for the next hop inside (relayed with every layer's expiry and delay, FR-ROUTE-09/10), and
+    /// every layer that cannot be opened (the handler drops it with its typed outcome). Never throws
+    /// for what it opens; only a cancellation of <paramref name="ct"/> propagates.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Each layer addressed to this agent is opened as the forward handler opens it: the restricted
+    /// unpack of an anoncrypt envelope around a plaintext message, which looks up no DID
+    /// (<see cref="UnpackAnoncryptedPlaintextAsync"/>), at most
+    /// <see cref="ForwardHandler.MaxSelfAddressedLayers"/> layers, the received one included. Only the
+    /// innermost layer, when it is not that shape (an authcrypt or signed message, the shapes a
+    /// mediator's own protocol messages arrive in; the restricted unpack refuses it for its shape),
+    /// gets the full unpack: one lookup of the sender's (or signer's) DID per request, what the same
+    /// message costs when it arrives directly. If that turns out to be a forward, it is not opened
+    /// further: it is the handler's to refuse. A layer that does not decrypt, or fails the receive
+    /// rules, is tried once and left to the handler.
+    /// </para>
+    /// <para>
+    /// Each layer's opening is recorded for that layer (<see cref="SelfAddressedPeels"/>). When the
+    /// forward goes to the forward handler, the handler's peel takes the recorded result or refusal
+    /// instead of opening the layer again. So each layer is opened once per request, and a chain
+    /// left to the handler costs what it cost before this look-ahead.
+    /// </para>
+    /// <para>
+    /// The message returned is the result of its own unpack: its sender, signer and anonymity are its
+    /// own envelope's. The caller admits it as it would a message that arrived directly (replay
+    /// admission, <c>created_time</c>, the id cap), with no return route (return_route.md: the
+    /// connection is the mediator's, not its sender's).
+    /// </para>
+    /// </remarks>
+    /// <param name="received">The unpack result of the received message.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The message found inside, the packed text it was unpacked from and how many layers were opened (at least one); <c>null</c> to leave the received forward to the forward handler.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="received"/> is <c>null</c>.</exception>
+    internal async Task<DeliveredUnpack?> OpenSelfAddressedMessageAsync(UnpackResult received, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(received);
+        if (!IsRewrapLayerForThisAgent(received))
+            return null;
+
+        var layer = received;
+        for (var opened = 1; opened <= ForwardHandler.MaxSelfAddressedLayers; opened++)
+        {
+            // The layer's one attachment (the shape rule checked it), decoded by the relay rule, then
+            // the forward handler's restricted opening (ForwardProcessor.PeelAsync does the same two
+            // steps). Every outcome but a cancellation is recorded for this layer, so the forward
+            // handler, if the forward goes to it, takes it instead of opening the layer again.
+            string text;
+            try
+            {
+                ForwardMessage.TryParse(layer.Message, out _, out var attachments);
+                text = ForwardProcessor.ExtractAttachmentText(attachments[0], _options.MaxReceiveBytes);
+            }
+            catch (DidCommException ex)
+            {
+                SelfAddressedPeels.Refused(this, layer, ex);
+                return null;
+            }
+
+            UnpackResult inner;
+            try
+            {
+                inner = await UnpackAnoncryptedPlaintextAsync(text, ct).ConfigureAwait(false);
+            }
+            catch (MalformedMessageException ex) when (ex.RefusedShape)
+            {
+                // Not an anoncrypted plaintext message (authcrypt, signed, another envelope inside,
+                // from_prior): the innermost layer, given the full unpack once.
+                SelfAddressedPeels.Refused(this, layer, ex);
+                return await OpenInnermostAsync(text, opened, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // It does not decrypt, parse or pass the receive rules: tried once here, it is the
+                // forward handler's to drop.
+                SelfAddressedPeels.Refused(this, layer, ex);
+                return null;
+            }
+            SelfAddressedPeels.Opened(this, layer, inner);
+
+            if (!string.Equals(inner.Message.Type, ForwardConstants.ForwardTypeUri, StringComparison.Ordinal))
+                return new DeliveredUnpack(inner, text, opened);
+            // A forward: another layer for this agent is opened in turn; any other is the handler's.
+            if (!IsRewrapLayerForThisAgent(inner))
+                return null;
+            layer = inner;
+        }
+
+        // Past the bound: the forward handler drops it.
+        return null;
+    }
+
+    /// <summary>
+    /// The one full unpack of <see cref="OpenSelfAddressedMessageAsync"/>: an attachment the
+    /// restricted unpack refused. A message that is not a forward is returned; a forward, or anything
+    /// that does not unpack, leaves the received forward to the handler (<c>null</c>).
+    /// </summary>
+    /// <param name="text">The attachment's packed text.</param>
+    /// <param name="opened">How many layers are opened once it is.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task<DeliveredUnpack?> OpenInnermostAsync(string text, int opened, CancellationToken ct)
+    {
+        try
+        {
+            var full = await UnpackAsync(text, ct).ConfigureAwait(false);
+            return string.Equals(full.Message.Type, ForwardConstants.ForwardTypeUri, StringComparison.Ordinal)
+                ? null
+                : new DeliveredUnpack(full, text, opened);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The opening loop of <see cref="UnpackDeliveredAsync"/> and <see cref="OpenReceivedRewrapAsync"/>,
+    /// from an unpacked outermost layer: a message that is not a forward is the message; a forward is
+    /// opened only when it is a layer re-wrapped for this agent, at most
+    /// <see cref="ForwardHandler.MaxSelfAddressedLayers"/> of them, and any other forward fails.
+    /// </summary>
+    /// <param name="outermost">The unpack result of the outermost layer.</param>
+    /// <param name="packed">The packed text it was unpacked from.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task<DeliveredUnpack> OpenRewrapLayersAsync(UnpackResult outermost, string packed, CancellationToken ct)
+    {
         var text = packed;
-        var result = await UnpackAsync(text, ct).ConfigureAwait(false);
+        var result = outermost;
         for (var opened = 0; ; opened++)
         {
             // Not a forward: this is the message. A structurally broken forward throws Malformed.
@@ -141,7 +327,7 @@ public sealed partial class DidCommClient
                     $"The delivered message carries more than {ForwardHandler.MaxSelfAddressedLayers} forward layers re-wrapped for this agent (FR-ROUTE-06).");
             }
 
-            text = Encoding.UTF8.GetString(ForwardProcessor.ExtractAttachmentBytes(attachments[0]));
+            text = ForwardProcessor.ExtractAttachmentText(attachments[0], _options.MaxReceiveBytes);
             result = await UnpackAsync(text, ct).ConfigureAwait(false);
         }
     }
@@ -174,6 +360,27 @@ public sealed partial class DidCommClient
         var selfAddressed = nextSubject is not null & decryptedBy is not null
             & string.Equals(nextSubject, decryptedBy, StringComparison.Ordinal);
         return anoncryptOfPlaintext & anonymous & noFromPrior & attachments.Count == 1 & selfAddressed;
+    }
+
+    /// <summary>
+    /// Whether an unpacked message is a <c>forward</c> re-wrapped for this agent
+    /// (<see cref="IsRewrapLayerForThisAgent(UnpackResult, string, IReadOnlyList{Attachment})"/>).
+    /// A forward too broken to read (no <c>next</c>, no attachments) is not one: it is left as it
+    /// arrived.
+    /// </summary>
+    /// <param name="layer">The unpack result.</param>
+    internal static bool IsRewrapLayerForThisAgent(UnpackResult layer)
+    {
+        ArgumentNullException.ThrowIfNull(layer);
+        try
+        {
+            return ForwardMessage.TryParse(layer.Message, out var next, out var attachments)
+                && IsRewrapLayerForThisAgent(layer, next, attachments);
+        }
+        catch (MalformedMessageException)
+        {
+            return false;
+        }
     }
 
     // The pack-stage refusal of a routed operation without a service resolver (PackEncryptedAsync's text).

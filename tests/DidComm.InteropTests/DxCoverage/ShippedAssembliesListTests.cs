@@ -36,6 +36,7 @@ public sealed class ShippedAssembliesListTests
         "DidComm.Mediator.AspNetCore -> DidComm.AspNetCore",
         "DidComm.Mediator.AspNetCore -> DidComm.Mediator",
         "DidComm.Mediator.Client -> DidComm.Core",
+        "DidComm.Transports.Http -> DidComm.Core",
         "DidComm.Transports.WebSocket -> DidComm.Core",
     ];
 
@@ -146,11 +147,11 @@ public sealed class ShippedAssembliesListTests
 
         var projects = Projects.Value;
 
-        // Core lets Transports.Http (which references Core) and a test assembly use its internals: only the shipped grantee is a new edge.
-        var newGrant = WithGrants(projects, "DidComm.Core", grants => grants.Append("DidComm.Transports.Http").Append("DidComm.Example.Tests"));
+        // Core lets Adapters.NetDid (which references Core) and a test assembly use its internals: only the shipped grantee is a new edge.
+        var newGrant = WithGrants(projects, "DidComm.Core", grants => grants.Append("DidComm.Adapters.NetDid").Append("DidComm.Example.Tests"));
         ShippedProjects.FriendEdgeProblems(ShippedProjects.FriendEdges(newGrant), PinnedFriendEdges)
             .Should().ContainSingle()
-            .Which.Should().StartWith("DidComm.Transports.Http -> DidComm.Core:").And.Contain("new InternalsVisibleTo grant");
+            .Which.Should().StartWith("DidComm.Adapters.NetDid -> DidComm.Core:").And.Contain("new InternalsVisibleTo grant");
 
         // Core stops granting Transports.WebSocket: the pinned edge is reported as gone.
         var removedGrant = WithGrants(projects, "DidComm.Core", grants => grants.Where(g => g != "DidComm.Transports.WebSocket"));

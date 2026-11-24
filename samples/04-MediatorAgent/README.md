@@ -7,9 +7,11 @@ single `SendAsync` on Alice's side discovers the route, wraps the forward and po
 writes no routing code at all. On the mediator, the library receives and checks each forward,
 answers the sender `202`, and then hands it to a small relay the host writes itself.
 
-This sample is the **routing relay only**. For a complete mediator — recipients enroll with
-Coordinate Mediation, messages wait in a queue and are picked up over HTTP or pushed over a
-WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediator()`).
+Sections 1–8 are the **routing relay only** (`AddRoutingMediator()` and the host's relay).
+Section 9 then shows the library doing that push itself: a complete mediator (`AddMediator()`
+with `DirectPush` on) stores each message in the recipient's mailbox and posts it to the inbox
+the operator registered for that recipient. For enrolment over Coordinate Mediation, pickup over
+HTTP and live delivery over a WebSocket, see [`samples/11-MediatedAgent`](../11-MediatedAgent/).
 
 ## What it demonstrates
 
@@ -29,12 +31,16 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   (already complete: the 202 went out first), re-checks expiry with
   `ForwardProcessingResult.IsExpired`, reads `NotBefore`, looks the recipient up in a bounded host
   directory (DID → inbox URL, at most 16 entries, filled only by the operator — never from a
-  peer's message or a DID document) and relays the still-encrypted onward bytes with
+  peer's message or a DID document) and relays the onward bytes, unchanged, with
   `DidCommClient.SendPackedAsync` — which applies the mediator's SSRF policy to the inbox URL and
-  never reads a response body. A failed relay, of any kind, is recorded as `Failed` and handed
+  never reads a response body. It sends them under the media type of their own envelope
+  (`RelayMediaType.cs`: encrypted, signed or plaintext, by the structural rule receivers use): a
+  sender may wrap a signed or plaintext message, and a receiver checks the declared type against
+  the envelope (transports.md), so labelling everything as encrypted would get such a message
+  refused with `415`. A failed relay, of any kind, is recorded as `Failed` and handed
   back to the forward handler, which logs its message id and exception type.
-  **The library's built-in push to a recipient's endpoint is deferred to #110**; until then a
-  relay like this one is the host's own code.
+  With `AddMediator()` the library makes this push itself (section 9), so a relay like this one
+  is for a host that keeps the routing role only.
 - **A time limit on every relay** — a sink runs on the forward handler's background pump, so it
   must never wait on an endpoint a peer controls without a bound: each relay gets at most
   `InboxRelaySink.RelayTimeout` (5 seconds) and is recorded as `Failed` when it runs out. Known
@@ -44,6 +50,8 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   messages. That protects other recipients from a slow one, not from a failing one: the HTTP
   transport has one circuit breaker for every destination, so repeated failed attempts at one
   inbox (retries included) can open it, and while it is open every recipient's relay fails.
+  (The library's own push in section 9 avoids this: it sends through its own copy of the
+  transport, with no retry and a circuit breaker that never opens.)
 - **A registered recipient with no inbox** — Carol is registered but the host knows no inbox for
   her, so the relay hands her forward to the library's `NullForwardSink`, which drops it and logs
   the message id.
@@ -83,10 +91,50 @@ WebSocket — see [`samples/11-MediatedAgent`](../11-MediatedAgent/) (`AddMediat
   an acknowledgement the host completes later (`DispatchAsync(…, acknowledged, session: null, ct)`)
   — nothing is relayed until it completes, the same rule that holds the relay behind the 202.
   Then `ForwardHandler.Dispose()` and `DisposeAsync()`.
+- **The library's own push: `AddMediator()` with `DirectPush` (FR-PICK-09 step 3)** — a second
+  mediator, `AddMediator(o => { o.CoordinateMediation.RoutingDids.Add(…); o.DirectPush = true; })`
+  behind `MapDidCommMediator("/didcomm")`, with `UseHttpTransport()` (the push goes out over HTTP)
+  and the same loopback opening of the outbound guard. `DirectPush` is off by default.
+  - **The operator's directory (`InboxDirectory.cs`)** — an `IRecipientEndpointDirectory`
+    registered before `AddMediator()`: for each recipient that enrolled, its own inbox, keyed by
+    the DID it enrolled with (the grant's peer DID). The mediator asks it just before each push
+    and never sends to an address a message names. Only the operator fills it, never from a
+    peer's message or a DID document. An inbox address can be a secret capability URL: the
+    mediator's own log lines never name it, and a push does not go through .NET's HTTP client
+    request logging (it uses only the innermost handler of the `"didcomm"` client); the host's own
+    sends are still logged there (`System.Net.Http.HttpClient.didcomm.*`).
+  - **Enrolment by the operator** — Bob and Carol are enrolled through the mediator's public
+    `IMediationStore` (`GrantAsync(new MediationGrant(…))`, then `UpdateRecipientsAsync(…,
+    RecipientUpdateAction.Add)`): each gets an account DID and a second DID, registered under the
+    grant, whose service names the mediator's DID. A wallet enrols itself over Coordinate
+    Mediation instead (cookbook CC, sample 11).
+  - **Pushed** — Alice writes to Bob's new DID; the mediator answers `202`, stores the message,
+    finds no live connection for Bob and posts it to his inbox. The push counts `Pushed-Direct`
+    on `didcomm.mediator.push.outcomes` (tag `didcomm.push.outcome`), read here through a
+    `MeterListener`, and Bob's mailbox (`IMessageStore.GetStatusAsync`) is empty afterwards. Each
+    message gets one attempt, whatever `UseHttpTransport`'s retry setting (left at its default
+    here): a `2xx` removes it from the mailbox; anything else leaves it there for pickup and it is
+    not tried again. An answered `4xx` other than `408` and `429` (the inbox's "not this message")
+    moves on to the next message; any other failure also pauses that recipient's direct pushes
+    for twice `PushTimeout` (the messages behind it go at the first relayed message after the
+    pause, until the next push that does not deliver, or by pickup). A `307` redirect is followed a few hops, each new address checked by the
+    outbound guard; `301`, `302`, `303` and `308` are not followed.
+  - **No inbox registered** — Carol is enrolled but has no entry in the directory: the push counts
+    `Push-Skipped-NoEndpoint`, nothing is sent, and her message waits in her mailbox (count 1)
+    until she picks it up.
+  - `DirectPush` works with `RewrapMode.ReanoncryptToNext` too: the mailbox then holds the
+    mediator's own forward addressed to the recipient, and the recipient's `MapDidCommEndpoint`
+    opens it (as the DIDComm spec expects of receivers).
+  - With `DirectPush` on, the mediator refuses to start without the directory, without
+    `UseHttpTransport()` (the push relies on what that HTTP client does: it checks each
+    connection's address when it connects, follows no redirect on its own and uses no proxy but a
+    `TrustedProxy` you name), or with an invalid `TrustedProxy`.
 
-Both web apps bind `http://127.0.0.1:0` (a port picked by the OS), every wait is on the event
-the next line reads with a 30-second hang guard, and nothing touches the network — the run is
-loopback-only and deterministic (FR-DX-02).
+The relay and Bob's inbox bind `http://127.0.0.1:0` (a port picked by the OS); section 9's
+mediator names its own address in its DID, so its loopback port is picked first
+(`samples/_shared/LoopbackPort`). Every wait is on the event the next line reads with a
+30-second hang guard, and nothing touches the network — the run is loopback-only and
+deterministic (FR-DX-02).
 
 ## Run it
 
@@ -191,7 +239,30 @@ Ports and DIDs change every run; the structure is stable:
     [bob] Content = Held until the acknowledgement.
   • Hand-built handler stopped (Dispose, then DisposeAsync waited for its relay to finish).
 
-== Section 9 — Teardown ==
+== Section 9 — The library's own push: AddMediator() with DirectPush ==
+    MediatorOptions.DirectPush by default = False
+    Complete mediator's inbox = http://127.0.0.1:<port>/didcomm
+    Complete mediator's DID = did:peer:2.Ez6LS…
+    [operator] Bob enrolled; the DID Bob gives to senders is registered = Added
+    [operator] Carol enrolled; the DID Carol gives to senders is registered = Added
+    [operator] Bob's inbox added to the directory = True
+    [operator] inboxes in the directory = 1 of 16
+    Endpoint used (the complete mediator, from Bob's new DID) = http://127.0.0.1:<port>/didcomm
+    Transport HTTP status for Bob's message = 202
+  • [bob] his inbox received the message from the mediator:
+    [bob] Content = Pushed by the mediator itself.
+    [bob] Authenticated = True
+    [bob] From == alice = True
+    [bob] RecipientAddressing = Addressed
+    [bob] return-route session = none (nothing to answer on)
+  • [mediator] didcomm.push.outcome = Pushed-Direct: Bob's inbox answered 202, so the message left his mailbox.
+    [mediator] messages waiting in Bob's mailbox = 0
+    Transport HTTP status for Carol's message = 202
+  • [mediator] didcomm.push.outcome = Push-Skipped-NoEndpoint: no inbox is registered for Carol, so nothing was sent.
+    [mediator] messages waiting in Carol's mailbox = 1
+    note: Carol gets it when she next picks up (Message Pickup: sample 11, cookbook DD). A push that fails waits the same way: it is not tried again.
+
+== Section 10 — Teardown ==
     [mediator] Bob unregistered = True
     [mediator] registered recipients = 0
 ```
@@ -200,6 +271,8 @@ Ports and DIDs change every run; the structure is stable:
 
 - [`samples/11-MediatedAgent`](../11-MediatedAgent/) — the complete mediator: enrollment,
   queued pickup over HTTP and live delivery over a WebSocket.
+- [`samples/02-Cookbook`](../02-Cookbook/) section FF — `AddMediator()` in about twenty lines,
+  and `DirectPush` in a few more (FF.4).
 - [`samples/05-WebSocketChat`](../05-WebSocketChat/) — the WebSocket transport: trust ping,
   discover-features, chat, and reconnect-after-drop.
 - [`samples/02-Cookbook`](../02-Cookbook/) sections O/P/Q — the same routing pieces

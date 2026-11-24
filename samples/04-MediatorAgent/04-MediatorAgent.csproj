@@ -5,7 +5,7 @@
     <RootNamespace>DidComm.Samples.MediatorAgent</RootNamespace>
     <AssemblyName>DidComm.Samples.MediatorAgent</AssemblyName>
     <IsPackable>false</IsPackable>
-    <Description>didcomm-dotnet mediated routing over HTTP — an ASP.NET Core mediator running the library's routing role (AddRoutingMediator behind the registry-aware MapDidCommEndpoint) with a host-written IForwardSink that relays each forward to the recipient's own inbox via SendPackedAsync, plus a console flow routing Alice → Mediator → Bob with did:peer identities carrying routingKeys: the outbound-endpoint SSRF guard and its explicit loopback opt-in, Discover Features answered on the same request, a registered recipient without an inbox, a forward for an unregistered DID, and the same relay composed without a DI container (PRD §14.3 sample 04).</Description>
+    <Description>didcomm-dotnet mediated routing over HTTP — an ASP.NET Core mediator running the library's routing role (AddRoutingMediator behind the registry-aware MapDidCommEndpoint) with a host-written IForwardSink that relays each forward to the recipient's own inbox via SendPackedAsync, plus a console flow routing Alice → Mediator → Bob with did:peer identities carrying routingKeys: the outbound-endpoint SSRF guard and its explicit loopback opt-in, Discover Features answered on the same request, a registered recipient without an inbox, a forward for an unregistered DID, and the same relay composed without a DI container; then the library doing the push itself: a complete mediator (AddMediator() with DirectPush) posting a stored message to the inbox the operator registered for the recipient, and keeping it for pickup when none is registered (PRD §14.3 sample 04).</Description>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,6 +21,10 @@
     <ProjectReference Include="..\..\src\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
     <ProjectReference Include="..\..\src\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
     <ProjectReference Include="..\..\src\DidComm.AspNetCore\DidComm.AspNetCore.csproj" />
+    <!-- Section 9 only: a complete mediator (AddMediator() with DirectPush) and its endpoints
+         (MapDidCommMediator). The routing relay of sections 1-8 needs neither. -->
+    <ProjectReference Include="..\..\src\DidComm.Mediator\DidComm.Mediator.csproj" />
+    <ProjectReference Include="..\..\src\DidComm.Mediator.AspNetCore\DidComm.Mediator.AspNetCore.csproj" />
     <ProjectReference Include="..\..\tests\DidComm.TestSupport\DidComm.TestSupport.csproj" />
     <ProjectReference Include="..\_shared\_shared.csproj" />
   </ItemGroup>

@@ -118,8 +118,10 @@ internal sealed class StompServerSession
         }
         // FR-TRN-12 / FR-TRN-02: the SEND content-type must be an accepted DIDComm media type
         // (application/didcomm-encrypted+json et al.) — the WebSocket analog of the HTTP 415 gate.
+        // Read once, as message_structure.md asks of a recipient (the short form included).
         if (!frame.TryGetHeader("content-type", out var contentType)
-            || !DidCommEndpointRouteBuilderExtensions.MatchesMediaType(contentType, acceptedMediaTypes))
+            || DidCommEndpointRouteBuilderExtensions.BaseMediaType(contentType) is not { } declaredType
+            || !DidCommEndpointRouteBuilderExtensions.IsAcceptedMediaType(declaredType, acceptedMediaTypes))
         {
             logger?.LogWarning("MapDidCommWebSocket(STOMP): SEND with missing/unaccepted content-type; discarding message.");
             return null;
@@ -129,8 +131,15 @@ internal sealed class StompServerSession
             logger?.LogWarning("MapDidCommWebSocket(STOMP): SEND with an empty body; discarding message.");
             return null;
         }
-        // The DIDComm rule: one packed message per STOMP SEND frame body.
-        return System.Text.Encoding.UTF8.GetString(frame.Body.Span);
+        // The DIDComm rule: one packed message per STOMP SEND frame body, whose content-type is the
+        // media type of the envelope it is (transports.md): refused as an unaccepted content-type.
+        var packed = System.Text.Encoding.UTF8.GetString(frame.Body.Span);
+        if (!DidCommEndpointRouteBuilderExtensions.EnvelopeIsOfType(declaredType, packed))
+        {
+            logger?.LogWarning("MapDidCommWebSocket(STOMP): SEND with missing/unaccepted content-type; discarding message.");
+            return null;
+        }
+        return packed;
     }
 
     /// <summary>True when the comma-separated accept-version list contains 1.2.</summary>

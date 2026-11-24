@@ -41,11 +41,15 @@ public sealed class ForwardPeelAdvTests
     // ── Identity: what the peel lets a stranger reach ─────────────────────────────────────
 
     [Fact]
-    public async Task A_mediator_service_message_inside_a_self_addressed_forward_is_never_dispatched_or_looked_up()
+    public async Task A_mediator_service_message_inside_a_self_addressed_forward_is_never_executed_by_the_forward_handler()
     {
-        // Forwards are outside FR-RR-08 replay admission, so a captured pickup / coordinate-mediation
-        // request re-wrapped in a self-addressed forward must not be executed by the peel: what is
-        // inside and is not a forward is dropped, and nothing about it reaches the registry.
+        // Forwards are outside FR-RR-08 replay admission, so the forward handler never executes what it
+        // opens: what is inside and is not a forward is dropped here, and nothing about it reaches the
+        // registry. Since owner decision OD-6 on #110 the library's receiving endpoints open such a
+        // forward first and admit the message inside like a direct one — the replay check covers a
+        // captured request wrapped this way, and nothing is answered on the wrapper's connection
+        // (MediatorIdentityAndLogsAdvTests, over the real endpoint) — so this drop is what a host that
+        // dispatches to the handler itself gets.
         await using var f = await Fixture.CreateAsync();
         foreach (var type in new[]
         {

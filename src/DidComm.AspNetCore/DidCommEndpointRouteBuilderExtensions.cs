@@ -7,6 +7,7 @@ using DidComm.Consistency;
 using DidComm.Diagnostics;
 using DidComm.Exceptions;
 using DidComm.Facade;
+using DidComm.Jose;
 using DidComm.Json;
 using DidComm.Messages;
 using DidComm.Protocols;
@@ -56,6 +57,17 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// (<c>Func&lt;UnpackResult, IReturnRouteSession?, CancellationToken, Task&lt;Message?&gt;&gt;</c>)
     /// for FR-RR-* behaviour.
     /// </para>
+    /// <para>
+    /// <b>A re-wrapped delivery (FR-ROUTE-06, receiver side).</b> A mediator in re-wrap mode
+    /// delivers each message inside a fresh anoncrypted <c>forward</c> addressed to this agent
+    /// itself (routing.md, "Rewrapping"). Such a forward — anoncrypted plaintext, no signature or
+    /// <c>from_prior</c>, one attachment, and as <c>next</c> the DID that decrypted it — is opened,
+    /// up to 8 layers deep, and <paramref name="onReceive"/> gets the message inside, unpacked under
+    /// the full receive rules: who sent or signed it, or that it is anonymous, is its own envelope's,
+    /// never a layer's. A ninth layer, or anything inside that is neither the message nor another
+    /// such layer, is refused with the same <c>400</c>. Every other forward reaches the callback as
+    /// it arrived: this endpoint relays nothing.
+    /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
     /// <param name="pattern">URL pattern (e.g. <c>"/didcomm"</c>).</param>
@@ -79,8 +91,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             // FR-TRN-02: validate the inbound Content-Type matches one of the DIDComm media
             // types we know how to unpack. Mismatched → 415 (the standard HTTP code for an
             // unsupported request body shape).
-            var contentType = httpContext.Request.ContentType;
-            if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
+            // Read once, as message_structure.md asks of a recipient (the short form included).
+            var declaredType = BaseMediaType(httpContext.Request.ContentType);
+            if (declaredType is null || !IsAcceptedMediaType(declaredType, receiveOptions.AcceptedMediaTypes))
             {
                 return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
             }
@@ -100,6 +113,10 @@ public static class DidCommEndpointRouteBuilderExtensions
             if (refusal is not null)
                 return refusal;
 
+            // transports.md: the declared media type is the one of the envelope the body is.
+            if (!EnvelopeIsOfType(declaredType, body))
+                return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+
             // #35: start the constant-time clock HERE — after the body has been read — so the floor
             // budgets only the unpack window where the recipient-kid-dependent timing lives. The body
             // read is kid-independent (the peer chose its size), so charging it against the floor would
@@ -110,7 +127,8 @@ public static class DidCommEndpointRouteBuilderExtensions
             UnpackResult unpacked;
             try
             {
-                unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+                // A forward re-wrapped for this agent is opened here (FR-ROUTE-06, receiver side).
+                unpacked = (await UnpackReceivedAsync(client, body, dispatcher: null, receiveOptions.AcceptedMediaTypes, httpContext.RequestAborted).ConfigureAwait(false)).Result;
             }
             catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
@@ -163,8 +181,9 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// fresh <c>created_time</c> and a first-seen id) — a refused one is answered <c>202</c> with an
     /// empty body and is not dispatched. When the inbound was authcrypted (an authcrypt layer with a
     /// sender key id — a verified signature alone does not count, although it also sets
-    /// <c>UnpackResult.Authenticated</c>), carries <c>return_route: all</c> and is not a
-    /// <c>forward</c>, the handler gets a session
+    /// <c>UnpackResult.Authenticated</c>), carries <c>return_route: all</c>, is not a
+    /// <c>forward</c> and did not arrive inside forward layers re-wrapped for this agent (see below),
+    /// the handler gets a session
     /// (<see cref="ProtocolContext.Session"/>) bound to the authenticated sender; a reply the handler
     /// returns — or the one message it pushes through the session — is authcrypted from the DID
     /// that decrypted the inbound to exactly that sender and returned as the <c>200</c> body
@@ -178,6 +197,25 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// a reflection / amplification / cross-tenant hazard; deliver such replies out of band with
     /// <see cref="DidCommClient.SendAsync"/> under your own egress policy. A Discover Features
     /// round-trip completes when the responder app sends its <c>disclose</c> back that way.
+    /// </para>
+    /// <para>
+    /// <b>A re-wrapped delivery (FR-ROUTE-06, receiver side).</b> A mediator in re-wrap mode
+    /// delivers each message inside a fresh anoncrypted <c>forward</c> addressed to this agent
+    /// itself (routing.md, "Rewrapping"). Unless a handler is registered for forwards, such a
+    /// forward — anoncrypted plaintext, no signature or <c>from_prior</c>, one attachment, and as
+    /// <c>next</c> the DID that decrypted it — is opened, up to 8 layers deep, and the message
+    /// inside goes through admission and dispatch as if it had arrived on its own: its own envelope
+    /// says who sent or signed it (a layer adds no sender), and replay admission (its
+    /// <c>created_time</c> included) keys on its own sender and id. It never gets a return-route
+    /// session, whatever its <c>return_route</c> says: return route is "only to be used between the
+    /// immediate sending agent and the agent it connects directly to" (return_route.md), and this
+    /// request is the mediator's, so the answer is <c>202</c> with an empty body and a handler's reply
+    /// is only logged, as for any message without a session. A ninth layer, or anything inside that
+    /// is neither the message nor another such layer, is refused with the uniform <c>400</c>. Every other
+    /// forward is dispatched as it arrived. A handler for forwards is the routing role
+    /// (<c>AddRoutingMediator()</c>, or <c>AddMediator()</c> of <c>DidComm.Mediator</c>): it receives
+    /// every forward as it arrived, and its <see cref="ForwardHandler"/> opens one addressed to its
+    /// own DID under its own rules.
     /// </para>
     /// <para>
     /// The dispatch carries a transport acknowledgement (<see cref="ProtocolContext.Acknowledged"/>):
@@ -256,8 +294,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Dispatch");
             var replayGuard = admissionEndpoint.ResolveGuard(sp, logger);
 
-            var contentType = httpContext.Request.ContentType;
-            if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
+            // Read once, as message_structure.md asks of a recipient (the short form included).
+            var declaredType = BaseMediaType(httpContext.Request.ContentType);
+            if (declaredType is null || !IsAcceptedMediaType(declaredType, receiveOptions.AcceptedMediaTypes))
                 return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
 
             var maxBytes = coreOptions.MaxReceiveBytes;
@@ -267,6 +306,10 @@ public static class DidCommEndpointRouteBuilderExtensions
             var (body, refusal) = await ReadBodyAsync(httpContext, maxBytes, logger).ConfigureAwait(false);
             if (refusal is not null)
                 return refusal;
+
+            // transports.md: the declared media type is the one of the envelope the body is.
+            if (!EnvelopeIsOfType(declaredType, body))
+                return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
 
             // #35: start the constant-time clock after the (kid-independent) body read, covering only
             // the unpack+dispatch window where the recipient-kid-dependent timing lives — see the
@@ -292,11 +335,15 @@ public static class DidCommEndpointRouteBuilderExtensions
             HttpReturnRouteSession? session = null;
             try
             {
-                var unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+                // A forward re-wrapped for this agent is opened here, unless a handler takes forwards
+                // (the routing role): admission and dispatch then see the message inside.
+                var received = await UnpackReceivedAsync(client, body, dispatcher, receiveOptions.AcceptedMediaTypes, httpContext.RequestAborted).ConfigureAwait(false);
+                var unpacked = received.Result;
 
                 // FR-RR-01/03/08: header, eligibility, replay. A refused message is answered like an
-                // accepted one (202, empty) and is neither dispatched nor given a session (JC-2).
-                var admission = InboundAdmission.Evaluate(unpacked, coreOptions, replayGuard, admissionEndpoint, logger);
+                // accepted one (202, empty) and is neither dispatched nor given a session (JC-2). A
+                // message opened out of re-wrapped layers is never given one either (return_route.md).
+                var admission = InboundAdmission.Evaluate(unpacked, coreOptions, replayGuard, admissionEndpoint, logger, routed: received.LayersOpened > 0);
                 if (!admission.Admitted)
                     return Results.StatusCode(StatusCodes.Status202Accepted);
 
@@ -369,6 +416,79 @@ public static class DidCommEndpointRouteBuilderExtensions
     private static TimeProvider Clock(IServiceProvider services) => services.GetService<TimeProvider>() ?? TimeProvider.System;
 
     /// <summary>
+    /// The unpack step of every receive path here (FR-TRN-07): unpack the received envelope and,
+    /// when it is a <c>forward</c> re-wrapped for this agent, open it (FR-ROUTE-06, receiver side;
+    /// owner decision OD-3 on #110). A mediator in re-wrap mode delivers each message inside a fresh
+    /// anoncrypted forward whose <c>next</c> is the receiver itself ("Receivers also need to know
+    /// about it, because it causes them to receive a double-packaged message", routing.md
+    /// "Rewrapping"); the message inside is then handled as if it had arrived on its own, under its
+    /// own envelope, except that it gets no return route (the caller passes the layer count to
+    /// <see cref="InboundAdmission.Evaluate"/>). The rule and the bound (8 layers) are <see cref="DidCommClient.UnpackDeliveredAsync"/>'s,
+    /// and the received layer is not unpacked a second time. Any other message, and any other
+    /// forward, is returned as it arrived: these endpoints relay nothing. A layer that fails inside
+    /// throws like an unpack failure, and the caller refuses it the way it refuses one.
+    /// <para>
+    /// On an endpoint with the routing role (a registered handler for forwards: the mediator's
+    /// <see cref="ForwardHandler"/>, behind <c>MapDidCommMediator</c> or a registry-aware
+    /// <c>MapDidCommEndpoint</c> with <c>AddRoutingMediator()</c>), a forward re-wrapped for this
+    /// agent whose layers end in a message that is not a forward is that message, for this agent
+    /// (owner decision OD-6 on #110): a mediator reached through a rewrapping mediator gets its own
+    /// protocol messages that way. It is opened with <see cref="DidCommClient.OpenSelfAddressedMessageAsync"/>
+    /// (the forward handler's restricted opening of each layer, at most 8, and one full unpack of the
+    /// innermost message: one lookup of its sender's DID, as when it arrives directly) and handled
+    /// like any opened message: admitted, with no return route, and dispatched under its own rules.
+    /// Every other forward — one for the next hop inside, or one that cannot be opened — goes to the
+    /// handler as it arrived, so the relay path (its 202 first, every layer's expiry and delay, its
+    /// typed drops) is the handler's as before.
+    /// </para>
+    /// <para>
+    /// A message opened out of layers must also be in an envelope the endpoint accepts
+    /// (<see cref="DidCommReceiveOptions.AcceptedMediaTypes"/>), as it would have to be had it
+    /// arrived on its own: the media type of its own outermost envelope (encrypted, signed or
+    /// plaintext, as its unpack found it) is checked, not only the wrapper's. One that is not
+    /// accepted is refused like a layer that cannot be opened.
+    /// </para>
+    /// </summary>
+    /// <param name="client">The facade.</param>
+    /// <param name="packed">The received envelope.</param>
+    /// <param name="dispatcher">The registry-aware endpoints' dispatcher, or <c>null</c> on a callback endpoint. A message whose type has a registered handler is returned as it arrived, except a forward re-wrapped for this agent around a message that is not a forward (see above).</param>
+    /// <param name="acceptedMediaTypes">The endpoint's <see cref="DidCommReceiveOptions.AcceptedMediaTypes"/>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The innermost message's unpack result (the received message itself when nothing was opened) and how many layers were opened: a message opened out of any never gets a return route (<see cref="InboundAdmission.Evaluate"/>).</returns>
+    /// <exception cref="MalformedMessageException">A message opened out of layers is in an envelope whose media type the endpoint does not accept.</exception>
+    private static async Task<DeliveredUnpack> UnpackReceivedAsync(
+        DidCommClient client, string packed, ProtocolDispatcher? dispatcher, IReadOnlyList<string> acceptedMediaTypes, CancellationToken ct)
+    {
+        var unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
+        var received = dispatcher is not null && dispatcher.HasHandlerFor(unpacked.Message.Type)
+            ? await client.OpenSelfAddressedMessageAsync(unpacked, ct).ConfigureAwait(false) ?? new DeliveredUnpack(unpacked, packed, 0)
+            : await client.OpenReceivedRewrapAsync(unpacked, packed, ct).ConfigureAwait(false);
+        if (received.LayersOpened > 0 && !MatchesMediaType(MediaTypeOf(received.Result), acceptedMediaTypes))
+        {
+            throw new MalformedMessageException(
+                "The message inside forward layers re-wrapped for this agent is in an envelope whose media type this endpoint does not accept (DidCommReceiveOptions.AcceptedMediaTypes).");
+        }
+        return received;
+    }
+
+    /// <summary>
+    /// The media type <paramref name="unpacked"/> would have arrived with on its own: the one of its
+    /// outermost envelope, as its unpack classified it.
+    /// </summary>
+    /// <param name="unpacked">An unpack result.</param>
+    private static string MediaTypeOf(UnpackResult unpacked)
+        => MediaTypeOf(unpacked.Stack is { Count: > 0 } stack ? stack[0] : EnvelopeKind.Plaintext);
+
+    /// <summary>The DIDComm media type of an envelope kind.</summary>
+    /// <param name="kind">The kind.</param>
+    private static string MediaTypeOf(EnvelopeKind kind) => kind switch
+    {
+        EnvelopeKind.Encrypted => DidCommMediaTypes.Encrypted,
+        EnvelopeKind.Signed => DidCommMediaTypes.Signed,
+        _ => DidCommMediaTypes.Plain,
+    };
+
+    /// <summary>
     /// Map an HTTP POST endpoint that unpacks DIDComm envelopes, runs return-route admission, and
     /// hands each admitted message to <paramref name="onReceive"/> together with its return-route
     /// session (FR-RR-04) — the callback counterpart of the registry-aware
@@ -378,7 +498,8 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <c>400</c> for any unpack failure (FR-API-07).
     /// <para>
     /// The session argument is non-null only when the inbound was authcrypted, carries
-    /// <c>return_route: all</c>, is not a <c>forward</c> and passed FR-RR-08 replay admission; a
+    /// <c>return_route: all</c>, is not a <c>forward</c>, did not arrive inside forward layers
+    /// re-wrapped for this agent (see below) and passed FR-RR-08 replay admission; a
     /// message the replay guard refuses is answered <c>202</c> and never reaches the callback. A
     /// non-null message the callback returns is sent through the session (authcrypted from the DID
     /// that decrypted the inbound to exactly the authenticated sender; refused otherwise) and
@@ -391,6 +512,21 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// 500, so a callback fault cannot become an unpack-success oracle — and anything it pushed
     /// before throwing is discarded. There is no transport acknowledgement here (no
     /// <see cref="ProtocolContext"/>): ordering work after the response is the callback's own job.
+    /// </para>
+    /// <para>
+    /// <b>A re-wrapped delivery (FR-ROUTE-06, receiver side).</b> A mediator in re-wrap mode
+    /// delivers each message inside a fresh anoncrypted <c>forward</c> addressed to this agent
+    /// itself (routing.md, "Rewrapping"). Such a forward — anoncrypted plaintext, no signature or
+    /// <c>from_prior</c>, one attachment, and as <c>next</c> the DID that decrypted it — is opened,
+    /// up to 8 layers deep, and the message inside goes through admission to the callback as if it
+    /// had arrived on its own: its own envelope says who sent or signed it (a layer adds no sender),
+    /// and replay admission (its <c>created_time</c> included) keys on its own sender and id. The
+    /// callback's session is always <c>null</c> for it, whatever its <c>return_route</c> says (return
+    /// route is only between the immediate sender and the agent it connects to, return_route.md), so
+    /// a message the callback returns is not sent and the answer is <c>202</c>. A ninth layer, or
+    /// anything inside that is neither the message nor another such layer, is refused with the same
+    /// <c>400</c>. Every other forward reaches the callback as it arrived: this endpoint
+    /// relays nothing.
     /// </para>
     /// </summary>
     /// <param name="endpoints">The ASP.NET Core endpoint route builder.</param>
@@ -416,8 +552,9 @@ public static class DidCommEndpointRouteBuilderExtensions
             var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("DidComm.AspNetCore.Receive");
             var replayGuard = admissionEndpoint.ResolveGuard(sp, logger);
 
-            var contentType = httpContext.Request.ContentType;
-            if (string.IsNullOrEmpty(contentType) || !MatchesMediaType(contentType, receiveOptions.AcceptedMediaTypes))
+            // Read once, as message_structure.md asks of a recipient (the short form included).
+            var declaredType = BaseMediaType(httpContext.Request.ContentType);
+            if (declaredType is null || !IsAcceptedMediaType(declaredType, receiveOptions.AcceptedMediaTypes))
                 return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
 
             var maxBytes = coreOptions.MaxReceiveBytes;
@@ -428,13 +565,18 @@ public static class DidCommEndpointRouteBuilderExtensions
             if (refusal is not null)
                 return refusal;
 
+            // transports.md: the declared media type is the one of the envelope the body is.
+            if (!EnvelopeIsOfType(declaredType, body))
+                return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+
             // #35: the floor budgets only the unpack window (see the first callback overload).
             var startTimestamp = Stopwatch.GetTimestamp();
 
-            UnpackResult unpacked;
+            DeliveredUnpack received;
             try
             {
-                unpacked = await client.UnpackAsync(body, httpContext.RequestAborted).ConfigureAwait(false);
+                // A forward re-wrapped for this agent is opened here: admission sees the message inside.
+                received = await UnpackReceivedAsync(client, body, dispatcher: null, receiveOptions.AcceptedMediaTypes, httpContext.RequestAborted).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (httpContext.RequestAborted.IsCancellationRequested)
             {
@@ -446,7 +588,9 @@ public static class DidCommEndpointRouteBuilderExtensions
                 return await NormalizedReceiveRejectionAsync(logger, ex, startTimestamp, receiveOptions.ReceiveRejectionFloor).ConfigureAwait(false);
             }
 
-            var admission = InboundAdmission.Evaluate(unpacked, coreOptions, replayGuard, admissionEndpoint, logger);
+            // A message opened out of re-wrapped layers gets no session (return_route.md).
+            var unpacked = received.Result;
+            var admission = InboundAdmission.Evaluate(unpacked, coreOptions, replayGuard, admissionEndpoint, logger, routed: received.LayersOpened > 0);
             if (!admission.Admitted)
                 return Results.StatusCode(StatusCodes.Status202Accepted);
 
@@ -566,6 +710,15 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// overload instead finishes such a message, within a bound; see there.)
     /// </para>
     /// <para>
+    /// <b>A re-wrapped delivery (FR-ROUTE-06, receiver side).</b> A forward a mediator in re-wrap
+    /// mode addressed to this agent itself — anoncrypted plaintext, no signature or
+    /// <c>from_prior</c>, one attachment, and as <c>next</c> the DID that decrypted it — is opened,
+    /// up to 8 layers deep, and <paramref name="onReceive"/> gets the message inside under its own
+    /// envelope (a layer adds no sender), as on <c>MapDidCommEndpoint</c>. A ninth layer, or anything
+    /// inside that is neither the message nor another such layer, is discarded like an envelope that
+    /// does not unpack. Every other forward reaches the callback as it arrived.
+    /// </para>
+    /// <para>
     /// <b>A refused handshake.</b> When the WebSocket handshake fails before the connection is
     /// accepted, most often because a server limit such as Kestrel's
     /// <c>Limits.MaxConcurrentUpgradedConnections</c> is reached, the request is answered
@@ -627,10 +780,10 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// <para>
     /// <b>Return-route (FR-RR-05)</b>, only when <see cref="DidCommReceiveOptions.AllowSameSocketReplies"/>
     /// is <c>true</c> (default <c>false</c>, FR-TRN-10 one-way) and never under STOMP. The connection
-    /// becomes a session at its first message that was authcrypted, carries <c>return_route: all</c>
-    /// and is not a <c>forward</c>; the session's peer (the authenticated sender) is fixed from then
-    /// on and it is registered in the <see cref="IReturnRouteSessionRegistry"/>, where handlers find
-    /// it for live pushes. Handler replies and <see cref="IReturnRouteSession.TrySendAsync(Message, CancellationToken)"/> pushes
+    /// becomes a session at its first message that was authcrypted, carries <c>return_route: all</c>,
+    /// is not a <c>forward</c> and did not arrive inside forward layers re-wrapped for this agent;
+    /// the session's peer (the authenticated sender) is fixed from then on and it is registered in
+    /// the <see cref="IReturnRouteSessionRegistry"/>, where handlers find it for live pushes. Handler replies and <see cref="IReturnRouteSession.TrySendAsync(Message, CancellationToken)"/> pushes
     /// are authcrypted from the DID that decrypted the opening message to exactly that peer and
     /// written as one text WebSocket message each (FR-TRN-09), by a single writer. A later header-less message
     /// leaves the mode unchanged; a later <c>none</c> (or <c>thread</c>) from the same pair stops
@@ -676,6 +829,17 @@ public static class DidCommEndpointRouteBuilderExtensions
     /// accepted envelope), so the dispatch carries none: <see cref="ProtocolContext.Acknowledged"/>
     /// is already complete and a handler that defers past the acknowledgement — the mediator's
     /// <c>ForwardHandler</c> — proceeds as soon as it has admitted the message.
+    /// </para>
+    /// <para>
+    /// <b>A re-wrapped delivery (FR-ROUTE-06, receiver side).</b> As on the registry-aware
+    /// <c>MapDidCommEndpoint</c>: unless a handler is registered for forwards (the routing role,
+    /// which receives every forward as it arrived), a forward a mediator in re-wrap mode addressed to
+    /// this agent itself is opened, up to 8 layers deep, and the message inside goes through
+    /// admission and dispatch as if it had arrived on its own, under its own envelope, except that it
+    /// never opens, changes or uses the connection's session (return route is only between the
+    /// immediate sender and the agent it connects to, return_route.md): it is dispatched without one
+    /// and its reply is not written. A ninth layer, or anything inside that is neither the message
+    /// nor another such layer, is discarded like an envelope that does not unpack.
     /// </para>
     /// <para>
     /// <b>A refused handshake.</b> When the WebSocket handshake fails before the connection is
@@ -901,6 +1065,12 @@ public static class DidCommEndpointRouteBuilderExtensions
                 else
                 {
                     packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                    // A bare frame declares no media type: the envelope's own must be accepted.
+                    if (!EnvelopeTypeIsAccepted(packed, receiveOptions.AcceptedMediaTypes))
+                    {
+                        SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding a message whose envelope's media type is not accepted.");
+                        continue;
+                    }
                 }
 
                 // #35: the recipient-kid timing side-channel that the HTTP receive path pads against
@@ -908,10 +1078,12 @@ public static class DidCommEndpointRouteBuilderExtensions
                 // discarded with NOTHING written back on the socket, so there is no per-message response
                 // for a peer to time. We deliberately do not pad the discard: it would add latency to the
                 // whole multiplexed message stream on the connection for a far weaker, noisier signal.
-                UnpackResult unpacked;
+                DeliveredUnpack received;
                 try
                 {
-                    unpacked = await client.UnpackAsync(packed, handlingToken).ConfigureAwait(false);
+                    // A forward re-wrapped for this agent is opened here, unless a handler takes
+                    // forwards (the routing role): admission and dispatch then see the message inside.
+                    received = await UnpackReceivedAsync(client, packed, dispatcher, receiveOptions.AcceptedMediaTypes, handlingToken).ConfigureAwait(false);
                 }
                 catch (MalformedMessageException ex)
                 {
@@ -943,7 +1115,10 @@ public static class DidCommEndpointRouteBuilderExtensions
 
                 // FR-RR-01/03/08: header, eligibility, replay. A refused message is dropped: nothing
                 // written, nothing dispatched, the session untouched (JC-2).
-                var admission = InboundAdmission.Evaluate(unpacked, coreOptions, returnRoute.Guard, returnRoute.Endpoint, logger);
+                // A message opened out of re-wrapped layers neither opens, changes nor uses the
+                // connection's session (return_route.md): it is dispatched without one.
+                var unpacked = received.Result;
+                var admission = InboundAdmission.Evaluate(unpacked, coreOptions, returnRoute.Guard, returnRoute.Endpoint, logger, routed: received.LayersOpened > 0);
                 if (!admission.Admitted)
                     continue;
 
@@ -1319,6 +1494,12 @@ public static class DidCommEndpointRouteBuilderExtensions
                 else
                 {
                     packed = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                    // A bare frame declares no media type: the envelope's own must be accepted.
+                    if (!EnvelopeTypeIsAccepted(packed, receiveOptions.AcceptedMediaTypes))
+                    {
+                        SafeLog.Write(logger, LogLevel.Warning, "MapDidCommWebSocket: discarding a message whose envelope's media type is not accepted.");
+                        continue;
+                    }
                 }
 
                 // #35: no constant-time pad here (unlike the HTTP 400 path) — a failed unpack is logged
@@ -1327,7 +1508,8 @@ public static class DidCommEndpointRouteBuilderExtensions
                 UnpackResult unpacked;
                 try
                 {
-                    unpacked = await client.UnpackAsync(packed, ct).ConfigureAwait(false);
+                    // A forward re-wrapped for this agent is opened here (FR-ROUTE-06, receiver side).
+                    unpacked = (await UnpackReceivedAsync(client, packed, dispatcher: null, receiveOptions.AcceptedMediaTypes, ct).ConfigureAwait(false)).Result;
                 }
                 catch (MalformedMessageException ex)
                 {
@@ -1381,30 +1563,96 @@ public static class DidCommEndpointRouteBuilderExtensions
         }
     }
 
-    // Internal (not private) so the FR-TRN-12 StompServerSession applies the same accepted-media-type
-    // gate to a SEND frame's content-type that the HTTP path applies to the Content-Type header.
-    internal static bool MatchesMediaType(string contentType, IReadOnlyList<string> accepted)
+    /// <summary>
+    /// The base media type a declared value names, read the way a recipient must read it: the
+    /// parameters (from the first <c>;</c>) dropped, white space trimmed, and a type without a
+    /// <c>/</c> read with the <c>application/</c> prefix present ("IANA types for DIDComm messages
+    /// MAY omit the application/ prefix; the recipient MUST treat media types not containing / as
+    /// having the application/ prefix present", message_structure.md, FR-MSG-06,
+    /// <see cref="MediaTypes.Normalize"/>). Media types compare case-insensitively (RFC 6838).
+    /// </summary>
+    /// <param name="value">A declared value (the HTTP <c>Content-Type</c>, a STOMP SEND's <c>content-type</c>) or an accepted-list entry.</param>
+    /// <returns>The base media type; <c>null</c> when the value names none: empty, parameters only, or more than one <c>/</c>.</returns>
+    internal static string? BaseMediaType(string? value)
     {
-        // ContentType can include parameters (e.g. "; charset=utf-8") — strip and compare the
-        // base media type only. A malformed header throws FormatException; treat that as "no
-        // match" so the endpoint answers 415 rather than letting a 500 escape.
-        string? mediaType;
-        try
-        {
-            mediaType = new ContentType(contentType).MediaType;
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
+        if (string.IsNullOrEmpty(value))
+            return null;
+        var semicolon = value.IndexOf(';');
+        var bare = (semicolon < 0 ? value : value[..semicolon]).Trim();
+        if (bare.Length == 0)
+            return null;
+        var slash = bare.IndexOf('/');
+        if (slash >= 0 && bare.IndexOf('/', slash + 1) >= 0)
+            return null;
+        return MediaTypes.Normalize(bare);
+    }
 
+    /// <summary>
+    /// Whether <paramref name="baseMediaType"/> (<see cref="BaseMediaType"/>) is one of
+    /// <paramref name="accepted"/>, each entry read the same way, so a list that names the short form
+    /// works too.
+    /// </summary>
+    /// <param name="baseMediaType">A base media type.</param>
+    /// <param name="accepted">The endpoint's <see cref="DidCommReceiveOptions.AcceptedMediaTypes"/>.</param>
+    internal static bool IsAcceptedMediaType(string baseMediaType, IReadOnlyList<string> accepted)
+    {
         foreach (var allowed in accepted)
         {
-            if (string.Equals(mediaType, allowed, StringComparison.OrdinalIgnoreCase))
+            if (BaseMediaType(allowed) is { } entry && string.Equals(baseMediaType, entry, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// Whether <paramref name="declaredBaseType"/> (<see cref="BaseMediaType"/>), the media type
+    /// declared for <paramref name="body"/>, is the media type of the envelope <paramref name="body"/>
+    /// is: "The IANA media type for the POST request MUST be set to the [corresponding media type]"
+    /// (transports.md). The envelope is classified by its structure alone, with the rule the unpack
+    /// uses (<see cref="EnvelopeDetector"/>), before any key is touched. A body that cannot be
+    /// classified passes here and is refused by the unpack, as before.
+    /// </summary>
+    /// <param name="declaredBaseType">The declared base media type (already found in the accepted list).</param>
+    /// <param name="body">The received body.</param>
+    internal static bool EnvelopeIsOfType(string declaredBaseType, string body)
+        => EnvelopeMediaType(body) is not { } envelope
+           || string.Equals(declaredBaseType, envelope, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether the media type of the envelope <paramref name="packed"/> is, classified by its
+    /// structure alone (<see cref="EnvelopeDetector"/>), is in <paramref name="accepted"/>: the rule
+    /// for a bare WebSocket message, which declares no media type. A body that cannot be classified
+    /// passes here and is refused by the unpack, as before.
+    /// </summary>
+    /// <param name="packed">The received message.</param>
+    /// <param name="accepted">The endpoint's <see cref="DidCommReceiveOptions.AcceptedMediaTypes"/>.</param>
+    internal static bool EnvelopeTypeIsAccepted(string packed, IReadOnlyList<string> accepted)
+        => EnvelopeMediaType(packed) is not { } envelope || MatchesMediaType(envelope, accepted);
+
+    /// <summary>The DIDComm media type of the envelope <paramref name="packed"/> is, by its structure; <c>null</c> when it cannot be classified.</summary>
+    /// <param name="packed">A packed message.</param>
+    private static string? EnvelopeMediaType(string packed)
+    {
+        if (string.IsNullOrEmpty(packed))
+            return null;
+        try
+        {
+            return MediaTypeOf(EnvelopeDetector.Detect(packed));
+        }
+        catch (MalformedMessageException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="mediaType"/>, read as <see cref="BaseMediaType"/> reads a declared
+    /// value, is one of <paramref name="accepted"/>.
+    /// </summary>
+    /// <param name="mediaType">A media type (an envelope's, or a declared value).</param>
+    /// <param name="accepted">The endpoint's <see cref="DidCommReceiveOptions.AcceptedMediaTypes"/>.</param>
+    internal static bool MatchesMediaType(string mediaType, IReadOnlyList<string> accepted)
+        => BaseMediaType(mediaType) is { } baseType && IsAcceptedMediaType(baseType, accepted);
 
     /// <summary>
     /// Read the request body of one of the HTTP receive endpoints. Returns the body, or what to answer

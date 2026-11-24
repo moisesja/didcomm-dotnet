@@ -175,28 +175,30 @@ public sealed class ForwardPeelAdv3Tests
     }
 
     [Fact]
-    public async Task An_opened_layer_can_be_larger_than_the_layer_it_came_out_of_but_never_over_the_receive_limit()
+    public async Task An_opened_layer_is_written_back_as_its_packer_wrote_it_and_never_over_the_receive_limit()
     {
-        // ForwardHandler's remarks: "each [unpack] of a payload smaller than the last". A data.json
-        // attachment is re-serialized with the default encoder, which writes '<' as < (six
-        // bytes for one), and a JWE ignores members it does not know: the layer the mediator opens
-        // is ~6x the attachment it was carried in. The receive limit still bounds every layer.
+        // ForwardHandler's remarks: an opened layer is not necessarily smaller than the one it came
+        // out of. A data.json attachment is written back with the encoder the library writes messages
+        // with, so what this library packed comes back at its own size, '<' included (the default
+        // encoder used to write it six bytes long, ADV-110-1c-1); and a JWE ignores members it does
+        // not know. What the writer still escapes longer (a DEL, six bytes for one) is stopped at the
+        // receive limit while it is written.
+        var relaxed = new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
         await using var f = Fixture.Create();
         var packed = System.Text.Json.Nodes.JsonNode.Parse(await f.AnoncryptAsync(Forward(Bob)))!.AsObject();
         packed["pad"] = new string('<', 100_000);
-        var outer = ForwardMessage.Create(Mediator, Mediator, new[] { packed.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) });
-        var attachmentBytes = Encoding.UTF8.GetByteCount(outer.Attachments![0].Data.Json!.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
-        var openedBytes = Encoding.UTF8.GetByteCount(outer.Attachments![0].Data.Json!.ToJsonString());
+        var outer = ForwardMessage.Create(Mediator, Mediator, new[] { packed.ToJsonString(relaxed) });
+        var attachmentBytes = Encoding.UTF8.GetByteCount(outer.Attachments![0].Data.Json!.ToJsonString(relaxed));
+        var openedBytes = ForwardProcessor.ExtractAttachmentBytes(outer.Attachments![0], f.Options.MaxReceiveBytes).Length;
 
         await f.HandleAsync(AsDecryptedByMediator(outer, Fixture.MediatorKid));
 
         f.Sink.Count.Should().Be(1, "the padded layer opened and the forward inside was relayed");
-        openedBytes.Should().BeGreaterThan(5 * attachmentBytes);
-        openedBytes.Should().BeLessThan(f.Options.MaxReceiveBytes);
+        openedBytes.Should().Be(attachmentBytes, "the layer comes back at the size its packer wrote it");
 
-        // Past the limit the layer is refused (Dropped-Malformed), never opened.
-        packed["pad"] = new string('<', (int)(f.Options.MaxReceiveBytes / 6) + 1);
-        await f.HandleAsync(AsDecryptedByMediator(ForwardMessage.Create(Mediator, Mediator, new[] { packed.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) }), Fixture.MediatorKid));
+        // Past the limit once written back, the layer is refused (Dropped-Malformed), never opened.
+        packed["pad"] = new string((char)0x7F, (int)(f.Options.MaxReceiveBytes / 6) + 1);
+        await f.HandleAsync(AsDecryptedByMediator(ForwardMessage.Create(Mediator, Mediator, new[] { packed.ToJsonString(relaxed) }), Fixture.MediatorKid));
         f.Sink.Count.Should().Be(1);
         f.Outcomes[ForwardOutcomes.DroppedMalformed].Should().Be(1);
     }

@@ -31,10 +31,13 @@ namespace DidComm.Mediator.Pipeline;
 /// delay cap of <see cref="MediatorOptions.MaxForwardDelay"/> and <see cref="MediatorOptions.RewrapMode"/>
 /// on the <c>ForwardProcessorOptions</c> handed out, no host routing-key provider with re-wrapping,
 /// and a forward recipient directory that is not the routing mediator's empty default) whichever way
-/// the container was composed; each routing DID passes FR-MED-07
+/// the container was composed; with <see cref="MediatorOptions.DirectPush"/> in effect, the host's
+/// endpoint directory is registered (checked when the forward sink's push workers are built) and
+/// the direct-push sender is built (so a missing HTTP transport or an invalid trusted proxy fails
+/// now, not at the first push); each routing DID passes FR-MED-07
 /// (<see cref="RoutingDidValidator"/>); the out-of-band invitation is built from the first routing
-/// DID; the observable instruments are registered; one Information line names counts and settings,
-/// never a DID.
+/// DID; the observable instruments are registered; one Information line names counts and settings
+/// (whether direct push is on among them), never a DID or an endpoint.
 /// </para>
 /// <para>
 /// <strong>Running.</strong> Every <see cref="MediatorOptions.PurgeInterval"/> it removes expired
@@ -107,7 +110,8 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
         var routingDids = ReadRoutingDids();
 
         // (2) The pipeline is the mediator's: a sink registered after AddMediator() would take every
-        //     forward away from the queue without a word.
+        //     forward away from the queue without a word. Building it builds the push workers, which
+        //     (with direct push in effect) require the host's endpoint directory.
         if (_services.GetService<IForwardSink>() is not MediatorForwardSink)
         {
             throw new InvalidOperationException(
@@ -140,6 +144,12 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
         //      Configure<MediatorOptions>, registrations made after the call) are caught here.
         CheckForwardSettings(effective);
 
+        // (5c) Direct push (#110), on the settings in effect: the single-attempt sender is built now
+        //      (it is the one the push workers use), so a missing UseHttpTransport() or an invalid
+        //      TrustedProxy fails start-up.
+        if (effective.DirectPush)
+            _services.GetRequiredService<DirectPushSender>();
+
         // (6) FR-MED-07: each routing DID is reachable the way senders reach it.
         var serviceResolver = _services.GetService<IServiceEndpointResolver>()
             ?? throw new InvalidOperationException(
@@ -170,11 +180,12 @@ internal sealed class MediatorHostedService : IHostedLifecycleService, IAsyncDis
 
         // (9) One line, no DID.
         MediatorLog.Write(_logger, LogLevel.Information,
-            "Mediator ready: {RoutingDidCount} routing DID(s) checked (FR-MED-07); forward delay honoured up to {MaxForwardDelay}; mailbox age limit {MaxMessageAge}; purge every {PurgeInterval}.",
+            "Mediator ready: {RoutingDidCount} routing DID(s) checked (FR-MED-07); forward delay honoured up to {MaxForwardDelay}; mailbox age limit {MaxMessageAge}; purge every {PurgeInterval}; direct push {DirectPush}.",
             routingDids.Count,
             effective.MaxForwardDelay,
             effective.Pickup.MaxMessageAge is { } age ? age.ToString() : "off",
-            effective.PurgeInterval);
+            effective.PurgeInterval,
+            effective.DirectPush ? "on" : "off");
     }
 
     /// <inheritdoc />

@@ -9,8 +9,8 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// A live push that comes back unacknowledged is never pushed again (owner decision on #100,
 /// 2026-11-20; Message Pickup 4.0 L304: "Messages already in the queue are not affected by Live
 /// Mode; they MUST still be requested with delivery-request messages", L308; 3.0 L203), as
-/// <see cref="InMemoryMessageStore"/> keeps it: a live-push lease (<see cref="MessageLease.LivePush"/>)
-/// marks every record it takes, in the same step (<see cref="QueuedMessage.LivePushReturned"/>),
+/// <see cref="InMemoryMessageStore"/> keeps it: a live-push lease (<see cref="MessageLease.ForPush"/>)
+/// marks every record it takes, in the same step (<see cref="QueuedMessage.PushTaken"/>),
 /// and the store remembers which lease set the mark; whatever ends that lease — its connection's
 /// close, its expiry, a give-back by id — the mark stays; only the same lease clears it, by saying
 /// its push was not sent (<see cref="IMessageStore.ReturnUnsentAsync"/>, or a pass-over), also after
@@ -24,7 +24,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
     // What the push workers ask for: one record at a time, under a live-push lease owned by the session.
     private static MessageLeaseRequest LiveTake(string owner = "socket", DateTimeOffset? now = null, DateTimeOffset? until = null, int max = int.MaxValue, string leaseId = KitLeaseId)
-        => new(Alice, null, max, long.MaxValue, now ?? T0, new MessageLease(owner, until ?? Far) { Id = leaseId, LivePush = true });
+        => new(Alice, null, max, long.MaxValue, now ?? T0, new MessageLease(owner, until ?? Far) { Id = leaseId, ForPush = true });
 
     // What a delivery-request asks for: the same, under a lease that is not a live push's.
     private static MessageLeaseRequest PickupTake(string? owner = null, DateTimeOffset? now = null, DateTimeOffset? until = null, int max = int.MaxValue)
@@ -47,7 +47,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
         (await store.LeaseIdsAsync(LiveTake(owner: "next-socket"))).Should().BeEmpty("a push that came back unacknowledged is never pushed live again");
         var picked = await LeaseAsync(store, PickupTake());
         picked.Select(m => m.Id).Should().Equal(new[] { "a", "b" }, "a delivery-request takes them as before, in order");
-        picked.Should().OnlyContain(m => m.LivePushReturned, "the record says it came back from a live push");
+        picked.Should().OnlyContain(m => m.PushTaken, "the record says it came back from a live push");
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
         var picked = (await LeaseAsync(store, PickupTake(now: until))).Should().ContainSingle().Subject;
         picked.Id.Should().Be("a");
-        picked.LivePushReturned.Should().BeTrue("the live push that took it marked it, and its lease running out did not clear the mark");
+        picked.PushTaken.Should().BeTrue("the live push that took it marked it, and its lease running out did not clear the mark");
     }
 
     [Fact]
@@ -78,8 +78,8 @@ public sealed class MessagePickupStoreLivePushReturnTests
         // The queue's own live push (DeliverAsync, JC-6): the record is stored and leased in one step.
         var store = NewStore();
         var until = T0 + LeaseFor;
-        await store.AddAsync(Message("closed"), new MessageLease("socket", Far) { Id = "push-1", LivePush = true });
-        await store.AddAsync(Message("timed-out"), new MessageLease("other-socket", until) { Id = "push-2", LivePush = true });
+        await store.AddAsync(Message("closed"), new MessageLease("socket", Far) { Id = "push-1", ForPush = true });
+        await store.AddAsync(Message("timed-out"), new MessageLease("other-socket", until) { Id = "push-2", ForPush = true });
 
         (await store.ReleaseLeasesAsync("socket", None)).Should().Be(1);
 
@@ -131,7 +131,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
         var again = (await LeaseAsync(store, LiveTake(owner: "socket", now: now, leaseId: "push-2"))).Should().ContainSingle("a later live push takes it again").Subject;
         again.Id.Should().Be("a");
-        again.LivePushReturned.Should().BeFalse();
+        again.PushTaken.Should().BeFalse();
     }
 
     [Theory]
@@ -180,7 +180,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
         (await store.LeaseIdsAsync(LiveTake(owner: "socket-2", now: now, leaseId: "push-2"))).Should().BeEmpty("a live push that may have been sent is never pushed live again");
         var picked = (await LeaseAsync(store, PickupTake(now: now))).Should().ContainSingle("a delivery-request takes it").Subject;
-        picked.LivePushReturned.Should().BeTrue();
+        picked.PushTaken.Should().BeTrue();
     }
 
     [Fact]
@@ -196,7 +196,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
         var pushed = await LeaseAsync(store, LiveTake(now: until));
         pushed.Select(m => m.Id).Should().Equal(new[] { "over-the-socket", "over-http" }, "only a live push that came back is kept from live pushes");
-        pushed.Should().OnlyContain(m => !m.LivePushReturned);
+        pushed.Should().OnlyContain(m => !m.PushTaken);
     }
 
     // ---- what the mark does --------------------------------------------------------------------
@@ -230,7 +230,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
         // A delivery-request over a socket takes both; its socket then closes.
         var later = until + Tick;
-        (await LeaseAsync(store, PickupTake(owner: "s2", now: later))).Should().OnlyContain(m => m.LivePushReturned).And.HaveCount(2);
+        (await LeaseAsync(store, PickupTake(owner: "s2", now: later))).Should().OnlyContain(m => m.PushTaken).And.HaveCount(2);
         (await store.ReleaseLeasesAsync("s2", None)).Should().Be(2);
         (await store.LeaseIdsAsync(LiveTake(owner: "s3", now: later))).Should().BeEmpty("the mark is the record's, not the lease's");
 
@@ -281,10 +281,10 @@ public sealed class MessagePickupStoreLivePushReturnTests
     public async Task A_mark_set_by_the_caller_of_enqueue_is_ignored()
     {
         var store = NewStore();
-        await store.AddAsync(Message("a") with { LivePushReturned = true });
+        await store.AddAsync(Message("a") with { PushTaken = true });
 
         var pushed = (await LeaseAsync(store, LiveTake())).Should().ContainSingle("a new record has never been pushed").Subject;
-        pushed.LivePushReturned.Should().BeFalse();
+        pushed.PushTaken.Should().BeFalse();
     }
 
     // ---- the mark is set at the take, by its lease, and cleared only by that lease ---------------
@@ -297,10 +297,10 @@ public sealed class MessagePickupStoreLivePushReturnTests
 
         var taken = await LeaseAsync(store, LiveTake(max: 2, until: T0 + LeaseFor, leaseId: "push-1"));
 
-        taken.Select(m => (m.Id, m.LivePushReturned)).Should().Equal(new[] { ("a", false), ("b", false) }, "the copies describe the records before the take");
+        taken.Select(m => (m.Id, m.PushTaken)).Should().Equal(new[] { ("a", false), ("b", false) }, "the copies describe the records before the take");
         // The store's own records carry the mark from the take on: a delivery-request reads it once the lease ran out.
         var later = T0 + LeaseFor;
-        (await LeaseAsync(store, PickupTake(now: later))).Select(m => (m.Id, m.LivePushReturned))
+        (await LeaseAsync(store, PickupTake(now: later))).Select(m => (m.Id, m.PushTaken))
             .Should().Equal(new[] { ("a", true), ("b", true), ("c", false) }, "only what the live push took is marked");
     }
 
@@ -308,12 +308,12 @@ public sealed class MessagePickupStoreLivePushReturnTests
     public async Task A_record_admitted_under_a_live_push_lease_is_marked_by_that_lease_and_one_admitted_under_another_lease_is_not()
     {
         var store = NewStore();
-        await store.AddAsync(Message("pushed"), new MessageLease("socket", T0 + LeaseFor) { Id = "push-1", LivePush = true });
+        await store.AddAsync(Message("pushed"), new MessageLease("socket", T0 + LeaseFor) { Id = "push-1", ForPush = true });
         await store.AddAsync(Message("picked"), new MessageLease("socket", T0 + LeaseFor) { Id = "pickup-1" });
         await store.AddAsync(Message("waiting"));
 
         var later = T0 + LeaseFor;
-        (await LeaseAsync(store, PickupTake(now: later, until: later + Tick))).Select(m => (m.Id, m.LivePushReturned))
+        (await LeaseAsync(store, PickupTake(now: later, until: later + Tick))).Select(m => (m.Id, m.PushTaken))
             .Should().Equal(new[] { ("pushed", true), ("picked", false), ("waiting", false) });
 
         // The mark is the admitting lease's: its own id clears it, any other does not.
@@ -361,7 +361,7 @@ public sealed class MessagePickupStoreLivePushReturnTests
         (await store.ReturnUnsentAsync(Alice, new[] { "pushed", "plain" }, "pickup", None)).Should().Be(2, "both leases ended");
 
         var picked = await LeaseAsync(store, PickupTake(now: until));
-        picked.Select(m => (m.Id, m.LivePushReturned)).Should().Equal(new[] { ("pushed", true), ("plain", false) }, "a delivery-request's lease never set a mark, so it clears none");
+        picked.Select(m => (m.Id, m.PushTaken)).Should().Equal(new[] { ("pushed", true), ("plain", false) }, "a delivery-request's lease never set a mark, so it clears none");
     }
 
     [Fact]
@@ -398,5 +398,102 @@ public sealed class MessagePickupStoreLivePushReturnTests
         (count, bytes, status.MessageCount, status.TotalBytes).Should().Be((3, 30L, 3, 30L), "only the acknowledgement removed something: the marks change no count");
         (await store.EnqueueAsync(Message("e"), null, T0, None)).Should().Be(EnqueueOutcome.Enqueued, "a marked record counts against the quota like any other, no more");
         (await store.EnqueueAsync(Message("f"), null, T0, None)).Should().Be(EnqueueOutcome.GrantMessageLimitReached);
+    }
+
+    // ---- a push lease without an owner (direct push, #110) --------------------------------------
+
+    public static TheoryData<StoreKind, string> OwnerlessPushLeaseEnds()
+    {
+        var data = new TheoryData<StoreKind, string>();
+        foreach (var kind in Enum.GetValues<StoreKind>())
+        {
+            foreach (var how in new[] { "released by its lease id", "its lease ran out", "a connection closed", "returned as unsent", "returned as unsent after it ran out", "passed over" })
+                data.Add(kind, how);
+        }
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(OwnerlessPushLeaseEnds))]
+    public async Task A_push_lease_without_an_owner_marks_what_it_takes_no_connections_close_ends_it_and_only_its_own_not_sent_clears_the_mark(StoreKind kind, string how)
+    {
+        // A direct push takes under a push lease that no connection owns: the store marks the record
+        // in the same step, a connection's close never ends that lease, and the mark goes only when
+        // that same lease says its push was not sent — on the library's store and on a host's.
+        var store = StoreKinds.Create(kind, new MessagePickupOptions { MaxQueueMessages = 100, MaxStoreMessages = 100 });
+        (await store.EnqueueAsync(Message("a"), null, T0, None)).Should().Be(EnqueueOutcome.Enqueued);
+        var until = T0 + LeaseFor;
+        MessageLeaseRequest DirectTake(DateTimeOffset now, string leaseId)
+            => new(Alice, null, 1, long.MaxValue, now, new MessageLease(null, now + LeaseFor) { Id = leaseId, ForPush = true });
+        // A delivery-request's look at what it would be handed, under a lease that ends at once (it changes nothing).
+        async Task<IReadOnlyList<QueuedMessage>> PeekAsync(DateTimeOffset now)
+            => await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 10, long.MaxValue, now, new MessageLease(null, now)), None);
+
+        var taken = await store.LeaseAsync(DirectTake(T0, "direct-1"), None);
+        taken.Select(m => (m.Id, m.PushTaken)).Should().Equal(new[] { ("a", false) }, "returned as it was before the take");
+        (await PeekAsync(T0)).Should().BeEmpty("leased to the push");
+
+        var now = T0;
+        var marked = true;
+        switch (how)
+        {
+            case "released by its lease id":
+                (await store.ReleaseAsync(Alice, new[] { "a" }, "direct-1", None)).Should().Be(1);
+                break;
+            case "its lease ran out":
+                now = until;
+                break;
+            case "a connection closed":
+                (await store.ReleaseLeasesAsync("socket", None)).Should().Be(0, "no connection owns the lease");
+                (await PeekAsync(T0)).Should().BeEmpty("still leased to the push after the close");
+                now = until;
+                break;
+            case "returned as unsent":
+                (await store.ReturnUnsentAsync(Alice, new[] { "a" }, "direct-1", None)).Should().Be(1);
+                marked = false;
+                break;
+            case "returned as unsent after it ran out":
+                now = until + Tick;
+                (await store.ReturnUnsentAsync(Alice, new[] { "a" }, "direct-1", None)).Should().Be(1, "the mark goes although the lease had ended");
+                marked = false;
+                break;
+            default:
+                (await store.PassOverAsync(Alice, new[] { "a" }, "direct-1", T0 + Tick, None)).Should().Be(1);
+                now = T0 + Tick;
+                marked = false;
+                break;
+        }
+
+        (await PeekAsync(now)).Select(m => (m.Id, m.PushTaken)).Should().Equal(new[] { ("a", marked) }, "a delivery-request takes it ({0})", how);
+        var again = await store.LeaseAsync(DirectTake(now, "direct-2"), None);
+        if (marked)
+            again.Should().BeEmpty("a record a push took is never handed to a push lease again ({0})", how);
+        else
+            again.Select(m => m.Id).Should().Equal(new[] { "a" }, "not sent: a later push takes it again ({0})", how);
+    }
+
+    [Theory]
+    [InlineData(StoreKind.InMemory)]
+    [InlineData(StoreKind.Reference)]
+    public async Task One_mark_serves_both_pushes_a_live_push_lease_never_takes_what_an_ownerless_push_lease_marked_nor_the_reverse(StoreKind kind)
+    {
+        var store = StoreKinds.Create(kind, new MessagePickupOptions { MaxQueueMessages = 100, MaxStoreMessages = 100 });
+        foreach (var id in new[] { "by-direct", "by-live", "plain" })
+            (await store.EnqueueAsync(Message(id), null, T0, None)).Should().Be(EnqueueOutcome.Enqueued);
+        var direct = new MessageLease(null, T0 + LeaseFor) { Id = "direct-1", ForPush = true };
+        var live = new MessageLease("socket", T0 + LeaseFor) { Id = "live-1", ForPush = true };
+        (await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, T0, direct), None)).Select(m => m.Id).Should().Equal("by-direct");
+        (await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, T0, live), None)).Select(m => m.Id).Should().Equal("by-live");
+        (await store.ReleaseAsync(Alice, new[] { "by-direct" }, "direct-1", None)).Should().Be(1);
+        (await store.ReleaseLeasesAsync("socket", None)).Should().Be(1, "only the live push's lease has an owner");
+
+        // Every later push lease, owned or not, gets only the record no push took.
+        var later = new MessageLease(null, Far) { Id = "direct-2", ForPush = true };
+        (await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 10, long.MaxValue, T0, later), None)).Select(m => m.Id).Should().Equal("plain");
+        var laterLive = new MessageLease("socket-2", Far) { Id = "live-2", ForPush = true };
+        (await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 10, long.MaxValue, T0, laterLive), None)).Should().BeEmpty();
+        // A delivery-request gets both marked records, in their places.
+        var pickup = await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 10, long.MaxValue, T0, new MessageLease(null, T0)), None);
+        pickup.Select(m => (m.Id, m.PushTaken)).Should().Equal(new[] { ("by-direct", true), ("by-live", true) });
     }
 }

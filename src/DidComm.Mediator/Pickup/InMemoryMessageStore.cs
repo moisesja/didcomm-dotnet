@@ -31,10 +31,13 @@ namespace DidComm.Mediator.Pickup;
 /// is no timer. Until one of those happens an expired record still occupies memory, so a host with
 /// many idle grants calls <see cref="MessagePickupQueue.PurgeExpiredAsync"/> now and then. A lease
 /// that has run out is simply no longer honoured by the next <see cref="LeaseAsync"/>, and so is a
-/// pass-over mark whose instant has come. The live-push mark (<see cref="QueuedMessage.LivePushReturned"/>)
-/// is not a matter of time: it is set when a live push takes a record, with the id of the lease
-/// that set it, and cleared only by that lease's <see cref="ReturnUnsentAsync"/> or
-/// <see cref="PassOverAsync"/>, so a lease that runs out changes nothing about it.
+/// pass-over mark whose instant has come. The push mark (<see cref="QueuedMessage.PushTaken"/>)
+/// is not a matter of time: it is set when a push lease takes a record — a push over a live
+/// connection, or to the recipient's registered endpoint (direct push, #110); a push lease may have
+/// no owner — with the id of the lease that set it, and cleared only by that lease's
+/// <see cref="ReturnUnsentAsync"/> or <see cref="PassOverAsync"/>, so a lease that runs out changes
+/// nothing about it. A lease without an owner is never in the owner index, so
+/// <see cref="ReleaseLeasesAsync"/> never ends it.
 /// </para>
 /// </remarks>
 public sealed class InMemoryMessageStore : IMessageStore
@@ -130,8 +133,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                 _grants.Add(message.GrantPeerDid, queue);
             }
 
-            // The sequence and the live-push mark are the store's: a new record has never been pushed.
-            var entry = new Entry(message with { Sequence = ++_sequence, LivePushReturned = false });
+            // The sequence and the push mark are the store's: a new record has never been pushed.
+            var entry = new Entry(message with { Sequence = ++_sequence, PushTaken = false });
             entry.Node = queue.Order.AddLast(entry);
             queue.ById.Add(message.Id, entry);
             queue.Bytes += size;
@@ -148,8 +151,8 @@ public sealed class InMemoryMessageStore : IMessageStore
             {
                 PutLease(entry, lease);
                 // Admitted under a live push's lease: taken by that push, in this same step.
-                if (lease.LivePush)
-                    SetLivePushMark(entry, lease.Id);
+                if (lease.ForPush)
+                    SetPushMark(entry, lease.Id);
             }
             return new ValueTask<EnqueueOutcome>(EnqueueOutcome.Enqueued);
         }
@@ -191,8 +194,8 @@ public sealed class InMemoryMessageStore : IMessageStore
                     continue;
                 if (request.AfterSequence is { } after && message.Sequence <= after)
                     continue;
-                // Taken by a live push that did not say it was not sent: only a delivery-request gets it now.
-                if (request.Lease.LivePush && message.LivePushReturned)
+                // Taken by a push (live or direct) that did not say it was not sent: only a delivery-request gets it now.
+                if (request.Lease.ForPush && message.PushTaken)
                     continue;
 
                 // A prefix of what is deliverable: stop at the first record that does not fit, never
@@ -201,11 +204,11 @@ public sealed class InMemoryMessageStore : IMessageStore
                 if (taken is not null && size > budget - total)
                     break;
 
-                // The record as it was before the take: a live push's own mark is not on its copy.
+                // The record as it was before the take: a push's own mark is not on its copy.
                 (taken ??= new List<QueuedMessage>(Math.Min(request.MaxMessages, queue.ById.Count))).Add(message);
                 PutLease(entry, request.Lease);
-                if (request.Lease.LivePush)
-                    SetLivePushMark(entry, request.Lease.Id);
+                if (request.Lease.ForPush)
+                    SetPushMark(entry, request.Lease.Id);
                 total += size;
                 if (taken.Count >= request.MaxMessages)
                     break;
@@ -255,7 +258,7 @@ public sealed class InMemoryMessageStore : IMessageStore
             foreach (var id in ids)
             {
                 // Only the lease named: a record taken again since carries another id and stays leased.
-                // The live-push mark stays whatever lease ends here: the push may have been sent.
+                // The push mark stays whatever lease ends here: the push may have been sent.
                 if (queue.ById.TryGetValue(id, out var entry) && string.Equals(entry.LeaseId, leaseId, StringComparison.Ordinal))
                 {
                     EndLease(entry);
@@ -288,7 +291,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 if (ended)
                     EndLease(entry);
                 // ...and the mark that lease set, whoever ended the lease or holds the record now.
-                var cleared = ClearLivePushMark(entry, leaseId);
+                var cleared = ClearPushMark(entry, leaseId);
                 if (ended || cleared)
                     changed++;
             }
@@ -314,7 +317,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 if (!queue.ById.TryGetValue(id, out var entry))
                     continue;
                 // Did not fit, so not sent: the mark this lease set goes, whoever ended the lease.
-                ClearLivePushMark(entry, leaseId);
+                ClearPushMark(entry, leaseId);
                 // Only records still under the lease named: one taken again since is not this caller's.
                 if (string.Equals(entry.LeaseId, leaseId, StringComparison.Ordinal))
                 {
@@ -340,7 +343,7 @@ public sealed class InMemoryMessageStore : IMessageStore
                 return new ValueTask<int>(0);
             foreach (var entry in entries)
             {
-                // The live-push mark stays: a push over this connection may have been sent.
+                // The push mark stays: a push over this connection may have been sent.
                 entry.LeaseId = null;
                 entry.LeaseOwner = null;
                 entry.LeaseExpiresAt = default;
@@ -545,8 +548,8 @@ public sealed class InMemoryMessageStore : IMessageStore
     }
 
     // Callers hold _gate. Puts the lease on the record, replacing whatever (expired) lease it had.
-    // The live-push mark is not the lease's: it is set and cleared on its own (SetLivePushMark,
-    // ClearLivePushMark), so replacing or ending a lease never touches it.
+    // The push mark is not the lease's: it is set and cleared on its own (SetPushMark,
+    // ClearPushMark), so replacing or ending a lease never touches it.
     private void PutLease(Entry entry, MessageLease lease)
     {
         EndLease(entry);
@@ -562,7 +565,7 @@ public sealed class InMemoryMessageStore : IMessageStore
     }
 
     // Callers hold _gate. Takes the lease off: a give-back by its taker, a pass-over, or the
-    // record's removal. The live-push mark stays as it is.
+    // record's removal. The push mark stays as it is.
     private void EndLease(Entry entry)
     {
         if (entry.LeaseOwner is { } owner && _owners.TryGetValue(owner, out var entries))
@@ -576,21 +579,21 @@ public sealed class InMemoryMessageStore : IMessageStore
         entry.LeaseExpiresAt = default;
     }
 
-    // Callers hold _gate. A live push took the record, under the lease leaseId. A live-push lease
+    // Callers hold _gate. A push took the record, under the lease leaseId. A push lease
     // never takes a marked record, so there is never an earlier mark to overwrite.
-    private static void SetLivePushMark(Entry entry, string leaseId)
+    private static void SetPushMark(Entry entry, string leaseId)
     {
-        entry.Message = entry.Message with { LivePushReturned = true };
+        entry.Message = entry.Message with { PushTaken = true };
         entry.MarkedBy = leaseId;
     }
 
     // Callers hold _gate. The lease leaseId says its push was not sent: its own mark goes, and only
     // its own. True when a mark was cleared.
-    private static bool ClearLivePushMark(Entry entry, string leaseId)
+    private static bool ClearPushMark(Entry entry, string leaseId)
     {
         if (!string.Equals(entry.MarkedBy, leaseId, StringComparison.Ordinal))
             return false;
-        entry.Message = entry.Message with { LivePushReturned = false };
+        entry.Message = entry.Message with { PushTaken = false };
         entry.MarkedBy = null;
         return true;
     }
@@ -598,7 +601,7 @@ public sealed class InMemoryMessageStore : IMessageStore
     // One stored record with its lease. LeaseId == null means "not leased"; a lease whose expiry
     // has passed is ignored by the readers and overwritten by the next PutLease. PassedOverUntil is
     // the pass-over mark: no owner, no id, ended only by time (default = never passed over).
-    // Message.LivePushReturned is the live-push mark and MarkedBy the id of the lease that set it
+    // Message.PushTaken is the push mark and MarkedBy the id of the lease that set it
     // (null when unmarked): it outlives that lease and is cleared only by that lease's id.
     private sealed class Entry(QueuedMessage message)
     {

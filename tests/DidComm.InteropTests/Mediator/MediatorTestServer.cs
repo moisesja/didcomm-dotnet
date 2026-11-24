@@ -45,7 +45,7 @@ namespace DidComm.InteropTests.Mediator;
 internal sealed class MediatorNetwork
 {
     /// <summary>The host names the tests use. Every container allow-lists them in its egress guard (they are not public addresses).</summary>
-    public static readonly IReadOnlyList<string> KnownHosts = new[] { "mediator.test", "m1.test", "m2.test", "inbox.test" };
+    public static readonly IReadOnlyList<string> KnownHosts = new[] { "mediator.test", "m1.test", "m2.test", "inbox.test", "recipient.test" };
 
     private readonly ConcurrentDictionary<string, Lazy<HttpMessageInvoker>> _servers = new(StringComparer.OrdinalIgnoreCase);
 

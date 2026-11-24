@@ -23,4 +23,13 @@ public sealed class MalformedMessageException : DidCommException
     /// mediator opening a forward addressed to itself, FR-ROUTE-06). Not part of the public contract.
     /// </summary>
     internal bool Expired { get; init; }
+
+    /// <summary>
+    /// Set when the restricted unpack of a layer addressed to this agent (an anoncrypt envelope around
+    /// a plaintext message only, FR-ROUTE-06) refused the layer for its shape — plaintext, signed,
+    /// authcrypt, another envelope inside, or <c>from_prior</c> — rather than because it does not
+    /// decrypt or parse. An internal caller that may then unpack the same layer in full, as the message
+    /// for this agent, does so only for this refusal. Not part of the public contract.
+    /// </summary>
+    internal bool RefusedShape { get; init; }
 }

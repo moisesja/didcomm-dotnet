@@ -34,4 +34,11 @@ public sealed class OutboundEndpointPolicy
     /// with <c>false</c> names are left to the proxy's own filtering.
     /// </summary>
     public bool ResolveDnsNames { get; set; } = true;
+
+    /// <summary>
+    /// The asynchronous name lookup the guards built from this policy use in
+    /// <see cref="OutboundEndpointGuard.ValidateAsync"/>; <c>null</c> (the default) for
+    /// <see cref="System.Net.Dns.GetHostAddressesAsync(string, CancellationToken)"/>. A seam for tests.
+    /// </summary>
+    internal Func<string, CancellationToken, Task<System.Net.IPAddress[]>>? ResolveDnsAsync { get; set; }
 }

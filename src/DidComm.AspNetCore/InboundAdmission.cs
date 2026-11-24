@@ -18,7 +18,7 @@ namespace DidComm.AspNetCore;
 /// <param name="Header">The parsed <c>return_route</c> header; <see cref="ReturnRouteHeader.None"/> when absent or malformed.</param>
 /// <param name="HeaderPresent"><c>true</c> when the message carries a <c>return_route</c> member at all (well-formed or not) — the WebSocket session changes mode only for such a message (FR-RR-05).</param>
 /// <param name="SessionEligible"><c>true</c> when the inbound may open or use a session: identity-eligible (see <paramref name="PeerDid"/>), mode <see cref="ReturnRouteMode.All"/> and admitted.</param>
-/// <param name="PeerDid">The DID subject of the authcrypt sender key id when the inbound is identity-eligible (encrypted and authenticated, key ids are DIDs, not a <c>forward</c>), whatever its mode; otherwise <c>null</c>.</param>
+/// <param name="PeerDid">The DID subject of the authcrypt sender key id when the inbound is identity-eligible (encrypted and authenticated, key ids are DIDs, not a <c>forward</c>, and not opened out of forward layers re-wrapped for this agent), whatever its mode; otherwise <c>null</c>.</param>
 /// <param name="LocalDid">The DID subject of the decrypting key id, set together with <paramref name="PeerDid"/>.</param>
 /// <param name="Replay">The replay guard's answer when the message was in FR-RR-08 scope and reached the guard; <c>null</c> when out of scope or refused before the guard.</param>
 internal readonly record struct InboundAdmissionResult(
@@ -48,17 +48,28 @@ internal static class InboundAdmission
     /// Evaluate <paramref name="unpacked"/>. Never throws: a fault in the replay guard (host code
     /// when the host registered its own) fails closed as "not admitted".
     /// </summary>
+    /// <remarks>
+    /// A message opened out of forward layers re-wrapped for this agent (<paramref name="routed"/>)
+    /// never gets a return route, whatever its header says: "This extension is only to be used
+    /// between the immediate sending agent and the agent it connects directly to. This extension
+    /// is not valid when routing keys are in use" (return_route.md). The connection it arrived on
+    /// is the mediator's, not its sender's, so a reply written there would be lost. It is admitted
+    /// like any other message otherwise: replay admission (with its <c>created_time</c> rule) keys
+    /// on its own sender and id.
+    /// </remarks>
     /// <param name="unpacked">The verified unpack result of the inbound.</param>
     /// <param name="options">The facade options; its clock (<c>DidCommOptions.Now()</c>) is read once here.</param>
     /// <param name="replayGuard">The FR-RR-08 guard.</param>
     /// <param name="endpoint">The per-endpoint state holding the log rate limiters.</param>
     /// <param name="logger">Optional logger.</param>
+    /// <param name="routed"><c>true</c> when <paramref name="unpacked"/> was opened out of one or more forward layers re-wrapped for this agent: it is then never identity-eligible for a return route (no <see cref="InboundAdmissionResult.PeerDid"/>, no session).</param>
     internal static InboundAdmissionResult Evaluate(
         UnpackResult unpacked,
         DidCommOptions options,
         IInboundReplayGuard replayGuard,
         InboundAdmissionEndpoint endpoint,
-        ILogger? logger)
+        ILogger? logger,
+        bool routed = false)
     {
         ArgumentNullException.ThrowIfNull(unpacked);
         ArgumentNullException.ThrowIfNull(options);
@@ -76,9 +87,16 @@ internal static class InboundAdmission
 
         // FR-RR-03: the identity half. The peer is the authcrypt sender's DID subject; a message that
         // is not encrypted+authenticated, or is a forward (FR-RR-02), never binds a session.
+        // A message opened out of re-wrapped forward layers came through a mediator: no return route
+        // (return_route.md: only between the immediate sender and the agent it connects to).
         string? peerDid = null;
         string? localDid = null;
-        if (ReturnRouteEligibility.TryGetPeer(unpacked, out var peer, out var local, out var why))
+        if (routed)
+        {
+            if (header.Mode == ReturnRouteMode.All)
+                SafeLog.Write(logger, LogLevel.Debug, "Inbound {MessageId}: return_route all cannot open a session (Routed: it arrived inside forward layers re-wrapped for this agent, return_route.md).", LogValues.Id(messageId));
+        }
+        else if (ReturnRouteEligibility.TryGetPeer(unpacked, out var peer, out var local, out var why))
         {
             peerDid = peer;
             localDid = local;

@@ -58,6 +58,37 @@ internal enum LiveStep
     NotSent,
 }
 
+/// <summary>What <see cref="PickupCoordinator.PushNextDirectAsync"/> did (#110).</summary>
+internal enum DirectStep
+{
+    /// <summary>The directory has no usable endpoint for the grant (none, a throw, or one a push cannot use): nothing was taken.</summary>
+    NoEndpoint,
+
+    /// <summary>The outbound address check refused the recipient's endpoint (a blocked address, or a name that resolves to one or does not resolve): no POST, nothing was taken; the recipient's direct pushes pause.</summary>
+    EndpointRefused,
+
+    /// <summary>Nothing is deliverable now.</summary>
+    Empty,
+
+    /// <summary>The record taken was removed: its recipient DID is no longer registered under the grant.</summary>
+    Removed,
+
+    /// <summary>The endpoint answered 2xx; the record is removed.</summary>
+    Delivered,
+
+    /// <summary>The attempt was made and did not deliver (a fault, or an answer that says the endpoint is unwell or wants "later": <see cref="Pipeline.DirectSendResult.Failed"/>): the record keeps its push mark and waits for a <c>delivery-request</c>.</summary>
+    NotDelivered,
+
+    /// <summary>The endpoint answered a 4xx other than 408 and 429, its definite "not this message" (<see cref="Pipeline.DirectSendResult.Refused"/>): as for <see cref="NotDelivered"/>, the record keeps its push mark and waits for a <c>delivery-request</c>; nothing says the endpoint is unwell.</summary>
+    Refused,
+
+    /// <summary>The record taken had expired by the time of the send: given back as unsent, never sent.</summary>
+    Expired,
+
+    /// <summary>The grant's peer has a live session with live delivery on by the time the push would take a record (one turned live delivery on, or a downgraded one resumed, while the directory answered): nothing was taken, and the next push goes live (D6: live first).</summary>
+    LiveSession,
+}
+
 /// <summary>The queue state a <c>status</c> reports, before a protocol version puts it into its own units and member names.</summary>
 /// <param name="Queue">What the store reports for the scope.</param>
 /// <param name="Now">The instant the state was read at.</param>
@@ -115,6 +146,9 @@ internal sealed class PickupCoordinator
     private long _notEncrypted;
     private long _queueFull;
     private long _undeliverable;
+    private long _directoryFaults;
+    private long _refusedEndpoints;
+    private long _directNotDelivered;
 
     public PickupCoordinator(
         IMessageStore store,
@@ -330,6 +364,10 @@ internal sealed class PickupCoordinator
             // grant reads an empty status without a store call, so its mark is zero: it has no
             // records, and whatever it is sent once granted arrives after any mark.)
             var live = state is not null && state.SetLive(liveDelivery ? buildLiveDelivery : null, queue.HighWaterSequence);
+            // Whatever the ownership read said: a grant may be made while this change runs, and a
+            // message relayed in that window is this session's to push (ADV-110-2b-2). A wake-up for a
+            // peer with no grant pushes nothing; at most the host's endpoint directory is asked about
+            // its DID, which IRecipientEndpointDirectory allows.
             if (live)
                 RaiseLiveDeliveryStarted(peerDid);
             return PickupOutcome.Of(new PickupStatusView(queue, now, live, null));
@@ -401,7 +439,7 @@ internal sealed class PickupCoordinator
             // A message that is not yet due is never pushed: it is queued and picked up once due.
             var due = options.NotBefore is not { } notBefore || notBefore <= now;
             var target = options.AllowLive && due ? FindLiveTarget(peerDid) : null;
-            lease = target is null ? null : new MessageLease(target.Value.State.OwnerToken, now + _leaseTimeout) { LivePush = true };
+            lease = target is null ? null : PushLease(target.Value.State.OwnerToken, now);
             // Before the lease exists: the session's close then knows there may be leases to end.
             target?.State.MarkLeasing();
 
@@ -521,7 +559,9 @@ internal sealed class PickupCoordinator
     /// Raised with the peer's DID when a session turns live delivery on (after the status that
     /// answers it was read): the mediator's push workers wake the grant, so a message that arrived
     /// after that status — and found no live session when it arrived — is pushed now rather than at
-    /// the grant's next message. A handler that throws is ignored.
+    /// the grant's next message. It is raised whether or not the peer held a grant when the status
+    /// was read (one may be made meanwhile); a peer without one has nothing to push. A handler that
+    /// throws is ignored.
     /// </summary>
     public event Action<string>? LiveDeliveryStarted;
 
@@ -548,9 +588,10 @@ internal sealed class PickupCoordinator
     /// <summary>
     /// Take the next message of <paramref name="grantPeerDid"/> the store hands out now — due,
     /// unexpired, unleased, not passed over, oldest first and, when <paramref name="afterSequence"/>
-    /// is given, arrived after it; under a live-push lease, never one an earlier live push took and
-    /// did not give back as unsent (<see cref="QueuedMessage.LivePushReturned"/>) — under
-    /// <paramref name="lease"/>, one record at a time (FR-PICK-03/09). Under a live-push lease the
+    /// is given, arrived after it; under a push lease (<see cref="MessageLease.ForPush"/>: a push
+    /// over a live connection or to the recipient's registered endpoint), never one an earlier push
+    /// took and did not give back as unsent (<see cref="QueuedMessage.PushTaken"/>) — under
+    /// <paramref name="lease"/>, one record at a time (FR-PICK-03/09). Under a push lease the
     /// store marks the record it hands over as taken by this push. Registration is checked at
     /// delivery time, exactly as for a pickup: a record whose recipient DID no longer belongs to the
     /// grant is removed, by id, and not handed over; anything else taken and not handed over is
@@ -584,11 +625,11 @@ internal sealed class PickupCoordinator
             // without one, or not after the one asked for, is outside the contract and not pushed.
             if (leased.Exists(record => record.Sequence < 1 || record.Sequence <= afterSequence))
                 throw new InvalidOperationException("The message store returned a record without an arrival sequence after the one it was asked for.");
-            // A record an earlier live push took is the recipient's to ask for: handed to a live-push
-            // lease (the store returns each record as it was before the take), it is outside the
-            // contract and not pushed again.
-            if (lease.LivePush && leased.Exists(record => record.LivePushReturned))
-                throw new InvalidOperationException("The message store handed a live push a record that came back unacknowledged from one.");
+            // A record an earlier push (live or direct) took is the recipient's to ask for: handed to
+            // a push lease (the store returns each record as it was before the take), it is outside
+            // the contract and not pushed again.
+            if (lease.ForPush && leased.Exists(record => record.PushTaken))
+                throw new InvalidOperationException("The message store handed a push a record an earlier push took and did not give back as unsent.");
             if (leased.Count == 0)
                 return (TakeResult.Empty, null);
             await DropUnregisteredAsync(grantPeerDid, leased, held, settled, ct).ConfigureAwait(false);
@@ -599,8 +640,8 @@ internal sealed class PickupCoordinator
         }
         finally
         {
-            // Taken but not handed over, so never sent: given back as unsent (for a live push's
-            // lease that also clears the mark the take set).
+            // Taken but not handed over, so never sent: given back as unsent (for a push lease that
+            // also clears the mark the take set).
             if (held.Count > 0)
                 await ReturnUnsentQuietlyAsync(grantPeerDid, held, lease.Id).ConfigureAwait(false);
         }
@@ -618,10 +659,10 @@ internal sealed class PickupCoordinator
     /// the status that answered its turning live delivery on are pushed (by arrival sequence,
     /// <see cref="LiveMode.AfterSequence"/>): what that status counted is the recipient's to pick
     /// up (FR-PICK-06). The record
-    /// is taken with <see cref="TakeNextAsync"/> under a live-push lease (<see cref="MessageLease.LivePush"/>)
+    /// is taken with <see cref="TakeNextAsync"/> under a push lease (<see cref="MessageLease.ForPush"/>)
     /// owned by that session (<see cref="MessagePickupOptions.LeaseTimeout"/>) and sent as a
     /// one-message <c>delivery</c> in the session's framing, bounded by <c>max_delivery_bytes</c>.
-    /// The take marks the record as taken by this live push (<see cref="QueuedMessage.LivePushReturned"/>),
+    /// The take marks the record as taken by this live push (<see cref="QueuedMessage.PushTaken"/>),
     /// and the mark stays unless this push says it was not sent: a message pushed live and returned
     /// unconfirmed is never pushed live again, only a <c>delivery-request</c> gets it (owner
     /// decision on #100; 4.0 L304, L308). Taken by the open session, it stays leased until
@@ -649,7 +690,7 @@ internal sealed class PickupCoordinator
         var (session, state) = target;
 
         var now = _didCommOptions.Now();
-        var lease = new MessageLease(state.OwnerToken, now + _leaseTimeout) { LivePush = true };
+        var lease = PushLease(state.OwnerToken, now);
         // Before the lease exists: the session's close then knows there may be leases to end.
         state.MarkLeasing();
         var (taken, record) = await TakeNextAsync(grantPeerDid, lease, live.AfterSequence, now, ct).ConfigureAwait(false);
@@ -712,6 +753,188 @@ internal sealed class PickupCoordinator
             }
         }
         return step;
+    }
+
+    /// <summary>
+    /// Push the next message of <paramref name="grantPeerDid"/> to the endpoint the host registered
+    /// for its recipient (step 3 of the delivery order, FR-PICK-09, #110): one send of the stored
+    /// encrypted message, unchanged. The mediator's push workers call this for a grant with no live
+    /// session when direct push is on, never the forward pump: the host's directory and the
+    /// recipient's server decide how long it takes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The endpoint comes first, and only from <paramref name="directory"/>, read once: with none, a
+    /// directory that throws (other than this call's own cancellation), or an endpoint a push cannot
+    /// use (<see cref="Pipeline.IDirectPushSender.CheckTargetAsync"/>), nothing is taken
+    /// (<see cref="DirectStep.NoEndpoint"/>); one the outbound address check refuses (a host name is
+    /// looked up, under <paramref name="ct"/>) takes nothing either and is
+    /// <see cref="DirectStep.EndpointRefused"/>. Then the record is taken with
+    /// <see cref="TakeNextAsync"/> under a push lease (<see cref="MessageLease.ForPush"/>, with no
+    /// owner, for <see cref="MessagePickupOptions.LeaseTimeout"/>): the store hands out only a due,
+    /// unexpired, unleased record that no earlier push took, oldest first, marks it in the same step
+    /// (<see cref="QueuedMessage.PushTaken"/>), and the registration is checked. The send goes
+    /// to the endpoint read before the take: a change in the directory applies from the next push.
+    /// </para>
+    /// <para>
+    /// Live first, here too (D6): right before the take the step looks again for the grant's live
+    /// session, by the rule <see cref="PushNextLiveAsync"/> uses. A session that turned live delivery
+    /// on while the directory answered — or a downgraded one that resumed — wins: nothing is taken
+    /// (<see cref="DirectStep.LiveSession"/>), and the next push goes live. A session that turns it on after that look — during the take or
+    /// the send — finds this push in flight, as a revoke-and-purge after the take does: the send goes
+    /// ahead, so a record the session's live-on status counted (the recipient's to pick up) may also
+    /// reach the endpoint — at most a duplicate delivery, which recipients handle by message id
+    /// (at least once).
+    /// </para>
+    /// <para>
+    /// The push workers (<see cref="Pipeline.PushDispatcher"/>) go on to the next record after a
+    /// <see cref="DirectStep.Refused"/>, and end their run and pause that recipient's direct pushes
+    /// after any other direct push that does not deliver. Those bounds, not this step, are what limit
+    /// a store that breaks its contract — one that drops the push mark, or judges expiry by a clock of
+    /// its own, and so hands out again a record a push already took: at most
+    /// 2 × <see cref="MaxDeliveryBatch"/> − 1 sends of a refused record per wake-up, and one per pause
+    /// otherwise. The store's mark stays the only record of an attempt (L-058).
+    /// </para>
+    /// <para>
+    /// Exactly one store call ends the lease, on every path, never cancelled. The endpoint answered
+    /// 2xx: the record is removed (<see cref="IMessageStore.AcknowledgeAsync"/>,
+    /// <see cref="DirectStep.Delivered"/>). The send was attempted and did not deliver — a 4xx other
+    /// than 408 and 429 (<see cref="DirectStep.Refused"/>), any other answer, a fault, or a
+    /// cancellation during the send (<see cref="DirectStep.NotDelivered"/>) — : the lease is given back by its id
+    /// (<see cref="IMessageStore.ReleaseAsync"/>) and the record keeps its mark, so it is never pushed
+    /// again, live or direct, and only a <c>delivery-request</c> gets it (owner decisions OD-3 and
+    /// OD-5 on #100; pickup is the later delivery, OD-2 on #110). The send was never attempted — the
+    /// deadline passed during the take, or the record expired since the take — : it is given back as
+    /// unsent (<see cref="IMessageStore.ReturnUnsentAsync"/>), which clears the mark.
+    /// </para>
+    /// <para>
+    /// A cancellation of <paramref name="ct"/> leaves as an <see cref="OperationCanceledException"/>
+    /// after the give-back; every other fault of the directory or the send is logged by exception
+    /// type and becomes a step. Store faults propagate (after the give-back, when a record was
+    /// taken). Log lines carry exception type names and fixed reason words only: never the endpoint,
+    /// a DID or a record id.
+    /// </para>
+    /// </remarks>
+    /// <param name="grantPeerDid">The grant; the endpoint registered for its peer gets the push.</param>
+    /// <param name="directory">The host's directory of recipient endpoints.</param>
+    /// <param name="sender">The single-attempt sender.</param>
+    /// <param name="ct">Cancellation token: the push's deadline.</param>
+    /// <returns>What happened; see <see cref="DirectStep"/>.</returns>
+    public async ValueTask<DirectStep> PushNextDirectAsync(string grantPeerDid, IRecipientEndpointDirectory directory, Pipeline.IDirectPushSender sender, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        ArgumentNullException.ThrowIfNull(sender);
+        // Off the caller's thread before any host code runs: the directory may block synchronously,
+        // and the caller's deadline must still govern.
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
+
+        // The endpoint, read once and before anything is taken.
+        Uri? endpoint;
+        try
+        {
+            endpoint = await directory.FindAsync(grantPeerDid, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            MediatorLog.ThrowIfCancelled(ct);
+            var level = MediatorLog.RateLimited(ref _directoryFaults, out var n);
+            Log(level, "Direct push: the recipient endpoint directory failed with {ExceptionType}; handled as no endpoint: nothing was taken and the messages stay queued for pickup. {Count} such failures.", ex.GetType().Name, n);
+            return DirectStep.NoEndpoint;
+        }
+        // The endpoint check, under the deadline (a host name is looked up): a cancellation leaves
+        // as itself, nothing taken.
+        var check = await sender.CheckTargetAsync(endpoint, ct).ConfigureAwait(false);
+        if (check.Verdict == Pipeline.PushTarget.Refused)
+        {
+            // The outbound address check refused where the recipient's endpoint points (or its name
+            // did not resolve): no POST, nothing taken; the dispatcher pauses its direct pushes.
+            var level = MediatorLog.RateLimited(ref _refusedEndpoints, out _);
+            Log(level, "Direct push: the recipient's endpoint was refused by the outbound address check ({Reason}); nothing was taken and the messages stay queued for pickup.", check.Reason);
+            return DirectStep.EndpointRefused;
+        }
+        if (check.Verdict != Pipeline.PushTarget.Accepted || endpoint is null)
+        {
+            // No endpoint is a recipient's ordinary state; one that may not be pushed to is the host's to fix.
+            var level = endpoint is null ? LogLevel.Debug : MediatorLog.RateLimited(ref _refusedEndpoints, out _);
+            Log(level, "Direct push: no endpoint the mediator may push to is registered for the recipient ({Reason}); nothing was taken and the messages stay queued for pickup.", check.Reason);
+            return DirectStep.NoEndpoint;
+        }
+
+        // Live first (D6), decided right before the take: a session may have turned live delivery
+        // on while the directory answered (host code, up to the push's deadline). From here on a
+        // live-on finds this push in flight.
+        if (HasLiveTarget(grantPeerDid))
+            return DirectStep.LiveSession;
+
+        var now = _didCommOptions.Now();
+        var lease = PushLease(owner: null, now);
+        var (taken, record) = await TakeNextAsync(grantPeerDid, lease, afterSequence: null, now, ct).ConfigureAwait(false);
+        if (record is null)
+            return taken == TakeResult.Removed ? DirectStep.Removed : DirectStep.Empty;
+
+        // The take marked the record as taken by this push (IMessageStore). From here exactly one
+        // store call ends the lease: the removal after a 2xx, a release by id after an attempt that
+        // did not deliver (the mark stays), or a give-back as unsent when nothing was attempted.
+        var attempted = false;
+        var delivered = false;
+        var refused = false;
+        try
+        {
+            // A take that came back after the deadline sends nothing: the record goes straight back.
+            ct.ThrowIfCancellationRequested();
+            // The store judged expiry at the take's instant; the send is later. Never send what has
+            // expired by now (FR-ROUTE-09, FR-PICK-10).
+            if (record.ExpiresAt is { } expiresAt && expiresAt <= _didCommOptions.Now())
+            {
+                Log(LogLevel.Debug, "Direct push: a message expired between its take and its send; it was not sent.");
+                return DirectStep.Expired;
+            }
+
+            // The attempt is spent from this call on, whatever it ends in (owner decision OD-5 on #100).
+            attempted = true;
+            var answer = await sender.SendAsync(endpoint, record.Payload, ct).ConfigureAwait(false);
+            delivered = answer == Pipeline.DirectSendResult.Delivered;
+            refused = answer == Pipeline.DirectSendResult.Refused;
+            if (refused)
+            {
+                var level = MediatorLog.RateLimited(ref _directNotDelivered, out var n);
+                Log(level, "Direct push not delivered: the recipient's endpoint refused the message (a 4xx answer); it stays queued for pickup and is not pushed again. {Count} such pushes.", n);
+            }
+            else if (!delivered)
+            {
+                var level = MediatorLog.RateLimited(ref _directNotDelivered, out var n);
+                Log(level, "Direct push not delivered: the recipient's endpoint did not accept the message; it stays queued for pickup and is not pushed again. {Count} such pushes.", n);
+            }
+        }
+        catch (Exception ex) when (attempted)
+        {
+            // A cancellation during the send leaves as itself, after the release below.
+            MediatorLog.ThrowIfCancelled(ct);
+            var level = MediatorLog.RateLimited(ref _directNotDelivered, out var n);
+            Log(level, "Direct push not delivered: the send failed with {ExceptionType}; the message stays queued for pickup and is not pushed again. {Count} such pushes.", ex.GetType().Name, n);
+        }
+        finally
+        {
+            if (!attempted)
+                await ReturnUnsentQuietlyAsync(grantPeerDid, new[] { record.Id }, lease.Id).ConfigureAwait(false);
+            else if (!delivered)
+                await ReleaseQuietlyAsync(grantPeerDid, new[] { record.Id }, lease.Id).ConfigureAwait(false);
+        }
+        if (!delivered)
+            return refused ? DirectStep.Refused : DirectStep.NotDelivered;
+
+        // Delivered: the record goes. Never cancelled; a removal that fails leaves the record under
+        // this push's mark and lease, so only a delivery-request gets it again (at least once).
+        try
+        {
+            await _store.AcknowledgeAsync(grantPeerDid, new[] { record.Id }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Error, "Direct push: a message the recipient's endpoint accepted could not be removed ({ExceptionType}); it stays queued, is not pushed again, and a delivery-request may deliver it a second time.", ex.GetType().Name);
+        }
+        return DirectStep.Delivered;
     }
 
     /// <summary>See <see cref="MessagePickupQueue.RemoveAsync"/>.</summary>
@@ -813,7 +1036,7 @@ internal sealed class PickupCoordinator
         CancellationToken ct)
     {
         // Over a live session the lease also ends when the session closes; over HTTP by time only.
-        // Never a live-push lease: what a delivery-request leaves unacknowledged is not marked
+        // Never a push lease: what a delivery-request leaves unacknowledged is not marked
         // (only a live push that comes back unacknowledged is kept from live pushes).
         var state = _tracker.Track(session);
         var lease = new MessageLease(state?.OwnerToken, now + _leaseTimeout);
@@ -914,6 +1137,14 @@ internal sealed class PickupCoordinator
                 await ReleaseQuietlyAsync(peerDid, held, lease.Id).ConfigureAwait(false);
         }
     }
+
+    // A push lease: the lease of a record the mediator pushes, over a live connection (owned by that
+    // session, so its close ends the lease) or to the recipient's registered endpoint (direct push,
+    // #110: no owner, so it ends by time or by the push's own give-back). The store's name for it is
+    // MessageLease.ForPush: the store marks every record it takes, in the same step, and keeps the
+    // mark unless this lease says its push was not sent, so a record one push took is never pushed
+    // again, live or direct; only a delivery-request gets it.
+    private MessageLease PushLease(string? owner, DateTimeOffset now) => new(owner, now + _leaseTimeout) { ForPush = true };
 
     // How long a record that did not fit alone is passed over: the lease timeout the first time,
     // twice that the next, and so on, without a ceiling short of the end of time. Whatever the
@@ -1127,10 +1358,10 @@ internal sealed class PickupCoordinator
     }
 
     // The give-back of a push that was not sent: the lease ends as with ReleaseQuietlyAsync, and a
-    // live push's mark that this lease set is cleared, even when the lease has ended already (the
-    // session's close or the lease's expiry ran first), so a later live push may take the record.
-    // Never throws, never cancelled. A record that could not be given back stays kept from live
-    // pushes (a delivery-request still gets it) and its lease ends by timeout.
+    // push's mark that this lease set is cleared, even when the lease has ended already (the
+    // session's close or the lease's expiry ran first), so a later push may take the record.
+    // Never throws, never cancelled. A record that could not be given back stays kept from pushes
+    // (a delivery-request still gets it) and its lease ends by timeout.
     private async ValueTask ReturnUnsentQuietlyAsync(string peerDid, IReadOnlyList<string> ids, string leaseId)
     {
         try
@@ -1139,7 +1370,7 @@ internal sealed class PickupCoordinator
         }
         catch (Exception ex)
         {
-            Log(LogLevel.Warning, "Message pickup: {Count} unsent live push(es) could not be given back ({ExceptionType}); they stay queued for pickup and their leases end by timeout.", ids.Count, ex.GetType().Name);
+            Log(LogLevel.Warning, "Message pickup: {Count} unsent push(es) could not be given back ({ExceptionType}); they stay queued for pickup and their leases end by timeout.", ids.Count, ex.GetType().Name);
         }
     }
 }

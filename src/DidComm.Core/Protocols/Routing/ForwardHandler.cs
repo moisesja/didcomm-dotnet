@@ -151,8 +151,11 @@ namespace DidComm.Protocols.Routing;
 /// (both count against the byte budget) and the pump only processes and sinks it. The relayed
 /// payload must not outlive any layer it came out of: its <see cref="ForwardProcessingResult.ExpiresTime"/>
 /// is the earliest <c>expires_time</c> of the received forward and every layer opened (FR-ROUTE-09),
-/// for the expired-while-queued check and for the queue that stores it. What is inside and is not a forward is dropped: a mediator is not the final recipient
-/// of an application message. The relayed forward's not-before is the latest of the holds asked
+/// for the expired-while-queued check and for the queue that stores it. What is inside and is not a forward is dropped by this handler, which
+/// relays forwards only. The library's receiving endpoints open such a forward before it gets here
+/// and handle the message inside as the mediator's own (owner decision OD-6 on #110: a mediator
+/// reached through a rewrapping mediator receives its own protocol messages that way); a host that
+/// dispatches to this handler itself gets the drop. The relayed forward's not-before is the latest of the holds asked
 /// for by the received forward and by every layer opened, each capped and drawn at the receipt
 /// instant — never their sum, so a chain of layers is held at most the cap. Only the DID that decrypted a layer counts as this
 /// mediator: a forward naming another of the mediator's DIDs as <c>next</c> is looked up, and
@@ -487,9 +490,9 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
             //      sourceward communication; Problem Reports are general; Transports (L67) requires a
             //      2xx for a successful receipt and leaves failures open. Answering like
             //      this is the owner's choice within that gap (2026-11-19), not a spec rule.
-            if (CarriesNonDidCommPayload(relayed))
+            if (CarriesNonDidCommPayload(relayed, context.Options.MaxReceiveBytes))
             {
-                Dropped(DropReason.PayloadNotDidComm, "Forward {MessageId} dropped: what it carries is not a DIDComm message (UTF-8 JSON with an object at the top level); nothing is stored or relayed (FR-ROUTE-01).", logId);
+                Dropped(DropReason.PayloadNotDidComm, "Forward {MessageId} dropped: what it carries is not a DIDComm message (UTF-8 JSON with an object at the top level, within MaxReceiveBytes); nothing is stored or relayed (FR-ROUTE-01).", logId);
                 return null;
             }
 
@@ -571,19 +574,21 @@ public sealed class ForwardHandler : IProtocolHandler, IProtocolHandlerRoles, ID
 
     /// <summary>
     /// Whether the single attachment of <paramref name="forward"/> fails the rule the processor relays
-    /// by (<see cref="ForwardProcessor.ExtractAttachmentBytes"/>): not base64url, empty, or not a
-    /// DIDComm message (UTF-8 JSON with an object at the top level). A forward without exactly one
-    /// attachment, or whose attachment has no data, is left to the processor's own checks on the pump,
-    /// as before. Decodes and discards: the work item keeps the plaintext, not a second copy.
+    /// by (<see cref="ForwardProcessor.ExtractAttachmentBytes"/>): not base64url, empty, not a
+    /// DIDComm message (UTF-8 JSON with an object at the top level), or longer than the receive limit
+    /// once written. A forward without exactly one attachment, or whose attachment has no data, is
+    /// left to the processor's own checks on the pump, as before. Decodes and discards: the work item
+    /// keeps the plaintext, not a second copy.
     /// </summary>
     /// <param name="forward">The forward to relay (already parsed once, so it parses).</param>
-    private static bool CarriesNonDidCommPayload(Message forward)
+    /// <param name="maxBytes">The receive limit (<see cref="Facade.DidCommOptions.MaxReceiveBytes"/>).</param>
+    private static bool CarriesNonDidCommPayload(Message forward, long maxBytes)
     {
         if (!ForwardMessage.TryParse(forward, out _, out var attachments) || attachments.Count != 1)
             return false;
         try
         {
-            ForwardProcessor.ExtractAttachmentBytes(attachments[0]);
+            ForwardProcessor.ExtractAttachmentBytes(attachments[0], maxBytes);
             return false;
         }
         catch (MalformedMessageException)

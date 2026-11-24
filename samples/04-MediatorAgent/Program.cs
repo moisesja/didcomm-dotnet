@@ -8,6 +8,10 @@ using DidComm.AspNetCore;
 using DidComm.Exceptions;
 using DidComm.Extensions.DependencyInjection;
 using DidComm.Facade;
+using DidComm.Mediator;
+using DidComm.Mediator.AspNetCore;
+using DidComm.Mediator.Coordination;
+using DidComm.Mediator.Pickup;
 using DidComm.Messages;
 using DidComm.Protocols;
 using DidComm.Protocols.DiscoverFeatures;
@@ -40,7 +44,9 @@ namespace DidComm.Samples.MediatorAgent;
 /// outbound-endpoint SSRF guard refusing the loopback mediator by default and the narrow opt-in a
 /// local demo needs, a Discover Features answer returned on the same request, a registered
 /// recipient without an inbox, a forward for an unregistered DID, and the same relay composed
-/// without a DI container.
+/// without a DI container. Last, the library doing that push itself: a complete mediator
+/// (<c>AddMediator()</c> with <c>DirectPush</c>) posts a stored message to the inbox the operator
+/// registered for the recipient, and keeps it for pickup when none is registered.
 /// The mediator's own DID names its inbox too, so Alice reaches it the normal way: resolved from a
 /// DID and checked by the outbound guard, never through an address override.
 /// <see cref="Main"/> is the CLI; <see cref="RunAsync"/> is the testable seam invoked by the
@@ -53,6 +59,9 @@ public static class Program
 
     /// <summary>The rate-limiter policy in front of the mediator's endpoint.</summary>
     private const string RelayRateLimitPolicy = "relay";
+
+    /// <summary>The rate-limiter policy in front of section 9's complete mediator.</summary>
+    private const string PushingMediatorRateLimitPolicy = "mediator";
 
     /// <summary>CLI entry point — writes to <see cref="Console.Out"/> and exits 0 on success.</summary>
     public static async Task<int> Main()
@@ -277,8 +286,8 @@ public static class Program
                 narrator.Value("Bob inbox (known only to the mediator)", bobInbox);
 
                 // The relay's own directory: Bob has an inbox; Carol does not (she would collect
-                // her messages some other way). The library's built-in push to a recipient's
-                // endpoint is a planned feature (#110); until then this directory is the host's.
+                // her messages some other way). Section 9 shows the library's complete mediator
+                // doing this push itself, from a directory the host gives it.
                 // Only the operator fills it — never from a peer's message or a DID document,
                 // or a stranger could point the relay at an address of its choosing.
                 narrator.Value("[mediator] Bob's inbox added to the relay's directory", relay.TryAddInbox(bob.Did, bobInbox));
@@ -450,10 +459,15 @@ public static class Program
                     await RunWithoutContainerAsync(
                         narrator, mediatorApp.Services, routingOptions, routedAlice.Client,
                         alice, mediator, bob, bobInbox, bobDeliveries.Reader);
+
+                    // ── 9. The library's own push: AddMediator() with DirectPush ─────────────
+                    await RunDirectPushAsync(
+                        narrator, mediatorApp.Services, routedAlice.Client, alice,
+                        bobSecrets, carolSecrets, bobInbox, bobDeliveries.Reader);
                 }
 
                 // Teardown: Bob leaves the mediator too.
-                narrator.Section("9", "Teardown");
+                narrator.Section("10", "Teardown");
                 narrator.Value("[mediator] Bob unregistered", recipients.Unregister(bob.Did));
                 narrator.Value("[mediator] registered recipients", recipients.Count);
             }
@@ -559,6 +573,212 @@ public static class Program
         await handler.DisposeAsync();
         narrator.Step("Hand-built handler stopped (Dispose, then DisposeAsync waited for its relay to finish).");
     }
+
+    /// <summary>
+    /// Section 9: the push of section 6, done by the library. A complete mediator
+    /// (<c>AddMediator()</c> + <c>MapDidCommMediator</c>) with <see cref="MediatorOptions.DirectPush"/>
+    /// on stores each relayed message in the recipient's mailbox, then posts it to the inbox the
+    /// operator registered for that recipient (<see cref="InboxDirectory"/>); a recipient with no
+    /// registered inbox gets it when it picks up.
+    /// </summary>
+    private static async Task RunDirectPushAsync(
+        Narrator narrator,
+        IServiceProvider keyTools,
+        DidCommClient aliceClient,
+        PeerIdentity alice,
+        InMemorySecretsResolver bobSecrets,
+        InMemorySecretsResolver carolSecrets,
+        Uri bobInbox,
+        ChannelReader<(UnpackResult Unpacked, bool HadSession)> bobDeliveries)
+    {
+        narrator.Section("9", "The library's own push: AddMediator() with DirectPush");
+
+        // A complete mediator keeps every relayed message in the recipient's mailbox first. It then
+        // pushes it over the recipient's live connection when there is one. With DirectPush on, and
+        // no live connection, it posts the message to the recipient's own inbox instead — the
+        // address the operator registered for that recipient, never one a message names. It is off
+        // unless you turn it on.
+        narrator.Value("MediatorOptions.DirectPush by default", new MediatorOptions().DirectPush);
+
+        // The operator's list of inboxes (InboxDirectory.cs), handed to the mediator below.
+        var inboxes = new InboxDirectory();
+        var (app, mediatorDid) = await LoopbackPort.StartAsync(port => StartPushingMediatorAsync(port, keyTools, inboxes));
+        try
+        {
+            var mediatorInbox = new Uri(app.Urls.Single() + "/didcomm");
+            narrator.Value("Complete mediator's inbox", mediatorInbox);
+            narrator.Value("Complete mediator's DID", Trunc(mediatorDid, 64));
+
+            // The mediator counts every push on didcomm.mediator.push.outcomes (meter
+            // "didcomm-dotnet", tag didcomm.push.outcome); an operator exports it with OpenTelemetry.
+            // As in section 1, this sample listens in-process, to this host's meters only.
+            var meters = app.Services.GetRequiredService<IMeterFactory>();
+            var pushedDirect = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var skippedNoEndpoint = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var pushListener = new MeterListener();
+            pushListener.InstrumentPublished = (instrument, listener) =>
+            {
+                if (ReferenceEquals(instrument.Meter.Scope, meters) && instrument.Name == "didcomm.mediator.push.outcomes")
+                    listener.EnableMeasurementEvents(instrument);
+            };
+            pushListener.SetMeasurementEventCallback<long>((_, _, tags, _) =>
+            {
+                foreach (var tag in tags)
+                {
+                    if (tag.Key != "didcomm.push.outcome")
+                        continue;
+                    if (tag.Value is "Pushed-Direct")
+                        pushedDirect.TrySetResult();
+                    else if (tag.Value is "Push-Skipped-NoEndpoint")
+                        skippedNoEndpoint.TrySetResult();
+                }
+            });
+            pushListener.Start();
+
+            // The operator enrols Bob and Carol by hand, through the mediator's public grant store.
+            // A wallet would enrol itself over Coordinate Mediation instead (cookbook CC, sample 11).
+            var grants = app.Services.GetRequiredService<IMediationStore>();
+            var mailboxes = app.Services.GetRequiredService<IMessageStore>();
+            var (bobAccount, bobPublic) = await EnrolAsync(narrator, "Bob", grants, keyTools, mediatorDid, bobSecrets);
+            var (carolAccount, carolPublic) = await EnrolAsync(narrator, "Carol", grants, keyTools, mediatorDid, carolSecrets);
+
+            // Bob told the operator where his inbox is when he enrolled; Carol did not (she picks
+            // up). The entry is keyed by the DID he enrolled with, and covers every DID he
+            // registers under that grant.
+            narrator.Value("[operator] Bob's inbox added to the directory", inboxes.TryAdd(bobAccount.Did, bobInbox));
+            narrator.Value("[operator] inboxes in the directory", $"{inboxes.Count} of {InboxDirectory.MaxEntries}");
+
+            // Alice writes to the DID Bob gave out. Its service names the mediator's DID, so
+            // SendAsync looks up the mediator's own address and wraps a forward for its keys.
+            var sent = await aliceClient.SendAsync(
+                Hello(alice.Did, bobPublic.Did, "Pushed by the mediator itself."),
+                new SendOptions(Recipients: new[] { bobPublic.Did }, From: alice.Did));
+            narrator.Value("Endpoint used (the complete mediator, from Bob's new DID)", sent.EndpointUsed);
+            narrator.Value("Transport HTTP status for Bob's message", sent.Transport.HttpStatusCode);
+
+            // The mediator answered 202, stored the message, found no live connection for Bob and
+            // posted it to the inbox in the directory: one attempt, whatever UseHttpTransport's
+            // retry setting (left at its default above). The push goes through the mediator's own
+            // copy of the HTTP transport, with no retry and a circuit breaker that never opens, so
+            // one failing inbox cannot block the others. A 307 redirect is followed a few hops,
+            // each new address checked by the outbound guard; any other answer, or an inbox that
+            // cannot be reached, leaves the message in the mailbox for Bob to pick up.
+            var pushed = await AwaitOrFailAsync(bobDeliveries.ReadAsync().AsTask(), "the mediator's push to Bob's inbox");
+            narrator.Step("[bob] his inbox received the message from the mediator:");
+            NarrateDelivery(narrator, pushed.Unpacked, pushed.HadSession, alice.Did);
+
+            // Wait for the outcome itself: the mediator removes the message once the inbox has
+            // answered 2xx, and then counts the push.
+            await AwaitOrFailAsync(pushedDirect.Task, "the mediator's Pushed-Direct outcome");
+            narrator.Step("[mediator] didcomm.push.outcome = Pushed-Direct: Bob's inbox answered 202, so the message left his mailbox.");
+            var bobMailbox = await mailboxes.GetStatusAsync(bobAccount.Did, recipientDid: null, DateTimeOffset.UtcNow, CancellationToken.None);
+            narrator.Value("[mediator] messages waiting in Bob's mailbox", bobMailbox.MessageCount);
+
+            // Carol is enrolled, but the directory has no inbox for her: nothing is sent, and the
+            // message waits in her mailbox.
+            var toCarol = await aliceClient.SendAsync(
+                Hello(alice.Did, carolPublic.Did, "Waiting in Carol's mailbox."),
+                new SendOptions(Recipients: new[] { carolPublic.Did }, From: alice.Did));
+            narrator.Value("Transport HTTP status for Carol's message", toCarol.Transport.HttpStatusCode);
+            await AwaitOrFailAsync(skippedNoEndpoint.Task, "the mediator's Push-Skipped-NoEndpoint outcome");
+            narrator.Step("[mediator] didcomm.push.outcome = Push-Skipped-NoEndpoint: no inbox is registered for Carol, so nothing was sent.");
+            var carolMailbox = await mailboxes.GetStatusAsync(carolAccount.Did, recipientDid: null, DateTimeOffset.UtcNow, CancellationToken.None);
+            narrator.Value("[mediator] messages waiting in Carol's mailbox", carolMailbox.MessageCount);
+            narrator.Note("Carol gets it when she next picks up (Message Pickup: sample 11, cookbook DD). A push that fails waits the same way: it is not tried again.");
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Build and start the complete mediator on <paramref name="port"/>. Its DID names its own
+    /// address, and <c>AddMediator()</c> checks that DID before the server listens, so the port is
+    /// picked first (<see cref="LoopbackPort"/>); in production the address is fixed and known.
+    /// </summary>
+    private static async Task<(WebApplication App, string Did)> StartPushingMediatorAsync(
+        int port, IServiceProvider keyTools, InboxDirectory inboxes)
+    {
+        var url = $"http://127.0.0.1:{port}"; // loopback http for this demo; production is https
+        var secrets = new InMemorySecretsResolver();
+        var mediator = await MintAsync(keyTools, new DidCommServiceSpec($"{url}/didcomm", Accept: new[] { "didcomm/v2" }));
+        foreach (var key in mediator.Privates) secrets.Add(key);
+
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders(); // keep the sample's console output to the narration
+        builder.WebHost.UseUrls(url);
+
+        // The operator's directory of recipient inboxes, registered before AddMediator(). Turning
+        // DirectPush on without one fails at start-up.
+        builder.Services.AddSingleton<IRecipientEndpointDirectory>(inboxes);
+        // As in section 1: anyone who can reach a mediator can post to it, so limit each client.
+        builder.Services.AddRateLimiter(o => o.AddPolicy(PushingMediatorRateLimitPolicy, http =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 100, Window = TimeSpan.FromSeconds(1) })));
+        builder.Services.AddDidComm(b => b
+            .UseNetDidResolver()
+            .UseSecretsResolver(secrets)
+            // The push goes out over HTTP, so the mediator needs the HTTP transport. Plain http
+            // only because this demo runs on loopback; production inboxes are https (the default).
+            .UseHttpTransport(o => o.AllowedSchemes = new[] { "http", "https" })
+            // The outbound guard checks every inbox address before the push, and every address a
+            // redirect leads to. This loopback sample opens 127.0.0.1 (on every port), nothing else.
+            .Configure(o => o.OutboundEndpointPolicy.AllowedHosts.Add("127.0.0.1"))
+            .AddMediator(o =>
+            {
+                o.CoordinateMediation.RoutingDids.Add(mediator.Did);
+                // Push to the recipient's own inbox when it has no live connection.
+                o.DirectPush = true;
+            }));
+
+        var app = builder.Build();
+        try
+        {
+            app.UseRateLimiter();
+            // POST /didcomm receives forwards (and Coordinate Mediation and pickup requests);
+            // GET /didcomm is the WebSocket endpoint, GET /didcomm/oob the invitation.
+            app.MapDidCommMediator("/didcomm").RequireRateLimiting(PushingMediatorRateLimitPolicy);
+            await app.StartAsync();
+            return (app, mediator.Did);
+        }
+        catch
+        {
+            await app.DisposeAsync(); // LoopbackPort tries again with a new port
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The operator enrols a recipient by hand: a grant for the DID it enrols with (its account with
+    /// this mediator), and a second DID registered under that grant, which it gives to senders and
+    /// whose service names the mediator (routing.md, "Using a DID as an endpoint").
+    /// </summary>
+    private static async Task<(PeerIdentity Account, PeerIdentity Public)> EnrolAsync(
+        Narrator narrator, string name, IMediationStore grants, IServiceProvider keyTools, string mediatorDid,
+        InMemorySecretsResolver secrets)
+    {
+        var account = await MintAsync(keyTools, service: null);
+        var grant = await grants.GrantAsync(new MediationGrant(account.Did, new[] { mediatorDid }), CancellationToken.None)
+            ?? throw new InvalidOperationException("The grant store is full.");
+        var publicDid = await MintAsync(keyTools, new DidCommServiceSpec(grant.RoutingDids[0]));
+        // The recipient holds its own keys. Added while nothing is being unpacked: this sample's key
+        // store is add-then-read only.
+        foreach (var key in account.Privates.Concat(publicDid.Privates)) secrets.Add(key);
+        var registered = await grants.UpdateRecipientsAsync(
+            account.Did, new[] { new RecipientUpdate(publicDid.Did, RecipientUpdateAction.Add) }, CancellationToken.None);
+        narrator.Value($"[operator] {name} enrolled; the DID {name} gives to senders is registered", registered[0]);
+        return (account, publicDid);
+    }
+
+    private static Task<PeerIdentity> MintAsync(IServiceProvider keyTools, DidCommServiceSpec? service)
+        => PeerIdentityFactory.CreateAsync(
+            keyTools.GetRequiredService<IDidManager>(),
+            keyTools.GetRequiredService<IKeyGenerator>(),
+            keyTools.GetRequiredService<ICryptoProvider>(),
+            service);
 
     /// <summary>Alice's authcrypt message for Bob, wrapped in a forward for the mediator and anoncrypted to it.</summary>
     private static async Task<string> HandPackForwardAsync(
