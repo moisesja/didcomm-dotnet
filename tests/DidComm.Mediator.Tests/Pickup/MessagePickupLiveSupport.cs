@@ -80,17 +80,14 @@ internal static class MessagePickupLive
         => UntilAsync(() => Task.FromResult(condition()), because);
 
     /// <summary>
-    /// Raise (never lower) the thread-pool floor before a test parks pool threads on a synchronous
-    /// rendezvous: CI runners have two cores, and a pool that ramps up slowly would starve the tests
-    /// running in parallel with this one.
+    /// Raise the thread-pool floor before a test parks pool threads on a synchronous rendezvous, and
+    /// put it back when the result is disposed (<see cref="ThreadPoolFloor"/>): CI runners have two
+    /// cores, and a pool that ramps up slowly would starve the tests running in parallel with this
+    /// one. Hold the result for the whole test: <c>using var floor = RaiseThreadPoolFloor(n);</c>.
     /// </summary>
-    public static void RaiseThreadPoolFloor(int parties)
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        var needed = Environment.ProcessorCount + 2 * parties;
-        if (worker < needed)
-            ThreadPool.SetMinThreads(needed, io);
-    }
+    /// <param name="parties">How many pool threads the test parks.</param>
+    public static IDisposable RaiseThreadPoolFloor(int parties)
+        => ThreadPoolFloor.Raise(Environment.ProcessorCount + 2 * parties);
 
     /// <summary>No captured line — rendered text or structured value, at any level — carries one of <paramref name="values"/>, or the text of a fake's exception.</summary>
     public static void ShouldNotLeak(IEnumerable<HandlerLogEntry> logs, params string?[] values)

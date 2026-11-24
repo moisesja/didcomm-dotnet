@@ -50,7 +50,7 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
         // higher floor that is the whole pool of a 4-vCPU runner (the test host holds threads of its
         // own), and on a busy machine new threads come seconds apart: every test running beside
         // this one stalled for 10 s and one timed out on windows CI (#98).
-        MessagePickupLive.RaiseThreadPoolFloor(DeliveredMessageUnpacker.FetchConcurrency);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(DeliveredMessageUnpacker.FetchConcurrency);
         var time = new ManualTimeProvider();
         using var gate = new ManualResetEventSlim(false);
         using var entered = new SemaphoreSlim(0);

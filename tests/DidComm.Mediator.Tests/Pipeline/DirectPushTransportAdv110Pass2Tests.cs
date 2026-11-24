@@ -68,7 +68,7 @@ public sealed class DirectPushTransportAdv110Pass2Tests
     [Fact]
     public async Task With_a_TrustedProxy_recipients_whose_endpoint_name_lookups_stall_settle_at_their_deadlines()
     {
-        MessagePickupLive.RaiseThreadPoolFloor(4);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(4);
         var lookups = new SemaphoreSlim(0);
         var policy = new OutboundEndpointPolicy { ResolveDnsAsync = (_, _) => { lookups.Release(); return new TaskCompletionSource<IPAddress[]>().Task; } };
         await using var container = Container(

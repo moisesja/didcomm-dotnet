@@ -231,7 +231,7 @@ public sealed class DirectPushFairnessQaTests
     public async Task A_directory_that_ignores_cancellation_holds_its_grant_until_it_returns_and_never_more_than_the_unsettled_bound(int stuck, bool healthyGoesOut)
     {
         const int Workers = 2;
-        MessagePickupLive.RaiseThreadPoolFloor(stuck);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(stuck);
         await using var direct = await DirectWorld.StartAsync(o => o.PushConcurrency = Workers);
         var fixture = direct.Fixture;
         var grants = new List<DirectGrant>();

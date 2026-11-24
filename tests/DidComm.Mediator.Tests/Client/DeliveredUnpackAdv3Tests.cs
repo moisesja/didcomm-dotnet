@@ -106,24 +106,20 @@ public sealed class DeliveredUnpackAdv3Tests
     }
 
     /// <summary>
-    /// ADV3-4 (defect, Low; fixed in fix round 3: every unpack runs on a thread-pool work item of its own). Property broken — <see cref="PickupClient.FetchAsync"/> remarks:
-    /// "So a fetch ends within the budget even when some senders' DIDs resolve slowly or never";
-    /// <see cref="DeliveredMessageUnpacker"/>: "The returned task is complete when the last message
-    /// has ended or, at the latest, when the budget runs out".
-    /// <para>
-    /// Attack: the workers start inside <c>UnpackAllAsync</c> on the caller's own stack
-    /// (<c>Delivery.Start</c> calls <c>RunWorkerAsync</c>, which calls the unpack synchronously
-    /// before its first await), so the unpack's synchronous part — host code: the DID resolver, the
-    /// secrets resolver — runs before the caller even holds the task. A resolver that blocks its
-    /// thread (sync-over-async HTTP for the attacker's did:webvh, ignoring the token) blocks the
-    /// caller's <c>FetchAsync</c> for as long as the attacker holds the connection: the budget fires
-    /// and fills in the outcome, but the caller cannot get to it. The blocked unpack also holds no
-    /// abandoned slot (it has no task yet), so the bound of 16 does not count it.
-    /// </para>
+    /// ADV3-4 (fixed in #96 fix round 3: every unpack runs on a thread-pool work item of its own;
+    /// since #111 its call is reserved before it starts). An unpack whose host code blocks its thread
+    /// and ignores its token: the caller of <c>UnpackAllAsync</c> holds the delivery's task while the
+    /// host code still blocks, the budget decides the message's outcome (out of time) while it still
+    /// blocks, and the call keeps its reservation until its thread comes back. Checked against
+    /// <see cref="PickupClient.FetchAsync"/>'s remarks ("a fetch ends within the budget even when some
+    /// senders' DIDs resolve slowly or never") and <see cref="DeliveredMessageUnpacker"/>'s ("the
+    /// returned task is complete when the last message has ended or, at the latest, when the budget
+    /// runs out").
     /// </summary>
     [Fact]
-    public async Task ADV3_4_an_unpack_that_blocks_its_thread_holds_the_caller_past_the_budget_and_takes_no_slot()
+    public async Task ADV3_4_an_unpack_that_blocks_its_thread_leaves_the_caller_its_task_and_the_budget_its_outcome_and_keeps_its_reservation()
     {
+        using var floor = new PoolFloor(parked: 1); // the unpack below parks a pool thread on the gate
         var time = new ManualTimeProvider();
         using var gate = new ManualResetEventSlim(false);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

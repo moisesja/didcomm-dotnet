@@ -202,7 +202,7 @@ public sealed class MessagePickupLiveSessionLifecycleTests
         // With signalOnly the closed session still says "all" and still accepts sends, so the only
         // thing that can keep a push away from it is the per-session state under test.
         const int rounds = 40;
-        MessagePickupLive.RaiseThreadPoolFloor(3);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(3);
         await using var fixture = PickupFixture.Create();
         var (mediator, peer) = await fixture.EnrolledAsync();
 
@@ -599,7 +599,7 @@ public sealed class MessagePickupLiveSessionLifecycleTests
     [Fact]
     public async Task The_thread_that_closes_a_session_does_not_wait_for_the_store()
     {
-        MessagePickupLive.RaiseThreadPoolFloor(2);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(2);
         await using var fixture = PickupFixture.Create(fakeStore: true);
         var (mediator, peer) = await fixture.EnrolledAsync();
         var socket = fixture.Session(peer, mediator, live: true);
