@@ -192,6 +192,12 @@ public sealed partial class DidCommClient
     /// rules, is tried once and left to the handler.
     /// </para>
     /// <para>
+    /// Each layer's opening is recorded for that layer (<see cref="SelfAddressedPeels"/>). When the
+    /// forward goes to the forward handler, the handler's peel takes the recorded result or refusal
+    /// instead of opening the layer again. So each layer is opened once per request, and a chain
+    /// left to the handler costs what it cost before this look-ahead.
+    /// </para>
+    /// <para>
     /// The message returned is the result of its own unpack: its sender, signer and anonymity are its
     /// own envelope's. The caller admits it as it would a message that arrived directly (replay
     /// admission, <c>created_time</c>, the id cap), with no return route (return_route.md: the
@@ -211,15 +217,19 @@ public sealed partial class DidCommClient
         var layer = received;
         for (var opened = 1; opened <= ForwardHandler.MaxSelfAddressedLayers; opened++)
         {
-            // The layer's one attachment (the shape rule checked it), decoded by the relay rule.
+            // The layer's one attachment (the shape rule checked it), decoded by the relay rule, then
+            // the forward handler's restricted opening (ForwardProcessor.PeelAsync does the same two
+            // steps). Every outcome but a cancellation is recorded for this layer, so the forward
+            // handler, if the forward goes to it, takes it instead of opening the layer again.
             string text;
             try
             {
                 ForwardMessage.TryParse(layer.Message, out _, out var attachments);
                 text = ForwardProcessor.ExtractAttachmentText(attachments[0], _options.MaxReceiveBytes);
             }
-            catch (DidCommException)
+            catch (DidCommException ex)
             {
+                SelfAddressedPeels.Refused(this, layer, ex);
                 return null;
             }
 
@@ -232,18 +242,21 @@ public sealed partial class DidCommClient
             {
                 // Not an anoncrypted plaintext message (authcrypt, signed, another envelope inside,
                 // from_prior): the innermost layer, given the full unpack once.
+                SelfAddressedPeels.Refused(this, layer, ex);
                 return await OpenInnermostAsync(text, opened, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // It does not decrypt, parse or pass the receive rules: tried once here, it is the
                 // forward handler's to drop.
+                SelfAddressedPeels.Refused(this, layer, ex);
                 return null;
             }
+            SelfAddressedPeels.Opened(this, layer, inner);
 
             if (!string.Equals(inner.Message.Type, ForwardConstants.ForwardTypeUri, StringComparison.Ordinal))
                 return new DeliveredUnpack(inner, text, opened);

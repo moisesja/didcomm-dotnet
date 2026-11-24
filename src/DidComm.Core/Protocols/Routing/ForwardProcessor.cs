@@ -273,7 +273,9 @@ public sealed class ForwardProcessor
     /// and what a sender's forward layers are (FR-ROUTE-02); anything else is refused as malformed
     /// before any DID is resolved, so opening a layer costs one decryption and no resolution of a DID
     /// the sender chose. The unpack otherwise applies every receive rule (size, FR-API-05 expiry,
-    /// consistency).
+    /// consistency). A layer that the routing-role endpoint's look-ahead already opened on this
+    /// request (<see cref="DidCommClient.OpenSelfAddressedMessageAsync"/>) is not opened again: the
+    /// peel returns what that opening found, or throws what refused it (<see cref="SelfAddressedPeels"/>).
     /// </summary>
     /// <param name="selfAddressed">The forward whose <c>next</c> is the DID that decrypted it.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -283,6 +285,10 @@ public sealed class ForwardProcessor
     internal async Task<UnpackResult> PeelAsync(UnpackResult selfAddressed, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(selfAddressed);
+        // A layer the routing-role endpoint already opened on this request (OD-6) is not opened
+        // again: its recorded result, or its recorded refusal, is this peel's (SelfAddressedPeels).
+        if (SelfAddressedPeels.TryTake(_client, selfAddressed, out var opened))
+            return opened;
         if (!ForwardMessage.TryParse(selfAddressed.Message, out _, out var attachments))
         {
             throw new ConsistencyException(
