@@ -182,7 +182,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     /// <summary>The channel's logger (category <c>DidComm.Mediator.Client.Internal.MediatorClientChannel</c>), or <c>null</c>.</summary>
     internal ILogger? Logger { get; }
 
-    /// <summary>The unpack limiter behind <see cref="UnpackDeliveredBatchAsync"/>: one budget per delivery, 4 at a time, a check against 16 abandoned unpacks, linked to this channel's shutdown.</summary>
+    /// <summary>
+    /// The unpacker behind <see cref="UnpackDeliveredBatchAsync"/>, one per channel (container) and
+    /// linked to this channel's shutdown: one budget per delivery, 4 messages at a time, each a share
+    /// of the time left; host unpack calls reserved before they start (64 per container, 4 per
+    /// sender and 16 for messages without a named sender, per mediator and mailbox); and the memory
+    /// of messages that were slow to open, held back until their pause ends.
+    /// </summary>
     internal DeliveredMessageUnpacker Unpacker { get; }
 
     /// <summary>Whether <see cref="Dispose"/> or <see cref="DisposeAsync"/> has run.</summary>

@@ -119,11 +119,11 @@ public sealed class MediatorClientUnobservedTests : IAsyncLifetime
             await FaultAsTheDeadlineFiresAsync(time, marker);
         });
 
-        seen.Should().BeEmpty("an abandoned unpack's fault is observed, whenever it comes");
+        seen.Should().BeEmpty("the fault of an unpack let go is observed, whenever it comes");
     }
 
     [Fact]
-    public async Task An_unpack_that_ended_as_its_deadline_fired_gives_its_abandoned_slot_back_at_once()
+    public async Task An_unpack_that_ended_as_its_deadline_fired_gives_its_reservation_back_at_once()
     {
         var time = new ManualTimeProvider();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -137,7 +137,7 @@ public sealed class MediatorClientUnobservedTests : IAsyncLifetime
 
         // The deadline and the unpack's own fault end together; whichever is recorded first wins.
         (await outcome.WaitAsync(PickupTest.Timeout)).Error.Should().Match(e => e is TimeoutException || e is InvalidOperationException);
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, PickupTest.Timeout).Should().BeTrue("nothing still runs, so no slot is kept");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, PickupTest.Timeout).Should().BeTrue("nothing still runs, so no reservation is kept");
     }
 
     // ---- helpers ------------------------------------------------------------------------------
@@ -233,16 +233,24 @@ public sealed class MediatorClientUnobservedTests : IAsyncLifetime
     private static async Task FaultAfterTheDeadlineAsync(ManualTimeProvider time, string marker)
     {
         var work = new TaskCompletionSource<DeliveredUnpack>(); // ignores its token
-        var unpacker = new DeliveredMessageUnpacker((_, _) => work.Task, TimeSpan.FromSeconds(1), time);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var unpacker = new DeliveredMessageUnpacker((_, _) =>
+        {
+            entered.TrySetResult();
+            return work.Task;
+        }, TimeSpan.FromSeconds(1), time);
         var outcome = unpacker.UnpackAsync(new byte[] { (byte)'x' }, default);
         await time.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        // The unpack runs on the thread pool (ADV3-4), and a work item whose token is cancelled before
+        // it runs never runs (#111, I-3): the clock moves once the unpack has started.
+        await entered.Task.WaitAsync(PickupTest.Timeout);
         time.Advance(TimeSpan.FromSeconds(1));
         (await outcome.WaitAsync(PickupTest.Timeout)).Error.Should().BeOfType<TimeoutException>();
-        unpacker.Abandoned.Should().Be(1, "it still runs");
+        unpacker.Reserved.Should().Be(1, "it still runs");
 
         work.SetException(new InvalidOperationException(marker));
         // The unpack runs on the thread pool (ADV3-4), so its end may reach the slot a moment later.
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, PickupTest.Timeout).Should().BeTrue("it ended");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, PickupTest.Timeout).Should().BeTrue("it ended");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

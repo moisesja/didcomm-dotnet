@@ -16,8 +16,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// Fix round 3 (#96) regressions for opening deliveries, beside the ADV-3 reproductions they close
 /// (<see cref="DeliveredUnpackAdv3Tests"/>, <see cref="MediatorClientChannelAdv3Tests"/>): every
-/// unpack (host code) runs off the caller's stack, and blocked host code still keeps an abandoned
-/// slot (ADV3-4); the channel's shutdown ends a delivery being opened at once and cancels the host
+/// unpack (host code) runs off the caller's stack, and blocked host code still keeps its
+/// reservation (ADV3-4); the channel's shutdown ends a delivery being opened at once and cancels the host
 /// code's tokens, for a fetch and a live stream alike (ADV3-7). Manual clocks and rendezvous only
 /// (L-044).
 /// </summary>
@@ -41,7 +41,7 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
     /// <summary>
     /// Four resolvers that block their threads: the caller of <c>UnpackAllAsync</c> gets its task
     /// back at once, none of the unpacks ran on its stack, the budget decides all four outcomes while
-    /// they still block, and each keeps an abandoned slot until its thread comes back.
+    /// they still block, and each keeps its reservation until its thread comes back.
     /// </summary>
     [Fact]
     public async Task Unpacks_run_off_the_callers_stack_and_ones_that_block_their_threads_keep_their_slots_until_they_return()
@@ -83,14 +83,14 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
             time.Advance(Budget);
 
             (await batch.WaitAsync(RealTime)).Should().OnlyContain(o => o.Error is TimeoutException, "the budget decides the outcomes while the resolvers still block");
-            unpacker.Abandoned.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "an unpack that blocks past the budget keeps an abandoned slot");
+            unpacker.Reserved.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "an unpack that blocks past the budget keeps its reservation");
             onCallersStack.Should().HaveCount(DeliveredMessageUnpacker.FetchConcurrency).And.OnlyContain(c => !c, "no unpack ran on the caller's stack");
         }
         finally
         {
             gate.Set();
         }
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue("each slot comes back when its thread returns");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue("each reservation comes back when its thread returns");
     }
 
     // ---- ADV3-7 -------------------------------------------------------------------------------
@@ -98,7 +98,7 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
     /// <summary>
     /// The owner's shutdown while a delivery is being opened: the delivery ends at once, cancelled
     /// with the shutdown's token; every host lookup's token is cancelled; one that ignores its token
-    /// keeps its abandoned slot until it ends; nothing else is left behind.
+    /// keeps its reservation until it ends; nothing else is left behind.
     /// </summary>
     [Fact]
     public async Task The_owners_shutdown_ends_a_delivery_being_opened_at_once_and_cancels_every_host_token()
@@ -127,10 +127,10 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
         (await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>())
             .Which.CancellationToken.Should().Be(shutdown.Token);
         tokens.Should().HaveCount(payloads.Length).And.OnlyContain(t => t.IsCancellationRequested, "the host code opening the delivery is told to stop");
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 1, RealTime).Should().BeTrue("the lookup that ignores its token keeps its slot");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 1, RealTime).Should().BeTrue("the lookup that ignores its token keeps its reservation");
 
         ignoring.SetResult(Opened("ignores-2"));
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
     /// <summary>A delivery handed over after the shutdown is cancelled at once and runs no host code.</summary>
@@ -207,7 +207,7 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
             time.Advance(Budget);
         }
         channel.LiveStreamCount.Should().Be(0);
-        SpinWait.SpinUntil(() => channel.Unpacker.Abandoned == 0 && channel.Unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+        SpinWait.SpinUntil(() => channel.Unpacker.Reserved == 0 && channel.Unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
     // ---- helpers ------------------------------------------------------------------------------

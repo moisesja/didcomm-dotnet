@@ -17,8 +17,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// exactly one outcome — a bad one is a failure, never an exception, and only the caller's
 /// cancellation throws; one budget on the injected clock covers every layer of every message of a
 /// delivery (owner decision 2-A), and decides the delivery when it runs out; a batch runs at most
-/// four at a time and keeps the input order; and abandoned unpacks are bounded (L-059), the
-/// seventeenth failing fast without starting. The success path is the real
+/// four at a time and keeps the input order; and host unpack calls are reserved before they start
+/// (#111, I-2), the seventeenth for a mailbox's messages without a named sender failing fast without
+/// starting. The success path is the real
 /// <see cref="DidCommClient.UnpackDeliveredAsync"/> over real envelopes, with the duplicate key the
 /// filter uses.
 /// </summary>
@@ -152,9 +153,9 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
         var outcome = await running;
         fake.Tokens.Single().IsCancellationRequested.Should().BeTrue();
         outcome.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("UnpackTimeout");
-        // The budget lets the unpack go at once; the unpack gives its slot back when it has noticed
-        // its cancellation, which host code may do a little later.
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue("the unpack honoured cancellation and ended");
+        // The budget lets the unpack go at once; the unpack gives its reservation back when it has
+        // noticed its cancellation, which host code may do a little later.
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, TimeSpan.FromSeconds(10)).Should().BeTrue("the unpack honoured cancellation and ended");
     }
 
     // ---- one budget per delivery (owner decision 2-A) ----
@@ -192,16 +193,17 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
         var outcomes = await batch.WaitAsync(TimeSpan.FromSeconds(10));
         outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("its share") && o.Error.Message.Contains("'request-1'"));
         outcomes.Skip(4).Should().OnlyContain(o => o.Succeeded, "slow messages in front do not keep these from their turn");
-        // No concurrency bound is asserted here: an abandoned unpack may still be running in host code
-        // when its worker has moved on (that is what the abandoned-slot bound is for).
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue();
+        // No concurrency bound is asserted here: an unpack let go may still be running in host code
+        // when its worker has moved on (that is what the reservations bound).
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, TimeSpan.FromSeconds(10)).Should().BeTrue();
     }
 
     [Fact]
     public async Task A_message_that_starts_late_still_ends_by_the_budget()
     {
         // The first four open at 9 s, inside their 10 s share; the second four start then and get
-        // their own 10 s, which ends at 19 s — before the budget's 20 s. The delivery never outlives it.
+        // the time left, 11 s (#111, I-7: one round of four is left), which ends with the budget at
+        // 20 s. The delivery never outlives it.
         var fake = new GatedUnpack(honoursCancellation: true);
         var unpacker = new DeliveredMessageUnpacker(fake.UnpackAsync, TimeSpan.FromSeconds(20), _time);
         var payloads = Enumerable.Range(0, 8).Select(i => (ReadOnlyMemory<byte>)Utf8("message-" + i)).ToArray();
@@ -212,7 +214,7 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
         for (var i = 0; i < DeliveredMessageUnpacker.FetchConcurrency; i++)
             fake.ReleaseOldest();
         await fake.Started(8);
-        _time.Advance(TimeSpan.FromSeconds(10));
+        _time.Advance(TimeSpan.FromSeconds(11));
 
         var outcomes = await batch.WaitAsync(TimeSpan.FromSeconds(10));
         outcomes.Take(4).Should().OnlyContain(o => o.Succeeded);
@@ -220,11 +222,12 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Unpacks_that_ignore_their_cancellation_give_up_their_worker_at_their_share_and_keep_an_abandoned_slot()
+    public async Task Unpacks_that_ignore_their_cancellation_give_up_their_worker_at_their_share_and_keep_their_reservation()
     {
-        // Six messages, two rounds: each gets half the budget. Host code that ignores cancellation
+        // Six messages: the first two get half the budget (two rounds of four are left), the next
+        // two the whole of it (one round is left; #111, I-7). Host code that ignores cancellation
         // cannot hold a worker past its share: the next message starts, and the ignored work keeps
-        // an abandoned slot (L-059) until it ends.
+        // its reservation until it ends.
         var fake = new GatedUnpack(honoursCancellation: false);
         var unpacker = new DeliveredMessageUnpacker(fake.UnpackAsync, Timeout, _time);
         var payloads = Enumerable.Range(0, 6).Select(i => (ReadOnlyMemory<byte>)Utf8("message-" + i)).ToArray();
@@ -240,11 +243,11 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
         outcomes.Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("while it was being opened"));
         outcomes.Should().OnlyContain(o => !o.Error!.Message.Contains("request"), "a delivery without a request id names none");
         fake.Calls.Should().Be(6, "every message got its turn");
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 6, TimeSpan.FromSeconds(10)).Should().BeTrue("the six still running keep their slots");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 6, TimeSpan.FromSeconds(10)).Should().BeTrue("the six still running keep their reservations");
 
-        // What the abandoned unpacks do afterwards changes nothing that was returned.
+        // What the unpacks let go do afterwards changes nothing that was returned.
         fake.Release();
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue();
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, TimeSpan.FromSeconds(10)).Should().BeTrue();
         outcomes.Should().OnlyContain(o => !o.Succeeded);
     }
 
@@ -274,30 +277,31 @@ public sealed class DeliveredMessageUnpackerTests : IAsyncLifetime
         (await running).Error.Should().BeOfType<TimeoutException>();
     }
 
-    // ---- the abandoned bound (L-059) ----
+    // ---- the reservations (#111, I-1, I-2) ----
 
     [Fact]
     public async Task Unpacks_that_ignore_their_deadline_are_bounded_and_the_next_fails_fast_without_starting()
     {
+        // Messages without a named sender, from one mailbox: their partition holds 16.
         var fake = new GatedUnpack(honoursCancellation: false);
         var unpacker = new DeliveredMessageUnpacker(fake.UnpackAsync, Timeout, _time);
 
-        var abandoned = Enumerable.Range(0, DeliveredMessageUnpacker.MaxAbandoned).Select(_ => unpacker.UnpackAsync(Utf8("x"), default)).ToArray();
-        await fake.Started(DeliveredMessageUnpacker.MaxAbandoned);
+        var letGo = Enumerable.Range(0, UnpackReservations.MaxPerAnonymous).Select(_ => unpacker.UnpackAsync(Utf8("x"), default)).ToArray();
+        await fake.Started(UnpackReservations.MaxPerAnonymous);
         _time.Advance(Timeout);
-        (await Task.WhenAll(abandoned)).Should().OnlyContain(o => o.Error is TimeoutException);
-        unpacker.Abandoned.Should().Be(DeliveredMessageUnpacker.MaxAbandoned);
+        (await Task.WhenAll(letGo)).Should().OnlyContain(o => o.Error is TimeoutException);
+        unpacker.Reserved.Should().Be(UnpackReservations.MaxPerAnonymous);
 
         // Bounded, so a missing bound fails the test instead of parking it.
         var refused = await unpacker.UnpackAsync(Utf8("x"), default).WaitAsync(TimeSpan.FromSeconds(10));
 
         refused.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted");
-        fake.Calls.Should().Be(DeliveredMessageUnpacker.MaxAbandoned, "the refused unpack never started");
+        fake.Calls.Should().Be(UnpackReservations.MaxPerAnonymous, "the refused unpack never started");
 
         fake.Release();
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, TimeSpan.FromSeconds(10)).Should().BeTrue("each slot is given back when its work ends");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, TimeSpan.FromSeconds(10)).Should().BeTrue("each reservation is given back when its work ends");
         var after = unpacker.UnpackAsync(Utf8("x"), default);
-        await fake.Started(DeliveredMessageUnpacker.MaxAbandoned + 1);
+        await fake.Started(UnpackReservations.MaxPerAnonymous + 1);
         (await after).Succeeded.Should().BeTrue("released work answers at once");
     }
 

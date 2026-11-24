@@ -28,26 +28,17 @@ public sealed class DeliveredUnpackAdv4Tests
     // ---- ADV3-4 -------------------------------------------------------------------------------
 
     /// <summary>
-    /// ADV4-2 (defect, Low). Property broken — the worker's own claim in
-    /// <c>DeliveredMessageUnpacker.Delivery.RunWorkerAsync</c>: "an abandoned unpack never keeps the
-    /// delivery (its bytes and the messages opened so far) alive (L-062)"; L-062: "Work that
-    /// outlives a reservation keeps only bounded values".
-    /// <para>
-    /// Attack: the unpack is started as <c>Task.Run(() =&gt; _owner.Unpack(packed, slotToken))</c>. The
-    /// lambda reads the field <c>_owner</c>, so its closure holds the <c>Delivery</c> itself, and the
-    /// running work item holds the closure for as long as the host code runs. A sender whose DID
-    /// lookup blocks its thread (the case ADV3-4 moved to the pool) therefore keeps the whole
-    /// delivery reachable after its result was returned and the caller let go of it: every other
-    /// message's bytes and the messages opened so far — other senders' decrypted plaintext — stay
-    /// in memory until the lookup returns. Since the fix the delivery returns and the caller moves
-    /// on, so up to <see cref="DeliveredMessageUnpacker.MaxAbandoned"/> (and the ADV3-2 overshoot)
-    /// blocked lookups can each pin a different delivery (with the 1 MiB default
-    /// <c>MaxReceiveBytes</c>, tens of MiB); before it the one blocked call held the caller too.
-    /// </para>
+    /// ADV4-2 (fixed by #111, I-4). An unpack let go at the budget keeps only its own bounded values:
+    /// its work item holds the unpack step, the packed text and the share's token, and nothing it
+    /// references holds the delivery. While a lookup still blocks its thread after the delivery's
+    /// result was returned and let go, another message's bytes and a message opened in the same
+    /// delivery are unreachable.
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111 (slow-sender hardening): an unpack that blocks its thread keeps its whole delivery reachable until it returns (ADV4-2).")]
-    public void ADV4_2_an_unpack_that_blocks_its_thread_keeps_its_whole_delivery_reachable_after_the_result_was_returned()
+    [Fact]
+    public void ADV4_2_an_unpack_that_blocks_its_thread_keeps_nothing_of_its_delivery_reachable_after_the_result_was_returned()
     {
+        // The blocked lookup parks a pool thread: raise the floor first (L-065).
+        using var floor = new PoolFloor(parked: 1);
         var clock = new CountingTimeProvider(new ManualTimeProvider());
         using var gate = new ManualResetEventSlim(false);
         using var entered = new SemaphoreSlim(0);
@@ -74,12 +65,12 @@ public sealed class DeliveredUnpackAdv4Tests
         }
 
         // The control: once the blocked thread returns, nothing else holds them.
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0, RealTime).Should().BeTrue();
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
         BecomesUnreachable(refs.Payload).Should().BeTrue("the test itself holds nothing of the delivery");
         BecomesUnreachable(refs.Opened).Should().BeTrue();
 
         keptWhileBlocked.Should().BeFalse(
-            "an abandoned unpack keeps only its own bounded values, not the delivery: another message's bytes and an opened message stayed reachable while a lookup blocked");
+            "an unpack let go keeps only its own bounded values, not the delivery: another message's bytes and an opened message stayed reachable while a lookup blocked");
     }
 
     // A delivery of one message whose lookup blocks and three honest ones: opened, its budget runs
@@ -98,7 +89,7 @@ public sealed class DeliveredUnpackAdv4Tests
         var outcomes = batch.Result;
         outcomes[0].Error.Should().BeOfType<TimeoutException>();
         outcomes[1].Succeeded.Should().BeTrue();
-        unpacker.Abandoned.Should().Be(1, "the blocked lookup keeps its abandoned slot");
+        unpacker.Reserved.Should().Be(1, "the blocked lookup keeps its reservation");
         return (new WeakReference(honest), new WeakReference(outcomes[1].Unpacked));
     }
 
@@ -131,23 +122,13 @@ public sealed class DeliveredUnpackAdv4Tests
     // ---- ADV3-7 -------------------------------------------------------------------------------
 
     /// <summary>
-    /// ADV4-3 (defect, Low). Property broken — <c>DeliveredMessageUnpacker.Delivery</c>: "After it is
-    /// closed nothing is started and nothing is recorded"; the fix's claim (ADV3-7) that the
-    /// container's disposal ends a delivery being opened, the host code seeing its token cancelled.
-    /// <para>
-    /// Attack: a worker checks <c>_closed</c>, marks the message started, creates its share and only
-    /// then hands the host code to <c>Task.Run</c> — with no token and no second look. When the
-    /// shutdown (or the budget, or the caller) ends the delivery in between, the delivery's result
-    /// is already final, yet the host code for that message is started afterwards: after the
-    /// container was disposed, with services the container may already have disposed. ADV3-4 widens
-    /// the window from "between the check and the call" to "until the work item runs": a work item
-    /// still queued on a busy pool (the blocking-resolver case ADV3-4 is about) when the delivery
-    /// ends still runs. Here the share's timer creation is the rendezvous: the shutdown lands while
-    /// the fifth message's worker creates its share.
-    /// </para>
+    /// ADV4-3 (fixed by #111, I-3). A host call is created only under the delivery's lock while the
+    /// delivery is open, with its share's token. The shutdown lands while the fifth message's worker
+    /// creates its share (the timer creation is the rendezvous): the delivery ends cancelled, and the
+    /// fifth message's host code never starts.
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111 (slow-sender hardening): a message a worker was starting when the delivery ended can still have its host unpack started afterwards (ADV4-3).")]
-    public async Task ADV4_3_a_message_whose_worker_was_starting_it_when_the_shutdown_came_has_its_host_code_started_after_the_delivery_ended()
+    [Fact]
+    public async Task ADV4_3_a_message_whose_worker_was_starting_it_when_the_shutdown_came_never_has_its_host_code_started()
     {
         var clock = new CountingTimeProvider(new ManualTimeProvider());
         using var shutdown = new CancellationTokenSource();
@@ -188,7 +169,7 @@ public sealed class DeliveredUnpackAdv4Tests
         {
             startedAfterTheEnd = null; // never started: what the summary promises
         }
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && unpacker.Opening == 0 && clock.LiveTimers == 0, RealTime).Should().BeTrue("nothing is left behind either way");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && clock.LiveTimers == 0, RealTime).Should().BeTrue("nothing is left behind either way");
 
         startedAfterTheEnd.Should().NotBe(true, "a delivery the shutdown ended starts no host code; m-4's was started after it ended");
     }
@@ -196,7 +177,7 @@ public sealed class DeliveredUnpackAdv4Tests
     /// <summary>
     /// ADV3-7 held (regression): host code that blocks its thread through the shutdown and then
     /// throws on that pool thread is observed — no <see cref="TaskScheduler.UnobservedTaskException"/>
-    /// — gives its abandoned slot back, and leaves no timer or opening delivery behind.
+    /// — gives its reservation back, and leaves no timer or opening delivery behind.
     /// </summary>
     [Fact]
     public async Task Host_code_that_throws_on_its_thread_after_the_shutdown_is_observed_and_gives_its_slot_back()
@@ -241,10 +222,10 @@ public sealed class DeliveredUnpackAdv4Tests
             shutdown.Cancel();
             Volatile.Read(ref guardFired).Should().Be(0, "the shutdown was decided while both unpacks were still blocked, not after their 10 s hang guard let them go");
             await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>();
-            unpacker.Abandoned.Should().Be(2);
+            unpacker.Reserved.Should().Be(2);
 
             gate.Set();
-            SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+            SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
         }
         finally
         {
