@@ -38,7 +38,9 @@ All notable changes to didcomm-dotnet are documented here. Format follows
     immediate sender and the agent it connects to (return_route.md L9). A forward for the next hop
     inside still goes to the forward handler as it arrived. A self-addressed layer that does not
     decrypt is tried once by the mediator endpoint's opening, then left to the forward handler; only
-    a layer refused for its shape gets the full unpack (red-team 1c-2, an L-075 fix).
+    a layer refused for its shape gets the full unpack (red-team 1c-2, an L-075 fix). The forward
+    handler takes the endpoint's opening of each layer instead of opening it again, so each layer
+    is opened once per request and a forward for the next hop costs what it did before.
   - OD-6, in the owner's words as put to them: "#110, G-2: a mediator that is itself reached through another mediator that re-wraps loses the messages meant for it." It went on to say that the reply still could not reach the requester, so "one-way messages (recipient updates, pickup acknowledgements) would work, and a mediation request would be applied but its grant not delivered." The option as put: "The mediator's endpoint opens the wrapper, and the message inside goes through normal admission and dispatch as if it had arrived directly: the replay check applies and there's no return route. Forwards for the next hop are unchanged. Cost: about 1–2 days on an issue that has already churned. It relaxes #95's rule to one lookup of the sender's DID per request, the same as a direct message costs. Two adversarial tests get rewritten to show that the replay check now covers that attack." The owner picked "Fix it in this PR (Recommended)".
 - **`DidComm.Core`: the outbound endpoint guard refuses a host name it cannot normalise or look up
   with a `TransportException`** (a defect found during #110 and fixed here, L-075).
@@ -131,7 +133,7 @@ connection gets each stored message posted, unchanged, to the endpoint the host 
   or holds them only for the pause (anything else), and is never sent again; after a pause those
   behind it go at the first wake-up after the pause, until the next push that does not deliver (one
   run per pause; under an endpoint that keeps failing, part of them go only by pickup), or by
-  pickup. A run yields unless it met a refusal and delivered nothing, so a real message waits
+  pickup. A run yields unless it met a refusal and delivered nothing, live or direct, so a real message waits
   behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row)
   delivers nothing; then until the next wake-up, or pickup (red-team 2b-1). A host store that loses
   the push mark gets a `4xx`-refused message posted up to 2 × `MaxDeliveryBatch` − 1 times per wake-up (a run that delivered something ahead of it yields once more), and
@@ -238,8 +240,10 @@ re-wrapped push opened by Bob's plain `MapDidCommEndpoint`. Tests: `DirectPushSt
 HTTP); for the receiving endpoints `OpenReceivedRewrapTests` (unit), `RewrappedReceiveTests` and
 `RewrappedReceiveQaTests` (over HTTP and WebSocket); for the guard
 `OutboundEndpointGuardLookupRefusalTests` and `MediatorClientGuardLookupRefusalTests`; for a
-mediator's own message through a rewrapping mediator `MediatorOwnMessageThroughRewrapTests`; the
-direct pause `DirectPushPauseTests` and `DirectPushPauseQaTests`; the red-team pass
+mediator's own message through a rewrapping mediator `MediatorOwnMessageThroughRewrapTests` and
+`SelfAddressedPeelOnceTests`; the
+direct pause `DirectPushPauseTests` and `DirectPushPauseQaTests`; a run that mixes a direct refusal
+and live pushes `DirectPushMixedRunTests`; the red-team pass
 `DirectPushAmplificationAdv110Tests`, `DirectPushStateAdv110Tests`,
 `DirectPushStarvationAdv110Tests` and `OpenReceivedRewrapAdv110Tests`; red-team pass 2
 `DirectPushDispatcherAdv110Pass2Tests`, `DirectPushTransportAdv110Pass2Tests`,

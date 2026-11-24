@@ -772,9 +772,14 @@ message (FR-RR-08 replay, `created_time`, the id cap) with no return route (retu
 is dispatched under its own acknowledgement rules. A forward for the next hop inside, and every
 layer that cannot be opened, go to `ForwardHandler` as they arrived, so the relay path (the `202`
 first, every layer's expiry and delay, the typed drops) is unchanged; called directly,
-`ForwardHandler` still drops a non-forward inside. The look-ahead costs at most 8 extra anoncrypt
-decryptions per request and no DID lookups before the innermost (a chain it then leaves to the
-handler is opened twice: the documented limit "A self-addressed chain is opened twice").
+`ForwardHandler` still drops a non-forward inside. Each layer is opened once per request: the
+look-ahead records each layer's opening, its result or its refusal, against that layer's own unpack
+result (`SelfAddressedPeels`, held weakly, by reference). `ForwardProcessor.PeelAsync` takes the
+recorded opening instead of decrypting the layer again, and only through the same facade. So a chain
+the look-ahead leaves to the handler costs what it did before the look-ahead (one restricted
+opening per layer, no DID lookups before the innermost). The mediator's timing tells a
+self-addressed forward from a direct one no more than before (`MediatorNextOracleAdvTests`,
+`SelfAddressedPeelOnceTests`).
 
 **Bounded ids and message types, and the pump's context (#95).** Every message id on the receive
 path — `ForwardHandler`, `ProtocolDispatcher`, `InboundAdmission`, the return-route sessions, the
@@ -2534,7 +2539,7 @@ push, in order:
    other than `408` and `429` — the endpoint's definite "not this message" → released with its mark
    kept (`Push-Failed`), and the operation goes on to the next record with no pause (red-team 1a-4,
    the coordinator's call under the churn rule (L-063), not an owner decision: messages anyone stored ahead of a real one cannot hold it back);
-   a run yields unless it met a refusal and delivered nothing, so a real message waits behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row) delivers nothing; then until the next wake-up, or pickup (red-team 2b-1). Anything else — a
+   a run yields unless it met a refusal and delivered nothing (live or direct), so a real message waits behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row) delivers nothing; then until the next wake-up, or pickup (red-team 2b-1). Anything else — a
    `5xx`, `408` or `429` (which say "later"), a `301`/`302`/`303`/`308` or other `3xx` at the end of
    the chain, a `307` chain past `MaxRedirectHops`, a `307` without a usable `Location`, no answer, a
    hop the guard refuses when the connection opens, a timeout, a transport fault — →
@@ -2561,7 +2566,7 @@ live push's deadline keeps the shared cooldown above. The property, narrowed: a 
 never holds up later ones (a `4xx`) or holds them only for the pause (anything else), and is never
 sent again; after a pause the ones behind it go at the first wake-up after the pause, until the
 next push that does not deliver (one run per pause; under an endpoint that keeps failing, part of
-them go only by pickup), or by pickup; a run yields unless it met a refusal and delivered nothing, so a real message waits behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row) delivers nothing; then until the next wake-up, or pickup. A store that drops the push mark gets a
+them go only by pickup), or by pickup; a run yields unless it met a refusal and delivered nothing (live or direct), so a real message waits behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row) delivers nothing; then until the next wake-up, or pickup. A store that drops the push mark gets a
 `4xx`-refused record POSTed up to 2 × `MaxDeliveryBatch` − 1 times per wake-up (a run that delivered something ahead of it yields once more), and any other failed one at
 most once per pause; a store that judges expiry by a clock of its own costs at most one take per
 wake-up. This one rule replaced, after QA round 3, the first build's "not delivered →
@@ -2945,7 +2950,7 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
   (red-team 2a-3). (2) A
   host store that drops the push mark re-pushes such a record up to 2 × `MaxDeliveryBatch` − 1 times per wake-up (a run that delivered something ahead of it yields once more) when the endpoint refuses it with a `4xx`, and at most once per direct pause otherwise (a
   marked record handed to a push anyway is refused, fail-closed); a crash between the take and the
-  send leaves the record marked: pickup only. A run yields unless it met a refusal and delivered nothing, so a real message waits behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row) delivers nothing; then until the next wake-up, or pickup.
+  send leaves the record marked: pickup only. A run yields unless it met a refusal and delivered nothing (live or direct), so a real message waits behind refused ones only when a whole run of them (more than `MaxDeliveryBatch` in a row) delivers nothing; then until the next wake-up, or pickup.
   (3) At-least-once: a deadline or a dropped connection after the receiver handled the POST, a
   `2xx` whose removal fails, or a POST that outlives its lease can deliver a message twice;
   recipients de-duplicate by message id. (4) A revocation and purge, or an acknowledgement, that
@@ -2975,10 +2980,6 @@ the same; the `MessageReceiveTimeout` XML docs name the connection limits):
   grant is not delivered (it is only logged); a `delivery-request` or `status-request` through the
   wrapper leases nothing, and its answer is only logged. Such a message records no
   `didcomm.forward.outcomes` value: it is not a forward the routing role handled.
-- **A self-addressed chain is opened twice (#110, red-team pass 2, O-1; docs only).** A chain of
-  layers addressed to the mediator that ends in a forward for the next hop, a broken layer or a
-  ninth layer is opened by the endpoint's look-ahead (OD-6) and then again by the forward handler:
-  up to 17 decryptions per request, all of bytes the sender sent, and no DID lookups.
 - **An anoncrypt layer with a `skid` header (#110, red-team pass 2, O-2; docs only).** The
   mediator's restricted opening refuses an anoncrypt layer that carries a `skid` header, while the
   plain endpoints' opening opens it. No honest sender sends that.
