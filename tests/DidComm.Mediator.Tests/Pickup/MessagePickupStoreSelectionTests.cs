@@ -374,7 +374,7 @@ public sealed class MessagePickupStoreSelectionTests
         // Every worker still running makes its call in the same phase of the barrier, so the calls
         // overlap as far as the scheduler allows in every phase. Leases outlive the test and nothing
         // is released, so an empty lease means the queue is leased out for good.
-        RaiseThreadPoolFloor(workers);
+        using var floor = RaiseThreadPoolFloor(workers);
         using var barrier = new Barrier(workers);
         var racers = Enumerable.Range(0, workers).Select(worker => Task.Run(async () =>
         {

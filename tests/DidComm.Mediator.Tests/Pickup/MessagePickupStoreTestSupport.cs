@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using DidComm.Mediator.Pickup;
+using DidComm.TestSupport;
 
 namespace DidComm.Mediator.Tests.Pickup.MessagePickupStoreSupport;
 
@@ -110,15 +111,10 @@ internal static class MessagePickupStoreKit
     public static QueueStatus Counts(this QueueStatus status) => status with { HighWaterSequence = 0 };
 
     /// <summary>
-    /// Raise (never lower) the thread-pool floor so that <paramref name="parties"/> workers parked on
-    /// a barrier do not starve the tests that run in parallel with this one: CI runners have two cores
-    /// and the pool adds threads slowly.
+    /// Raise the thread-pool floor so that <paramref name="parties"/> workers parked on a barrier do
+    /// not starve the tests that run in parallel with this one (CI runners have two cores and the pool
+    /// adds threads slowly), until the result is disposed (<see cref="ThreadPoolFloor"/>, counted).
+    /// Hold it for the whole test.
     /// </summary>
-    public static void RaiseThreadPoolFloor(int parties)
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        var needed = Environment.ProcessorCount + 2 * parties;
-        if (worker < needed)
-            ThreadPool.SetMinThreads(needed, io);
-    }
+    public static IDisposable RaiseThreadPoolFloor(int parties) => ThreadPoolFloor.ForParked(parties);
 }

@@ -287,7 +287,7 @@ public sealed class MediatorLivePushAdv4Tests
         const int Stalled = 64;
         const int PerStalled = 16;
         const int Workers = 4;
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var time = new QaManualTimeProvider();
         var (mediator, keys) = await StartAsync(honourCancellation: true, time, m => m.PushConcurrency = Workers);
         await using var _ = mediator;

@@ -37,7 +37,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// <c>q</c>, a partition drops its least recently seen entry; beyond <c>r</c>, the least recently used
 /// partition goes. Both orders come from a sequence counter, never from a clock. What an eviction
 /// costs: one more opening of that message when it is delivered again, as after a restart (the
-/// memory is in-process only). A partition whose last entry is forgotten is removed.
+/// memory is in-process only). With more than <c>q</c> messages that never open queued in one
+/// mailbox the evictions never stop, so the memory cannot hold them all paused at once and a fetch
+/// loop alone does not reach the message behind them; the host's <c>AckAsync</c> does (R-4). A
+/// partition whose last entry is forgotten is removed.
 /// </para>
 /// <para>
 /// One leaf lock protects the partitions and the counter: no other lock is taken while it is held,

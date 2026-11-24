@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using DidComm.Facade;
 using DidComm.Messages;
+using DidComm.TestSupport;
 
 namespace DidComm.Mediator.Tests.Client;
 

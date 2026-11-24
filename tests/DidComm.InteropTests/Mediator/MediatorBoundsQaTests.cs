@@ -152,7 +152,7 @@ public sealed class MediatorBoundsQaTests
     [Fact]
     public async Task Behind_a_slow_sink_the_handler_admits_1024_forwards_drops_the_next_as_saturated_and_relays_every_admitted_one()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         // A host's own store enforces its own quotas: build it with room for every admitted forward.
         var store = new QaParkingStore(new InMemoryMessageStore(new MessagePickupOptions { MaxQueueMessages = 2_000, MaxStoreMessages = 2_000 }));
         await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = s => s.AddSingleton<IMessageStore>(store));
@@ -185,7 +185,7 @@ public sealed class MediatorBoundsQaTests
     [Fact]
     public async Task Behind_a_slow_sink_the_handler_byte_budget_of_64_MiB_drops_the_forward_that_would_exceed_it()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         const int Payload = 6 * 1024 * 1024;
         var store = new QaParkingStore();
         await using var mediator = await MediatorTestServer.StartAsync(o =>

@@ -23,14 +23,17 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// <item><description>when sessions close, a message is delivered again only after a session it was delivered over had begun to close (the documented at-least-once).</description></item>
 /// </list>
 /// </remarks>
-public sealed class MessagePickupAdversarialResourceHammerTests
+public sealed class MessagePickupAdversarialResourceHammerTests : IDisposable
 {
     private const int PoisonSize = 199;
     private const int MaxQueueMessages = 40;
     private const int MaxStoreMessages = 60;
     private const int MaxDeliveryBatch = 4;
 
-    public MessagePickupAdversarialResourceHammerTests() => MessagePickupAdversarialResource.RaiseThreadPoolFloor(48);
+    // Held for each test and put back when it ends (xunit disposes the instance after its test).
+    private readonly IDisposable _floor = MessagePickupAdversarialResource.RaiseThreadPoolFloor(48);
+
+    public void Dispose() => _floor.Dispose();
 
     [Theory]
     [InlineData(false, 11)]

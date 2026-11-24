@@ -96,22 +96,27 @@ public sealed class MediatorClientOptions
     /// delivery needs (the whole of it for up to four messages, half for five to eight), and never
     /// less than a quarter of it. A message starts only while at least that quarter is left. A
     /// message that is not open when its share is up — its sender's DID resolves slowly, or never —
-    /// is reported as a failed item with a <see cref="TimeoutException"/> (naming the request, never a
-    /// message) and is not acknowledged, and the next message takes its place; so slow messages
-    /// cannot keep the ones behind them from being opened, and the time messages failing at once did
-    /// not use goes to the ones after them. The rest of the delivery is returned and acknowledged as
-    /// usual. A live stream opens a delivery before it yields any of its items, so the time you spend
-    /// on an item never counts against this.
+    /// is cut only while another message of the delivery is still waiting to start and could still
+    /// start, or when a message was refused since it started because its sender's or the container's
+    /// openings were at their bound; otherwise it keeps the rest of this value, until a later refusal
+    /// cuts it. A cut message is reported as a failed item with a <see cref="TimeoutException"/>
+    /// (naming the request, never a message) and is not acknowledged, and the next message takes its
+    /// place; so slow messages cannot keep the ones behind them from being opened, and the time
+    /// messages failing at once did not use goes to the ones after them. A delivery whose last
+    /// messages never open lasts this whole value. The rest of the delivery is returned and
+    /// acknowledged as usual. A live stream opens a delivery before it yields any of its items, so
+    /// the time you spend on an item never counts against this.
     /// </para>
     /// <para>
     /// <strong>Messages that were slow to open are remembered</strong> (per mediator and mailbox): a
-    /// message that ran out of its share, or failed after at least 3 percent of this value, is not
-    /// opened again when it is delivered again, for a pause of 30 times this value (10 minutes by
-    /// default), doubling each time it is slow again up to 180 times (1 hour). Such a message is
-    /// returned at once as a failed item and is not acknowledged. So a loop that fetches until drained,
-    /// or a live stream's drain, gets past any number of slow messages: each delivery learns some of
-    /// them within this value, and the ones it remembers cost nothing. See
-    /// <see cref="PickupClient.FetchAsync"/> for the details and for what remains with slow senders.
+    /// message that was cut or ran into the end of this value, or that failed after at least 3
+    /// percent of it, is not opened again when it is delivered again, for a pause of 30 times this
+    /// value (10 minutes by default), doubling each time it is slow again up to 256 times (about 85
+    /// minutes). Such a message is returned at once as a failed item and is not acknowledged. So a
+    /// loop that fetches until drained, or a live stream's drain, gets past slow messages (up to 256
+    /// in front of yours): each delivery learns some of them within this value, and the ones it
+    /// remembers cost nothing. See <see cref="PickupClient.FetchAsync"/> for how long that takes and
+    /// for what remains with slow senders.
     /// </para>
     /// <para>
     /// <strong>Resolvers that block.</strong> Each message is opened on a thread-pool work item of its

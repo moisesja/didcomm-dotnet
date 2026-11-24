@@ -26,7 +26,7 @@ public sealed class MediatorAcknowledgementQaTests
     [Fact]
     public async Task Several_forwards_held_at_OnStarting_reach_the_store_zero_times_until_their_202s_are_committed()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var store = new QaParkingStore();
         await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = s => s.AddSingleton<IMessageStore>(store));
         var bob = await mediator.NewPeerAsync();

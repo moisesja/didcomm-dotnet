@@ -287,7 +287,7 @@ public sealed class MessagePickupLivePushExitMatrixTests
         // The two calls run at once, many times over, so every interleaving the lock allows occurs.
         // The mark does not depend on which lands first: only the give-back's own kind decides it.
         // Two pool threads meet at a barrier each round: raise the floor so neighbours do not starve (L-065).
-        MessagePickupStoreSupport.MessagePickupStoreKit.RaiseThreadPoolFloor(2);
+        using var floor = MessagePickupStoreSupport.MessagePickupStoreKit.RaiseThreadPoolFloor(2);
         var t0 = new DateTimeOffset(2026, 11, 21, 12, 0, 0, TimeSpan.Zero);
         const string Grant = "did:example:alice";
         for (var round = 0; round < 200; round++)
