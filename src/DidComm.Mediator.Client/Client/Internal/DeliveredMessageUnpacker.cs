@@ -51,8 +51,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// struck when the call started after the budget did and ran for at least <see cref="SlowThreshold"/>
 /// until its outcome was decided: by its own failure, by its share's end, or by the budget's end.
 /// A message that opens is forgotten. Nothing is written for a refusal, a message that did not
-/// start, a malformed message, or a message still running when the caller cancelled or the shutdown
-/// came. Whoever records an outcome makes its write, and every write is made before the delivery's
+/// start, a call whose token was cancelled before its work item ran (it never runs), a malformed
+/// message, or a message still running when the caller cancelled or the shutdown came. Whoever records an outcome makes its write, and every write is made before the delivery's
 /// result is set.
 /// </para>
 /// <para>
@@ -263,7 +263,8 @@ internal sealed class DeliveredMessageUnpacker
         return share < left ? share : left;
     }
 
-    // I-9: the call started after the budget did, and ran for at least τ until its outcome was decided.
+    // I-9 (with the call having run): it started after the budget did, and ran for at least τ until
+    // its outcome was decided.
     private bool WasSlow(long budgetStart, long started, long ended)
         => budgetStart <= started && started <= ended && Time.GetElapsedTime(started, ended) >= SlowThreshold;
 
@@ -289,9 +290,23 @@ internal sealed class DeliveredMessageUnpacker
     private static string ForRequest(string? requestId)
         => requestId is null ? string.Empty : string.Create(CultureInfo.InvariantCulture, $" of request '{requestId}'");
 
-    // The host call's work item (I-4): exactly the unpack step, the packed text and the share's
-    // token. Nothing reachable from it references the delivery.
-    private sealed record HostCall(Func<string, CancellationToken, Task<DeliveredUnpack>> Unpack, string Packed, CancellationToken Token);
+    // The host call's work item (I-4): it references exactly the unpack step, the packed text and
+    // the share's token, so nothing reachable from it references the delivery. It also notes whether
+    // the unpack ran: one whose token was cancelled before the work item ran never runs, and is not
+    // remembered as slow (I-9).
+    private sealed class HostCall(Func<string, CancellationToken, Task<DeliveredUnpack>> unpack, string packed, CancellationToken token)
+    {
+        private int _ran;
+
+        internal bool Ran => Volatile.Read(ref _ran) != 0;
+
+        internal Task<DeliveredUnpack> Run()
+        {
+            token.ThrowIfCancellationRequested();
+            Volatile.Write(ref _ran, 1);
+            return unpack(packed, token);
+        }
+    }
 
     // What the recorder of an outcome writes to the memory.
     private enum MemoryWrite
@@ -329,8 +344,8 @@ internal sealed class DeliveredMessageUnpacker
         private readonly GuardedDeadline _budget;
         private readonly CancellationToken _budgetToken;
         private readonly DeliveredOutcome[] _outcomes;
-        private readonly bool[] _started;
         private readonly long[] _startedAt;
+        private readonly HostCall?[] _calls;
         private readonly TaskCompletionSource<IReadOnlyList<DeliveredOutcome>> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly object _gate = new();
         private int _next;
@@ -350,8 +365,8 @@ internal sealed class DeliveredMessageUnpacker
             _outcomes = outcomes;
             _requestId = requestId;
             _ct = ct;
-            _started = new bool[messages.Count];
             _startedAt = new long[messages.Count];
+            _calls = new HostCall?[messages.Count];
             _budgetStart = owner.Time.GetTimestamp();
             // Linked to the caller and to the owner's shutdown, so the container's disposal ends
             // the delivery at once and every host lookup's token is cancelled (ADV3-7).
@@ -431,6 +446,7 @@ internal sealed class DeliveredMessageUnpacker
                 GuardedDeadline? deadline = null;
                 CancellationToken shareToken;
                 long startedAt;
+                HostCall? call = null;
                 Task<DeliveredUnpack>? work = null;
                 try
                 {
@@ -446,16 +462,12 @@ internal sealed class DeliveredMessageUnpacker
                     {
                         if (_ending == Ending.Open)
                         {
-                            _started[index] = true;
+                            call = new HostCall(_owner.Unpack, packed, shareToken);
                             _startedAt[index] = startedAt;
+                            _calls[index] = call;
                             work = Task.Factory.StartNew(
-                                static state =>
-                                {
-                                    var call = (HostCall)state!;
-                                    call.Token.ThrowIfCancellationRequested();
-                                    return call.Unpack(call.Packed, call.Token);
-                                },
-                                new HostCall(_owner.Unpack, packed, shareToken),
+                                static state => ((HostCall)state!).Run(),
+                                call,
                                 shareToken,
                                 TaskCreationOptions.DenyChildAttach,
                                 TaskScheduler.Default).Unwrap();
@@ -470,7 +482,7 @@ internal sealed class DeliveredMessageUnpacker
                         ReleaseShare(deadline);
                     throw;
                 }
-                if (work is null)
+                if (work is null || call is null)
                 {
                     // Closed before the call was created: OnBudgetEnded recorded it as not started.
                     reservation.Release();
@@ -504,7 +516,7 @@ internal sealed class DeliveredMessageUnpacker
                     // its reservation until it ends.
                     ReleaseShare(deadline);
                     var cut = _owner.Time.GetTimestamp();
-                    if (!Complete(index, OutOfShare(_requestId, share), _owner.WasSlow(_budgetStart, startedAt, cut) ? MemoryWrite.Strike : MemoryWrite.None))
+                    if (!Complete(index, OutOfShare(_requestId, share), call.Ran && _owner.WasSlow(_budgetStart, startedAt, cut) ? MemoryWrite.Strike : MemoryWrite.None))
                         return;
                     // Never take the next message on the share timer's own thread.
                     await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
@@ -515,7 +527,7 @@ internal sealed class DeliveredMessageUnpacker
                     reservation.Release(); // D-13, as on success
                     var failed = _owner.Time.GetTimestamp();
                     outcome = DeliveredOutcome.Failure(ex);
-                    write = _owner.WasSlow(_budgetStart, startedAt, failed) ? MemoryWrite.Strike : MemoryWrite.None;
+                    write = call.Ran && _owner.WasSlow(_budgetStart, startedAt, failed) ? MemoryWrite.Strike : MemoryWrite.None;
                 }
                 // Disposed here, on whatever thread completed the unpack. When host code completed
                 // it from a callback on the share's own token, that thread is inside the share's
@@ -586,8 +598,8 @@ internal sealed class DeliveredMessageUnpacker
                 {
                     if (_outcomes[index] is not null)
                         continue;
-                    _outcomes[index] = _owner.OutOfTime(_requestId, _started[index]);
-                    if (_ending == Ending.Budget && _started[index] && _owner.WasSlow(_budgetStart, _startedAt[index], ended))
+                    _outcomes[index] = _owner.OutOfTime(_requestId, started: _calls[index] is not null);
+                    if (_ending == Ending.Budget && _calls[index] is { Ran: true } && _owner.WasSlow(_budgetStart, _startedAt[index], ended))
                         (slow ??= new List<string?>()).Add(_messages[index].Id);
                 }
                 _writing++;

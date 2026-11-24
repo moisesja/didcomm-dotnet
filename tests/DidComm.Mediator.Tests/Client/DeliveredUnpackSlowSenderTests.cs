@@ -146,6 +146,34 @@ public sealed class DeliveredUnpackSlowSenderTests
         calls.Labels.Count(l => l == "quick").Should().Be(2);
     }
 
+    /// <summary>
+    /// I-9 with I-3: a message whose share ends before its work item runs never has its host code
+    /// run, and is not remembered, although its share ran for more than the slow threshold. The
+    /// clock jumps past the first message's share right after its start is read, so its work item is
+    /// created with a cancelled token. The messages after it run and are remembered when the budget
+    /// ends them.
+    /// </summary>
+    [Fact]
+    public async Task A_message_whose_share_ended_before_its_host_call_ran_is_not_remembered()
+    {
+        var manual = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var first = DeliveredMessageUnpacker.ShareOf(Budget, 5); // the first of five gets half the budget
+        var time = new JumpAfterTimer(manual, timerNumber: 2, jump: first); // timer 1 is the budget, 2 the first share
+        var unpacker = new DeliveredMessageUnpacker(Stall(calls), Budget, time);
+        var messages = Enumerable.Range(0, 5).Select(i => Message(TestJwe.Anoncrypt("q" + i), "q" + i)).ToArray();
+
+        var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
+        await calls.WaitForAsync(4, RealTime);
+        time.Jumped.Should().BeTrue();
+        manual.Advance(Budget);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("its share");
+        calls.Labels.Should().NotContain("q0", "its token was cancelled before its work item ran");
+        unpacker.Memory.HeldBack(Bob, new[] { "q0", "q1", "q2", "q3", "q4" }).Should().Equal(false, true, true, true, true);
+    }
+
     /// <summary>A remembered message whose pause has ended is opened again; once it opens it is forgotten.</summary>
     [Fact]
     public async Task A_remembered_message_is_opened_after_its_pause_and_forgotten_once_it_opens()
@@ -520,6 +548,40 @@ public sealed class DeliveredUnpackSlowSenderTests
     }
 
     // ---- helpers ------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A manual clock that, right after its <c>timerNumber</c>-th timer is created, answers the next
+    /// reading and then moves the clock on by <c>jump</c>, firing what came due.
+    /// </summary>
+    private sealed class JumpAfterTimer(ManualTimeProvider inner, int timerNumber, TimeSpan jump) : TimeProvider
+    {
+        private int _created;
+        private int _armed;
+        private int _jumped;
+
+        public bool Jumped => Volatile.Read(ref _jumped) != 0;
+
+        public override long TimestampFrequency => inner.TimestampFrequency;
+
+        public override long GetTimestamp()
+        {
+            var reading = inner.GetTimestamp();
+            if (Interlocked.Exchange(ref _armed, 0) == 1)
+            {
+                inner.Advance(jump);
+                Volatile.Write(ref _jumped, 1);
+            }
+            return reading;
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = inner.CreateTimer(callback, state, dueTime, period);
+            if (Interlocked.Increment(ref _created) == timerNumber)
+                Volatile.Write(ref _armed, 1);
+            return timer;
+        }
+    }
 
     private static DeliveredInput Message(string packed, string id) => new(id, TestJwe.Bytes(packed));
 
