@@ -6,18 +6,17 @@ namespace DidComm.Resolution;
 
 /// <summary>
 /// Internal lookups that translate a kid into a public JWK by resolving the kid's DID through
-/// <see cref="IDidKeyService"/>. Used by the facade to satisfy the envelope layer's
-/// <see cref="IInternalSenderKeyLookup"/> contract (authcrypt sender public keys) and the
-/// signer-key <c>Func&lt;string, Jwk?&gt;</c> JWS verification slot.
+/// <see cref="IDidKeyService"/>. Used by the facade, for key services without
+/// <see cref="IDidKeyBindingService"/>, to satisfy the envelope layer's
+/// <see cref="IInternalSenderKeyLookup"/> contract (authcrypt sender public keys) and its JWS
+/// signer-key lookup.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Sync-over-async at the seam: the public <see cref="IDidKeyService"/> contract is async, but the
-/// DataProofs JWS verify (<c>JwsParser.Parse</c>) and the authcrypt sender-key resolver
-/// (<c>IJweSenderKeyResolver</c>) are synchronous contracts, so these <em>public-key</em> lookups
-/// bridge sync-over-async. This is safe under .NET 10's no-synchronization-context runtime. (The
-/// <em>secret-key</em> recipient path no longer bridges — it runs natively async through the
-/// opaque-capable ECDH handles; FR-SEC-06.)
+/// Both lookups are awaited, with the unpack's cancellation token, before DataProofs' synchronous
+/// JWS verify (<c>JwsParser.Parse</c>) and authcrypt sender-key callback
+/// (<c>IJweSenderKeyResolver.TryGet</c>) run; those callbacks answer from the resolved key (see
+/// <c>EnvelopeReader</c>). Each call resolves once; nothing is kept between calls.
 /// </para>
 /// <para>
 /// The DID portion of the kid is extracted by <see cref="DidSubject.DidSubjectOf"/>; for a
@@ -27,24 +26,27 @@ namespace DidComm.Resolution;
 /// </remarks>
 internal static class DidKeyServiceLookups
 {
+    /// <summary>The authcrypt sender-key lookup (<c>keyAgreement</c>) over <paramref name="keyService"/>.</summary>
+    /// <param name="keyService">The registered key service.</param>
     public static IInternalSenderKeyLookup SenderKeyLookup(IDidKeyService keyService)
     {
         ArgumentNullException.ThrowIfNull(keyService);
         return new DidKeyServiceSenderLookup(keyService);
     }
 
-    public static Func<string, Jwk?> SignerKeyLookup(IDidKeyService keyService)
+    /// <summary>The JWS signer-key lookup (<c>authentication</c>) over <paramref name="keyService"/>.</summary>
+    /// <param name="keyService">The registered key service.</param>
+    public static Func<string, CancellationToken, ValueTask<Jwk?>> SignerKeyLookup(IDidKeyService keyService)
     {
         ArgumentNullException.ThrowIfNull(keyService);
-        return kid => Lookup(keyService, kid, VerificationRelationship.Authentication);
+        return (kid, ct) => LookupAsync(keyService, kid, VerificationRelationship.Authentication, ct);
     }
 
-    private static Jwk? Lookup(IDidKeyService keyService, string kid, VerificationRelationship relationship)
+    private static async ValueTask<Jwk?> LookupAsync(IDidKeyService keyService, string kid, VerificationRelationship relationship, CancellationToken ct)
     {
         var did = DidSubject.DidSubjectOf(kid);
         if (did is null) return null;
-        var keys = keyService.GetVerificationMethodsAsync(did, relationship)
-            .ConfigureAwait(false).GetAwaiter().GetResult();
+        var keys = await keyService.GetVerificationMethodsAsync(did, relationship, ct).ConfigureAwait(false);
         foreach (var key in keys)
         {
             if (string.Equals(key.Kid, kid, StringComparison.Ordinal))
@@ -57,6 +59,6 @@ internal static class DidKeyServiceLookups
     {
         private readonly IDidKeyService _keyService;
         public DidKeyServiceSenderLookup(IDidKeyService keyService) => _keyService = keyService;
-        public Jwk? TryGet(string skid) => Lookup(_keyService, skid, VerificationRelationship.KeyAgreement);
+        public ValueTask<Jwk?> ResolveAsync(string skid, CancellationToken ct) => LookupAsync(_keyService, skid, VerificationRelationship.KeyAgreement, ct);
     }
 }

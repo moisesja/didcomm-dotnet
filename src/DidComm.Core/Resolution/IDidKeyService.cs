@@ -22,10 +22,10 @@ namespace DidComm.Resolution;
 /// caller raises an appropriate operation-specific error.
 /// </para>
 /// <para>
-/// On the unpack path the facade drives this contract through a sync-over-async bridge (the
-/// JOSE composition layer is synchronous). Implementations MUST use <c>ConfigureAwait(false)</c>
-/// on every internal <c>await</c> and avoid synchronization-context affinity — see
-/// <see cref="DidComm.Facade.DidCommClient.UnpackAsync"/> for the host support boundary.
+/// On the unpack path the facade awaits this contract with the unpack's cancellation token, before
+/// the synchronous JOSE composition layer needs the key — see
+/// <see cref="DidComm.Facade.DidCommClient.UnpackAsync"/>. Implementations should honour the token
+/// and use <c>ConfigureAwait(false)</c> on every internal <c>await</c>.
 /// </para>
 /// </remarks>
 /// <example>
