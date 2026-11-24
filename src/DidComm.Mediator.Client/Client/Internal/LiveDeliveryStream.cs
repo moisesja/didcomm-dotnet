@@ -167,7 +167,7 @@ internal sealed class LiveDeliveryStream
     /// <summary>
     /// How much longer than <see cref="MediatorClientOptions.RequestTimeout"/> a run of failures may
     /// last before a retryable failure ends the stream (ADV5-2): the give-up alarm is armed at the
-    /// run's first failure for <c>RequestTimeout</c> plus this (60 s by default), so a transient
+    /// first failure since it was last let go, for <c>RequestTimeout</c> plus this (60 s by default), so a transient
     /// condition that lasts one <c>RequestTimeout</c> — the busy refusal, whose cause ends within one;
     /// a mediator restarting — clears before the stream gives up, and the back-off really reaches
     /// <see cref="MaxBackoff"/> on the way.
