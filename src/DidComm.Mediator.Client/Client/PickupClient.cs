@@ -302,7 +302,7 @@ public sealed class PickupClient
     /// proven.) At this library's mediator (a quota of 100 messages per mailbox, at most 10 per
     /// delivery), 99 slow messages in front of yours are passed within about 500 seconds with
     /// <paramref name="limit"/> 4 and about 200 seconds with 10. With limits 1 to 3, learning 99 takes
-    /// longer than the first pause, so some are learned twice: within about 2 hours 12 minutes, 33
+    /// longer than the first pause, so some are learned again: within about 2 hours 12 minutes, 33
     /// minutes and 22 minutes. At a mediator that delivers more than 16 at a time a fetch may wait out
     /// a lease between passes: 99 in front, fetched 100 at a time at a 60-second lease, are passed
     /// within about 560 seconds.
