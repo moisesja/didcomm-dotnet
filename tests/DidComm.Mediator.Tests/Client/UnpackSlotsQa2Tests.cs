@@ -668,6 +668,35 @@ public sealed class UnpackSlotsQa2Tests
         Volatile.Read(ref _atNextRestore).Should().BeNull("the armed ending was used");
     }
 
+    /// <summary>
+    /// R-2 and D-13, pinned: messages that name a sender only in <c>apu</c> count against the
+    /// mailbox's anonymous partition, not that sender's, although Core resolves that sender for them
+    /// (<see cref="SenderPartitionCoreQa2Tests"/>). So with lookups that ignore their tokens, Sam's
+    /// own partition holds four of them and the anonymous partition sixteen more: twenty lookups of
+    /// Sam's DID run at once in one mailbox, and the twenty-first message naming Sam is refused.
+    /// </summary>
+    [Fact]
+    public async Task Lookups_of_one_senders_DID_can_run_in_its_partition_and_the_anonymous_one_at_once()
+    {
+        var (unpacker, time, calls, never) = WithJunkThatNeverEnds();
+        var bob = new DeliveryScope(M1, Bob);
+        try
+        {
+            await FillAsync(unpacker, time, calls, bob, Enumerable.Range(0, 4).Select(i => Junk(TestJwe.Authcrypt("did:example:sam#key-1", $"junk-skid-{i}"))).ToArray());
+            await FillAsync(unpacker, time, calls, bob, Enumerable.Range(0, 16).Select(i => Junk(TestJwe.AuthcryptApuOnly("did:example:sam#key-1", $"junk-apu-{i}"))).ToArray());
+
+            unpacker.Reserved.Should().Be(20, "four in Sam's partition and sixteen in the anonymous one, all naming Sam");
+            calls.Count.Should().Be(20);
+            (await Open(unpacker, bob, TestJwe.Authcrypt("did:example:sam#key-1", "junk-skid-4"), TestJwe.AuthcryptApuOnly("did:example:sam#key-1", "junk-apu-16")))
+                .Should().OnlyContain(o => IsRefusal(o, "for its sender"), "both partitions are full");
+        }
+        finally
+        {
+            never.TrySetCanceled();
+        }
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
+    }
+
     // ---- I-1: the pool threads a blocking resolver holds ------------------------------------------
 
     /// <summary>

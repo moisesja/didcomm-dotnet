@@ -366,6 +366,27 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         driver.Reported.Should().BeLessThanOrEqualTo(10, "cleared at the third cycle's start");
     }
 
+    /// <summary>
+    /// I-19 and the owner's direction "end a drain round that brings nothing new": at a mediator that
+    /// keeps acknowledged messages (it answers every round with the same ten, already opened, yielded
+    /// and acknowledged in this drain), a round of them brings nothing new. Each poll should open each
+    /// message at most once and send at most two delivery requests; nothing new is yielded either way.
+    /// </summary>
+    [Fact]
+    public async Task At_a_mediator_that_keeps_acknowledged_messages_each_poll_opens_each_message_at_most_once()
+    {
+        var exchange = new SimExchange();
+        var head = Enumerable.Range(0, 10).Select(i => ($"g{i}", $"ok:g{i}")).ToArray();
+        exchange.Inner.On(MessagePickup.DeliveryRequestType, r => Delivery(r, head)); // acknowledged messages stay queued
+        await using var driver = new StreamDriver(exchange);
+        await driver.RunAsync(() => exchange.Log.Count(r => r.Type == LiveOn) > 1, TimeSpan.FromMinutes(5));
+
+        var firstPoll = exchange.Log.TakeWhile((r, i) => i == 0 || r.Type != LiveOn).ToArray();
+        driver.Items.Select(i => i.Item.Id).Should().Equal(head.Select(h => h.Item1), "each message is yielded once");
+        firstPoll.Count(r => r.Type == Drain).Should().BeLessThanOrEqualTo(2, "a round of messages already acknowledged in this drain brings nothing new: {0}", Trace(exchange));
+        exchange.HostCalls.Should().BeLessThanOrEqualTo(20, "each poll opens each message at most once");
+    }
+
     // ---- ADV3-1: the turns ------------------------------------------------------------------------
 
     /// <summary>
