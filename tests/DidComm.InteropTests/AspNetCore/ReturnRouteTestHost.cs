@@ -169,6 +169,7 @@ internal sealed class ReturnRouteTestHost : IAsyncDisposable
         var callback = options.Callback;
         app.MapDidCommEndpoint("/didcomm-callback", (unpacked, session, ct) =>
             callback is null ? Task.FromResult<Message?>(null) : callback(unpacked, session, ct));
+        options.MapMore?.Invoke(app);
         await app.StartAsync();
 
         var host = new ReturnRouteTestHost(app, clock, logs, recorder, server.Did, KidsOf(server), alice, carol, mallory);
@@ -505,6 +506,9 @@ internal sealed class ReturnRouteTestHostOptions
 
     /// <summary>The <c>/didcomm-callback</c> endpoint's behaviour (the session-aware overload).</summary>
     public Func<UnpackResult, IReturnRouteSession?, CancellationToken, Task<Message?>>? Callback { get; set; }
+
+    /// <summary>Runs after the three standard endpoints are mapped: more endpoints on the same host (the callback-only overloads).</summary>
+    public Action<WebApplication>? MapMore { get; set; }
 }
 
 /// <summary>The envelope an inbound arrives in (FR-RR-03 eligibility matrix).</summary>

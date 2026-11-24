@@ -17,7 +17,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
     private static readonly TimeSpan LeaseFor = new MessagePickupOptions().LeaseTimeout;
 
     private static MessageLeaseRequest LiveTake(string grant, string owner, DateTimeOffset now, DateTimeOffset? until = null, string? leaseId = null)
-        => new(grant, null, int.MaxValue, long.MaxValue, now, new MessageLease(owner, until ?? Far) { Id = leaseId ?? Guid.NewGuid().ToString("N"), LivePush = true });
+        => new(grant, null, int.MaxValue, long.MaxValue, now, new MessageLease(owner, until ?? Far) { Id = leaseId ?? Guid.NewGuid().ToString("N"), ForPush = true });
 
     private static MessageLeaseRequest PickupTake(string grant, DateTimeOffset now, string? owner = null, DateTimeOffset? until = null, string? leaseId = null)
         => new(grant, null, int.MaxValue, long.MaxValue, now, new MessageLease(owner, until ?? now + Tick) { Id = leaseId ?? Guid.NewGuid().ToString("N") });
@@ -87,7 +87,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         store.OnLease = async (request, ct) =>
         {
             var leased = await store.Inner.LeaseAsync(request, ct);
-            if (request.Lease.LivePush && leased.Count > 0 && !newer.Closed.IsCancellationRequested)
+            if (request.Lease.ForPush && leased.Count > 0 && !newer.Closed.IsCancellationRequested)
             {
                 newer.Close();
                 await MessagePickupLive.UntilAsync(() => store.ReleasedOwners.Count == 1 && tracker.PendingReleases == 0, "the close's clean-up ran to its end");
@@ -303,7 +303,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         // instant); one after the expiry does, and the record carries the mark from then on.
         (await store.LeaseIdsAsync(PickupTake(Alice, until - Tick))).Should().BeEmpty();
         var taken = await store.LeaseAsync(PickupTake(Alice, until, until: until + LeaseFor), None);
-        taken.Should().ContainSingle().Which.LivePushReturned.Should().BeTrue();
+        taken.Should().ContainSingle().Which.PushTaken.Should().BeTrue();
         foreach (var now in new[] { T0, until, until + LeaseFor + Tick, Far })
             (await store.LeaseIdsAsync(LiveTake(Alice, "s3", now, now + LeaseFor))).Should().BeEmpty($"a live push at {now:O}, after a delivery-request took it over");
     }
@@ -314,7 +314,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         var store = NewStore();
         await store.AddAsync(Alice, "pushed", "never-pushed");
         var now = T0;
-        (await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, now, new MessageLease("s0", now + LeaseFor) { Id = "push", LivePush = true }), None))
+        (await store.LeaseAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, now, new MessageLease("s0", now + LeaseFor) { Id = "push", ForPush = true }), None))
             .Single().Id.Should().Be("pushed");
         await store.ReleaseLeasesAsync("s0", None);
         var before = await store.HeldAsync(now: now);
@@ -325,7 +325,7 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
             var lease = "pickup-" + cycle;
             var owner = "socket-" + cycle;
             var taken = await store.LeaseAsync(PickupTake(Alice, now, owner: owner, until: now + LeaseFor, leaseId: lease), None);
-            taken.Select(m => (m.Id, m.LivePushReturned)).Should().Equal(("pushed", true), ("never-pushed", false));
+            taken.Select(m => (m.Id, m.PushTaken)).Should().Equal(("pushed", true), ("never-pushed", false));
             switch (cycle % 4)
             {
                 case 0:
@@ -379,10 +379,10 @@ public sealed class MessagePickupLivePushReturnAdv4Tests
         var store = NewStore();
         await store.AddAsync(Message("old") with { ExpiresAt = T0 + LeaseFor + LeaseFor });
         await store.AddAsync(Alice, "a", "b");
-        (await store.LeaseIdsAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, T0, new MessageLease("s", Far) { LivePush = true }))).Should().Equal("old");
+        (await store.LeaseIdsAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, T0, new MessageLease("s", Far) { ForPush = true }))).Should().Equal("old");
         await store.ReleaseLeasesAsync("s", None);
 
-        (await store.LeaseIdsAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, T0, new MessageLease("s2", Far) { Id = "p", LivePush = true }))).Should().Equal(new[] { "a" }, "passed by, not a stop");
+        (await store.LeaseIdsAsync(new MessageLeaseRequest(Alice, null, 1, long.MaxValue, T0, new MessageLease("s2", Far) { Id = "p", ForPush = true }))).Should().Equal(new[] { "a" }, "passed by, not a stop");
         (await store.LeaseIdsAsync(PickupTake(Alice, T0, until: T0 + LeaseFor))).Should().Equal(new[] { "old", "b" }, "a delivery-request takes it in its place");
 
         var expired = T0 + LeaseFor + LeaseFor;

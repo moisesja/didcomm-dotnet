@@ -15,7 +15,10 @@ namespace DidComm.InteropTests.Samples;
 /// mediator's Discover Features answer returned on the request, the 202 before the relay, the
 /// relay with <c>SendPackedAsync</c>, Bob's authenticated delivery, Carol dropped by
 /// <c>NullForwardSink</c>, the forward for an unregistered DID dropped by the handler, and the
-/// same relay composed without a DI container.
+/// same relay composed without a DI container. Then the library's own push: a complete mediator
+/// (<c>AddMediator()</c> with <c>DirectPush</c>) posts Alice's message to the inbox the operator
+/// registered for Bob (<c>Pushed-Direct</c>, his mailbox empty afterwards), and keeps Carol's,
+/// who has no inbox registered, in her mailbox (<c>Push-Skipped-NoEndpoint</c>).
 /// </summary>
 public sealed class MediatorAgentSmokeTests
 {
@@ -84,6 +87,34 @@ public sealed class MediatorAgentSmokeTests
         transcript.Should().Contain("[mediator] our transport acknowledged before the sink ran = True");
         transcript.Should().Contain("[bob] Content = Held until the acknowledgement.");
         transcript.Should().Contain("Hand-built handler stopped");
+
+        // The library's own push (AddMediator() with DirectPush): off by default; on here, the
+        // complete mediator posts Bob's message to the inbox the operator registered for him and
+        // removes it from his mailbox; Carol, with no inbox registered, keeps hers for pickup.
+        var section9Start = transcript.IndexOf("== Section 9 — The library's own push: AddMediator() with DirectPush ==", StringComparison.Ordinal);
+        section9Start.Should().BeGreaterThan(0, "section 9 runs");
+        var section9 = transcript[section9Start..];
+        section9.Should().Contain("MediatorOptions.DirectPush by default = False");
+        var complete = Regex.Match(section9, @"Complete mediator's inbox = (http://127\.0\.0\.1:\d+/didcomm)");
+        complete.Success.Should().BeTrue("the complete mediator prints its inbox");
+        complete.Groups[1].Value.Should().NotBe(inbox.Groups[1].Value, "it is a second mediator, beside the routing relay");
+        section9.Should().Contain("[operator] Bob enrolled; the DID Bob gives to senders is registered = Added");
+        section9.Should().Contain("[operator] Carol enrolled; the DID Carol gives to senders is registered = Added");
+        section9.Should().Contain("[operator] Bob's inbox added to the directory = True");
+        section9.Should().Contain("[operator] inboxes in the directory = 1 of 16");
+        section9.Should().Contain($"Endpoint used (the complete mediator, from Bob's new DID) = {complete.Groups[1].Value}");
+        section9.Should().Contain("Transport HTTP status for Bob's message = 202");
+        section9.Should().Contain("[bob] Content = Pushed by the mediator itself.");
+        section9.Should().Contain("[bob] Authenticated = True");
+        section9.Should().Contain("[bob] From == alice = True");
+        section9.Should().Contain("[mediator] didcomm.push.outcome = Pushed-Direct");
+        section9.Should().Contain("[mediator] messages waiting in Bob's mailbox = 0");
+        section9.Should().Contain("Transport HTTP status for Carol's message = 202");
+        section9.Should().Contain("[mediator] didcomm.push.outcome = Push-Skipped-NoEndpoint");
+        section9.Should().Contain("[mediator] messages waiting in Carol's mailbox = 1");
+        section9.Should().NotContain("[bob] Content = Waiting in Carol's mailbox.", "nothing is sent to an inbox for Carol");
+
+        transcript.Should().Contain("== Section 10 — Teardown ==");
         transcript.Should().Contain("[mediator] registered recipients = 0");
 
         // Never a full DID in the narration: every did:peer is truncated to at most 64 characters.

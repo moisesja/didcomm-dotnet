@@ -109,6 +109,26 @@ internal sealed class MediatedClientTestWorld
     public static string Base64Url(string text)
         => Convert.ToBase64String(Encoding.UTF8.GetBytes(text)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
+    /// <summary>
+    /// Anoncrypt plaintext JSON written by hand to Bob, as a peer that is not this library can send
+    /// it: what the library's own writer would escape (a raw DEL, say) stays as written.
+    /// </summary>
+    public string RawAnoncryptToBob(string plaintextJson)
+        => DataProofsDotnet.Jose.Encryption.JweBuilder.BuildEcdhEsA256Kw(
+            Encoding.UTF8.GetBytes(plaintextJson), new[] { BobKey.PublicJwk }, DidComm.Jose.JoseAlgorithms.A256CbcHs512, new JoseCryptoProvider(), MediaTypes.Encrypted);
+
+    /// <summary>
+    /// A forward to Bob (<c>next</c> = Bob) written by hand, whose one <c>data.json</c> attachment is
+    /// <paramref name="attachmentJson"/> exactly as given (raw characters kept).
+    /// </summary>
+    public static string RawForwardToBob(string attachmentJson)
+        => "{\"id\":\"raw" + Guid.NewGuid().ToString("N") + "\",\"typ\":\"" + MediaTypes.Plaintext + "\",\"type\":\"" + ForwardConstants.ForwardTypeUri
+           + "\",\"to\":[\"" + Bob + "\"],\"body\":{\"next\":\"" + Bob + "\"},\"attachments\":[{\"id\":\"a1\",\"media_type\":\"" + ForwardConstants.PayloadMediaType
+           + "\",\"data\":{\"json\":" + attachmentJson + "}}]}";
+
+    /// <summary><paramref name="count"/> raw DEL characters (U+007F): legal unescaped in JSON, escaped to six bytes by the library's writer.</summary>
+    public static string RawDel(int count) => new((char)0x7F, count);
+
     public async Task<string> AnoncryptAsync(Message message, string to = Bob)
         => (await Senders().PackEncryptedAsync(message, new PackEncryptedOptions(Recipients: new[] { to }))).Message;
 

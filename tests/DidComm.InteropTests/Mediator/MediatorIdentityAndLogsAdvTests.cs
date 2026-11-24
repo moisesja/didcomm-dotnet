@@ -9,6 +9,7 @@ using DidComm.Mediator.Pickup;
 using DidComm.Messages;
 using DidComm.Protocols.Routing;
 using DidComm.TestSupport;
+using DidComm.Transports.ReturnRoute;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
@@ -21,34 +22,65 @@ namespace DidComm.InteropTests.Mediator;
 /// </summary>
 public sealed class MediatorIdentityAndLogsAdvTests
 {
-    // ── Whose mail: the peel cannot execute a captured mediator-service request ──────────
+    // ── Whose mail: a captured mediator-service request, wrapped, is a replay ────────────
 
-    [Fact]
-    public async Task A_captured_delivery_request_of_Bob_rewrapped_by_Mallory_in_a_self_addressed_forward_is_never_executed()
+    public enum FirstArrival
     {
-        // Forwards are outside FR-RR-08 replay admission. If the peel dispatched what it opened, a
-        // captured (never posted) delivery-request of Bob's, wrapped in a forward addressed to the
-        // mediator itself, would lease Bob's messages with no session to send them on.
+        /// <summary>Bob posts his request first; Mallory wraps the captured copy afterwards.</summary>
+        Original,
+
+        /// <summary>Mallory wraps a captured request Bob never posted.</summary>
+        Wrapped,
+    }
+
+    [Theory]
+    [InlineData(FirstArrival.Original)]
+    [InlineData(FirstArrival.Wrapped)]
+    public async Task A_captured_delivery_request_of_Bob_rewrapped_by_Mallory_is_refused_as_a_replay_and_never_answered_on_her_connection(FirstArrival first)
+    {
+        // Owner decision OD-6 on #110: the mediator's endpoint opens a forward addressed to itself and
+        // admits the message inside as if it had arrived directly. So the replay check (FR-RR-08,
+        // keyed on Bob's DID and the request's id) covers a captured request wrapped in a
+        // self-addressed forward, and an opened message never gets a return route (return_route.md
+        // L9): nothing is answered on the connection of whoever wrapped it. Wrapping adds nothing to
+        // a plain replay of the captured request.
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
         var alice = await mediator.NewSenderAsync();
         var mallory = await mediator.NewSenderAsync();
         var note = await Qa.SendNoteAsync(mediator, alice, bob);
-
-        var captured = await mediator.AuthcryptAsync(bob, mediator.Prepare(MessagePickup.CreateDeliveryRequest(bob.Did, mediator.Did, 10)));
+        var request = mediator.Prepare(MessagePickup.CreateDeliveryRequest(bob.Did, mediator.Did, 10));
+        var captured = await mediator.AuthcryptAsync(bob, request);
         var (wrapped, _) = await mallory.ForwardAsync(mediator.Did, mediator.Did, captured);
-        await Qa.PostForwardAsync(mediator, wrapped);
+
+        var bobs = (Status: HttpStatusCode.Continue, ContentType: (string?)null, Body: string.Empty);
+        if (first == FirstArrival.Original)
+            bobs = await mediator.PostAsync(captured);
+        var mallorys = await mediator.PostAsync(wrapped);
+        if (first == FirstArrival.Wrapped)
+            bobs = await mediator.PostAsync(captured);
         await mediator.FlushAsync();
 
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.Queued, ForwardOutcomes.DroppedMalformed);
-        (await mediator.StatusAsync(bob)).MessageCount.Should().Be(1);
-        var delivered = (await mediator.FetchAsync(bob)).Should().ContainSingle("Bob's message was never leased by the captured request").Subject;
-        (await MediatorRecipient.UnpackFromSenderAsync(bob, delivered.Payload, alice)).Message.Id.Should().Be(note.Id);
-
-        // The captured request was never admitted either: Bob can still use it himself.
-        var response = await mediator.PostAsync(captured);
-        response.Status.Should().Be(HttpStatusCode.OK, "the captured request reached replay admission only now");
+        mallorys.Status.Should().Be(HttpStatusCode.Accepted, "the wrapped copy is never answered on Mallory's connection");
+        mallorys.Body.Should().BeEmpty();
+        mediator.Outcomes.Should().Equal(new[] { ForwardOutcomes.Queued }, "only Alice's note was a forward; Mallory's wrapper was opened, not relayed");
+        mediator.Logs.Entries.Where(e => e.Contains("dropped: replay admission", StringComparison.Ordinal) && e.Contains(request.Id, StringComparison.Ordinal))
+            .Should().ContainSingle("the second arrival of the one request, wrapped or not, is refused by the replay check")
+            .Which.Should().Contain(nameof(ReplayAdmission.Duplicate));
+        if (first == FirstArrival.Original)
+        {
+            bobs.Status.Should().Be(HttpStatusCode.OK, "Bob's own request was answered on his own connection");
+            (await bob.Client.UnpackAsync(bobs.Body)).Message.Thid.Should().Be(request.Id, "the answer to Bob's request went to Bob");
+        }
+        else
+        {
+            bobs.Status.Should().Be(HttpStatusCode.Accepted, "Bob's later copy is the replay now, refused like any");
+            bobs.Body.Should().BeEmpty();
+            // The wrapped copy, admitted without a return route, leased nothing: Bob's message waits.
+            var fetched = (await mediator.FetchAsync(bob)).Should().ContainSingle().Subject;
+            (await MediatorRecipient.UnpackFromSenderAsync(bob, fetched.Payload, alice)).Message.Id.Should().Be(note.Id);
+        }
         mediator.LeakingLogLines().Should().BeEmpty();
     }
 

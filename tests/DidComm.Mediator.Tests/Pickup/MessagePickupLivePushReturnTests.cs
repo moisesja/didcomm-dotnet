@@ -9,7 +9,7 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// <summary>
 /// The coordinator's side of "a live push that comes back unacknowledged is never pushed again"
 /// (owner decision on #100, 2026-11-20): every lease it takes for a live push says so
-/// (<see cref="MessageLease.LivePush"/>) and no delivery-request's lease does; a push the session
+/// (<see cref="MessageLease.ForPush"/>) and no delivery-request's lease does; a push the session
 /// took, or whose send threw or was cancelled once the session had it, counts as pushed — its lease
 /// is given back by id and the mark its take set stays, whichever of that give-back and the close's
 /// clean-up lands first (owner decision 2026-11-21, OD-5; PR #143 review P2-1); and a record a store
@@ -32,14 +32,14 @@ public sealed class MessagePickupLivePushReturnTests
         (await fixture.Queue.DeliverAsync(peer, PickupFixture.Payload(40, 1))).Outcome.Should().Be(PickupDeliveryOutcome.PushedLive);
         var admitted = store.Enqueued.Should().ContainSingle().Subject.Lease;
         admitted.Should().NotBeNull();
-        admitted!.LivePush.Should().BeTrue("the record is admitted under a live push's lease");
+        admitted!.ForPush.Should().BeTrue("the record is admitted under a live push's lease");
 
         // The push workers' push: queued without a live push of its own, then taken for the session.
         await fixture.QueueAsync(peer, PickupFixture.Payload(40, 2), new PickupDeliveryOptions(AllowLive: false));
         (await fixture.Queue.Coordinator.PushNextLiveAsync(peer, None)).Should().Be(LiveStep.Sent);
         var take = store.LeaseRequests.Should().ContainSingle().Subject;
         take.AfterSequence.Should().NotBeNull("precondition: the push workers' take");
-        take.Lease.LivePush.Should().BeTrue();
+        take.Lease.ForPush.Should().BeTrue();
 
         // A delivery-request, over HTTP and over the live socket.
         await fixture.QueueAsync(peer, PickupFixture.Payload(40, 3), new PickupDeliveryOptions(AllowLive: false));
@@ -48,7 +48,7 @@ public sealed class MessagePickupLivePushReturnTests
         (await fixture.FetchAsync(peer, mediator, socket, 10)).Should().NotBeNull();
         var pickups = store.LeaseRequests.Skip(1).ToArray();
         pickups.Should().HaveCount(2);
-        pickups.Should().OnlyContain(r => !r.Lease.LivePush && r.AfterSequence == null, "a delivery-request's lease is never a live push's");
+        pickups.Should().OnlyContain(r => !r.Lease.ForPush && r.AfterSequence == null, "a delivery-request's lease is never a live push's");
     }
 
     [Theory]
@@ -101,12 +101,12 @@ public sealed class MessagePickupLivePushReturnTests
         await MessagePickupLive.UntilAsync(() => fixture.Queue.Coordinator.Tracker.PendingReleases == 0 && store.ReleasedOwners.Count >= 1, "the close's clean-up ran");
 
         var now = fixture.Clock.Now;
-        var live = new MessageLeaseRequest(peer, null, 10, long.MaxValue, now, new MessageLease("another-socket", now + TimeSpan.FromMinutes(1)) { LivePush = true });
+        var live = new MessageLeaseRequest(peer, null, 10, long.MaxValue, now, new MessageLease("another-socket", now + TimeSpan.FromMinutes(1)) { ForPush = true });
         (await store.Inner.LeaseAsync(live, None)).Should().BeEmpty("a push that came back unacknowledged is never pushed live again");
         var pickup = new MessageLeaseRequest(peer, null, 10, long.MaxValue, now, new MessageLease(null, now + TimeSpan.FromMinutes(1)));
         var held = (await store.Inner.LeaseAsync(pickup, None)).Should().ContainSingle("a delivery-request still gets it").Subject;
         held.Id.Should().Be(id);
-        held.LivePushReturned.Should().BeTrue();
+        held.PushTaken.Should().BeTrue();
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class MessagePickupLivePushReturnTests
         store.OnLease = async (request, ct) =>
         {
             var leased = await store.Inner.LeaseAsync(request, ct);
-            return leased.Select(m => m with { LivePushReturned = true }).ToArray();
+            return leased.Select(m => m with { PushTaken = true }).ToArray();
         };
 
         var push = () => fixture.Queue.Coordinator.PushNextLiveAsync(peer, None).AsTask();

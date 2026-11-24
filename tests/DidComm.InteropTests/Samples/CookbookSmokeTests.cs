@@ -127,6 +127,12 @@ public sealed class CookbookSmokeTests
         transcript.Should().Contain("[mediator] the replay reached a handler = False");     // FF.2 (b): refused before dispatch
         transcript.Should().Contain("msg-1, again = Duplicate");                            // FF.3: replay guard
         transcript.Should().Contain("SaturationCount / ClockBehindRefusalCount = 1 / 1");   // FF.3
+        transcript.Should().Contain("MediatorOptions.DirectPush by default = False");       // FF.4: off by default
+        transcript.Should().Contain("AddMediator() with DirectPush and a directory = accepted"); // FF.4
+        transcript.Should().Contain("DirectPush with RewrapMode.ReanoncryptToNext = accepted"); // FF.4: with re-wrapping too
+        transcript.Should().Contain("[bob] his inbox answered the push with HTTP = 202");        // FF.4: the re-wrapped push
+        transcript.Should().Contain("[bob] his callback got = Hello Bob, wrapped once more by the mediator"); // FF.4: opened by MapDidCommEndpoint
+        transcript.Should().Contain("[bob] authcrypted by Alice, as she sent it = True");       // FF.4: under its own envelope
         transcript.Should().Contain("The proxy received = POST http://203.0.113.10/didcomm HTTP/1.1"); // GG: HTTP through the named proxy
         transcript.Should().Contain("The proxy received = CONNECT 198.51.100.7:80 HTTP/1.1");  // GG: WebSocket tunnelled through it
         transcript.Should().Contain("Refused = by the library, before the proxy was asked");   // GG: checks that need no socket

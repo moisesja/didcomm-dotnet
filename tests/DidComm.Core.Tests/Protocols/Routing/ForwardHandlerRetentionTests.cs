@@ -270,7 +270,7 @@ public sealed class ForwardHandlerRetentionTests
                 new WeakReference(unpacked.Message),
                 new WeakReference(attachment.Data.Json),
                 unpacked.Message.Id,
-                ForwardProcessor.ExtractAttachmentBytes(attachment));
+                ForwardProcessor.ExtractAttachmentBytes(attachment, long.MaxValue));
             (await Handler.HandleAsync(unpacked.Message, Context(unpacked, acknowledged), CancellationToken.None)).Should().BeNull();
             return admitted;
         }

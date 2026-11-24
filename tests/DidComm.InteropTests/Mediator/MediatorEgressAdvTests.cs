@@ -27,8 +27,10 @@ public sealed class MediatorEgressAdvTests
     // ADV-2 DEFECT 1 (P2, fixed by #95 AD-1 and ADV-3 D2): a stranger's forward addressed to the
     // mediator itself used to be opened on the single forward pump, after the 202, so an
     // attacker-chosen DID resolution held up every other relay. Layers addressed to the mediator are
-    // now opened inline, on the sender's own request, and must be an anoncrypt envelope around a
-    // plaintext message: the stranger's signed note is refused before its signer is resolved.
+    // opened inline, on the sender's own request. Since owner decision OD-6 on #110 the message
+    // inside that is not a forward is the mediator's own, unpacked in full on that same request: one
+    // lookup of its signer's DID, as when the stranger posts the signed note directly, never on the
+    // pump.
     [Fact]
     public async Task A_strangers_forward_addressed_to_the_mediator_cannot_hold_up_other_senders_relays()
     {
@@ -48,44 +50,51 @@ public sealed class MediatorEgressAdvTests
             var signed = await stranger.Client.PackSignedAsync(stranger.Note(mediator.Did), stranger.Did);
             var (selfAddressed, _) = await stranger.ForwardAsync(mediator.Did, next: mediator.Did, signed);
             strangersPost = Task.Run(() => mediator.PostAsync(selfAddressed));
-            (await strangersPost.WaitAsync(Wait)).Status.Should().Be(HttpStatusCode.Accepted, "answered at once: nothing in it is resolved");
+            await resolver.Entered.WaitAsync(Wait);
+            strangersPost.IsCompleted.Should().BeFalse("the stranger's own request pays for the lookup of the signer it chose");
 
-            // An ordinary relay from someone else, for an enrolled recipient.
+            // An ordinary relay from someone else, for an enrolled recipient, while the stranger's
+            // request is parked.
             var note = alice.Note(bob.Did);
             var (forward, _) = await alice.ForwardAsync(mediator.Did, bob.Did, await alice.AuthcryptAsync(note, bob.Did));
             (await mediator.PostAsync(forward)).Status.Should().Be(HttpStatusCode.Accepted);
 
             // Property: Bob's message is queued whatever the stranger's forward asked for.
             await MediatorTestServer.WaitUntilAsync(() => mediator.Store.MessageCount == 1, "a stranger's forward must not hold every other relay behind a DID resolution it chose");
-            resolver.Entered.IsCompleted.Should().BeFalse("the stranger's DID is never resolved: a layer addressed to the mediator must be an anoncrypt of a plaintext");
         }
         finally
         {
             resolver.Release();
         }
 
+        (await strangersPost!.WaitAsync(Wait)).Status.Should().Be(HttpStatusCode.Accepted);
         await mediator.FlushAsync();
         mediator.Store.MessageCount.Should().Be(1, "the stranger's forward stored nothing");
-        mediator.Outcomes.Should().Contain(ForwardOutcomes.DroppedMalformed);
+        mediator.Outcomes.Should().Equal(new[] { ForwardOutcomes.Queued }, "the stranger's wrapper was opened to a message for the mediator, not relayed");
+        resolver.Calls.Should().BeGreaterThan(0);
     }
 
     [Fact]
-    public async Task A_strangers_self_addressed_forward_never_stores_anything_and_ends_with_one_outcome()
+    public async Task A_strangers_self_addressed_forward_never_stores_anything_and_its_message_is_the_mediators_own()
     {
-        // What does hold: with a resolver that answers, the signed message inside is opened, found
-        // not to be a forward, and dropped; one outcome, nothing stored, nothing pushed.
+        // What does hold: with a resolver that answers, the signed note inside is opened and handled
+        // as a message to the mediator (owner decision OD-6 on #110): no handler takes a note, nothing
+        // is stored, nothing is relayed, and no forward outcome is counted.
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
         var stranger = await mediator.NewSenderAsync();
 
-        var signed = await stranger.Client.PackSignedAsync(stranger.Note(mediator.Did), stranger.Did);
+        var note = stranger.Note(mediator.Did);
+        var signed = await stranger.Client.PackSignedAsync(note, stranger.Did);
         var (selfAddressed, _) = await stranger.ForwardAsync(mediator.Did, next: mediator.Did, signed);
         (await mediator.PostAsync(selfAddressed)).Status.Should().Be(HttpStatusCode.Accepted);
         await mediator.FlushAsync();
 
-        mediator.Outcomes.Should().Equal(ForwardOutcomes.DroppedMalformed);
+        mediator.Outcomes.Should().BeEmpty();
         mediator.Store.MessageCount.Should().Be(0);
+        mediator.Logs.Entries.Should().Contain(e => e.Contains("No protocol handler registered", StringComparison.Ordinal) && e.Contains(note.Id, StringComparison.Ordinal),
+            "the note inside reached the mediator's dispatcher");
         mediator.LeakingLogLines().Should().BeEmpty();
     }
 
