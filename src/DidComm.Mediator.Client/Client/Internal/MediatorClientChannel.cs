@@ -551,12 +551,12 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     }
 
     /// <inheritdoc/>
-    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
         try
         {
-            return await Unpacker.UnpackAllAsync(payloads, requestId, ct).ConfigureAwait(false);
+            return await Unpacker.UnpackAllAsync(scope, messages, requestId, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (IsDisposed)
         {

@@ -152,12 +152,13 @@ internal interface IMediatorExchange
     /// push — under one budget (<see cref="MediatorClientOptions.UnpackTimeout"/>, owner decision 2-A),
     /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> at a time (design D-19). A
     /// message the budget runs out on is a <see cref="TimeoutException"/> failure naming
-    /// <paramref name="requestId"/>. Outcomes are in the order of <paramref name="payloads"/>.
+    /// <paramref name="requestId"/>. Outcomes are in the order of <paramref name="messages"/>.
     /// </summary>
-    /// <param name="payloads">The delivered bytes, in delivery order.</param>
+    /// <param name="scope">The mediator and the mailbox the delivery came from, as the host's call named them (#111).</param>
+    /// <param name="messages">The delivered messages (attachment id and bytes), in delivery order.</param>
     /// <param name="requestId">Our id of the request the delivery answers; <c>null</c> for a live push.</param>
     /// <param name="ct">The caller's cancellation; it and the channel's disposal alone make the call throw — a bad message is a failure outcome.</param>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
     /// <exception cref="ObjectDisposedException">The channel was disposed, before or while the delivery was being opened (ADV3-7: the disposal cancels the host code opening it).</exception>
-    Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct);
+    Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct);
 }

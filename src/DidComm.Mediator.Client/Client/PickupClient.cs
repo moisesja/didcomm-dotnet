@@ -400,16 +400,16 @@ public sealed class PickupClient
             throw DeliveryReader.NoUsableIds(request.Id, spec);
         LogReading(contents, request.Id);
 
-        var payloads = new List<ReadOnlyMemory<byte>>(contents.Entries.Count);
+        var inputs = new List<DeliveredInput>(contents.Entries.Count);
         foreach (var entry in contents.Entries)
         {
             if (entry.Payload is { } payload)
-                payloads.Add(payload);
+                inputs.Add(new DeliveredInput(entry.Id, payload));
         }
-        var outcomes = payloads.Count == 0
+        var outcomes = inputs.Count == 0
             ? Array.Empty<DeliveredOutcome>()
-            : await Exchange.UnpackDeliveredBatchAsync(payloads, request.Id, ct).ConfigureAwait(false);
-        if (outcomes.Count != payloads.Count)
+            : await Exchange.UnpackDeliveredBatchAsync(new DeliveryScope(mediatorDid, from), inputs, request.Id, ct).ConfigureAwait(false);
+        if (outcomes.Count != inputs.Count)
             throw new InvalidOperationException("The unpacker returned another number of outcomes than it was given messages.");
 
         // Classify in delivery order. Failures (did not decode, did not unpack, for another DID than

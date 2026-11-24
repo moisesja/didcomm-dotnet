@@ -129,6 +129,25 @@ internal sealed class DeliveredMessageUnpacker
         => UnpackAllAsync(payloads, requestId: null, ct);
 
     /// <summary>
+    /// Open the messages of one delivery from <paramref name="scope"/> (the mediator and mailbox the
+    /// host's call named), each with its attachment id (#111). Outcomes are in the order of
+    /// <paramref name="messages"/>.
+    /// </summary>
+    /// <param name="scope">The mediator and the mailbox the delivery came from.</param>
+    /// <param name="messages">The delivered messages, in delivery order.</param>
+    /// <param name="requestId">Our id of the request the delivery answers, named by the timeout failures; <c>null</c> for a live push.</param>
+    /// <param name="ct">The caller's cancellation; it and <see cref="Shutdown"/> alone make the call throw.</param>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> or <see cref="Shutdown"/> was cancelled.</exception>
+    internal Task<IReadOnlyList<DeliveredOutcome>> UnpackAllAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        var payloads = new ReadOnlyMemory<byte>[messages.Count];
+        for (var i = 0; i < payloads.Length; i++)
+            payloads[i] = messages[i].Payload;
+        return UnpackAllAsync(payloads, requestId, ct);
+    }
+
+    /// <summary>
     /// Open the messages of one delivery under one budget, at most <see cref="FetchConcurrency"/> at
     /// a time; the outcomes are in the order of <paramref name="payloads"/>. The returned task is
     /// complete when the last message has ended or, at the latest, when the budget runs out; it is

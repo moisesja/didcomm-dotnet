@@ -561,16 +561,16 @@ internal sealed class LiveDeliveryStream
         if (taken.Count == 0)
             return;
 
-        var payloads = new List<ReadOnlyMemory<byte>>(taken.Count);
+        var inputs = new List<DeliveredInput>(taken.Count);
         foreach (var entry in taken)
         {
             if (entry.Payload is { } payload)
-                payloads.Add(payload);
+                inputs.Add(new DeliveredInput(entry.Id, payload));
         }
-        var outcomes = payloads.Count == 0
+        var outcomes = inputs.Count == 0
             ? Array.Empty<DeliveredOutcome>()
-            : await _exchange.UnpackDeliveredBatchAsync(payloads, requestId, ct).ConfigureAwait(false);
-        if (outcomes.Count != payloads.Count)
+            : await _exchange.UnpackDeliveredBatchAsync(new DeliveryScope(_mediatorDid, _localDid), inputs, requestId, ct).ConfigureAwait(false);
+        if (outcomes.Count != inputs.Count)
             throw new InvalidOperationException("The unpacker returned another number of outcomes than it was given messages.");
 
         var failures = new List<Exception>();

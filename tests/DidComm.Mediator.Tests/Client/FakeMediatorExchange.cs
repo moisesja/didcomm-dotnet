@@ -111,7 +111,7 @@ internal sealed class FakeMediatorExchange : IMediatorExchange
 
     public Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
 
-    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
+    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct) => throw new NotSupportedException("Not used by MediationClient.");
 
     /// <summary>A client over this exchange, as the DI constructor builds it.</summary>
     public MediationClient Client(Microsoft.Extensions.Logging.ILogger<MediationClient>? logger = null) => new(this, logger);

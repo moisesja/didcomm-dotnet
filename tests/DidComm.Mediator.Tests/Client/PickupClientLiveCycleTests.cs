@@ -693,8 +693,8 @@ public sealed class PickupClientLiveCycleTests
 
             => inner.SendOneWayAsync(route, request, name, mediatorDid, localDid, ct);
 
-        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
-            => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);
+        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
+            => inner.UnpackDeliveredBatchAsync(scope, messages, requestId, ct);
     }
 
     // ---- the back-off schedule ----------------------------------------------------------------

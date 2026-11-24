@@ -296,19 +296,19 @@ internal sealed class FakePickupExchange : IMediatorExchange
         return await Unpacker(text, ct);
     }
 
-    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
     {
         lock (_gate)
-            _batches.Add((requestId, payloads.Count));
+            _batches.Add((requestId, messages.Count));
         if (Budgeted is { } budgeted)
         {
-            var opened = await budgeted.UnpackAllAsync(payloads, requestId, ct);
+            var opened = await budgeted.UnpackAllAsync(scope, messages, requestId, ct);
             AfterBatchUnpack?.Invoke();
             return opened;
         }
-        var outcomes = new List<DeliveredOutcome>(payloads.Count);
-        foreach (var payload in payloads)
-            outcomes.Add(await UnpackDeliveredAsync(payload, ct));
+        var outcomes = new List<DeliveredOutcome>(messages.Count);
+        foreach (var message in messages)
+            outcomes.Add(await UnpackDeliveredAsync(message.Payload, ct));
         AfterBatchUnpack?.Invoke();
         return outcomes;
     }
