@@ -214,13 +214,17 @@ public sealed class PickupClientLiveRobustnessQa2Tests
         PickupE2E.ShouldBeAlicesNote(item, alice, recipient, m1);
 
         store.FailNext();
+        var mark = time.Mark();
         var next = stream.MoveNextAsync().AsTask();
         await MediatorTestServer.WaitUntilAsync(() => store.Acks.Count == 1, "the acknowledgement reached the store, which failed it");
-        // The mediator answers nothing; the acknowledgement times out on the client's clock.
-        await time.WaitForScheduledTimersAsync(1, MediatorTestServer.Timeout);
+        // The mediator answers nothing; the acknowledgement times out on the client's clock. The
+        // rendezvous is that request's own deadline, and then the back-off's alarm: the next cycle's
+        // alarm stays scheduled meanwhile (#111), so "a timer is scheduled" is no rendezvous.
+        await time.WaitForTimerAsync(mark, TimeSpan.FromSeconds(30), MediatorTestServer.Timeout);
+        mark = time.Mark();
         time.Advance(TimeSpan.FromSeconds(30));
         await MediatorTestServer.WaitUntilAsync(() => mediator.Logs.Entries.Any(e => e.Contains("(messages-received) failed (TimeoutException)")), "the failed acknowledgement put the stream into its back-off");
-        await Qa2.StreamIdleAsync(harness, time);
+        await time.WaitForTimerAsync(mark, LiveBackoff, MediatorTestServer.Timeout);
         time.Advance(LiveBackoff);
         await MediatorTestServer.WaitUntilAsync(() => store.Acks.Count >= 2, "the acknowledgement was sent again after the back-off");
         await Qa2.StoreHoldsAsync(mediator, 0, "the retried acknowledgement removed m1");

@@ -11,9 +11,9 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// ADV-4, the last red-team pass of #96, scoped to the live-stream fixes of fix round 3
-/// (<c>b87c85e</c>): drain rounds and pushes take turns (ADV3-1), and a clock reading lower than the
-/// one a point was set at counts as due (ADV3-5). Driven by the fake exchange and manual clocks;
-/// nothing sleeps (L-044).
+/// (<c>b87c85e</c>): drain rounds and pushes take turns (ADV3-1), and how the stream's clock decides
+/// what is due (ADV3-5; since #111 every "due" is an alarm the stream arms, and no clock reading is
+/// compared). Driven by the fake exchange and manual clocks; nothing sleeps (L-044).
 /// </summary>
 public sealed class PickupClientLiveAdv4Tests
 {
@@ -179,20 +179,19 @@ public sealed class PickupClientLiveAdv4Tests
     // ---- ADV3-5: the clock -----------------------------------------------------------------------
 
     /// <summary>
-    /// ADV4-4 (defect, Low; needs a host <see cref="TimeProvider"/> whose readings go lower on
-    /// consecutive reads). Property broken — <see cref="LiveDeliveryStream"/> remarks: "A reading
-    /// lower than that one ... counts as due, at the cost of one early cycle, retry or flush".
+    /// ADV4-4 (was a defect, Low; fixed in #111: every "due" is the firing of an alarm the stream
+    /// armed, and no clock reading is compared, so a host <see cref="TimeProvider"/> whose readings go
+    /// lower on consecutive reads changes no decision). Property checked — <see cref="LiveDeliveryStream"/>
+    /// remarks: a host clock "whose readings keep going lower, costs nothing: no early cycle, retry or
+    /// flush, no storm".
     /// <para>
-    /// Attack: every decision takes a fresh reading and treats any reading below the stored one as
-    /// due. A clock that reads lower each time it is read (one tick per read here; a wall-clock
-    /// based provider being slewed or corrected backwards, a buggy virtualised clock) makes the
-    /// next cycle due on every pass of the loop, before the stream looks at its buffered items, the
-    /// mailbox or the drain: it sends <c>live-delivery-change</c> in a tight loop, never drains and
-    /// never yields the message that was pushed. Before the fix the same clock made the stream never
-    /// poll again; now it storms.
+    /// The host clock reads one tick lower each time it is read (a wall-clock based provider being
+    /// slewed or corrected backwards, a buggy virtualised clock), and no timer moves. Checked: the
+    /// stream sends one <c>live-delivery-change</c> at the start, drains, and yields the message
+    /// pushed meanwhile.
     /// </para>
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111: a host TimeProvider whose readings keep going lower makes every pass find the next cycle due (ADV4-4).")]
+    [Fact]
     public async Task ADV4_4_a_clock_whose_readings_keep_going_lower_makes_the_stream_send_live_delivery_change_in_a_tight_loop()
     {
         var clock = new BackwardTimeProvider();
@@ -234,12 +233,12 @@ public sealed class PickupClientLiveAdv4Tests
     }
 
     /// <summary>
-    /// ADV4-4, the back-off side of the same rule: with a clock that reads lower right after the
-    /// back-off was set, the back-off (1 s, doubling) is skipped every time, so five failed attempts
-    /// follow each other at once and the stream ends with the fifth instead of riding out a
-    /// mediator that is unreachable for a few seconds.
+    /// ADV4-4, the back-off side of the same rule (fixed in #111): with a clock that reads lower
+    /// right after the back-off was set, the back-off (1 s, doubling) still lasts until its alarm
+    /// fires, so a mediator that is unreachable for a moment gets one attempt and a pause, not
+    /// attempts back to back that end the stream.
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111: a host TimeProvider whose readings keep going lower skips every back-off (ADV4-4).")]
+    [Fact]
     public async Task ADV4_4_a_clock_whose_readings_keep_going_lower_skips_every_back_off_and_ends_the_stream_at_once()
     {
         var clock = new BackwardTimeProvider();
@@ -249,7 +248,10 @@ public sealed class PickupClientLiveAdv4Tests
         {
             if (!r.Live)
                 return Task.FromResult(Status(r, live: false));
-            Interlocked.Increment(ref attempts);
+            // The brake: a stream that keeps trying with no pause would never return to the test
+            // (its attempts are synchronous here), so the 50th attempt ends it at once.
+            if (Interlocked.Increment(ref attempts) >= 50)
+                return Task.FromException<InboundMessageSnapshot>(new InvalidDataException("brake: the stream kept trying"));
             return Task.FromException<InboundMessageSnapshot>(new TimeoutException("the mediator does not answer"));
         });
         var client = new PickupClient(new SteppedExchange(exchange, clock), logger: null);
@@ -264,7 +266,7 @@ public sealed class PickupClientLiveAdv4Tests
         var sent = Volatile.Read(ref attempts);
         if (endedAtOnce)
         {
-            await FluentActions.Awaiting(() => move).Should().ThrowAsync<TimeoutException>();
+            await FluentActions.Awaiting(() => move).Should().ThrowAsync<Exception>();
             await stream.DisposeAsync();
         }
         else
@@ -278,11 +280,13 @@ public sealed class PickupClientLiveAdv4Tests
 
     /// <summary>
     /// ADV3-5 held (regression): a clock that steps back an hour, forward two, and back one again
-    /// costs one early cycle per step and nothing more — no storm, every pushed message arrives, and
-    /// a stream left alone afterwards sends nothing until its interval passes.
+    /// costs nothing — no extra cycle, no storm, every pushed message arrives, and a stream left
+    /// alone afterwards sends nothing until its interval passes. Updated in #111: the stream decides
+    /// "due" by alarms, so a step no longer costs one early cycle (it did when "due" was a clock
+    /// reading below the one a point was set at).
     /// </summary>
     [Fact]
-    public async Task A_clock_that_steps_back_forward_and_back_again_costs_one_early_cycle_per_step()
+    public async Task A_clock_that_steps_back_forward_and_back_again_costs_no_extra_cycle()
     {
         var clock = new SteppingTimeProvider();
         var exchange = new FakePickupExchange(time: null) { Route = WebSocketRoute };
@@ -311,9 +315,9 @@ public sealed class PickupClientLiveAdv4Tests
         var waiting = stream.MoveNextAsync().AsTask();
         await clock.Inner.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
         var types = Types(exchange);
-        types.Count(t => t == LiveOn).Should().Be(4, "one cycle at the start and one early cycle per step: {0}", string.Join(", ", types));
-        types.Count(t => t == Drain).Should().Be(4);
-        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q2", "q3", "q4" }, "a step makes a flush due early, never twice and never never");
+        types.Count(t => t == LiveOn).Should().Be(1, "one cycle at the start, and a step of the clock costs no cycle: {0}", string.Join(", ", types));
+        types.Count(t => t == Drain).Should().Be(1);
+        exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q2", "q3", "q4" }, "a step makes no flush due early or late: the four are acknowledged once nothing is ready");
         await StopAsync(stream, waiting, cts);
     }
 

@@ -260,6 +260,9 @@ public sealed class PickupV4LiveEndToEndTests
 
         using var cts = new CancellationTokenSource();
         var stream = harness.Pickup.ReceiveLiveAsync(mediator.Did, bob.Did, harness.WebSocketEndpoint, cts.Token).GetAsyncEnumerator();
+        // The next cycle's alarm is armed when the first drain ends (#111), before m1 is pushed: the
+        // mark for it is taken before the stream starts.
+        var mark = time.Mark();
         var first = PickupE2E.MoveNext(stream);
         await observer.WaitForAsync(bob.Did, r => r.Kind == "4.0/delivery-request", "the stream's first drain asked");
         var m1 = await PickupE2E.SendAsync(mediator, alice, recipient, "m1");
@@ -276,10 +279,9 @@ public sealed class PickupV4LiveEndToEndTests
         await mediator.PushesIdleAsync();
         mediator.PushOutcome(PushOutcomes.PushedLive).Should().Be(1, "no live session is left for Bob: m2 waits in the queue");
 
-        var mark = time.Mark();
         var next = PickupE2E.MoveNext(stream);
         await Qa2.StoreHoldsAsync(mediator, 1, "m1 was acknowledged");
-        await time.WaitForTimerAsync(mark, Poll, MediatorTestServer.Timeout);
+        await time.WaitForTimerAsync(mark, Poll, MediatorTestServer.Timeout); // the next cycle's alarm
         await MediatorTestServer.WaitUntilAsync(() => harness.Channel.PendingCount == 0, "nothing is waiting for an answer");
         next.IsCompleted.Should().BeFalse();
         time.Advance(Poll);

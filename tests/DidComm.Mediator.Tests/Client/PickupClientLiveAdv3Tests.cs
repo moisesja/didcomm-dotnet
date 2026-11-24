@@ -48,10 +48,17 @@ public sealed class PickupClientLiveAdv3Tests
         exchange.UseBudget(Budget);
         // Queued before the stream started (or delayed by its sender, or its push dropped): only a drain reaches it.
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("queued-1", "ok:queued-1")), r => Status(r));
+        // Each slow push signals once its opening has started: its budget and its share exist then.
+        // That is the rendezvous, not a count of scheduled timers: the next cycle's alarm and the
+        // flush age are scheduled meanwhile (#111).
+        var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
         exchange.Unpacker = async (text, ct) =>
         {
             if (text.StartsWith("stall:", StringComparison.Ordinal))
+            {
+                Volatile.Read(ref stalled[0]).TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, ct); // the attacker's DID never resolves; the token is honoured
+            }
             return DefaultOutcome(text);
         };
         var cycles = 0;
@@ -75,17 +82,19 @@ public sealed class PickupClientLiveAdv3Tests
             // push (s0, pushed while live mode went on), so the queued message is the first item.
             (await PickupTest.Within(move)).Should().BeTrue();
             stream.Current.Id.Should().Be("queued-1");
+            Volatile.Write(ref stalled[0], new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
             move = stream.MoveNextAsync().AsTask();
 
             for (var i = 0; i < rounds; i++)
             {
-                // The push being opened: its budget and its message's share.
-                await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout);
+                // The push being opened: its budget and its message's share exist.
+                await Volatile.Read(ref stalled[0]).Task.WaitAsync(PickupTest.Timeout);
                 // The attacker's next message arrives while this one is still being opened.
                 exchange.Registration!.TryPush(Push(($"s{i + 1}", $"stall:s{i + 1}"))).Should().BeTrue();
                 exchange.Clock.Advance(Budget);
                 (await PickupTest.Within(move)).Should().BeTrue();
                 items.Add(stream.Current);
+                Volatile.Write(ref stalled[0], new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
                 move = stream.MoveNextAsync().AsTask();
             }
 
@@ -168,10 +177,16 @@ public sealed class PickupClientLiveAdv3Tests
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
+        // "slow" signals once its opening has started (its budget and its share exist then); the next
+        // cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no rendezvous (#111).
+        var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.Unpacker = async (text, ct) =>
         {
             if (text.StartsWith("stall:", StringComparison.Ordinal))
+            {
+                stalled.TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
             return DefaultOutcome(text);
         };
         exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
@@ -186,7 +201,7 @@ public sealed class PickupClientLiveAdv3Tests
         var move = stream.MoveNextAsync().AsTask();
         try
         {
-            await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // "slow" is being opened
+            await stalled.Task.WaitAsync(PickupTest.Timeout); // "slow" is being opened
             var accepted = Enumerable.Range(0, 1000).Count(i => exchange.Registration!.TryPush(Push(($"p{i}", $"ok:p{i}"))));
             accepted.Should().Be(LiveRegistration.PushCapacity);
 
@@ -217,8 +232,15 @@ public sealed class PickupClientLiveAdv3Tests
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
+        // Every worker signals once its message's opening has started (the budget and that share exist
+        // then); the next cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no
+        // rendezvous (#111).
+        var entered = 0;
+        var allEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.Unpacker = async (text, ct) =>
         {
+            if (Interlocked.Increment(ref entered) == DeliveredMessageUnpacker.FetchConcurrency)
+                allEntered.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return DefaultOutcome(text);
         };
@@ -231,7 +253,7 @@ public sealed class PickupClientLiveAdv3Tests
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
         var move = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1 + DeliveredMessageUnpacker.FetchConcurrency, PickupTest.Timeout);
+        await allEntered.Task.WaitAsync(PickupTest.Timeout);
 
         await StopAsync(stream, move, cts);
 

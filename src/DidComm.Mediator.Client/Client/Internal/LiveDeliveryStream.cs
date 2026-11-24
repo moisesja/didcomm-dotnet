@@ -1,5 +1,8 @@
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using System.Security.Cryptography;
+using System.Text;
 using DidComm.Exceptions;
 using DidComm.Mediator.Pickup;
 using DidComm.Messages;
@@ -9,7 +12,7 @@ namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
 /// One <see cref="PickupClient.ReceiveLiveAsync"/> enumeration (#96 design §4.8 as amended by
-/// orchestrator note R-2). Owner: engineer C.
+/// orchestrator note R-2; its scheduling simplified in #111). Owner: engineer C.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -22,24 +25,49 @@ namespace DidComm.Mediator.Client.Internal;
 /// acknowledged.
 /// </para>
 /// <para>
+/// <strong>One loop, one rule.</strong> The stream is in one of three phases — idle, draining or
+/// backing off — and has three alarms (<see cref="Alarm"/>): the next cycle, the flush age and the
+/// give-up point. Each pass of its loop asks one function what to do next (in this order: flush
+/// what was taken, start a cycle, yield an opened message, run a drain round when no push is owed
+/// its turn, take a waiting push, run a drain round) and does it; when the answer is "nothing", it
+/// waits, and the wait returns without awaiting exactly when that same function has something to
+/// do. Every action changes the state that made it due, so the loop never spins.
+/// </para>
+/// <para>
 /// <strong>Cycle.</strong> <c>live-delivery-change{true}</c> → <c>status</c>, then a drain
-/// (<c>delivery-request{10}</c> until a <c>status</c> — under 4.0 until an empty <c>delivery</c> —
-/// at most 50 rounds). Live mode is turned on
-/// before the drain, so a message that arrives between the two is pushed (it is after the
-/// mediator's arrival mark) or drained, never neither. The cycle runs at the start, one
-/// <see cref="MediatorClientOptions.LivePollInterval"/> after the previous cycle's drain ended, on
-/// the monotonic clock (which also picks up delayed messages, never pushed when they fall due, and
-/// recovers a dropped connection), and after a failed step once its back-off has passed (1 s,
-/// doubling to 30 s). A cycle that has started is never pre-empted: it runs until its drain ends or
-/// one of its steps fails (R1-1). The mediator has no scheduler for due messages, now or later
-/// (owner decision D2 on #88, 2026-11-14), so this polling is the permanent design, not a stopgap.
-/// Only a failure a retry can fix is retried (<see cref="Retryable"/>); once the stream's steps have
-/// kept failing for longer than <see cref="MediatorClientOptions.RequestTimeout"/> plus
-/// <see cref="GiveUpMargin"/> (60 s by default) the next failure ends it with its exception
-/// (ADV5-2), and any other failure (a <see cref="MediationProtocolException"/> such as live mode not
-/// supported, a pack-stage error such as <see cref="SecretNotFoundException"/>) ends it at once.
-/// While a back-off lasts nothing is sent, acknowledgements included. The run of failures ends only
-/// when a drain completes (ADV5-3, a known limit deferred to #111).
+/// (<c>delivery-request{10}</c> rounds; see "The drain's end"). Live mode is turned on before the
+/// drain, so a message that arrives between the two is pushed (it is after the mediator's arrival
+/// mark) or drained, never neither. The cycle runs at the start, one
+/// <see cref="MediatorClientOptions.LivePollInterval"/> after the previous cycle's drain ended (which
+/// also picks up delayed messages, never pushed when they fall due, and recovers a dropped
+/// connection), and after a failed step once its back-off has passed (1 s, doubling to 30 s). A
+/// cycle that has started is never pre-empted: it runs until its drain ends or one of its steps
+/// fails, and the alarm of the next cycle is armed only then, never while a drain runs (R1-1). The
+/// mediator has no scheduler for due messages, now or later (owner decision D2 on #88,
+/// 2026-11-14), so this polling is the permanent design, not a stopgap. Only a failure a retry can
+/// fix is retried (<see cref="Retryable"/>); any other failure (a
+/// <see cref="MediationProtocolException"/> such as live mode not supported, a pack-stage error such
+/// as <see cref="SecretNotFoundException"/>) ends the stream at once. While a back-off lasts nothing
+/// is sent, acknowledgements included.
+/// </para>
+/// <para>
+/// <strong>The run of failures (ADV5-2, ADV5-3).</strong> Failed steps form a run: its count sets the
+/// back-off, and its first failure arms a give-up alarm of
+/// <see cref="MediatorClientOptions.RequestTimeout"/> plus <see cref="GiveUpMargin"/> (60 s by
+/// default). A retryable failure after that alarm has fired ends the stream with its exception;
+/// earlier ones back off. Progress ends the run (the count starts again and the give-up alarm is let
+/// go): a drain that ends, a delivery — a drain round's answer or a push — that brings at least one
+/// message this stream neither holds nor has yielded as a failure in the current drain, or an
+/// acknowledgement the mediator accepted (under 4.0: sent). So failures separated by progress never
+/// add up to a give-up, however many there are.
+/// </para>
+/// <para>
+/// <strong>The drain's end (ADV5-4).</strong> A drain ends at a <c>status</c> (under 4.0 an empty
+/// <c>delivery</c>), at a failed step, after <see cref="MaxDrainRounds"/> rounds, or at a round that
+/// brings nothing new: every message in it is one the stream holds, or one it has already yielded as
+/// a failure in this drain. A mediator that does not set delivered messages aside answers every
+/// round with the head of its queue, so a message there that never opens is yielded once per cycle,
+/// at a cost of two delivery requests per cycle, instead of filling every round of every drain.
 /// </para>
 /// <para>
 /// <strong>Drain rounds and pushes take turns (ADV3-1).</strong> Once a cycle is draining, its next
@@ -52,14 +80,18 @@ namespace DidComm.Mediator.Client.Internal;
 /// its turn. A push that waits stays leased to the session at the mediator: nothing is lost.
 /// </para>
 /// <para>
-/// <strong>Clock.</strong> The cycle, the back-off and the 10-second flush age are judged by the time
-/// elapsed since the reading they were set at. A reading lower than that one (a host clock that
-/// stepped back: an NTP correction, a restored snapshot) counts as due, at the cost of one early
-/// cycle, retry or flush per step, instead of postponing them by the step (ADV3-5, L-060; the
-/// version cache treats such an age the same way). A known limit (ADV4-4, deferred to #111): a
-/// host <see cref="TimeProvider"/> whose readings keep going lower on every read (not one step
-/// back, which breaks its monotonic contract) makes every pass find the next cycle due, so the
-/// stream re-sends <c>live-delivery-change</c> in a tight loop and skips its back-offs.
+/// <strong>Clock (ADV3-5, ADV4-4).</strong> The stream never reads the clock to decide anything.
+/// The next cycle, the end of a back-off, the 10-second flush age and the give-up point are each an
+/// alarm the stream arms when the state that starts them begins (a drain ends, a step fails, the
+/// first message is taken, a run of failures starts), and each is due when its timer has fired. So
+/// a host clock that steps back or forward (an NTP correction, a restored snapshot), or whose
+/// readings keep going lower, costs nothing: no early cycle, retry or flush, no storm, and no
+/// postponement. Each arming is a new alarm and disposes the one it replaces; a replaced alarm's
+/// late callback sets only its own flag and changes no decision. The wait is one awaited operation —
+/// the mailbox's <c>WaitToReadAsync</c> on a wake source of its own — and the hand-over with an
+/// alarm cannot miss a firing: the wait publishes its fresh wake source and only then looks again at
+/// what is due; an alarm sets its flag and only then cancels the wake source it finds published.
+/// The mailbox runs no continuation inline, so no stream code runs on a timer thread.
 /// </para>
 /// <para>
 /// <strong>Items.</strong> Pushes are read from the mailbox (at most 10 messages per delivery). Each
@@ -69,29 +101,35 @@ namespace DidComm.Mediator.Client.Internal;
 /// yielded in delivery order. The consumer's time with an item is therefore never counted against
 /// the budget, and a message the budget runs out on is a failure item (a
 /// <see cref="TimeoutException"/> that names the drain round's request id; one from a push names no
-/// request, since a push answers none). A message this stream already
-/// holds (opened and not yet yielded, or taken and not yet acknowledged) is skipped and not opened
-/// again; one the duplicate filter remembers is acknowledged and not yielded; a failure is yielded,
-/// never acknowledged, and reported again when it comes back. A drain answered with a delivery in
-/// which no message has a usable id ends the stream (nothing in it could be acknowledged, so the
-/// drain would ask again for ever); such a push is ignored.
+/// request, since a push answers none). A delivery that brings nothing new is not opened at all.
+/// Otherwise a message this stream already holds (opened and not yet yielded, or taken and not yet
+/// acknowledged) is skipped and not opened again; one the duplicate filter remembers is
+/// acknowledged and not yielded; a failure is yielded, never acknowledged, and reported again when
+/// it comes back (in a later drain, or outside one). A drain answered with a delivery in which no
+/// message has a usable id ends the stream (nothing in it could be acknowledged, so the drain would
+/// ask again for ever); such a push is ignored.
 /// </para>
 /// <para>
 /// <strong>Acknowledgement (R-2).</strong> A yielded message is taken — added to the duplicate filter
 /// and queued for acknowledgement — when the consumer asks for the next item; taken messages are
-/// acknowledged when 10 are waiting, when nothing is ready, or when the oldest has waited 10 s, in
-/// <c>messages-received</c> messages of at most <see cref="MaxAckIds"/> ids each (several when more
-/// are waiting, as after an acknowledgement outage); under 4.0 each is sent one way
-/// (<see cref="IMediatorExchange.SendOneWayAsync"/>: nothing answers it, so only the send is
-/// waited for). When the enumeration ends for any reason the
-/// last yielded message is not taken; what was taken is acknowledged, live mode is turned off, both
-/// within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever the caller's token, and
-/// the mailbox is closed. Buffered or drained messages never yielded are never acknowledged.
+/// acknowledged when 10 are waiting, when nothing is ready, or once 10 s have passed since the first
+/// of them was taken (then until none wait), in <c>messages-received</c> messages of at most
+/// <see cref="MaxAckIds"/> ids each (several when more are waiting, as after an acknowledgement
+/// outage); under 4.0 each is sent one way (<see cref="IMediatorExchange.SendOneWayAsync"/>: nothing
+/// answers it, so only the send is waited for). When the enumeration ends for any reason the last
+/// yielded message is not taken; what was taken is acknowledged, live mode is turned off, both
+/// within one <see cref="MediatorClientOptions.RequestTimeout"/> whatever the caller's token, and the
+/// mailbox is closed. Buffered or drained messages never yielded are never acknowledged.
 /// </para>
 /// <para>
-/// <strong>Bounds.</strong> At most 10 opened messages ready (one delivery), the mailbox's 8 pushes, and at
-/// most 100 taken waiting for an acknowledgement (10 unless acknowledgements fail); the set of held
-/// ids is bounded by their sum. Not thread-safe: one consumer, as <c>IAsyncEnumerator</c> requires.
+/// <strong>Bounds.</strong> At most 10 opened messages ready (one delivery), the mailbox's 8 pushes,
+/// and at most 100 taken waiting for an acknowledgement (10 unless acknowledgements fail); the set of
+/// held ids is bounded by their sum. The failures yielded in the current drain are remembered as
+/// 128-bit keys of their attachment ids (compared exactly): added only while a drain runs and
+/// cleared when the next cycle starts, so at most (50 rounds + 50 pushes) × 10 — a drain has at
+/// most 50 rounds and takes at most one push per round. At most one timer per alarm, three in all,
+/// each disposed when it is replaced or let go, and when the stream ends. Not thread-safe: one
+/// consumer, as <c>IAsyncEnumerator</c> requires.
 /// </para>
 /// </remarks>
 internal sealed class LiveDeliveryStream
@@ -120,15 +158,16 @@ internal sealed class LiveDeliveryStream
     internal const int MaxTaken = 100;
 
     /// <summary>
-    /// How much longer than <see cref="MediatorClientOptions.RequestTimeout"/> the stream's steps may
-    /// keep failing before it ends (ADV5-2): the give-up point is <c>RequestTimeout</c> plus this
-    /// (60 s by default), so a transient condition that lasts one <c>RequestTimeout</c> — the busy
-    /// refusal, whose cause ends within one; a mediator restarting — clears before the stream gives
-    /// up, and the back-off really reaches <see cref="MaxBackoff"/> on the way.
+    /// How much longer than <see cref="MediatorClientOptions.RequestTimeout"/> a run of failures may
+    /// last before a retryable failure ends the stream (ADV5-2): the give-up alarm is armed at the
+    /// run's first failure for <c>RequestTimeout</c> plus this (60 s by default), so a transient
+    /// condition that lasts one <c>RequestTimeout</c> — the busy refusal, whose cause ends within one;
+    /// a mediator restarting — clears before the stream gives up, and the back-off really reaches
+    /// <see cref="MaxBackoff"/> on the way.
     /// </summary>
     internal static readonly TimeSpan GiveUpMargin = TimeSpan.FromSeconds(30);
 
-    /// <summary>Taken messages are acknowledged once the oldest has waited this long.</summary>
+    /// <summary>Taken messages are acknowledged once this long has passed since the first of them was taken.</summary>
     internal static readonly TimeSpan FlushAge = TimeSpan.FromSeconds(10);
 
     /// <summary>The first back-off after a failed step; it doubles up to <see cref="MaxBackoff"/>.</summary>
@@ -145,24 +184,28 @@ internal sealed class LiveDeliveryStream
     private readonly string _localDid;
     private readonly TimeProvider _time;
     private readonly MessagePickupVersion _version;
+    private readonly Action _poke;
+    private readonly Action? _onWakePublished;
 
     private readonly Queue<Opened> _ready = new();
     private readonly HashSet<string> _held = new(StringComparer.Ordinal);
-    private readonly List<(string Id, long At)> _taken = new();
+    private readonly List<string> _taken = new();
+    private readonly HashSet<UInt128> _reported = new();
 
     private PickupItem? _yielded;
     private UInt128 _yieldedKey;
-    private Due _nextCycle;
-    private Due _notBefore;
-    private bool _draining;
+    private Phase _phase = Phase.Idle;
+    private Alarm _cycle = Alarm.AlreadyFired; // the first cycle runs at the first MoveNextAsync
+    private Alarm? _flushAge;
+    private Alarm? _giveUp;
+    private CancellationTokenSource? _wake;
     private bool _pushTurn;
     private int _drainRounds;
     private int _failures;
-    private long? _failingSince;
     private bool _liveRequested;
     private bool _warnedNotLive;
 
-    private LiveDeliveryStream(IMediatorExchange exchange, PickupLog log, MediatorRoute route, LiveRegistration registration, string mediatorDid, string localDid, MessagePickupVersion version)
+    private LiveDeliveryStream(IMediatorExchange exchange, PickupLog log, MediatorRoute route, LiveRegistration registration, string mediatorDid, string localDid, MessagePickupVersion version, Action? onWakePublished)
     {
         _exchange = exchange;
         _version = version;
@@ -172,9 +215,43 @@ internal sealed class LiveDeliveryStream
         _mediatorDid = mediatorDid;
         _localDid = localDid;
         _time = exchange.Time;
-        // Both due at once: the first cycle runs at the first MoveNextAsync.
-        _nextCycle = DueIn(TimeSpan.Zero);
-        _notBefore = _nextCycle;
+        _poke = Poke;
+        _onWakePublished = onWakePublished;
+    }
+
+    /// <summary>Where the stream is in its cycle.</summary>
+    private enum Phase
+    {
+        /// <summary>Between cycles: the next one is due when the cycle alarm fires.</summary>
+        Idle,
+
+        /// <summary>A cycle turned live mode on and its drain runs; no cycle can come due.</summary>
+        Draining,
+
+        /// <summary>A step failed: nothing is sent until the cycle alarm (the back-off) fires.</summary>
+        BackingOff,
+    }
+
+    /// <summary>What the loop does next (<see cref="NextAction"/>).</summary>
+    private enum Step
+    {
+        /// <summary>Nothing: wait for a push, an alarm or the caller's cancellation.</summary>
+        None,
+
+        /// <summary>Send one <c>messages-received</c> of the oldest taken ids.</summary>
+        Flush,
+
+        /// <summary>Turn live mode on and start a drain.</summary>
+        Cycle,
+
+        /// <summary>Hand the next opened message to the consumer.</summary>
+        Yield,
+
+        /// <summary>Send one <c>delivery-request</c> of the drain.</summary>
+        DrainRound,
+
+        /// <summary>Take the next push from the mailbox.</summary>
+        Push,
     }
 
     /// <summary>How many taken messages wait for an acknowledgement (test seam).</summary>
@@ -194,19 +271,25 @@ internal sealed class LiveDeliveryStream
     /// <param name="serviceEndpointOverride">The caller's endpoint, or <c>null</c>.</param>
     /// <param name="resolveVersion">The client's version resolution (route, mediator DID, local DID, token): pinned, remembered or negotiated.</param>
     /// <param name="ct">The caller's cancellation; combined with the one given to <c>GetAsyncEnumerator</c>.</param>
+    /// <param name="onWakePublished">
+    /// Test seam, <c>null</c> in production: runs on the stream's thread each time its wait has
+    /// published a fresh wake source and before it looks again at what is due — the window in which
+    /// an alarm that fires must still wake the wait.
+    /// </param>
     internal static IAsyncEnumerable<PickupItem> ReceiveAsync(
         IMediatorExchange exchange, PickupLog log, string mediatorDid, string localDid, Uri? serviceEndpointOverride,
-        Func<MediatorRoute, string, string, CancellationToken, Task<MessagePickupVersion>> resolveVersion, CancellationToken ct)
+        Func<MediatorRoute, string, string, CancellationToken, Task<MessagePickupVersion>> resolveVersion, CancellationToken ct,
+        Action? onWakePublished = null)
     {
         ArgumentNullException.ThrowIfNull(exchange);
         ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(resolveVersion);
-        return RunAsync(exchange, log, mediatorDid, localDid, serviceEndpointOverride, resolveVersion, ct);
+        return RunAsync(exchange, log, mediatorDid, localDid, serviceEndpointOverride, resolveVersion, onWakePublished, ct);
     }
 
     private static async IAsyncEnumerable<PickupItem> RunAsync(
         IMediatorExchange exchange, PickupLog log, string mediatorDid, string localDid, Uri? serviceEndpointOverride,
-        Func<MediatorRoute, string, string, CancellationToken, Task<MessagePickupVersion>> resolveVersion,
+        Func<MediatorRoute, string, string, CancellationToken, Task<MessagePickupVersion>> resolveVersion, Action? onWakePublished,
         [EnumeratorCancellation] CancellationToken ct)
     {
         // Refused before anything is sent: a route that is not a WebSocket, or a second stream for
@@ -226,7 +309,7 @@ internal sealed class LiveDeliveryStream
             registration.Dispose();
             throw;
         }
-        var stream = new LiveDeliveryStream(exchange, log, route, registration, mediatorDid, localDid, version);
+        var stream = new LiveDeliveryStream(exchange, log, route, registration, mediatorDid, localDid, version, onWakePublished);
         log.LiveStarted();
         try
         {
@@ -257,106 +340,127 @@ internal sealed class LiveDeliveryStream
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            if (FlushDue())
+            switch (NextAction())
             {
-                // One messages-received of at most MaxAckIds ids; looked at again, so the rest of a
-                // longer backlog follows in further messages.
-                await FlushAsync(ct).ConfigureAwait(false);
-                continue;
+                case Step.Flush:
+                    // One messages-received of at most MaxAckIds ids; looked at again, so the rest of
+                    // a longer backlog follows in further messages.
+                    await FlushAsync(ct).ConfigureAwait(false);
+                    break;
+                case Step.Cycle:
+                    await CycleAsync(ct).ConfigureAwait(false);
+                    break;
+                case Step.Yield:
+                    if (Yield(_ready.Dequeue()) is { } item)
+                        return item;
+                    break;
+                case Step.DrainRound:
+                    await DrainRoundAsync(ct).ConfigureAwait(false);
+                    break;
+                case Step.Push:
+                    if (_registration.Pushes.TryRead(out var push))
+                    {
+                        _pushTurn = false;
+                        await LoadPushAsync(push, ct).ConfigureAwait(false);
+                    }
+                    break;
+                default:
+                    if (!await WaitAsync(ct).ConfigureAwait(false))
+                        return null;
+                    break;
             }
-            // A cycle that has started finishes before the next one is armed (R1-1): its drain runs
-            // to its end (a status, an empty delivery, MaxDrainRounds, or a failure), and only then
-            // is the next cycle scheduled, LivePollInterval after that end. So a mediator whose
-            // answers take longer than the interval still gets the drain's delivery requests, and
-            // a cycle coming due can never pre-empt a drain in progress.
-            if (!_draining && IsDue(_nextCycle))
-            {
-                await CycleAsync(ct).ConfigureAwait(false);
-                continue;
-            }
-            if (_ready.TryDequeue(out var opened))
-            {
-                if (Yield(opened) is { } item)
-                    return item;
-                continue;
-            }
-            // While a cycle drains, its rounds and the pushes take turns, a drain round first
-            // (ADV3-1): a waiting push is taken only after a drain round, so a steady flow of pushes
-            // that each take their whole budget to open cannot keep the drain from running, and a
-            // drain that keeps meeting slow messages cannot keep the pushes from their turn — no
-            // cycle can come due while a drain is in progress (R1-1), so nothing clears the owed
-            // push turn (ADV4-1).
-            var drainDue = _draining && IsDue(_notBefore);
-            if (drainDue && !_pushTurn)
-            {
-                await DrainRoundAsync(ct).ConfigureAwait(false);
-                continue;
-            }
-            if (_registration.Pushes.TryRead(out var push))
-            {
-                _pushTurn = false;
-                await LoadPushAsync(push, ct).ConfigureAwait(false);
-                continue;
-            }
-            if (drainDue)
-            {
-                await DrainRoundAsync(ct).ConfigureAwait(false);
-                continue;
-            }
-            if (!await WaitAsync(ct).ConfigureAwait(false))
-                return null;
         }
     }
 
-    // Taken messages wait for an acknowledgement until 10 are waiting, nothing is ready (neither a
-    // buffered message nor a push), or the oldest has waited 10 s; never during a back-off.
-    private bool FlushDue()
+    /// <summary>
+    /// What the loop does next: the one rule the loop dispatches on and the wait returns on (I-16).
+    /// Each step changes the state that made it due — a flush shrinks the taken list or starts a
+    /// back-off, a cycle starts a drain or a back-off, a yield dequeues, a drain round loads, ends the
+    /// drain or starts a back-off, a push is read off the mailbox — so the loop cannot spin.
+    /// </summary>
+    private Step NextAction()
     {
-        if (_taken.Count == 0 || !IsDue(_notBefore))
-            return false;
-        return _taken.Count >= FlushAt
-            || (_ready.Count == 0 && !_registration.Pushes.TryPeek(out _))
-            || HasPassed(_taken[0].At, FlushAge);
+        // Nothing is sent while a back-off lasts, acknowledgements included.
+        var backingOff = _phase == Phase.BackingOff && !_cycle.Fired;
+        var pushWaiting = _registration.Pushes.TryPeek(out _);
+        // Taken messages wait for an acknowledgement until 10 are waiting, nothing is ready (neither
+        // an opened message nor a push), or the flush age has passed since the first was taken.
+        if (!backingOff && _taken.Count > 0
+            && (_taken.Count >= FlushAt || (_ready.Count == 0 && !pushWaiting) || _flushAge is { Fired: true }))
+            return Step.Flush;
+        // A cycle that has started runs its drain to its end before the next one is due (R1-1):
+        // while draining, no cycle is armed at all.
+        if (_phase != Phase.Draining && _cycle.Fired)
+            return Step.Cycle;
+        if (_ready.Count > 0)
+            return Step.Yield;
+        // While a cycle drains, its rounds and the pushes take turns, a drain round first (ADV3-1):
+        // a waiting push is taken only after a drain round, so a steady flow of pushes that each take
+        // their whole budget to open cannot keep the drain from running, and a drain that keeps
+        // meeting slow messages cannot keep the pushes from their turn.
+        if (_phase == Phase.Draining && !_pushTurn)
+            return Step.DrainRound;
+        if (pushWaiting)
+            return Step.Push;
+        if (_phase == Phase.Draining)
+            return Step.DrainRound;
+        return Step.None;
     }
 
-    // Wait for a push, the next cycle, or the caller's cancellation. One awaited operation, so no
-    // task is left behind for nobody to observe: two tasks raced with WhenAny leave the loser
-    // running, and a mailbox the channel's disposal ends with an error after the race was decided
-    // would fault it unobserved. The read is woken by a timer of our own instead (OwnDeadline: its
-    // callback cannot carry an exception onto a timer thread), linked to the caller's token.
-    // true: something to do (a push, or the cycle is due); false: the mailbox was closed without an
+    // Wait for a push, an alarm or the caller's cancellation. One awaited operation, so no task is
+    // left behind for nobody to observe: two tasks raced with WhenAny leave the loser running, and a
+    // mailbox the channel's disposal ends with an error after the race was decided would fault it
+    // unobserved. The read is woken by a wake source of the stream's own, which an alarm cancels
+    // when it fires (Poke) and the caller's token cancels through a registration.
+    // true: something to do (a push, or an alarm fired); false: the mailbox was closed without an
     // error, and the stream ends; an error it was closed with (the channel's disposal) is thrown.
     private async Task<bool> WaitAsync(CancellationToken ct)
     {
-        // The point the loop acts on next: while a cycle drains, the back-off gate of its drain
-        // rounds; otherwise the next cycle (ADV5-1: waiting on the next cycle while draining span,
-        // since that point stays due for the whole drain). One reading: due (passed, or the clock
-        // stepped back below its reading), or the time left, then more than zero and at most it.
-        var point = _draining ? _notBefore : _nextCycle;
-        var elapsed = _time.GetElapsedTime(point.Since);
-        if (elapsed < TimeSpan.Zero || elapsed >= point.After)
+        // The wake hand-over (a Dekker pair; both writes are full fences): this side publishes its
+        // wake source, then looks at the alarms; an alarm sets its flag, then cancels the wake source
+        // it finds. Whatever the interleaving, either the look below sees the flag or the alarm
+        // cancels this wake source, so a firing is never slept through. The source is not disposed:
+        // a late poke may still cancel it, and a plain source holds nothing that needs disposing.
+        var wake = new CancellationTokenSource();
+        Interlocked.Exchange(ref _wake, wake);
+        _onWakePublished?.Invoke();
+        if (NextAction() != Step.None)
             return true;
-        using var wake = OwnDeadline.Start(_time, point.After - elapsed, ct);
-        // Read again once the timer exists: a clock that passed the point while the timer was being
-        // set (a manual clock moved in between) is seen here, not waited out for a whole interval.
-        if (IsDue(point))
-            return true;
+        using var caller = ct.UnsafeRegister(static state => GuardedDeadline.CancelQuietly((CancellationTokenSource)state!), wake);
         try
         {
             return await _registration.Pushes.WaitToReadAsync(wake.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (wake.IsCancellationRequested)
         {
             ct.ThrowIfCancellationRequested();
-            return true; // the timer: the cycle is due
+            return true; // an alarm fired
         }
+    }
+
+    // An alarm fired (on its timer's thread, after it set its flag): wake the wait, if one is
+    // published. Never throws and never waits; a source that is not being waited on any more is
+    // cancelled for nothing.
+    private void Poke()
+    {
+        if (Volatile.Read(ref _wake) is { } wake)
+            GuardedDeadline.CancelQuietly(wake);
+    }
+
+    // Arm the cycle alarm: the next cycle (one interval after a drain ended) or the end of a back-off.
+    // The alarm it replaces is disposed; its late callback, if any, sets only its own flag.
+    private void ArmCycle(TimeSpan due)
+    {
+        var replaced = _cycle;
+        _cycle = Alarm.Start(_time, due, _poke);
+        replaced.Dispose();
     }
 
     // ---- the cycle --------------------------------------------------------------------------
 
-    // The next cycle is not scheduled here, before the answer (R1-1: an answer slower than the
-    // interval would find it due on return, and the stream would send live-on for ever): it is
-    // scheduled when this cycle's drain ends (DrainDone), or after a back-off when a step fails.
+    // The next cycle is not armed here, before the answer (R1-1: an answer slower than the interval
+    // would find it due on return, and the stream would send live-on for ever): it is armed when
+    // this cycle's drain ends (DrainDone), or for a back-off when a step fails (Failed).
     private async Task CycleAsync(CancellationToken ct)
     {
         _liveRequested = true;
@@ -377,13 +481,10 @@ internal sealed class LiveDeliveryStream
             _warnedNotLive = true;
             _log.LiveNotInEffect(request.Id);
         }
-        _draining = true;
+        _phase = Phase.Draining;
+        _reported.Clear();
         _pushTurn = false; // the cycle's first drain round goes before any waiting push
         _drainRounds = 0;
-        // Live mode is on again: a back-off left over from the step that failed before this cycle
-        // no longer gates its drain rounds (ADV5-1: a clock stepped back into that back-off ran a
-        // cycle early and then left its drain gated, and the loop spun without awaiting).
-        _notBefore = DueIn(TimeSpan.Zero);
     }
 
     private async Task DrainRoundAsync(CancellationToken ct)
@@ -420,46 +521,50 @@ internal sealed class LiveDeliveryStream
         // Nothing in it can be acknowledged, so the next round would get it again: not retried.
         if (contents.Entries.Count == 0)
             throw DeliveryReader.NoUsableIds(request.Id, spec);
-        await LoadAsync(contents, request.Id, ct).ConfigureAwait(false);
+        // A round that brings nothing new ends the drain (ADV5-4): a mediator that does not set
+        // delivered messages aside would answer the next round with the same messages again.
+        if (!await LoadAsync(contents, request.Id, ct).ConfigureAwait(false))
+        {
+            DrainDone();
+            return;
+        }
         if (++_drainRounds >= MaxDrainRounds)
             DrainDone();
     }
 
-    // A cycle ran to its end: the failure count starts again, and the next cycle is due one
+    // A cycle ran to its end: the run of failures is over, and the next cycle is due one
     // LivePollInterval from now — measured from the end of this one, never from its start (R1-1).
+    // With Failed, the only place the cycle alarm is armed (I-17).
     private void DrainDone()
     {
-        _draining = false;
-        _failures = 0;
-        _failingSince = null;
-        _nextCycle = DueIn(_exchange.Options.LivePollInterval);
+        _phase = Phase.Idle;
+        ResetRun();
+        ArmCycle(_exchange.Options.LivePollInterval);
     }
 
-    // A step failed: back off (the next cycle re-arms live mode and drains again), or end the
-    // stream with this exception once the steps have kept failing for longer than RequestTimeout
-    // plus GiveUpMargin (ADV5-2: a count of five gave up after 1+2+4+8 = 15 s, before a busy refusal,
-    // whose cause ends within one RequestTimeout, could clear). A clock stepped back below the run's
-    // first failure starts the run again, so a step back never ends a stream.
+    // A step failed: back off (the next cycle re-arms live mode and drains again), or end the stream
+    // with this exception once the run's give-up alarm has fired (ADV5-2: a count of five gave up
+    // after 1+2+4+8 = 15 s, before a busy refusal, whose cause ends within one RequestTimeout, could
+    // clear). The run's first failure arms the give-up alarm; progress lets it go (ResetRun).
     private void Failed(string requestId, MediatorExchangeSpec spec, Exception error)
     {
+        if (_giveUp is { Fired: true })
+            ExceptionDispatchInfo.Capture(error).Throw();
         _failures++;
-        _draining = false;
-        if (_failingSince is not { } since)
-        {
-            _failingSince = Now;
-        }
-        else
-        {
-            var failingFor = _time.GetElapsedTime(since);
-            if (failingFor < TimeSpan.Zero)
-                _failingSince = Now;
-            else if (failingFor > _exchange.Options.RequestTimeout + GiveUpMargin)
-                ExceptionDispatchInfo.Capture(error).Throw();
-        }
+        _phase = Phase.BackingOff;
         var backoff = Backoff(_failures);
-        _notBefore = DueIn(backoff);
-        _nextCycle = _notBefore;
+        ArmCycle(backoff);
+        _giveUp ??= Alarm.Start(_time, _exchange.Options.RequestTimeout + GiveUpMargin, _poke);
         _log.CycleFailed(requestId, spec.Name, error, _failures, backoff);
+    }
+
+    // Progress (a drain that ended, a delivery that brought something new, an accepted
+    // acknowledgement): the run of failures is over, and its give-up alarm is let go (ADV5-3).
+    private void ResetRun()
+    {
+        _failures = 0;
+        _giveUp?.Dispose();
+        _giveUp = null;
     }
 
     /// <summary>1 s, doubling per failure in a row, at most 30 s.</summary>
@@ -532,14 +637,18 @@ internal sealed class LiveDeliveryStream
                 _log.PushIgnored("not a delivery");
             return;
         }
+        // A push is not a drain round: one that brings nothing new opens nothing, and ends nothing.
         await LoadAsync(DeliveryReader.ReadEntries(message.Attachments, MaxPerDelivery), requestId: null, ct).ConfigureAwait(false);
     }
 
-    // Take one delivery: skip the ids this stream already holds, open the rest up front under one
-    // budget (the consumer's time with an item never counts against it), and queue the results in
-    // delivery order. Failures are logged once per delivery, with the drain round's request id; a
-    // push's (requestId null) name none, in the log and in their TimeoutException alike.
-    private async Task LoadAsync(DeliveryContents contents, string? requestId, CancellationToken ct)
+    // Take one delivery. When it brings nothing new — every message in it is held by this stream or
+    // was yielded as a failure in this drain — nothing is opened and the answer is false. Otherwise
+    // it is progress (the run of failures is over): skip the ids this stream already holds, open the
+    // rest up front under one budget (the consumer's time with an item never counts against it), and
+    // queue the results in delivery order. Failures are logged once per delivery, with the drain
+    // round's request id; a push's (requestId null) name none, in the log and in their
+    // TimeoutException alike.
+    private async Task<bool> LoadAsync(DeliveryContents contents, string? requestId, CancellationToken ct)
     {
         if (contents.Excess > 0)
             _log.BeyondLimit(requestId, contents.Excess);
@@ -547,19 +656,28 @@ internal sealed class LiveDeliveryStream
             _log.UnusableIds(requestId, contents.Unusable);
         if (contents.RepeatedIds > 0)
             _log.RepeatedIds(requestId, contents.RepeatedIds);
+        var fresh = 0;
+        var held = 0;
+        foreach (var entry in contents.Entries)
+        {
+            // Every entry is looked at (no early exit); attachment ids compare exactly.
+            var isHeld = _held.Contains(entry.Id);
+            var isReported = _reported.Contains(ReportKey(entry.Id));
+            held += isHeld ? 1 : 0;
+            fresh += isHeld | isReported ? 0 : 1;
+        }
+        if (held > 0)
+            _log.HeldSkipped(held);
+        if (fresh == 0)
+            return false;
+        ResetRun();
+
         var taken = new List<DeliveryEntry>(contents.Entries.Count);
-        var skipped = 0;
         foreach (var entry in contents.Entries)
         {
             if (_held.Add(entry.Id))
                 taken.Add(entry);
-            else
-                skipped++;
         }
-        if (skipped > 0)
-            _log.HeldSkipped(skipped);
-        if (taken.Count == 0)
-            return;
 
         var inputs = new List<DeliveredInput>(taken.Count);
         foreach (var entry in taken)
@@ -583,18 +701,23 @@ internal sealed class LiveDeliveryStream
             _ready.Enqueue(new Opened(entry, outcome));
         }
         _log.UnpackFailures(requestId, failures);
+        return true;
     }
 
     // The next opened message: a failure is yielded and let go (it comes back and is reported
-    // again); a repeat of a message already returned from this mailbox is taken (acknowledged) and
-    // not yielded. The duplicate filter is asked now, not when the delivery was opened, so a copy
-    // that follows a message taken from the same delivery is recognised.
+    // again; while a drain runs, it is remembered for the rest of that drain, so a round that brings
+    // only it again ends the drain); a repeat of a message already returned from this mailbox is
+    // taken (acknowledged) and not yielded. The duplicate filter is asked now, not when the delivery
+    // was opened, so a copy that follows a message taken from the same delivery is recognised.
     private PickupItem? Yield(Opened opened)
     {
         var entry = opened.Entry;
         if (opened.Outcome is not { } outcome || outcome.Unpacked is not { } unpacked)
         {
             _held.Remove(entry.Id);
+            // Only while a drain runs: what a drain remembers is bounded by its rounds and its pushes.
+            if (_phase == Phase.Draining)
+                _reported.Add(ReportKey(entry.Id));
             return new PickupItem(entry.Id, unpacked: null, opened.Outcome?.Error ?? entry.Error);
         }
         if (_exchange.Duplicates.Contains(_localDid, outcome.DedupeKey))
@@ -606,6 +729,16 @@ internal sealed class LiveDeliveryStream
         _yielded = item;
         _yieldedKey = outcome.DedupeKey;
         return item;
+    }
+
+    // The key a failure is remembered by for the rest of a drain: SHA-256 truncated to 128 bits over
+    // the attachment id's exact UTF-8 bytes. Attachment ids are opaque and compare exactly (Message
+    // Pickup 3.0 L170, 4.0 L257): no case folding, which could merge two distinct ids.
+    private static UInt128 ReportKey(string attachmentId)
+    {
+        Span<byte> digest = stackalloc byte[32];
+        SHA256.HashData(Encoding.UTF8.GetBytes(attachmentId), digest);
+        return BinaryPrimitives.ReadUInt128BigEndian(digest[..16]);
     }
 
     /// <summary>A message of a delivery the stream took, opened (or not decodable: <see cref="Outcome"/> <c>null</c>, the entry's error).</summary>
@@ -622,17 +755,19 @@ internal sealed class LiveDeliveryStream
         _yielded = null;
     }
 
+    // Queue a taken id for acknowledgement; the first one taken arms the flush age.
     private void AddTaken(string id)
     {
         if (_taken.Count >= MaxTaken)
         {
             // Only while acknowledgements keep failing: the oldest is forgotten unacknowledged; it
             // comes back and the duplicate filter recognises it.
-            _held.Remove(_taken[0].Id);
+            _held.Remove(_taken[0]);
             _taken.RemoveAt(0);
             _log.TakenDropped(1);
         }
-        _taken.Add((id, Now));
+        _taken.Add(id);
+        _flushAge ??= Alarm.Start(_time, FlushAge, _poke);
     }
 
     // ---- acknowledgement and end --------------------------------------------------------------
@@ -654,13 +789,14 @@ internal sealed class LiveDeliveryStream
             return;
         }
         Acknowledged(ids.Length);
+        ResetRun();
     }
 
     /// <summary>
     /// The end of the enumeration, whatever ended it: acknowledge what was taken and turn live mode
     /// off, within one <see cref="MediatorClientOptions.RequestTimeout"/> independent of the caller's
-    /// token, then close the mailbox. Never throws: the enumeration's own outcome is what the consumer
-    /// sees.
+    /// token, then close the mailbox and let the alarms go. Never throws: the enumeration's own
+    /// outcome is what the consumer sees.
     /// </summary>
     private async Task EndAsync()
     {
@@ -705,6 +841,9 @@ internal sealed class LiveDeliveryStream
         {
             _log.LiveEnded(_taken.Count);
             _registration.Dispose();
+            _cycle.Dispose();
+            _flushAge?.Dispose();
+            _giveUp?.Dispose();
         }
     }
 
@@ -721,35 +860,21 @@ internal sealed class LiveDeliveryStream
         var count = Math.Min(_taken.Count, MaxAckIds);
         var ids = new string[count];
         for (var i = 0; i < count; i++)
-            ids[i] = _taken[i].Id;
+            ids[i] = _taken[i];
         return ids;
     }
 
+    // The oldest `count` taken ids were acknowledged; once none wait, the flush age is let go (the
+    // next one taken arms it again).
     private void Acknowledged(int count)
     {
         for (var i = 0; i < count; i++)
-            _held.Remove(_taken[i].Id);
+            _held.Remove(_taken[i]);
         _taken.RemoveRange(0, count);
-    }
-
-    // ---- time -------------------------------------------------------------------------------
-
-    private long Now => _time.GetTimestamp();
-
-    /// <summary>A point <see cref="After"/> past the clock reading <see cref="Since"/> (a <see cref="TimeProvider"/> timestamp).</summary>
-    /// <param name="Since">The reading it was set at.</param>
-    /// <param name="After">How long after that reading it is due.</param>
-    private readonly record struct Due(long Since, TimeSpan After);
-
-    private Due DueIn(TimeSpan after) => new(Now, after);
-
-    private bool IsDue(Due due) => HasPassed(due.Since, due.After);
-
-    // Whether `span` has passed since the reading `since`. A reading lower than `since` is a clock
-    // that stepped back: due at once, never postponed by the step (ADV3-5, L-060).
-    private bool HasPassed(long since, TimeSpan span)
-    {
-        var elapsed = _time.GetElapsedTime(since);
-        return elapsed < TimeSpan.Zero || elapsed >= span;
+        if (_taken.Count == 0)
+        {
+            _flushAge?.Dispose();
+            _flushAge = null;
+        }
     }
 }
