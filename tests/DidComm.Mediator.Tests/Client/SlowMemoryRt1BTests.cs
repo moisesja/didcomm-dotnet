@@ -119,6 +119,36 @@ public sealed class SlowMemoryRt1BTests
             HostRan.TotalMilliseconds, unpacker.SlowThreshold.TotalMilliseconds, unpacker.Memory.FirstPause.TotalMinutes);
     }
 
+    /// <summary>
+    /// D-2: the pause doubles each time a message is slow again. One slow episode seen by deliveries
+    /// of the same message that run at the same time (two fetch loops on one mailbox, or a fetch
+    /// beside a live stream) is one strike: after it the message is paused for the first pause, not
+    /// for a doubled one.
+    /// </summary>
+    [Fact(Skip = "RT1 defect: concurrent deliveries of one message each add a strike for the same slow episode")]
+    public async Task One_slow_episode_seen_by_concurrent_deliveries_of_the_same_message_pauses_it_for_the_first_pause_only()
+    {
+        const int concurrent = 4;
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
+        {
+            using (calls.Enter(TestJwe.LabelOf(packed), ct))
+                return await UnpackFakes.StallUntilCancelled(ct);
+        }, Budget, time);
+        var message = new[] { new DeliveredInput("alice-1", TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, "alice-1"))) };
+
+        var deliveries = Enumerable.Range(0, concurrent).Select(d => unpacker.UnpackAllAsync(Bob, message, $"request-{d}", default)).ToArray();
+        await calls.WaitForAsync(concurrent, RealTime);
+        time.Advance(Budget);
+        await Task.WhenAll(deliveries).WaitAsync(RealTime);
+
+        time.Advance(unpacker.Memory.FirstPause);
+        unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
+            "one slow episode is one strike, so the first pause ({0} min) has ended; {1} concurrent deliveries paused it for {2} min",
+            unpacker.Memory.FirstPause.TotalMinutes, concurrent, unpacker.Memory.PauseAfter(concurrent).TotalMinutes);
+    }
+
     // An honest message: its sender's DID resolves in 2 s on the manual clock, then it opens. The
     // returned task completes with the clock's reading when its host code starts.
     private static Func<string, CancellationToken, Task<DeliveredUnpack>> Honest(ManualTimeProvider time, out TaskCompletionSource<long> entered)
