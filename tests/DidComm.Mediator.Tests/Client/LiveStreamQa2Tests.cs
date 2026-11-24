@@ -118,19 +118,24 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     // ---- D-12, I-18: the run ----------------------------------------------------------------------
 
     /// <summary>
-    /// D-12 with <see cref="MediatorClientOptions.RequestTimeout"/> at 1 tick, 30 s and 10 min: a stream
+    /// D-12 with <see cref="MediatorClientOptions.RequestTimeout"/> at 1 tick, 30 s and 10 min (and at
+    /// 30 s with the clock's readings stepping back and forth, or going lower on every read): a stream
     /// whose live-on requests all fail retries after 1, 2, 4, 8, 16 and then every 30 s, and ends
     /// with the failure of the first attempt at or after RequestTimeout + 30 s from the run's first
     /// failure — not one attempt before.
     /// </summary>
     [Theory]
-    [InlineData(1L)]
-    [InlineData(30 * TimeSpan.TicksPerSecond)]
-    [InlineData(600 * TimeSpan.TicksPerSecond)]
-    public async Task A_run_of_failures_ends_the_stream_at_the_first_attempt_from_RequestTimeout_plus_30_s_and_not_before(long requestTimeoutTicks)
+    [InlineData(1L, ClockMode.Steady)]
+    [InlineData(30 * TimeSpan.TicksPerSecond, ClockMode.Steady)]
+    [InlineData(600 * TimeSpan.TicksPerSecond, ClockMode.Steady)]
+    [InlineData(30 * TimeSpan.TicksPerSecond, ClockMode.StepsBackAndForth)]
+    [InlineData(30 * TimeSpan.TicksPerSecond, ClockMode.ReadingsKeepFalling)]
+    public async Task A_run_of_failures_ends_the_stream_at_the_first_attempt_from_RequestTimeout_plus_30_s_and_not_before(long requestTimeoutTicks, ClockMode mode)
     {
         var requestTimeout = TimeSpan.FromTicks(requestTimeoutTicks);
         var exchange = new SimExchange(o => o.RequestTimeout = requestTimeout);
+        exchange.Clock.ReadingsKeepFalling = mode == ClockMode.ReadingsKeepFalling;
+        var waits = 0;
         var attempts = new List<TimeSpan>();
         exchange.Inner.On(MessagePickup.LiveDeliveryChangeType, r =>
         {
@@ -140,7 +145,12 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
             throw new TimeoutException($"attempt {attempts.Count}");
         });
         await using var driver = new StreamDriver(exchange);
-        await driver.RunAsync(() => false, TimeSpan.FromHours(1));
+        await driver.RunAsync(() => false, TimeSpan.FromHours(1), onWait: () =>
+        {
+            if (mode == ClockMode.StepsBackAndForth)
+                exchange.Clock.Step(++waits % 2 == 1 ? TimeSpan.FromHours(-1) : TimeSpan.FromHours(3));
+            return false;
+        });
 
         var giveUp = requestTimeout + LiveDeliveryStream.GiveUpMargin;
         var expected = new List<TimeSpan> { TimeSpan.Zero };

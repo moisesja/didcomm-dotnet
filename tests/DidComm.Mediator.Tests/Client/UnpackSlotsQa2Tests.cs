@@ -330,6 +330,7 @@ public sealed class UnpackSlotsQa2Tests
         var kinds = new[] { 'o', 'x', 'f', 'd', 's', 'l' };
         var random = new Random(2111);
         var deliveries = 0;
+        var ended = new Dictionary<string, int> { ["opened"] = 0, ["failed"] = 0, ["share"] = 0, ["budget"] = 0, ["refused"] = 0, ["caller"] = 0, ["shutdown"] = 0 };
         try
         {
             for (var round = 0; round < 250; round++)
@@ -368,7 +369,23 @@ public sealed class UnpackSlotsQa2Tests
                     await Task.Yield();
                 }
                 foreach (var batch in batches)
+                {
                     await ((Task)batch).ContinueWith(static _ => { }, TaskScheduler.Default).WaitAsync(RealTime);
+                    if (batch.IsCanceled)
+                    {
+                        ended[round % 5 == 2 ? "shutdown" : "caller"]++;
+                        continue;
+                    }
+                    foreach (var outcome in await batch)
+                    {
+                        var kind = outcome.Succeeded ? "opened"
+                            : IsRefusal(outcome, "capacity") ? "refused"
+                            : outcome.Error is TimeoutException t && t.Message.Contains("share", StringComparison.Ordinal) ? "share"
+                            : outcome.Error is TimeoutException ? "budget"
+                            : "failed";
+                        ended[kind]++;
+                    }
+                }
                 SpinWait.SpinUntil(() => reservations.Reserved == Volatile.Read(ref lateRunning), RealTime)
                     .Should().BeTrue("the reservations held are exactly the late calls still running (round {0}: {1} held, {2} running)", round, reservations.Reserved, Volatile.Read(ref lateRunning));
                 if (round % 25 == 24)
@@ -393,6 +410,7 @@ public sealed class UnpackSlotsQa2Tests
         Volatile.Read(ref max).Should().BeLessThanOrEqualTo(C);
         Volatile.Read(ref max).Should().BeGreaterThan(Four, "the run held many calls at once");
         deliveries.Should().Be(2000);
+        ended.Should().OnlyContain(e => e.Value > 0, "every way a call ends happened: {0}", string.Join(", ", ended.Select(e => $"{e.Key} {e.Value}")));
     }
 
     private static async Task<DeliveredUnpack> FailAfter(TimeSpan after, TimeProvider time, CancellationToken ct)
