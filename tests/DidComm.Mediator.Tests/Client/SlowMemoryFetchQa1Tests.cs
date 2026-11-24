@@ -377,6 +377,60 @@ public sealed class SlowMemoryFetchQa1Tests
         exchange.Unpacker.Memory.Count.Should().Be(1);
     }
 
+    /// <summary>
+    /// A mediator that repeats an attachment id inside one delivery: the message is handed to the
+    /// unpacker once (the first wins), so one delivery is one strike and its pause is the first one,
+    /// not a doubled one.
+    /// </summary>
+    [Fact]
+    public async Task An_id_repeated_inside_one_delivery_is_opened_and_struck_once()
+    {
+        var (exchange, _) = SlowSenderFetchQa1Tests.Setup(_ => Qa1Step.Stall, lease: null);
+        exchange.Wire.On(MessagePickup.DeliveryRequestType, r => FakePickupExchange.RawDelivery(r, new[]
+        {
+            FakePickupExchange.RawEntry("twice", Qa1.Anon("copy-1")),
+            FakePickupExchange.RawEntry("twice", Qa1.Anon("copy-2")),
+        }));
+        var client = exchange.Client();
+
+        await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 2));
+
+        exchange.Host.Calls.Labels.Should().Equal("copy-1");
+        exchange.Clock.Inner.Advance(T0);
+        var calls = exchange.Host.Calls.Count;
+        await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 2));
+        exchange.Host.Calls.Count.Should().Be(calls + 1, "its pause was the first one, so it is due after 10 minutes");
+    }
+
+    /// <summary>
+    /// I-9 on the fetch path: the caller cancels a fetch 10 s into its delivery, while four messages
+    /// run. The fetch ends cancelled, nothing is acknowledged, and none of the four is remembered,
+    /// so the next fetch opens them again.
+    /// </summary>
+    [Fact]
+    public async Task A_fetch_the_caller_cancels_while_messages_run_remembers_none_of_them_and_acknowledges_nothing()
+    {
+        var (exchange, mediator) = SlowSenderFetchQa1Tests.Setup(_ => Qa1Step.Stall, lease: null);
+        SlowSenderFetchQa1Tests.Queue(mediator, junk: 3, honestAt: 3);
+        exchange.Host.Calls.Count.Should().Be(0);
+        var client = exchange.Client();
+        using var cancel = new CancellationTokenSource();
+
+        var fetch = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 4, ct: cancel.Token);
+        await exchange.Host.Calls.WaitForAsync(4, Qa1Exchange.Guard);
+        exchange.Clock.Inner.Advance(TimeSpan.FromSeconds(10));
+        cancel.Cancel();
+        var ended = await Record.ExceptionAsync(() => fetch.WaitAsync(Qa1Exchange.Guard));
+
+        ended.Should().BeAssignableTo<OperationCanceledException>();
+        exchange.Unpacker.Memory.Count.Should().Be(0);
+        exchange.Wire.AcknowledgedIds.Should().BeEmpty();
+        var again = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 4);
+        await exchange.Host.Calls.WaitForAsync(8, Qa1Exchange.Guard);
+        exchange.Clock.Inner.Advance(B);
+        await again.WaitAsync(Qa1Exchange.Guard);
+    }
+
     // ---- clocks (L-060, I-12) -----------------------------------------------------------------------
 
     /// <summary>
