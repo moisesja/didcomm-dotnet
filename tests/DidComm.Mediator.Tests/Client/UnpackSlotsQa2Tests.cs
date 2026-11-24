@@ -247,12 +247,15 @@ public sealed class UnpackSlotsQa2Tests
             calls.Count.Should().Be(C, "no refused message started");
             unpacker.Reserved.Should().Be(C);
 
-            // One sender's lookups end: four reservations come back, and four messages of anyone open.
-            var firstSender = calls.Labels.First();
-            LookupOf(firstSender[..firstSender.LastIndexOf('-')]).TrySetResult(UnpackFakes.Opened("late"));
-            SpinWait.SpinUntil(() => unpacker.Reserved == C - Four, RealTime).Should().BeTrue();
-            (await Open(unpacker, bob, TestJwe.Anoncrypt("after-1"), TestJwe.Authcrypt("did:example:newcomer#key-1", "after-2"), TestJwe.Anoncrypt("after-3"), TestJwe.Authcrypt("did:example:alice#key-1", "after-4")))
-                .Should().OnlyContain(o => o.Succeeded);
+            // One sender's lookups end (as many as started for it, one to four): that many reservations
+            // come back, and that many messages of anyone open.
+            var first = calls.Labels.First();
+            var sender = first[..first.LastIndexOf('-')];
+            var released = calls.Labels.Count(l => l.StartsWith(sender + "-", StringComparison.Ordinal));
+            LookupOf(sender).TrySetResult(UnpackFakes.Opened("late"));
+            SpinWait.SpinUntil(() => unpacker.Reserved == C - released, RealTime).Should().BeTrue("{0} reservations came back", released);
+            var anyone = new[] { TestJwe.Anoncrypt("after-1"), TestJwe.Authcrypt("did:example:newcomer#key-1", "after-2"), TestJwe.Anoncrypt("after-3"), TestJwe.Authcrypt("did:example:alice#key-1", "after-4") };
+            (await Open(unpacker, bob, anyone.Take(released).ToArray())).Should().OnlyContain(o => o.Succeeded);
         }
         finally
         {

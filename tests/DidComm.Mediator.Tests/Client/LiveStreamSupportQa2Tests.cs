@@ -323,12 +323,14 @@ internal sealed class SimExchange : IMediatorExchange
     private int Waiting => _stalls.Values.Count(token => !token.IsCancellationRequested);
 
     // Every message the workers took has entered its host call, every worker that can take one holds
-    // one, and every call whose outcome is not recorded yet waits on the clock.
+    // one, and every call whose outcome is not recorded yet waits on the clock — at least one does:
+    // a batch whose every message has its outcome completes without the clock.
     private bool Settled(int n, int entered, long settled)
     {
         var e = HostCalls - entered;
         var s = (int)(Unpacker.Settled - settled);
-        return e == Math.Min(n, s + DeliveredMessageUnpacker.FetchConcurrency) && e - s == Waiting;
+        var waiting = Waiting;
+        return waiting > 0 && e == Math.Min(n, s + DeliveredMessageUnpacker.FetchConcurrency) && e - s == waiting;
     }
 
     private async Task<DeliveredUnpack> HostAsync(string packed, CancellationToken ct)
