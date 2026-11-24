@@ -28,10 +28,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// <strong>One loop, one rule.</strong> The stream is in one of three phases — idle, draining or
 /// backing off — and has three alarms (<see cref="Alarm"/>): the next cycle, the flush age and the
 /// give-up point. Each pass of its loop asks one function what to do next (in this order: flush
-/// what was taken, start a cycle, yield an opened message, run a drain round that is owed, take a
-/// waiting push, run a drain round) and does it; when the answer is "nothing", it waits, and the
-/// wait returns without awaiting exactly when that same function has something to do. Every action
-/// changes the state that made it due, so the loop never spins.
+/// what was taken, start a cycle, yield an opened message, run a drain round when no push is owed
+/// its turn, take a waiting push, run a drain round) and does it; when the answer is "nothing", it
+/// waits, and the wait returns without awaiting exactly when that same function has something to
+/// do. Every action changes the state that made it due, so the loop never spins.
 /// </para>
 /// <para>
 /// <strong>Cycle.</strong> <c>live-delivery-change{true}</c> → <c>status</c>, then a drain
@@ -128,8 +128,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// 128-bit keys of their attachment ids (compared exactly): added only while a drain runs and
 /// cleared when the next cycle starts, so at most (50 rounds + 50 pushes) × 10 — a drain has at
 /// most 50 rounds and takes at most one push per round. At most one timer per alarm, three in all,
-/// each disposed when it is replaced and when the stream ends. Not thread-safe: one consumer, as
-/// <c>IAsyncEnumerator</c> requires.
+/// each disposed when it is replaced or let go, and when the stream ends. Not thread-safe: one
+/// consumer, as <c>IAsyncEnumerator</c> requires.
 /// </para>
 /// </remarks>
 internal sealed class LiveDeliveryStream
