@@ -591,15 +591,8 @@ internal sealed class StreamDriver : IAsyncDisposable
         }
     }
 
-    /// <summary>How many failures the stream remembers for the current drain (its <c>_reported</c> set).</summary>
-    public int Reported
-    {
-        get
-        {
-            var member = typeof(LiveDeliveryStream).GetField("_reported", BindingFlags.Instance | BindingFlags.NonPublic)!;
-            return ((HashSet<UInt128>)member.GetValue(Stream)!).Count;
-        }
-    }
+    /// <summary>How many ids the stream remembers for the current drain: yielded as failures, or taken (its test seam).</summary>
+    public int Reported => Stream.DoneThisDrainCount;
 
     /// <summary>Stop the stream: cancel, observe the pending move, dispose (which acknowledges and turns live mode off).</summary>
     public async ValueTask DisposeAsync()

@@ -184,14 +184,16 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     /// <summary>
     /// I-18 (ADV5-3): five failures (at 0, 1, 3, 7 and 15 s) and then progress at 15 or 31 s. Progress
     /// lets the run's give-up alarm go: the stream does not end at the old run's give-up point (61 s)
-    /// but at the first attempt 60 s after the new run's first failure (92 s; 152 s after a drain's
-    /// end, whose next cycle is an interval later). A push with nothing usable is not progress: the
-    /// stream ends at 61 s.
+    /// but at the first attempt 60 s after the first failure that follows the progress. After a
+    /// request that succeeded the back-off starts again at 1 s, so that attempt is at 92 s (152 s after
+    /// a drain's end, whose next cycle is an interval later). After a push the back-off goes on (owner
+    /// decision B1: 30 s pauses from 31 s), so it is at 91 s. A push with nothing usable is not
+    /// progress: the stream ends at 61 s.
     /// </summary>
     [Theory]
     [InlineData(Progress.DrainEnd, 152)]
     [InlineData(Progress.DrainRoundWithNewMessage, 92)]
-    [InlineData(Progress.PushWithNewMessage, 92)]
+    [InlineData(Progress.PushWithNewMessage, 91)]
     [InlineData(Progress.AcceptedAcknowledgement, 92)]
     [InlineData(Progress.PushWithNothingUsable, 61)]
     public async Task Progress_lets_the_give_up_alarm_go_and_the_next_failure_starts_a_new_run(Progress progress, int endsAtSeconds)
@@ -239,10 +241,11 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// R-11, pinned and measured: every request fails, and a push brings a new message every P
-    /// seconds. Each such push is progress, so while pushes come at least once a minute the stream
-    /// never gives up; its requests stay at most one per first back-off (1 s). With P = 61 s it gives
-    /// up at 61 s, as a stream without pushes does.
+    /// R-11 (owner decision B1), pinned and measured: every request fails, and a push brings a new
+    /// message every P seconds. A push lets the give-up alarm go but keeps the back-off, so while
+    /// pushes come at least once a minute the stream never gives up, and its requests follow the
+    /// back-off whatever P is: after 1, 2, 4, 8 and 16 s, then one every 30 s (24 in ten minutes). With
+    /// P = 61 s it gives up at 61 s, as a stream without pushes does.
     /// </summary>
     [Theory]
     [InlineData(1, false)]
@@ -272,8 +275,13 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
             driver.EndedAt.Should().Be(TimeSpan.FromSeconds(61));
             return;
         }
-        driver.EndedAt.Should().BeNull("each push with a new message ends the run of failures (R-11)");
-        sent.Should().BeLessThanOrEqualTo((int)(TenMinutes / LiveDeliveryStream.FirstBackoff) + 1, "every failed request backs off at least the first back-off");
+        driver.EndedAt.Should().BeNull("each push with a new message lets the give-up alarm go (R-11)");
+        var expected = new List<TimeSpan> { TimeSpan.Zero };
+        while (expected[^1] + LiveDeliveryStream.Backoff(expected.Count) <= TenMinutes)
+            expected.Add(expected[^1] + LiveDeliveryStream.Backoff(expected.Count));
+        exchange.Log.Where(r => r.At <= TenMinutes).Select(r => r.At).Should().Equal(expected,
+            "one request per back-off, and the back-off grows to 30 s however often pushes come (owner decision B1)");
+        sent.Should().Be(24);
         driver.Stream.TakenCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken);
         driver.Stream.HeldCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken + LiveRegistration.PushCapacity + LiveDeliveryStream.MaxPerDelivery);
     }
@@ -382,7 +390,7 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     /// and acknowledged in this drain), a round of them brings nothing new. Each poll should open each
     /// message at most once and send at most two delivery requests; nothing new is yielded either way.
     /// </summary>
-    [Fact(Skip = "QA defect: a drain round made only of messages already acknowledged in the same drain does not end the drain")]
+    [Fact]
     public async Task At_a_mediator_that_keeps_acknowledged_messages_each_poll_opens_each_message_at_most_once()
     {
         var exchange = new SimExchange();
