@@ -44,6 +44,25 @@ public sealed class SlowMemoryTests
         }
     }
 
+    [Fact]
+    public void A_strike_while_the_message_is_still_paused_adds_nothing_and_one_after_the_pause_doubles_it()
+    {
+        var time = new ManualTimeProvider();
+        var memory = new SlowMemory(time, T0, Cap, q: 4, r: 4);
+        memory.Strike(Bob, "q1");
+        time.Advance(T0 / 2);
+        memory.Strike(Bob, "q1"); // the same slow episode, seen by a delivery that ran at the same time
+
+        time.Advance(T0 / 2);
+        Held(memory, "q1").Should().BeFalse("one episode is one strike: the first pause, from the first strike, has ended");
+
+        memory.Strike(Bob, "q1"); // slow again after its pause
+        time.Advance(2 * T0 - TimeSpan.FromTicks(1));
+        Held(memory, "q1").Should().BeTrue("the second episode doubles the pause");
+        time.Advance(TimeSpan.FromTicks(1));
+        Held(memory, "q1").Should().BeFalse();
+    }
+
     // ---- M2: a clock that steps back never holds a message past due ----
 
     [Fact]

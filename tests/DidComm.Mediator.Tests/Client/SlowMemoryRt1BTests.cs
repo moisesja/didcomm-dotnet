@@ -125,7 +125,7 @@ public sealed class SlowMemoryRt1BTests
     /// beside a live stream) is one strike: after it the message is paused for the first pause, not
     /// for a doubled one.
     /// </summary>
-    [Fact(Skip = "RT1 defect: concurrent deliveries of one message each add a strike for the same slow episode")]
+    [Fact]
     public async Task One_slow_episode_seen_by_concurrent_deliveries_of_the_same_message_pauses_it_for_the_first_pause_only()
     {
         const int concurrent = 4;
